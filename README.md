@@ -25,7 +25,7 @@ or write your own.
 
 The flow of manually opening and closing activities should be familiar.
 
-<video src="./raw/branch/main/docs/readme/basic-flow.webm" alt="Happy path demo showing home screen --> GCompris --> home screen"></video>
+<video controls src="https://git.armeafamily.com/albert/shepherd-launcher/raw/branch/main/docs/readme/basic-flow.webm" alt="Happy path demo showing home screen --> GCompris --> home screen"></video>
 
 Activities can be made selectively available at certain times of day.
 
@@ -40,7 +40,7 @@ Activities can have configurable time limits, including:
 * total usage per day
 * cooldown periods before that particular activity can be restarted
 
-<video src="./raw/branch/main/docs/readme/tuxmath-expiring.webm" alt="TuxMath session shown about to expire, including warnings and automatic termination"></video>
+<video controls src="https://git.armeafamily.com/albert/shepherd-launcher/raw/branch/main/docs/readme/tuxmath-expiring.webm" alt="TuxMath session shown about to expire, including warnings and automatic termination"></video>
 
 ### Anything on Linux
 
