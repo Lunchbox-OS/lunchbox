@@ -170,7 +170,9 @@ severity = "critical"
 message = "30 seconds! Save NOW!"
 ```
 
-See [config.example.toml](./config.example.toml) for more.
+See [config.example.toml](./config.example.toml) and 
+[the Wiki](https://git.armeafamily.com/albert/shepherd-launcher/wiki)
+for more.
 
 ## Development
 
