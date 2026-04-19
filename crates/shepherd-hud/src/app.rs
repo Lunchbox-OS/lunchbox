@@ -245,12 +245,7 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
     std::thread::spawn(move || {
         const DEBOUNCE_MS: u64 = 50; // Wait 50ms for more changes before sending
 
-        loop {
-            // Wait for first volume request
-            let Ok(mut latest_percent) = volume_rx.recv() else {
-                break; // Channel closed
-            };
-
+        while let Ok(mut latest_percent) = volume_rx.recv() {
             // Drain any pending requests, keeping only the latest value
             // Use a short timeout to debounce rapid changes
             loop {

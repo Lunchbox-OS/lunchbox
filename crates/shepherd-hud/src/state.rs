@@ -177,10 +177,10 @@ impl SharedState {
                 });
             }
 
-            EventPayload::SessionEnded { session_id, .. } => {
-                if self.session_state().session_id() == Some(session_id) {
-                    self.set_session_state(SessionState::NoSession);
-                }
+            EventPayload::SessionEnded { session_id, .. }
+                if self.session_state().session_id() == Some(session_id) =>
+            {
+                self.set_session_state(SessionState::NoSession);
             }
 
             EventPayload::WarningIssued {
@@ -233,13 +233,13 @@ impl SharedState {
                 });
             }
 
-            EventPayload::SessionExpiring { session_id } => {
-                if self.session_state().session_id() == Some(session_id) {
-                    self.set_session_state(SessionState::Ending {
-                        session_id: session_id.clone(),
-                        reason: "Time expired".to_string(),
-                    });
-                }
+            EventPayload::SessionExpiring { session_id }
+                if self.session_state().session_id() == Some(session_id) =>
+            {
+                self.set_session_state(SessionState::Ending {
+                    session_id: session_id.clone(),
+                    reason: "Time expired".to_string(),
+                });
             }
 
             EventPayload::StateChanged(snapshot) => {
