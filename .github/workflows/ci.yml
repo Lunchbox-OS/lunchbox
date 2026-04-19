@@ -19,7 +19,7 @@ jobs:
       - name: Install git
         run: |
           apt-get update
-          apt-get install -y git curl
+          apt-get install -y git curl nodejs
 
       - uses: actions/checkout@v4
 
@@ -54,7 +54,7 @@ jobs:
       - name: Install git
         run: |
           apt-get update
-          apt-get install -y git curl
+          apt-get install -y git curl nodejs
 
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
       - name: Install git
         run: |
           apt-get update
-          apt-get install -y git curl
+          apt-get install -y git curl nodejs
 
       - uses: actions/checkout@v4
 
@@ -129,7 +129,7 @@ jobs:
       - name: Install git
         run: |
           apt-get update
-          apt-get install -y git curl
+          apt-get install -y git curl nodejs
 
       - uses: actions/checkout@v4
 
