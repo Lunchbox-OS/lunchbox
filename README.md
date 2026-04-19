@@ -107,12 +107,10 @@ As a result, `shepherd-launcher` is not licensed for use in any region that requ
 
 This includes, but is not limited to:
 
-* California
-* Louisiana
-* Texas
-* Utah
+* [California](https://legiscan.com/CA/text/AB1043/id/3269704)
+* [Brazil](https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/Lei/L15211.htm)
 
-[Many other states are considering similar legislation.](https://actonline.org/2025/01/14/the-abcs-of-age-verification-in-the-united-states/)
+[The US as a whole](https://www.govtrack.us/congress/bills/119/hr8250) and [individual states](https://actonline.org/2025/01/14/the-abcs-of-age-verification-in-the-united-states/) are considering similar legislation.
 
 If you disagree with this assessment and you reside in an affected region, **please contact your representatives.**
 
