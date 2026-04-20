@@ -91,7 +91,13 @@ impl LinuxHost {
     /// can run a game. By starting Steam at daemon startup, these steps complete
     /// in the background and game launches feel nearly instant.
     pub fn preload_steam(&self) {
-        let argv = vec!["snap".to_string(), "run".to_string(), "steam".to_string()];
+        // -silent tells Steam not to show its main window on startup
+        let argv = vec![
+            "snap".to_string(),
+            "run".to_string(),
+            "steam".to_string(),
+            "-silent".to_string(),
+        ];
         match ManagedProcess::spawn(
             &argv,
             &HashMap::new(),
