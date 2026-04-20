@@ -1,3 +1,5 @@
+Issues are tracked on Forgejo at <https://git.armeafamily.com/albert/shepherd-launcher/issues>.
+
 Agents: please use the existing documentation for setup.
 
 <CONTRIBUTING.md> describes environment setup and build, test, and lint, including helper scripts and exact commands.

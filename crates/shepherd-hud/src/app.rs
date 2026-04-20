@@ -355,6 +355,7 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
     let time_display_clone = time_display.clone();
     let warning_box_clone = warning_box.clone();
     let warning_label_clone = warning_label.clone();
+    let battery_box_clone = battery_box.clone();
     let battery_icon_clone = battery_icon.clone();
     let battery_label_clone = battery_label.clone();
     let volume_button_clone = volume_button.clone();
@@ -441,11 +442,13 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
 
         // Update battery
         let battery = BatteryStatus::read();
-        battery_icon_clone.set_icon_name(Some(battery.icon_name()));
-        if let Some(percent) = battery.percent {
-            battery_label_clone.set_text(&format!("{}%", percent));
-        } else {
-            battery_label_clone.set_text("--%");
+        let has_battery = battery.percent.is_some();
+        battery_box_clone.set_visible(has_battery);
+        if has_battery {
+            battery_icon_clone.set_icon_name(Some(battery.icon_name()));
+            if let Some(percent) = battery.percent {
+                battery_label_clone.set_text(&format!("{}%", percent));
+            }
         }
 
         // Update volume from cached state (updated via events, no polling needed)
