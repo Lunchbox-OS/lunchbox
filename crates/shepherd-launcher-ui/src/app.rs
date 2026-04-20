@@ -467,6 +467,10 @@ impl LauncherApp {
         let mut last_gamepad_event = std::time::Instant::now() - std::time::Duration::from_secs(60);
         // Release the inhibitor after this much gamepad inactivity.
         const IDLE_INHIBIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        // Use PID-based sway criteria to reliably target this window regardless of app_id.
+        let pid = std::process::id();
+        let inhibit_on_cmd = format!("[pid=\"{pid}\"] inhibit_idle visible");
+        let inhibit_off_cmd = format!("[pid=\"{pid}\"] inhibit_idle none");
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut had_event = false;
@@ -510,17 +514,37 @@ impl LauncherApp {
                 last_gamepad_event = now;
                 if !idle_inhibited {
                     idle_inhibited = true;
-                    let _ = std::process::Command::new("swaymsg")
-                        .arg("[app_id=\"shepherd-launcher\"] inhibit_idle visible")
-                        .spawn();
+                    debug!("Gamepad active: enabling idle inhibitor");
+                    match std::process::Command::new("swaymsg")
+                        .arg(&inhibit_on_cmd)
+                        .output()
+                    {
+                        Ok(out) if out.status.success() => {}
+                        Ok(out) => warn!(
+                            status = ?out.status,
+                            stderr = %String::from_utf8_lossy(&out.stderr),
+                            "swaymsg inhibit_idle visible failed"
+                        ),
+                        Err(e) => warn!(error = %e, "Failed to run swaymsg"),
+                    }
                 }
             } else if idle_inhibited
                 && now.duration_since(last_gamepad_event) >= IDLE_INHIBIT_TIMEOUT
             {
                 idle_inhibited = false;
-                let _ = std::process::Command::new("swaymsg")
-                    .arg("[app_id=\"shepherd-launcher\"] inhibit_idle none")
-                    .spawn();
+                debug!("Gamepad inactive: releasing idle inhibitor");
+                match std::process::Command::new("swaymsg")
+                    .arg(&inhibit_off_cmd)
+                    .output()
+                {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => warn!(
+                        status = ?out.status,
+                        stderr = %String::from_utf8_lossy(&out.stderr),
+                        "swaymsg inhibit_idle none failed"
+                    ),
+                    Err(e) => warn!(error = %e, "Failed to run swaymsg"),
+                }
             }
 
             glib::ControlFlow::Continue
