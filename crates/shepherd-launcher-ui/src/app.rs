@@ -461,9 +461,13 @@ impl LauncherApp {
         let rt = runtime.clone();
         let state_clone = state.clone();
         let mut axis_state = GamepadAxisState::default();
+        // Tracks last time we reset the logind idle hint to avoid excessive spawns.
+        let mut last_idle_reset = std::time::Instant::now() - std::time::Duration::from_secs(60);
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
+            let mut had_event = false;
             while let Some(event) = gilrs.next_event() {
+                had_event = true;
                 let Some(grid) = grid_weak.upgrade() else {
                     return glib::ControlFlow::Break;
                 };
@@ -490,6 +494,19 @@ impl LauncherApp {
                         Self::handle_gamepad_axis(&grid, axis, value, &mut axis_state);
                     }
                     _ => {}
+                }
+            }
+
+            // Reset the logind idle hint on any gamepad activity so that swayidle
+            // (configured with idlehint) doesn't blank the screen during controller use.
+            // Throttled to once per 30 seconds to avoid excessive subprocess spawning.
+            if had_event {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_idle_reset) >= std::time::Duration::from_secs(30) {
+                    last_idle_reset = now;
+                    let _ = std::process::Command::new("loginctl")
+                        .args(["set-idle-hint", "false"])
+                        .spawn();
                 }
             }
 
