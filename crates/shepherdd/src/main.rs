@@ -12,8 +12,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use shepherd_api::{
-    Command, ErrorCode, ErrorInfo, Event, EventPayload, HealthStatus, Response, ResponsePayload,
-    SessionEndReason, StopMode, VolumeInfo, VolumeRestrictions,
+    Command, EntryKind, ErrorCode, ErrorInfo, Event, EventPayload, HealthStatus, Response,
+    ResponsePayload, SessionEndReason, StopMode, VolumeInfo, VolumeRestrictions,
 };
 use shepherd_config::{VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
@@ -148,6 +148,19 @@ impl Service {
         // Start host process monitor
         let _monitor_handle = self.host.start_monitor();
 
+        // Preload Steam if any Steam entries are configured so it is ready
+        // when a user launches a game (skips Steam's startup sequence)
+        let has_steam = self
+            .engine
+            .policy()
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
+        if has_steam {
+            info!("Steam entries detected, preloading Steam in background");
+            self.host.preload_steam();
+        }
+
         // Get channels
         let mut host_events = self.host.subscribe();
         let ipc_ref = self.ipc.clone();
@@ -259,6 +272,9 @@ impl Service {
                 }
             }
         }
+
+        // Stop preloaded Steam (if any) after active sessions are terminated
+        host.stop_steam_preload();
 
         // Log shutdown
         if let Err(e) = store.append_audit(AuditEvent::new(AuditEventType::ServiceStopped)) {

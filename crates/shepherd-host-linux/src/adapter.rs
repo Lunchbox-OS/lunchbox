@@ -61,6 +61,8 @@ pub struct LinuxHost {
     /// Track session info for killing
     session_info: Arc<Mutex<HashMap<SessionId, SessionInfo>>>,
     steam_sessions: Arc<Mutex<HashMap<u32, SteamSession>>>,
+    /// PIDs of preloaded Steam launcher processes (not session-tracked)
+    steam_preload_pids: Arc<Mutex<HashSet<u32>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
 }
@@ -77,8 +79,51 @@ impl LinuxHost {
             processes: Arc::new(Mutex::new(HashMap::new())),
             session_info: Arc::new(Mutex::new(HashMap::new())),
             steam_sessions: Arc::new(Mutex::new(HashMap::new())),
+            steam_preload_pids: Arc::new(Mutex::new(HashSet::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
+        }
+    }
+
+    /// Spawn Steam in the background so it is ready when a game is launched.
+    ///
+    /// Steam performs several startup steps (update, auth, cloud sync) before it
+    /// can run a game. By starting Steam at daemon startup, these steps complete
+    /// in the background and game launches feel nearly instant.
+    pub fn preload_steam(&self) {
+        let argv = vec!["snap".to_string(), "run".to_string(), "steam".to_string()];
+        match ManagedProcess::spawn(
+            &argv,
+            &HashMap::new(),
+            None,
+            None,
+            Some("steam".to_string()),
+        ) {
+            Ok(proc) => {
+                let pid = proc.pid;
+                self.processes.lock().unwrap().insert(pid, proc);
+                self.steam_preload_pids.lock().unwrap().insert(pid);
+                info!(pid = pid, "Steam preloaded in background");
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to preload Steam");
+            }
+        }
+    }
+
+    /// Kill any preloaded Steam instance. Called during graceful shutdown.
+    pub fn stop_steam_preload(&self) {
+        let preload_pids: Vec<u32> = self
+            .steam_preload_pids
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        if !preload_pids.is_empty() {
+            info!("Stopping preloaded Steam");
+            kill_snap_cgroup("steam", nix::sys::signal::Signal::SIGKILL);
+            self.steam_preload_pids.lock().unwrap().clear();
         }
     }
 
@@ -86,6 +131,7 @@ impl LinuxHost {
     pub fn start_monitor(&self) -> tokio::task::JoinHandle<()> {
         let processes = self.processes.clone();
         let steam_sessions = self.steam_sessions.clone();
+        let steam_preload_pids = self.steam_preload_pids.clone();
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -95,6 +141,7 @@ impl LinuxHost {
                 let mut exited = Vec::new();
                 let steam_pids: HashSet<u32> =
                     { steam_sessions.lock().unwrap().keys().cloned().collect() };
+                let preload_pids: HashSet<u32> = { steam_preload_pids.lock().unwrap().clone() };
 
                 {
                     let mut procs = processes.lock().unwrap();
@@ -119,6 +166,11 @@ impl LinuxHost {
                 for (pid, pgid, status, is_steam) in exited {
                     if is_steam {
                         info!(pid = pid, pgid = pgid, status = ?status, "Steam launch process exited");
+                        continue;
+                    }
+                    if preload_pids.contains(&pid) {
+                        info!(pid = pid, "Steam preload process exited");
+                        steam_preload_pids.lock().unwrap().remove(&pid);
                         continue;
                     }
                     info!(pid = pid, pgid = pgid, status = ?status, "Process exited - sending HostEvent::Exited");
