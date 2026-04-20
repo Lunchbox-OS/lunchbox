@@ -461,8 +461,12 @@ impl LauncherApp {
         let rt = runtime.clone();
         let state_clone = state.clone();
         let mut axis_state = GamepadAxisState::default();
-        // Tracks last time we reset the logind idle hint to avoid excessive spawns.
-        let mut last_idle_reset = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        // Tracks whether sway's idle inhibitor is currently enabled for this window.
+        let mut idle_inhibited = false;
+        // Tracks last gamepad event time to know when to release the inhibitor.
+        let mut last_gamepad_event = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        // Release the inhibitor after this much gamepad inactivity.
+        const IDLE_INHIBIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut had_event = false;
@@ -497,17 +501,26 @@ impl LauncherApp {
                 }
             }
 
-            // Reset the logind idle hint on any gamepad activity so that swayidle
-            // (configured with idlehint) doesn't blank the screen during controller use.
-            // Throttled to once per 30 seconds to avoid excessive subprocess spawning.
+            // Use sway's native idle inhibitor to prevent the screen blanking during
+            // controller use. The inhibitor is set to "visible" so it only suppresses
+            // idle when the launcher is the topmost window (i.e., no game is running).
+            // swaymsg is called only on state transitions to avoid excess subprocesses.
+            let now = std::time::Instant::now();
             if had_event {
-                let now = std::time::Instant::now();
-                if now.duration_since(last_idle_reset) >= std::time::Duration::from_secs(30) {
-                    last_idle_reset = now;
-                    let _ = std::process::Command::new("loginctl")
-                        .args(["set-idle-hint", "false"])
+                last_gamepad_event = now;
+                if !idle_inhibited {
+                    idle_inhibited = true;
+                    let _ = std::process::Command::new("swaymsg")
+                        .arg("[app_id=\"shepherd-launcher\"] inhibit_idle visible")
                         .spawn();
                 }
+            } else if idle_inhibited
+                && now.duration_since(last_gamepad_event) >= IDLE_INHIBIT_TIMEOUT
+            {
+                idle_inhibited = false;
+                let _ = std::process::Command::new("swaymsg")
+                    .arg("[app_id=\"shepherd-launcher\"] inhibit_idle none")
+                    .spawn();
             }
 
             glib::ControlFlow::Continue
