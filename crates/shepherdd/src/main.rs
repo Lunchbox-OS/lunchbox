@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use shepherd_api::{
     Command, EntryKind, ErrorCode, ErrorInfo, Event, EventPayload, HealthStatus, Response,
     ResponsePayload, SessionEndReason, StopMode, VolumeInfo, VolumeRestrictions,
@@ -22,7 +23,7 @@ use shepherd_host_linux::{LinuxHost, LinuxVolumeController};
 use shepherd_ipc::{IpcServer, ServerMessage};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{ClientId, MonotonicInstant, RateLimiter, default_config_path};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
@@ -56,6 +57,7 @@ struct Args {
 
 /// Main service state
 struct Service {
+    config_path: PathBuf,
     engine: CoreEngine,
     host: Arc<LinuxHost>,
     volume: Arc<LinuxVolumeController>,
@@ -134,6 +136,7 @@ impl Service {
         let rate_limiter = RateLimiter::new(30, Duration::from_secs(1));
 
         Ok(Self {
+            config_path: args.config.clone(),
             engine,
             host,
             volume,
@@ -145,6 +148,8 @@ impl Service {
     }
 
     async fn run(self) -> Result<()> {
+        let config_path = self.config_path.clone();
+
         // Start host process monitor
         let _monitor_handle = self.host.start_monitor();
 
@@ -191,6 +196,52 @@ impl Service {
                 error!(error = %e, "IPC server error");
             }
         });
+
+        // Set up config file watcher
+        let (config_change_tx, mut config_change_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let watched_path = config_path.clone();
+        let _config_watcher: Option<RecommendedWatcher> = {
+            let tx = config_change_tx;
+            match RecommendedWatcher::new(
+                move |result: notify::Result<notify::Event>| {
+                    if let Ok(event) = result {
+                        let is_relevant = matches!(
+                            event.kind,
+                            notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                        );
+                        if is_relevant && event.paths.iter().any(|p| p == &watched_path) {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                notify::Config::default(),
+            ) {
+                Ok(mut watcher) => {
+                    if let Some(dir) = config_path.parent() {
+                        match watcher.watch(dir, RecursiveMode::NonRecursive) {
+                            Ok(()) => {
+                                info!(
+                                    config_path = %config_path.display(),
+                                    "Watching config file for changes"
+                                );
+                                Some(watcher)
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to watch config directory, auto-reload disabled");
+                                None
+                            }
+                        }
+                    } else {
+                        warn!("Config path has no parent directory, auto-reload disabled");
+                        None
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to create config watcher, auto-reload disabled");
+                    None
+                }
+            }
+        };
 
         // Set up signal handlers
         let mut sigterm =
@@ -243,9 +294,16 @@ impl Service {
                     Self::handle_host_event(&engine, &ipc_ref, host_event).await;
                 }
 
+                // Config file changed on disk
+                Some(()) = config_change_rx.recv() => {
+                    // Drain any additional buffered events to debounce rapid saves
+                    while config_change_rx.try_recv().is_ok() {}
+                    Self::handle_config_reload(&engine, &ipc_ref, &config_path).await;
+                }
+
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, msg).await;
+                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &config_path, msg).await;
                 }
             }
         }
@@ -283,6 +341,36 @@ impl Service {
 
         info!("Shutdown complete");
         Ok(())
+    }
+
+    async fn handle_config_reload(
+        engine: &Arc<Mutex<CoreEngine>>,
+        ipc: &Arc<IpcServer>,
+        config_path: &Path,
+    ) {
+        match load_config(config_path) {
+            Ok(policy) => {
+                let entry_count = {
+                    let event = engine.lock().await.reload_policy(policy);
+                    if let CoreEvent::PolicyReloaded { entry_count } = event {
+                        entry_count
+                    } else {
+                        0
+                    }
+                };
+                info!(
+                    entry_count,
+                    config_path = %config_path.display(),
+                    "Config reloaded"
+                );
+                ipc.broadcast_event(Event::new(EventPayload::PolicyReloaded { entry_count }));
+                let state = engine.lock().await.get_state();
+                ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to reload config, keeping existing policy");
+            }
+        }
     }
 
     async fn handle_core_event(
@@ -471,6 +559,7 @@ impl Service {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_ipc_message(
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
@@ -478,6 +567,7 @@ impl Service {
         ipc: &Arc<IpcServer>,
         store: &Arc<dyn Store>,
         rate_limiter: &Arc<Mutex<RateLimiter>>,
+        config_path: &Path,
         msg: ServerMessage,
     ) {
         match msg {
@@ -504,6 +594,7 @@ impl Service {
                     &client_id,
                     request.request_id,
                     request.command,
+                    config_path,
                 )
                 .await;
 
@@ -549,6 +640,7 @@ impl Service {
         client_id: &ClientId,
         request_id: u64,
         command: Command,
+        config_path: &Path,
     ) -> Response {
         let now = shepherd_util::now();
         let now_mono = MonotonicInstant::now();
@@ -754,11 +846,31 @@ impl Service {
                     );
                 }
 
-                // TODO: Reload from original config path
-                Response::error(
-                    request_id,
-                    ErrorInfo::new(ErrorCode::InternalError, "Reload not yet implemented"),
-                )
+                match load_config(config_path) {
+                    Ok(policy) => {
+                        let entry_count = {
+                            let event = engine.lock().await.reload_policy(policy);
+                            if let CoreEvent::PolicyReloaded { entry_count } = event {
+                                entry_count
+                            } else {
+                                0
+                            }
+                        };
+                        ipc.broadcast_event(Event::new(EventPayload::PolicyReloaded {
+                            entry_count,
+                        }));
+                        let state = engine.lock().await.get_state();
+                        ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+                        Response::success(request_id, ResponsePayload::ConfigReloaded)
+                    }
+                    Err(e) => Response::error(
+                        request_id,
+                        ErrorInfo::new(
+                            ErrorCode::InternalError,
+                            format!("Config reload failed: {e}"),
+                        ),
+                    ),
+                }
             }
 
             Command::SubscribeEvents => Response::success(
