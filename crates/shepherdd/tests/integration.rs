@@ -3,7 +3,7 @@
 //! These tests verify the end-to-end behavior of shepherdd.
 
 use shepherd_api::{EntryKind, WarningSeverity, WarningThreshold};
-use shepherd_config::{AvailabilityPolicy, Entry, LimitsPolicy, Policy};
+use shepherd_config::{AvailabilityPolicy, Entry, LimitsPolicy, Policy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision};
 use shepherd_host_api::{HostCapabilities, MockHost};
 use shepherd_store::{SqliteStore, Store};
@@ -11,6 +11,34 @@ use shepherd_util::{self, EntryId, MonotonicInstant};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+fn make_test_entry(id: &str) -> Entry {
+    Entry {
+        id: EntryId::new(id),
+        label: format!("Entry {id}"),
+        icon_ref: None,
+        kind: EntryKind::Process {
+            command: "/bin/true".into(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: None,
+        },
+        availability: AvailabilityPolicy {
+            windows: vec![],
+            always: true,
+        },
+        limits: LimitsPolicy {
+            max_run: Some(Duration::from_secs(10)),
+            daily_quota: None,
+            cooldown: None,
+        },
+        warnings: vec![],
+        volume: None,
+        disabled: false,
+        disabled_reason: None,
+        internet: Default::default(),
+    }
+}
 
 fn make_test_policy() -> Policy {
     Policy {
@@ -318,6 +346,258 @@ fn test_config_parsing() {
         Some(Duration::from_secs(300))
     );
     assert_eq!(policy.entries[0].warnings.len(), 1);
+}
+
+// --- Config reload tests ---
+
+#[test]
+fn test_reload_policy_emits_event() {
+    let policy = make_test_policy();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let caps = HostCapabilities::minimal();
+    let mut engine = CoreEngine::new(policy, store, caps);
+
+    let new_policy = Policy {
+        service: Default::default(),
+        entries: vec![make_test_entry("game-a"), make_test_entry("game-b")],
+        default_warnings: vec![],
+        default_max_run: None,
+        volume: Default::default(),
+    };
+
+    let event = engine.reload_policy(new_policy);
+    assert!(
+        matches!(event, CoreEvent::PolicyReloaded { entry_count: 2 }),
+        "Expected PolicyReloaded with entry_count=2, got {event:?}"
+    );
+}
+
+#[test]
+fn test_reload_policy_updates_entry_list() {
+    let policy = make_test_policy();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let caps = HostCapabilities::minimal();
+    let mut engine = CoreEngine::new(policy, store, caps);
+
+    let now = shepherd_util::now();
+    assert_eq!(engine.list_entries(now).len(), 1);
+    assert!(
+        engine
+            .list_entries(now)
+            .iter()
+            .any(|e| e.entry_id.as_str() == "test-game")
+    );
+
+    let new_policy = Policy {
+        service: Default::default(),
+        entries: vec![make_test_entry("game-a"), make_test_entry("game-b")],
+        default_warnings: vec![],
+        default_max_run: None,
+        volume: Default::default(),
+    };
+    engine.reload_policy(new_policy);
+
+    let entries = engine.list_entries(now);
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|e| e.entry_id.as_str() == "game-a"));
+    assert!(entries.iter().any(|e| e.entry_id.as_str() == "game-b"));
+    assert!(
+        !entries.iter().any(|e| e.entry_id.as_str() == "test-game"),
+        "Old entry should be gone after reload"
+    );
+}
+
+#[test]
+fn test_reload_policy_preserves_active_session() {
+    let policy = make_test_policy();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let caps = HostCapabilities::minimal();
+    let mut engine = CoreEngine::new(policy, store, caps);
+
+    let entry_id = EntryId::new("test-game");
+    let now = shepherd_util::now();
+    let now_mono = MonotonicInstant::now();
+
+    // Start a session
+    let plan = match engine.request_launch(&entry_id, now) {
+        LaunchDecision::Approved(p) => p,
+        _ => panic!("Launch should be approved"),
+    };
+    let session_id = plan.session_id.clone();
+    engine.start_session(plan, now, now_mono);
+    assert!(engine.has_active_session());
+
+    // Reload with a completely different set of entries
+    let new_policy = Policy {
+        service: Default::default(),
+        entries: vec![make_test_entry("game-a")],
+        default_warnings: vec![],
+        default_max_run: None,
+        volume: Default::default(),
+    };
+    engine.reload_policy(new_policy);
+
+    // Active session must be unaffected
+    assert!(engine.has_active_session(), "Session should survive reload");
+    assert_eq!(
+        engine.current_session().unwrap().plan.session_id,
+        session_id,
+        "Session ID should be unchanged after reload"
+    );
+}
+
+#[test]
+fn test_load_config_reflects_file_changes() {
+    use std::io::Write as _;
+    use tempfile::NamedTempFile;
+
+    let mut file = NamedTempFile::new().unwrap();
+    write!(
+        file,
+        r#"config_version = 1
+
+[[entries]]
+id = "entry-one"
+label = "Entry One"
+kind = {{ type = "process", command = "/bin/true" }}
+"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+
+    let policy = load_config(file.path()).unwrap();
+    assert_eq!(policy.entries.len(), 1);
+    assert_eq!(policy.entries[0].id.as_str(), "entry-one");
+
+    // Overwrite the file with two entries
+    let path = file.path().to_owned();
+    std::fs::write(
+        &path,
+        r#"config_version = 1
+
+[[entries]]
+id = "entry-one"
+label = "Entry One"
+kind = { type = "process", command = "/bin/true" }
+
+[[entries]]
+id = "entry-two"
+label = "Entry Two"
+kind = { type = "process", command = "/bin/false" }
+"#,
+    )
+    .unwrap();
+
+    let policy = load_config(&path).unwrap();
+    assert_eq!(policy.entries.len(), 2);
+    assert!(policy.entries.iter().any(|e| e.id.as_str() == "entry-two"));
+}
+
+#[test]
+fn test_load_config_returns_error_on_invalid_file() {
+    use tempfile::NamedTempFile;
+
+    let mut file = NamedTempFile::new().unwrap();
+    use std::io::Write as _;
+    writeln!(file, "this is not valid toml {{{{").unwrap();
+    file.flush().unwrap();
+
+    assert!(
+        load_config(file.path()).is_err(),
+        "Invalid TOML should fail to load"
+    );
+}
+
+#[test]
+fn test_load_config_returns_error_on_validation_failure() {
+    use tempfile::NamedTempFile;
+
+    let mut file = NamedTempFile::new().unwrap();
+    use std::io::Write as _;
+    // Missing required `kind` field
+    write!(
+        file,
+        r#"config_version = 1
+
+[[entries]]
+id = "bad-entry"
+label = "Bad Entry"
+"#
+    )
+    .unwrap();
+    file.flush().unwrap();
+
+    assert!(
+        load_config(file.path()).is_err(),
+        "Config with missing required fields should fail validation"
+    );
+}
+
+#[tokio::test]
+async fn test_config_file_watcher_detects_changes() {
+    use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        r#"config_version = 1
+[[entries]]
+id = "initial"
+label = "Initial"
+kind = { type = "process", command = "/bin/true" }
+"#,
+    )
+    .unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let watched = config_path.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |result: notify::Result<notify::Event>| {
+            if let Ok(event) = result {
+                let is_relevant = matches!(
+                    event.kind,
+                    notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                );
+                if is_relevant && event.paths.iter().any(|p| p == &watched) {
+                    let _ = tx.send(());
+                }
+            }
+        },
+        notify::Config::default(),
+    )
+    .unwrap();
+    watcher
+        .watch(dir.path(), RecursiveMode::NonRecursive)
+        .unwrap();
+
+    // Write a new config to the same path
+    std::fs::write(
+        &config_path,
+        r#"config_version = 1
+[[entries]]
+id = "updated"
+label = "Updated"
+kind = { type = "process", command = "/bin/true" }
+"#,
+    )
+    .unwrap();
+
+    // Should receive a notification within 5 seconds
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("Timed out waiting for file change notification")
+        .expect("Watcher channel closed unexpectedly");
+
+    // Drain any additional debounce events (mirrors production behavior)
+    while rx.try_recv().is_ok() {}
+
+    // The file on disk should now reflect the updated config
+    let policy = load_config(&config_path).unwrap();
+    assert_eq!(policy.entries.len(), 1);
+    assert_eq!(policy.entries[0].id.as_str(), "updated");
 }
 
 #[test]
