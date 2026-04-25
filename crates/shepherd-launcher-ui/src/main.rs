@@ -33,6 +33,11 @@ struct Args {
     /// Send StopCurrent to shepherdd and exit (for compositor keybindings)
     #[arg(long)]
     stop_current: bool,
+
+    /// Exit 0 if no activity is running (idle/screen-off is allowed), 1 if a session
+    /// is active (idle should be suppressed). Used by swayidle to gate DPMS.
+    #[arg(long)]
+    is_idle_allowed: bool,
 }
 
 fn main() -> Result<()> {
@@ -75,6 +80,25 @@ fn main() -> Result<()> {
             }
         })?;
         return Ok(());
+    }
+
+    if args.is_idle_allowed {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let session_active = runtime.block_on(async {
+            let client = CommandClient::new(&socket_path);
+            match client.get_state().await {
+                Ok(response) => match response.result {
+                    ResponseResult::Ok(ResponsePayload::State(state)) => {
+                        state.current_session.is_some()
+                    }
+                    _ => false,
+                },
+                Err(_) => false,
+            }
+        });
+        // Exit 1 (false) when a session is active so swayidle skips the DPMS command.
+        // Exit 0 (true/success) when idle is allowed.
+        std::process::exit(if session_active { 1 } else { 0 });
     }
 
     // Run GTK application
