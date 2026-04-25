@@ -1,0 +1,38 @@
+[package]
+name = "shepherd-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local-network management HTTP API for shepherdd"
+
+[dependencies]
+shepherd-util = { workspace = true }
+shepherd-api = { workspace = true }
+shepherd-host-api = { workspace = true }
+shepherd-config = { workspace = true }
+shepherd-store = { workspace = true }
+shepherd-core = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+axum = { workspace = true }
+tokio-stream = { workspace = true }
+
+[dev-dependencies]
+async-trait = "0.1"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tempfile = { workspace = true }
+shepherd-store = { workspace = true }
+shepherd-core = { workspace = true }
+shepherd-host-api = { workspace = true }
+shepherd-config = { workspace = true }
+shepherd-api = { workspace = true }
+shepherd-util = { workspace = true }

@@ -18,6 +18,7 @@ shepherd-store = { workspace = true }
 shepherd-core = { workspace = true }
 shepherd-host-linux = { workspace = true }
 shepherd-ipc = { workspace = true }
+shepherd-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

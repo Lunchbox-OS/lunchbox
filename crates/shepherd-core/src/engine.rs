@@ -106,6 +106,29 @@ impl CoreEngine {
 
     /// Evaluate a single entry for availability
     fn evaluate_entry(&self, entry: &Entry, now: DateTime<Local>) -> EntryView {
+        let today = now.date_naive();
+        let daily_override = self
+            .store
+            .get_daily_override(&entry.id, today)
+            .ok()
+            .flatten();
+
+        // If manually disabled by a parent override, short-circuit all other checks
+        if daily_override.as_ref().and_then(|o| o.availability) == Some(false) {
+            return EntryView {
+                entry_id: entry.id.clone(),
+                label: entry.label.clone(),
+                icon_ref: entry.icon_ref.clone(),
+                kind_tag: entry.kind.tag(),
+                enabled: false,
+                reasons: vec![ReasonCode::ManuallyDisabled { until: today }],
+                max_run_if_started_now: None,
+            };
+        }
+
+        let bypass_window = daily_override.as_ref().and_then(|o| o.availability) == Some(true);
+        let quota_delta = daily_override.as_ref().and_then(|o| o.quota_delta_seconds);
+
         let mut reasons = Vec::new();
         let mut enabled = true;
 
@@ -124,8 +147,8 @@ impl CoreEngine {
             reasons.push(ReasonCode::UnsupportedKind { kind: kind_tag });
         }
 
-        // Check availability window
-        if !entry.availability.is_available(&now) {
+        // Check availability window (skipped when parent enables outside window)
+        if !bypass_window && !entry.availability.is_available(&now) {
             enabled = false;
             reasons.push(ReasonCode::OutsideTimeWindow {
                 next_window_start: None, // TODO: compute next window
@@ -171,20 +194,23 @@ impl CoreEngine {
             });
         }
 
-        // Check daily quota
-        if let Some(quota) = entry.limits.daily_quota {
-            let today = now.date_naive();
-            if let Ok(used) = self.store.get_usage(&entry.id, today)
-                && used >= quota
-            {
+        // Check daily quota (adjusted by any parent-set delta)
+        if let Some(quota) = entry.limits.daily_quota
+            && let Ok(used) = self.store.get_usage(&entry.id, today)
+        {
+            let effective_quota = apply_quota_delta(quota, quota_delta);
+            if used >= effective_quota {
                 enabled = false;
-                reasons.push(ReasonCode::QuotaExhausted { used, quota });
+                reasons.push(ReasonCode::QuotaExhausted {
+                    used,
+                    quota: effective_quota,
+                });
             }
         }
 
         // Calculate max run if enabled (None when disabled, Some(None) flattened for unlimited)
         let max_run_if_started_now = if enabled {
-            self.compute_max_duration(entry, now)
+            self.compute_max_duration(entry, now, quota_delta)
         } else {
             None
         };
@@ -202,7 +228,12 @@ impl CoreEngine {
 
     /// Compute maximum duration for an entry if started now.
     /// Returns None if the entry has no time limit (unlimited).
-    fn compute_max_duration(&self, entry: &Entry, now: DateTime<Local>) -> Option<Duration> {
+    fn compute_max_duration(
+        &self,
+        entry: &Entry,
+        now: DateTime<Local>,
+        quota_delta: Option<i64>,
+    ) -> Option<Duration> {
         let mut max = entry.limits.max_run;
 
         // Limit by time window remaining
@@ -213,11 +244,12 @@ impl CoreEngine {
             });
         }
 
-        // Limit by daily quota remaining
+        // Limit by daily quota remaining (adjusted by override delta)
         if let Some(quota) = entry.limits.daily_quota {
             let today = now.date_naive();
             if let Ok(used) = self.store.get_usage(&entry.id, today) {
-                let remaining = quota.saturating_sub(used);
+                let effective_quota = apply_quota_delta(quota, quota_delta);
+                let remaining = effective_quota.saturating_sub(used);
                 max = Some(match max {
                     Some(m) => m.min(remaining),
                     None => remaining,
@@ -608,6 +640,51 @@ impl CoreEngine {
         );
 
         Some(new_deadline)
+    }
+
+    /// Reduce current session time (admin action).
+    /// Clamps the new deadline to at least 5 seconds from now to avoid
+    /// immediately expiring the session.
+    pub fn reduce_current(
+        &mut self,
+        by: Duration,
+        now_mono: MonotonicInstant,
+        _now: DateTime<Local>,
+    ) -> Option<DateTime<Local>> {
+        let session = self.current_session.as_mut()?;
+
+        let deadline_mono = session.deadline_mono?;
+        let deadline = session.deadline?;
+
+        // Remaining time until deadline (zero if already expired)
+        let remaining = deadline_mono.saturating_duration_until(now_mono);
+        let min_remaining = Duration::from_secs(5);
+        let new_remaining = remaining.saturating_sub(by).max(min_remaining);
+        let actual_reduction = remaining.saturating_sub(new_remaining);
+        let new_deadline_mono = now_mono + new_remaining;
+        let new_deadline =
+            deadline - chrono::Duration::from_std(actual_reduction).unwrap_or_default();
+
+        session.deadline_mono = Some(new_deadline_mono);
+        session.deadline = Some(new_deadline);
+
+        info!(
+            session_id = %session.plan.session_id,
+            reduced_by_secs = actual_reduction.as_secs(),
+            new_deadline = %new_deadline,
+            "Session time reduced"
+        );
+
+        Some(new_deadline)
+    }
+}
+
+/// Apply a signed quota delta to a base duration, clamping to zero from below.
+fn apply_quota_delta(quota: Duration, delta: Option<i64>) -> Duration {
+    match delta {
+        None | Some(0) => quota,
+        Some(d) if d > 0 => quota + Duration::from_secs(d as u64),
+        Some(d) => quota.saturating_sub(Duration::from_secs((-d) as u64)),
     }
 }
 

@@ -9,6 +9,7 @@ members = [
     "crates/shepherd-core",
     "crates/shepherd-host-linux",
     "crates/shepherd-ipc",
+    "crates/shepherd-http",
     "crates/shepherdd",
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
@@ -31,6 +32,7 @@ shepherd-store = { path = "crates/shepherd-store" }
 shepherd-core = { path = "crates/shepherd-core" }
 shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
+shepherd-http = { path = "crates/shepherd-http" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -70,6 +72,10 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # GTK4 UI
 gtk4 = "0.9"
 gtk4-layer-shell = "0.4"
+
+# HTTP API
+axum = { version = "0.8", features = ["macros"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Testing
 tempfile = "3.9"

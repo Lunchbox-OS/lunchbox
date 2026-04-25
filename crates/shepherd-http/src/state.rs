@@ -1,0 +1,20 @@
+//! Shared application state for HTTP handlers
+
+use shepherd_api::{Event, MaintenanceState};
+use shepherd_core::CoreEngine;
+use shepherd_host_api::{HostAdapter, VolumeController};
+use shepherd_store::Store;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{Mutex, broadcast};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub engine: Arc<Mutex<CoreEngine>>,
+    pub store: Arc<dyn Store>,
+    pub host: Arc<dyn HostAdapter>,
+    pub volume: Arc<dyn VolumeController>,
+    pub maintenance: Arc<Mutex<MaintenanceState>>,
+    pub event_tx: broadcast::Sender<Event>,
+    pub config_path: PathBuf,
+}
