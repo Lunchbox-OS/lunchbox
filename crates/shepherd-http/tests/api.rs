@@ -6,7 +6,9 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use shepherd_api::{EntryKind, Event, MaintenanceState};
-use shepherd_config::{AvailabilityPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy};
+use shepherd_config::{
+    AvailabilityPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy,
+};
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
     HostCapabilities, MockHost, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
@@ -40,7 +42,10 @@ impl MockVolume {
                 can_mute: true,
                 max_volume: 100,
             },
-            status: std::sync::Mutex::new(VolumeStatus { percent: 50, muted: false }),
+            status: std::sync::Mutex::new(VolumeStatus {
+                percent: 50,
+                muted: false,
+            }),
         }
     }
 }
@@ -101,7 +106,10 @@ fn test_policy() -> Policy {
                 env: HashMap::new(),
                 cwd: None,
             },
-            availability: AvailabilityPolicy { windows: vec![], always: true },
+            availability: AvailabilityPolicy {
+                windows: vec![],
+                always: true,
+            },
             limits: LimitsPolicy {
                 max_run: Some(Duration::from_secs(300)),
                 daily_quota: None,
@@ -529,11 +537,7 @@ async fn overrides_get_nonexistent_returns_null() {
 async fn overrides_upsert_empty_body_returns_400() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(
-        &app,
-        req_put_json("/api/v1/overrides/test-game", json!({})),
-    )
-    .await;
+    let (status, body) = send(&app, req_put_json("/api/v1/overrides/test-game", json!({}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "bad_request");
 }
@@ -662,11 +666,7 @@ async fn usage_invalid_date_range_returns_400() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
     // from is after to
-    let (status, body) = send(
-        &app,
-        req_get("/api/v1/usage?from=2026-04-25&to=2026-04-01"),
-    )
-    .await;
+    let (status, body) = send(&app, req_get("/api/v1/usage?from=2026-04-25&to=2026-04-01")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "bad_request");
 }
@@ -676,11 +676,7 @@ async fn usage_date_range_returns_stats_in_range() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
     // Valid range with no data — just check it doesn't error
-    let (status, body) = send(
-        &app,
-        req_get("/api/v1/usage?from=2026-01-01&to=2026-04-25"),
-    )
-    .await;
+    let (status, body) = send(&app, req_get("/api/v1/usage?from=2026-01-01&to=2026-04-25")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_array());
 }
@@ -774,8 +770,11 @@ async fn volume_set_percent_updates_volume() {
         None,
         cfg.path().to_path_buf(),
     );
-    let (status, body) =
-        send(&app, req_put_json("/api/v1/volume", json!({ "percent": 70 }))).await;
+    let (status, body) = send(
+        &app,
+        req_put_json("/api/v1/volume", json!({ "percent": 70 })),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["percent"], 70);
 }
@@ -791,8 +790,11 @@ async fn volume_set_muted_updates_mute_state() {
         None,
         cfg.path().to_path_buf(),
     );
-    let (status, body) =
-        send(&app, req_put_json("/api/v1/volume", json!({ "muted": true }))).await;
+    let (status, body) = send(
+        &app,
+        req_put_json("/api/v1/volume", json!({ "muted": true })),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["muted"], true);
 }
@@ -814,8 +816,11 @@ async fn volume_set_above_max_is_clamped() {
         cfg.path().to_path_buf(),
     );
     // Request 95%, expect it clamped to 80
-    let (status, body) =
-        send(&app, req_put_json("/api/v1/volume", json!({ "percent": 95 }))).await;
+    let (status, body) = send(
+        &app,
+        req_put_json("/api/v1/volume", json!({ "percent": 95 })),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["percent"], 80);
 }
@@ -835,8 +840,11 @@ async fn volume_set_forbidden_when_change_disallowed() {
         None,
         cfg.path().to_path_buf(),
     );
-    let (status, body) =
-        send(&app, req_put_json("/api/v1/volume", json!({ "percent": 50 }))).await;
+    let (status, body) = send(
+        &app,
+        req_put_json("/api/v1/volume", json!({ "percent": 50 })),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"], "forbidden");
 }
@@ -856,8 +864,11 @@ async fn volume_mute_forbidden_when_mute_disallowed() {
         None,
         cfg.path().to_path_buf(),
     );
-    let (status, body) =
-        send(&app, req_put_json("/api/v1/volume", json!({ "muted": true }))).await;
+    let (status, body) = send(
+        &app,
+        req_put_json("/api/v1/volume", json!({ "muted": true })),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"], "forbidden");
 }

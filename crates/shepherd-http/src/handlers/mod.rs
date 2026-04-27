@@ -59,5 +59,7 @@ pub fn router(state: AppState, auth_token: Option<String>) -> Router {
             },
         ));
 
-    Router::new().nest("/api/v1", api)
+    Router::new()
+        .nest("/api/v1", api)
+        .fallback(crate::web_assets::static_handler)
 }
