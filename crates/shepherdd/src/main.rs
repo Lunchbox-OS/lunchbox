@@ -178,23 +178,6 @@ impl Service {
             .await
             .expect("Message receiver should be available");
 
-        // Forward events sent via the HTTP event_tx to IPC subscribers (e.g. the HUD).
-        // HTTP handlers only have access to event_tx, not the IpcServer, so without this
-        // forwarding the HUD would never see events originating from HTTP handlers.
-        let mut http_to_ipc_rx = event_tx.subscribe();
-        let ipc_for_http_events = ipc_ref.clone();
-        tokio::spawn(async move {
-            loop {
-                match http_to_ipc_rx.recv().await {
-                    Ok(event) => ipc_for_http_events.broadcast_event(event),
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("HTTP→IPC event forwarder lagged by {n} messages");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
         // Wrap mutable state
         let engine = Arc::new(Mutex::new(self.engine));
         let rate_limiter = Arc::new(Mutex::new(self.rate_limiter));
@@ -208,6 +191,8 @@ impl Service {
             eng.policy().service.management_api.clone()
         };
         if let Some(api_cfg) = management_api_config {
+            let ipc_for_broadcast = ipc_ref.clone();
+            let event_tx_for_broadcast = event_tx.clone();
             let http_state = HttpAppState {
                 engine: engine.clone(),
                 store: store.clone(),
@@ -215,6 +200,10 @@ impl Service {
                 volume: volume.clone() as Arc<dyn VolumeController>,
                 maintenance: Arc::new(Mutex::new(MaintenanceState::default())),
                 event_tx: event_tx.clone(),
+                broadcast_fn: Arc::new(move |event: Event| {
+                    ipc_for_broadcast.broadcast_event(event.clone());
+                    let _ = event_tx_for_broadcast.send(event);
+                }),
                 config_path: config_path.clone(),
             };
             let http_server = HttpServer::new(http_state, api_cfg);

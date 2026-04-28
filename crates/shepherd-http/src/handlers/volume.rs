@@ -81,7 +81,7 @@ pub async fn set_volume(
 async fn broadcast_volume_change(state: &AppState) -> axum::response::Response {
     match state.volume.get_status().await {
         Ok(s) => {
-            let _ = state.event_tx.send(Event::new(EventPayload::VolumeChanged {
+            (state.broadcast_fn)(Event::new(EventPayload::VolumeChanged {
                 percent: s.percent,
                 muted: s.muted,
             }));

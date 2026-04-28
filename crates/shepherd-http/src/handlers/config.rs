@@ -16,12 +16,8 @@ pub async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
                 eng.reload_policy(policy);
             }
             let snap = state.engine.lock().await.get_state();
-            let _ = state
-                .event_tx
-                .send(Event::new(EventPayload::PolicyReloaded { entry_count }));
-            let _ = state
-                .event_tx
-                .send(Event::new(EventPayload::StateChanged(snap)));
+            (state.broadcast_fn)(Event::new(EventPayload::PolicyReloaded { entry_count }));
+            (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "entry_count": entry_count })),

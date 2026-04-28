@@ -16,5 +16,8 @@ pub struct AppState {
     pub volume: Arc<dyn VolumeController>,
     pub maintenance: Arc<Mutex<MaintenanceState>>,
     pub event_tx: broadcast::Sender<Event>,
+    /// Broadcasts an event to all subscribers: both IPC clients (HUD) and HTTP SSE clients.
+    /// Equivalent to calling the daemon's internal `broadcast()` helper.
+    pub broadcast_fn: Arc<dyn Fn(Event) + Send + Sync>,
     pub config_path: PathBuf,
 }

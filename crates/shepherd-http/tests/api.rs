@@ -141,6 +141,7 @@ fn make_app_with_policy(
         HostCapabilities::minimal(),
     )));
     let (tx, _) = broadcast::channel::<Event>(64);
+    let tx_for_fn = tx.clone();
     let state = AppState {
         engine,
         store,
@@ -148,6 +149,9 @@ fn make_app_with_policy(
         volume,
         maintenance: Arc::new(Mutex::new(MaintenanceState::default())),
         event_tx: tx,
+        broadcast_fn: Arc::new(move |event: Event| {
+            let _ = tx_for_fn.send(event);
+        }),
         config_path,
     };
     handlers::router(state, auth_token.map(str::to_owned))

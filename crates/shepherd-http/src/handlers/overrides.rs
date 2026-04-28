@@ -76,9 +76,7 @@ pub async fn upsert_override(
 
     // Broadcast state change so UIs update immediately
     let snap = state.engine.lock().await.get_state();
-    let _ = state
-        .event_tx
-        .send(Event::new(EventPayload::StateChanged(snap)));
+    (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
 
     Ok(Json(ov))
 }
@@ -94,7 +92,7 @@ pub async fn delete_override(
     match state.store.clear_daily_override(&id, date) {
         Ok(true) => {
             let snap = state.engine.lock().await.get_state();
-            let _ = state.event_tx.send(Event::new(EventPayload::StateChanged(snap)));
+            (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (

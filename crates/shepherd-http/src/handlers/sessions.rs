@@ -115,14 +115,12 @@ pub async fn launch(
                         eng.current_session().and_then(|s| s.deadline)
                     };
 
-                    let _ = state
-                        .event_tx
-                        .send(Event::new(EventPayload::SessionStarted {
-                            session_id: session_id.clone(),
-                            entry_id: entry_id.clone(),
-                            label: plan_label,
-                            deadline,
-                        }));
+                    (state.broadcast_fn)(Event::new(EventPayload::SessionStarted {
+                        session_id: session_id.clone(),
+                        entry_id: entry_id.clone(),
+                        label: plan_label,
+                        deadline,
+                    }));
 
                     (
                         StatusCode::OK,
@@ -139,9 +137,7 @@ pub async fn launch(
                     eng.notify_session_exited(Some(-1), now_mono, now);
                     let snap = eng.get_state();
                     drop(eng);
-                    let _ = state
-                        .event_tx
-                        .send(Event::new(EventPayload::StateChanged(snap)));
+                    (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(LaunchResponse::Denied {
@@ -193,16 +189,14 @@ pub async fn stop_current(
         )
             .into_response(),
         StopDecision::Stopped(result) => {
-            let _ = state.event_tx.send(Event::new(EventPayload::SessionEnded {
+            (state.broadcast_fn)(Event::new(EventPayload::SessionEnded {
                 session_id: result.session_id,
                 entry_id: result.entry_id,
                 reason: result.reason,
                 duration: result.duration,
             }));
             let snap = state.engine.lock().await.get_state();
-            let _ = state
-                .event_tx
-                .send(Event::new(EventPayload::StateChanged(snap)));
+            (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
 
             if let Some(h) = handle {
                 let host_mode = match mode {
@@ -255,9 +249,7 @@ pub async fn extend_current(
     };
 
     let snap = state.engine.lock().await.get_state();
-    let _ = state
-        .event_tx
-        .send(Event::new(EventPayload::StateChanged(snap)));
+    (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
 
     Ok(Json(ExtendResponse { new_deadline }))
 }

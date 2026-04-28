@@ -210,7 +210,7 @@ impl CoreEngine {
 
         // Calculate max run if enabled (None when disabled, Some(None) flattened for unlimited)
         let max_run_if_started_now = if enabled {
-            self.compute_max_duration(entry, now, quota_delta)
+            self.compute_max_duration(entry, now, quota_delta, bypass_window)
         } else {
             None
         };
@@ -233,15 +233,18 @@ impl CoreEngine {
         entry: &Entry,
         now: DateTime<Local>,
         quota_delta: Option<i64>,
+        bypass_window: bool,
     ) -> Option<Duration> {
         let mut max = entry.limits.max_run;
 
-        // Limit by time window remaining
-        if let Some(window_remaining) = entry.availability.remaining_in_window(&now) {
-            max = Some(match max {
-                Some(m) => m.min(window_remaining),
-                None => window_remaining,
-            });
+        // Limit by time window remaining, unless an admin override bypasses the window.
+        if !bypass_window {
+            if let Some(window_remaining) = entry.availability.remaining_in_window(&now) {
+                max = Some(match max {
+                    Some(m) => m.min(window_remaining),
+                    None => window_remaining,
+                });
+            }
         }
 
         // Limit by daily quota remaining (adjusted by override delta)
