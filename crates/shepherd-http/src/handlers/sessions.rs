@@ -235,21 +235,29 @@ pub async fn extend_current(
 ) -> ApiResult<Json<ExtendResponse>> {
     let now = shepherd_util::now();
     let now_mono = MonotonicInstant::now();
-    let mut eng = state.engine.lock().await;
 
-    if !eng.has_active_session() {
-        return Err(ApiError::NotFound("No active session".into()));
-    }
+    let new_deadline = {
+        let mut eng = state.engine.lock().await;
 
-    let new_deadline = if body.seconds >= 0 {
-        eng.extend_current(Duration::from_secs(body.seconds as u64), now_mono, now)
-    } else {
-        eng.reduce_current(
-            Duration::from_secs(body.seconds.unsigned_abs()),
-            now_mono,
-            now,
-        )
+        if !eng.has_active_session() {
+            return Err(ApiError::NotFound("No active session".into()));
+        }
+
+        if body.seconds >= 0 {
+            eng.extend_current(Duration::from_secs(body.seconds as u64), now_mono, now)
+        } else {
+            eng.reduce_current(
+                Duration::from_secs(body.seconds.unsigned_abs()),
+                now_mono,
+                now,
+            )
+        }
     };
+
+    let snap = state.engine.lock().await.get_state();
+    let _ = state
+        .event_tx
+        .send(Event::new(EventPayload::StateChanged(snap)));
 
     Ok(Json(ExtendResponse { new_deadline }))
 }

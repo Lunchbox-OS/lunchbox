@@ -178,6 +178,23 @@ impl Service {
             .await
             .expect("Message receiver should be available");
 
+        // Forward events sent via the HTTP event_tx to IPC subscribers (e.g. the HUD).
+        // HTTP handlers only have access to event_tx, not the IpcServer, so without this
+        // forwarding the HUD would never see events originating from HTTP handlers.
+        let mut http_to_ipc_rx = event_tx.subscribe();
+        let ipc_for_http_events = ipc_ref.clone();
+        tokio::spawn(async move {
+            loop {
+                match http_to_ipc_rx.recv().await {
+                    Ok(event) => ipc_for_http_events.broadcast_event(event),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("HTTP→IPC event forwarder lagged by {n} messages");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         // Wrap mutable state
         let engine = Arc::new(Mutex::new(self.engine));
         let rate_limiter = Arc::new(Mutex::new(self.rate_limiter));
@@ -1000,12 +1017,21 @@ impl Service {
 
                 let mut eng = engine.lock().await;
                 match eng.extend_current(by, now_mono, now) {
-                    Some(new_deadline) => Response::success(
-                        request_id,
-                        ResponsePayload::Extended {
-                            new_deadline: Some(new_deadline),
-                        },
-                    ),
+                    Some(new_deadline) => {
+                        let state = eng.get_state();
+                        drop(eng);
+                        Self::broadcast(
+                            ipc,
+                            event_tx,
+                            Event::new(EventPayload::StateChanged(state)),
+                        );
+                        Response::success(
+                            request_id,
+                            ResponsePayload::Extended {
+                                new_deadline: Some(new_deadline),
+                            },
+                        )
+                    }
                     None => Response::error(
                         request_id,
                         ErrorInfo::new(
