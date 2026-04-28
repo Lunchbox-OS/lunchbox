@@ -69,16 +69,25 @@ export function EntriesPage() {
     }
   };
 
-  const handleToggleOverride = async (entry: EntryView, ov: DailyOverride | undefined) => {
+  const handleDisableToday = async (entry: EntryView) => {
     setBusyId(entry.entry_id);
     try {
-      if (ov?.availability === false) {
-        await deleteOverride(entry.entry_id, todayString());
-        flash(`${entry.label}: override cleared`);
-      } else {
-        await upsertOverride(entry.entry_id, false, null, todayString());
-        flash(`${entry.label}: disabled for today`);
-      }
+      await upsertOverride(entry.entry_id, false, null, todayString());
+      flash(`${entry.label}: disabled for today`);
+      refetchEntries();
+      refetchOverrides();
+    } catch (e) {
+      flash(String(e), false);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleClearOverride = async (entry: EntryView) => {
+    setBusyId(entry.entry_id);
+    try {
+      await deleteOverride(entry.entry_id, todayString());
+      flash(`${entry.label}: override cleared`);
       refetchEntries();
       refetchOverrides();
     } catch (e) {
@@ -148,7 +157,8 @@ export function EntriesPage() {
             override={overrideMap.get(entry.entry_id)}
             busy={busyId === entry.entry_id}
             onLaunch={() => handleLaunch(entry.entry_id)}
-            onDisable={() => handleToggleOverride(entry, overrideMap.get(entry.entry_id))}
+            onDisableToday={() => handleDisableToday(entry)}
+            onClear={() => handleClearOverride(entry)}
             onEnable={() => handleEnableOverride(entry)}
           />
         ))}
@@ -167,14 +177,16 @@ function EntryCard({
   override,
   busy,
   onLaunch,
-  onDisable,
+  onDisableToday,
+  onClear,
   onEnable,
 }: {
   entry: EntryView;
   override: DailyOverride | undefined;
   busy: boolean;
   onLaunch: () => void;
-  onDisable: () => void;
+  onDisableToday: () => void;
+  onClear: () => void;
   onEnable: () => void;
 }) {
   const manuallyDisabled = override?.availability === false;
@@ -225,34 +237,26 @@ function EntryCard({
         )}
 
         <Box sx={{ display: "flex", gap: 1, mt: 1.5, flexWrap: "wrap" }}>
-          {manuallyDisabled ? (
-            <Button size="small" variant="outlined" onClick={onDisable} disabled={busy}>
+          {(manuallyDisabled || manuallyEnabled) ? (
+            <Button size="small" variant="outlined" onClick={onClear} disabled={busy}>
               {busy ? <Spinner size={14} /> : "Clear Override"}
             </Button>
           ) : (
             <>
-              {!manuallyEnabled && (
-                <Button size="small" variant="text" color="inherit" onClick={onDisable} disabled={busy}>
-                  {busy ? <Spinner size={14} /> : "Disable Today"}
-                </Button>
-              )}
+              <Button size="small" variant="text" color="inherit" onClick={onDisableToday} disabled={busy}>
+                {busy ? <Spinner size={14} /> : "Disable Today"}
+              </Button>
               {!entry.enabled && (
-                <Button
-                  size="small"
-                  variant={manuallyEnabled ? "contained" : "outlined"}
-                  color="primary"
-                  onClick={manuallyEnabled ? onDisable : onEnable}
-                  disabled={busy}
-                >
-                  {busy ? <Spinner size={14} /> : manuallyEnabled ? "Clear Override" : "Enable Today"}
-                </Button>
-              )}
-              {entry.enabled && (
-                <Button size="small" variant="contained" onClick={onLaunch} disabled={busy}>
-                  {busy ? <Spinner size={14} /> : "Launch"}
+                <Button size="small" variant="outlined" color="primary" onClick={onEnable} disabled={busy}>
+                  {busy ? <Spinner size={14} /> : "Enable Today"}
                 </Button>
               )}
             </>
+          )}
+          {entry.enabled && (
+            <Button size="small" variant="contained" onClick={onLaunch} disabled={busy}>
+              {busy ? <Spinner size={14} /> : "Launch"}
+            </Button>
           )}
         </Box>
       </CardContent>

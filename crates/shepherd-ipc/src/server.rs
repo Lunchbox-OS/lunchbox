@@ -28,6 +28,16 @@ pub enum ServerMessage {
     },
 }
 
+/// Message sent to the writer task for a connected client
+enum WriterMessage {
+    /// Write this JSON response as-is
+    Response(String),
+    /// Write this JSON response, then start forwarding broadcast events
+    SubscribeResponse(String),
+    /// Write this JSON response, then stop forwarding broadcast events
+    UnsubscribeResponse(String),
+}
+
 /// IPC Server
 pub struct IpcServer {
     socket_path: PathBuf,
@@ -40,8 +50,7 @@ pub struct IpcServer {
 
 struct ClientHandle {
     info: ClientInfo,
-    response_tx: mpsc::UnboundedSender<String>,
-    subscribed: bool,
+    response_tx: mpsc::UnboundedSender<WriterMessage>,
 }
 
 impl IpcServer {
@@ -142,7 +151,7 @@ impl IpcServer {
 
     async fn handle_client(&self, stream: UnixStream, client_id: ClientId, info: ClientInfo) {
         let (read_half, write_half) = stream.into_split();
-        let (response_tx, mut response_rx) = mpsc::unbounded_channel::<String>();
+        let (response_tx, mut response_rx) = mpsc::unbounded_channel::<WriterMessage>();
 
         // Register client
         {
@@ -152,7 +161,6 @@ impl IpcServer {
                 ClientHandle {
                     info: info.clone(),
                     response_tx: response_tx.clone(),
-                    subscribed: false,
                 },
             );
         }
@@ -163,12 +171,12 @@ impl IpcServer {
             info: info.clone(),
         });
 
-        let clients = self.clients.clone();
         let message_tx = self.message_tx.clone();
         let event_tx = self.event_tx.clone();
         let client_id_clone = client_id.clone();
 
-        // Spawn reader task
+        // Spawn reader task — forwards raw requests to the daemon; subscription
+        // state is managed entirely by the writer task to preserve ordering.
         let _reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(read_half);
             let mut line = String::new();
@@ -188,15 +196,6 @@ impl IpcServer {
 
                         match serde_json::from_str::<Request>(line) {
                             Ok(request) => {
-                                // Check for subscribe command
-                                if matches!(request.command, shepherd_api::Command::SubscribeEvents)
-                                {
-                                    let mut clients = clients.write().await;
-                                    if let Some(handle) = clients.get_mut(&client_id_clone) {
-                                        handle.subscribed = true;
-                                    }
-                                }
-
                                 let _ = message_tx.send(ServerMessage::Request {
                                     client_id: client_id_clone.clone(),
                                     request,
@@ -219,7 +218,10 @@ impl IpcServer {
             }
         });
 
-        // Spawn writer task
+        // Spawn writer task — serialises responses and events onto the socket.
+        // `is_subscribed` is a local flag so event forwarding only begins AFTER
+        // the SubscribeEvents response has been flushed; this prevents the client
+        // from seeing an event frame where it expects the subscribe response.
         let mut event_rx = event_tx.subscribe();
         let clients_writer = self.clients.clone();
         let client_id_writer = client_id.clone();
@@ -227,35 +229,41 @@ impl IpcServer {
 
         tokio::spawn(async move {
             let mut writer = write_half;
+            let mut is_subscribed = false;
 
             loop {
                 tokio::select! {
-                    // Handle responses
-                    Some(response) = response_rx.recv() => {
-                        let mut msg = response;
-                        msg.push('\n');
-                        if let Err(e) = writer.write_all(msg.as_bytes()).await {
+                    // Handle responses (and subscription state changes)
+                    Some(msg) = response_rx.recv() => {
+                        let (json, sub_after) = match msg {
+                            WriterMessage::Response(s) => (s, None),
+                            WriterMessage::SubscribeResponse(s) => (s, Some(true)),
+                            WriterMessage::UnsubscribeResponse(s) => (s, Some(false)),
+                        };
+                        let mut frame = json;
+                        frame.push('\n');
+                        if let Err(e) = writer.write_all(frame.as_bytes()).await {
                             debug!(client_id = %client_id_writer, error = %e, "Write error");
                             break;
                         }
+                        // Apply subscription change only after the response is on the wire
+                        if let Some(v) = sub_after {
+                            is_subscribed = v;
+                        }
                     }
 
-                    // Handle events (for subscribed clients)
+                    // Handle events (only when subscribed)
                     Ok(event) = event_rx.recv() => {
-                        let is_subscribed = {
-                            let clients = clients_writer.read().await;
-                            clients.get(&client_id_writer).map(|h| h.subscribed).unwrap_or(false)
-                        };
-
                         if is_subscribed
-                            && let Ok(json) = serde_json::to_string(&event) {
-                                let mut msg = json;
-                                msg.push('\n');
-                                if let Err(e) = writer.write_all(msg.as_bytes()).await {
-                                    debug!(client_id = %client_id_writer, error = %e, "Event write error");
-                                    break;
-                                }
+                            && let Ok(json) = serde_json::to_string(&event)
+                        {
+                            let mut frame = json;
+                            frame.push('\n');
+                            if let Err(e) = writer.write_all(frame.as_bytes()).await {
+                                debug!(client_id = %client_id_writer, error = %e, "Event write error");
+                                break;
                             }
+                        }
                     }
                 }
             }
@@ -274,15 +282,48 @@ impl IpcServer {
     /// Send a response to a specific client
     pub async fn send_response(&self, client_id: &ClientId, response: Response) -> IpcResult<()> {
         let json = serde_json::to_string(&response)?;
-
         let clients = self.clients.read().await;
         if let Some(handle) = clients.get(client_id) {
             handle
                 .response_tx
-                .send(json)
+                .send(WriterMessage::Response(json))
                 .map_err(|_| IpcError::ConnectionClosed)?;
         }
+        Ok(())
+    }
 
+    /// Send the SubscribeEvents response to a client and enable event forwarding.
+    /// The writer task guarantees that no events are delivered before this response.
+    pub async fn send_subscribe_response(
+        &self,
+        client_id: &ClientId,
+        response: Response,
+    ) -> IpcResult<()> {
+        let json = serde_json::to_string(&response)?;
+        let clients = self.clients.read().await;
+        if let Some(handle) = clients.get(client_id) {
+            handle
+                .response_tx
+                .send(WriterMessage::SubscribeResponse(json))
+                .map_err(|_| IpcError::ConnectionClosed)?;
+        }
+        Ok(())
+    }
+
+    /// Send the UnsubscribeEvents response to a client and disable event forwarding.
+    pub async fn send_unsubscribe_response(
+        &self,
+        client_id: &ClientId,
+        response: Response,
+    ) -> IpcResult<()> {
+        let json = serde_json::to_string(&response)?;
+        let clients = self.clients.read().await;
+        if let Some(handle) = clients.get(client_id) {
+            handle
+                .response_tx
+                .send(WriterMessage::UnsubscribeResponse(json))
+                .map_err(|_| IpcError::ConnectionClosed)?;
+        }
         Ok(())
     }
 

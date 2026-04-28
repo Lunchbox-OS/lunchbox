@@ -126,14 +126,14 @@ impl CoreEngine {
             };
         }
 
-        let bypass_window = daily_override.as_ref().and_then(|o| o.availability) == Some(true);
+        let manually_enabled = daily_override.as_ref().and_then(|o| o.availability) == Some(true);
         let quota_delta = daily_override.as_ref().and_then(|o| o.quota_delta_seconds);
 
         let mut reasons = Vec::new();
         let mut enabled = true;
 
-        // Check if explicitly disabled
-        if entry.disabled {
+        // Check if explicitly disabled (skipped when an enable-today override is set)
+        if !manually_enabled && entry.disabled {
             enabled = false;
             reasons.push(ReasonCode::Disabled {
                 reason: entry.disabled_reason.clone(),
@@ -147,8 +147,8 @@ impl CoreEngine {
             reasons.push(ReasonCode::UnsupportedKind { kind: kind_tag });
         }
 
-        // Check availability window (skipped when parent enables outside window)
-        if !bypass_window && !entry.availability.is_available(&now) {
+        // Check availability window (skipped when an enable-today override is set)
+        if !manually_enabled && !entry.availability.is_available(&now) {
             enabled = false;
             reasons.push(ReasonCode::OutsideTimeWindow {
                 next_window_start: None, // TODO: compute next window
@@ -210,7 +210,7 @@ impl CoreEngine {
 
         // Calculate max run if enabled (None when disabled, Some(None) flattened for unlimited)
         let max_run_if_started_now = if enabled {
-            self.compute_max_duration(entry, now, quota_delta, bypass_window)
+            self.compute_max_duration(entry, now, quota_delta, manually_enabled)
         } else {
             None
         };
@@ -233,18 +233,18 @@ impl CoreEngine {
         entry: &Entry,
         now: DateTime<Local>,
         quota_delta: Option<i64>,
-        bypass_window: bool,
+        manually_enabled: bool,
     ) -> Option<Duration> {
         let mut max = entry.limits.max_run;
 
         // Limit by time window remaining, unless an admin override bypasses the window.
-        if !bypass_window {
-            if let Some(window_remaining) = entry.availability.remaining_in_window(&now) {
-                max = Some(match max {
-                    Some(m) => m.min(window_remaining),
-                    None => window_remaining,
-                });
-            }
+        if !manually_enabled
+            && let Some(window_remaining) = entry.availability.remaining_in_window(&now)
+        {
+            max = Some(match max {
+                Some(m) => m.min(window_remaining),
+                None => window_remaining,
+            });
         }
 
         // Limit by daily quota remaining (adjusted by override delta)
@@ -921,5 +921,248 @@ mod tests {
             .collect();
         assert_eq!(expiry_events.len(), 1);
         assert!(matches!(expiry_events[0], CoreEvent::ExpireDue { .. }));
+    }
+
+    #[test]
+    fn test_enable_override_bypasses_time_window() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+        use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
+
+        let entry_id = EntryId::new("time-restricted");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Time Restricted".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy {
+                    windows: vec![TimeWindow::new(
+                        DaysOfWeek::ALL_DAYS,
+                        WallClock::new(23, 55).unwrap(),
+                        WallClock::new(23, 59).unwrap(),
+                    )],
+                    always: false,
+                },
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        // Use noon as test time — well outside the 23:55–23:59 window
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Without override: disabled due to time window
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled outside window");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::OutsideTimeWindow { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Set availability=true override for today
+        store
+            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .unwrap();
+
+        // With override: should be enabled even outside the window
+        let entries = engine.list_entries(noon);
+        assert!(entries[0].enabled, "should be enabled with override");
+        assert!(
+            entries[0].reasons.is_empty(),
+            "no reasons when enabled: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Approved(_)
+        ));
+    }
+
+    #[test]
+    fn test_disable_override_blocks_during_window() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+        use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
+
+        let entry_id = EntryId::new("time-restricted");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Time Restricted".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy {
+                    windows: vec![TimeWindow::new(
+                        DaysOfWeek::ALL_DAYS,
+                        WallClock::new(10, 0).unwrap(),
+                        WallClock::new(14, 0).unwrap(),
+                    )],
+                    always: false,
+                },
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        // Use noon (12:00) — inside the 10:00–14:00 window
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Without override: enabled (inside window)
+        let entries = engine.list_entries(noon);
+        assert!(entries[0].enabled, "should be enabled inside window");
+
+        // Set availability=false override for today
+        store
+            .upsert_daily_override(&entry_id, today, Some(false), None)
+            .unwrap();
+
+        // With override: disabled even though we're inside the window
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled with override");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::ManuallyDisabled { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+    }
+
+    #[test]
+    fn test_enable_override_bypasses_config_disabled() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+
+        let entry_id = EntryId::new("config-disabled");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Config Disabled".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy::default(),
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                disabled: true,
+                disabled_reason: Some("under review".into()),
+                internet: Default::default(),
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Without override: disabled by config
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled by config");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::Disabled { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Set availability=true override for today
+        store
+            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .unwrap();
+
+        // With override: should be enabled even though disabled by config
+        let entries = engine.list_entries(noon);
+        assert!(
+            entries[0].enabled,
+            "should be enabled with override despite config-disabled"
+        );
+        assert!(
+            entries[0].reasons.is_empty(),
+            "no reasons when enabled: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Approved(_)
+        ));
     }
 }

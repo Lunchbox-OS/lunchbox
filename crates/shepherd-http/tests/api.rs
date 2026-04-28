@@ -16,6 +16,7 @@ use shepherd_host_api::{
 use shepherd_http::{AppState, handlers};
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
+use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -632,6 +633,95 @@ async fn overrides_disabled_entry_shows_as_unavailable() {
     // ReasonCode serializes as { "code": "manually_disabled", ... }
     let reasons = body["reasons"].as_array().unwrap();
     assert!(reasons.iter().any(|r| r["code"] == "manually_disabled"));
+}
+
+#[tokio::test]
+async fn overrides_enable_entry_outside_time_window() {
+    // Build a policy with a narrow time window (23:55–23:59) so the entry is
+    // almost always outside its allowed hours.
+    let windowed_policy = Policy {
+        service: ServiceConfig::default(),
+        entries: vec![Entry {
+            id: EntryId::new("time-restricted"),
+            label: "Time Restricted".into(),
+            icon_ref: None,
+            kind: EntryKind::Process {
+                command: "game".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+            availability: AvailabilityPolicy {
+                windows: vec![TimeWindow::new(
+                    DaysOfWeek::ALL_DAYS,
+                    WallClock::new(23, 55).unwrap(),
+                    WallClock::new(23, 59).unwrap(),
+                )],
+                always: false,
+            },
+            limits: LimitsPolicy {
+                max_run: None,
+                daily_quota: None,
+                cooldown: None,
+            },
+            warnings: vec![],
+            volume: None,
+            disabled: false,
+            disabled_reason: None,
+            internet: Default::default(),
+        }],
+        default_warnings: vec![],
+        default_max_run: None,
+        volume: VolumePolicy::default(),
+    };
+
+    let cfg = temp_config();
+    let app = make_app_with_policy(windowed_policy, None, cfg.path().to_path_buf());
+
+    // Entry should be disabled (outside the 23:55–23:59 window) at current time.
+    // We verify the API reflects the right state without relying on a fixed clock.
+    let (status, body) = send(&app, req_get("/api/v1/entries/time-restricted")).await;
+    assert_eq!(status, StatusCode::OK);
+    // Entry is disabled — outside the window
+    assert!(!body["enabled"].as_bool().unwrap());
+    let reasons = body["reasons"].as_array().unwrap();
+    assert!(
+        reasons.iter().any(|r| r["code"] == "outside_time_window"),
+        "expected outside_time_window, got: {reasons:?}"
+    );
+
+    // Enable via override (no date = today)
+    let (status, _) = send(
+        &app,
+        req_put_json(
+            "/api/v1/overrides/time-restricted",
+            json!({ "availability": true }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Entry should now be enabled despite being outside the window
+    let (status, body) = send(&app, req_get("/api/v1/entries/time-restricted")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["enabled"].as_bool().unwrap(),
+        "entry should be enabled after override, got: {body}"
+    );
+    assert!(
+        body["reasons"].as_array().unwrap().is_empty(),
+        "no reasons expected when enabled: {}",
+        body["reasons"]
+    );
+
+    // Launch should also be approved
+    let (status, body) = send(
+        &app,
+        req_post_json("/api/v1/sessions", json!({ "entry_id": "time-restricted" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"], "approved");
 }
 
 // ---------------------------------------------------------------------------

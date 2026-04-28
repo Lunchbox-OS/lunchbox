@@ -660,6 +660,30 @@ impl Service {
                     }
                 }
 
+                // SubscribeEvents / UnsubscribeEvents must go through dedicated
+                // methods so the writer task can flip the subscription flag only
+                // AFTER the response frame is on the wire, preventing events from
+                // arriving before the subscribe acknowledgement.
+                match &request.command {
+                    Command::SubscribeEvents => {
+                        let response = Response::success(
+                            request.request_id,
+                            ResponsePayload::Subscribed {
+                                client_id: client_id.clone(),
+                            },
+                        );
+                        let _ = ipc.send_subscribe_response(&client_id, response).await;
+                        return;
+                    }
+                    Command::UnsubscribeEvents => {
+                        let response =
+                            Response::success(request.request_id, ResponsePayload::Unsubscribed);
+                        let _ = ipc.send_unsubscribe_response(&client_id, response).await;
+                        return;
+                    }
+                    _ => {}
+                }
+
                 let response = Self::handle_command(
                     engine,
                     host,
@@ -970,15 +994,9 @@ impl Service {
                 }
             }
 
-            Command::SubscribeEvents => Response::success(
-                request_id,
-                ResponsePayload::Subscribed {
-                    client_id: client_id.clone(),
-                },
-            ),
-
-            Command::UnsubscribeEvents => {
-                Response::success(request_id, ResponsePayload::Unsubscribed)
+            Command::SubscribeEvents | Command::UnsubscribeEvents => {
+                // Handled before handle_command is called; unreachable in practice.
+                unreachable!("subscribe/unsubscribe handled in handle_ipc_message")
             }
 
             Command::GetHealth => {
