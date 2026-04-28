@@ -11,6 +11,7 @@ import Typography from "@mui/material/Typography";
 import VolumeOffIcon from "@mui/icons-material/VolumeOff";
 import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   enterMaintenance,
   exitMaintenance,
@@ -20,82 +21,59 @@ import {
   setVolumeMuted,
   setVolumePercent,
 } from "../api/client";
-import { useApi } from "../hooks/useApi";
 import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 import { ConnectionSettings } from "./ConnectionSettings";
 
 export function AdminPage() {
-  const { data: volume, loading: volLoading, refetch: refetchVolume } = useApi(getVolume, []);
-  const { data: maintenance, loading: maintLoading, refetch: refetchMaint } = useApi(getMaintenance, []);
+  const queryClient = useQueryClient();
+  const { data: volume, isPending: volLoading } = useQuery({
+    queryKey: ["volume"],
+    queryFn: getVolume,
+  });
+  const { data: maintenance, isPending: maintLoading } = useQuery({
+    queryKey: ["maintenance"],
+    queryFn: getMaintenance,
+  });
 
-  const [busyVol, setBusyVol] = useState(false);
-  const [busyMaint, setBusyMaint] = useState(false);
-  const [busyReload, setBusyReload] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [showConn, setShowConn] = useState(false);
 
-  useEvents(() => { refetchVolume(); refetchMaint(); });
+  useEvents();
 
   const flash = (text: string, ok = true) => {
     setMsg({ text, ok });
     setTimeout(() => setMsg(null), 3000);
   };
 
-  const handleSetVolume = async (percent: number) => {
-    setBusyVol(true);
-    try {
-      await setVolumePercent(percent);
-      refetchVolume();
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyVol(false);
-    }
-  };
+  const setPercentMutation = useMutation({
+    mutationFn: setVolumePercent,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["volume"] }),
+    onError: (e) => flash(String(e), false),
+  });
 
-  const handleToggleMute = async () => {
-    if (!volume) return;
-    setBusyVol(true);
-    try {
-      await setVolumeMuted(!volume.muted);
-      refetchVolume();
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyVol(false);
-    }
-  };
+  const setMutedMutation = useMutation({
+    mutationFn: setVolumeMuted,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["volume"] }),
+    onError: (e) => flash(String(e), false),
+  });
 
-  const handleMaintenance = async () => {
-    setBusyMaint(true);
-    try {
-      if (maintenance?.active) {
-        await exitMaintenance();
-        flash("Maintenance mode disabled");
-      } else {
-        await enterMaintenance();
-        flash("Maintenance mode enabled");
-      }
-      refetchMaint();
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyMaint(false);
-    }
-  };
+  const maintenanceMutation = useMutation({
+    mutationFn: async () => { await (maintenance?.active ? exitMaintenance() : enterMaintenance()); },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["maintenance"] });
+      flash(maintenance?.active ? "Maintenance mode disabled" : "Maintenance mode enabled");
+    },
+    onError: (e) => flash(String(e), false),
+  });
 
-  const handleReload = async () => {
-    setBusyReload(true);
-    try {
-      const res = await reloadConfig();
-      flash(`Config reloaded (${res.entry_count} entries)`);
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyReload(false);
-    }
-  };
+  const reloadMutation = useMutation({
+    mutationFn: reloadConfig,
+    onSuccess: (res) => flash(`Config reloaded (${res.entry_count} entries)`),
+    onError: (e) => flash(String(e), false),
+  });
+
+  const busyVol = setPercentMutation.isPending || setMutedMutation.isPending;
 
   const VolumeIcon = !volume || volume.muted
     ? VolumeOffIcon
@@ -129,7 +107,7 @@ export function AdminPage() {
                 <Button
                   variant={volume.muted ? "contained" : "outlined"}
                   size="small"
-                  onClick={handleToggleMute}
+                  onClick={() => setMutedMutation.mutate(!volume.muted)}
                   disabled={busyVol || !volume.restrictions.allow_mute}
                   sx={{ minWidth: 44, px: 1 }}
                   aria-label={volume.muted ? "Unmute" : "Mute"}
@@ -141,7 +119,7 @@ export function AdminPage() {
                   max={volume.restrictions.max_volume ?? 100}
                   value={volume.muted ? 0 : volume.percent}
                   disabled={busyVol || !volume.restrictions.allow_change}
-                  onChange={(_, v) => handleSetVolume(v as number)}
+                  onChange={(_, v) => setPercentMutation.mutate(v as number)}
                   aria-label="Volume"
                   sx={{ flex: 1 }}
                 />
@@ -188,10 +166,10 @@ export function AdminPage() {
                 variant={maintenance?.active ? "contained" : "outlined"}
                 color={maintenance?.active ? "warning" : "primary"}
                 size="small"
-                onClick={handleMaintenance}
-                disabled={busyMaint}
+                onClick={() => maintenanceMutation.mutate()}
+                disabled={maintenanceMutation.isPending}
               >
-                {busyMaint ? <Spinner size={18} /> : maintenance?.active ? "Disable" : "Enable"}
+                {maintenanceMutation.isPending ? <Spinner size={18} /> : maintenance?.active ? "Disable" : "Enable"}
               </Button>
             </Box>
           )}
@@ -207,9 +185,9 @@ export function AdminPage() {
           </Typography>
           <Button
             variant="outlined"
-            onClick={handleReload}
-            disabled={busyReload}
-            startIcon={busyReload ? <Spinner size={16} /> : undefined}
+            onClick={() => reloadMutation.mutate()}
+            disabled={reloadMutation.isPending}
+            startIcon={reloadMutation.isPending ? <Spinner size={16} /> : undefined}
           >
             Reload Config
           </Button>

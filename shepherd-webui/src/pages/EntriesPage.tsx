@@ -11,6 +11,7 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import SearchIcon from "@mui/icons-material/Search";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   deleteOverride,
   launchSession,
@@ -25,7 +26,6 @@ import {
   type DailyOverride,
   type EntryView,
 } from "../api/types";
-import { useApi } from "../hooks/useApi";
 import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 
@@ -34,82 +34,84 @@ function todayString(): string {
 }
 
 export function EntriesPage() {
-  const { data: entries, loading: entriesLoading, refetch: refetchEntries } = useApi(listEntries, []);
-  const { data: overrides, refetch: refetchOverrides } = useApi(
-    () => listOverrides(todayString()),
-    [],
-  );
+  const queryClient = useQueryClient();
+  const today = todayString();
+
+  const { data: entries, isPending: entriesLoading } = useQuery({
+    queryKey: ["entries"],
+    queryFn: () => listEntries(),
+  });
+  const { data: overrides } = useQuery({
+    queryKey: ["overrides", today],
+    queryFn: () => listOverrides(today),
+  });
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [search, setSearch] = useState("");
 
-  useEvents(() => { refetchEntries(); refetchOverrides(); });
+  useEvents();
 
   const flash = (text: string, ok = true) => {
     setMsg({ text, ok });
     setTimeout(() => setMsg(null), 3000);
   };
 
-  const handleLaunch = async (entry_id: string) => {
-    setBusyId(entry_id);
-    try {
-      const res = await launchSession(entry_id);
+  const invalidateAll = () => {
+    queryClient.invalidateQueries({ queryKey: ["entries"] });
+    queryClient.invalidateQueries({ queryKey: ["overrides"] });
+  };
+
+  const launchMutation = useMutation({
+    mutationFn: (entry_id: string) => launchSession(entry_id),
+    onMutate: (entry_id) => setBusyId(entry_id),
+    onSuccess: (res) => {
       if (res.result === "approved") {
         flash("Session started!");
-        refetchEntries();
+        invalidateAll();
       } else {
         const reason = res.reasons[0] ? reasonLabel(res.reasons[0]) : "Denied";
         flash(`Cannot launch: ${reason}`, false);
       }
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyId(null);
-    }
-  };
+    },
+    onError: (e) => flash(String(e), false),
+    onSettled: () => setBusyId(null),
+  });
 
-  const handleDisableToday = async (entry: EntryView) => {
-    setBusyId(entry.entry_id);
-    try {
-      await upsertOverride(entry.entry_id, false, null, todayString());
+  const disableMutation = useMutation({
+    mutationFn: (entry: EntryView) =>
+      upsertOverride(entry.entry_id, false, null, today),
+    onMutate: (entry) => setBusyId(entry.entry_id),
+    onSuccess: (_, entry) => {
       flash(`${entry.label}: disabled for today`);
-      refetchEntries();
-      refetchOverrides();
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyId(null);
-    }
-  };
+      invalidateAll();
+    },
+    onError: (e) => flash(String(e), false),
+    onSettled: () => setBusyId(null),
+  });
 
-  const handleClearOverride = async (entry: EntryView) => {
-    setBusyId(entry.entry_id);
-    try {
-      await deleteOverride(entry.entry_id, todayString());
+  const clearMutation = useMutation({
+    mutationFn: (entry: EntryView) => deleteOverride(entry.entry_id, today),
+    onMutate: (entry) => setBusyId(entry.entry_id),
+    onSuccess: (_, entry) => {
       flash(`${entry.label}: override cleared`);
-      refetchEntries();
-      refetchOverrides();
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyId(null);
-    }
-  };
+      invalidateAll();
+    },
+    onError: (e) => flash(String(e), false),
+    onSettled: () => setBusyId(null),
+  });
 
-  const handleEnableOverride = async (entry: EntryView) => {
-    setBusyId(entry.entry_id);
-    try {
-      await upsertOverride(entry.entry_id, true, null, todayString());
+  const enableMutation = useMutation({
+    mutationFn: (entry: EntryView) =>
+      upsertOverride(entry.entry_id, true, null, today),
+    onMutate: (entry) => setBusyId(entry.entry_id),
+    onSuccess: (_, entry) => {
       flash(`${entry.label}: enabled for today`);
-      refetchEntries();
-      refetchOverrides();
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusyId(null);
-    }
-  };
+      invalidateAll();
+    },
+    onError: (e) => flash(String(e), false),
+    onSettled: () => setBusyId(null),
+  });
 
   const loading = entriesLoading && !entries;
   const filtered = (entries ?? []).filter((e) =>
@@ -156,10 +158,10 @@ export function EntriesPage() {
             entry={entry}
             override={overrideMap.get(entry.entry_id)}
             busy={busyId === entry.entry_id}
-            onLaunch={() => handleLaunch(entry.entry_id)}
-            onDisableToday={() => handleDisableToday(entry)}
-            onClear={() => handleClearOverride(entry)}
-            onEnable={() => handleEnableOverride(entry)}
+            onLaunch={() => launchMutation.mutate(entry.entry_id)}
+            onDisableToday={() => disableMutation.mutate(entry)}
+            onClear={() => clearMutation.mutate(entry)}
+            onEnable={() => enableMutation.mutate(entry)}
           />
         ))}
         {!loading && filtered.length === 0 && (

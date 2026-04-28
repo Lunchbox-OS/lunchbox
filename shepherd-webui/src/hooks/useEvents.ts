@@ -1,16 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { sseUrl } from "../api/client";
 
-export type EventCallback = () => void;
-
 /**
- * Subscribes to the shepherd SSE event stream and calls `onEvent` on every
- * event received. The callback is stable — callers should call refetch
- * functions rather than relying on event payloads for state updates.
+ * Subscribes to the shepherd SSE event stream and invalidates all cached
+ * queries on every event so TanStack Query refetches fresh data automatically.
  */
-export function useEvents(onEvent: EventCallback): void {
-  const cbRef = useRef(onEvent);
-  cbRef.current = onEvent;
+export function useEvents(): void {
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     let es: EventSource | null = null;
@@ -19,7 +16,7 @@ export function useEvents(onEvent: EventCallback): void {
     function connect() {
       try {
         es = new EventSource(sseUrl());
-        es.onmessage = () => cbRef.current();
+        es.onmessage = () => queryClient.invalidateQueries();
         es.onerror = () => {
           es?.close();
           es = null;
@@ -36,5 +33,5 @@ export function useEvents(onEvent: EventCallback): void {
       es?.close();
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, []);
+  }, [queryClient]);
 }

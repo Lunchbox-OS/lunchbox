@@ -9,9 +9,9 @@ import Snackbar from "@mui/material/Snackbar";
 import Typography from "@mui/material/Typography";
 import StopIcon from "@mui/icons-material/Stop";
 import { styled } from "@mui/material/styles";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { extendSession, getCurrentSession, stopSession } from "../api/client";
 import { formatDuration, type SessionInfo } from "../api/types";
-import { useApi } from "../hooks/useApi";
 import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 
@@ -32,42 +32,39 @@ const CountdownText = styled(Typography)(({ theme }) => ({
 }));
 
 export function DashboardPage() {
-  const { data: session, loading, refetch } = useApi(getCurrentSession, []);
-  const [busy, setBusy] = useState(false);
+  const queryClient = useQueryClient();
+  const { data: session, isPending: loading } = useQuery({
+    queryKey: ["session", "current"],
+    queryFn: getCurrentSession,
+  });
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
-  useEvents(refetch);
+  useEvents();
 
   const flash = (text: string, ok = true) => {
     setMsg({ text, ok });
     setTimeout(() => setMsg(null), 3000);
   };
 
-  const handleStop = async () => {
-    setBusy(true);
-    try {
-      await stopSession();
-      refetch();
+  const stopMutation = useMutation({
+    mutationFn: stopSession,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session"] });
       flash("Session stopped");
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    onError: (e) => flash(String(e), false),
+  });
 
-  const handleAdjust = async (secs: number) => {
-    setBusy(true);
-    try {
-      await extendSession(secs);
-      refetch();
+  const adjustMutation = useMutation({
+    mutationFn: extendSession,
+    onSuccess: (_, secs) => {
+      queryClient.invalidateQueries({ queryKey: ["session"] });
       flash(secs > 0 ? `+${secs / 60}m added` : `${secs / 60}m removed`);
-    } catch (e) {
-      flash(String(e), false);
-    } finally {
-      setBusy(false);
-    }
-  };
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const busy = stopMutation.isPending || adjustMutation.isPending;
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -99,7 +96,12 @@ export function DashboardPage() {
       )}
 
       {session && (
-        <SessionCard session={session} busy={busy} onStop={handleStop} onAdjust={handleAdjust} />
+        <SessionCard
+          session={session}
+          busy={busy}
+          onStop={() => stopMutation.mutate()}
+          onAdjust={(secs) => adjustMutation.mutate(secs)}
+        />
       )}
     </Box>
   );

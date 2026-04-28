@@ -1,3 +1,4 @@
+import axios from "axios";
 import type {
   DailyOverride,
   EntryView,
@@ -25,25 +26,29 @@ function getToken(): string | null {
   return localStorage.getItem("apiToken");
 }
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+const axiosInstance = axios.create();
+
+axiosInstance.interceptors.request.use((config) => {
+  config.baseURL = `${getBase()}/api/v1`;
   const token = getToken();
-  const headers: Record<string, string> = {
-    ...(init.body ? { "Content-Type": "application/json" } : {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
 
-  const res = await fetch(`${getBase()}/api/v1${path}`, {
-    ...init,
-    headers: { ...headers, ...(init.headers as Record<string, string> ?? {}) },
-  });
+axiosInstance.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (axios.isAxiosError(err) && err.response) {
+      const message = err.response.data?.message ?? err.response.statusText;
+      throw new ApiError(err.response.status, message);
+    }
+    throw err;
+  },
+);
 
-  if (res.status === 204) return undefined as T;
-
-  const body = await res.json().catch(() => ({ message: res.statusText }));
-  if (!res.ok) {
-    throw new ApiError(res.status, body?.message ?? res.statusText);
-  }
-  return body as T;
+async function req<T>(url: string, config: import("axios").AxiosRequestConfig = {}): Promise<T> {
+  const res = await axiosInstance.request<T>({ url, ...config });
+  return res.data;
 }
 
 // Health
@@ -61,7 +66,7 @@ export const getCurrentSession = () => req<SessionInfo | null>("/sessions/curren
 export const launchSession = (entry_id: string) =>
   req<LaunchResponse>("/sessions", {
     method: "POST",
-    body: JSON.stringify({ entry_id }),
+    data: { entry_id },
   });
 
 export const stopSession = () =>
@@ -70,7 +75,7 @@ export const stopSession = () =>
 export const extendSession = (seconds: number) =>
   req<{ new_deadline: string | null }>("/sessions/current/extend", {
     method: "POST",
-    body: JSON.stringify({ seconds }),
+    data: { seconds },
   });
 
 // Daily overrides
@@ -90,7 +95,7 @@ export const upsertOverride = (
 ) =>
   req<DailyOverride>(`/overrides/${entry_id}`, {
     method: "PUT",
-    body: JSON.stringify({ date, availability, quota_delta_seconds }),
+    data: { date, availability, quota_delta_seconds },
   });
 
 export const deleteOverride = (entry_id: string, date?: string) =>
@@ -128,12 +133,12 @@ export const getVolume = () => req<VolumeInfo>("/volume");
 export const setVolumePercent = (percent: number) =>
   req<VolumeInfo>("/volume", {
     method: "PUT",
-    body: JSON.stringify({ percent }),
+    data: { percent },
   });
 export const setVolumeMuted = (muted: boolean) =>
   req<VolumeInfo>("/volume", {
     method: "PUT",
-    body: JSON.stringify({ muted }),
+    data: { muted },
   });
 
 // Config
@@ -145,8 +150,5 @@ export function sseUrl(): string {
   const base = getBase();
   const token = getToken();
   const url = `${base}/api/v1/events`;
-  // EventSource doesn't support custom headers; if a token is required,
-  // pass it as a query param and the server would need to accept it that way.
-  // For now, rely on same-origin or no-auth setups for SSE.
   return token ? `${url}?token=${encodeURIComponent(token)}` : url;
 }

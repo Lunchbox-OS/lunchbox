@@ -5,9 +5,9 @@ import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Typography from "@mui/material/Typography";
 import { styled } from "@mui/material/styles";
+import { useQuery } from "@tanstack/react-query";
 import { getUsage } from "../api/client";
 import { formatDurationHuman, type UsageStat } from "../api/types";
-import { useApi } from "../hooks/useApi";
 import { Spinner } from "../components/Spinner";
 
 type Range = "today" | "7d" | "30d";
@@ -40,7 +40,10 @@ export function UsagePage() {
   const [range, setRange] = useState<Range>("7d");
   const { from, to } = dateRange(range);
 
-  const { data, loading } = useApi(() => getUsage(from, to), [from, to]);
+  const { data, isPending: loading } = useQuery({
+    queryKey: ["usage", from, to],
+    queryFn: () => getUsage(from, to),
+  });
 
   const byEntry = new Map<string, { label: string; secs: number }>();
   for (const stat of data ?? []) {
