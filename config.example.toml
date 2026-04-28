@@ -43,7 +43,7 @@ timeout_ms = 1500
 # Intended for local/LAN use (e.g. a parent's phone on the same network).
 # WARNING: Do not expose this port to the internet without additional firewalling.
 [service.management_api]
-# enabled = true             # Set to false to disable even if section is present
+enabled = true
 port = 8080                  # TCP port to listen on
 bind = "0.0.0.0"             # Bind address ("127.0.0.1" for localhost-only)
 # auth_token = "changeme"    # Optional Bearer token; omit to allow unauthenticated access
