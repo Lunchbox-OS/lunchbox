@@ -74,7 +74,7 @@ build_webui() {
 
     npm run build
     success "Web UI built"
-    cd "$repo_root"
+    cd "$repo_root" || die "Failed to return to repo root"
 }
 
 # Build the project
