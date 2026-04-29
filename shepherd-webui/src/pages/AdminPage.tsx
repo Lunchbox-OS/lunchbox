@@ -13,9 +13,6 @@ import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  enterMaintenance,
-  exitMaintenance,
-  getMaintenance,
   getVolume,
   reloadConfig,
   setVolumeMuted,
@@ -30,10 +27,6 @@ export function AdminPage() {
   const { data: volume, isPending: volLoading } = useQuery({
     queryKey: ["volume"],
     queryFn: getVolume,
-  });
-  const { data: maintenance, isPending: maintLoading } = useQuery({
-    queryKey: ["maintenance"],
-    queryFn: getMaintenance,
   });
 
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -55,15 +48,6 @@ export function AdminPage() {
   const setMutedMutation = useMutation({
     mutationFn: setVolumeMuted,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["volume"] }),
-    onError: (e) => flash(String(e), false),
-  });
-
-  const maintenanceMutation = useMutation({
-    mutationFn: async () => { await (maintenance?.active ? exitMaintenance() : enterMaintenance()); },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["maintenance"] });
-      flash(maintenance?.active ? "Maintenance mode disabled" : "Maintenance mode enabled");
-    },
     onError: (e) => flash(String(e), false),
   });
 
@@ -132,47 +116,6 @@ export function AdminPage() {
               )}
             </Stack>
           ) : null}
-        </CardContent>
-      </Card>
-
-      {/* Maintenance Mode */}
-      <Card variant="outlined">
-        <CardContent>
-          <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 600 }}>Maintenance Mode</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Temporarily suspends compositor restrictions so you can access system settings.
-            Resets automatically on restart.
-          </Typography>
-          {maintLoading && !maintenance ? (
-            <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}><Spinner /></Box>
-          ) : (
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                <Box
-                  sx={{
-                    width: 10,
-                    height: 10,
-                    borderRadius: "50%",
-                    bgcolor: maintenance?.active ? "warning.main" : "action.disabled",
-                  }}
-                />
-                <Typography variant="body2">
-                  {maintenance?.active
-                    ? `Active since ${new Date(maintenance.activated_at!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                    : "Inactive"}
-                </Typography>
-              </Box>
-              <Button
-                variant={maintenance?.active ? "contained" : "outlined"}
-                color={maintenance?.active ? "warning" : "primary"}
-                size="small"
-                onClick={() => maintenanceMutation.mutate()}
-                disabled={maintenanceMutation.isPending}
-              >
-                {maintenanceMutation.isPending ? <Spinner size={18} /> : maintenance?.active ? "Disable" : "Enable"}
-              </Button>
-            </Box>
-          )}
         </CardContent>
       </Card>
 

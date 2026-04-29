@@ -117,11 +117,6 @@ export interface UsageStat {
   duration_seconds: number;
 }
 
-export interface MaintenanceState {
-  active: boolean;
-  activated_at: string | null;
-}
-
 export interface VolumeRestrictions {
   max_volume: number | null;
   min_volume: number | null;

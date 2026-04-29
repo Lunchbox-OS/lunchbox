@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use shepherd_api::{EntryKind, Event, MaintenanceState};
+use shepherd_api::{EntryKind, Event};
 use shepherd_config::{
     AvailabilityPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy,
 };
@@ -148,7 +148,6 @@ fn make_app_with_policy(
         store,
         host,
         volume,
-        maintenance: Arc::new(Mutex::new(MaintenanceState::default())),
         event_tx: tx,
         broadcast_fn: Arc::new(move |event: Event| {
             let _ = tx_for_fn.send(event);
@@ -773,69 +772,6 @@ async fn usage_date_range_returns_stats_in_range() {
     let (status, body) = send(&app, req_get("/api/v1/usage?from=2026-01-01&to=2026-04-25")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_array());
-}
-
-// ---------------------------------------------------------------------------
-// Maintenance mode
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn maintenance_starts_inactive() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["active"], false);
-}
-
-#[tokio::test]
-async fn maintenance_enter_sets_active() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_post("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["active"], true);
-    assert!(!body["activated_at"].is_null());
-}
-
-#[tokio::test]
-async fn maintenance_double_enter_returns_409() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-
-    let (status, _) = send(&app, req_post("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (status, body) = send(&app, req_post("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "conflict");
-}
-
-#[tokio::test]
-async fn maintenance_exit_clears_state() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-
-    // Enter
-    let (status, _) = send(&app, req_post("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Exit
-    let (status, _) = send(&app, req_delete("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-
-    // Inactive again
-    let (status, body) = send(&app, req_get("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["active"], false);
-}
-
-#[tokio::test]
-async fn maintenance_exit_when_inactive_returns_404() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    let (status, _) = send(&app, req_delete("/api/v1/maintenance")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

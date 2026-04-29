@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use shepherd_api::{
-    Command, EntryKind, ErrorCode, ErrorInfo, Event, EventPayload, HealthStatus, MaintenanceState,
-    Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo, VolumeRestrictions,
+    Command, EntryKind, ErrorCode, ErrorInfo, Event, EventPayload, HealthStatus, Response,
+    ResponsePayload, SessionEndReason, StopMode, VolumeInfo, VolumeRestrictions,
 };
 use shepherd_config::{VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
@@ -198,7 +198,6 @@ impl Service {
                 store: store.clone(),
                 host: host.clone() as Arc<dyn HostAdapter>,
                 volume: volume.clone() as Arc<dyn VolumeController>,
-                maintenance: Arc::new(Mutex::new(MaintenanceState::default())),
                 event_tx: event_tx.clone(),
                 broadcast_fn: Arc::new(move |event: Event| {
                     ipc_for_broadcast.broadcast_event(event.clone());

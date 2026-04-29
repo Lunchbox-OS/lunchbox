@@ -26,9 +26,6 @@ All routes are under `/api/v1/`. An optional Bearer token can be configured for 
 | `DELETE` | `/overrides/{entry_id}` | Clear override |
 | `GET` | `/usage` | Screen-time stats (`?from=&to=`) |
 | `GET` | `/usage/{entry_id}` | Stats for one entry |
-| `GET` | `/maintenance` | Maintenance mode status |
-| `POST` | `/maintenance` | Enable maintenance mode |
-| `DELETE` | `/maintenance` | Disable maintenance mode |
 | `GET` | `/volume` | Current volume |
 | `PUT` | `/volume` | Set volume or mute |
 | `POST` | `/config/reload` | Hot-reload configuration |
@@ -53,6 +50,5 @@ auth_token = "changeme"  # optional
 - `tokio-stream` — BroadcastStream for SSE
 - `shepherd-core` — Policy engine access
 - `shepherd-store` — Persistence (daily overrides, usage)
-- `shepherd-host-api` — Maintenance mode
 - `shepherd-config` — ManagementApiConfig
 - `shepherd-api` — Shared types (DailyOverride, UsageStat, Event, …)

@@ -357,13 +357,6 @@ pub struct UsageStat {
     pub duration_seconds: u64,
 }
 
-/// State of the maintenance/debug mode
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MaintenanceState {
-    pub active: bool,
-    pub activated_at: Option<DateTime<Local>>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

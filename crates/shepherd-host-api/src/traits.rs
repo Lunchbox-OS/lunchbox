@@ -130,13 +130,6 @@ pub trait HostAdapter: Send + Sync {
     fn is_healthy(&self) -> bool {
         true
     }
-
-    /// Optional: enter or exit maintenance/debug mode.
-    /// In maintenance mode, host-level restrictions (e.g. Sway window rules) are relaxed
-    /// so a parent can perform setup tasks. Default is a no-op.
-    async fn set_maintenance_mode(&self, _active: bool) -> HostResult<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

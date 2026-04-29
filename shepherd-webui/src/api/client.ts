@@ -3,7 +3,6 @@ import type {
   DailyOverride,
   EntryView,
   LaunchResponse,
-  MaintenanceState,
   SessionInfo,
   UsageStat,
   VolumeInfo,
@@ -120,13 +119,6 @@ export const getEntryUsage = (entry_id: string, from?: string, to?: string) => {
   const qs = params.toString();
   return req<UsageStat[]>(qs ? `/usage/${entry_id}?${qs}` : `/usage/${entry_id}`);
 };
-
-// Maintenance
-export const getMaintenance = () => req<MaintenanceState>("/maintenance");
-export const enterMaintenance = () =>
-  req<MaintenanceState>("/maintenance", { method: "POST" });
-export const exitMaintenance = () =>
-  req<void>("/maintenance", { method: "DELETE" });
 
 // Volume
 export const getVolume = () => req<VolumeInfo>("/volume");

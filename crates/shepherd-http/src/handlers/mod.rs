@@ -3,7 +3,6 @@
 pub mod config;
 pub mod entries;
 pub mod health;
-pub mod maintenance;
 pub mod overrides;
 pub mod sessions;
 pub mod sse;
@@ -39,12 +38,6 @@ pub fn router(state: AppState, auth_token: Option<String>) -> Router {
         )
         .route("/usage", get(usage::get_usage_all))
         .route("/usage/{entry_id}", get(usage::get_usage_entry))
-        .route(
-            "/maintenance",
-            get(maintenance::get_maintenance)
-                .post(maintenance::enter_maintenance)
-                .delete(maintenance::exit_maintenance),
-        )
         .route("/volume", get(volume::get_volume).put(volume::set_volume))
         .route("/config/reload", axum::routing::post(config::reload_config))
         .route("/events", get(sse::sse_handler))
