@@ -24,5 +24,8 @@ export default defineConfig({
     distPath: {
       root: "dist",
     },
+    cleanDistPath: {
+      keep: [/\.gitkeep$/],
+    },
   },
 });
