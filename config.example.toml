@@ -46,6 +46,9 @@ timeout_ms = 1500
 enabled = true
 port = 8080                  # TCP port to listen on
 bind = "0.0.0.0"             # Bind address ("127.0.0.1" for localhost-only)
+# bind_retry_seconds = 300   # Retry initial bind for this long if the address is not yet
+                             # assigned (e.g. ZeroTier interface still coming up at login).
+                             # 0 = retry forever. Default: 300.
 # auth_token = "changeme"    # Optional Bearer token; omit to allow unauthenticated access
 
 # Default warning thresholds

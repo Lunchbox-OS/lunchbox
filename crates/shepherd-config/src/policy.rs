@@ -128,6 +128,9 @@ impl ServiceConfig {
 pub struct ManagementApiConfig {
     pub port: u16,
     pub bind: IpAddr,
+    /// How long to keep retrying the initial bind when the address is unavailable.
+    /// `None` means retry indefinitely.
+    pub bind_retry: Option<Duration>,
     pub auth_token: Option<String>,
 }
 
@@ -138,9 +141,15 @@ impl ManagementApiConfig {
             .as_deref()
             .and_then(|s| IpAddr::from_str(s).ok())
             .unwrap_or_else(|| IpAddr::from_str("127.0.0.1").unwrap());
+        let bind_retry = match raw.bind_retry_seconds {
+            Some(0) => None,
+            Some(s) => Some(Duration::from_secs(s)),
+            None => Some(Duration::from_secs(300)),
+        };
         Self {
             port: raw.port.unwrap_or(7890),
             bind,
+            bind_retry,
             auth_token: raw.auth_token.clone(),
         }
     }

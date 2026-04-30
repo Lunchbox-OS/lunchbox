@@ -268,6 +268,11 @@ pub struct RawManagementApiConfig {
     /// IP address to bind to (default: "127.0.0.1")
     pub bind: Option<String>,
 
+    /// How long (in seconds) to keep retrying the initial bind when the requested address is
+    /// unavailable (e.g. an interface like ZeroTier that has not yet come up). 0 means retry
+    /// indefinitely. Default: 300.
+    pub bind_retry_seconds: Option<u64>,
+
     /// Optional Bearer token for authentication. If absent, all LAN clients are trusted.
     pub auth_token: Option<String>,
 }
