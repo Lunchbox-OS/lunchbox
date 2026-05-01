@@ -12,12 +12,18 @@ import { Spinner } from "../components/Spinner";
 
 type Range = "today" | "7d" | "30d";
 
+function localDateString(d: Date): string {
+  // Usage is recorded under the local-time day; a UTC ISO slice rolls
+  // forward in the evening and queries the wrong window.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function dateRange(range: Range): { from: string; to: string } {
   const to = new Date();
   const from = new Date();
   if (range === "7d") from.setDate(from.getDate() - 6);
   else if (range === "30d") from.setDate(from.getDate() - 29);
-  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+  return { from: localDateString(from), to: localDateString(to) };
 }
 
 const BarFill = styled(Box)(({ theme }) => ({

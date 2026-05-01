@@ -30,7 +30,11 @@ import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 
 function todayString(): string {
-  return new Date().toISOString().slice(0, 10);
+  // Use the local date — overrides are stored under the local-time day, so
+  // a UTC ISO slice rolls forward by a day in the evening (and produces a
+  // mismatch where the engine looks under the local date and finds nothing).
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 export function EntriesPage() {
