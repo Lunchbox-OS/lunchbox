@@ -81,7 +81,7 @@ apply temporary overrides.
 
 !["Now" screen showing time adjustment and "Stop Session" buttons](./docs/readme/management-now.png)
 
-!["Activities" screen showing the configured activities and manual enable/disable overrides](./docs/readme/management-activites.png)
+!["Activities" screen showing the configured activities and manual enable/disable overrides](./docs/readme/management-activities.png)
 
 ## Core concepts
 
