@@ -611,7 +611,7 @@ impl CoreEngine {
     pub fn extend_current(
         &mut self,
         by: Duration,
-        _now_mono: MonotonicInstant,
+        now_mono: MonotonicInstant,
         _now: DateTime<Local>,
     ) -> Option<DateTime<Local>> {
         let session = self.current_session.as_mut()?;
@@ -625,6 +625,14 @@ impl CoreEngine {
 
         session.deadline_mono = Some(new_deadline_mono);
         session.deadline = Some(new_deadline);
+
+        // Re-arm any previously-issued warnings whose threshold is now in the
+        // future relative to the new deadline. They will fire again as the new
+        // remaining time drops back below the threshold.
+        let new_remaining = new_deadline_mono.saturating_duration_until(now_mono);
+        session
+            .warnings_issued
+            .retain(|&threshold| new_remaining <= Duration::from_secs(threshold));
 
         // Log to audit
         let _ = self
@@ -859,6 +867,103 @@ mod tests {
         let events = engine.tick(later, now);
         let warning_events: Vec<_> = events
             .iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert!(warning_events.is_empty());
+    }
+
+    #[test]
+    fn test_extend_reschedules_warning() {
+        let policy = Policy {
+            entries: vec![Entry {
+                id: EntryId::new("test"),
+                label: "Test".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "test".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy {
+                    windows: vec![],
+                    always: true,
+                },
+                limits: LimitsPolicy {
+                    max_run: Some(Duration::from_secs(120)),
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![shepherd_api::WarningThreshold {
+                    seconds_before: 60,
+                    severity: WarningSeverity::Warn,
+                    message_template: None,
+                }],
+                volume: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+            }],
+            service: Default::default(),
+            default_warnings: vec![],
+            default_max_run: Some(Duration::from_secs(3600)),
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let mut engine = CoreEngine::new(policy, store, caps);
+
+        let entry_id = EntryId::new("test");
+        let now = shepherd_util::now();
+        let now_mono = MonotonicInstant::now();
+
+        if let LaunchDecision::Approved(plan) = engine.request_launch(&entry_id, now) {
+            engine.start_session(plan, now, now_mono);
+        }
+
+        // At 70s elapsed (50s remaining), 60s warning fires.
+        let t1 = now_mono + Duration::from_secs(70);
+        let warning_events: Vec<_> = engine
+            .tick(t1, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert_eq!(warning_events.len(), 1);
+
+        // Extend by 120s. New deadline is at 240s; remaining is now 170s,
+        // which is well above the 60s threshold, so the warning must re-arm.
+        engine.extend_current(Duration::from_secs(120), t1, now);
+
+        // 30s after extension (100s elapsed, 140s remaining): still no warning.
+        let t2 = t1 + Duration::from_secs(30);
+        let warning_events: Vec<_> = engine
+            .tick(t2, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert!(warning_events.is_empty());
+
+        // At 190s elapsed (50s remaining against new deadline), warning fires again.
+        let t3 = now_mono + Duration::from_secs(190);
+        let warning_events: Vec<_> = engine
+            .tick(t3, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert_eq!(warning_events.len(), 1);
+        assert!(matches!(
+            warning_events[0],
+            CoreEvent::Warning {
+                threshold_seconds: 60,
+                ..
+            }
+        ));
+
+        // And it still doesn't fire twice after re-arming.
+        let warning_events: Vec<_> = engine
+            .tick(t3, now)
+            .into_iter()
             .filter(|e| matches!(e, CoreEvent::Warning { .. }))
             .collect();
         assert!(warning_events.is_empty());
