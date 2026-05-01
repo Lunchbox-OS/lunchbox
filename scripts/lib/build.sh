@@ -51,6 +51,32 @@ binaries_exist() {
     return 0
 }
 
+# Build the web UI (must run before cargo so rust-embed picks up dist/)
+build_webui() {
+    local repo_root
+    repo_root="$(get_repo_root)"
+    local webui_dir="$repo_root/shepherd-webui"
+
+    if [[ ! -d "$webui_dir" ]]; then
+        warn "shepherd-webui directory not found; skipping web UI build"
+        return 0
+    fi
+
+    require_command npm
+
+    info "Building web UI..."
+    cd "$webui_dir" || die "Failed to change directory to $webui_dir"
+
+    if [[ ! -d node_modules ]]; then
+        info "Installing npm dependencies..."
+        npm install
+    fi
+
+    npm run build
+    success "Web UI built"
+    cd "$repo_root" || die "Failed to return to repo root"
+}
+
 # Build the project
 build_cargo() {
     local release="${1:-false}"
@@ -59,9 +85,11 @@ build_cargo() {
     
     verify_repo
     require_command cargo rust
-    
+
+    build_webui
+
     cd "$repo_root" || die "Failed to change directory to $repo_root"
-    
+
     local build_type
     if [[ "$release" == "true" ]]; then
         build_type="release"

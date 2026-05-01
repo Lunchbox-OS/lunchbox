@@ -5,8 +5,8 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawConfig, RawEntry, RawEntryKind, RawInternetConfig, RawServiceConfig, RawVolumeConfig,
-    RawWarningThreshold,
+    RawConfig, RawEntry, RawEntryKind, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
+    RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_time};
 use shepherd_api::{EntryKind, WarningSeverity, WarningThreshold};
@@ -14,7 +14,9 @@ use shepherd_util::{
     DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
     socket_path_without_env,
 };
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 /// Validated policy ready for use by the core engine
@@ -93,6 +95,8 @@ pub struct ServiceConfig {
     pub child_log_dir: PathBuf,
     /// Internet connectivity configuration
     pub internet: InternetConfig,
+    /// Management HTTP API configuration (None = disabled)
+    pub management_api: Option<ManagementApiConfig>,
 }
 
 impl ServiceConfig {
@@ -102,6 +106,11 @@ impl ServiceConfig {
             .child_log_dir
             .unwrap_or_else(|| log_dir.join("sessions"));
         let internet = convert_internet_config(raw.internet.as_ref());
+        let management_api = raw
+            .management_api
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(ManagementApiConfig::from_raw);
         Self {
             socket_path: raw.socket_path.unwrap_or_else(socket_path_without_env),
             log_dir,
@@ -109,6 +118,39 @@ impl ServiceConfig {
             child_log_dir,
             data_dir: raw.data_dir.unwrap_or_else(default_data_dir),
             internet,
+            management_api,
+        }
+    }
+}
+
+/// Validated management HTTP API configuration
+#[derive(Debug, Clone)]
+pub struct ManagementApiConfig {
+    pub port: u16,
+    pub bind: IpAddr,
+    /// How long to keep retrying the initial bind when the address is unavailable.
+    /// `None` means retry indefinitely.
+    pub bind_retry: Option<Duration>,
+    pub auth_token: Option<String>,
+}
+
+impl ManagementApiConfig {
+    fn from_raw(raw: &RawManagementApiConfig) -> Self {
+        let bind = raw
+            .bind
+            .as_deref()
+            .and_then(|s| IpAddr::from_str(s).ok())
+            .unwrap_or_else(|| IpAddr::from_str("127.0.0.1").unwrap());
+        let bind_retry = match raw.bind_retry_seconds {
+            Some(0) => None,
+            Some(s) => Some(Duration::from_secs(s)),
+            None => Some(Duration::from_secs(300)),
+        };
+        Self {
+            port: raw.port.unwrap_or(7890),
+            bind,
+            bind_retry,
+            auth_token: raw.auth_token.clone(),
         }
     }
 }
@@ -127,6 +169,7 @@ impl Default for ServiceConfig {
                 DEFAULT_INTERNET_CHECK_INTERVAL,
                 DEFAULT_INTERNET_CHECK_TIMEOUT,
             ),
+            management_api: None,
         }
     }
 }

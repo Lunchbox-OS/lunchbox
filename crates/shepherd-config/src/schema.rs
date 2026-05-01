@@ -52,6 +52,10 @@ pub struct RawServiceConfig {
     /// Internet connectivity check settings
     #[serde(default)]
     pub internet: Option<RawInternetConfig>,
+
+    /// Management HTTP API settings
+    #[serde(default)]
+    pub management_api: Option<RawManagementApiConfig>,
 }
 
 /// Raw entry definition
@@ -249,6 +253,28 @@ pub struct RawEntryInternet {
 
 fn default_severity() -> String {
     "warn".to_string()
+}
+
+/// Management HTTP API configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawManagementApiConfig {
+    /// Whether the management API is enabled (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// TCP port to listen on (default: 7890)
+    pub port: Option<u16>,
+
+    /// IP address to bind to (default: "127.0.0.1")
+    pub bind: Option<String>,
+
+    /// How long (in seconds) to keep retrying the initial bind when the requested address is
+    /// unavailable (e.g. an interface like ZeroTier that has not yet come up). 0 means retry
+    /// indefinitely. Default: 300.
+    pub bind_retry_seconds: Option<u64>,
+
+    /// Optional Bearer token for authentication. If absent, all LAN clients are trusted.
+    pub auth_token: Option<String>,
 }
 
 /// Volume control configuration

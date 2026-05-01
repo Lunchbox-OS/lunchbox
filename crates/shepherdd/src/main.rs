@@ -20,6 +20,7 @@ use shepherd_config::{VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
 use shepherd_host_api::{HostAdapter, HostEvent, StopMode as HostStopMode, VolumeController};
 use shepherd_host_linux::{LinuxHost, LinuxVolumeController};
+use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{ClientId, MonotonicInstant, RateLimiter, default_config_path};
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -150,6 +151,9 @@ impl Service {
     async fn run(self) -> Result<()> {
         let config_path = self.config_path.clone();
 
+        // Broadcast channel shared by IPC and HTTP SSE
+        let (event_tx, _event_rx) = broadcast::channel::<Event>(256);
+
         // Start host process monitor
         let _monitor_handle = self.host.start_monitor();
 
@@ -180,6 +184,34 @@ impl Service {
         let host = self.host.clone();
         let volume = self.volume.clone();
         let store = self.store.clone();
+
+        // Start HTTP management API if configured
+        let management_api_config = {
+            let eng = engine.lock().await;
+            eng.policy().service.management_api.clone()
+        };
+        if let Some(api_cfg) = management_api_config {
+            let ipc_for_broadcast = ipc_ref.clone();
+            let event_tx_for_broadcast = event_tx.clone();
+            let http_state = HttpAppState {
+                engine: engine.clone(),
+                store: store.clone(),
+                host: host.clone() as Arc<dyn HostAdapter>,
+                volume: volume.clone() as Arc<dyn VolumeController>,
+                event_tx: event_tx.clone(),
+                broadcast_fn: Arc::new(move |event: Event| {
+                    ipc_for_broadcast.broadcast_event(event.clone());
+                    let _ = event_tx_for_broadcast.send(event);
+                }),
+                config_path: config_path.clone(),
+            };
+            let http_server = HttpServer::new(http_state, api_cfg);
+            tokio::spawn(async move {
+                if let Err(e) = http_server.run().await {
+                    error!(error = %e, "HTTP management API error");
+                }
+            });
+        }
 
         // Start internet connectivity monitoring (if configured)
         if let Some(monitor) = self.internet_monitor {
@@ -285,25 +317,25 @@ impl Service {
                     };
 
                     for event in events {
-                        Self::handle_core_event(&engine, &host, &ipc_ref, event, now_mono, now).await;
+                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, event, now_mono, now).await;
                     }
                 }
 
                 // Host events (process exit)
                 Some(host_event) = host_events.recv() => {
-                    Self::handle_host_event(&engine, &ipc_ref, host_event).await;
+                    Self::handle_host_event(&engine, &ipc_ref, &event_tx, host_event).await;
                 }
 
                 // Config file changed on disk
                 Some(()) = config_change_rx.recv() => {
                     // Drain any additional buffered events to debounce rapid saves
                     while config_change_rx.try_recv().is_ok() {}
-                    Self::handle_config_reload(&engine, &ipc_ref, &config_path).await;
+                    Self::handle_config_reload(&engine, &ipc_ref, &event_tx, &config_path).await;
                 }
 
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &config_path, msg).await;
+                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &event_tx, &config_path, msg).await;
                 }
             }
         }
@@ -343,9 +375,16 @@ impl Service {
         Ok(())
     }
 
+    /// Broadcast an event to both IPC subscribers and HTTP SSE subscribers
+    fn broadcast(ipc: &Arc<IpcServer>, tx: &broadcast::Sender<Event>, event: Event) {
+        ipc.broadcast_event(event.clone());
+        let _ = tx.send(event);
+    }
+
     async fn handle_config_reload(
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
     ) {
         match load_config(config_path) {
@@ -363,9 +402,13 @@ impl Service {
                     config_path = %config_path.display(),
                     "Config reloaded"
                 );
-                ipc.broadcast_event(Event::new(EventPayload::PolicyReloaded { entry_count }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::PolicyReloaded { entry_count }),
+                );
                 let state = engine.lock().await.get_state();
-                ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+                Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
             }
             Err(e) => {
                 warn!(error = %e, "Failed to reload config, keeping existing policy");
@@ -377,6 +420,7 @@ impl Service {
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
         ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
         event: CoreEvent,
         _now_mono: MonotonicInstant,
         _now: chrono::DateTime<chrono::Local>,
@@ -396,13 +440,17 @@ impl Service {
                     "Warning issued"
                 );
 
-                ipc.broadcast_event(Event::new(EventPayload::WarningIssued {
-                    session_id: session_id.clone(),
-                    threshold_seconds: *threshold_seconds,
-                    time_remaining: *time_remaining,
-                    severity: *severity,
-                    message: message.clone(),
-                }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::WarningIssued {
+                        session_id: session_id.clone(),
+                        threshold_seconds: *threshold_seconds,
+                        time_remaining: *time_remaining,
+                        severity: *severity,
+                        message: message.clone(),
+                    }),
+                );
             }
 
             CoreEvent::ExpireDue { session_id } => {
@@ -428,9 +476,13 @@ impl Service {
                     let _ = host.stop(&handle, HostStopMode::Force).await;
                 }
 
-                ipc.broadcast_event(Event::new(EventPayload::SessionExpiring {
-                    session_id: session_id.clone(),
-                }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::SessionExpiring {
+                        session_id: session_id.clone(),
+                    }),
+                );
             }
 
             CoreEvent::SessionStarted {
@@ -439,12 +491,16 @@ impl Service {
                 label,
                 deadline,
             } => {
-                ipc.broadcast_event(Event::new(EventPayload::SessionStarted {
-                    session_id: session_id.clone(),
-                    entry_id: entry_id.clone(),
-                    label: label.clone(),
-                    deadline: *deadline,
-                }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::SessionStarted {
+                        session_id: session_id.clone(),
+                        entry_id: entry_id.clone(),
+                        label: label.clone(),
+                        deadline: *deadline,
+                    }),
+                );
             }
 
             CoreEvent::SessionEnded {
@@ -453,32 +509,44 @@ impl Service {
                 reason,
                 duration,
             } => {
-                ipc.broadcast_event(Event::new(EventPayload::SessionEnded {
-                    session_id: session_id.clone(),
-                    entry_id: entry_id.clone(),
-                    reason: reason.clone(),
-                    duration: *duration,
-                }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::SessionEnded {
+                        session_id: session_id.clone(),
+                        entry_id: entry_id.clone(),
+                        reason: reason.clone(),
+                        duration: *duration,
+                    }),
+                );
 
                 // Broadcast state change
                 let state = {
                     let engine = engine.lock().await;
                     engine.get_state()
                 };
-                ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+                Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
             }
 
             CoreEvent::PolicyReloaded { entry_count } => {
-                ipc.broadcast_event(Event::new(EventPayload::PolicyReloaded {
-                    entry_count: *entry_count,
-                }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::PolicyReloaded {
+                        entry_count: *entry_count,
+                    }),
+                );
             }
 
             CoreEvent::EntryAvailabilityChanged { entry_id, enabled } => {
-                ipc.broadcast_event(Event::new(EventPayload::EntryAvailabilityChanged {
-                    entry_id: entry_id.clone(),
-                    enabled: *enabled,
-                }));
+                Self::broadcast(
+                    ipc,
+                    event_tx,
+                    Event::new(EventPayload::EntryAvailabilityChanged {
+                        entry_id: entry_id.clone(),
+                        enabled: *enabled,
+                    }),
+                );
             }
 
             CoreEvent::AvailabilitySetChanged => {
@@ -487,7 +555,7 @@ impl Service {
                     let engine = engine.lock().await;
                     engine.get_state()
                 };
-                ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+                Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
             }
         }
     }
@@ -495,6 +563,7 @@ impl Service {
     async fn handle_host_event(
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
         event: HostEvent,
     ) {
         match event {
@@ -532,12 +601,16 @@ impl Service {
                         duration_secs = duration.as_secs(),
                         "Broadcasting SessionEnded"
                     );
-                    ipc.broadcast_event(Event::new(EventPayload::SessionEnded {
-                        session_id,
-                        entry_id,
-                        reason,
-                        duration,
-                    }));
+                    Self::broadcast(
+                        ipc,
+                        event_tx,
+                        Event::new(EventPayload::SessionEnded {
+                            session_id,
+                            entry_id,
+                            reason,
+                            duration,
+                        }),
+                    );
 
                     // Broadcast state change
                     let state = {
@@ -545,7 +618,7 @@ impl Service {
                         engine.get_state()
                     };
                     info!("Broadcasting StateChanged");
-                    ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
                 }
             }
 
@@ -567,6 +640,7 @@ impl Service {
         ipc: &Arc<IpcServer>,
         store: &Arc<dyn Store>,
         rate_limiter: &Arc<Mutex<RateLimiter>>,
+        event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
         msg: ServerMessage,
     ) {
@@ -585,6 +659,30 @@ impl Service {
                     }
                 }
 
+                // SubscribeEvents / UnsubscribeEvents must go through dedicated
+                // methods so the writer task can flip the subscription flag only
+                // AFTER the response frame is on the wire, preventing events from
+                // arriving before the subscribe acknowledgement.
+                match &request.command {
+                    Command::SubscribeEvents => {
+                        let response = Response::success(
+                            request.request_id,
+                            ResponsePayload::Subscribed {
+                                client_id: client_id.clone(),
+                            },
+                        );
+                        let _ = ipc.send_subscribe_response(&client_id, response).await;
+                        return;
+                    }
+                    Command::UnsubscribeEvents => {
+                        let response =
+                            Response::success(request.request_id, ResponsePayload::Unsubscribed);
+                        let _ = ipc.send_unsubscribe_response(&client_id, response).await;
+                        return;
+                    }
+                    _ => {}
+                }
+
                 let response = Self::handle_command(
                     engine,
                     host,
@@ -594,6 +692,7 @@ impl Service {
                     &client_id,
                     request.request_id,
                     request.command,
+                    event_tx,
                     config_path,
                 )
                 .await;
@@ -640,6 +739,7 @@ impl Service {
         client_id: &ClientId,
         request_id: u64,
         command: Command,
+        event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
     ) -> Response {
         let now = shepherd_util::now();
@@ -709,14 +809,16 @@ impl Service {
                                         deadline,
                                     } = event
                                     {
-                                        ipc.broadcast_event(Event::new(
-                                            EventPayload::SessionStarted {
+                                        Self::broadcast(
+                                            ipc,
+                                            event_tx,
+                                            Event::new(EventPayload::SessionStarted {
                                                 session_id: session_id.clone(),
                                                 entry_id,
                                                 label,
                                                 deadline,
-                                            },
-                                        ));
+                                            }),
+                                        );
 
                                         Response::success(
                                             request_id,
@@ -745,20 +847,24 @@ impl Service {
                                         duration,
                                     }) = eng.notify_session_exited(Some(-1), now_mono, now)
                                     {
-                                        ipc.broadcast_event(Event::new(
-                                            EventPayload::SessionEnded {
+                                        Self::broadcast(
+                                            ipc,
+                                            event_tx,
+                                            Event::new(EventPayload::SessionEnded {
                                                 session_id,
                                                 entry_id,
                                                 reason,
                                                 duration,
-                                            },
-                                        ));
+                                            }),
+                                        );
 
                                         // Broadcast state change so clients return to idle
                                         let state = eng.get_state();
-                                        ipc.broadcast_event(Event::new(
-                                            EventPayload::StateChanged(state),
-                                        ));
+                                        Self::broadcast(
+                                            ipc,
+                                            event_tx,
+                                            Event::new(EventPayload::StateChanged(state)),
+                                        );
                                     }
 
                                     Response::error(
@@ -802,16 +908,24 @@ impl Service {
                             reason = ?result.reason,
                             "Broadcasting SessionEnded from StopCurrent"
                         );
-                        ipc.broadcast_event(Event::new(EventPayload::SessionEnded {
-                            session_id: result.session_id,
-                            entry_id: result.entry_id,
-                            reason: result.reason,
-                            duration: result.duration,
-                        }));
+                        Self::broadcast(
+                            ipc,
+                            event_tx,
+                            Event::new(EventPayload::SessionEnded {
+                                session_id: result.session_id,
+                                entry_id: result.entry_id,
+                                reason: result.reason,
+                                duration: result.duration,
+                            }),
+                        );
 
                         // Also broadcast StateChanged so UIs can update their entry list
                         let snapshot = eng.get_state();
-                        ipc.broadcast_event(Event::new(EventPayload::StateChanged(snapshot)));
+                        Self::broadcast(
+                            ipc,
+                            event_tx,
+                            Event::new(EventPayload::StateChanged(snapshot)),
+                        );
 
                         drop(eng); // Release lock before host operations
 
@@ -856,11 +970,17 @@ impl Service {
                                 0
                             }
                         };
-                        ipc.broadcast_event(Event::new(EventPayload::PolicyReloaded {
-                            entry_count,
-                        }));
+                        Self::broadcast(
+                            ipc,
+                            event_tx,
+                            Event::new(EventPayload::PolicyReloaded { entry_count }),
+                        );
                         let state = engine.lock().await.get_state();
-                        ipc.broadcast_event(Event::new(EventPayload::StateChanged(state)));
+                        Self::broadcast(
+                            ipc,
+                            event_tx,
+                            Event::new(EventPayload::StateChanged(state)),
+                        );
                         Response::success(request_id, ResponsePayload::ConfigReloaded)
                     }
                     Err(e) => Response::error(
@@ -873,15 +993,9 @@ impl Service {
                 }
             }
 
-            Command::SubscribeEvents => Response::success(
-                request_id,
-                ResponsePayload::Subscribed {
-                    client_id: client_id.clone(),
-                },
-            ),
-
-            Command::UnsubscribeEvents => {
-                Response::success(request_id, ResponsePayload::Unsubscribed)
+            Command::SubscribeEvents | Command::UnsubscribeEvents => {
+                // Handled before handle_command is called; unreachable in practice.
+                unreachable!("subscribe/unsubscribe handled in handle_ipc_message")
             }
 
             Command::GetHealth => {
@@ -909,12 +1023,21 @@ impl Service {
 
                 let mut eng = engine.lock().await;
                 match eng.extend_current(by, now_mono, now) {
-                    Some(new_deadline) => Response::success(
-                        request_id,
-                        ResponsePayload::Extended {
-                            new_deadline: Some(new_deadline),
-                        },
-                    ),
+                    Some(new_deadline) => {
+                        let state = eng.get_state();
+                        drop(eng);
+                        Self::broadcast(
+                            ipc,
+                            event_tx,
+                            Event::new(EventPayload::StateChanged(state)),
+                        );
+                        Response::success(
+                            request_id,
+                            ResponsePayload::Extended {
+                                new_deadline: Some(new_deadline),
+                            },
+                        )
+                    }
                     None => Response::error(
                         request_id,
                         ErrorInfo::new(
@@ -971,10 +1094,14 @@ impl Service {
                     Ok(()) => {
                         // Broadcast volume change
                         if let Ok(status) = volume.get_status().await {
-                            ipc.broadcast_event(Event::new(EventPayload::VolumeChanged {
-                                percent: status.percent,
-                                muted: status.muted,
-                            }));
+                            Self::broadcast(
+                                ipc,
+                                event_tx,
+                                Event::new(EventPayload::VolumeChanged {
+                                    percent: status.percent,
+                                    muted: status.muted,
+                                }),
+                            );
                         }
                         Response::success(request_id, ResponsePayload::VolumeSet)
                     }
@@ -1002,10 +1129,14 @@ impl Service {
                 match volume.toggle_mute().await {
                     Ok(()) => {
                         if let Ok(status) = volume.get_status().await {
-                            ipc.broadcast_event(Event::new(EventPayload::VolumeChanged {
-                                percent: status.percent,
-                                muted: status.muted,
-                            }));
+                            Self::broadcast(
+                                ipc,
+                                event_tx,
+                                Event::new(EventPayload::VolumeChanged {
+                                    percent: status.percent,
+                                    muted: status.muted,
+                                }),
+                            );
                         }
                         Response::success(request_id, ResponsePayload::VolumeSet)
                     }
@@ -1033,10 +1164,14 @@ impl Service {
                 match volume.set_mute(muted).await {
                     Ok(()) => {
                         if let Ok(status) = volume.get_status().await {
-                            ipc.broadcast_event(Event::new(EventPayload::VolumeChanged {
-                                percent: status.percent,
-                                muted: status.muted,
-                            }));
+                            Self::broadcast(
+                                ipc,
+                                event_tx,
+                                Event::new(EventPayload::VolumeChanged {
+                                    percent: status.percent,
+                                    muted: status.muted,
+                                }),
+                            );
                         }
                         Response::success(request_id, ResponsePayload::VolumeSet)
                     }

@@ -38,6 +38,19 @@ check = "https://connectivitycheck.gstatic.com/generate_204"
 interval_seconds = 300  # Keep this high to avoid excessive network requests
 timeout_ms = 1500
 
+# HTTP management API (optional)
+# Exposes a REST API for remote control, usage analytics, and daily overrides.
+# Intended for local/LAN use (e.g. a parent's phone on the same network).
+# WARNING: Do not expose this port to the internet without additional firewalling.
+[service.management_api]
+enabled = true
+port = 8080                  # TCP port to listen on
+bind = "0.0.0.0"             # Bind address ("127.0.0.1" for localhost-only)
+# bind_retry_seconds = 300   # Retry initial bind for this long if the address is not yet
+                             # assigned (e.g. ZeroTier interface still coming up at login).
+                             # 0 = retry forever. Default: 300.
+# auth_token = "changeme"    # Optional Bearer token; omit to allow unauthenticated access
+
 # Default warning thresholds
 [[service.default_warnings]]
 seconds_before = 300

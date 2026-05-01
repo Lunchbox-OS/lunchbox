@@ -74,6 +74,31 @@ using a tool like [DB Browser for SQLite](https://sqlitebrowser.org/) while the
 service is not running to inject application usage. The schema is defined in
 the [shepherd-store crate](./crates/shepherd-store/).
 
+### Web UI
+
+The management API HTTP server (`shepherd-http`) embeds the React SPA at compile
+time from `shepherd-webui/dist/`. Build it before building the Rust code:
+
+```sh
+cd shepherd-webui
+npm install      # once
+npm run build    # generates shepherd-webui/dist/
+cd ..
+cargo build      # dist/ is now embedded in the binary
+```
+
+During development, you can run the rsbuild dev server (which proxies API calls
+to `localhost:8080`) instead of embedding:
+
+```sh
+cd shepherd-webui
+npm run dev      # hot-reloading dev server, usually on port 3000
+```
+
+The Rust binary is still needed for the API; the dev server is only for the
+frontend. If the web UI has not been built, shepherdd still works normally — the
+daemon just returns 404 for all non-API routes.
+
 ### Testing and linting
 
 Run the test suite:

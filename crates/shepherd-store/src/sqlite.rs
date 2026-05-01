@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::{Connection, OptionalExtension, params};
+use shepherd_api::DailyOverride;
 use shepherd_util::EntryId;
 use std::path::Path;
 use std::sync::Mutex;
@@ -68,9 +69,21 @@ impl SqliteStore {
                 snapshot_json TEXT NOT NULL
             );
 
+            -- Daily overrides set by parents
+            CREATE TABLE IF NOT EXISTS daily_overrides (
+                entry_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                availability INTEGER,
+                quota_delta_seconds INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (entry_id, date)
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_usage_day ON usage(day);
+            CREATE INDEX IF NOT EXISTS idx_overrides_date ON daily_overrides(date);
             "#,
         )?;
 
@@ -252,6 +265,190 @@ impl Store for SqliteStore {
                 false
             }
         }
+    }
+
+    fn get_daily_override(
+        &self,
+        entry_id: &EntryId,
+        date: NaiveDate,
+    ) -> StoreResult<Option<DailyOverride>> {
+        let conn = self.conn.lock().unwrap();
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        let row: Option<(Option<i64>, Option<i64>, String, String)> = conn
+            .query_row(
+                "SELECT availability, quota_delta_seconds, created_at, updated_at \
+                 FROM daily_overrides WHERE entry_id = ? AND date = ?",
+                params![entry_id.as_str(), date_str],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        Ok(row.map(|(avail, delta, created_at_str, updated_at_str)| {
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(|_| shepherd_util::now());
+            let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(|_| shepherd_util::now());
+            DailyOverride {
+                entry_id: entry_id.clone(),
+                date,
+                availability: avail.map(|v| v != 0),
+                quota_delta_seconds: delta,
+                created_at,
+                updated_at,
+            }
+        }))
+    }
+
+    fn upsert_daily_override(
+        &self,
+        entry_id: &EntryId,
+        date: NaiveDate,
+        availability: Option<bool>,
+        quota_delta_seconds: Option<i64>,
+    ) -> StoreResult<DailyOverride> {
+        let conn = self.conn.lock().unwrap();
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let now_str = shepherd_util::now().to_rfc3339();
+        let avail_int: Option<i64> = availability.map(|b| if b { 1 } else { 0 });
+
+        conn.execute(
+            r#"
+            INSERT INTO daily_overrides (entry_id, date, availability, quota_delta_seconds, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(entry_id, date) DO UPDATE SET
+                availability = excluded.availability,
+                quota_delta_seconds = excluded.quota_delta_seconds,
+                updated_at = excluded.updated_at
+            "#,
+            params![entry_id.as_str(), date_str, avail_int, quota_delta_seconds, now_str, now_str],
+        )?;
+
+        let created_at_str: String = conn.query_row(
+            "SELECT created_at FROM daily_overrides WHERE entry_id = ? AND date = ?",
+            params![entry_id.as_str(), date_str],
+            |row| row.get(0),
+        )?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Local))
+            .unwrap_or_else(|_| shepherd_util::now());
+        let updated_at = shepherd_util::now();
+
+        debug!(entry_id = %entry_id, date = %date_str, "Daily override upserted");
+        Ok(DailyOverride {
+            entry_id: entry_id.clone(),
+            date,
+            availability,
+            quota_delta_seconds,
+            created_at,
+            updated_at,
+        })
+    }
+
+    fn clear_daily_override(&self, entry_id: &EntryId, date: NaiveDate) -> StoreResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        let count = conn.execute(
+            "DELETE FROM daily_overrides WHERE entry_id = ? AND date = ?",
+            params![entry_id.as_str(), date_str],
+        )?;
+
+        debug!(entry_id = %entry_id, date = %date_str, deleted = count > 0, "Daily override cleared");
+        Ok(count > 0)
+    }
+
+    fn list_daily_overrides(&self, date: NaiveDate) -> StoreResult<Vec<DailyOverride>> {
+        let conn = self.conn.lock().unwrap();
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        let mut stmt = conn.prepare(
+            "SELECT entry_id, availability, quota_delta_seconds, created_at, updated_at \
+             FROM daily_overrides WHERE date = ?",
+        )?;
+
+        let rows = stmt.query_map([date_str], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut overrides = Vec::new();
+        for row in rows {
+            let (entry_id_str, avail, delta, created_at_str, updated_at_str) = row?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(|_| shepherd_util::now());
+            let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(|_| shepherd_util::now());
+            overrides.push(DailyOverride {
+                entry_id: EntryId::new(entry_id_str),
+                date,
+                availability: avail.map(|v| v != 0),
+                quota_delta_seconds: delta,
+                created_at,
+                updated_at,
+            });
+        }
+
+        Ok(overrides)
+    }
+
+    fn get_usage_range(
+        &self,
+        entry_id: &EntryId,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> StoreResult<Vec<(NaiveDate, Duration)>> {
+        let conn = self.conn.lock().unwrap();
+        let from_str = from.format("%Y-%m-%d").to_string();
+        let to_str = to.format("%Y-%m-%d").to_string();
+
+        let mut stmt = conn.prepare(
+            "SELECT day, duration_secs FROM usage \
+             WHERE entry_id = ? AND day >= ? AND day <= ? \
+             ORDER BY day ASC",
+        )?;
+
+        let rows = stmt.query_map(params![entry_id.as_str(), from_str, to_str], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (day_str, secs) = row?;
+            if let Ok(date) = NaiveDate::parse_from_str(&day_str, "%Y-%m-%d") {
+                results.push((date, Duration::from_secs(secs as u64)));
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn get_all_usage_for_date(&self, date: NaiveDate) -> StoreResult<Vec<(EntryId, Duration)>> {
+        let conn = self.conn.lock().unwrap();
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        let mut stmt = conn.prepare("SELECT entry_id, duration_secs FROM usage WHERE day = ?")?;
+
+        let rows = stmt.query_map([date_str], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (entry_id_str, secs) = row?;
+            results.push((EntryId::new(entry_id_str), Duration::from_secs(secs as u64)));
+        }
+
+        Ok(results)
     }
 }
 

@@ -30,3 +30,6 @@ libgtk4-layer-shell-dev
 
 # Required for rustup
 curl
+
+# Node.js / npm (required to build the embedded web UI before cargo build)
+npm

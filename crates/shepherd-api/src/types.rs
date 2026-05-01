@@ -1,6 +1,6 @@
 //! Shared types for the shepherdd API
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use shepherd_util::{EntryId, SessionId};
 use std::collections::HashMap;
@@ -140,6 +140,8 @@ pub enum ReasonCode {
     Disabled { reason: Option<String> },
     /// Internet connectivity is required but unavailable
     InternetUnavailable { check: Option<String> },
+    /// Entry is manually disabled for the day via a daily override
+    ManuallyDisabled { until: NaiveDate },
 }
 
 /// Warning severity level
@@ -328,6 +330,31 @@ impl VolumeInfo {
             "audio-volume-high-symbolic"
         }
     }
+}
+
+/// A parent-set daily override for a single entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyOverride {
+    pub entry_id: EntryId,
+    pub date: NaiveDate,
+    /// Override the entry's availability for this day.
+    /// `Some(false)` blocks it entirely; `Some(true)` allows it outside its time window.
+    /// `None` means no availability override (quota delta may still apply).
+    pub availability: Option<bool>,
+    /// Signed adjustment to today's quota in seconds.
+    /// Positive = extra time; negative = reduced time; `None` = no change.
+    pub quota_delta_seconds: Option<i64>,
+    pub created_at: DateTime<Local>,
+    pub updated_at: DateTime<Local>,
+}
+
+/// Screen-time usage for a single entry on a single day
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageStat {
+    pub entry_id: EntryId,
+    pub label: String,
+    pub date: NaiveDate,
+    pub duration_seconds: u64,
 }
 
 #[cfg(test)]

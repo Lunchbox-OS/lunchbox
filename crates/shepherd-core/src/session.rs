@@ -112,21 +112,23 @@ impl ActiveSession {
     /// Returns empty vec for unlimited sessions (no warnings to issue).
     pub fn pending_warnings(&self, now_mono: MonotonicInstant) -> Vec<(u64, Duration)> {
         // Unlimited sessions don't have warnings
-        let remaining = match self.time_remaining(now_mono) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
+        let (remaining, max_duration) =
+            match (self.time_remaining(now_mono), self.plan.max_duration) {
+                (Some(r), Some(m)) => (r, m),
+                _ => return Vec::new(),
+            };
 
-        let elapsed = now_mono.duration_since(self.started_at_mono);
-
+        // Trigger when remaining <= threshold so warnings track the live deadline
+        // (including extensions/reductions), rather than the original schedule.
         self.plan
-            .warning_times()
-            .into_iter()
-            .filter(|(threshold, trigger_after)| {
-                // Should trigger if elapsed >= trigger_after and not already issued
-                elapsed >= *trigger_after && !self.warnings_issued.contains(threshold)
+            .warnings
+            .iter()
+            .filter(|w| {
+                Duration::from_secs(w.seconds_before) < max_duration
+                    && remaining <= Duration::from_secs(w.seconds_before)
+                    && !self.warnings_issued.contains(&w.seconds_before)
             })
-            .map(|(threshold, _)| (threshold, remaining))
+            .map(|w| (w.seconds_before, remaining))
             .collect()
     }
 

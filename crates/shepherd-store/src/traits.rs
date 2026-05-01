@@ -1,6 +1,7 @@
 //! Store trait definitions
 
 use chrono::{DateTime, Local, NaiveDate};
+use shepherd_api::DailyOverride;
 use shepherd_util::{EntryId, SessionId};
 use std::time::Duration;
 
@@ -47,6 +48,43 @@ pub trait Store: Send + Sync {
 
     /// Check if store is healthy
     fn is_healthy(&self) -> bool;
+
+    // Daily overrides
+
+    /// Get the daily override for an entry on a given date, if any
+    fn get_daily_override(
+        &self,
+        entry_id: &EntryId,
+        date: NaiveDate,
+    ) -> StoreResult<Option<DailyOverride>>;
+
+    /// Upsert a daily override for an entry
+    fn upsert_daily_override(
+        &self,
+        entry_id: &EntryId,
+        date: NaiveDate,
+        availability: Option<bool>,
+        quota_delta_seconds: Option<i64>,
+    ) -> StoreResult<DailyOverride>;
+
+    /// Remove the daily override for an entry, returning true if one existed
+    fn clear_daily_override(&self, entry_id: &EntryId, date: NaiveDate) -> StoreResult<bool>;
+
+    /// List all daily overrides active on a given date
+    fn list_daily_overrides(&self, date: NaiveDate) -> StoreResult<Vec<DailyOverride>>;
+
+    // Usage queries (extended)
+
+    /// Get daily usage totals for an entry over a date range (inclusive)
+    fn get_usage_range(
+        &self,
+        entry_id: &EntryId,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> StoreResult<Vec<(NaiveDate, Duration)>>;
+
+    /// Get usage for all entries on a given date
+    fn get_all_usage_for_date(&self, date: NaiveDate) -> StoreResult<Vec<(EntryId, Duration)>>;
 }
 
 /// State snapshot for crash recovery

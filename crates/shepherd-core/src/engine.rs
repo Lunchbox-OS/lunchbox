@@ -106,11 +106,34 @@ impl CoreEngine {
 
     /// Evaluate a single entry for availability
     fn evaluate_entry(&self, entry: &Entry, now: DateTime<Local>) -> EntryView {
+        let today = now.date_naive();
+        let daily_override = self
+            .store
+            .get_daily_override(&entry.id, today)
+            .ok()
+            .flatten();
+
+        // If manually disabled by a parent override, short-circuit all other checks
+        if daily_override.as_ref().and_then(|o| o.availability) == Some(false) {
+            return EntryView {
+                entry_id: entry.id.clone(),
+                label: entry.label.clone(),
+                icon_ref: entry.icon_ref.clone(),
+                kind_tag: entry.kind.tag(),
+                enabled: false,
+                reasons: vec![ReasonCode::ManuallyDisabled { until: today }],
+                max_run_if_started_now: None,
+            };
+        }
+
+        let manually_enabled = daily_override.as_ref().and_then(|o| o.availability) == Some(true);
+        let quota_delta = daily_override.as_ref().and_then(|o| o.quota_delta_seconds);
+
         let mut reasons = Vec::new();
         let mut enabled = true;
 
-        // Check if explicitly disabled
-        if entry.disabled {
+        // Check if explicitly disabled (skipped when an enable-today override is set)
+        if !manually_enabled && entry.disabled {
             enabled = false;
             reasons.push(ReasonCode::Disabled {
                 reason: entry.disabled_reason.clone(),
@@ -124,8 +147,8 @@ impl CoreEngine {
             reasons.push(ReasonCode::UnsupportedKind { kind: kind_tag });
         }
 
-        // Check availability window
-        if !entry.availability.is_available(&now) {
+        // Check availability window (skipped when an enable-today override is set)
+        if !manually_enabled && !entry.availability.is_available(&now) {
             enabled = false;
             reasons.push(ReasonCode::OutsideTimeWindow {
                 next_window_start: None, // TODO: compute next window
@@ -171,20 +194,23 @@ impl CoreEngine {
             });
         }
 
-        // Check daily quota
-        if let Some(quota) = entry.limits.daily_quota {
-            let today = now.date_naive();
-            if let Ok(used) = self.store.get_usage(&entry.id, today)
-                && used >= quota
-            {
+        // Check daily quota (adjusted by any parent-set delta)
+        if let Some(quota) = entry.limits.daily_quota
+            && let Ok(used) = self.store.get_usage(&entry.id, today)
+        {
+            let effective_quota = apply_quota_delta(quota, quota_delta);
+            if used >= effective_quota {
                 enabled = false;
-                reasons.push(ReasonCode::QuotaExhausted { used, quota });
+                reasons.push(ReasonCode::QuotaExhausted {
+                    used,
+                    quota: effective_quota,
+                });
             }
         }
 
         // Calculate max run if enabled (None when disabled, Some(None) flattened for unlimited)
         let max_run_if_started_now = if enabled {
-            self.compute_max_duration(entry, now)
+            self.compute_max_duration(entry, now, quota_delta, manually_enabled)
         } else {
             None
         };
@@ -202,22 +228,31 @@ impl CoreEngine {
 
     /// Compute maximum duration for an entry if started now.
     /// Returns None if the entry has no time limit (unlimited).
-    fn compute_max_duration(&self, entry: &Entry, now: DateTime<Local>) -> Option<Duration> {
+    fn compute_max_duration(
+        &self,
+        entry: &Entry,
+        now: DateTime<Local>,
+        quota_delta: Option<i64>,
+        manually_enabled: bool,
+    ) -> Option<Duration> {
         let mut max = entry.limits.max_run;
 
-        // Limit by time window remaining
-        if let Some(window_remaining) = entry.availability.remaining_in_window(&now) {
+        // Limit by time window remaining, unless an admin override bypasses the window.
+        if !manually_enabled
+            && let Some(window_remaining) = entry.availability.remaining_in_window(&now)
+        {
             max = Some(match max {
                 Some(m) => m.min(window_remaining),
                 None => window_remaining,
             });
         }
 
-        // Limit by daily quota remaining
+        // Limit by daily quota remaining (adjusted by override delta)
         if let Some(quota) = entry.limits.daily_quota {
             let today = now.date_naive();
             if let Ok(used) = self.store.get_usage(&entry.id, today) {
-                let remaining = quota.saturating_sub(used);
+                let effective_quota = apply_quota_delta(quota, quota_delta);
+                let remaining = effective_quota.saturating_sub(used);
                 max = Some(match max {
                     Some(m) => m.min(remaining),
                     None => remaining,
@@ -576,7 +611,7 @@ impl CoreEngine {
     pub fn extend_current(
         &mut self,
         by: Duration,
-        _now_mono: MonotonicInstant,
+        now_mono: MonotonicInstant,
         _now: DateTime<Local>,
     ) -> Option<DateTime<Local>> {
         let session = self.current_session.as_mut()?;
@@ -590,6 +625,14 @@ impl CoreEngine {
 
         session.deadline_mono = Some(new_deadline_mono);
         session.deadline = Some(new_deadline);
+
+        // Re-arm any previously-issued warnings whose threshold is now in the
+        // future relative to the new deadline. They will fire again as the new
+        // remaining time drops back below the threshold.
+        let new_remaining = new_deadline_mono.saturating_duration_until(now_mono);
+        session
+            .warnings_issued
+            .retain(|&threshold| new_remaining <= Duration::from_secs(threshold));
 
         // Log to audit
         let _ = self
@@ -608,6 +651,51 @@ impl CoreEngine {
         );
 
         Some(new_deadline)
+    }
+
+    /// Reduce current session time (admin action).
+    /// Clamps the new deadline to at least 5 seconds from now to avoid
+    /// immediately expiring the session.
+    pub fn reduce_current(
+        &mut self,
+        by: Duration,
+        now_mono: MonotonicInstant,
+        _now: DateTime<Local>,
+    ) -> Option<DateTime<Local>> {
+        let session = self.current_session.as_mut()?;
+
+        let deadline_mono = session.deadline_mono?;
+        let deadline = session.deadline?;
+
+        // Remaining time until deadline (zero if already expired)
+        let remaining = deadline_mono.saturating_duration_until(now_mono);
+        let min_remaining = Duration::from_secs(5);
+        let new_remaining = remaining.saturating_sub(by).max(min_remaining);
+        let actual_reduction = remaining.saturating_sub(new_remaining);
+        let new_deadline_mono = now_mono + new_remaining;
+        let new_deadline =
+            deadline - chrono::Duration::from_std(actual_reduction).unwrap_or_default();
+
+        session.deadline_mono = Some(new_deadline_mono);
+        session.deadline = Some(new_deadline);
+
+        info!(
+            session_id = %session.plan.session_id,
+            reduced_by_secs = actual_reduction.as_secs(),
+            new_deadline = %new_deadline,
+            "Session time reduced"
+        );
+
+        Some(new_deadline)
+    }
+}
+
+/// Apply a signed quota delta to a base duration, clamping to zero from below.
+fn apply_quota_delta(quota: Duration, delta: Option<i64>) -> Duration {
+    match delta {
+        None | Some(0) => quota,
+        Some(d) if d > 0 => quota + Duration::from_secs(d as u64),
+        Some(d) => quota.saturating_sub(Duration::from_secs((-d) as u64)),
     }
 }
 
@@ -785,6 +873,103 @@ mod tests {
     }
 
     #[test]
+    fn test_extend_reschedules_warning() {
+        let policy = Policy {
+            entries: vec![Entry {
+                id: EntryId::new("test"),
+                label: "Test".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "test".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy {
+                    windows: vec![],
+                    always: true,
+                },
+                limits: LimitsPolicy {
+                    max_run: Some(Duration::from_secs(120)),
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![shepherd_api::WarningThreshold {
+                    seconds_before: 60,
+                    severity: WarningSeverity::Warn,
+                    message_template: None,
+                }],
+                volume: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+            }],
+            service: Default::default(),
+            default_warnings: vec![],
+            default_max_run: Some(Duration::from_secs(3600)),
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let mut engine = CoreEngine::new(policy, store, caps);
+
+        let entry_id = EntryId::new("test");
+        let now = shepherd_util::now();
+        let now_mono = MonotonicInstant::now();
+
+        if let LaunchDecision::Approved(plan) = engine.request_launch(&entry_id, now) {
+            engine.start_session(plan, now, now_mono);
+        }
+
+        // At 70s elapsed (50s remaining), 60s warning fires.
+        let t1 = now_mono + Duration::from_secs(70);
+        let warning_events: Vec<_> = engine
+            .tick(t1, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert_eq!(warning_events.len(), 1);
+
+        // Extend by 120s. New deadline is at 240s; remaining is now 170s,
+        // which is well above the 60s threshold, so the warning must re-arm.
+        engine.extend_current(Duration::from_secs(120), t1, now);
+
+        // 30s after extension (100s elapsed, 140s remaining): still no warning.
+        let t2 = t1 + Duration::from_secs(30);
+        let warning_events: Vec<_> = engine
+            .tick(t2, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert!(warning_events.is_empty());
+
+        // At 190s elapsed (50s remaining against new deadline), warning fires again.
+        let t3 = now_mono + Duration::from_secs(190);
+        let warning_events: Vec<_> = engine
+            .tick(t3, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert_eq!(warning_events.len(), 1);
+        assert!(matches!(
+            warning_events[0],
+            CoreEvent::Warning {
+                threshold_seconds: 60,
+                ..
+            }
+        ));
+
+        // And it still doesn't fire twice after re-arming.
+        let warning_events: Vec<_> = engine
+            .tick(t3, now)
+            .into_iter()
+            .filter(|e| matches!(e, CoreEvent::Warning { .. }))
+            .collect();
+        assert!(warning_events.is_empty());
+    }
+
+    #[test]
     fn test_session_expiry() {
         let policy = Policy {
             entries: vec![Entry {
@@ -841,5 +1026,248 @@ mod tests {
             .collect();
         assert_eq!(expiry_events.len(), 1);
         assert!(matches!(expiry_events[0], CoreEvent::ExpireDue { .. }));
+    }
+
+    #[test]
+    fn test_enable_override_bypasses_time_window() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+        use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
+
+        let entry_id = EntryId::new("time-restricted");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Time Restricted".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy {
+                    windows: vec![TimeWindow::new(
+                        DaysOfWeek::ALL_DAYS,
+                        WallClock::new(23, 55).unwrap(),
+                        WallClock::new(23, 59).unwrap(),
+                    )],
+                    always: false,
+                },
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        // Use noon as test time — well outside the 23:55–23:59 window
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Without override: disabled due to time window
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled outside window");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::OutsideTimeWindow { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Set availability=true override for today
+        store
+            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .unwrap();
+
+        // With override: should be enabled even outside the window
+        let entries = engine.list_entries(noon);
+        assert!(entries[0].enabled, "should be enabled with override");
+        assert!(
+            entries[0].reasons.is_empty(),
+            "no reasons when enabled: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Approved(_)
+        ));
+    }
+
+    #[test]
+    fn test_disable_override_blocks_during_window() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+        use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
+
+        let entry_id = EntryId::new("time-restricted");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Time Restricted".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy {
+                    windows: vec![TimeWindow::new(
+                        DaysOfWeek::ALL_DAYS,
+                        WallClock::new(10, 0).unwrap(),
+                        WallClock::new(14, 0).unwrap(),
+                    )],
+                    always: false,
+                },
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        // Use noon (12:00) — inside the 10:00–14:00 window
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Without override: enabled (inside window)
+        let entries = engine.list_entries(noon);
+        assert!(entries[0].enabled, "should be enabled inside window");
+
+        // Set availability=false override for today
+        store
+            .upsert_daily_override(&entry_id, today, Some(false), None)
+            .unwrap();
+
+        // With override: disabled even though we're inside the window
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled with override");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::ManuallyDisabled { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+    }
+
+    #[test]
+    fn test_enable_override_bypasses_config_disabled() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+
+        let entry_id = EntryId::new("config-disabled");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Config Disabled".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy::default(),
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                disabled: true,
+                disabled_reason: Some("under review".into()),
+                internet: Default::default(),
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Without override: disabled by config
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled by config");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::Disabled { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Set availability=true override for today
+        store
+            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .unwrap();
+
+        // With override: should be enabled even though disabled by config
+        let entries = engine.list_entries(noon);
+        assert!(
+            entries[0].enabled,
+            "should be enabled with override despite config-disabled"
+        );
+        assert!(
+            entries[0].reasons.is_empty(),
+            "no reasons when enabled: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Approved(_)
+        ));
     }
 }
