@@ -74,6 +74,15 @@ If it can run on Linux in *any way, shape, or form*, it can be supervised by
 
 > [A Short Hike](https://ashorthike.com/) running via Steam
 
+### Local management
+
+`shepherd-launcher` optionally runs a management UI and API that can be used to
+apply temporary overrides.
+
+!["Now" screen showing time adjustment and "Stop Session" buttons](./docs/readme/management-now.png)
+
+!["Activities" screen showing the configured activities and manual enable/disable overrides](./docs/readme/management-activites.png)
+
 ## Core concepts
 
 * **Launcher-first**: only one foreground activity at a time
