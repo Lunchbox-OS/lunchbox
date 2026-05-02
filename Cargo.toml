@@ -13,6 +13,7 @@ members = [
     "crates/shepherdd",
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
+    "crates/shepherd-e2e",
 ]
 
 [workspace.package]
