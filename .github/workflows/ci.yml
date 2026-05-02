@@ -29,12 +29,18 @@ jobs:
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Cache cargo registry and build
+      - name: Cache cargo registry, toolchains, and build
         uses: actions/cache@v4
         with:
+          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
+          # rebuild it from source each time, ~1-2 min).
+          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
+          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -64,12 +70,18 @@ jobs:
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Cache cargo registry and build
+      - name: Cache cargo registry, toolchains, and build
         uses: actions/cache@v4
         with:
+          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
+          # rebuild it from source each time, ~1-2 min).
+          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
+          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -102,12 +114,18 @@ jobs:
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Cache cargo registry and build
+      - name: Cache cargo registry, toolchains, and build
         uses: actions/cache@v4
         with:
+          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
+          # rebuild it from source each time, ~1-2 min).
+          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
+          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -147,12 +165,18 @@ jobs:
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Cache cargo registry and build
+      - name: Cache cargo registry, toolchains, and build
         uses: actions/cache@v4
         with:
+          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
+          # rebuild it from source each time, ~1-2 min).
+          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
+          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -187,12 +211,18 @@ jobs:
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Cache cargo registry and build
+      - name: Cache cargo registry, toolchains, and build
         uses: actions/cache@v4
         with:
+          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
+          # rebuild it from source each time, ~1-2 min).
+          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
+          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |

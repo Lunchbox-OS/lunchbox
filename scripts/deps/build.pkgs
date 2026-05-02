@@ -28,6 +28,14 @@ libgirepository1.0-dev
 # Layer shell for HUD overlay
 libgtk4-layer-shell-dev
 
+# LLVM toolchain for bpf-linker (compiles the cgroup_skb BPF program in
+# crates/shepherd-firewall-bpf to bpfel-unknown-none). bpf-linker uses
+# llvm-sys, which links against libLLVM at runtime; the -dev packages
+# carry the headers needed to compile bpf-linker via `cargo install`.
+clang
+llvm-20-dev
+libpolly-20-dev
+
 # Required for rustup
 curl
 
