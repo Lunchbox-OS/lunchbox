@@ -1809,6 +1809,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-firewall-helper"
+version = "0.1.0"
+
+[[package]]
 name = "shepherd-host-api"
 version = "0.1.0"
 dependencies = [

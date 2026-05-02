@@ -26,6 +26,16 @@ SHEPHERD_SWAY_CONFD="shepherd.conf.d"
 DESKTOP_ENTRY_DIR="share/wayland-sessions"
 DESKTOP_ENTRY_NAME="shepherd.desktop"
 
+# Firewall helper paths (hardcoded -- the polkit .policy file references
+# the absolute path to the helper binary, and polkit's own dirs are fixed
+# system locations regardless of $prefix).
+FIREWALL_HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
+POLKIT_ACTIONS_DIR="/usr/share/polkit-1/actions"
+POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+FIREWALL_POLICY_NAME="org.shepherd.firewall.policy"
+FIREWALL_RULES_NAME="50-shepherd-firewall.rules"
+FIREWALL_GROUP="shepherd-firewall"
+
 # Install release binaries
 install_bins() {
     local prefix="${1:-$DEFAULT_PREFIX}"
@@ -186,6 +196,80 @@ install_config() {
     fi
 }
 
+# Install the firewall helper and its polkit assets.
+#
+# Args:
+#   $1 -- target user to add to the shepherd-firewall group (optional;
+#         skipped when DESTDIR is set so packaging doesn't mutate hosts)
+#   $2 -- "true" for release binary, "false" for debug (default: true)
+install_firewall() {
+    local user="${1:-}"
+    local release="${2:-true}"
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    require_root
+
+    local helper_src
+    helper_src="$(get_target_dir "$release")/shepherd-firewall-helper"
+    local helper_dst="$destdir$FIREWALL_HELPER_PATH"
+    local policy_src="$repo_root/dist/polkit/$FIREWALL_POLICY_NAME"
+    local policy_dst="$destdir$POLKIT_ACTIONS_DIR/$FIREWALL_POLICY_NAME"
+    local rules_src="$repo_root/dist/polkit/$FIREWALL_RULES_NAME"
+    local rules_dst="$destdir$POLKIT_RULES_DIR/$FIREWALL_RULES_NAME"
+
+    if [[ ! -x "$helper_src" ]]; then
+        if [[ "$release" == "true" ]]; then
+            die "shepherd-firewall-helper not found at $helper_src; run 'shepherd build --release' first"
+        else
+            die "shepherd-firewall-helper not found at $helper_src; run 'cargo build --bin shepherd-firewall-helper' first"
+        fi
+    fi
+    if [[ ! -f "$policy_src" || ! -f "$rules_src" ]]; then
+        die "Polkit assets missing at $repo_root/dist/polkit/"
+    fi
+
+    info "Installing firewall helper to $helper_dst..."
+    ensure_dir "$(dirname "$helper_dst")" 0755
+    install -m 0755 -o root -g root "$helper_src" "$helper_dst"
+
+    info "Installing polkit policy to $policy_dst..."
+    ensure_dir "$(dirname "$policy_dst")" 0755
+    install -m 0644 -o root -g root "$policy_src" "$policy_dst"
+
+    info "Installing polkit rule to $rules_dst..."
+    ensure_dir "$(dirname "$rules_dst")" 0755
+    install -m 0644 -o root -g root "$rules_src" "$rules_dst"
+
+    # Group + user membership + polkit reload only on a real (non-packaging)
+    # install. Under DESTDIR these would mutate the build host and the
+    # resulting package, which is wrong.
+    if [[ -z "$destdir" ]]; then
+        if ! getent group "$FIREWALL_GROUP" >/dev/null; then
+            info "Creating system group: $FIREWALL_GROUP"
+            groupadd --system "$FIREWALL_GROUP"
+        fi
+        if [[ -n "$user" ]]; then
+            if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "$FIREWALL_GROUP"; then
+                info "$user is already a member of $FIREWALL_GROUP"
+            else
+                info "Adding $user to $FIREWALL_GROUP"
+                usermod -aG "$FIREWALL_GROUP" "$user"
+                warn "$user must log out and back in for the new group membership to take effect."
+            fi
+        fi
+        if systemctl is-active --quiet polkit 2>/dev/null; then
+            info "Reloading polkit so the new rule takes effect"
+            systemctl reload polkit 2>/dev/null \
+                || systemctl restart polkit 2>/dev/null \
+                || warn "Could not reload polkit; restart it manually for the rule to apply"
+        fi
+    fi
+
+    success "Firewall helper installed"
+}
+
 # Install everything
 install_all() {
     local user="${1:-}"
@@ -202,16 +286,19 @@ install_all() {
     info "Installing shepherd-launcher (prefix: $prefix)..."
     
     install_bins "$prefix"
+    install_firewall "$user" "true"
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"
     install_config "$user" "" "$force"
-    
+
     success "Installation complete!"
     info ""
     info "Next steps:"
     info "  1. Edit user config at ~$user/.config/shepherd/config.toml"
-    info "  2. Select 'Shepherd Kiosk' session at login"
-    info "  3. Optionally run 'shepherd harden apply --user $user' for kiosk mode"
+    info "  2. Have $user log out and back in (so the new shepherd-firewall"
+    info "     group membership takes effect for per-entry firewall rules)"
+    info "  3. Select 'Shepherd Kiosk' session at login"
+    info "  4. Optionally run 'shepherd harden apply --user $user' for kiosk mode"
 }
 
 # Main install command dispatcher
@@ -223,7 +310,8 @@ install_main() {
     local prefix="$DEFAULT_PREFIX"
     local source_config=""
     local force="false"
-    
+    local release="true"
+
     # Parse remaining arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -243,15 +331,26 @@ install_main() {
                 force="true"
                 shift
                 ;;
+            --debug)
+                release="false"
+                shift
+                ;;
+            --release)
+                release="true"
+                shift
+                ;;
             *)
                 die "Unknown option: $1"
                 ;;
         esac
     done
-    
+
     case "$subcmd" in
         bins)
             install_bins "$prefix"
+            ;;
+        firewall)
+            install_firewall "$user" "$release"
             ;;
         config)
             install_config "$user" "$source_config" "$force"
@@ -271,23 +370,34 @@ Usage: shepherd install <command> [OPTIONS]
 
 Commands:
     bins              Install release binaries
+    firewall          Install the privileged firewall helper + polkit rule
     config            Deploy user configuration
     sway-config       Install sway configuration
     desktop-entry     Install display manager desktop entry
-    all               Install everything
+    all               Install everything (incl. firewall helper)
 
 Options:
-    --user USER       Target user for config deployment (required for config/all)
+    --user USER       Target user for config / firewall group (required for
+                      config / all; optional for firewall)
     --prefix PREFIX   Installation prefix (default: $DEFAULT_PREFIX)
     --source CONFIG   Source config file (default: config.example.toml)
     --force, -f       Overwrite existing configuration files
+    --release         Use release binaries (default)
+    --debug           Use debug binaries (for 'firewall' during development)
 
 Environment:
-    DESTDIR           Installation root for packaging (default: empty)
+    DESTDIR           Installation root for packaging (default: empty).
+                      When set, 'firewall' skips groupadd/usermod/polkit-reload.
+
+Notes:
+    The firewall helper installs to a fixed system path
+    ($FIREWALL_HELPER_PATH) regardless of --prefix, because polkit's
+    .policy file references the helper by absolute path and polkit's
+    own directories are not relocatable.
 
 Examples:
     shepherd install bins --prefix /usr/local
-    shepherd install config --user kiosk
+    shepherd install firewall --user kiosk
     shepherd install config --user kiosk --force
     shepherd install all --user kiosk --prefix /usr
 EOF

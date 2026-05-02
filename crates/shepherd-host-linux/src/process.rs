@@ -12,16 +12,27 @@ use tracing::{debug, info, warn};
 
 use shepherd_host_api::{ExitStatus, FirewallSpec, HostError, HostResult};
 
+/// Path to the privileged firewall helper. Overridable via
+/// `SHEPHERD_FIREWALL_HELPER` for development installs.
+pub const DEFAULT_FIREWALL_HELPER_PATH: &str = "/usr/libexec/shepherd-firewall-helper";
+
+/// Resolve the firewall helper path, honoring the env override.
+pub fn firewall_helper_path() -> String {
+    std::env::var("SHEPHERD_FIREWALL_HELPER")
+        .unwrap_or_else(|_| DEFAULT_FIREWALL_HELPER_PATH.to_string())
+}
+
 /// Whether the host can actually enforce per-cgroup IP filters.
 ///
 /// systemd backs `IPAddressDeny=`/`IPAddressAllow=` with cgroup BPF
-/// (`cgroup_skb`), which requires `CAP_NET_ADMIN` to attach. Per
-/// `man systemd.resource-control`, IP address filters are NOT supported by
-/// per-user instances of the service manager. So when shepherdd runs as a
-/// regular user without `CAP_NET_ADMIN` (the default for `./run-dev` and for
-/// the sway-launched production daemon), `systemd-run --user --scope
-/// --property=IPAddressDeny=any` accepts the property but silently attaches no
-/// BPF program -- traffic is not filtered.
+/// (`cgroup_skb`), which requires `CAP_NET_ADMIN` to attach. The per-user
+/// systemd manager doesn't have that capability, so we cannot apply IP filters
+/// directly from shepherdd. We delegate to the privileged helper at
+/// `/usr/libexec/shepherd-firewall-helper`, which is invoked via `pkexec`.
+///
+/// "Supported" therefore means: the helper is installed AND polkit grants the
+/// current user the `org.shepherd.firewall.apply-process` action without an
+/// auth prompt. Both are checked at startup.
 #[derive(Debug, Clone)]
 pub enum FirewallEnforcementStatus {
     Supported,
@@ -37,52 +48,211 @@ impl FirewallEnforcementStatus {
 static FW_STATUS: OnceLock<FirewallEnforcementStatus> = OnceLock::new();
 
 /// Cached probe of whether per-cgroup IP filters can be enforced from this
-/// process. The check is a euid + `CapEff` read of `/proc/self/status`: we
-/// need either real root or `CAP_NET_ADMIN` in our effective capability set.
+/// process. Checks for the helper binary and a non-prompted polkit grant.
 pub fn firewall_enforcement_status() -> &'static FirewallEnforcementStatus {
     FW_STATUS.get_or_init(probe_firewall_enforcement)
 }
 
 fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
-    if nix::unistd::geteuid().is_root() {
-        return FirewallEnforcementStatus::Supported;
+    let helper = firewall_helper_path();
+    if !std::path::Path::new(&helper).exists() {
+        return FirewallEnforcementStatus::Unsupported {
+            reason: format!(
+                "shepherd-firewall-helper not installed at {} -- run \
+                 scripts/integration-tests/setup-firewall-dev.sh (dev) or \
+                 `shepherd install firewall` (production), or set \
+                 SHEPHERD_FIREWALL_HELPER to its path",
+                helper
+            ),
+        };
     }
-    const CAP_NET_ADMIN_BIT: u32 = 12;
-    match read_cap_eff() {
-        Ok(eff) if (eff >> CAP_NET_ADMIN_BIT) & 1 == 1 => FirewallEnforcementStatus::Supported,
-        Ok(_) => FirewallEnforcementStatus::Unsupported {
-            reason: "shepherdd is running as a regular user without CAP_NET_ADMIN, and \
-                 IPAddressDeny=/IPAddressAllow= are not supported by the per-user systemd \
-                 manager (see `man systemd.resource-control`). Configured firewall rules \
-                 will NOT be enforced. To enforce them, shepherdd needs to either (a) run \
-                 as root / from a system unit with the system systemd manager, or \
-                 (b) attach BPF cgroup programs itself with CAP_NET_ADMIN+CAP_BPF, or \
-                 (c) hand the firewall setup off to a privileged helper (polkit / setcap'd \
-                 helper). Today the WIP code path goes through `systemd-run --user --scope` \
-                 and silently produces no filter."
-                .into(),
-        },
+    match probe_polkit_grant() {
+        Ok(()) => FirewallEnforcementStatus::Supported,
         Err(e) => FirewallEnforcementStatus::Unsupported {
             reason: format!(
-                "could not read /proc/self/status to determine effective caps: {}",
+                "polkit denies non-prompted access to org.shepherd.firewall.apply-process: \
+                 {}. Install dist/polkit/50-shepherd-firewall.rules and add this user to \
+                 the `shepherd-firewall` group (see scripts/integration-tests/setup-firewall-dev.sh).",
                 e
             ),
         },
     }
 }
 
-fn read_cap_eff() -> std::io::Result<u64> {
-    let status = std::fs::read_to_string("/proc/self/status")?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("CapEff:") {
-            return u64::from_str_radix(rest.trim(), 16)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()));
+/// Run `pkcheck` (without `--allow-user-interaction`) so it returns success
+/// only if the action is granted with no auth prompt required.
+fn probe_polkit_grant() -> Result<(), String> {
+    let pid = std::process::id();
+    let output = std::process::Command::new("pkcheck")
+        .args([
+            "--action-id",
+            "org.shepherd.firewall.apply-process",
+            "--process",
+            &pid.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("could not exec pkcheck: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
+/// Build the argv prefix for spawning a Process-kind activity through the
+/// privileged firewall helper. The full argv handed to `Command::spawn` is the
+/// returned prefix plus the activity's own command + args.
+///
+/// `inherit_env` is the environment shepherdd would otherwise have set on the
+/// activity. We pass it as `--env KEY=VAL` to the helper because `pkexec`
+/// strips the parent environment.
+pub fn firewall_helper_argv_prefix(
+    spec: &FirewallSpec,
+    scope_name: &str,
+    uid: u32,
+    gid: u32,
+    inherit_env: &HashMap<String, String>,
+    cwd: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "pkexec".into(),
+        // Preserve shepherdd's cwd so the activity's effective cwd matches
+        // the no-firewall path (pkexec otherwise resets to root's home).
+        "--keep-cwd".into(),
+        firewall_helper_path(),
+        "apply-process".into(),
+        "--scope-name".into(),
+        scope_name.into(),
+        "--uid".into(),
+        uid.to_string(),
+        "--gid".into(),
+        gid.to_string(),
+        "--default".into(),
+        if spec.default_deny { "deny" } else { "allow" }.into(),
+    ];
+    for r in &spec.allow {
+        args.push("--allow".into());
+        args.push(r.clone());
+    }
+    for r in &spec.deny {
+        args.push("--deny".into());
+        args.push(r.clone());
+    }
+    if let Some(c) = cwd {
+        args.push("--cwd".into());
+        args.push(c.to_string_lossy().into_owned());
+    }
+    // Pass env through args because pkexec sanitizes its parent's env.
+    let mut keys: Vec<&String> = inherit_env.keys().collect();
+    keys.sort(); // deterministic for tests / logs
+    for k in keys {
+        args.push("--env".into());
+        args.push(format!("{}={}", k, inherit_env[k]));
+    }
+    args.push("--".into());
+    args
+}
+
+/// Generate a unique systemd scope name for a session. Used as the
+/// `--scope-name` argument to the helper.
+pub fn make_scope_name(session_id: &str) -> String {
+    // systemd unit names allow alnum + `-_.\:@`. Session IDs are UUIDs from
+    // shepherd-util, which only contain hex + dashes -- safe to embed verbatim.
+    format!("shepherd-{}.scope", session_id)
+}
+
+/// Variables shepherdd inherits from its own env when launching an activity.
+/// Centralized so both the direct spawn path and the firewall-helper path use
+/// the same set.
+const INHERITED_ENV_VARS: &[&str] = &[
+    // Core paths
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    // Display/graphics - both X11 and Wayland
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_SESSION_DESKTOP",
+    "XDG_CURRENT_DESKTOP",
+    "XAUTHORITY",
+    // XDG directories
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_DIRS",
+    "XDG_CONFIG_DIRS",
+    // Snap support
+    "SNAP",
+    "SNAP_USER_DATA",
+    "SNAP_USER_COMMON",
+    "SNAP_REAL_HOME",
+    "SNAP_NAME",
+    "SNAP_INSTANCE_NAME",
+    "SNAP_ARCH",
+    "SNAP_VERSION",
+    "SNAP_REVISION",
+    "SNAP_COMMON",
+    "SNAP_DATA",
+    "SNAP_LIBRARY_PATH",
+    // Locale
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    // D-Bus
+    "DBUS_SESSION_BUS_ADDRESS",
+    // Graphics/GPU
+    "LIBGL_ALWAYS_SOFTWARE",
+    "__GLX_VENDOR_LIBRARY_NAME",
+    "VK_ICD_FILENAMES",
+    "MESA_LOADER_DRIVER_OVERRIDE",
+    // Audio
+    "PULSE_SERVER",
+    "PULSE_COOKIE",
+    // GTK/GLib
+    "GTK_MODULES",
+    "GIO_EXTRA_MODULES",
+    "GSETTINGS_SCHEMA_DIR",
+    "GSETTINGS_BACKEND",
+    // SSL/TLS
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    // Desktop session info
+    "DESKTOP_SESSION",
+    "GNOME_DESKTOP_SESSION_ID",
+];
+
+/// Build the env map that an activity should run with: inherited vars from
+/// shepherdd's own env, plus a few hardcoded overrides, plus the user-specified
+/// vars from the entry config (which take precedence). Used by both the direct
+/// spawn path and the firewall-helper path.
+pub fn build_inherited_env(user_env: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for &var in INHERITED_ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            out.insert(var.to_string(), val);
         }
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "no CapEff line in /proc/self/status",
-    ))
+    // Java AWT/Swing on Sway needs this for correct rendering.
+    out.insert("_JAVA_AWT_WM_NONREPARENTING".to_string(), "1".to_string());
+    // Chromium / Electron password store.
+    out.insert("PASSWORD_STORE".to_string(), "gnome".to_string());
+    // SHEPHERD_WAYLAND_DISPLAY override (used when the service runs on the
+    // parent compositor but apps need to launch into a nested one).
+    if let Ok(d) = std::env::var("SHEPHERD_WAYLAND_DISPLAY") {
+        out.insert("WAYLAND_DISPLAY".to_string(), d);
+    }
+    // Entry-specific vars override the inherited defaults.
+    for (k, v) in user_env {
+        out.insert(k.clone(), v.clone());
+    }
+    out
 }
 
 /// Managed child process with process group tracking
@@ -111,24 +281,6 @@ pub fn init() {
             );
         }
     }
-}
-
-/// Build a `systemd-run --user --scope` argv prefix that applies a firewall
-/// spec to the spawned command via systemd's BPF address filter.
-///
-/// Caller is expected to append the actual command and its arguments after the
-/// returned prefix. The prefix already terminates with `--`.
-pub fn firewall_systemd_run_prefix(spec: &FirewallSpec) -> Vec<String> {
-    let mut args = vec![
-        "systemd-run".to_string(),
-        "--user".to_string(),
-        "--scope".to_string(),
-        "--collect".to_string(),
-        "--quiet".to_string(),
-    ];
-    args.extend(firewall_property_args(spec, "--property="));
-    args.push("--".to_string());
-    args
 }
 
 /// Apply a firewall spec to an already-running systemd scope (e.g. a flatpak
@@ -505,102 +657,16 @@ impl ManagedProcess {
         let mut cmd = Command::new(program);
         cmd.args(args);
 
-        // Set environment
+        // Build the env map and apply it. `build_inherited_env` is shared
+        // with the firewall-helper path so the activity sees the same env
+        // whether or not it goes through pkexec.
         cmd.env_clear();
-
-        // Inherit essential environment variables
-        // These are needed for most Linux applications to work correctly
-        let inherit_vars = [
-            // Core paths
-            "PATH",
-            "HOME",
-            "USER",
-            "SHELL",
-            // Display/graphics - both X11 and Wayland
-            "DISPLAY",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "XDG_SESSION_TYPE",
-            "XDG_SESSION_DESKTOP",
-            "XDG_CURRENT_DESKTOP",
-            // X11 authorization (needed for XWayland apps)
-            "XAUTHORITY",
-            // XDG directories (needed for app data/config)
-            "XDG_DATA_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "XDG_STATE_HOME",
-            "XDG_DATA_DIRS",
-            "XDG_CONFIG_DIRS",
-            // Snap support (critical for Snap apps like Minecraft)
-            "SNAP",
-            "SNAP_USER_DATA",
-            "SNAP_USER_COMMON",
-            "SNAP_REAL_HOME",
-            "SNAP_NAME",
-            "SNAP_INSTANCE_NAME",
-            "SNAP_ARCH",
-            "SNAP_VERSION",
-            "SNAP_REVISION",
-            "SNAP_COMMON",
-            "SNAP_DATA",
-            "SNAP_LIBRARY_PATH",
-            // Locale
-            "LANG",
-            "LANGUAGE",
-            "LC_ALL",
-            // D-Bus (needed for many GUI apps)
-            "DBUS_SESSION_BUS_ADDRESS",
-            // Graphics/GPU
-            "LIBGL_ALWAYS_SOFTWARE",
-            "__GLX_VENDOR_LIBRARY_NAME",
-            "VK_ICD_FILENAMES",
-            "MESA_LOADER_DRIVER_OVERRIDE",
-            // Audio
-            "PULSE_SERVER",
-            "PULSE_COOKIE",
-            // GTK/GLib settings (needed for proper theming and SSL)
-            "GTK_MODULES",
-            "GIO_EXTRA_MODULES",
-            "GSETTINGS_SCHEMA_DIR",
-            "GSETTINGS_BACKEND",
-            // SSL/TLS certificate locations
-            "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-            "CURL_CA_BUNDLE",
-            "REQUESTS_CA_BUNDLE",
-            // Desktop session info (needed for portal integration)
-            "DESKTOP_SESSION",
-            "GNOME_DESKTOP_SESSION_ID",
-        ];
-
-        for var in inherit_vars {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
+        let activity_env = build_inherited_env(env);
+        for (k, v) in &activity_env {
+            cmd.env(k, v);
         }
-
-        // Java AWT/Swing applications (like Minecraft) need this to work properly
-        // on non-reparenting window managers like Sway. Without this, Java apps may
-        // have focus issues or render incorrectly.
-        cmd.env("_JAVA_AWT_WM_NONREPARENTING", "1");
-
-        // Special handling for WAYLAND_DISPLAY:
-        // If SHEPHERD_WAYLAND_DISPLAY is set, use that instead of the inherited value.
-        // This allows apps to be launched on a nested compositor while the service
-        // runs on the parent compositor. When the service runs inside the nested
-        // compositor, this is not needed as WAYLAND_DISPLAY is already correct.
         if let Ok(shepherd_display) = std::env::var("SHEPHERD_WAYLAND_DISPLAY") {
             debug!(display = %shepherd_display, "Using SHEPHERD_WAYLAND_DISPLAY override for child process");
-            cmd.env("WAYLAND_DISPLAY", shepherd_display);
-        }
-
-        // Chromium-based browsers and Electron apps need this to use the correct password store.
-        cmd.env("PASSWORD_STORE", "gnome");
-
-        // Add custom environment (these can override inherited vars)
-        for (k, v) in env {
-            cmd.env(k, v);
         }
 
         // Set working directory
@@ -881,24 +947,64 @@ mod tests {
     }
 
     #[test]
-    fn firewall_enforcement_status_is_unsupported_when_unprivileged() {
-        // This crate is exercised in CI under a regular user without
-        // CAP_NET_ADMIN. Whenever that's the case, the probe must report
-        // Unsupported -- otherwise the silent no-op bug we just fixed would
-        // come back without anyone noticing.
-        if !nix::unistd::geteuid().is_root() {
-            let eff = read_cap_eff().unwrap_or(0);
-            const CAP_NET_ADMIN_BIT: u32 = 12;
-            if (eff >> CAP_NET_ADMIN_BIT) & 1 == 0 {
-                assert!(
-                    matches!(
-                        firewall_enforcement_status(),
-                        FirewallEnforcementStatus::Unsupported { .. }
-                    ),
-                    "Unprivileged process should report firewall enforcement as Unsupported"
-                );
-            }
+    fn firewall_enforcement_status_is_unsupported_when_helper_missing() {
+        // When the privileged helper isn't installed (the case in CI and any
+        // fresh checkout), the probe must report Unsupported. This is what
+        // stops the silent-no-op bug from regressing: configuring firewall
+        // rules without the helper present should *visibly* fail to enforce.
+        let helper = firewall_helper_path();
+        if !std::path::Path::new(&helper).exists() {
+            assert!(
+                matches!(
+                    firewall_enforcement_status(),
+                    FirewallEnforcementStatus::Unsupported { .. }
+                ),
+                "Probe should report Unsupported when helper at {} is missing",
+                helper
+            );
         }
+    }
+
+    #[test]
+    fn helper_argv_prefix_serializes_rules_and_env() {
+        let spec = FirewallSpec {
+            default_deny: true,
+            allow: vec!["127.0.0.0/8".into(), "::1/128".into()],
+            deny: vec!["10.0.0.0/8".into()],
+        };
+        let mut env = HashMap::new();
+        env.insert("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string());
+        env.insert(
+            "DBUS_SESSION_BUS_ADDRESS".to_string(),
+            "unix:abc".to_string(),
+        );
+
+        let prefix = firewall_helper_argv_prefix(
+            &spec,
+            "shepherd-test.scope",
+            1000,
+            1000,
+            &env,
+            Some(std::path::Path::new("/tmp")),
+        );
+
+        assert_eq!(prefix[0], "pkexec");
+        assert!(prefix.iter().any(|a| a == "--keep-cwd"));
+        assert!(prefix.iter().any(|a| a == "apply-process"));
+        assert!(prefix.iter().any(|a| a == "shepherd-test.scope"));
+        // uid/gid are emitted as two args (`--uid` + `1000`), matching the
+        // separated form the helper's argv parser expects.
+        let uid_idx = prefix.iter().position(|a| a == "--uid").unwrap();
+        assert_eq!(prefix[uid_idx + 1], "1000");
+        let gid_idx = prefix.iter().position(|a| a == "--gid").unwrap();
+        assert_eq!(prefix[gid_idx + 1], "1000");
+        assert!(prefix.iter().any(|a| a == "--default"));
+        assert!(prefix.iter().any(|a| a == "deny"));
+        assert!(prefix.iter().any(|a| a == "127.0.0.0/8"));
+        assert!(prefix.iter().any(|a| a == "10.0.0.0/8"));
+        assert!(prefix.iter().any(|a| a == "/tmp"));
+        assert!(prefix.iter().any(|a| a == "WAYLAND_DISPLAY=wayland-0"));
+        assert_eq!(prefix.last().unwrap(), "--");
     }
 
     #[test]

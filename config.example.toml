@@ -376,13 +376,6 @@ command = "ptyxis"
 [entries.availability]
 always = true
 
-# Optional per-entry firewall.
-# Enforced via systemd IPAddressAllow=/IPAddressDeny= on the session's scope.
-# Hostnames are NOT resolved at this layer -- list IP addresses or CIDR
-# ranges, or one of the systemd address tokens: any, localhost, link-local,
-# multicast.
-# Note: applied after the runtime scope appears for snap/flatpak entries
-# (small race window during early app startup). Not yet supported for Steam.
 [entries.firewall]
 default = "deny"  # "deny" (default) blocks all unmatched traffic; "allow" permits all
 allow = [
