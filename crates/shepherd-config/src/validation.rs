@@ -1,8 +1,10 @@
 //! Configuration validation
 
 use crate::internet::InternetCheckTarget;
-use crate::schema::{RawConfig, RawDays, RawEntry, RawEntryKind, RawTimeWindow};
+use crate::schema::{RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawTimeWindow};
 use std::collections::HashSet;
+use std::net::IpAddr;
+use std::str::FromStr;
 use thiserror::Error;
 
 /// Validation error
@@ -173,6 +175,11 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
         // Note: warnings are ignored for unlimited entries (max_run = 0)
     }
 
+    // Validate firewall rules
+    if let Some(firewall) = &entry.firewall {
+        errors.extend(validate_firewall(firewall, &entry.id));
+    }
+
     // Validate internet requirements
     if let Some(internet) = &entry.internet {
         if let Some(check) = &internet.check
@@ -232,6 +239,84 @@ fn validate_time_window(window: &RawTimeWindow, entry_id: &str) -> Vec<Validatio
     }
 
     errors
+}
+
+fn validate_firewall(firewall: &RawFirewallConfig, entry_id: &str) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+
+    let default = firewall.default.to_ascii_lowercase();
+    if default != "allow" && default != "deny" {
+        errors.push(ValidationError::EntryError {
+            entry_id: entry_id.to_string(),
+            message: format!(
+                "firewall.default must be \"allow\" or \"deny\", got \"{}\"",
+                firewall.default
+            ),
+        });
+    }
+
+    for (list_name, rules) in [("allow", &firewall.allow), ("deny", &firewall.deny)] {
+        for rule in rules {
+            if let Err(e) = parse_firewall_rule(rule) {
+                errors.push(ValidationError::EntryError {
+                    entry_id: entry_id.to_string(),
+                    message: format!("firewall.{} rule \"{}\": {}", list_name, rule, e),
+                });
+            }
+        }
+    }
+
+    errors
+}
+
+/// Validate and canonicalize a firewall rule.
+///
+/// Accepts:
+/// - systemd address tokens: `any`, `localhost`, `link-local`, `multicast`
+/// - bare IPv4 / IPv6 addresses
+/// - CIDR ranges (`10.0.0.0/8`, `2001:db8::/32`)
+///
+/// Returns the canonical (trimmed) string suitable for handing to systemd.
+pub fn parse_firewall_rule(rule: &str) -> Result<String, String> {
+    let trimmed = rule.trim();
+    if trimmed.is_empty() {
+        return Err("rule is empty".into());
+    }
+
+    // systemd-supported address tokens
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "any" | "localhost" | "link-local" | "multicast"
+    ) {
+        return Ok(lower);
+    }
+
+    // Split off optional CIDR prefix length
+    let (addr_part, prefix_part) = match trimmed.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (trimmed, None),
+    };
+
+    let addr = IpAddr::from_str(addr_part)
+        .map_err(|_| format!("\"{}\" is not a valid IP address", addr_part))?;
+
+    if let Some(prefix_str) = prefix_part {
+        let prefix: u8 = prefix_str
+            .parse()
+            .map_err(|_| format!("\"{}\" is not a valid prefix length", prefix_str))?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err(format!(
+                "prefix /{} exceeds maximum /{} for {}",
+                prefix,
+                max,
+                if addr.is_ipv4() { "IPv4" } else { "IPv6" }
+            ));
+        }
+    }
+
+    Ok(trimmed.to_string())
 }
 
 /// Parse HH:MM time format
@@ -322,6 +407,65 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_firewall_rule_accepts_tokens() {
+        assert_eq!(parse_firewall_rule("any").unwrap(), "any");
+        assert_eq!(parse_firewall_rule("LOCALHOST").unwrap(), "localhost");
+        assert_eq!(parse_firewall_rule("link-local").unwrap(), "link-local");
+        assert_eq!(parse_firewall_rule("multicast").unwrap(), "multicast");
+    }
+
+    #[test]
+    fn test_parse_firewall_rule_accepts_addresses() {
+        assert_eq!(parse_firewall_rule("10.0.0.1").unwrap(), "10.0.0.1");
+        assert_eq!(parse_firewall_rule("10.0.0.0/8").unwrap(), "10.0.0.0/8");
+        assert_eq!(parse_firewall_rule("::1").unwrap(), "::1");
+        assert_eq!(
+            parse_firewall_rule("2001:db8::/32").unwrap(),
+            "2001:db8::/32"
+        );
+        // Whitespace is trimmed
+        assert_eq!(
+            parse_firewall_rule("  192.168.1.0/24  ").unwrap(),
+            "192.168.1.0/24"
+        );
+    }
+
+    #[test]
+    fn test_parse_firewall_rule_rejects_garbage() {
+        assert!(parse_firewall_rule("").is_err());
+        assert!(parse_firewall_rule("notanip").is_err());
+        assert!(parse_firewall_rule("10.0.0.1/abc").is_err());
+        assert!(parse_firewall_rule("10.0.0.1/33").is_err());
+        assert!(parse_firewall_rule("::1/129").is_err());
+        assert!(parse_firewall_rule("example.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_firewall_default_must_be_known() {
+        let cfg = RawFirewallConfig {
+            default: "maybe".into(),
+            allow: vec![],
+            deny: vec![],
+        };
+        let errors = validate_firewall(&cfg, "x");
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::EntryError { message, .. } if message.contains("default")
+        )));
+    }
+
+    #[test]
+    fn test_validate_firewall_propagates_rule_errors() {
+        let cfg = RawFirewallConfig {
+            default: "deny".into(),
+            allow: vec!["10.0.0.0/8".into(), "garbage".into()],
+            deny: vec![],
+        };
+        let errors = validate_firewall(&cfg, "x");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
     fn test_duplicate_id_detection() {
         let config = RawConfig {
             config_version: 1,
@@ -344,6 +488,7 @@ mod tests {
                     disabled: false,
                     disabled_reason: None,
                     internet: None,
+                    firewall: None,
                 },
                 RawEntry {
                     id: "game".into(),
@@ -362,6 +507,7 @@ mod tests {
                     disabled: false,
                     disabled_reason: None,
                     internet: None,
+                    firewall: None,
                 },
             ],
         };

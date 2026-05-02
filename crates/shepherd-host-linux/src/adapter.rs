@@ -14,8 +14,9 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::process::{
-    ManagedProcess, find_steam_game_pids, init, kill_by_command, kill_flatpak_cgroup,
-    kill_snap_cgroup, kill_steam_game_processes,
+    ManagedProcess, apply_firewall_to_existing_scope, find_steam_game_pids,
+    firewall_systemd_run_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
+    kill_steam_game_processes,
 };
 
 /// Expand `~` at the beginning of a path to the user's home directory
@@ -346,13 +347,46 @@ impl HostAdapter for LinuxHost {
         // Determine if this is a sandboxed app (snap or flatpak)
         let sandboxed_app_name = snap_name.clone().or_else(|| flatpak_app_id.clone());
 
+        // Apply firewall: for Process kind, wrap the spawn in a transient
+        // systemd scope. For Flatpak/Snap the runtime creates its own scope,
+        // so we apply the firewall to that scope after it appears.
+        let final_argv = if let Some(ref spec) = options.firewall {
+            if sandboxed_app_name.is_none() && steam_app_id.is_none() {
+                let mut prefixed = firewall_systemd_run_prefix(spec);
+                prefixed.extend(argv);
+                prefixed
+            } else {
+                argv
+            }
+        } else {
+            argv
+        };
+
         let proc = ManagedProcess::spawn(
-            &argv,
+            &final_argv,
             &env,
             cwd.as_ref(),
             options.log_path.clone(),
             sandboxed_app_name,
         )?;
+
+        // For runtime-managed scopes (snap/flatpak), apply the firewall after
+        // the scope appears. Steam is not yet supported.
+        if let Some(spec) = options.firewall.clone() {
+            if let Some(ref snap) = snap_name {
+                let pattern = format!("snap.{}.{}-", snap, snap);
+                tokio::spawn(async move {
+                    apply_firewall_to_existing_scope(&pattern, &spec, Duration::from_secs(5)).await;
+                });
+            } else if let Some(ref app_id) = flatpak_app_id {
+                let pattern = format!("app-flatpak-{}-", app_id);
+                tokio::spawn(async move {
+                    apply_firewall_to_existing_scope(&pattern, &spec, Duration::from_secs(5)).await;
+                });
+            } else if steam_app_id.is_some() {
+                warn!("Firewall is not yet supported for Steam entries; ignoring");
+            }
+        }
 
         let pid = proc.pid;
         let pgid = proc.pgid;

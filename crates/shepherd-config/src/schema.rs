@@ -99,6 +99,38 @@ pub struct RawEntry {
     /// Internet requirement for this entry
     #[serde(default)]
     pub internet: Option<RawEntryInternet>,
+
+    /// Network firewall rules applied while this entry is running
+    #[serde(default)]
+    pub firewall: Option<RawFirewallConfig>,
+}
+
+/// Per-entry firewall configuration
+///
+/// Enforced via systemd `IPAddressAllow=`/`IPAddressDeny=` properties on the
+/// per-session scope. Hostname matching is **not** performed at the kernel
+/// layer; pair with a browser-side allowlist (e.g. Chrome `URLAllowlist`) when
+/// hostname resolution is needed.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawFirewallConfig {
+    /// Default policy when no `allow` or `deny` rule matches.
+    /// "deny" (default) blocks all traffic except `allow` entries.
+    /// "allow" permits all traffic except `deny` entries.
+    #[serde(default = "default_firewall_default")]
+    pub default: String,
+
+    /// Allowlisted destinations (CIDR or systemd address tokens like "any",
+    /// "localhost", "link-local", "multicast")
+    #[serde(default)]
+    pub allow: Vec<String>,
+
+    /// Denylisted destinations (applied after `allow`)
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+fn default_firewall_default() -> String {
+    "deny".to_string()
 }
 
 /// Raw entry kind

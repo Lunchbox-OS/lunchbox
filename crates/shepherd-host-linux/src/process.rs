@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use tracing::{debug, info, warn};
 
-use shepherd_host_api::{ExitStatus, HostError, HostResult};
+use shepherd_host_api::{ExitStatus, FirewallSpec, HostError, HostResult};
 
 /// Managed child process with process group tracking
 pub struct ManagedProcess {
@@ -25,6 +25,110 @@ pub struct ManagedProcess {
 /// Initialize process management (called once at startup)
 pub fn init() {
     info!("Process management initialized");
+}
+
+/// Build a `systemd-run --user --scope` argv prefix that applies a firewall
+/// spec to the spawned command via systemd's BPF address filter.
+///
+/// Caller is expected to append the actual command and its arguments after the
+/// returned prefix. The prefix already terminates with `--`.
+pub fn firewall_systemd_run_prefix(spec: &FirewallSpec) -> Vec<String> {
+    let mut args = vec![
+        "systemd-run".to_string(),
+        "--user".to_string(),
+        "--scope".to_string(),
+        "--collect".to_string(),
+        "--quiet".to_string(),
+    ];
+    args.extend(firewall_property_args(spec, "--property="));
+    args.push("--".to_string());
+    args
+}
+
+/// Apply a firewall spec to an already-running systemd scope (e.g. a flatpak
+/// or snap app whose scope was created by the runtime, not by us).
+///
+/// Polls the user cgroup hierarchy for a scope whose name starts with
+/// `scope_prefix` for up to `timeout`, then applies the firewall via
+/// `systemctl --user --runtime set-property`. Returns the scope name on
+/// success.
+pub async fn apply_firewall_to_existing_scope(
+    scope_prefix: &str,
+    spec: &FirewallSpec,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let scope_name = wait_for_scope(scope_prefix, timeout).await?;
+
+    let mut args = vec![
+        "--user".to_string(),
+        "--runtime".to_string(),
+        "set-property".to_string(),
+        scope_name.clone(),
+    ];
+    args.extend(firewall_property_args(spec, ""));
+
+    let result = tokio::process::Command::new("systemctl")
+        .args(&args)
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => {
+            info!(scope = %scope_name, "Applied firewall to scope");
+            Some(scope_name)
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(scope = %scope_name, stderr = %stderr, "systemctl set-property failed");
+            None
+        }
+        Err(e) => {
+            warn!(scope = %scope_name, error = %e, "Failed to run systemctl");
+            None
+        }
+    }
+}
+
+/// Translate a firewall spec into `IPAddressAllow=`/`IPAddressDeny=` property
+/// strings. `prefix` is prepended to each (`"--property="` for systemd-run,
+/// empty for `systemctl set-property`).
+fn firewall_property_args(spec: &FirewallSpec, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if spec.default_deny {
+        out.push(format!("{}IPAddressDeny=any", prefix));
+    }
+    for rule in &spec.allow {
+        out.push(format!("{}IPAddressAllow={}", prefix, rule));
+    }
+    for rule in &spec.deny {
+        out.push(format!("{}IPAddressDeny={}", prefix, rule));
+    }
+    out
+}
+
+async fn wait_for_scope(prefix: &str, timeout: std::time::Duration) -> Option<String> {
+    let uid = nix::unistd::getuid().as_raw();
+    let base = std::path::PathBuf::from(format!(
+        "/sys/fs/cgroup/user.slice/user-{}.slice/user@{}.service/app.slice",
+        uid, uid
+    ));
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(prefix) && name_str.ends_with(".scope") {
+                    return Some(name_str.into_owned());
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// Kill all processes in a snap's cgroup using systemd

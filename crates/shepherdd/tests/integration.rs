@@ -37,6 +37,7 @@ fn make_test_entry(id: &str) -> Entry {
         disabled: false,
         disabled_reason: None,
         internet: Default::default(),
+        firewall: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn make_test_policy() -> Policy {
             disabled: false,
             disabled_reason: None,
             internet: Default::default(),
+            firewall: None,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),

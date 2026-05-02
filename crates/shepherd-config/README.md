@@ -176,6 +176,34 @@ required = true
 # check = "tcp://1.1.1.1:53"
 ```
 
+### Firewall
+
+Entries may apply a network allowlist/denylist enforced via systemd's BPF
+address filter (`IPAddressAllow=`/`IPAddressDeny=`). Rules are IP addresses,
+CIDR ranges, or systemd tokens (`any`, `localhost`, `link-local`,
+`multicast`). Hostnames are **not** resolved at this layer — pair with a
+browser-side allowlist (e.g. Chrome `URLAllowlist`) when hostname matching
+is required.
+
+```toml
+[entries.firewall]
+default = "deny"   # "deny" (default) or "allow"
+allow = [
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+]
+deny = []
+```
+
+Enforcement notes:
+- For `process` entries, the session is wrapped in a transient
+  `systemd-run --user --scope` with the firewall properties set up front.
+- For `flatpak` and `snap` entries, the runtime creates its own scope; the
+  firewall is applied via `systemctl --user --runtime set-property` once
+  that scope appears (small race window during early app startup).
+- Not yet supported for `steam` entries.
+
 ## Validation
 
 The configuration is validated at load time. Validation catches:
