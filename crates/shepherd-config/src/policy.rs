@@ -5,10 +5,10 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawConfig, RawEntry, RawEntryKind, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawVolumeConfig, RawWarningThreshold,
+    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInternetConfig,
+    RawManagementApiConfig, RawServiceConfig, RawVolumeConfig, RawWarningThreshold,
 };
-use crate::validation::{parse_days, parse_time};
+use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{EntryKind, WarningSeverity, WarningThreshold};
 use shepherd_util::{
     DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
@@ -188,6 +188,7 @@ pub struct Entry {
     pub disabled: bool,
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
+    pub firewall: Option<FirewallPolicy>,
 }
 
 impl Entry {
@@ -216,6 +217,7 @@ impl Entry {
             .unwrap_or_else(|| default_warnings.to_vec());
         let volume = raw.volume.as_ref().map(convert_volume_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
+        let firewall = raw.firewall.as_ref().map(convert_firewall_config);
 
         Self {
             id: EntryId::new(raw.id),
@@ -229,6 +231,7 @@ impl Entry {
             disabled: raw.disabled,
             disabled_reason: raw.disabled_reason,
             internet,
+            firewall,
         }
     }
 }
@@ -271,6 +274,39 @@ pub struct LimitsPolicy {
     /// Daily quota. None means unlimited.
     pub daily_quota: Option<Duration>,
     pub cooldown: Option<Duration>,
+}
+
+/// Network firewall policy applied to a session at spawn time.
+///
+/// Rules are passed verbatim to systemd's `IPAddressAllow=`/`IPAddressDeny=`
+/// properties on the per-session scope. Validated at config load time:
+/// each rule is either a parseable CIDR or one of the systemd address tokens.
+#[derive(Debug, Clone)]
+pub struct FirewallPolicy {
+    /// If true, deny all traffic by default; only `allow` rules pass.
+    /// If false, allow all traffic by default; `deny` rules block.
+    pub default_deny: bool,
+    /// Allow rules (CIDR strings or systemd address tokens)
+    pub allow: Vec<String>,
+    /// Deny rules (applied after allow)
+    pub deny: Vec<String>,
+}
+
+fn convert_firewall_config(raw: &RawFirewallConfig) -> FirewallPolicy {
+    let default_deny = !raw.default.eq_ignore_ascii_case("allow");
+    // Rules were already validated by `validate_config`; canonicalize whitespace
+    // so the strings we hand to systemd are clean.
+    let normalize = |rules: &[String]| -> Vec<String> {
+        rules
+            .iter()
+            .map(|r| parse_firewall_rule(r).unwrap_or_else(|_| r.trim().to_string()))
+            .collect()
+    };
+    FirewallPolicy {
+        default_deny,
+        allow: normalize(&raw.allow),
+        deny: normalize(&raw.deny),
+    }
 }
 
 /// Volume control policy

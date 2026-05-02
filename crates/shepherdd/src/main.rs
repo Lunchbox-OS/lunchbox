@@ -765,8 +765,19 @@ impl Service {
                         // Start the session in the engine
                         let event = eng.start_session(plan.clone(), now, now_mono);
 
-                        // Get the entry kind for spawning
-                        let entry_kind = eng.policy().get_entry(&entry_id).map(|e| e.kind.clone());
+                        // Get the entry kind and firewall policy for spawning
+                        let entry_snapshot = eng
+                            .policy()
+                            .get_entry(&entry_id)
+                            .map(|e| (e.kind.clone(), e.firewall.clone()));
+                        let entry_kind = entry_snapshot.as_ref().map(|(k, _)| k.clone());
+                        let firewall = entry_snapshot.and_then(|(_, fw)| fw).map(|fw| {
+                            shepherd_host_api::FirewallSpec {
+                                default_deny: fw.default_deny,
+                                allow: fw.allow,
+                                deny: fw.deny,
+                            }
+                        });
 
                         // Build spawn options with log path if capture_child_output is enabled
                         let spawn_options = if eng.policy().service.capture_child_output {
@@ -783,10 +794,14 @@ impl Service {
                                 capture_stdout: true,
                                 capture_stderr: true,
                                 log_path: Some(log_path),
+                                firewall,
                                 ..Default::default()
                             }
                         } else {
-                            shepherd_host_api::SpawnOptions::default()
+                            shepherd_host_api::SpawnOptions {
+                                firewall,
+                                ..Default::default()
+                            }
                         };
 
                         drop(eng); // Release lock before spawning

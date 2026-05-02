@@ -187,6 +187,22 @@ stdout and stderr can be captured to session log files:
 └── ...
 ```
 
+## Network firewall
+
+When `SpawnOptions::firewall` is set, the adapter applies a per-session
+network filter via systemd's BPF address controls
+(`IPAddressAllow=`/`IPAddressDeny=`).
+
+- **Process kind**: the spawn argv is wrapped in
+  `systemd-run --user --scope --collect --quiet --property=...` so the
+  firewall is in place from the first instruction.
+- **Flatpak / Snap**: the runtime creates its own scope
+  (`app-flatpak-<id>-*.scope`, `snap.<name>.<name>-*.scope`). The adapter
+  spawns the app, polls for the scope, and then applies the firewall via
+  `systemctl --user --runtime set-property`. Small race window during
+  early app startup.
+- **Steam**: not yet supported (logged as a warning).
+
 ## Future Enhancements
 
 Planned features (hooks are designed in):
@@ -195,6 +211,7 @@ Planned features (hooks are designed in):
 - **Namespace isolation** - Optional sandboxing
 - **Sway/Wayland integration** - Focus and fullscreen control
 - **D-Bus monitoring** - Window readiness detection
+- **Steam firewall support** - apply IPAddressAllow/Deny to Steam game scopes
 
 ## Dependencies
 
