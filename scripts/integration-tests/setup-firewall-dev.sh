@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# One-time dev setup for the firewall integration test.
+# One-time dev setup for the firewall helper.
 #
 # Builds the helper (debug profile) and delegates to the main installer
 # (`shepherd install firewall --debug`) so dev and production share the
 # same install logic. Adds the invoking user to the shepherd-firewall group.
 #
-# After running with sudo:
-#   1. log out and back in (or open a new sway session) so the supplementary
-#      group membership takes effect, then
-#   2. ./scripts/integration-tests/test-firewall.sh
+# After running with sudo, log out and back in (or open a new sway session)
+# so the supplementary group membership takes effect. Local activities with
+# `[entries.firewall]` configured will then be enforced; the wiring is also
+# covered in CI by the shepherd-e2e firewall tests.
 
 set -euo pipefail
 

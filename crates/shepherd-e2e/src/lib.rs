@@ -92,6 +92,7 @@ pub struct HarnessBuilder {
     spawn_launcher: bool,
     spawn_hud: bool,
     auth_token: Option<String>,
+    extra_env: Vec<(String, String)>,
 }
 
 impl Default for HarnessBuilder {
@@ -107,6 +108,7 @@ impl HarnessBuilder {
             spawn_launcher: false,
             spawn_hud: false,
             auth_token: None,
+            extra_env: Vec::new(),
         }
     }
 
@@ -133,6 +135,14 @@ impl HarnessBuilder {
 
     pub fn spawn_hud(mut self, yes: bool) -> Self {
         self.spawn_hud = yes;
+        self
+    }
+
+    /// Add an environment variable to shepherdd's process. Applied after the
+    /// harness's standard `env_clear()` + base env, so it can override the
+    /// defaults (e.g. `PATH` to inject fakes for `pkcheck`/`pkexec`).
+    pub fn shepherdd_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_env.push((key.into(), value.into()));
         self
     }
 
@@ -356,6 +366,9 @@ impl TestHarness {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null());
+        for (k, v) in &builder.extra_env {
+            shepherdd_cmd.env(k, v);
+        }
         let shepherdd = shepherdd_cmd.spawn().context("spawn shepherdd")?;
 
         let http_client = HttpClient::new(http_port, auth_token.clone());
