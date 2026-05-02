@@ -15,8 +15,9 @@ use tracing::{info, warn};
 
 use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
-    find_steam_game_pids, firewall_enforcement_status, firewall_systemd_run_prefix, init,
-    kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup, kill_steam_game_processes,
+    build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
+    firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
+    kill_steam_game_processes, make_scope_name,
 };
 
 /// Expand `~` at the beginning of a path to the user's home directory
@@ -347,17 +348,29 @@ impl HostAdapter for LinuxHost {
         // Determine if this is a sandboxed app (snap or flatpak)
         let sandboxed_app_name = snap_name.clone().or_else(|| flatpak_app_id.clone());
 
-        // Apply firewall: for Process kind, wrap the spawn in a transient
-        // systemd scope. For Flatpak/Snap the runtime creates its own scope,
-        // so we apply the firewall to that scope after it appears.
-        //
-        // If we know upfront we can't enforce (no CAP_NET_ADMIN, user-mode
-        // systemd), skip the wrapper rather than producing a silent no-op.
+        // Apply firewall: for Process kind, hand the launch to the privileged
+        // helper via pkexec, which runs `systemd-run --scope` against the
+        // *system* manager (the one that can attach BPF cgroup programs).
+        // Snap/flatpak go through `apply_firewall_to_existing_scope` below;
+        // Steam isn't supported. If the helper isn't installed or polkit
+        // doesn't grant us, skip the wrapper rather than spawning under a
+        // silent no-op.
         let final_argv = if let Some(ref spec) = options.firewall {
             if sandboxed_app_name.is_none() && steam_app_id.is_none() {
                 match firewall_enforcement_status() {
                     FirewallEnforcementStatus::Supported => {
-                        let mut prefixed = firewall_systemd_run_prefix(spec);
+                        let scope_name = make_scope_name(&session_id.to_string());
+                        let activity_env = build_inherited_env(&env);
+                        let uid = nix::unistd::getuid().as_raw();
+                        let gid = nix::unistd::getgid().as_raw();
+                        let mut prefixed = firewall_helper_argv_prefix(
+                            spec,
+                            &scope_name,
+                            uid,
+                            gid,
+                            &activity_env,
+                            cwd.as_deref(),
+                        );
                         prefixed.extend(argv);
                         prefixed
                     }

@@ -376,13 +376,6 @@ command = "ptyxis"
 [entries.availability]
 always = true
 
-# Optional per-entry firewall.
-# Enforced via systemd IPAddressAllow=/IPAddressDeny= on the session's scope.
-# Hostnames are NOT resolved at this layer -- list IP addresses or CIDR
-# ranges, or one of the systemd address tokens: any, localhost, link-local,
-# multicast.
-# Note: applied after the runtime scope appears for snap/flatpak entries
-# (small race window during early app startup). Not yet supported for Steam.
 [entries.firewall]
 default = "deny"  # "deny" (default) blocks all unmatched traffic; "allow" permits all
 allow = [
@@ -395,11 +388,19 @@ deny = []
 # Disabled by default; the test harness flips it on for the day via the
 # management API override (PUT /api/v1/overrides/integration-tests).
 #
-# The activity itself runs under a deny-by-default firewall (only loopback is
+# The activity runs under a deny-by-default firewall (only loopback is
 # allowed). The activity script asserts that:
 #   - it CAN reach 127.0.0.1 (allowed)
 #   - it CANNOT reach an external host (denied)
 # This is the actual end-to-end check that the firewall is enforcing.
+#
+# We invoke `bash` directly (NOT via ptyxis or any other GNOME terminal):
+# ptyxis spawns each tab inside a fresh `systemd-run --user --scope`, which
+# moves the activity into a *new* user-slice scope and escapes the firewall
+# scope shepherdd set up. The same caveat applies to anything else that
+# re-parents into its own systemd scope (snap, flatpak, gnome-terminal).
+# Output goes to dev-runtime/integration-tests.log via `tee` inside the
+# activity script, which is what the orchestrator polls.
 [[entries]]
 id = "integration-tests"
 label = "Integration Tests"
@@ -409,14 +410,19 @@ disabled_reason = "Used by integration tests only; enabled at runtime via the AP
 
 [entries.kind]
 type = "process"
-command = "ptyxis"
-# `-s` runs ptyxis standalone so the launching process stays alive for the
-# duration of the activity (and dies cleanly when the window closes).
-args = ["-s", "--", "./scripts/integration-tests/run-activity.sh"]
+command = "bash"
+args = ["./scripts/integration-tests/run-activity.sh"]
 
 [entries.availability]
 always = true
 
+# Optional per-entry firewall.
+# Enforced via systemd IPAddressAllow=/IPAddressDeny= on the session's scope.
+# Hostnames are NOT resolved at this layer -- list IP addresses or CIDR
+# ranges, or one of the systemd address tokens: any, localhost, link-local,
+# multicast.
+# Note: applied after the runtime scope appears for snap/flatpak entries
+# (small race window during early app startup). Not yet supported for Steam.
 [entries.firewall]
 default = "deny"
 allow = [

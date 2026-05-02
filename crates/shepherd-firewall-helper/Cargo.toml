@@ -1,0 +1,14 @@
+[package]
+name = "shepherd-firewall-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged helper that applies per-activity firewall rules on shepherdd's behalf"
+
+[[bin]]
+name = "shepherd-firewall-helper"
+path = "src/main.rs"
+
+# Intentionally no dependencies. This binary is invoked via pkexec as root,
+# so its trusted computing base must stay tiny and easy to audit.
+[dependencies]

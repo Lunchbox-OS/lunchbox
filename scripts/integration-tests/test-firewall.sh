@@ -63,15 +63,48 @@ cleanup() {
     local rc=$?
     echo "[orchestrator] Cleaning up nested sway (pid $RUN_DEV_PID)..."
     if [[ -n "${RUN_DEV_PID:-}" ]] && kill -0 "$RUN_DEV_PID" 2>/dev/null; then
+        # SIGTERM the run-dev shell. As of the SIGTERM trap added in
+        # scripts/lib/sway.sh, this propagates to the nested sway and
+        # libwayland's atexit handler removes the socket cleanly.
         kill -TERM "$RUN_DEV_PID" 2>/dev/null || true
-        for _ in $(seq 1 10); do
+        for _ in $(seq 1 15); do
             kill -0 "$RUN_DEV_PID" 2>/dev/null || break
             sleep 1
         done
         kill -KILL "$RUN_DEV_PID" 2>/dev/null || true
     fi
     pkill -x shepherdd 2>/dev/null || true
-    pkill -x ptyxis 2>/dev/null || true
+    # Note: do NOT broadly `pkill -x ptyxis` -- that would also nuke the user's
+    # `ptyxis --gapplication-service` D-Bus service running outside the test.
+    # The nested sway's death already cascade-kills the test's standalone
+    # ptyxis via wayland disconnect.
+
+    # Belt-and-suspenders: sweep any wayland-N / sway-ipc socket that
+    # libwayland didn't clean up (e.g. if sway was forcibly SIGKILL'd above).
+    # Same logic as scripts/lib/sway.sh::sway_purge_stale_sockets, inlined
+    # here so the orchestrator doesn't need to source the lib.
+    local rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [[ -d "$rt" ]]; then
+        local sock pid n path
+        shopt -s extglob nullglob
+        for sock in "$rt"/sway-ipc.*.sock; do
+            pid="${sock##*ipc.*([0-9]).}"; pid="${pid%.sock}"
+            if [[ -n "$pid" && ! -d "/proc/$pid" ]]; then
+                rm -f "$sock"
+            fi
+        done
+        shopt -u nullglob
+        for n in $(seq 1 32); do
+            path="$rt/wayland-$n"
+            [[ -e "$path" ]] || continue
+            python3 -c "import socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(0.2)
+try: s.connect(sys.argv[1])
+except OSError: sys.exit(1)" "$path" 2>/dev/null \
+                || rm -f "$path" "$path.lock"
+        done
+    fi
+
     exit "$rc"
 }
 trap cleanup EXIT INT TERM
