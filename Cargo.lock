@@ -1791,6 +1791,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "shepherd-api",
+ "shepherd-ipc",
+ "shepherd-util",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "shepherd-host-api"
 version = "0.1.0"
 dependencies = [

@@ -66,16 +66,20 @@ get_packages() {
         run)
             read_package_file "$DEPS_DIR/run.pkgs"
             ;;
+        test)
+            read_package_file "$DEPS_DIR/test.pkgs"
+            ;;
         dev)
-            # Union of all three sets, deduplicated
+            # Union of all four sets, deduplicated
             {
                 read_package_file "$DEPS_DIR/build.pkgs"
                 read_package_file "$DEPS_DIR/run.pkgs"
+                read_package_file "$DEPS_DIR/test.pkgs"
                 read_package_file "$DEPS_DIR/dev.pkgs"
             } | sort -u
             ;;
         *)
-            die "Unknown package set: $set_name (valid: build, run, dev)"
+            die "Unknown package set: $set_name (valid: build, run, test, dev)"
             ;;
     esac
 }
@@ -189,7 +193,8 @@ Commands:
 Package sets:
     build    Build-time dependencies (+ Rust via rustup)
     run      Runtime dependencies only
-    dev      All dependencies (build + run + dev extras + Rust)
+    test     Extra packages needed for the shepherd-e2e harness
+    dev      All dependencies (build + run + test + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
 

@@ -1,0 +1,18 @@
+# Test-time system packages for shepherd-launcher
+# These are needed in addition to the build deps to run the
+# `shepherd-e2e` end-to-end suite, which boots a real headless
+# Sway compositor and the shepherd binaries inside a temp environment.
+# One package per line, comments start with #
+
+# Sway compositor (the harness drives a real Sway, not a mock)
+sway
+
+# wlroots headless backend pulls in dbus indirectly, but the harness
+# isolates each test with its own runtime dir so we want the binary
+# available explicitly.
+dbus-daemon
+
+# `coreutils` provides /usr/bin/sleep, which the test entries spawn as a
+# stand-in for a real activity. It's almost always installed already, but
+# list it for completeness.
+coreutils

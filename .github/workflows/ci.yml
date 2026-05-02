@@ -80,6 +80,49 @@ jobs:
           . "$HOME/.cargo/env"
           cargo test --all-targets
 
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:25.10
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install -y git curl nodejs
+
+      - uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        run: |
+          ./scripts/shepherd deps install build
+          ./scripts/shepherd deps install run
+          ./scripts/shepherd deps install test
+
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build binaries (e2e harness execs them from target/debug)
+        run: |
+          . "$HOME/.cargo/env"
+          ./scripts/shepherd build
+
+      - name: Run e2e tests
+        run: |
+          . "$HOME/.cargo/env"
+          cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
+
   lint:
     name: Clippy
     runs-on: ubuntu-latest
