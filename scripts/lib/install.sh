@@ -20,6 +20,7 @@ DEFAULT_BINDIR="bin"
 # Standard sway config location
 SWAY_CONFIG_DIR="/etc/sway"
 SHEPHERD_SWAY_CONFIG="shepherd.conf"
+SHEPHERD_SWAY_CONFD="shepherd.conf.d"
 
 # Desktop entry location
 DESKTOP_ENTRY_DIR="share/wayland-sessions"
@@ -67,14 +68,19 @@ install_sway_config() {
     local src_config="$repo_root/sway.conf"
     local dst_dir="$destdir$SWAY_CONFIG_DIR"
     local dst_config="$dst_dir/$SHEPHERD_SWAY_CONFIG"
-    
+    local dst_confd="$dst_dir/$SHEPHERD_SWAY_CONFD"
+
     if [[ ! -f "$src_config" ]]; then
         die "Source sway.conf not found at $src_config"
     fi
-    
+
     info "Installing sway configuration to $dst_config..."
-    
+
     ensure_dir "$dst_dir" 0755
+    # Drop-in directory for site-local overrides (e.g. HiDPI scale).
+    # ensure_dir is a no-op if it already exists, so user-placed files are
+    # preserved across re-installs.
+    ensure_dir "$dst_confd" 0755
     
     # Create a production version of the sway config
     # Replace debug paths with installed paths
