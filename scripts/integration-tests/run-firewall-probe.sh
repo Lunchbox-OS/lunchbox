@@ -23,6 +23,12 @@ LOG="${SHEPHERD_FIREWALL_PROBE_LOG:?SHEPHERD_FIREWALL_PROBE_LOG required}"
 ALLOW="${SHEPHERD_FIREWALL_PROBE_ALLOW:?SHEPHERD_FIREWALL_PROBE_ALLOW required}"
 DENY="${SHEPHERD_FIREWALL_PROBE_DENY:?SHEPHERD_FIREWALL_PROBE_DENY required}"
 HOLD="${SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS:-120}"
+# Snap/Flatpak entries have an inherent race: shepherdd polls for the
+# runtime's scope cgroup to appear, then invokes the helper to attach BPF.
+# That can lag the activity's start by hundreds of ms. Wait so the probes
+# happen *after* the BPF program is attached. Process-kind entries don't
+# have the race (BPF is attached at scope creation), so default 0.
+INITIAL_DELAY="${SHEPHERD_FIREWALL_PROBE_INITIAL_DELAY:-0}"
 
 # Probe a host:port over TCP. Returns "OPEN" on successful connect, "BLOCKED"
 # otherwise. Uses bash's /dev/tcp (so no python/curl/nc dependency).
@@ -44,6 +50,10 @@ probe() {
 }
 
 mkdir -p "$(dirname "$LOG")"
+
+if [ "$INITIAL_DELAY" != "0" ]; then
+    sleep "$INITIAL_DELAY"
+fi
 
 allow_result=$(probe "$ALLOW" 3)
 deny_result=$(probe "$DENY" 6)

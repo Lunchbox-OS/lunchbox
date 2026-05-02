@@ -363,9 +363,24 @@ impl TestHarness {
             .env("XDG_CACHE_HOME", &xdg_cache_home)
             .env("WAYLAND_DISPLAY", &wayland_display)
             .env("XDG_SESSION_TYPE", "wayland")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .stdin(Stdio::null());
+        // Optionally redirect shepherdd's stdout/stderr to a path the test
+        // can read (debugging firewall enforcement, BPF attach, etc.).
+        // Default: silence.
+        match std::env::var("SHEPHERD_E2E_LOG_FILE") {
+            Ok(path) => {
+                let f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .with_context(|| format!("open SHEPHERD_E2E_LOG_FILE {path}"))?;
+                let f2 = f.try_clone().context("clone log file fd")?;
+                shepherdd_cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
+            }
+            Err(_) => {
+                shepherdd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
         for (k, v) in &builder.extra_env {
             shepherdd_cmd.env(k, v);
         }

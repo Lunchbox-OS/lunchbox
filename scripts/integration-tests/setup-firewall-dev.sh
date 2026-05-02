@@ -27,9 +27,11 @@ if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
 fi
 
 # Build the debug helper as the calling user, so the binary in target/debug
-# isn't owned by root after this script runs.
+# isn't owned by root after this script runs. Use `bash -lc` so the user's
+# login profile loads ~/.cargo/bin onto PATH (sudo strips it via
+# secure_path).
 echo "[setup] Building debug helper..."
-sudo -u "$TARGET_USER" sh -c "cd '$REPO_ROOT' && cargo build --bin shepherd-firewall-helper"
+sudo -u "$TARGET_USER" bash -lc "cd '$REPO_ROOT' && cargo build --bin shepherd-firewall-helper"
 
 # Delegate to the main installer.
 exec "$REPO_ROOT/scripts/shepherd" install firewall --user "$TARGET_USER" --debug

@@ -16,6 +16,13 @@
   <vendor>Shepherd Launcher</vendor>
   <vendor_url>https://git.armeafamily.com/albert/shepherd-launcher</vendor_url>
 
+  <!--
+    One action covers every helper subcommand because polkit's
+    `org.freedesktop.policykit.exec.path` annotation gates execution of
+    the binary as a whole, regardless of argv. Both `apply-process` (for
+    Process-kind entries via systemd-run) and `apply-cgroup` (for
+    Snap/Flatpak BPF cgroup attach) go through this single action.
+  -->
   <action id="org.shepherd.firewall.apply-process">
     <description>Apply per-activity firewall rules to a shepherd-launcher activity</description>
     <message>Authentication is required to apply per-activity firewall rules.</message>

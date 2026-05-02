@@ -287,61 +287,65 @@ pub fn init() {
 /// or snap app whose scope was created by the runtime, not by us).
 ///
 /// Polls the user cgroup hierarchy for a scope whose name starts with
-/// `scope_prefix` for up to `timeout`, then applies the firewall via
-/// `systemctl --user --runtime set-property`. Returns the scope name on
-/// success.
+/// `scope_prefix` for up to `timeout`, then invokes the privileged helper's
+/// `apply-cgroup` subcommand. The helper attaches a `cgroup_skb/egress` BPF
+/// program directly to the cgroup and exits, so the filter persists for the
+/// life of the scope. Returns the scope name on success.
+///
+/// `systemctl --user --runtime set-property IPAddressDeny=…` was the older
+/// approach here; per-user systemd lacks `CAP_NET_ADMIN`/`CAP_BPF`, so it
+/// silently accepted the property without attaching any BPF program. The
+/// helper does the attach itself.
 pub async fn apply_firewall_to_existing_scope(
     scope_prefix: &str,
     spec: &FirewallSpec,
     timeout: std::time::Duration,
 ) -> Option<String> {
     let scope_name = wait_for_scope(scope_prefix, timeout).await?;
+    let uid = nix::unistd::getuid().as_raw();
+    let cgroup_path = format!(
+        "/sys/fs/cgroup/user.slice/user-{0}.slice/user@{0}.service/app.slice/{1}",
+        uid, scope_name
+    );
 
-    let mut args = vec![
-        "--user".to_string(),
-        "--runtime".to_string(),
-        "set-property".to_string(),
-        scope_name.clone(),
+    let mut args: Vec<String> = vec![
+        "--keep-cwd".into(),
+        firewall_helper_path(),
+        "apply-cgroup".into(),
+        "--cgroup-path".into(),
+        cgroup_path.clone(),
+        "--default".into(),
+        if spec.default_deny { "deny" } else { "allow" }.into(),
     ];
-    args.extend(firewall_property_args(spec, ""));
+    for rule in &spec.allow {
+        args.push("--allow".into());
+        args.push(rule.clone());
+    }
+    for rule in &spec.deny {
+        args.push("--deny".into());
+        args.push(rule.clone());
+    }
 
-    let result = tokio::process::Command::new("systemctl")
+    let result = tokio::process::Command::new("pkexec")
         .args(&args)
         .output()
         .await;
 
     match result {
         Ok(output) if output.status.success() => {
-            info!(scope = %scope_name, "Applied firewall to scope");
+            info!(scope = %scope_name, cgroup = %cgroup_path, "Applied firewall (BPF) to scope");
             Some(scope_name)
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(scope = %scope_name, stderr = %stderr, "systemctl set-property failed");
+            warn!(scope = %scope_name, stderr = %stderr, "helper apply-cgroup failed");
             None
         }
         Err(e) => {
-            warn!(scope = %scope_name, error = %e, "Failed to run systemctl");
+            warn!(scope = %scope_name, error = %e, "Failed to run pkexec helper");
             None
         }
     }
-}
-
-/// Translate a firewall spec into `IPAddressAllow=`/`IPAddressDeny=` property
-/// strings. `prefix` is prepended to each (`"--property="` for systemd-run,
-/// empty for `systemctl set-property`).
-fn firewall_property_args(spec: &FirewallSpec, prefix: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if spec.default_deny {
-        out.push(format!("{}IPAddressDeny=any", prefix));
-    }
-    for rule in &spec.allow {
-        out.push(format!("{}IPAddressAllow={}", prefix, rule));
-    }
-    for rule in &spec.deny {
-        out.push(format!("{}IPAddressDeny={}", prefix, rule));
-    }
-    out
 }
 
 async fn wait_for_scope(prefix: &str, timeout: std::time::Duration) -> Option<String> {

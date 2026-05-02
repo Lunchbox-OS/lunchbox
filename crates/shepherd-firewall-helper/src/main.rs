@@ -1,15 +1,24 @@
 //! Privileged helper for shepherdd's per-activity firewall.
 //!
-//! Invoked by shepherdd via `pkexec`. Validates its arguments, then `exec`s
-//! `systemd-run --scope` with the firewall properties and `--uid=`/`--gid=`
-//! to drop privileges before the activity starts.
+//! Invoked by shepherdd via `pkexec`. Three subcommands:
 //!
-//! See README.md for the CLI and the trust boundary.
+//! - `apply-process`: legacy/Process-kind. Validates argv, then `exec`s
+//!   `systemd-run --scope --uid=… --property=IPAddress*=…` so systemd
+//!   creates a fresh transient scope with the BPF address filter attached.
+//! - `apply-cgroup`: Snap/Flatpak. The runtime already created the scope;
+//!   we open the cgroup and attach our own `cgroup_skb/egress` BPF program
+//!   to it. The program is compiled from the sibling `shepherd-firewall-bpf`
+//!   crate and embedded via `include_bytes!`.
+//! - `stop-scope`: shells out to `systemctl stop <unit>`.
+//!
+//! See README.md for the trust boundary.
 
 use std::ffi::OsString;
 use std::net::IpAddr;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
+
+mod bpf;
 
 const HELPER_NAME: &str = "shepherd-firewall-helper";
 
@@ -20,13 +29,13 @@ fn die(msg: impl AsRef<str>) -> ! {
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
-    let subcmd = args
-        .next()
-        .map(os_to_string)
-        .unwrap_or_else(|| die("missing subcommand (expected 'apply-process' or 'stop-scope')"));
+    let subcmd = args.next().map(os_to_string).unwrap_or_else(|| {
+        die("missing subcommand (expected 'apply-process', 'apply-cgroup', or 'stop-scope')")
+    });
 
     match subcmd.as_str() {
         "apply-process" => apply_process(args),
+        "apply-cgroup" => apply_cgroup(args),
         "stop-scope" => stop_scope(args),
         other => die(format!("unknown subcommand '{}'", other)),
     }
@@ -133,10 +142,7 @@ fn apply_process(args: impl Iterator<Item = OsString>) -> ExitCode {
 
     // Bind --uid to PKEXEC_UID: a user granted the action must not be able to
     // launch a process as a different user.
-    let pkexec_uid = std::env::var("PKEXEC_UID")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or_else(|| die("PKEXEC_UID is unset; this helper must be invoked via pkexec"));
+    let pkexec_uid = require_pkexec_uid();
     if uid != pkexec_uid {
         die(format!(
             "--uid {} does not match PKEXEC_UID {}",
@@ -147,11 +153,6 @@ fn apply_process(args: impl Iterator<Item = OsString>) -> ExitCode {
     if command_argv.is_empty() {
         die("missing command after '--'");
     }
-    // Allow either an absolute path that exists, or a bare command name
-    // (alnum + `_-.`) which systemd-run will resolve via PATH. This isn't a
-    // privilege boundary -- the activity runs as PKEXEC_UID (the calling
-    // user, who could spawn anything as themselves anyway) -- but it keeps
-    // the helper's argv tidy and rejects obvious tampering.
     if !is_acceptable_command(&command_argv[0]) {
         die(format!(
             "command must be an absolute path or a bare name (alnum + '_-.') , got '{}'",
@@ -194,6 +195,79 @@ fn apply_process(args: impl Iterator<Item = OsString>) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
+// apply-cgroup
+// ---------------------------------------------------------------------------
+
+/// `apply-cgroup --cgroup-path P --default deny|allow [--allow R]... [--deny R]...`
+///
+/// Loads the embedded cgroup_skb BPF program, populates its rule maps from
+/// the argv, then attaches `cgroup_skb/egress` to the cgroup at `P` via the
+/// legacy `BPF_PROG_ATTACH` syscall (so the attach persists after the
+/// helper exits). The kernel detaches the program automatically when the
+/// cgroup is destroyed.
+fn apply_cgroup(args: impl Iterator<Item = OsString>) -> ExitCode {
+    let mut cgroup_path: Option<String> = None;
+    let mut default_deny: Option<bool> = None;
+    let mut allow_rules: Vec<String> = Vec::new();
+    let mut deny_rules: Vec<String> = Vec::new();
+
+    let mut iter = args.map(os_to_string);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--cgroup-path" => {
+                let v = iter
+                    .next()
+                    .unwrap_or_else(|| die("--cgroup-path needs value"));
+                cgroup_path = Some(v);
+            }
+            "--default" => {
+                let v = iter.next().unwrap_or_else(|| die("--default needs value"));
+                default_deny = Some(match v.as_str() {
+                    "deny" => true,
+                    "allow" => false,
+                    _ => die("--default must be 'deny' or 'allow'"),
+                });
+            }
+            "--allow" => {
+                let v = iter.next().unwrap_or_else(|| die("--allow needs value"));
+                if !is_valid_rule(&v) {
+                    die(format!("invalid --allow value '{}'", v));
+                }
+                allow_rules.push(v);
+            }
+            "--deny" => {
+                let v = iter.next().unwrap_or_else(|| die("--deny needs value"));
+                if !is_valid_rule(&v) {
+                    die(format!("invalid --deny value '{}'", v));
+                }
+                deny_rules.push(v);
+            }
+            other => die(format!("unknown option '{}'", other)),
+        }
+    }
+
+    let cgroup_path = cgroup_path.unwrap_or_else(|| die("--cgroup-path is required"));
+    let default_deny = default_deny.unwrap_or_else(|| die("--default is required"));
+
+    let pkexec_uid = require_pkexec_uid();
+    if !is_valid_user_cgroup_path(&cgroup_path, pkexec_uid) {
+        die(format!(
+            "--cgroup-path must be an absolute path under \
+             /sys/fs/cgroup/user.slice/user-{0}.slice/user@{0}.service/, got '{1}'",
+            pkexec_uid, cgroup_path
+        ));
+    }
+
+    match bpf::apply_cgroup(&cgroup_path, default_deny, &allow_rules, &deny_rules) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}: apply-cgroup failed: {:#}", HELPER_NAME, e);
+            ExitCode::from(2)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // stop-scope
 // ---------------------------------------------------------------------------
 
@@ -224,6 +298,13 @@ fn stop_scope(args: impl Iterator<Item = OsString>) -> ExitCode {
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
+
+fn require_pkexec_uid() -> u32 {
+    std::env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or_else(|| die("PKEXEC_UID is unset; this helper must be invoked via pkexec"))
+}
 
 fn parse_uid(s: &str) -> u32 {
     s.parse::<u32>()
@@ -310,6 +391,42 @@ fn is_acceptable_command(s: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
+/// Cgroup path that may legitimately host an activity for `pkexec_uid`.
+/// Must:
+/// * be absolute
+/// * be under `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/`
+/// * contain only safe characters (no `..`, no `\0`, no `\n`)
+/// * resolve to an existing directory containing `cgroup.procs`
+fn is_valid_user_cgroup_path(path: &str, pkexec_uid: u32) -> bool {
+    let prefix = format!(
+        "/sys/fs/cgroup/user.slice/user-{0}.slice/user@{0}.service/",
+        pkexec_uid
+    );
+    if !path.starts_with(&prefix) {
+        return false;
+    }
+    if path.contains('\0') || path.contains('\n') {
+        return false;
+    }
+    // Reject "..": the suffix path must not be able to escape the user@
+    // subtree.
+    for component in path.split('/').skip(1) {
+        if component == ".." {
+            return false;
+        }
+    }
+    // The cgroup directory exists and contains cgroup.procs.
+    let p = std::path::Path::new(path);
+    let m = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if !m.is_dir() {
+        return false;
+    }
+    p.join("cgroup.procs").exists()
+}
+
 // ---------------------------------------------------------------------------
 // Tests (validation logic only -- exec paths require a running systemd)
 // ---------------------------------------------------------------------------
@@ -388,5 +505,28 @@ mod tests {
         assert!(!is_acceptable_command("foo;bar"));
         assert!(!is_acceptable_command("/this/path/should/not/exist"));
         assert!(!is_acceptable_command("relative/path"));
+    }
+
+    #[test]
+    fn cgroup_path_must_be_under_user_subtree() {
+        // We can only test the structural check, not the existence one (that
+        // requires a real cgroup).
+        let uid = 1000;
+        // Wrong prefixes are always rejected.
+        assert!(!is_valid_user_cgroup_path("relative", uid));
+        assert!(!is_valid_user_cgroup_path("/", uid));
+        assert!(!is_valid_user_cgroup_path(
+            "/sys/fs/cgroup/system.slice/foo.scope",
+            uid
+        ));
+        assert!(!is_valid_user_cgroup_path(
+            "/sys/fs/cgroup/user.slice/user-2000.slice/user@2000.service/foo.scope",
+            uid
+        ));
+        // `..` blocked.
+        assert!(!is_valid_user_cgroup_path(
+            "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/../foo",
+            uid
+        ));
     }
 }
