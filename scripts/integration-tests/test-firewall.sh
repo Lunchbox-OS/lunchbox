@@ -141,8 +141,19 @@ if [[ -z "$exit_code" ]]; then
     exit 1
 fi
 
+# If the activity failed, surface any firewall-enforcement diagnosis the
+# daemon emitted at startup (this is what tells the human "the test fails
+# because shepherdd lacks CAP_NET_ADMIN", not "the test is bogus").
 if [[ "$exit_code" != "0" ]]; then
     echo "[orchestrator] FAIL: activity reported EXIT_CODE: $exit_code." >&2
+    if [[ -f "$RUN_DEV_LOG" ]]; then
+        diag=$(grep -E 'firewall|CAP_NET_ADMIN|IPAddress' "$RUN_DEV_LOG" 2>/dev/null | head -10)
+        if [[ -n "$diag" ]]; then
+            echo "" >&2
+            echo "[orchestrator] Relevant lines from shepherdd log ($RUN_DEV_LOG):" >&2
+            printf '  %s\n' $'\n'"$diag" >&2
+        fi
+    fi
     exit "$exit_code"
 fi
 

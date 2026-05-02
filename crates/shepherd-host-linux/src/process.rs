@@ -7,9 +7,83 @@ use std::fs::File;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 
 use shepherd_host_api::{ExitStatus, FirewallSpec, HostError, HostResult};
+
+/// Whether the host can actually enforce per-cgroup IP filters.
+///
+/// systemd backs `IPAddressDeny=`/`IPAddressAllow=` with cgroup BPF
+/// (`cgroup_skb`), which requires `CAP_NET_ADMIN` to attach. Per
+/// `man systemd.resource-control`, IP address filters are NOT supported by
+/// per-user instances of the service manager. So when shepherdd runs as a
+/// regular user without `CAP_NET_ADMIN` (the default for `./run-dev` and for
+/// the sway-launched production daemon), `systemd-run --user --scope
+/// --property=IPAddressDeny=any` accepts the property but silently attaches no
+/// BPF program -- traffic is not filtered.
+#[derive(Debug, Clone)]
+pub enum FirewallEnforcementStatus {
+    Supported,
+    Unsupported { reason: String },
+}
+
+impl FirewallEnforcementStatus {
+    pub fn is_supported(&self) -> bool {
+        matches!(self, FirewallEnforcementStatus::Supported)
+    }
+}
+
+static FW_STATUS: OnceLock<FirewallEnforcementStatus> = OnceLock::new();
+
+/// Cached probe of whether per-cgroup IP filters can be enforced from this
+/// process. The check is a euid + `CapEff` read of `/proc/self/status`: we
+/// need either real root or `CAP_NET_ADMIN` in our effective capability set.
+pub fn firewall_enforcement_status() -> &'static FirewallEnforcementStatus {
+    FW_STATUS.get_or_init(probe_firewall_enforcement)
+}
+
+fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
+    if nix::unistd::geteuid().is_root() {
+        return FirewallEnforcementStatus::Supported;
+    }
+    const CAP_NET_ADMIN_BIT: u32 = 12;
+    match read_cap_eff() {
+        Ok(eff) if (eff >> CAP_NET_ADMIN_BIT) & 1 == 1 => FirewallEnforcementStatus::Supported,
+        Ok(_) => FirewallEnforcementStatus::Unsupported {
+            reason: "shepherdd is running as a regular user without CAP_NET_ADMIN, and \
+                 IPAddressDeny=/IPAddressAllow= are not supported by the per-user systemd \
+                 manager (see `man systemd.resource-control`). Configured firewall rules \
+                 will NOT be enforced. To enforce them, shepherdd needs to either (a) run \
+                 as root / from a system unit with the system systemd manager, or \
+                 (b) attach BPF cgroup programs itself with CAP_NET_ADMIN+CAP_BPF, or \
+                 (c) hand the firewall setup off to a privileged helper (polkit / setcap'd \
+                 helper). Today the WIP code path goes through `systemd-run --user --scope` \
+                 and silently produces no filter."
+                .into(),
+        },
+        Err(e) => FirewallEnforcementStatus::Unsupported {
+            reason: format!(
+                "could not read /proc/self/status to determine effective caps: {}",
+                e
+            ),
+        },
+    }
+}
+
+fn read_cap_eff() -> std::io::Result<u64> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("CapEff:") {
+            return u64::from_str_radix(rest.trim(), 16)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no CapEff line in /proc/self/status",
+    ))
+}
 
 /// Managed child process with process group tracking
 pub struct ManagedProcess {
@@ -25,6 +99,18 @@ pub struct ManagedProcess {
 /// Initialize process management (called once at startup)
 pub fn init() {
     info!("Process management initialized");
+    match firewall_enforcement_status() {
+        FirewallEnforcementStatus::Supported => {
+            info!("Per-entry firewall enforcement is available");
+        }
+        FirewallEnforcementStatus::Unsupported { reason } => {
+            warn!(
+                reason = %reason,
+                "Per-entry firewall enforcement is NOT available; \
+                 entries with [entries.firewall] configured will be spawned without filtering"
+            );
+        }
+    }
 }
 
 /// Build a `systemd-run --user --scope` argv prefix that applies a firewall
@@ -786,6 +872,34 @@ impl Drop for ManagedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firewall_enforcement_status_does_not_panic() {
+        // Result depends on the test runner's caps -- we can't assert
+        // Supported vs. Unsupported, only that the probe runs.
+        let _ = firewall_enforcement_status();
+    }
+
+    #[test]
+    fn firewall_enforcement_status_is_unsupported_when_unprivileged() {
+        // This crate is exercised in CI under a regular user without
+        // CAP_NET_ADMIN. Whenever that's the case, the probe must report
+        // Unsupported -- otherwise the silent no-op bug we just fixed would
+        // come back without anyone noticing.
+        if !nix::unistd::geteuid().is_root() {
+            let eff = read_cap_eff().unwrap_or(0);
+            const CAP_NET_ADMIN_BIT: u32 = 12;
+            if (eff >> CAP_NET_ADMIN_BIT) & 1 == 0 {
+                assert!(
+                    matches!(
+                        firewall_enforcement_status(),
+                        FirewallEnforcementStatus::Unsupported { .. }
+                    ),
+                    "Unprivileged process should report firewall enforcement as Unsupported"
+                );
+            }
+        }
+    }
 
     #[test]
     fn spawn_simple_process() {
