@@ -390,3 +390,37 @@ allow = [
     "::1/128",
 ]
 deny = []
+
+# Integration test runner -- driven by scripts/integration-tests/test-firewall.sh.
+# Disabled by default; the test harness flips it on for the day via the
+# management API override (PUT /api/v1/overrides/integration-tests).
+#
+# The activity itself runs under a deny-by-default firewall (only loopback is
+# allowed). The activity script asserts that:
+#   - it CAN reach 127.0.0.1 (allowed)
+#   - it CANNOT reach an external host (denied)
+# This is the actual end-to-end check that the firewall is enforcing.
+[[entries]]
+id = "integration-tests"
+label = "Integration Tests"
+icon = "utilities-terminal"
+disabled = true
+disabled_reason = "Used by integration tests only; enabled at runtime via the API."
+
+[entries.kind]
+type = "process"
+command = "ptyxis"
+# `-s` runs ptyxis standalone so the launching process stays alive for the
+# duration of the activity (and dies cleanly when the window closes).
+args = ["-s", "--", "./scripts/integration-tests/run-activity.sh"]
+
+[entries.availability]
+always = true
+
+[entries.firewall]
+default = "deny"
+allow = [
+    "127.0.0.0/8",  # IPv4 loopback (also lets the activity reach the management API)
+    "::1/128",      # IPv6 loopback
+]
+deny = []
