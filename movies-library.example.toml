@@ -1,0 +1,68 @@
+# Example shepherd-media library file.
+#
+# Copy this to `~/.config/shepherd/movies.toml` (or wherever the entries in
+# `config.example.toml` point) and adjust the `uri` values for your own
+# files. See `docs/shepherd-media.md` for the schema reference.
+#
+# Validate after editing:
+#   shepherd-media validate ~/.config/shepherd/movies.toml
+
+schema_version = 1
+library_id = "movies"
+title = "Movies"
+
+# ---------------------------------------------------------------------------
+# Big Buck Bunny — saved on local disk.
+# Available for free as CC BY 3.0 at https://peach.blender.org/download/
+# ---------------------------------------------------------------------------
+[[items]]
+id = "big-buck-bunny"
+title = "Big Buck Bunny"
+kind = "video"
+duration_seconds = 596
+
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///home/CHANGE-ME/Videos/big_buck_bunny_720p_h264.mov"
+
+# ---------------------------------------------------------------------------
+# Sintel — another Blender open movie, also CC BY 3.0.
+# https://durian.blender.org/download/
+# ---------------------------------------------------------------------------
+[[items]]
+id = "sintel"
+title = "Sintel"
+kind = "video"
+duration_seconds = 888
+
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///home/CHANGE-ME/Videos/sintel-1024-surround.mp4"
+
+# ---------------------------------------------------------------------------
+# Tears of Steel — Blender's open sci-fi short, CC BY 3.0.
+# https://mango.blender.org/download/
+# ---------------------------------------------------------------------------
+[[items]]
+id = "tears-of-steel"
+title = "Tears of Steel"
+kind = "video"
+duration_seconds = 734
+
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///home/CHANGE-ME/Videos/tears_of_steel_1080p.mov"
+
+# ---------------------------------------------------------------------------
+# "lofi hip hop radio 📚 beats to relax/study to" — streamed live from
+# YouTube. Referenced as a direct-play activity in `config.example.toml`.
+# Requires `yt-dlp` on PATH at runtime.
+# ---------------------------------------------------------------------------
+[[items]]
+id = "lofi-beats"
+title = "Lofi Beats"
+kind = "audio"
+
+[[items.sources]]
+platforms = ["*"]
+uri = "https://www.youtube.com/watch?v=jfKfPfyJRdk"

@@ -184,6 +184,31 @@ install_config() {
         maybe_sudo chmod 0644 "$dst_config"
         success "Installed user configuration for $user"
     fi
+
+    # The example config references `~/.config/shepherd/movies.toml` for the
+    # shepherd-media entries. If the user picked the default example config,
+    # also drop the matching example library so the entries don't 404 on
+    # first launch. The user is still expected to edit the URIs.
+    local source_library="$repo_root/movies-library.example.toml"
+    local dst_library="$user_config_dir/movies.toml"
+    if [[ -f "$source_library" ]]; then
+        if maybe_sudo test -f "$dst_library"; then
+            if [[ "$force" == "true" ]]; then
+                warn "Overwriting existing media library at $dst_library"
+                maybe_sudo cp "$source_library" "$dst_library"
+                maybe_sudo chown "$user:$user" "$dst_library"
+                maybe_sudo chmod 0644 "$dst_library"
+                success "Overwrote media library for $user"
+            else
+                info "Media library already exists at $dst_library, skipping"
+            fi
+        else
+            maybe_sudo cp "$source_library" "$dst_library"
+            maybe_sudo chown "$user:$user" "$dst_library"
+            maybe_sudo chmod 0644 "$dst_library"
+            success "Installed media library for $user (edit URIs before use)"
+        fi
+    fi
 }
 
 # Install everything

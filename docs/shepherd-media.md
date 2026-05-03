@@ -24,6 +24,13 @@ In addition to the standard `shepherd-launcher` build dependencies:
 
 ## Authoring a library file
 
+A starter library is checked in at the repo root as
+[`movies-library.example.toml`](../movies-library.example.toml). It defines
+the items referenced from `config.example.toml` (Big Buck Bunny, Sintel,
+Tears of Steel, and a Lofi Beats YouTube stream) and is the recommended
+starting point — copy it to `~/.config/shepherd/movies.toml` and update the
+`uri` paths for your own files.
+
 A library file is TOML with the schema below. Save it anywhere readable by
 the user shepherdd runs as; relative poster paths are resolved against the
 library file's directory.

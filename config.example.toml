@@ -320,6 +320,15 @@ cooldown_seconds = 0  # No cooldown
 # collection. See docs/shepherd-media.md for the schema and authoring guide.
 # `shepherd-media validate <library.toml>` checks a file before you wire it
 # up here.
+#
+# The entries below all reference `~/.config/shepherd/movies.toml`. A starter
+# library that defines `big-buck-bunny`, `sintel`, `tears-of-steel`, and
+# `lofi-beats` is checked in at `movies-library.example.toml`; copy it and
+# update the `uri` paths to point at your own files:
+#
+#   cp movies-library.example.toml ~/.config/shepherd/movies.toml
+#   $EDITOR ~/.config/shepherd/movies.toml
+#   shepherd-media validate ~/.config/shepherd/movies.toml
 
 # "Big Buck Bunny" saved on local disk, registered as a single direct-play
 # activity. The same library file can host many items; only one is exposed
