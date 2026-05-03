@@ -50,6 +50,7 @@ RUN apt-get update && \
         systemd-sysv \
         dbus \
         polkitd \
+        pkexec \
         sudo \
     && rm -rf /var/lib/apt/lists/*
 
