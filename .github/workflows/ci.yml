@@ -8,230 +8,183 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
+
+# All Rust jobs share a pre-baked CI image (.ci/Dockerfile) hosted in
+# Forgejo's container registry, so they no longer race to apt-install
+# the same ~1 GB of build deps in parallel containers (which used to
+# OOM-kill the runner). The `image` job builds + pushes the image on
+# cache miss and emits its ref as an output for the rest of the chain.
 
 jobs:
-  build:
-    name: Build
+  image:
+    name: CI image
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:25.10
+    permissions:
+      packages: write
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y git curl nodejs
-
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: ./scripts/shepherd deps install build
+      - name: Compute image tag
+        id: tag
+        run: |
+          # Strict hash over the inputs that determine image content.
+          # Year+week prefix forces a weekly rebuild so distro security
+          # updates roll in even when no input file has changed.
+          hash=$(cat \
+              .ci/Dockerfile \
+              scripts/deps/build.pkgs \
+              scripts/deps/run.pkgs \
+              scripts/deps/test.pkgs \
+              scripts/lib/deps.sh \
+            | sha256sum | cut -c1-12)
+          year_week=$(date -u +%Gw%V)
+          ref="${CI_IMAGE_NAME}:${year_week}-${hash}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Image ref: ${ref}"
 
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Log in to Forgejo container registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login git.armeafamily.com \
+                --username "${{ github.actor }}" --password-stdin
 
-      - name: Cache cargo registry, toolchains, and build
+      - name: Build and push if tag is missing
+        run: |
+          ref="${{ steps.tag.outputs.ref }}"
+          if docker manifest inspect "$ref" >/dev/null 2>&1; then
+            echo "Image already published: $ref"
+            exit 0
+          fi
+          docker build -t "$ref" -f .ci/Dockerfile .
+          docker push "$ref"
+
+  build:
+    name: Build
+    needs: image
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
-          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
-          # rebuild it from source each time, ~1-2 min).
-          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
-          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
+          # The image already provides ~/.cargo/bin (bpf-linker) and
+          # ~/.rustup/toolchains; only the dep registry and target/
+          # vary by branch and warrant per-branch caching.
           path: |
-            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: |
-          . "$HOME/.cargo/env"
-          ./scripts/shepherd build
+        run: ./scripts/shepherd build
 
   test:
     name: Test
+    needs: image
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:25.10
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y git curl nodejs
-
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: ./scripts/shepherd deps install build
-
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Cache cargo registry, toolchains, and build
+      - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
-          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
-          # rebuild it from source each time, ~1-2 min).
-          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
-          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
-            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: |
-          . "$HOME/.cargo/env"
-          cargo test --all-targets
+        run: cargo test --all-targets
 
   e2e:
     name: E2E
+    needs: image
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:25.10
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y git curl nodejs
-
       - uses: actions/checkout@v4
 
-      - name: Install build and test dependencies
-        run: |
-          ./scripts/shepherd deps install build
-          ./scripts/shepherd deps install run
-          ./scripts/shepherd deps install test
-
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Cache cargo registry, toolchains, and build
+      - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
-          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
-          # rebuild it from source each time, ~1-2 min).
-          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
-          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
-            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Build binaries (e2e harness execs them from target/debug)
-        run: |
-          . "$HOME/.cargo/env"
-          ./scripts/shepherd build
+        run: ./scripts/shepherd build
 
       - name: Run e2e tests
-        run: |
-          . "$HOME/.cargo/env"
-          cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
+        run: cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
 
   lint:
     name: Clippy
+    needs: image
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:25.10
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y git curl nodejs
-
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: ./scripts/shepherd deps install build
-
-      - name: Add clippy component
-        run: |
-          . "$HOME/.cargo/env"
-          rustup component add clippy
-
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Cache cargo registry, toolchains, and build
+      - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
-          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
-          # rebuild it from source each time, ~1-2 min).
-          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
-          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
           path: |
-            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.rustup/toolchains
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Run Clippy
-        run: |
-          . "$HOME/.cargo/env"
-          cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   fmt:
     name: Rustfmt
+    needs: image
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:25.10
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y git curl nodejs
-
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: ./scripts/shepherd deps install build
-
-      - name: Add rustfmt component
-        run: |
-          . "$HOME/.cargo/env"
-          rustup component add rustfmt
-
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Cache cargo registry, toolchains, and build
-        uses: actions/cache@v4
-        with:
-          # ~/.cargo/bin keeps `bpf-linker` between runs (otherwise we
-          # rebuild it from source each time, ~1-2 min).
-          # ~/.rustup/toolchains keeps the nightly toolchain (the BPF
-          # crate needs `-Zbuild-std=core` on bpfel-unknown-none).
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.rustup/toolchains
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
       - name: Check formatting
-        run: |
-          . "$HOME/.cargo/env"
-          cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
   shellcheck:
     name: ShellCheck
