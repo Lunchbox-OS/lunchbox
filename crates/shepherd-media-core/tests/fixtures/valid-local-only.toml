@@ -1,0 +1,31 @@
+schema_version = 1
+library_id = "valid-local-only"
+title = "Local Only"
+
+[[items]]
+id = "big-buck-bunny"
+title = "Big Buck Bunny"
+kind = "video"
+poster = "posters/bbb.jpg"
+duration_seconds = 596
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///srv/media/bbb.mp4"
+
+[[items]]
+id = "sintel"
+title = "Sintel"
+kind = "video"
+poster = "posters/sintel.jpg"
+[[items.sources]]
+platforms = ["linux", "android"]
+uri = "file:///srv/media/sintel.mkv"
+
+[[items]]
+id = "tears-of-steel"
+title = "Tears of Steel"
+kind = "video"
+poster = "posters/tears.jpg"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/media/tears.webm"

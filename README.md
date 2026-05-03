@@ -51,6 +51,11 @@ If it can run on Linux in *any way, shape, or form*, it can be supervised by
 
 > [Big Buck Bunny](https://peach.blender.org/) playing locally via `mpv`
 
+For collections of media files (local or YouTube), the bundled
+[`shepherd-media`](./docs/shepherd-media.md) launcher reads a declarative
+`.toml` library file and presents either a single direct-play activity or a
+browseable poster grid.
+
 !["Putt Putt Joins the Circus" hosted within shepherd-launcher UI](./docs/readme/apps-puttputt.png)
 
 > [Putt Putt Joins the Circus](https://humongous.fandom.com/wiki/Putt-Putt_Joins_the_Circus)

@@ -1,0 +1,17 @@
+# This file is *valid* at parse time — the schema only requires that each
+# item has at least one source declared. None of these sources match the
+# Linux runtime, so resolution at play time will return None and the UI is
+# expected to gray the item out. This file lives in the "invalid" group to
+# match the spec naming, but the parse test intentionally treats it as
+# parse-valid; see resolve.rs for the resolution-failure assertion.
+schema_version = 1
+library_id = "android-only"
+title = "Android Only"
+
+[[items]]
+id = "phone-only"
+title = "Phone-only video"
+kind = "video"
+[[items.sources]]
+platforms = ["android"]
+uri = "file:///sdcard/Movies/movie.mp4"

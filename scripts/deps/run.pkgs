@@ -14,3 +14,9 @@ libgtk-4-1
 libadwaita-1-0
 libgtk4-layer-shell0
 libudev1
+
+# mpv runtime (libmpv2 is linked dynamically by shepherd-media; mpv brings in
+# both the binary and the .so) and yt-dlp (used transitively by libmpv when
+# resolving YouTube URLs)
+mpv
+yt-dlp

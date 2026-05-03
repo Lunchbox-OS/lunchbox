@@ -14,6 +14,7 @@ SHEPHERD_BINARIES=(
     "shepherdd"
     "shepherd-launcher"
     "shepherd-hud"
+    "shepherd-media"
 )
 
 # Get the target directory for binaries

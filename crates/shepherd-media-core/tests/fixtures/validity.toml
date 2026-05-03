@@ -1,0 +1,52 @@
+# Manifest declaring whether each fixture should pass or fail load_library.
+# Update this file whenever a fixture is added or its expected outcome changes.
+
+[[fixtures]]
+file = "valid-local-only.toml"
+expect = "ok"
+
+[[fixtures]]
+file = "valid-youtube-only.toml"
+expect = "ok"
+
+[[fixtures]]
+file = "valid-mixed.toml"
+expect = "ok"
+
+[[fixtures]]
+file = "valid-platform-fallback.toml"
+expect = "ok"
+
+[[fixtures]]
+file = "valid-no-poster.toml"
+expect = "ok"
+
+[[fixtures]]
+file = "invalid-bad-schema-version.toml"
+expect = "fail"
+error_kind = "unsupported-schema"
+
+[[fixtures]]
+file = "invalid-duplicate-id.toml"
+expect = "fail"
+error_kind = "duplicate-id"
+
+[[fixtures]]
+file = "invalid-drm-rejected.toml"
+expect = "fail"
+error_kind = "drm-rejected"
+
+[[fixtures]]
+file = "invalid-unknown-key.toml"
+expect = "fail"
+error_kind = "parse"
+
+[[fixtures]]
+file = "invalid-empty-sources.toml"
+expect = "fail"
+error_kind = "empty-sources"
+
+# This fixture parses cleanly; resolution failure is asserted in resolve.rs.
+[[fixtures]]
+file = "invalid-no-sources-for-any-platform.toml"
+expect = "ok"

@@ -1,0 +1,27 @@
+schema_version = 1
+library_id = "valid-youtube-only"
+title = "YouTube Only"
+
+[[items]]
+id = "big-buck-bunny"
+title = "Big Buck Bunny (YouTube)"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://www.youtube.com/watch?v=YE7VzlLtp-4"
+
+[[items]]
+id = "lofi-beats"
+title = "Lofi Beats"
+kind = "audio"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://www.youtube.com/watch?v=jfKfPfyJRdk"
+
+[[items]]
+id = "short-clip"
+title = "Short Clip"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://youtu.be/dQw4w9WgXcQ"

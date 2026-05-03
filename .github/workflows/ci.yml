@@ -203,6 +203,53 @@ jobs:
           . "$HOME/.cargo/env"
           cargo fmt --all -- --check
 
+  android-portability:
+    name: Android portability (shepherd-media-core)
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:25.10
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install -y git curl
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ./scripts/shepherd deps install build
+
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Add aarch64-linux-android target
+        run: |
+          . "$HOME/.cargo/env"
+          rustup target add aarch64-linux-android
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-android-
+
+      # We `cargo check` rather than `cargo build` because we only need to
+      # verify that shepherd-media-core's dependencies and code compile for
+      # the Android target — we don't need an Android linker. This job exists
+      # to fail loudly if a Linux-specific dep gets added to the core.
+      - name: Check shepherd-media-core for aarch64-linux-android
+        run: |
+          . "$HOME/.cargo/env"
+          cargo check \
+            --target aarch64-linux-android \
+            --no-default-features \
+            -p shepherd-media-core
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
