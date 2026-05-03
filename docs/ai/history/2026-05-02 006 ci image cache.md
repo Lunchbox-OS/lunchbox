@@ -105,17 +105,32 @@ package (~1 MB), nowhere near OOM territory.
     is dominated by `cargo` work.
   - Weekly rollover: one rebuild per week, baseline cost.
 
-## Manual setup the runner needs
+## Talking to docker from a job
 
-  - **act-runner must expose its docker socket into job containers.**
-    The default `runs-on: ubuntu-latest` job container has no docker
-    CLI and no `/var/run/docker.sock`, so `docker push` from the
-    `image` job fails. First attempt (run #33) hit
-    `docker: command not found`; the workflow now `apt-get install
-    docker.io` first and asserts `docker info` succeeds with a clear
-    error if not. To make the daemon reachable, set
-    `container.docker_host: -` in the act-runner's config and restart
-    it. (Forgejo's act-runner default is *not* to expose the socket.)
+The `image` job needs to run `docker build`/`docker push` from inside
+its job container. Two iterations got that working:
+
+  - **Run #33** failed with `docker: command not found` — act-runner's
+    default job container (`node:20-bookworm`) has git but no docker
+    CLI. Fix: `apt-get install -y docker.io` as the first step.
+  - **Run #34** failed at the new `docker info` check — the CLI
+    couldn't reach a daemon. The user's act-runner is configured for
+    docker-in-docker (`container.docker_host: tcp://docker:2375`),
+    which auto-starts a `docker:dind` sidecar per workflow but
+    doesn't auto-set `DOCKER_HOST` in jobs. Fix: set
+    `env.DOCKER_HOST: tcp://docker:2375` on the `image` job and
+    poll `docker info` until the sidecar is ready (the sidecar
+    takes a few seconds to come up).
+
+Switching the runner to `container.docker_host: -` (host-socket
+mount) was considered and rejected — it would erode isolation for
+*other* repos served by the same runner that today get a fresh
+ephemeral DinD per workflow. This repo's existing workflows don't
+run docker from inside a job, so they're unaffected by the
+`docker_host` value either way.
+
+## Other manual setup
+
   - **`secrets.GITHUB_TOKEN` needs package write scope.** Forgejo
     grants this when the workflow declares `permissions: packages:
     write` (per Gitea convention). If the runner's token policy

@@ -20,6 +20,13 @@ jobs:
   image:
     name: CI image
     runs-on: ubuntu-latest
+    # Talk to act-runner's docker-in-docker sidecar instead of the
+    # host socket, so this workflow doesn't require any runner-side
+    # config change. The sidecar is auto-started when the runner has
+    # `container.docker_host: tcp://docker:2375` set, which is the
+    # default DinD layout.
+    env:
+      DOCKER_HOST: tcp://docker:2375
     permissions:
       packages: write
     outputs:
@@ -28,9 +35,7 @@ jobs:
       - name: Install docker CLI
         # The default `runs-on: ubuntu-latest` job container
         # (node:20-bookworm) has git but no docker CLI. Install
-        # docker.io so we can talk to the runner host's daemon.
-        # Requires act-runner to expose its docker socket into job
-        # containers (set `container.docker_host: -` in its config).
+        # docker.io so we can talk to the DinD sidecar.
         run: |
           apt-get update
           apt-get install -y docker.io
@@ -55,14 +60,21 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${ref}"
 
-      - name: Verify docker daemon accessible
+      - name: Wait for DinD sidecar
+        # The sidecar takes a couple of seconds to come up. Retry
+        # `docker info` until it answers (or surface a clear error
+        # if the runner isn't actually running DinD).
         run: |
-          if ! docker info >/dev/null 2>&1; then
-            echo "::error::docker daemon not reachable from this job."
-            echo "::error::act-runner must expose its docker socket — set"
-            echo "::error::\`container.docker_host: -\` in its config."
-            exit 1
-          fi
+          for _ in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready at $DOCKER_HOST"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::docker daemon at $DOCKER_HOST never became ready."
+          echo "::error::act-runner needs \`container.docker_host: tcp://docker:2375\`."
+          exit 1
 
       - name: Log in to Forgejo container registry
         run: |
