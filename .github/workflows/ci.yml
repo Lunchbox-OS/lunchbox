@@ -44,16 +44,13 @@ jobs:
         # from a job container at the bridge gateway IP (which is
         # the dind container itself, listening on 0.0.0.0:2375
         # because the compose env sets DOCKER_TLS_CERTDIR="").
-        # Parse /proc/net/route directly so we don't have to
-        # depend on `iproute2` being in the base image.
+        # `iproute2` was just pulled in as a transitive dep of the
+        # docker.io install above, so `ip route` is on PATH.
         run: |
-          gateway=$(awk '$2=="00000000"{a=$3; printf "%d.%d.%d.%d\n",
-                          strtonum("0x"substr(a,7,2)),
-                          strtonum("0x"substr(a,5,2)),
-                          strtonum("0x"substr(a,3,2)),
-                          strtonum("0x"substr(a,1,2))}' /proc/net/route)
+          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
           if [ -z "$gateway" ]; then
             echo "::error::could not determine bridge gateway IP"
+            ip route || true
             exit 1
           fi
           echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
