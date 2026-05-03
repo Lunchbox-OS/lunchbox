@@ -39,6 +39,37 @@ RUN ./scripts/shepherd deps install build && \
 # need to.
 RUN /root/.cargo/bin/rustup component add clippy rustfmt
 
+# systemd + polkit + dbus + sudo are needed by the firewall E2E job
+# (firewall_real.rs), which boots the container with `--entrypoint
+# /sbin/init` so it can drive activity scopes through a real system
+# systemd manager and pkexec the privileged helper. Other jobs use
+# this image with the default entrypoint and never touch any of this.
+RUN apt-get update && \
+    apt-get install -y \
+        systemd \
+        systemd-sysv \
+        dbus \
+        polkit \
+        sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Mask units that are useless or fail noisily inside a container so
+# `systemctl is-system-running` reaches `running` (not perpetually
+# `starting`) once dbus/polkit are up.
+RUN systemctl mask \
+        systemd-udevd.service \
+        systemd-udev-trigger.service \
+        systemd-modules-load.service \
+        systemd-resolved.service \
+        systemd-networkd.service \
+        NetworkManager.service \
+        ModemManager.service \
+        getty@.service \
+        serial-getty@.service \
+        systemd-firstboot.service \
+        systemd-machine-id-commit.service \
+    || true
+
 # Make rustup-installed tools (cargo, rustc, bpf-linker, clippy-driver,
 # rustfmt) available without sourcing ~/.cargo/env in every CI step.
 ENV PATH="/root/.cargo/bin:${PATH}"

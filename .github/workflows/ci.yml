@@ -239,6 +239,113 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  firewall:
+    name: Firewall E2E
+    needs: image
+    runs-on: ubuntu-latest
+    # The test (crates/shepherd-e2e/tests/firewall_real.rs) needs systemd
+    # as PID1 + polkit + dbus + a writable cgroup hierarchy + the BPF
+    # capabilities for cgroup_skb attach. The runner config has
+    # `container.privileged: false`, which we *don't* want to flip
+    # globally (it would erode isolation for every other job). Instead,
+    # this job stays a regular non-privileged Forgejo job and uses the
+    # dind sidecar it already has access to to launch a private
+    # privileged container with `--entrypoint /sbin/init`, copies the
+    # workspace into it via `tar | docker exec`, and drives the test
+    # there over `docker exec`. The sidecar is torn down on exit.
+    steps:
+      - name: Install docker CLI
+        run: |
+          apt-get update
+          apt-get install -y docker.io
+
+      - name: Point DOCKER_HOST at the DinD bridge gateway
+        run: |
+          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
+          if [ -z "$gateway" ]; then
+            echo "::error::could not determine bridge gateway IP"
+            ip route || true
+            exit 1
+          fi
+          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=tcp://${gateway}:2375"
+
+      - uses: actions/checkout@v4
+
+      - name: Wait for DinD daemon
+        run: |
+          for _ in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready at $DOCKER_HOST"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::DinD daemon never became ready"
+          exit 1
+
+      - name: Log in to Forgejo container registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" \
+            | docker login git.armeafamily.com \
+                --username "${{ github.actor }}" --password-stdin
+
+      - name: Run firewall_real in a privileged systemd sidecar
+        env:
+          IMAGE_REF: ${{ needs.image.outputs.ref }}
+        run: |
+          set -euo pipefail
+
+          # Boot a private sidecar with systemd as PID1.
+          cid=$(docker run -d --rm \
+              --privileged \
+              --cgroupns=host \
+              --tmpfs /run \
+              --tmpfs /run/lock \
+              --entrypoint /sbin/init \
+              "$IMAGE_REF")
+          echo "sidecar container id: $cid"
+          trap 'docker stop "$cid" >/dev/null 2>&1 || true' EXIT
+
+          # Wait for systemd to settle. `degraded` is OK — masked units
+          # don't count as failures we care about here.
+          docker exec "$cid" bash -c '
+            for _ in $(seq 1 60); do
+              case "$(systemctl is-system-running 2>/dev/null || true)" in
+                running|degraded) exit 0 ;;
+              esac
+              sleep 1
+            done
+            echo "::error::systemd never became ready inside the sidecar"
+            systemctl --no-pager --no-legend list-units --state=failed || true
+            exit 1
+          '
+
+          # Copy the workspace in. The runner job and the dind daemon
+          # do not share a filesystem, so `--volume` between them
+          # silently mounts the wrong path; tar-pipe over `docker exec`
+          # is the cleanest way across that boundary.
+          docker exec "$cid" mkdir -p /work
+          tar -c -C "$PWD" --exclude=./target --exclude=./.git . \
+            | docker exec -i "$cid" tar -xC /work
+
+          # Build the helper, install it via the project's own
+          # installer (drops polkit policy + rule, creates the
+          # shepherd-firewall group), put root in the group, then
+          # `sg`-reexec cargo so the new supplementary group takes
+          # effect for the test process.
+          docker exec "$cid" bash -c '
+            set -euo pipefail
+            cd /work
+            cargo build -p shepherd-firewall-helper --bin shepherd-firewall-helper
+            ./scripts/shepherd install firewall --debug --user root
+            systemctl restart polkit
+            sg shepherd-firewall -c "
+              cargo test -p shepherd-e2e --test firewall_real -- \
+                --include-ignored --test-threads=1 --nocapture
+            "
+          '
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest

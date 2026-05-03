@@ -174,8 +174,65 @@ run docker from inside a job, so they're unaffected by the
     if it's convenient to allow unauthenticated pulls (e.g. for
     forks). Heavy jobs pass `credentials:` so private works.
 
+## Process firewall E2E in CI
+
+After the image flow stabilized, we added the `firewall_real.rs`
+process-enforcement test to CI as a separate job.
+
+The test boots a `TestHarness` (which spawns sway + shepherdd), drives
+shepherdd to launch a `[entries.kind = "process"]` activity through
+the *system* systemd manager, then pkexecs the privileged helper to
+attach a cgroup_skb BPF program to the activity's scope and probes
+loopback (allow) + 8.8.8.8:53 (deny). To run, the container needs:
+systemd as PID1, polkit + dbus as services, the helper installed at
+`/usr/libexec/shepherd-firewall-helper` with the polkit policy + rule
+in place, the test process's supplementary group set including
+`shepherd-firewall`, and `--privileged --cgroupns=host` for the BPF
+attach.
+
+### Approach: privileged sidecar over the existing dind
+
+The straightforward path — set `container.privileged: true` in the
+runner config so the firewall job's container can be `--privileged`
+— would erode isolation for *every* job on the runner. The job
+instead stays a regular non-privileged Forgejo job, talks to the
+dind sidecar (via the same gateway-IP DOCKER_HOST trick the image
+job uses), and `docker run`s its own private privileged container
+with `--entrypoint /sbin/init`. The workspace copies in via
+`tar | docker exec` (the runner's job container and the dind daemon
+don't share a filesystem, so plain `--volume` between them mounts
+the wrong path), the project's `scripts/shepherd install firewall
+--debug` drops the helper + polkit assets + group, `usermod -aG
+shepherd-firewall root` plus `sg` switches the supplementary group
+in for the test, and `cargo test -p shepherd-e2e --test
+firewall_real -- --include-ignored` drives it. The sidecar is torn
+down on job exit.
+
+### Image change
+
+`.ci/Dockerfile` grows by one apt layer (~70 MB) for systemd +
+systemd-sysv + dbus + polkit + sudo, plus a `systemctl mask` pass
+that silences the units that fail noisily inside a container
+(udev, modules-load, resolved, networkd, NetworkManager, getty,
+firstboot, machine-id-commit). All other jobs use the image with
+the default entrypoint, so systemd never boots for them.
+
+### Snap and flatpak deliberately *not* in CI
+
+Snap can't run reliably in a container (squashfs loop mounts,
+host-loaded AppArmor profiles, full systemd). Flatpak's bubblewrap
+fights with privileged mode. The snap/flatpak adapter code in
+`crates/shepherd-host-linux/src/adapter.rs` is a thin wrapper over
+the same `apply_firewall_to_existing_scope` primitive the process
+test exercises, so a green process test catches ~all of the same
+regressions.
+
 ## Open questions / follow-ups
 
   - Mid-week security update with no input change: bump the
     Dockerfile (a comment is enough) to force a fresh hash, or wait
     a week.
+  - The firewall job runs `cargo build` from a clean target/ each
+    time (the workspace is tar-piped in without the build cache).
+    Adding `actions/cache` for `target/` would shave 2–3 min once
+    things land green.
