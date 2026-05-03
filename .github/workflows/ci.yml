@@ -329,15 +329,17 @@ jobs:
           tar -c -C "$PWD" --exclude=./target --exclude=./.git . \
             | docker exec -i "$cid" tar -xC /work
 
-          # Build the helper, install it via the project's own
-          # installer (drops polkit policy + rule, creates the
-          # shepherd-firewall group), put root in the group, then
-          # `sg`-reexec cargo so the new supplementary group takes
-          # effect for the test process.
+          # Build everything (webui + workspace) so the TestHarness
+          # has shepherdd, shepherd-launcher, shepherd-hud, and the
+          # firewall helper all under target/debug. Then install the
+          # helper via the project's own installer (drops polkit
+          # policy + rule, creates the shepherd-firewall group), put
+          # root in the group, and `sg`-reexec cargo so the new
+          # supplementary group takes effect for the test process.
           docker exec "$cid" bash -c '
             set -euo pipefail
             cd /work
-            cargo build -p shepherd-firewall-helper --bin shepherd-firewall-helper
+            ./scripts/shepherd build
             ./scripts/shepherd install firewall --debug --user root
             systemctl restart polkit
             sg shepherd-firewall -c "
