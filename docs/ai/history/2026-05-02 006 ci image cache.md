@@ -105,22 +105,50 @@ package (~1 MB), nowhere near OOM territory.
     is dominated by `cargo` work.
   - Weekly rollover: one rebuild per week, baseline cost.
 
+## Why the heavy jobs were OOMing in the first place
+
+The runner's `config.yml` has
+`container.options: "--cpus=2 --memory=2g"`. Every job container is
+hard-capped at 2 GB. Once 9bc470f added clang + llvm-20-dev +
+libpolly-20-dev, the apt-get unpacking step exceeded that cap and
+the kernel SIGKILLed apt mid-flight — that's the "Killed" we saw in
+runs #31 and #32. The image-cache approach sidesteps this entirely:
+the apt unpacking now happens inside `docker build`, whose child
+containers don't inherit the `--memory=2g` cap from the job that
+spawned the build.
+
+(Heavy jobs that *consume* the prebaked image are still capped at
+2 GB. Cargo compilation can spike toward that ceiling, so this may
+need revisiting if rust-side OOMs reappear — either lift the cap
+in the runner config or pin `cargo build --jobs 1` for the heaviest
+crates.)
+
 ## Talking to docker from a job
 
 The `image` job needs to run `docker build`/`docker push` from inside
-its job container. Two iterations got that working:
+its job container. Three iterations got that working:
 
   - **Run #33** failed with `docker: command not found` — act-runner's
     default job container (`node:20-bookworm`) has git but no docker
     CLI. Fix: `apt-get install -y docker.io` as the first step.
   - **Run #34** failed at the new `docker info` check — the CLI
-    couldn't reach a daemon. The user's act-runner is configured for
-    docker-in-docker (`container.docker_host: tcp://docker:2375`),
-    which auto-starts a `docker:dind` sidecar per workflow but
-    doesn't auto-set `DOCKER_HOST` in jobs. Fix: set
-    `env.DOCKER_HOST: tcp://docker:2375` on the `image` job and
-    poll `docker info` until the sidecar is ready (the sidecar
-    takes a few seconds to come up).
+    couldn't reach a daemon. First guess was that act-runner just
+    needed `DOCKER_HOST=tcp://docker:2375` set (the same value the
+    runner config has), but the hostname `docker` doesn't resolve
+    from inside a job container.
+  - **Run #35** failed for the same reason as #34, just with the
+    explicit DOCKER_HOST. The user's setup is docker-compose with
+    two services, `runner` and `docker:dind`, on a shared compose
+    network. The runner reaches dind via the compose-network DNS
+    name `docker`. But job containers are spawned by dind itself
+    and live on *dind's* bridge network, where `docker` doesn't
+    resolve. The dind daemon is, however, reachable at the bridge
+    gateway IP — which is the dind container itself, listening on
+    `0.0.0.0:2375` (TLS off via `DOCKER_TLS_CERTDIR=""`).
+
+    Fix: parse `/proc/net/route` to read the default gateway IP at
+    job startup and set `DOCKER_HOST=tcp://<gateway>:2375`. This
+    works without depending on iproute2 in the base image.
 
 Switching the runner to `container.docker_host: -` (host-socket
 mount) was considered and rejected — it would erode isolation for

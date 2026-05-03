@@ -20,13 +20,6 @@ jobs:
   image:
     name: CI image
     runs-on: ubuntu-latest
-    # Talk to act-runner's docker-in-docker sidecar instead of the
-    # host socket, so this workflow doesn't require any runner-side
-    # config change. The sidecar is auto-started when the runner has
-    # `container.docker_host: tcp://docker:2375` set, which is the
-    # default DinD layout.
-    env:
-      DOCKER_HOST: tcp://docker:2375
     permissions:
       packages: write
     outputs:
@@ -35,10 +28,36 @@ jobs:
       - name: Install docker CLI
         # The default `runs-on: ubuntu-latest` job container
         # (node:20-bookworm) has git but no docker CLI. Install
-        # docker.io so we can talk to the DinD sidecar.
+        # docker.io so we can talk to the DinD daemon.
         run: |
           apt-get update
           apt-get install -y docker.io
+
+      - name: Point DOCKER_HOST at the DinD bridge gateway
+        # The runner is configured with
+        # `container.docker_host: tcp://docker:2375`, which auto-
+        # provisions a docker:dind sidecar. The hostname `docker`
+        # only resolves on the docker-compose network the runner
+        # lives on — but job containers are children of the dind
+        # service and live on dind's own bridge network, where
+        # `docker` doesn't resolve. The dind daemon is reachable
+        # from a job container at the bridge gateway IP (which is
+        # the dind container itself, listening on 0.0.0.0:2375
+        # because the compose env sets DOCKER_TLS_CERTDIR="").
+        # Parse /proc/net/route directly so we don't have to
+        # depend on `iproute2` being in the base image.
+        run: |
+          gateway=$(awk '$2=="00000000"{a=$3; printf "%d.%d.%d.%d\n",
+                          strtonum("0x"substr(a,7,2)),
+                          strtonum("0x"substr(a,5,2)),
+                          strtonum("0x"substr(a,3,2)),
+                          strtonum("0x"substr(a,1,2))}' /proc/net/route)
+          if [ -z "$gateway" ]; then
+            echo "::error::could not determine bridge gateway IP"
+            exit 1
+          fi
+          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=tcp://${gateway}:2375"
 
       - uses: actions/checkout@v4
 
@@ -60,10 +79,9 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${ref}"
 
-      - name: Wait for DinD sidecar
-        # The sidecar takes a couple of seconds to come up. Retry
-        # `docker info` until it answers (or surface a clear error
-        # if the runner isn't actually running DinD).
+      - name: Wait for DinD daemon
+        # Even after the sidecar is up, the daemon can take a few
+        # seconds before it answers requests. Poll until ready.
         run: |
           for _ in $(seq 1 30); do
             if docker info >/dev/null 2>&1; then
@@ -73,7 +91,8 @@ jobs:
             sleep 1
           done
           echo "::error::docker daemon at $DOCKER_HOST never became ready."
-          echo "::error::act-runner needs \`container.docker_host: tcp://docker:2375\`."
+          echo "::error::Confirm the runner has container.docker_host: tcp://docker:2375 set"
+          echo "::error::and a docker:dind sidecar reachable from job containers."
           exit 1
 
       - name: Log in to Forgejo container registry
