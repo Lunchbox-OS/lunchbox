@@ -49,7 +49,7 @@ RUN apt-get update && \
         systemd \
         systemd-sysv \
         dbus \
-        polkit \
+        polkitd \
         sudo \
     && rm -rf /var/lib/apt/lists/*
 
