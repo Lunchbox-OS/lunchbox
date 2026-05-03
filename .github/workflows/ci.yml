@@ -329,23 +329,44 @@ jobs:
           tar -c -C "$PWD" --exclude=./target --exclude=./.git . \
             | docker exec -i "$cid" tar -xC /work
 
-          # Build everything (webui + workspace) so the TestHarness
-          # has shepherdd, shepherd-launcher, shepherd-hud, and the
-          # firewall helper all under target/debug. Then install the
-          # helper via the project's own installer (drops polkit
-          # policy + rule, creates the shepherd-firewall group), put
-          # root in the group, and `sg`-reexec cargo so the new
-          # supplementary group takes effect for the test process.
+          # Build everything (webui + workspace) so the TestHarness has
+          # shepherdd, shepherd-launcher, shepherd-hud, and the firewall
+          # helper under target/debug. Then install the helper via the
+          # project's own installer (drops polkit policy + rule, creates
+          # the shepherd-firewall group, adds the test user to it).
+          #
+          # The helper rejects `--uid 0` to prevent a polkit-blessed user
+          # from launching activities as root through it, so shepherdd —
+          # and therefore the test process that boots shepherdd — must
+          # run as a non-root user. Create a `tester` account and run
+          # cargo test under it via `runuser`, which re-execs with the
+          # full supplementary group set (incl. shepherd-firewall just
+          # added by the installer) so polkit's isInGroup() check passes.
           docker exec "$cid" bash -c '
             set -euo pipefail
             cd /work
             ./scripts/shepherd build
-            ./scripts/shepherd install firewall --debug --user root
+
+            useradd --create-home --user-group tester
+            ./scripts/shepherd install firewall --debug --user tester
             systemctl restart polkit
-            sg shepherd-firewall -c "
-              cargo test -p shepherd-e2e --test firewall_real -- \
-                --include-ignored --test-threads=1 --nocapture
-            "
+
+            # Hand the workspace and root'\''s rustup install over to
+            # tester so cargo can write target/ and reuse the populated
+            # registry at /root/.cargo (toolchain at /root/.cargo/bin
+            # is already on PATH via the image ENV). /root itself stays
+            # 0700 — only +x is needed so tester can traverse into it.
+            chown -R tester:tester /work /root/.cargo /root/.rustup
+            chmod a+x /root
+
+            runuser -u tester -- env \
+              CARGO_HOME=/root/.cargo \
+              RUSTUP_HOME=/root/.rustup \
+              bash -c "
+                cd /work
+                cargo test -p shepherd-e2e --test firewall_real -- \
+                  --include-ignored --test-threads=1 --nocapture
+              "
           '
 
   shellcheck:
