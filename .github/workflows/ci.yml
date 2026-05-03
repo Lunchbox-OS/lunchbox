@@ -15,6 +15,12 @@ env:
 # the same ~1 GB of build deps in parallel containers (which used to
 # OOM-kill the runner). The `image` job builds + pushes the image on
 # cache miss and emits its ref as an output for the rest of the chain.
+#
+# Requires a repo secret named `REGISTRY_TOKEN` containing a Forgejo
+# personal access token with package read+write scope; the workflow
+# `permissions: packages: write` block alone does not elevate
+# `secrets.GITHUB_TOKEN` enough to push to the registry on this
+# Forgejo instance (it authenticates fine for read but 401s on push).
 
 jobs:
   image:
@@ -94,7 +100,7 @@ jobs:
 
       - name: Log in to Forgejo container registry
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" \
+          echo "${{ secrets.REGISTRY_TOKEN }}" \
             | docker login git.armeafamily.com \
                 --username "${{ github.actor }}" --password-stdin
 
@@ -116,7 +122,7 @@ jobs:
       image: ${{ needs.image.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -145,7 +151,7 @@ jobs:
       image: ${{ needs.image.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -171,7 +177,7 @@ jobs:
       image: ${{ needs.image.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -200,7 +206,7 @@ jobs:
       image: ${{ needs.image.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -226,7 +232,7 @@ jobs:
       image: ${{ needs.image.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 

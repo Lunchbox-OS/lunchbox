@@ -157,17 +157,22 @@ ephemeral DinD per workflow. This repo's existing workflows don't
 run docker from inside a job, so they're unaffected by the
 `docker_host` value either way.
 
-## Other manual setup
+## Authenticating to the registry
 
-  - **`secrets.GITHUB_TOKEN` needs package write scope.** Forgejo
-    grants this when the workflow declares `permissions: packages:
-    write` (per Gitea convention). If the runner's token policy
-    disagrees, the user may need a personal access token kept in
-    `secrets.CI_REGISTRY_TOKEN` instead.
-  - **First push creates the package.** Forgejo may default it to
+  - **`secrets.GITHUB_TOKEN` is not enough on this Forgejo instance.**
+    Run #37 got past every other hurdle, then died on
+    `unexpected status from POST /v2/.../blobs/uploads/: 401`. The
+    `docker login` step succeeded ("Login Succeeded") because the
+    auto-generated token has read scope; the push 401'd because the
+    workflow's `permissions: packages: write` block didn't elevate
+    it to write. The fix is a personal access token with the
+    Package read+write scope, kept in repo secret `REGISTRY_TOKEN`.
+    Both `docker login` in the `image` job and the heavy jobs'
+    `container.credentials:` use this secret.
+  - **First push creates the package.** Forgejo defaults it to
     private; visibility can be flipped on the package settings page
     if it's convenient to allow unauthenticated pulls (e.g. for
-    forks). Heavy jobs already pass `credentials:` so private works.
+    forks). Heavy jobs pass `credentials:` so private works.
 
 ## Open questions / follow-ups
 
