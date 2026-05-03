@@ -298,8 +298,18 @@ impl HostAdapter for LinuxHost {
                 (argv, env.clone(), None, None, None, Some(*app_id))
             }
             EntryKind::Flatpak { app_id, args, env } => {
-                // For Flatpak apps, we use 'flatpak run <app_id>' to launch them.
-                let mut argv = vec!["flatpak".to_string(), "run".to_string(), app_id.clone()];
+                // `flatpak run` strips most environment variables before
+                // exec'ing the sandboxed app; user-supplied
+                // `[entries.kind.env]` entries only reach the app via the
+                // explicit `--env=KEY=VAL` flag. Build them into the argv
+                // (sorted for deterministic ordering and easier debugging).
+                let mut argv = vec!["flatpak".to_string(), "run".to_string()];
+                let mut keys: Vec<&String> = env.keys().collect();
+                keys.sort();
+                for k in keys {
+                    argv.push(format!("--env={}={}", k, env[k]));
+                }
+                argv.push(app_id.clone());
                 argv.extend(expand_args(args));
                 (argv, env.clone(), None, None, Some(app_id.clone()), None)
             }
