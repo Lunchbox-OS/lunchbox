@@ -105,14 +105,29 @@ package (~1 MB), nowhere near OOM territory.
     is dominated by `cargo` work.
   - Weekly rollover: one rebuild per week, baseline cost.
 
+## Manual setup the runner needs
+
+  - **act-runner must expose its docker socket into job containers.**
+    The default `runs-on: ubuntu-latest` job container has no docker
+    CLI and no `/var/run/docker.sock`, so `docker push` from the
+    `image` job fails. First attempt (run #33) hit
+    `docker: command not found`; the workflow now `apt-get install
+    docker.io` first and asserts `docker info` succeeds with a clear
+    error if not. To make the daemon reachable, set
+    `container.docker_host: -` in the act-runner's config and restart
+    it. (Forgejo's act-runner default is *not* to expose the socket.)
+  - **`secrets.GITHUB_TOKEN` needs package write scope.** Forgejo
+    grants this when the workflow declares `permissions: packages:
+    write` (per Gitea convention). If the runner's token policy
+    disagrees, the user may need a personal access token kept in
+    `secrets.CI_REGISTRY_TOKEN` instead.
+  - **First push creates the package.** Forgejo may default it to
+    private; visibility can be flipped on the package settings page
+    if it's convenient to allow unauthenticated pulls (e.g. for
+    forks). Heavy jobs already pass `credentials:` so private works.
+
 ## Open questions / follow-ups
 
-  - `secrets.GITHUB_TOKEN` package write scope: Forgejo grants this
-    with `permissions: packages: write` per Gitea convention. If the
-    runner's token policy disagrees, the user may need a personal
-    access token kept in `secrets.CI_REGISTRY_TOKEN` instead.
-  - First push creates the package. Forgejo may default it to private;
-    visibility can be flipped on the package settings page if it's
-    convenient to allow unauthenticated pulls (e.g. for forks).
-  - Mid-week security update with no input change: bump the Dockerfile
-    (a comment is enough) to force a fresh hash, or wait a week.
+  - Mid-week security update with no input change: bump the
+    Dockerfile (a comment is enough) to force a fresh hash, or wait
+    a week.

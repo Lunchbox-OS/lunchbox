@@ -25,6 +25,16 @@ jobs:
     outputs:
       ref: ${{ steps.tag.outputs.ref }}
     steps:
+      - name: Install docker CLI
+        # The default `runs-on: ubuntu-latest` job container
+        # (node:20-bookworm) has git but no docker CLI. Install
+        # docker.io so we can talk to the runner host's daemon.
+        # Requires act-runner to expose its docker socket into job
+        # containers (set `container.docker_host: -` in its config).
+        run: |
+          apt-get update
+          apt-get install -y docker.io
+
       - uses: actions/checkout@v4
 
       - name: Compute image tag
@@ -44,6 +54,15 @@ jobs:
           ref="${CI_IMAGE_NAME}:${year_week}-${hash}"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${ref}"
+
+      - name: Verify docker daemon accessible
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::docker daemon not reachable from this job."
+            echo "::error::act-runner must expose its docker socket — set"
+            echo "::error::\`container.docker_host: -\` in its config."
+            exit 1
+          fi
 
       - name: Log in to Forgejo container registry
         run: |
