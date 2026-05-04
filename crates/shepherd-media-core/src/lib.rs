@@ -6,6 +6,7 @@
 
 pub mod library;
 pub mod player;
+pub mod playlist;
 pub mod protocol;
 pub mod resolver;
 pub mod schema;

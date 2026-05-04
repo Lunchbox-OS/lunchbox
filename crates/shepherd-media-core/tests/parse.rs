@@ -63,6 +63,24 @@ fn corpus_matches_manifest() {
     }
 }
 
+#[test]
+fn m3u_playlist_derives_library_id_from_filename() {
+    let lib = load_library(&fixtures_dir().join("valid-playlist.m3u")).unwrap();
+    assert_eq!(lib.library_id, "valid-playlist");
+    assert_eq!(lib.items.len(), 3);
+    assert_eq!(lib.items[0].id, "track-001");
+}
+
+#[test]
+fn m3u8_extinf_populates_titles_and_durations() {
+    let lib = load_library(&fixtures_dir().join("valid-playlist-extinf.m3u8")).unwrap();
+    assert_eq!(lib.items.len(), 4);
+    assert_eq!(lib.items[0].title, "Big Buck Bunny");
+    assert_eq!(lib.items[0].duration_seconds, Some(596));
+    assert_eq!(lib.items[2].title, "Lofi Beats (live)");
+    assert_eq!(lib.items[2].duration_seconds, None);
+}
+
 fn error_kind_label(e: &LibraryError) -> &'static str {
     match e {
         LibraryError::Read { .. } => "read",

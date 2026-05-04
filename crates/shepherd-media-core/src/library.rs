@@ -201,16 +201,37 @@ struct RawSource {
 }
 
 /// Load a library file from disk.
+///
+/// The file extension picks the parser:
+/// - `.m3u` / `.m3u8` → M3U playlist (auto-derived `library_id`/`title`).
+/// - everything else → TOML library (the native format).
+///
+/// An `.m3u8` URI *inside* a TOML library is an HLS stream, not a nested
+/// playlist; that distinction lives in `uri::classify`. Only the top-level
+/// file passed here is treated as a playlist.
 pub fn load_library(path: &Path) -> Result<Library, LibraryError> {
     let content = std::fs::read_to_string(path).map_err(|e| LibraryError::Read {
         path: path.to_path_buf(),
         source: e,
     })?;
-    parse_library(&content, path)
+    if is_playlist_extension(path) {
+        crate::playlist::parse_playlist(&content, path)
+    } else {
+        parse_library(&content, path)
+    }
 }
 
-/// Parse a library file from an in-memory string. Public for tests; callers
-/// should generally prefer `load_library`.
+fn is_playlist_extension(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase()),
+        Some(ref e) if e == "m3u" || e == "m3u8"
+    )
+}
+
+/// Parse a TOML library file from an in-memory string. Public for tests;
+/// callers should generally prefer `load_library`.
 pub fn parse_library(content: &str, source_path: &Path) -> Result<Library, LibraryError> {
     let raw: RawLibrary = toml::from_str(content).map_err(|e| LibraryError::Parse {
         path: source_path.to_path_buf(),

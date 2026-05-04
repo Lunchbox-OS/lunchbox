@@ -35,6 +35,43 @@ A library file is TOML with the schema below. Save it anywhere readable by
 the user shepherdd runs as; relative poster paths are resolved against the
 library file's directory.
 
+### M3U / M3U8 playlists
+
+`shepherd-media` also accepts `.m3u` and `.m3u8` playlist files anywhere a
+library path is required (CLI `--library`, the entries in `config.toml`,
+etc.). The dispatch is by file extension; the rest of the pipeline doesn't
+care which format the file was authored in.
+
+```m3u
+#EXTM3U
+#EXTINF:596,Big Buck Bunny
+file:///srv/media/big-buck-bunny.mp4
+#EXTINF:-1,Lofi Beats (live)
+https://www.youtube.com/watch?v=jfKfPfyJRdk
+```
+
+Notes:
+
+- `library_id` and `title` are derived from the playlist filename
+  (`my-list.m3u` → `library_id = "my-list"`, `title = "my-list"`).
+- Item IDs are auto-generated as `track-001`, `track-002`, … so you can
+  pass them directly to `--item` in direct-play mode.
+- `#EXTINF:<seconds>,<title>` immediately preceding an entry sets that
+  entry's title and (for non-negative durations) `duration_seconds`. All
+  other `#`-prefixed lines are ignored.
+- Relative paths are resolved against the playlist file's directory.
+  Plain absolute paths (`/srv/media/foo.mp4`) are wrapped as `file://`
+  URIs automatically.
+- The same DRM/subscription rejection list applies: a Netflix URL inside
+  a playlist fails validation, citing the line number.
+- Note that `.m3u8` is also the extension HLS uses for stream manifests;
+  inside a TOML library a `.m3u8` URI classifies as `direct-http` and is
+  played directly. Only the top-level file passed via `--library` is ever
+  interpreted as a playlist.
+
+If you need stable item IDs, posters, per-platform fallback sources, or
+multiple sources per item, convert the playlist to TOML.
+
 ```toml
 schema_version = 1
 library_id = "kids-movies"

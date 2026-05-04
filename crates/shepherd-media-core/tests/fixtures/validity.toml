@@ -50,3 +50,17 @@ error_kind = "empty-sources"
 [[fixtures]]
 file = "invalid-no-sources-for-any-platform.toml"
 expect = "ok"
+
+# M3U / M3U8 playlist support.
+[[fixtures]]
+file = "valid-playlist.m3u"
+expect = "ok"
+
+[[fixtures]]
+file = "valid-playlist-extinf.m3u8"
+expect = "ok"
+
+[[fixtures]]
+file = "invalid-playlist-drm.m3u"
+expect = "fail"
+error_kind = "drm-rejected"
