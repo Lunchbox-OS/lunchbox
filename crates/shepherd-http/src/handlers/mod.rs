@@ -3,6 +3,7 @@
 pub mod config;
 pub mod entries;
 pub mod health;
+pub mod logout;
 pub mod overrides;
 pub mod sessions;
 pub mod sse;
@@ -40,6 +41,7 @@ pub fn router(state: AppState, auth_token: Option<String>) -> Router {
         .route("/usage/{entry_id}", get(usage::get_usage_entry))
         .route("/volume", get(volume::get_volume).put(volume::set_volume))
         .route("/config/reload", axum::routing::post(config::reload_config))
+        .route("/user/logout", axum::routing::post(logout::logout))
         .route("/events", get(sse::sse_handler))
         .with_state(state)
         .layer(middleware::from_fn(

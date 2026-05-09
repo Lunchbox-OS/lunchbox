@@ -550,6 +550,17 @@ impl HostAdapter for LinuxHost {
         Ok(())
     }
 
+    async fn logout(&self) -> HostResult<()> {
+        match tokio::process::Command::new("swaymsg")
+            .arg("exit")
+            .status()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(HostError::Internal(format!("swaymsg exit failed: {e}"))),
+        }
+    }
+
     fn subscribe(&self) -> mpsc::UnboundedReceiver<HostEvent> {
         self.event_rx
             .lock()
