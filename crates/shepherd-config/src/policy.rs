@@ -1,5 +1,6 @@
 //! Validated policy structures
 
+use crate::icon::autodetect_icon;
 use crate::internet::{
     DEFAULT_INTERNET_CHECK_INTERVAL, DEFAULT_INTERNET_CHECK_TIMEOUT, EntryInternetPolicy,
     InternetCheckTarget, InternetConfig,
@@ -220,7 +221,7 @@ impl Entry {
         Self {
             id: EntryId::new(raw.id),
             label: raw.label,
-            icon_ref: raw.icon,
+            icon_ref: raw.icon.or_else(|| autodetect_icon(&kind)),
             kind,
             availability,
             limits,
