@@ -1184,6 +1184,14 @@ impl Service {
                 }
             }
 
+            Command::Logout => {
+                info!("Logout requested via IPC");
+                if let Err(e) = host.logout().await {
+                    warn!(error = %e, "Logout failed");
+                }
+                Response::success(request_id, ResponsePayload::LoggedOut)
+            }
+
             Command::Ping => Response::success(request_id, ResponsePayload::Pong),
         }
     }
