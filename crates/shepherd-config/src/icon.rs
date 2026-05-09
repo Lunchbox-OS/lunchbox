@@ -194,6 +194,10 @@ mod tests {
         file
     }
 
+    fn write_desktop_file_in(dir: &std::path::Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
     #[test]
     fn read_desktop_icon_finds_icon() {
         let file = write_desktop_file(
@@ -271,5 +275,78 @@ mod tests {
             args: Default::default(),
         };
         assert_eq!(autodetect_icon(&kind), None);
+    }
+
+    #[test]
+    fn search_dir_finds_icon_by_command() {
+        let dir = tempfile::tempdir().unwrap();
+        write_desktop_file_in(
+            dir.path(),
+            "myapp.desktop",
+            "[Desktop Entry]\nName=MyApp\nExec=myapp %U\nIcon=myapp-icon\nType=Application\n",
+        );
+        assert_eq!(
+            search_dir_for_command(dir.path(), "myapp"),
+            Some("myapp-icon".to_string())
+        );
+    }
+
+    #[test]
+    fn search_dir_finds_icon_by_full_path_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        write_desktop_file_in(
+            dir.path(),
+            "myapp.desktop",
+            "[Desktop Entry]\nName=MyApp\nExec=/usr/bin/myapp %U\nIcon=myapp-icon\nType=Application\n",
+        );
+        assert_eq!(
+            search_dir_for_command(dir.path(), "myapp"),
+            Some("myapp-icon".to_string())
+        );
+    }
+
+    #[test]
+    fn search_dir_returns_none_for_wrong_command() {
+        let dir = tempfile::tempdir().unwrap();
+        write_desktop_file_in(
+            dir.path(),
+            "otherapp.desktop",
+            "[Desktop Entry]\nName=Other\nExec=otherapp %U\nIcon=other-icon\nType=Application\n",
+        );
+        assert_eq!(search_dir_for_command(dir.path(), "myapp"), None);
+    }
+
+    #[test]
+    fn search_dir_skips_non_desktop_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_desktop_file_in(
+            dir.path(),
+            "myapp.txt",
+            "[Desktop Entry]\nName=MyApp\nExec=myapp %U\nIcon=myapp-icon\n",
+        );
+        assert_eq!(search_dir_for_command(dir.path(), "myapp"), None);
+    }
+
+    #[test]
+    fn search_dir_empty_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(search_dir_for_command(dir.path(), "myapp"), None);
+    }
+
+    #[test]
+    fn find_steam_icon_reads_desktop_file() {
+        let home = tempfile::tempdir().unwrap();
+        let apps_dir = home.path().join(".local/share/applications");
+        std::fs::create_dir_all(&apps_dir).unwrap();
+        std::fs::write(
+            apps_dir.join("steam_12345.desktop"),
+            "[Desktop Entry]\nName=My Game\nExec=steam steam://rungameid/12345\nIcon=steam_icon_12345\nType=Application\n",
+        )
+        .unwrap();
+        // Override HOME so home_dir() points to our temp dir
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let result = find_steam_icon(12345);
+        unsafe { std::env::remove_var("HOME") };
+        assert_eq!(result, Some("steam_icon_12345".to_string()));
     }
 }
