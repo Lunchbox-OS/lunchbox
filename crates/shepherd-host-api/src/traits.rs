@@ -121,6 +121,11 @@ pub trait HostAdapter: Send + Sync {
         Err(HostError::Internal("Not supported".into()))
     }
 
+    /// Log out the current user session (e.g., exit the Sway compositor session)
+    async fn logout(&self) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
     /// Optional: ensure the shell/launcher is visible
     async fn ensure_shell_visible(&self) -> HostResult<()> {
         Ok(())

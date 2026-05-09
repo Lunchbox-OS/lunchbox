@@ -164,7 +164,7 @@ cooldown_seconds = 300  # 5 minute cooldown after each session
 [[entries]]
 id = "gcompris"
 label = "GCompris"
-icon = "~/Games/Icons/GCompris.png"  # Custom icon path
+# icon is autodetected from the snap's .desktop file (no need to specify)
 
 [entries.kind]
 type = "snap"
@@ -198,7 +198,8 @@ cooldown_seconds = 0  # No cooldown
 [[entries]]
 id = "steam-celeste"
 label = "Celeste"
-icon = "~/Games/Icons/Celeste.png"
+# icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_504230"
+# icon = "~/Games/Icons/Celeste.png"  # Override with a custom image if preferred
 
 [entries.kind]
 type = "steam"
@@ -223,7 +224,8 @@ end = "20:00"
 [[entries]]
 id = "steam-a-short-hike"
 label = "A Short Hike"
-icon = "~/Games/Icons/A_Short_Hike.png"
+# icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_1055540"
+# icon = "~/Games/Icons/A_Short_Hike.png"  # Override with a custom image if preferred
 
 [entries.kind]
 type = "steam"
@@ -250,7 +252,7 @@ end = "20:00"
 [[entries]]
 id = "prism-launcher"
 label = "Prism Launcher"
-icon = "org.prismlauncher.PrismLauncher"
+# icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
 type = "flatpak"
@@ -300,7 +302,7 @@ max_volume = 60  # Limit volume during gaming sessions
 [[entries]]
 id = "krita"
 label = "Krita"
-icon = "org.kde.krita"
+# icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
 type = "flatpak"

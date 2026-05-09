@@ -137,6 +137,10 @@ export const setVolumeMuted = (muted: boolean) =>
 export const reloadConfig = () =>
   req<{ entry_count: number }>("/config/reload", { method: "POST" });
 
+// User
+export const logoutUser = () =>
+  req<void>("/user/logout", { method: "POST" });
+
 // Build SSE URL with auth token header workaround (use query param)
 export function sseUrl(): string {
   const base = getBase();

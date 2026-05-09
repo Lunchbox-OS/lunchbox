@@ -8,12 +8,14 @@ import Slider from "@mui/material/Slider";
 import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
+import LogoutIcon from "@mui/icons-material/Logout";
 import VolumeOffIcon from "@mui/icons-material/VolumeOff";
 import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getVolume,
+  logoutUser,
   reloadConfig,
   setVolumeMuted,
   setVolumePercent,
@@ -54,6 +56,12 @@ export function AdminPage() {
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: (res) => flash(`Config reloaded (${res.entry_count} entries)`),
+    onError: (e) => flash(String(e), false),
+  });
+
+  const logoutMutation = useMutation({
+    mutationFn: logoutUser,
+    onSuccess: () => flash("Logout requested"),
     onError: (e) => flash(String(e), false),
   });
 
@@ -133,6 +141,25 @@ export function AdminPage() {
             startIcon={reloadMutation.isPending ? <Spinner size={16} /> : undefined}
           >
             Reload Config
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Logout */}
+      <Card variant="outlined">
+        <CardContent>
+          <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 600 }}>Log Out User</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            End the user's desktop session and return to the login screen.
+          </Typography>
+          <Button
+            variant="outlined"
+            color="error"
+            onClick={() => logoutMutation.mutate()}
+            disabled={logoutMutation.isPending}
+            startIcon={logoutMutation.isPending ? <Spinner size={16} /> : <LogoutIcon />}
+          >
+            Log Out
           </Button>
         </CardContent>
       </Card>
