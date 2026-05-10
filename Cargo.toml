@@ -16,6 +16,7 @@ members = [
     "crates/shepherd-e2e",
     "crates/shepherd-media-core",
     "crates/shepherd-media",
+    "crates/shepherd-touch-bridge",
 ]
 
 [workspace.package]

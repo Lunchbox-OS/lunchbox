@@ -344,6 +344,7 @@ mod tests {
                     disabled: false,
                     disabled_reason: None,
                     internet: None,
+                    input_compat: None,
                 },
                 RawEntry {
                     id: "game".into(),
@@ -362,6 +363,7 @@ mod tests {
                     disabled: false,
                     disabled_reason: None,
                     internet: None,
+                    input_compat: None,
                 },
             ],
         };

@@ -9,6 +9,7 @@
 
 mod adapter;
 mod process;
+mod sidecar;
 mod volume;
 
 pub use adapter::*;
