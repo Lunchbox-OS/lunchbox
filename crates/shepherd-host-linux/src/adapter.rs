@@ -39,6 +39,21 @@ fn expand_args(args: &[String]) -> Vec<String> {
     args.iter().map(|arg| expand_tilde(arg)).collect()
 }
 
+/// Pop any sidecars registered for `pid` and terminate them on a blocking
+/// thread so the async monitor isn't stalled by SIGTERM/SIGKILL waits.
+fn reap_sidecars(sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>, pid: u32) {
+    let children = sidecars.lock().unwrap().remove(&pid);
+    if let Some(children) = children
+        && !children.is_empty()
+    {
+        tokio::task::spawn_blocking(move || {
+            for child in children {
+                terminate_sidecar(child, "touch-bridge");
+            }
+        });
+    }
+}
+
 /// Information tracked for each session for cleanup purposes
 #[derive(Clone, Debug)]
 struct SessionInfo {
@@ -65,8 +80,9 @@ pub struct LinuxHost {
     steam_sessions: Arc<Mutex<HashMap<u32, SteamSession>>>,
     /// PIDs of preloaded Steam launcher processes (not session-tracked)
     steam_preload_pids: Arc<Mutex<HashSet<u32>>>,
-    /// Per-session sidecar processes (touch-bridge, etc.)
-    sidecars: Arc<Mutex<HashMap<SessionId, Vec<Child>>>>,
+    /// Per-activity sidecar processes (touch-bridge, etc.), keyed by the
+    /// activity's pid so the monitor can reap them on natural exit too.
+    sidecars: Arc<Mutex<HashMap<u32, Vec<Child>>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
 }
@@ -143,6 +159,7 @@ impl LinuxHost {
         let processes = self.processes.clone();
         let steam_sessions = self.steam_sessions.clone();
         let steam_preload_pids = self.steam_preload_pids.clone();
+        let sidecars = self.sidecars.clone();
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -186,6 +203,8 @@ impl LinuxHost {
                     }
                     info!(pid = pid, pgid = pgid, status = ?status, "Process exited - sending HostEvent::Exited");
 
+                    reap_sidecars(&sidecars, pid);
+
                     // We don't have the session_id here, so we use a placeholder
                     // The service should track the mapping
                     let handle = HostSessionHandle::new(
@@ -215,13 +234,21 @@ impl LinuxHost {
                 }
 
                 if !ended.is_empty() {
-                    let mut map = steam_sessions.lock().unwrap();
-                    let mut procs = processes.lock().unwrap();
+                    let ended_pids: Vec<u32> = ended.iter().map(|(pid, _)| *pid).collect();
+                    {
+                        let mut map = steam_sessions.lock().unwrap();
+                        let mut procs = processes.lock().unwrap();
+                        for pid in &ended_pids {
+                            map.remove(pid);
+                            procs.remove(pid);
+                        }
+                    }
+
+                    for pid in &ended_pids {
+                        reap_sidecars(&sidecars, *pid);
+                    }
 
                     for (pid, pgid) in ended {
-                        map.remove(&pid);
-                        procs.remove(&pid);
-
                         let handle = HostSessionHandle::new(
                             SessionId::new(),
                             HostHandlePayload::Linux { pid, pgid },
@@ -382,10 +409,7 @@ impl HostAdapter for LinuxHost {
         let pgid = proc.pgid;
 
         if !session_sidecars.is_empty() {
-            self.sidecars
-                .lock()
-                .unwrap()
-                .insert(session_id.clone(), session_sidecars);
+            self.sidecars.lock().unwrap().insert(pid, session_sidecars);
         }
 
         // Store the session info so we can use it for killing even after process exits
@@ -575,8 +599,8 @@ impl HostAdapter for LinuxHost {
             }
         }
 
-        // Tear down any per-session sidecars (e.g., touch-to-mouse bridge).
-        let sidecars = self.sidecars.lock().unwrap().remove(&session_id);
+        // Tear down any per-activity sidecars (e.g., touch-to-mouse bridge).
+        let sidecars = self.sidecars.lock().unwrap().remove(&pid);
         if let Some(children) = sidecars {
             for child in children {
                 terminate_sidecar(child, "touch-bridge");
