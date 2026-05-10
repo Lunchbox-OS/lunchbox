@@ -86,6 +86,18 @@ pub enum EntryKind {
     },
 }
 
+/// Input compatibility mode for an activity.
+///
+/// Some activities don't process raw touch events from Wayland and need a
+/// shim to translate touch into mouse events at the compositor level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputCompatMode {
+    /// Grab touchscreens and emit synthesized pointer events via
+    /// `zwlr_virtual_pointer_v1` for the lifetime of the activity.
+    TouchToMouse,
+}
+
 impl EntryKind {
     pub fn tag(&self) -> EntryKindTag {
         match self {

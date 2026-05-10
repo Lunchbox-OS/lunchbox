@@ -6,11 +6,11 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawConfig, RawEntry, RawEntryKind, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawVolumeConfig, RawWarningThreshold,
+    RawConfig, RawEntry, RawEntryKind, RawInputCompat, RawInternetConfig, RawManagementApiConfig,
+    RawServiceConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_time};
-use shepherd_api::{EntryKind, WarningSeverity, WarningThreshold};
+use shepherd_api::{EntryKind, InputCompatMode, WarningSeverity, WarningThreshold};
 use shepherd_util::{
     DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
     socket_path_without_env,
@@ -189,6 +189,7 @@ pub struct Entry {
     pub disabled: bool,
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
+    pub input_compat: Option<InputCompatMode>,
 }
 
 impl Entry {
@@ -217,6 +218,7 @@ impl Entry {
             .unwrap_or_else(|| default_warnings.to_vec());
         let volume = raw.volume.as_ref().map(convert_volume_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
+        let input_compat = raw.input_compat.map(convert_input_compat);
 
         Self {
             id: EntryId::new(raw.id),
@@ -230,6 +232,7 @@ impl Entry {
             disabled: raw.disabled,
             disabled_reason: raw.disabled_reason,
             internet,
+            input_compat,
         }
     }
 }
@@ -376,6 +379,12 @@ fn convert_internet_config(raw: Option<&RawInternetConfig>) -> InternetConfig {
         .unwrap_or(DEFAULT_INTERNET_CHECK_TIMEOUT);
 
     InternetConfig::new(check, interval, timeout)
+}
+
+fn convert_input_compat(raw: RawInputCompat) -> InputCompatMode {
+    match raw {
+        RawInputCompat::TouchToMouse => InputCompatMode::TouchToMouse,
+    }
 }
 
 fn convert_entry_internet(raw: Option<&crate::schema::RawEntryInternet>) -> EntryInternetPolicy {

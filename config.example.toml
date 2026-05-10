@@ -242,6 +242,26 @@ days = "weekends"
 start = "10:00"
 end = "20:00"
 
+# World of Goo (original) via Steam.
+# Some games — notably the Tomorrow Corporation / 2D Boy titles below —
+# don't process Wayland touch events but otherwise work great on a
+# touchscreen. Setting `input_compat = "touch_to_mouse"` runs a sidecar
+# that grabs touchscreens and synthesizes mouse events for the duration of
+# the activity. Requires the user running shepherdd to be in the `input`
+# group; see docs/INSTALL.md.
+# https://store.steampowered.com/app/22000/World_of_Goo/
+[[entries]]
+id = "steam-world-of-goo"
+label = "World of Goo"
+input_compat = "touch_to_mouse"
+
+[entries.kind]
+type = "steam"
+app_id = 22000
+
+[entries.availability]
+always = true
+
 ## === Flatpak-based applications ===
 # Flatpak entries use the "flatpak" type for proper process management.
 # Similar to Snap, Flatpak apps run in sandboxed environments and use

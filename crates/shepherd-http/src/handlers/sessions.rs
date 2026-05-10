@@ -69,7 +69,9 @@ pub async fn launch(
             // Determine spawn options
             let (entry_kind, spawn_opts) = {
                 let eng = state.engine.lock().await;
-                let kind = eng.policy().get_entry(&entry_id).map(|e| e.kind.clone());
+                let entry = eng.policy().get_entry(&entry_id);
+                let kind = entry.map(|e| e.kind.clone());
+                let input_compat = entry.and_then(|e| e.input_compat);
                 let opts = if eng.policy().service.capture_child_output {
                     let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
                     let filename = format!(
@@ -81,10 +83,14 @@ pub async fn launch(
                         capture_stdout: true,
                         capture_stderr: true,
                         log_path: Some(eng.policy().service.child_log_dir.join(filename)),
+                        input_compat,
                         ..Default::default()
                     }
                 } else {
-                    SpawnOptions::default()
+                    SpawnOptions {
+                        input_compat,
+                        ..Default::default()
+                    }
                 };
                 (kind, opts)
             };

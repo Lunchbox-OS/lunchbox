@@ -1,13 +1,14 @@
 //! Linux host adapter implementation
 
 use async_trait::async_trait;
-use shepherd_api::EntryKind;
+use shepherd_api::{EntryKind, InputCompatMode};
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
     HostSessionHandle, SpawnOptions, StopMode,
 };
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -17,6 +18,7 @@ use crate::process::{
     ManagedProcess, find_steam_game_pids, init, kill_by_command, kill_flatpak_cgroup,
     kill_snap_cgroup, kill_steam_game_processes,
 };
+use crate::sidecar::{spawn_touch_bridge, terminate_sidecar};
 
 /// Expand `~` at the beginning of a path to the user's home directory
 fn expand_tilde(path: &str) -> String {
@@ -63,6 +65,8 @@ pub struct LinuxHost {
     steam_sessions: Arc<Mutex<HashMap<u32, SteamSession>>>,
     /// PIDs of preloaded Steam launcher processes (not session-tracked)
     steam_preload_pids: Arc<Mutex<HashSet<u32>>>,
+    /// Per-session sidecar processes (touch-bridge, etc.)
+    sidecars: Arc<Mutex<HashMap<SessionId, Vec<Child>>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
 }
@@ -80,6 +84,7 @@ impl LinuxHost {
             session_info: Arc::new(Mutex::new(HashMap::new())),
             steam_sessions: Arc::new(Mutex::new(HashMap::new())),
             steam_preload_pids: Arc::new(Mutex::new(HashSet::new())),
+            sidecars: Arc::new(Mutex::new(HashMap::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
         }
@@ -346,16 +351,42 @@ impl HostAdapter for LinuxHost {
         // Determine if this is a sandboxed app (snap or flatpak)
         let sandboxed_app_name = snap_name.clone().or_else(|| flatpak_app_id.clone());
 
+        // Spawn any input-compat sidecars before the activity. We log
+        // failures but don't propagate them — the activity should still
+        // launch even if (e.g.) no touchscreen is present.
+        let mut session_sidecars: Vec<Child> = Vec::new();
+        if matches!(options.input_compat, Some(InputCompatMode::TouchToMouse)) {
+            match spawn_touch_bridge() {
+                Ok(child) => session_sidecars.push(child),
+                Err(e) => {
+                    warn!(error = %e, "Failed to spawn touch-to-mouse bridge; continuing without it")
+                }
+            }
+        }
+
         let proc = ManagedProcess::spawn(
             &argv,
             &env,
             cwd.as_ref(),
             options.log_path.clone(),
             sandboxed_app_name,
-        )?;
+        )
+        .inspect_err(|_| {
+            // Tear down any sidecars if the activity itself fails to spawn.
+            for child in std::mem::take(&mut session_sidecars) {
+                terminate_sidecar(child, "touch-bridge");
+            }
+        })?;
 
         let pid = proc.pid;
         let pgid = proc.pgid;
+
+        if !session_sidecars.is_empty() {
+            self.sidecars
+                .lock()
+                .unwrap()
+                .insert(session_id.clone(), session_sidecars);
+        }
 
         // Store the session info so we can use it for killing even after process exits
         let session_info_entry = SessionInfo {
@@ -541,6 +572,14 @@ impl HostAdapter for LinuxHost {
                         let _ = p.kill();
                     }
                 }
+            }
+        }
+
+        // Tear down any per-session sidecars (e.g., touch-to-mouse bridge).
+        let sidecars = self.sidecars.lock().unwrap().remove(&session_id);
+        if let Some(children) = sidecars {
+            for child in children {
+                terminate_sidecar(child, "touch-bridge");
             }
         }
 

@@ -765,8 +765,10 @@ impl Service {
                         // Start the session in the engine
                         let event = eng.start_session(plan.clone(), now, now_mono);
 
-                        // Get the entry kind for spawning
-                        let entry_kind = eng.policy().get_entry(&entry_id).map(|e| e.kind.clone());
+                        // Get the entry kind and any per-entry spawn metadata
+                        let entry = eng.policy().get_entry(&entry_id);
+                        let entry_kind = entry.map(|e| e.kind.clone());
+                        let input_compat = entry.and_then(|e| e.input_compat);
 
                         // Build spawn options with log path if capture_child_output is enabled
                         let spawn_options = if eng.policy().service.capture_child_output {
@@ -783,10 +785,14 @@ impl Service {
                                 capture_stdout: true,
                                 capture_stderr: true,
                                 log_path: Some(log_path),
+                                input_compat,
                                 ..Default::default()
                             }
                         } else {
-                            shepherd_host_api::SpawnOptions::default()
+                            shepherd_host_api::SpawnOptions {
+                                input_compat,
+                                ..Default::default()
+                            }
                         };
 
                         drop(eng); // Release lock before spawning
