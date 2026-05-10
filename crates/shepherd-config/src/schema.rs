@@ -99,6 +99,20 @@ pub struct RawEntry {
     /// Internet requirement for this entry
     #[serde(default)]
     pub internet: Option<RawEntryInternet>,
+
+    /// Input compatibility mode (e.g., touch-to-mouse for games that
+    /// ignore raw touch events).
+    #[serde(default)]
+    pub input_compat: Option<RawInputCompat>,
+}
+
+/// Input compatibility mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawInputCompat {
+    /// Translate touchscreen input into mouse events via a sidecar that
+    /// grabs touch devices and uses the Wayland virtual-pointer protocol.
+    TouchToMouse,
 }
 
 /// Raw entry kind

@@ -54,6 +54,22 @@ sudo ./scripts/shepherd install bins --prefix /usr/local
 sudo ./scripts/shepherd install config --user kiosk
 ```
 
+## Touch-to-mouse compatibility (optional)
+
+Activities can opt into a touch-to-mouse compatibility mode (see
+`input_compat = "touch_to_mouse"` in `config.example.toml`) for games that
+ignore raw touch events. The sidecar that powers this needs to read
+`/dev/input/event*`, which requires the user to be in the `input` group.
+
+`shepherd install all` adds this group automatically. To add it to an
+existing install, run:
+
+```sh
+sudo ./scripts/shepherd install groups --user kiosk
+```
+
+The change takes effect on the user's next login.
+
 ## Kiosk hardening (optional)
 
 Kiosk hardening is optional and intended for devices primarily used by
