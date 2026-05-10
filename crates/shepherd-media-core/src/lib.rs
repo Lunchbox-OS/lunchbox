@@ -12,6 +12,7 @@ pub mod resolver;
 pub mod schema;
 pub mod session;
 pub mod uri;
+pub mod youtube_playlist;
 
 pub use library::{
     ClassifiedUri, Item, ItemKind, Library, LibraryError, Platform, PlayerHint, PosterRef, Source,
@@ -22,6 +23,9 @@ pub use protocol::{ProtocolEmitter, ProtocolEvent, UriClass};
 pub use resolver::{PlatformInfo, resolve_source};
 pub use session::{Session, SessionInput, SessionState};
 pub use uri::DrmRejection;
+pub use youtube_playlist::{
+    YoutubePlaylistEntry, build_library_from_entries, is_youtube_playlist_url,
+};
 
 #[cfg(feature = "libmpv")]
 pub use player::LibmpvPlayer;

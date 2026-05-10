@@ -3741,6 +3741,8 @@ dependencies = [
  "gilrs",
  "image",
  "nix 0.29.0",
+ "serde",
+ "serde_json",
  "shepherd-media-core",
  "thiserror 1.0.69",
  "tracing",

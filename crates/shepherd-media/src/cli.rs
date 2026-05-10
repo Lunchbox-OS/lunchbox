@@ -1,7 +1,5 @@
 //! `clap`-derived CLI surface for `shepherd-media`.
 
-use std::path::PathBuf;
-
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -22,22 +20,29 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Parse and validate a library file.
+    /// Parse and validate a library file or YouTube playlist URL.
     Validate {
-        /// Path to the library `.toml`.
-        library: PathBuf,
+        /// Path to a library `.toml`, `.m3u`, or `.m3u8`, or a YouTube
+        /// playlist URL (e.g. `https://www.youtube.com/playlist?list=PL…`).
+        /// YouTube URLs require `yt-dlp` to be installed.
+        library: String,
     },
     /// Direct-play mode: launch a single item end-to-end.
     Play {
+        /// Path to a library `.toml`, `.m3u`, or `.m3u8`, or a YouTube
+        /// playlist URL.
         #[arg(long)]
-        library: PathBuf,
+        library: String,
         #[arg(long)]
         item: String,
     },
     /// Browse mode: open the poster-grid UI.
     Browse {
+        /// Path to a library `.toml`, `.m3u`, or `.m3u8`, or a YouTube
+        /// playlist URL (e.g. `https://www.youtube.com/playlist?list=PL…`).
+        /// YouTube URLs require `yt-dlp` to be installed.
         #[arg(long)]
-        library: PathBuf,
+        library: String,
     },
 }
 

@@ -4,6 +4,7 @@ mod cli;
 mod platform;
 mod posters;
 mod ui;
+mod youtube;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -13,7 +14,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use shepherd_media_core::{
-    LibmpvPlayer, ProtocolEmitter, Session, SessionInput, load_library, resolve_source,
+    LibmpvPlayer, Library, ProtocolEmitter, Session, SessionInput, build_library_from_entries,
+    is_youtube_playlist_url, load_library, resolve_source,
 };
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -47,8 +49,27 @@ fn main() -> ExitCode {
     ExitCode::from(result)
 }
 
-fn run_validate(library_path: &Path) -> u8 {
-    match load_library(library_path) {
+/// Load a library from either a file path or a YouTube playlist URL.
+///
+/// YouTube playlist URLs (those with a `list=` query parameter on a YouTube
+/// host) are fetched via `yt-dlp`. Everything else is treated as a file path
+/// and dispatched to `load_library`, which handles TOML, M3U, and M3U8.
+fn load_library_from_source(source: &str) -> Result<Library, (u8, String)> {
+    if is_youtube_playlist_url(source) {
+        let info = youtube::fetch_playlist(source).map_err(|e| (EXIT_VALIDATION, e))?;
+        Ok(build_library_from_entries(
+            source,
+            info.title,
+            info.playlist_id.as_deref(),
+            &info.entries,
+        ))
+    } else {
+        load_library(Path::new(source)).map_err(|e| (EXIT_VALIDATION, e.to_string()))
+    }
+}
+
+fn run_validate(library_source: &str) -> u8 {
+    match load_library_from_source(library_source) {
         Ok(lib) => {
             println!(
                 "OK: library_id={} items={}",
@@ -57,19 +78,19 @@ fn run_validate(library_path: &Path) -> u8 {
             );
             EXIT_OK
         }
-        Err(e) => {
-            eprintln!("validation failed: {e}");
-            EXIT_VALIDATION
+        Err((code, msg)) => {
+            eprintln!("validation failed: {msg}");
+            code
         }
     }
 }
 
-fn run_play(library_path: &Path, item_id: &str, no_protocol: bool) -> u8 {
-    let library = match load_library(library_path) {
+fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
+    let library = match load_library_from_source(library_source) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("validation failed: {e}");
-            return EXIT_VALIDATION;
+        Err((code, msg)) => {
+            eprintln!("validation failed: {msg}");
+            return code;
         }
     };
 
@@ -123,12 +144,12 @@ fn run_play(library_path: &Path, item_id: &str, no_protocol: bool) -> u8 {
     EXIT_OK
 }
 
-fn run_browse(library_path: &Path, no_protocol: bool) -> u8 {
-    let library = match load_library(library_path) {
+fn run_browse(library_source: &str, no_protocol: bool) -> u8 {
+    let library = match load_library_from_source(library_source) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("validation failed: {e}");
-            return EXIT_VALIDATION;
+        Err((code, msg)) => {
+            eprintln!("validation failed: {msg}");
+            return code;
         }
     };
 
