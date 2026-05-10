@@ -154,6 +154,11 @@ impl Service {
         // Broadcast channel shared by IPC and HTTP SSE
         let (event_tx, _event_rx) = broadcast::channel::<Event>(256);
 
+        // Shutdown signal: any path that should bring down shepherdd flips this
+        // to `true`. The main loop, the HTTP server's `with_graceful_shutdown`,
+        // and the OS-signal listener task all observe it.
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
         // Start host process monitor
         let _monitor_handle = self.host.start_monitor();
 
@@ -190,7 +195,7 @@ impl Service {
             let eng = engine.lock().await;
             eng.policy().service.management_api.clone()
         };
-        if let Some(api_cfg) = management_api_config {
+        let http_handle = if let Some(api_cfg) = management_api_config {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();
             let http_state = HttpAppState {
@@ -204,14 +209,18 @@ impl Service {
                     let _ = event_tx_for_broadcast.send(event);
                 }),
                 config_path: config_path.clone(),
+                shutdown_tx: shutdown_tx.clone(),
             };
             let http_server = HttpServer::new(http_state, api_cfg);
-            tokio::spawn(async move {
-                if let Err(e) = http_server.run().await {
+            let http_shutdown_rx = shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = http_server.run(http_shutdown_rx).await {
                     error!(error = %e, "HTTP management API error");
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         // Start internet connectivity monitoring (if configured)
         if let Some(monitor) = self.internet_monitor {
@@ -275,12 +284,23 @@ impl Service {
             }
         };
 
-        // Set up signal handlers
+        // Set up signal handlers as a spawned listener that flips the shared
+        // shutdown signal. This unifies the OS-signal path with the
+        // logout-handler path so the main loop only watches one source.
         let mut sigterm =
             signal(SignalKind::terminate()).context("Failed to create SIGTERM handler")?;
         let mut sigint =
             signal(SignalKind::interrupt()).context("Failed to create SIGINT handler")?;
         let mut sighup = signal(SignalKind::hangup()).context("Failed to create SIGHUP handler")?;
+        let signal_shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => info!("Received SIGTERM, shutting down gracefully"),
+                _ = sigint.recv() => info!("Received SIGINT, shutting down gracefully"),
+                _ = sighup.recv() => info!("Received SIGHUP, shutting down gracefully"),
+            }
+            let _ = signal_shutdown_tx.send(true);
+        });
 
         // Main event loop
         let tick_interval = Duration::from_millis(100);
@@ -290,20 +310,11 @@ impl Service {
 
         loop {
             tokio::select! {
-                // Signal: SIGTERM or SIGINT - graceful shutdown
-                _ = sigterm.recv() => {
-                    info!("Received SIGTERM, shutting down gracefully");
-                    break;
-                }
-                _ = sigint.recv() => {
-                    info!("Received SIGINT, shutting down gracefully");
-                    break;
-                }
-
-                // Signal: SIGHUP - graceful shutdown (sent by sway on exit)
-                _ = sighup.recv() => {
-                    info!("Received SIGHUP, shutting down gracefully");
-                    break;
+                // Shutdown requested (signal, HTTP logout, or IPC logout)
+                Ok(()) = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
 
                 // Tick timer - check warnings and expiry
@@ -335,7 +346,7 @@ impl Service {
 
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &event_tx, &config_path, msg).await;
+                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &event_tx, &shutdown_tx, &config_path, msg).await;
                 }
             }
         }
@@ -365,6 +376,28 @@ impl Service {
 
         // Stop preloaded Steam (if any) after active sessions are terminated
         host.stop_steam_preload();
+
+        // Exit the desktop session (e.g. `swaymsg exit`). Doing this here, after
+        // sessions are stopped and after the HTTP server has begun graceful
+        // shutdown, ensures the in-flight logout response is flushed before the
+        // browser is torn down with sway.
+        if let Err(e) = host.logout().await {
+            warn!(error = %e, "Logout (host exit) failed");
+        }
+
+        // Wait for the HTTP server to drain. SSE clients will disconnect when
+        // sway exits, but we cap the wait so a stuck client cannot block
+        // shutdown indefinitely.
+        if let Some(mut handle) = http_handle {
+            match tokio::time::timeout(Duration::from_secs(3), &mut handle).await {
+                Ok(Ok(())) => info!("HTTP server drained"),
+                Ok(Err(e)) => warn!(error = %e, "HTTP server task failed during shutdown"),
+                Err(_) => {
+                    warn!("HTTP server did not drain within 3s; aborting");
+                    handle.abort();
+                }
+            }
+        }
 
         // Log shutdown
         if let Err(e) = store.append_audit(AuditEvent::new(AuditEventType::ServiceStopped)) {
@@ -633,6 +666,7 @@ impl Service {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn handle_ipc_message(
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
@@ -641,6 +675,7 @@ impl Service {
         store: &Arc<dyn Store>,
         rate_limiter: &Arc<Mutex<RateLimiter>>,
         event_tx: &broadcast::Sender<Event>,
+        shutdown_tx: &tokio::sync::watch::Sender<bool>,
         config_path: &Path,
         msg: ServerMessage,
     ) {
@@ -693,6 +728,7 @@ impl Service {
                     request.request_id,
                     request.command,
                     event_tx,
+                    shutdown_tx,
                     config_path,
                 )
                 .await;
@@ -740,6 +776,7 @@ impl Service {
         request_id: u64,
         command: Command,
         event_tx: &broadcast::Sender<Event>,
+        shutdown_tx: &tokio::sync::watch::Sender<bool>,
         config_path: &Path,
     ) -> Response {
         let now = shepherd_util::now();
@@ -1192,9 +1229,7 @@ impl Service {
 
             Command::Logout => {
                 info!("Logout requested via IPC");
-                if let Err(e) = host.logout().await {
-                    warn!(error = %e, "Logout failed");
-                }
+                let _ = shutdown_tx.send(true);
                 Response::success(request_id, ResponsePayload::LoggedOut)
             }
 
