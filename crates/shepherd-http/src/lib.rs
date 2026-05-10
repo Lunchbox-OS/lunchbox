@@ -18,6 +18,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -32,12 +33,16 @@ impl HttpServer {
         Self { state, config }
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let addr = SocketAddr::new(self.config.bind, self.config.port);
         let app = handlers::router(self.state, self.config.auth_token);
         let listener = bind_with_retry(addr, self.config.bind_retry).await?;
         info!(%addr, "Management HTTP API listening");
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.wait_for(|v| *v).await;
+            })
+            .await?;
         Ok(())
     }
 }

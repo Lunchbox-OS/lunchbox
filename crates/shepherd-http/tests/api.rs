@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,7 @@ fn make_app_with_policy(
     )));
     let (tx, _) = broadcast::channel::<Event>(64);
     let tx_for_fn = tx.clone();
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let state = AppState {
         engine,
         store,
@@ -154,6 +155,7 @@ fn make_app_with_policy(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        shutdown_tx,
     };
     handlers::router(state, auth_token.map(str::to_owned))
 }
