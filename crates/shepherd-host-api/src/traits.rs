@@ -1,7 +1,7 @@
 //! Host adapter traits
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode};
+use shepherd_api::{EntryKind, InputCompatMode, InputCompatOptions};
 use shepherd_util::SessionId;
 use std::time::Duration;
 use thiserror::Error;
@@ -71,9 +71,16 @@ pub struct SpawnOptions {
     /// Request foreground focus (if supported)
     pub foreground: bool,
 
-    /// Optional input compatibility mode (e.g., touch-to-mouse). The host
-    /// adapter is responsible for any sidecar processes this implies.
-    pub input_compat: Option<InputCompatMode>,
+    /// Input compatibility modes to apply (e.g., touch-to-mouse,
+    /// gamepad-to-mouse+keyboard). Empty = none. The host adapter is
+    /// responsible for any sidecar processes this implies and for spawning
+    /// at most one sidecar per mode.
+    pub input_compat: Vec<InputCompatMode>,
+
+    /// Per-activity tunables passed through to the sidecars (deadzones,
+    /// speeds, etc.). Sidecars use built-in defaults for any field left
+    /// `None`.
+    pub input_compat_options: InputCompatOptions,
 }
 
 /// Events from the host adapter
