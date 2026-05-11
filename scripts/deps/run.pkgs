@@ -16,7 +16,10 @@ libgtk4-layer-shell0
 libudev1
 
 # mpv runtime (libmpv2 is linked dynamically by shepherd-media; mpv brings in
-# both the binary and the .so) and yt-dlp (used transitively by libmpv when
-# resolving YouTube URLs)
+# both the binary and the .so)
 mpv
-yt-dlp
+
+# Python venv support — needed to create the yt-dlp virtualenv.
+# yt-dlp itself is installed via pip into /opt/shepherd/ytdlp-venv so it
+# stays up-to-date independent of the Ubuntu package archive.
+python3-venv
