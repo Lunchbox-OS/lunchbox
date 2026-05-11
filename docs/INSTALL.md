@@ -54,12 +54,17 @@ sudo ./scripts/shepherd install bins --prefix /usr/local
 sudo ./scripts/shepherd install config --user kiosk
 ```
 
-## Touch-to-mouse compatibility (optional)
+## Input compatibility sidecars (optional)
 
-Activities can opt into a touch-to-mouse compatibility mode (see
-`input_compat = "touch_to_mouse"` in `config.example.toml`) for games that
-ignore raw touch events. The sidecar that powers this needs to read
-`/dev/input/event*`, which requires the user to be in the `input` group.
+Activities can opt into one or more input-compat sidecars via the
+`input_compat` entry (see `config.example.toml`):
+
+- `touch_to_mouse` — for games that ignore raw touch events.
+- `gamepad_productivity` / `gamepad_gpd` — remap a gamepad to mouse +
+  keyboard for activities that ignore gamepad input.
+
+The sidecars read `/dev/input/event*`, which requires the user to be in
+the `input` group.
 
 `shepherd install all` adds this group automatically. To add it to an
 existing install, run:
