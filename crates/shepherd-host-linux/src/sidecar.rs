@@ -77,12 +77,25 @@ pub fn spawn_gamepad_bridge(
     if let Some(v) = options.gamepad_scroll_speed {
         cmd.arg("--scroll-speed").arg(format!("{v}"));
     }
-    debug!(binary = %bin.display(), preset = preset.as_cli(), "Launching gamepad bridge");
+    info!(
+        binary = %bin.display(),
+        preset = preset.as_cli(),
+        "Launching gamepad bridge"
+    );
     let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .spawn()?;
+        .spawn()
+        .inspect_err(|e| {
+            // Log path + error explicitly so a missing/unreachable binary
+            // doesn't disappear into a generic "spawn failed" message.
+            warn!(
+                binary = %bin.display(),
+                error = %e,
+                "Failed to exec gamepad bridge binary"
+            );
+        })?;
     info!(
         pid = child.id(),
         preset = preset.as_cli(),

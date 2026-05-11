@@ -138,29 +138,51 @@ impl WaylandOutputs {
             .roundtrip(&mut state)
             .context("Wayland registry roundtrip failed")?;
 
-        let pointer_manager = state
-            .pointer_manager
-            .clone()
-            .ok_or_else(|| anyhow!("compositor does not support zwlr_virtual_pointer_v1"))?;
+        let pointer_manager = state.pointer_manager.clone().ok_or_else(|| {
+            anyhow!(
+                "compositor does not support zwlr_virtual_pointer_v1 (a wlroots-only \
+                 protocol); the bridge requires a wlroots compositor such as Sway. \
+                 If you're running this standalone, launch it from inside the \
+                 shepherd-launcher Sway session (or `./run-dev`), not from your \
+                 desktop's Wayland session (KWin/Mutter/etc.)"
+            )
+        })?;
         let pointer = pointer_manager.create_virtual_pointer(state.seat.as_ref(), &qh, ());
 
-        // Virtual keyboard is best-effort. If the compositor doesn't expose
-        // it (older wlroots, non-wlroots compositors that ship only the
-        // pointer), continue with mouse-only output and warn.
-        let keyboard = if let (Some(km), Some(seat)) =
-            (state.keyboard_manager.clone(), state.seat.clone())
-        {
-            let kb = km.create_virtual_keyboard(&seat, &qh, ());
-            upload_keymap(&kb)?;
-            Some(kb)
-        } else {
-            tracing::warn!(
-                "compositor does not support zwp_virtual_keyboard_v1; gamepad → keyboard events will be dropped"
-            );
-            None
+        // Virtual keyboard is best-effort. Any failure (no protocol
+        // advertised, keymap rejected, …) demotes us to mouse-only output
+        // — the bridge is still useful for the pointer side, so don't
+        // kill the whole process over it.
+        let keyboard = match (state.keyboard_manager.clone(), state.seat.clone()) {
+            (Some(km), Some(seat)) => {
+                let kb = km.create_virtual_keyboard(&seat, &qh, ());
+                match upload_keymap(&kb) {
+                    Ok(()) => Some(kb),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "keymap upload failed; continuing without keyboard output"
+                        );
+                        kb.destroy();
+                        None
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "compositor does not advertise zwp_virtual_keyboard_v1; continuing without keyboard output"
+                );
+                None
+            }
         };
 
-        event_queue.flush()?;
+        // Roundtrip once so any protocol error caused by the keymap event
+        // surfaces here (where we can recover) instead of in the main
+        // loop's flush (where it kills the bridge).
+        event_queue
+            .roundtrip(&mut state)
+            .context("Wayland post-setup roundtrip failed")?;
+
         Ok(Self {
             _conn: conn,
             event_queue,
@@ -229,10 +251,14 @@ fn upload_keymap(kb: &ZwpVirtualKeyboardV1) -> Result<()> {
     let name = c"shepherd-gamepad-bridge-keymap";
     let fd = memfd_create(name, MemFdCreateFlag::MFD_CLOEXEC).context("memfd_create failed")?;
     let mut file = File::from(fd);
-    file.write_all(KEYMAP.as_bytes())
+    let bytes = KEYMAP.as_bytes();
+    file.write_all(bytes)
         .context("failed to write keymap to memfd")?;
     file.flush().ok();
-    // Format 1 = xkb_v1 text. The compositor will mmap the fd and parse it.
-    kb.keymap(1, file.as_fd(), KEYMAP.len() as u32);
+    // Format 1 = xkb_v1 text. The compositor will mmap `bytes.len()` bytes
+    // and parse the result as a NUL-terminated xkb_v1 keymap — KEYMAP
+    // already ends in `\0`, so reporting the full byte length includes
+    // that terminator.
+    kb.keymap(1, file.as_fd(), bytes.len() as u32);
     Ok(())
 }
