@@ -15,6 +15,7 @@ members = [
     "crates/shepherd-hud",
     "crates/shepherd-e2e",
     "crates/shepherd-touch-bridge",
+    "crates/shepherd-gamepad-bridge",
 ]
 
 [workspace.package]

@@ -88,14 +88,59 @@ pub enum EntryKind {
 
 /// Input compatibility mode for an activity.
 ///
-/// Some activities don't process raw touch events from Wayland and need a
-/// shim to translate touch into mouse events at the compositor level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Some activities don't process raw touch or gamepad events from Wayland and
+/// need a shim to translate input at the compositor level. Modes are
+/// orthogonal: an activity can stack `TouchToMouse` with one of the
+/// `Gamepad*` modes if the device has both a touchscreen and a gamepad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputCompatMode {
     /// Grab touchscreens and emit synthesized pointer events via
     /// `zwlr_virtual_pointer_v1` for the lifetime of the activity.
     TouchToMouse,
+    /// Remap a gamepad to mouse + keyboard using the productivity preset:
+    /// triggers = LMB, shoulders = RMB, left stick = mouse, right stick =
+    /// scroll, stick-click toggles which stick drives the mouse, D-pad =
+    /// arrow keys, A = Enter, Start = Escape.
+    GamepadProductivity,
+    /// Remap a gamepad to mouse + keyboard using the GPD/FPS preset:
+    /// LT = LMB, RT = RMB, LB = MMB, left stick = WASD, right stick = mouse,
+    /// D-pad = scroll, A = Space, X = R, B = E, Y = F.
+    GamepadGpd,
+}
+
+impl InputCompatMode {
+    /// True if this mode is one of the gamepad presets.
+    pub fn is_gamepad(self) -> bool {
+        matches!(self, Self::GamepadProductivity | Self::GamepadGpd)
+    }
+}
+
+/// Per-activity tunables for input compatibility sidecars.
+///
+/// All fields are optional; sidecars apply their own defaults when a field is
+/// `None`. Only the gamepad fields are populated today, but the struct lives
+/// alongside the mode list so future tunables for other modes can be added
+/// without another schema change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct InputCompatOptions {
+    /// Gamepad analog-stick deadzone as a fraction of full deflection (0..1).
+    /// Below this magnitude the stick is treated as centered.
+    pub gamepad_deadzone: Option<f32>,
+    /// Gamepad mouse speed in pixels per second at full stick deflection.
+    pub gamepad_mouse_speed: Option<f32>,
+    /// Gamepad scroll speed in discrete wheel units per second at full
+    /// deflection.
+    pub gamepad_scroll_speed: Option<f32>,
+}
+
+impl InputCompatOptions {
+    /// True if every field is `None`.
+    pub fn is_empty(&self) -> bool {
+        self.gamepad_deadzone.is_none()
+            && self.gamepad_mouse_speed.is_none()
+            && self.gamepad_scroll_speed.is_none()
+    }
 }
 
 impl EntryKind {

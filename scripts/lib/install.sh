@@ -188,8 +188,9 @@ install_config() {
 
 # Groups the kiosk user must belong to for shepherd-launcher features.
 #
-# - input: required by shepherd-touch-bridge (used when an entry has
-#   `input_compat = "touch_to_mouse"`) so it can read /dev/input/event*.
+# - input: required by shepherd-touch-bridge and shepherd-gamepad-bridge
+#   (used when an entry has `input_compat = "touch_to_mouse"` or
+#   `gamepad_*`) so they can read /dev/input/event*.
 #
 # Add new groups here as features need them; install_user_groups walks the
 # array and skips memberships the user already has.

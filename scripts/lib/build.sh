@@ -15,6 +15,7 @@ SHEPHERD_BINARIES=(
     "shepherd-launcher"
     "shepherd-hud"
     "shepherd-touch-bridge"
+    "shepherd-gamepad-bridge"
 )
 
 # Get the target directory for binaries

@@ -10,17 +10,17 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use shepherd_api::{InputCompatMode, InputCompatOptions};
 use tracing::{debug, info, warn};
 
-/// Locate the `shepherd-touch-bridge` binary.
+/// Locate a sidecar binary by name.
 ///
 /// Resolution order:
-/// 1. `SHEPHERD_TOUCH_BRIDGE_BIN` env var (absolute or PATH-resolvable).
+/// 1. The matching `SHEPHERD_*_BIN` env var override, if set and non-empty.
 /// 2. A sibling of the running daemon binary (`current_exe()`'s directory).
-/// 3. The literal name `shepherd-touch-bridge`, which `Command` will look
-///    up via `PATH` at spawn time.
-pub fn touch_bridge_binary() -> PathBuf {
-    if let Ok(val) = std::env::var("SHEPHERD_TOUCH_BRIDGE_BIN")
+/// 3. The literal binary name, which `Command` resolves via `PATH`.
+fn sidecar_binary(name: &str, env_override: &str) -> PathBuf {
+    if let Ok(val) = std::env::var(env_override)
         && !val.is_empty()
     {
         return PathBuf::from(val);
@@ -28,17 +28,25 @@ pub fn touch_bridge_binary() -> PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("shepherd-touch-bridge");
+        let candidate = dir.join(name);
         if candidate.exists() {
             return candidate;
         }
     }
-    PathBuf::from("shepherd-touch-bridge")
+    PathBuf::from(name)
 }
 
-/// Spawn the touch-to-mouse bridge as a child of the daemon. Returns the
-/// `Child` so callers can track and terminate it. Errors here are
-/// non-fatal: the activity should still launch even if the bridge fails.
+/// Locate the `shepherd-touch-bridge` binary.
+pub fn touch_bridge_binary() -> PathBuf {
+    sidecar_binary("shepherd-touch-bridge", "SHEPHERD_TOUCH_BRIDGE_BIN")
+}
+
+/// Locate the `shepherd-gamepad-bridge` binary.
+pub fn gamepad_bridge_binary() -> PathBuf {
+    sidecar_binary("shepherd-gamepad-bridge", "SHEPHERD_GAMEPAD_BRIDGE_BIN")
+}
+
+/// Spawn the touch-to-mouse bridge as a child of the daemon.
 pub fn spawn_touch_bridge() -> std::io::Result<Child> {
     let bin = touch_bridge_binary();
     debug!(binary = %bin.display(), "Launching touch-to-mouse bridge");
@@ -49,6 +57,75 @@ pub fn spawn_touch_bridge() -> std::io::Result<Child> {
         .spawn()?;
     info!(pid = child.id(), "Touch-to-mouse bridge spawned");
     Ok(child)
+}
+
+/// Spawn the gamepad-to-keyboard+mouse bridge for the given preset, with the
+/// supplied tunables forwarded as CLI flags.
+pub fn spawn_gamepad_bridge(
+    preset: GamepadPreset,
+    options: &InputCompatOptions,
+) -> std::io::Result<Child> {
+    let bin = gamepad_bridge_binary();
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--preset").arg(preset.as_cli());
+    if let Some(v) = options.gamepad_deadzone {
+        cmd.arg("--deadzone").arg(format!("{v}"));
+    }
+    if let Some(v) = options.gamepad_mouse_speed {
+        cmd.arg("--mouse-speed").arg(format!("{v}"));
+    }
+    if let Some(v) = options.gamepad_scroll_speed {
+        cmd.arg("--scroll-speed").arg(format!("{v}"));
+    }
+    info!(
+        binary = %bin.display(),
+        preset = preset.as_cli(),
+        "Launching gamepad bridge"
+    );
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .inspect_err(|e| {
+            // Log path + error explicitly so a missing/unreachable binary
+            // doesn't disappear into a generic "spawn failed" message.
+            warn!(
+                binary = %bin.display(),
+                error = %e,
+                "Failed to exec gamepad bridge binary"
+            );
+        })?;
+    info!(
+        pid = child.id(),
+        preset = preset.as_cli(),
+        "Gamepad bridge spawned"
+    );
+    Ok(child)
+}
+
+/// Gamepad preset selection for the sidecar CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GamepadPreset {
+    Productivity,
+    Gpd,
+}
+
+impl GamepadPreset {
+    pub fn from_mode(mode: InputCompatMode) -> Option<Self> {
+        match mode {
+            InputCompatMode::GamepadProductivity => Some(Self::Productivity),
+            InputCompatMode::GamepadGpd => Some(Self::Gpd),
+            InputCompatMode::TouchToMouse => None,
+        }
+    }
+
+    pub fn as_cli(self) -> &'static str {
+        match self {
+            Self::Productivity => "productivity",
+            Self::Gpd => "gpd",
+        }
+    }
 }
 
 /// Send SIGTERM, wait briefly for graceful exit, then SIGKILL if needed.
