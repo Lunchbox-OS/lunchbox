@@ -26,14 +26,18 @@ use crate::preset::{OutputEvent, ScrollAxis};
 /// A minimal xkb keymap that lets the compositor resolve symbols via its own
 /// xkb data files. This avoids pulling in libxkbcommon — the bridge just
 /// ships evdev keycodes, and the compositor's libxkbcommon handles the
-/// rest.
+/// rest. The trailing `\0` is required: wlroots mmaps the fd we send and
+/// passes it to `xkb_keymap_new_from_string`, which expects a
+/// null-terminated string; without it the compositor either rejects the
+/// keymap (protocol error → our connection dies) or reads past the
+/// mapping.
 const KEYMAP: &str = "xkb_keymap {
     xkb_keycodes  \"evdev\"    { include \"evdev\" };
     xkb_types     \"complete\" { include \"complete\" };
     xkb_compat    \"complete\" { include \"complete\" };
     xkb_symbols   \"us\"       { include \"pc+us\" };
 };
-";
+\0";
 
 #[derive(Default)]
 pub struct WaylandState {
