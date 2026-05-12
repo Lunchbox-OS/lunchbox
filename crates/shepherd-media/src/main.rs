@@ -4,6 +4,7 @@ mod cli;
 mod platform;
 mod posters;
 mod ui;
+mod video_cache;
 mod youtube;
 
 use std::path::Path;
@@ -21,6 +22,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
+use crate::video_cache::{CachingPlayer, VideoCache};
 
 /// Exit codes per the spec; keep in sync with `docs/shepherd-media.md`.
 const EXIT_OK: u8 = 0;
@@ -106,12 +108,18 @@ fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
         return EXIT_INVOCATION;
     }
 
-    let player = match LibmpvPlayer::new() {
+    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new() {
         Ok(p) => Box::new(p),
         Err(e) => {
             error!("failed to construct libmpv player: {e}");
             return EXIT_PLAYER;
         }
+    };
+
+    // Cache lookup only — no queue_all for single-shot play.
+    let player: Box<dyn shepherd_media_core::PlayerHandle> = match VideoCache::new() {
+        Some(cache) => Box::new(CachingPlayer::new(inner, cache, &library)),
+        None => inner,
     };
 
     let emitter = if no_protocol {
@@ -153,12 +161,22 @@ fn run_browse(library_source: &str, no_protocol: bool) -> u8 {
         }
     };
 
-    let player = match LibmpvPlayer::new() {
+    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new() {
         Ok(p) => Box::new(p),
         Err(e) => {
             error!("failed to construct libmpv player: {e}");
             return EXIT_PLAYER;
         }
+    };
+
+    // Option A: queue every remote library item for background download so
+    // subsequent plays serve from the local cache.
+    let player: Box<dyn shepherd_media_core::PlayerHandle> = match VideoCache::new() {
+        Some(cache) => {
+            cache.queue_all(&library);
+            Box::new(CachingPlayer::new(inner, cache, &library))
+        }
+        None => inner,
     };
 
     let emitter = if no_protocol {
