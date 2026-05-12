@@ -54,6 +54,13 @@ mod libmpv_backend {
     // INFO=40 and so on — lower is more severe.
     const MPV_LOG_LEVEL_ERROR: u32 = 20;
 
+    // input-conf written at player startup. Overrides mpv's quit bindings to
+    // `stop` so q/ESC/window-close returns mpv to idle rather than terminating
+    // the process. LibmpvPlayer is reused across playbacks in browse mode, so
+    // it must stay alive between them.
+    const INPUT_CONF_PATH: &str = "/tmp/shepherd-media-input.conf";
+    const INPUT_CONF_CONTENT: &str = "q stop\nESC stop\nCLOSE_WIN stop\n";
+
     /// libmpv-backed `PlayerHandle`. Constructed once per session; `play`
     /// reuses the same mpv instance to swap files via `loadfile`.
     pub struct LibmpvPlayer {
@@ -63,11 +70,18 @@ mod libmpv_backend {
 
     impl LibmpvPlayer {
         pub fn new() -> Result<Self, PlayerError> {
+            std::fs::write(INPUT_CONF_PATH, INPUT_CONF_CONTENT)
+                .map_err(|e| PlayerError::Backend(format!("failed to write input-conf: {e}")))?;
+
             let mpv = Mpv::with_initializer(|init| {
-                // Suppress mpv's default keybindings; the launcher owns input.
-                init.set_property("input-default-bindings", "no")?;
-                init.set_property("input-vo-keyboard", "no")?;
-                init.set_property("osc", "no")?;
+                // Enable mpv's default keybindings and OSC for in-playback
+                // navigation (play/pause, seek, scrubber). The input-conf
+                // above overrides the quit bindings so q/ESC stops playback
+                // instead of terminating the process.
+                init.set_property("input-default-bindings", "yes")?;
+                init.set_property("input-vo-keyboard", "yes")?;
+                init.set_property("osc", "yes")?;
+                init.set_property("input-conf", INPUT_CONF_PATH)?;
                 init.set_property("keep-open", "no")?;
                 init.set_property("fullscreen", "yes")?;
                 init.set_property("ytdl", "yes")?;
