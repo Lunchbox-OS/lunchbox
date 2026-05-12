@@ -414,6 +414,18 @@ pub struct UsageStat {
     pub duration_seconds: u64,
 }
 
+/// An action that can be performed on a window via the debug API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowAction {
+    /// Ask the window to close (sway `kill`).
+    Close,
+    /// Move the window to the scratchpad to hide it from view.
+    Hide,
+    /// Pull the window out of the scratchpad so it is shown again.
+    Show,
+}
+
 /// Debug snapshot of a single window known to the host's compositor.
 ///
 /// Currently surfaced via the management API for debugging the Sway tree —

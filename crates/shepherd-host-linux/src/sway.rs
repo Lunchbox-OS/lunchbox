@@ -11,10 +11,20 @@
 //! Steam client) live under that workspace's `floating_nodes`.
 
 use serde::Deserialize;
-use shepherd_api::WindowInfo;
+use shepherd_api::{WindowAction, WindowInfo};
 use shepherd_host_api::{HostError, HostResult};
 
 const SCRATCHPAD_WORKSPACE: &str = "__i3_scratch";
+
+/// Sway returns a JSON array of `{success, error?}` objects for run_command
+/// requests. Exit status is 0 even when the command failed against the tree,
+/// so we have to inspect the response.
+#[derive(Debug, Deserialize)]
+struct CommandReply {
+    success: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 struct Node {
@@ -43,6 +53,38 @@ struct Node {
 struct WindowProperties {
     #[serde(default)]
     class: Option<String>,
+}
+
+/// Perform a debug action on the window with the given sway con_id.
+pub async fn act_on_window(window_id: u64, action: WindowAction) -> HostResult<()> {
+    let verb = match action {
+        WindowAction::Close => "kill",
+        WindowAction::Hide => "move scratchpad",
+        WindowAction::Show => "scratchpad show",
+    };
+    let cmd = format!("[con_id={window_id}] {verb}");
+    let output = tokio::process::Command::new("swaymsg")
+        .arg(&cmd)
+        .output()
+        .await
+        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(HostError::Internal(format!(
+            "swaymsg exited non-zero: {stderr}"
+        )));
+    }
+    let replies: Vec<CommandReply> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg reply: {e}")))?;
+    for reply in replies {
+        if !reply.success {
+            let err = reply.error.unwrap_or_else(|| "unknown sway error".into());
+            return Err(HostError::Internal(format!(
+                "swaymsg `{cmd}` failed: {err}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Run `swaymsg -t get_tree` and return a flattened window list.
