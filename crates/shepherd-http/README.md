@@ -29,6 +29,11 @@ All routes are under `/api/v1/`. An optional Bearer token can be configured for 
 | `GET` | `/volume` | Current volume |
 | `PUT` | `/volume` | Set volume or mute |
 | `POST` | `/config/reload` | Hot-reload configuration |
+| `POST` | `/user/logout` | End the user's desktop session |
+| `GET` | `/debug/windows` | Read-only list of compositor windows (Sway) |
+| `POST` | `/debug/windows/{id}/close` | Ask the window to close (sway `kill`) |
+| `POST` | `/debug/windows/{id}/hide` | Move the window to the scratchpad |
+| `POST` | `/debug/windows/{id}/show` | Pull the window out of the scratchpad |
 | `GET` | `/events` | Server-Sent Events stream |
 
 ## Configuration

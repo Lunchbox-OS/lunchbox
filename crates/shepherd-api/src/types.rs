@@ -414,6 +414,46 @@ pub struct UsageStat {
     pub duration_seconds: u64,
 }
 
+/// An action that can be performed on a window via the debug API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowAction {
+    /// Ask the window to close (sway `kill`).
+    Close,
+    /// Move the window to the scratchpad to hide it from view.
+    Hide,
+    /// Pull the window out of the scratchpad so it is shown again.
+    Show,
+}
+
+/// Debug snapshot of a single window known to the host's compositor.
+///
+/// Currently surfaced via the management API for debugging the Sway tree —
+/// in particular, to see which windows have been moved to the scratchpad
+/// (e.g. the hidden Steam client) versus which are on-screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// Compositor-assigned window/container id.
+    pub id: u64,
+    /// Window title, if the application set one.
+    pub name: Option<String>,
+    /// Wayland app_id, if available.
+    pub app_id: Option<String>,
+    /// X11 class (xwayland windows), if available.
+    pub window_class: Option<String>,
+    /// Owning process id, if reported by the compositor.
+    pub pid: Option<u32>,
+    /// Workspace name the window belongs to, if any. `__i3_scratch` is the
+    /// scratchpad pseudo-workspace.
+    pub workspace: Option<String>,
+    /// True if the window currently lives on the scratchpad (hidden).
+    pub in_scratchpad: bool,
+    /// True if the window is currently being rendered.
+    pub visible: bool,
+    /// True if the window has keyboard focus.
+    pub focused: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,7 @@ import type {
   SessionInfo,
   UsageStat,
   VolumeInfo,
+  WindowsResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -140,6 +141,15 @@ export const reloadConfig = () =>
 // User
 export const logoutUser = () =>
   req<void>("/user/logout", { method: "POST" });
+
+// Debug
+export const listWindows = () => req<WindowsResponse>("/debug/windows");
+export const closeWindow = (id: number) =>
+  req<void>(`/debug/windows/${id}/close`, { method: "POST" });
+export const hideWindow = (id: number) =>
+  req<void>(`/debug/windows/${id}/hide`, { method: "POST" });
+export const showWindow = (id: number) =>
+  req<void>(`/debug/windows/${id}/show`, { method: "POST" });
 
 // Build SSE URL with auth token header workaround (use query param)
 export function sseUrl(): string {

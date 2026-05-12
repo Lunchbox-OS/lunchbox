@@ -1,6 +1,7 @@
 //! HTTP route definitions
 
 pub mod config;
+pub mod debug;
 pub mod entries;
 pub mod health;
 pub mod logout;
@@ -42,6 +43,19 @@ pub fn router(state: AppState, auth_token: Option<String>) -> Router {
         .route("/volume", get(volume::get_volume).put(volume::set_volume))
         .route("/config/reload", axum::routing::post(config::reload_config))
         .route("/user/logout", axum::routing::post(logout::logout))
+        .route("/debug/windows", get(debug::list_windows))
+        .route(
+            "/debug/windows/{id}/close",
+            axum::routing::post(debug::close_window),
+        )
+        .route(
+            "/debug/windows/{id}/hide",
+            axum::routing::post(debug::hide_window),
+        )
+        .route(
+            "/debug/windows/{id}/show",
+            axum::routing::post(debug::show_window),
+        )
         .route("/events", get(sse::sse_handler))
         .with_state(state)
         .layer(middleware::from_fn(
