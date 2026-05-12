@@ -1895,6 +1895,7 @@ dependencies = [
  "dirs",
  "nix 0.29.0",
  "serde",
+ "serde_json",
  "shell-escape",
  "shepherd-api",
  "shepherd-host-api",

@@ -1,7 +1,7 @@
 //! Linux host adapter implementation
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode};
+use shepherd_api::{EntryKind, InputCompatMode, WindowInfo};
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
     HostSessionHandle, SpawnOptions, StopMode,
@@ -634,6 +634,10 @@ impl HostAdapter for LinuxHost {
             Ok(_) => Ok(()),
             Err(e) => Err(HostError::Internal(format!("swaymsg exit failed: {e}"))),
         }
+    }
+
+    async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
+        crate::sway::list_windows().await
     }
 
     fn subscribe(&self) -> mpsc::UnboundedReceiver<HostEvent> {
