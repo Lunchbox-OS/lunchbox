@@ -261,19 +261,35 @@ fn source_url(source: &Source) -> Option<String> {
     }
 }
 
-/// Scan `cache_dir` for a completed download file named `<item_id>.<ext>`,
-/// excluding in-progress `.part` files.  Returns the first match.
+/// Scan `cache_dir` for a completed download file named `<item_id>.<ext>`.
+///
+/// Requires the sentinel file `<item_id>.done` to be present; without it the
+/// download is considered in-progress (yt-dlp may have written intermediate
+/// per-format files that are not yet merged) and `None` is returned.
 fn find_cached_file(cache_dir: &Path, item_id: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(cache_dir).ok()?;
+    // The sentinel is written only after the download fully commits.
+    if !cache_dir.join(format!("{item_id}.done")).exists() {
+        return None;
+    }
     let prefix = format!("{item_id}.");
-    for entry in entries.flatten() {
+    for entry in std::fs::read_dir(cache_dir).ok()?.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with(&prefix) && !name_str.ends_with(".part") {
+        if name_str.starts_with(&prefix)
+            && !name_str.ends_with(".part")
+            && !name_str.ends_with(".done")
+        {
             return Some(entry.path());
         }
     }
     None
+}
+
+/// Write the completion sentinel for `item_id`.  Called once the video file
+/// is fully on disk and ready to play.
+fn write_done_sentinel(cache_dir: &Path, item_id: &str) -> Result<(), String> {
+    let path = cache_dir.join(format!("{item_id}.done"));
+    std::fs::write(&path, b"").map_err(|e| format!("failed to write done sentinel: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -282,27 +298,43 @@ fn find_cached_file(cache_dir: &Path, item_id: &str) -> Option<PathBuf> {
 
 struct CacheEntry {
     path: PathBuf,
+    /// The item ID derived from the filename stem, used to delete the paired
+    /// `.done` sentinel on eviction.
+    item_id: String,
     size: u64,
     mtime: SystemTime,
 }
 
-/// Collect all complete (non-`.part`) files in `cache_dir` with their sizes
-/// and mtimes.  Returns `None` only if the directory cannot be read at all.
+/// Collect all committed video files in `cache_dir` — those that have a
+/// corresponding `<item_id>.done` sentinel — with their sizes and mtimes.
+/// In-progress downloads (no sentinel) are excluded so they do not count
+/// toward the size cap or get evicted mid-download.
+/// Returns `None` only if the directory cannot be read at all.
 fn collect_cache_entries(cache_dir: &Path) -> Option<Vec<CacheEntry>> {
     let mut entries = Vec::new();
     for de in std::fs::read_dir(cache_dir).ok()?.flatten() {
         let name = de.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.ends_with(".part") {
+        if name_str.ends_with(".part") || name_str.ends_with(".done") {
             continue;
         }
         let Ok(meta) = de.metadata() else { continue };
         if !meta.is_file() {
             continue;
         }
+        // Derive item_id from the filename stem (e.g. "my-video" from "my-video.mp4").
+        let item_id = match de.path().file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        // Only include files whose download has been fully committed.
+        if !cache_dir.join(format!("{item_id}.done")).exists() {
+            continue;
+        }
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         entries.push(CacheEntry {
             path: de.path(),
+            item_id,
             size: meta.len(),
             mtime,
         });
@@ -339,6 +371,10 @@ fn evict_to(cache_dir: &Path, target_bytes: u64) {
         match std::fs::remove_file(&entry.path) {
             Ok(()) => {
                 info!("evicted cached video: {}", entry.path.display());
+                // Remove the sentinel so find_cached_file won't return a
+                // stale hit for the now-deleted video file.
+                let sentinel = cache_dir.join(format!("{}.done", entry.item_id));
+                let _ = std::fs::remove_file(sentinel);
                 remaining = remaining.saturating_sub(entry.size);
             }
             Err(e) => warn!("cache eviction failed for {}: {e}", entry.path.display()),
@@ -410,7 +446,7 @@ fn download_youtube(cache_dir: &Path, item_id: &str, url: &str) -> Result<(), St
     if !status.success() {
         return Err(format!("yt-dlp exited with {status} for {url}"));
     }
-    Ok(())
+    write_done_sentinel(cache_dir, item_id)
 }
 
 fn download_http(cache_dir: &Path, item_id: &str, url: &str) -> Result<(), String> {
@@ -436,5 +472,5 @@ fn download_http(cache_dir: &Path, item_id: &str, url: &str) -> Result<(), Strin
     std::fs::rename(&part_path, &final_path)
         .map_err(|e| format!("failed to rename part file: {e}"))?;
 
-    Ok(())
+    write_done_sentinel(cache_dir, item_id)
 }
