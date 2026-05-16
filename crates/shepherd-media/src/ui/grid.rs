@@ -1,25 +1,24 @@
 //! Poster grid rendering.
 
 use eframe::egui;
-use shepherd_media_core::{Session, resolve_source};
+use shepherd_media_core::{Item, Session, resolve_source};
 
 use crate::platform;
 use crate::posters::PosterCache;
 use crate::ui::theme;
 
-/// Draw the poster grid, recomputing the column count based on the available
-/// width. The library is read-only here; the caller owns the session.
+/// Draw the poster grid for `items` (already filtered to the currently visible
+/// subset).  `focused` is an index into `items`.
 pub fn draw(
     ctx: &egui::Context,
     session: &mut Session,
+    items: &[Item],
     focused: &mut usize,
     columns: &mut usize,
     posters: &PosterCache,
 ) {
-    // Snapshot just the bits we need so we can hand `session` back to the
-    // panel closure without an outstanding borrow on its library.
-    let library = session.library().clone();
     let mut to_select: Option<String> = None;
+    let library_title = session.library().title.clone();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::none().fill(theme::BG).inner_margin(48.0))
@@ -28,7 +27,7 @@ pub fn draw(
             let target_tile_width = 220.0;
             *columns = ((available / (target_tile_width + 16.0)).floor() as usize).max(1);
 
-            ui.heading(library.title.clone());
+            ui.heading(library_title);
             ui.add_space(16.0);
 
             let info = platform::current();
@@ -38,7 +37,7 @@ pub fn draw(
                     .num_columns(*columns)
                     .spacing(egui::vec2(16.0, 24.0))
                     .show(ui, |ui| {
-                        for (idx, item) in library.items.iter().enumerate() {
+                        for (idx, item) in items.iter().enumerate() {
                             let playable = resolve_source(item, &info).is_some();
                             let is_focused = idx == *focused;
                             let bytes = posters.get(&item.id).cloned();

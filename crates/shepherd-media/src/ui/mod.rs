@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use eframe::egui;
-use shepherd_media_core::{Session, SessionInput, SessionState};
+use shepherd_media_core::{
+    ClassifiedUri, Item, Session, SessionInput, SessionState, resolve_source,
+};
 
 use crate::platform;
 use crate::posters::{self, PosterCache};
+use crate::video_cache::VideoCache;
 
 /// Why the UI loop returned.
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +23,12 @@ pub enum ExitCause {
     Signal,
 }
 
-pub fn run(mut session: Session, term: Arc<AtomicBool>) -> Result<ExitCause, eframe::Error> {
+pub fn run(
+    mut session: Session,
+    term: Arc<AtomicBool>,
+    online: Arc<AtomicBool>,
+    cache: Option<Arc<VideoCache>>,
+) -> Result<ExitCause, eframe::Error> {
     let posters = posters::prefetch(session.library());
 
     let options = eframe::NativeOptions {
@@ -50,6 +58,8 @@ pub fn run(mut session: Session, term: Arc<AtomicBool>) -> Result<ExitCause, efr
                 columns: 4,
                 term,
                 signaled: signaled_clone,
+                online,
+                cache,
             }))
         }),
     )?;
@@ -65,10 +75,51 @@ struct BrowseApp {
     session: Session,
     posters: PosterCache,
     gilrs: Option<gilrs::Gilrs>,
+    /// Index into the *visible* item list for the current frame.
     focused: usize,
     columns: usize,
     term: Arc<AtomicBool>,
     signaled: Arc<AtomicBool>,
+    /// Latest connectivity status from the background check thread.
+    /// `true` when online or when no connectivity check is configured.
+    online: Arc<AtomicBool>,
+    /// Video cache used to determine which remote items are available offline.
+    cache: Option<Arc<VideoCache>>,
+}
+
+impl BrowseApp {
+    /// Build the list of items to display for the current frame.
+    ///
+    /// When online, every item with a source for this platform is shown.
+    /// When offline, only items that can be played without network access are
+    /// shown: local-filesystem sources and previously cached remote items.
+    fn visible_items(&self) -> Vec<Item> {
+        let info = platform::current();
+        let online = self.online.load(Ordering::Relaxed);
+        self.session
+            .library()
+            .items
+            .iter()
+            .filter(|item| {
+                let Some(source) = resolve_source(item, &info) else {
+                    return false;
+                };
+                if online {
+                    return true;
+                }
+                // Offline: only show items we can play without the network.
+                match &source.uri {
+                    ClassifiedUri::Local(_) => true,
+                    _ => self
+                        .cache
+                        .as_deref()
+                        .map(|c| c.cached_path(&item.id).is_some())
+                        .unwrap_or(false),
+                }
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl eframe::App for BrowseApp {
@@ -92,9 +143,6 @@ impl eframe::App for BrowseApp {
             self.session.state(),
             SessionState::Playing { .. } | SessionState::Stopping { .. }
         ) {
-            // Keep the egui context ticking so we can react to player events,
-            // but don't draw the grid. Painting an empty central panel keeps
-            // the window alive on Wayland.
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(egui::Color32::BLACK))
                 .show(ctx, |_| {});
@@ -102,26 +150,30 @@ impl eframe::App for BrowseApp {
             return;
         }
 
-        self.handle_keyboard(ctx);
+        let visible = self.visible_items();
+        // Clamp focus to the visible set (it may shrink when going offline).
+        if !visible.is_empty() {
+            self.focused = self.focused.min(visible.len() - 1);
+        }
+
+        self.handle_keyboard(ctx, &visible);
         grid::draw(
             ctx,
             &mut self.session,
+            &visible,
             &mut self.focused,
             &mut self.columns,
             &self.posters,
         );
 
-        // Repaint regularly to keep state-machine ticks flowing even when
-        // there's no input.
         ctx.request_repaint_after(Duration::from_millis(100));
         let _ = frame;
     }
 }
 
 impl BrowseApp {
-    fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        let library = self.session.library().clone();
-        let n = library.items.len();
+    fn handle_keyboard(&mut self, ctx: &egui::Context, visible: &[Item]) {
+        let n = visible.len();
         if n == 0 {
             return;
         }
@@ -132,16 +184,16 @@ impl BrowseApp {
                 self.move_focus(1, n);
             }
             if input.key_pressed(egui::Key::ArrowLeft) {
-                self.move_focus_back(1, n);
+                self.move_focus_back(1);
             }
             if input.key_pressed(egui::Key::ArrowDown) {
                 self.move_focus(cols, n);
             }
             if input.key_pressed(egui::Key::ArrowUp) {
-                self.move_focus_back(cols, n);
+                self.move_focus_back(cols);
             }
             if input.key_pressed(egui::Key::Enter) {
-                self.activate(&library, n);
+                self.activate(visible);
             }
             if input.key_pressed(egui::Key::Escape) {
                 self.session.handle_input(SessionInput::ExitSession);
@@ -150,24 +202,19 @@ impl BrowseApp {
     }
 
     fn move_focus(&mut self, step: usize, len: usize) {
-        let next = (self.focused + step).min(len.saturating_sub(1));
-        self.focused = next;
+        self.focused = (self.focused + step).min(len.saturating_sub(1));
     }
 
-    fn move_focus_back(&mut self, step: usize, _len: usize) {
+    fn move_focus_back(&mut self, step: usize) {
         self.focused = self.focused.saturating_sub(step);
     }
 
-    fn activate(&mut self, library: &shepherd_media_core::Library, n: usize) {
-        if self.focused >= n {
+    fn activate(&mut self, visible: &[Item]) {
+        let Some(item) = visible.get(self.focused) else {
             return;
-        }
-        let item = &library.items[self.focused];
-        // Don't try to start items that have no source for the current
-        // platform; the grid grays them out, but a stray Enter shouldn't
-        // emit a confusing warning either.
+        };
         let info = platform::current();
-        if shepherd_media_core::resolve_source(item, &info).is_none() {
+        if resolve_source(item, &info).is_none() {
             return;
         }
         self.session
@@ -175,27 +222,33 @@ impl BrowseApp {
     }
 
     fn poll_gamepad(&mut self) {
-        let Some(gilrs) = self.gilrs.as_mut() else {
-            return;
+        // Collect events inside a block so the mutable borrow on self.gilrs
+        // ends before we call self.visible_items().
+        let events: Vec<gilrs::EventType> = {
+            let Some(gilrs) = self.gilrs.as_mut() else {
+                return;
+            };
+            let mut ev = Vec::new();
+            while let Some(event) = gilrs.next_event() {
+                ev.push(event.event);
+            }
+            ev
         };
-        // Drain the queue first so we drop the gilrs borrow before mutating
-        // self.
-        let mut events = Vec::new();
-        while let Some(event) = gilrs.next_event() {
-            events.push(event.event);
+        if events.is_empty() {
+            return;
         }
-        let library = self.session.library().clone();
-        let n = library.items.len();
+        let visible = self.visible_items();
+        let n = visible.len();
         let cols = self.columns.max(1);
         for ev in events {
             use gilrs::{Button, EventType};
             if let EventType::ButtonPressed(btn, _) = ev {
                 match btn {
-                    Button::DPadLeft => self.move_focus_back(1, n),
+                    Button::DPadLeft => self.move_focus_back(1),
                     Button::DPadRight => self.move_focus(1, n),
-                    Button::DPadUp => self.move_focus_back(cols, n),
+                    Button::DPadUp => self.move_focus_back(cols),
                     Button::DPadDown => self.move_focus(cols, n),
-                    Button::South => self.activate(&library, n),
+                    Button::South => self.activate(&visible),
                     Button::East => self.session.handle_input(SessionInput::ExitSession),
                     _ => {}
                 }

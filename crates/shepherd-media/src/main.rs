@@ -1,6 +1,7 @@
 //! Linux entry point for the `shepherd-media` library launcher.
 
 mod cli;
+mod connectivity;
 mod platform;
 mod posters;
 mod ui;
@@ -45,7 +46,10 @@ fn main() -> ExitCode {
     let result = match &cli.command {
         Command::Validate { library } => run_validate(library),
         Command::Play { library, item } => run_play(library, item, cli.no_protocol),
-        Command::Browse { library } => run_browse(library, cli.no_protocol),
+        Command::Browse {
+            library,
+            connectivity_check,
+        } => run_browse(library, cli.no_protocol, connectivity_check.as_deref()),
     };
 
     ExitCode::from(result)
@@ -152,7 +156,7 @@ fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
     EXIT_OK
 }
 
-fn run_browse(library_source: &str, no_protocol: bool) -> u8 {
+fn run_browse(library_source: &str, no_protocol: bool, connectivity_check: Option<&str>) -> u8 {
     let library = match load_library_from_source(library_source) {
         Ok(l) => l,
         Err((code, msg)) => {
@@ -171,12 +175,22 @@ fn run_browse(library_source: &str, no_protocol: bool) -> u8 {
 
     // Option A: queue every remote library item for background download so
     // subsequent plays serve from the local cache.
-    let player: Box<dyn shepherd_media_core::PlayerHandle> = match VideoCache::new() {
-        Some(cache) => {
-            cache.queue_all(&library);
-            Box::new(CachingPlayer::new(inner, cache, &library))
-        }
+    let cache = VideoCache::new();
+    if let Some(ref c) = cache {
+        c.queue_all(&library);
+    }
+    let cache_for_ui = cache.clone();
+    let player: Box<dyn shepherd_media_core::PlayerHandle> = match cache {
+        Some(c) => Box::new(CachingPlayer::new(inner, c, &library)),
         None => inner,
+    };
+
+    // Connectivity check: start as "online" when no check URL is given so
+    // that all items are shown by default. When a URL is given, start as
+    // "offline" (pessimistic) and update within CHECK_TIMEOUT seconds.
+    let online = match connectivity_check {
+        Some(url) => connectivity::spawn_checker(url.to_string()),
+        None => std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
     let emitter = if no_protocol {
@@ -188,7 +202,7 @@ fn run_browse(library_source: &str, no_protocol: bool) -> u8 {
 
     info!("starting browse UI");
     let term = install_signal_handler();
-    match ui::run(session, term) {
+    match ui::run(session, term, online, cache_for_ui) {
         Ok(reason) => match reason {
             ui::ExitCause::User => EXIT_OK,
             ui::ExitCause::Signal => EXIT_SIGNAL,
