@@ -291,7 +291,7 @@ fn build_item(raw: RawItem, parent: &Path, source_path: &Path) -> Result<Item, L
         RawItemKind::Audio => ItemKind::Audio,
     };
 
-    let poster = match raw.poster {
+    let explicit_poster = match raw.poster {
         Some(s) => Some(parse_poster(&raw.id, &s, parent, source_path)?),
         None => None,
     };
@@ -308,6 +308,8 @@ fn build_item(raw: RawItem, parent: &Path, source_path: &Path) -> Result<Item, L
         sources.push(build_source(&raw.id, raw_source, source_path)?);
     }
 
+    let poster = explicit_poster.or_else(|| derive_poster(&sources));
+
     Ok(Item {
         id: raw.id,
         title: raw.title,
@@ -317,6 +319,21 @@ fn build_item(raw: RawItem, parent: &Path, source_path: &Path) -> Result<Item, L
         duration_seconds: raw.duration_seconds,
         sources,
     })
+}
+
+/// Derive a poster for items that omit `poster = "..."` but reference a source
+/// from which one can be inferred. Today: YouTube sources yield the standard
+/// thumbnail URL. Returns `None` if no source supports inference.
+fn derive_poster(sources: &[Source]) -> Option<PosterRef> {
+    for source in sources {
+        if let ClassifiedUri::YouTube(url) = &source.uri
+            && let Some(id) = uri::youtube_video_id(url)
+            && let Some(thumb) = uri::youtube_thumbnail_url(&id)
+        {
+            return Some(PosterRef::Remote(thumb));
+        }
+    }
+    None
 }
 
 fn build_source(item_id: &str, raw: RawSource, source_path: &Path) -> Result<Source, LibraryError> {
@@ -525,6 +542,84 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, LibraryError::Parse { .. }));
+    }
+
+    #[test]
+    fn youtube_source_without_explicit_poster_derives_thumbnail() {
+        let lib = parse(
+            r#"
+                schema_version = 1
+                library_id = "demo"
+                title = "Demo"
+
+                [[items]]
+                id = "yt"
+                title = "Test"
+                kind = "video"
+
+                [[items.sources]]
+                platforms = ["*"]
+                uri = "https://www.youtube.com/watch?v=YE7VzlLtp-4"
+            "#,
+        )
+        .unwrap();
+        match &lib.items[0].poster {
+            Some(PosterRef::Remote(u)) => assert_eq!(
+                u.as_str(),
+                "https://i.ytimg.com/vi/YE7VzlLtp-4/hqdefault.jpg"
+            ),
+            other => panic!("expected derived remote poster, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_poster_overrides_youtube_derivation() {
+        let lib = parse(
+            r#"
+                schema_version = 1
+                library_id = "demo"
+                title = "Demo"
+
+                [[items]]
+                id = "yt"
+                title = "Test"
+                kind = "video"
+                poster = "https://example.com/custom.jpg"
+
+                [[items.sources]]
+                platforms = ["*"]
+                uri = "https://www.youtube.com/watch?v=YE7VzlLtp-4"
+            "#,
+        )
+        .unwrap();
+        match &lib.items[0].poster {
+            Some(PosterRef::Remote(u)) => {
+                assert_eq!(u.as_str(), "https://example.com/custom.jpg");
+            }
+            other => panic!("expected explicit poster to win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_youtube_source_without_poster_yields_none() {
+        let lib = parse(
+            r#"
+                schema_version = 1
+                library_id = "demo"
+                title = "Demo"
+
+                [[items]]
+                id = "local"
+                title = "Test"
+                kind = "video"
+
+                [[items.sources]]
+                platforms = ["*"]
+                uri = "file:///srv/media/a.mp4"
+            "#,
+        )
+        .unwrap();
+        assert!(lib.items[0].poster.is_none());
     }
 
     #[test]

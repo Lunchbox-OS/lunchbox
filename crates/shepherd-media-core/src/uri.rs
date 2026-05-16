@@ -164,6 +164,56 @@ fn classify_http(url: &Url) -> Result<ClassifiedUri, UriError> {
     Ok(ClassifiedUri::Unknown(url.clone()))
 }
 
+/// Extract the YouTube video ID from a YouTube URL, handling the common URL
+/// shapes (`watch?v=ID`, `youtu.be/ID`, `/embed/ID`, `/v/ID`, `/shorts/ID`).
+///
+/// Returns `None` if the host is not a YouTube host, no ID can be located, or
+/// the candidate ID contains characters outside YouTube's `[A-Za-z0-9_-]` set.
+/// The validation prevents an attacker-supplied URL from injecting URL syntax
+/// into the derived thumbnail URL downstream.
+pub fn youtube_video_id(url: &Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    if !YOUTUBE_HOSTS.contains(&host.as_str()) {
+        return None;
+    }
+
+    if let Some((_, v)) = url.query_pairs().find(|(k, _)| k == "v") {
+        let candidate = v.into_owned();
+        if is_valid_youtube_video_id(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    let mut segments = url.path_segments()?.filter(|s| !s.is_empty());
+    let first = segments.next()?;
+    let candidate = if host == "youtu.be" {
+        first.to_string()
+    } else if matches!(first, "embed" | "v" | "shorts") {
+        segments.next()?.to_string()
+    } else {
+        return None;
+    };
+
+    is_valid_youtube_video_id(&candidate).then_some(candidate)
+}
+
+/// Build the standard YouTube thumbnail URL for a video ID. `hqdefault.jpg`
+/// is the highest size guaranteed to exist for every video (480×360);
+/// `maxresdefault.jpg` is sharper but 404s on older or low-resolution uploads.
+pub fn youtube_thumbnail_url(video_id: &str) -> Option<Url> {
+    if !is_valid_youtube_video_id(video_id) {
+        return None;
+    }
+    Url::parse(&format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")).ok()
+}
+
+fn is_valid_youtube_video_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 fn drm_match(host: &str, url: &Url) -> Option<String> {
     if REJECTED_DRM_HOSTS.contains(&host) {
         // Amazon's storefront is huge; keep the rule string specific so the
@@ -243,5 +293,81 @@ mod tests {
     fn amazon_non_prime_path_is_unknown() {
         let result = classify("https://www.amazon.com/dp/B07XYZ").unwrap();
         assert!(matches!(result, ClassifiedUri::Unknown(_)));
+    }
+
+    fn parse(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn youtube_video_id_from_watch_url() {
+        assert_eq!(
+            youtube_video_id(&parse("https://www.youtube.com/watch?v=YE7VzlLtp-4")),
+            Some("YE7VzlLtp-4".to_string())
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_from_watch_with_playlist() {
+        assert_eq!(
+            youtube_video_id(&parse(
+                "https://www.youtube.com/watch?v=YE7VzlLtp-4&list=PLabc"
+            )),
+            Some("YE7VzlLtp-4".to_string())
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_from_short_url() {
+        assert_eq!(
+            youtube_video_id(&parse("https://youtu.be/dQw4w9WgXcQ")),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_from_embed_url() {
+        assert_eq!(
+            youtube_video_id(&parse("https://www.youtube.com/embed/dQw4w9WgXcQ")),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_from_shorts_url() {
+        assert_eq!(
+            youtube_video_id(&parse("https://www.youtube.com/shorts/abc_DEF1234")),
+            Some("abc_DEF1234".to_string())
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_rejects_invalid_chars() {
+        assert_eq!(
+            youtube_video_id(&parse("https://www.youtube.com/watch?v=../etc/passwd")),
+            None
+        );
+    }
+
+    #[test]
+    fn youtube_video_id_returns_none_for_non_youtube_host() {
+        assert_eq!(
+            youtube_video_id(&parse("https://example.com/watch?v=abc")),
+            None
+        );
+    }
+
+    #[test]
+    fn youtube_thumbnail_url_builds_hqdefault() {
+        let thumb = youtube_thumbnail_url("YE7VzlLtp-4").unwrap();
+        assert_eq!(
+            thumb.as_str(),
+            "https://i.ytimg.com/vi/YE7VzlLtp-4/hqdefault.jpg"
+        );
+    }
+
+    #[test]
+    fn youtube_thumbnail_url_rejects_invalid_id() {
+        assert!(youtube_thumbnail_url("../etc/passwd").is_none());
     }
 }

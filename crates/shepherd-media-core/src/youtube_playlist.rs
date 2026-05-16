@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::library::{ClassifiedUri, Item, ItemKind, Library, Platform, PosterRef, Source};
 use crate::schema::SCHEMA_VERSION;
+use crate::uri;
 
 /// Returns `true` if `s` is a YouTube URL that carries a playlist context,
 /// i.e. it has a `list` query parameter.
@@ -91,10 +92,15 @@ fn build_item(entry: &YoutubePlaylistEntry, index: usize) -> Item {
     let url = Url::parse(&video_url)
         .unwrap_or_else(|_| Url::parse("https://www.youtube.com/").expect("fallback URL is valid"));
 
+    // Fall back to the derived `i.ytimg.com/.../hqdefault.jpg` URL when yt-dlp
+    // didn't provide one. `--flat-playlist` mode in particular returns an
+    // empty `thumbnail` field; the real URLs live in a `thumbnails[]` array
+    // the platform binary doesn't currently parse.
     let poster = entry
         .thumbnail_url
         .as_ref()
-        .map(|u| PosterRef::Remote(u.clone()));
+        .map(|u| PosterRef::Remote(u.clone()))
+        .or_else(|| uri::youtube_thumbnail_url(&entry.video_id).map(PosterRef::Remote));
 
     Item {
         id,
@@ -305,6 +311,31 @@ mod tests {
             &lib.items[0].poster,
             Some(PosterRef::Remote(u)) if u == &thumb
         ));
+    }
+
+    #[test]
+    fn builds_library_derives_thumbnail_when_yt_dlp_omits_it() {
+        // `--flat-playlist` returns an empty `thumbnail` field; we should fall
+        // back to deriving the `i.ytimg.com/.../hqdefault.jpg` URL.
+        let entries = vec![YoutubePlaylistEntry {
+            video_id: "YE7VzlLtp-4".to_string(),
+            title: "Test".to_string(),
+            duration_seconds: None,
+            thumbnail_url: None,
+        }];
+        let lib = build_library_from_entries(
+            "https://www.youtube.com/playlist?list=PL1",
+            None,
+            Some("PL1"),
+            &entries,
+        );
+        match &lib.items[0].poster {
+            Some(PosterRef::Remote(u)) => assert_eq!(
+                u.as_str(),
+                "https://i.ytimg.com/vi/YE7VzlLtp-4/hqdefault.jpg"
+            ),
+            other => panic!("expected derived poster, got {other:?}"),
+        }
     }
 
     #[test]
