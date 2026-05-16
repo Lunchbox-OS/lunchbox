@@ -2,6 +2,35 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Video quality preset.  Maps to a yt-dlp format selector used both by the
+/// live player (mpv's `ytdl-format` property) and the video cache downloader.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Quality {
+    /// No height restriction — download the best available quality.
+    Best,
+    /// Up to 1080p (default).
+    #[value(name = "1080p")]
+    Q1080,
+    /// Up to 720p.
+    #[value(name = "720p")]
+    Q720,
+    /// Up to 480p.
+    #[value(name = "480p")]
+    Q480,
+}
+
+impl Quality {
+    /// Returns the yt-dlp `--format` / mpv `ytdl-format` string for this preset.
+    pub fn ytdl_format(self) -> &'static str {
+        match self {
+            Quality::Best => "bestvideo+bestaudio/best",
+            Quality::Q1080 => "bestvideo[height<=?1080]+bestaudio/best[height<=?1080]/best",
+            Quality::Q720 => "bestvideo[height<=?720]+bestaudio/best[height<=?720]/best",
+            Quality::Q480 => "bestvideo[height<=?480]+bestaudio/best[height<=?480]/best",
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "shepherd-media")]
 #[command(about = "shepherd-launcher media-library activity", long_about = None)]
@@ -16,6 +45,10 @@ pub struct Cli {
     /// Suppress the stdout protocol stream. Useful when running by hand.
     #[arg(long, global = true)]
     pub no_protocol: bool,
+
+    /// Maximum video quality for playback and background downloads.
+    #[arg(long, value_enum, default_value = "1080p", global = true)]
+    pub quality: Quality,
 }
 
 #[derive(Debug, Subcommand)]

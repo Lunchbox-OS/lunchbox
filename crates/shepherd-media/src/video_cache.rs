@@ -81,7 +81,7 @@ impl VideoCache {
     /// Construct a `VideoCache`, creating the cache directory and spawning the
     /// background worker thread.  Returns `None` if the cache directory cannot
     /// be determined or created; in that case the caller should skip caching.
-    pub fn new() -> Option<Arc<Self>> {
+    pub fn new(ytdl_format: &str) -> Option<Arc<Self>> {
         let cache_dir = video_cache_dir()?;
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             warn!(
@@ -94,9 +94,10 @@ impl VideoCache {
         let (tx, rx) = mpsc::channel::<DownloadRequest>();
         let dir = cache_dir.clone();
         let max_bytes = max_cache_bytes();
+        let format = ytdl_format.to_string();
         std::thread::Builder::new()
             .name("video-cache-worker".into())
-            .spawn(move || download_worker(dir, rx, max_bytes))
+            .spawn(move || download_worker(dir, rx, max_bytes, format))
             .ok()?;
 
         Some(Arc::new(VideoCache {
@@ -386,7 +387,12 @@ fn evict_to(cache_dir: &Path, target_bytes: u64) {
 // Background download worker
 // ---------------------------------------------------------------------------
 
-fn download_worker(cache_dir: PathBuf, rx: mpsc::Receiver<DownloadRequest>, max_bytes: u64) {
+fn download_worker(
+    cache_dir: PathBuf,
+    rx: mpsc::Receiver<DownloadRequest>,
+    max_bytes: u64,
+    ytdl_format: String,
+) {
     for req in rx {
         if find_cached_file(&cache_dir, &req.item_id).is_some() {
             debug!("video already cached, skipping: {}", req.item_id);
@@ -408,7 +414,9 @@ fn download_worker(cache_dir: PathBuf, rx: mpsc::Receiver<DownloadRequest>, max_
 
         debug!("downloading video: {}", req.item_id);
         let result = match req.kind {
-            DownloadKind::YouTube => download_youtube(&cache_dir, &req.item_id, &req.url),
+            DownloadKind::YouTube => {
+                download_youtube(&cache_dir, &req.item_id, &req.url, &ytdl_format)
+            }
             DownloadKind::Http => download_http(&cache_dir, &req.item_id, &req.url),
         };
 
@@ -425,14 +433,19 @@ fn download_worker(cache_dir: PathBuf, rx: mpsc::Receiver<DownloadRequest>, max_
     }
 }
 
-fn download_youtube(cache_dir: &Path, item_id: &str, url: &str) -> Result<(), String> {
+fn download_youtube(
+    cache_dir: &Path,
+    item_id: &str,
+    url: &str,
+    ytdl_format: &str,
+) -> Result<(), String> {
     let output_template = cache_dir.join(format!("{item_id}.%(ext)s"));
     let status = Command::new("yt-dlp")
         .args([
             "--quiet",
             "--no-warnings",
             "--format",
-            "bestvideo[height<=?1080]+bestaudio/best[height<=?1080]/best",
+            ytdl_format,
             "--output",
         ])
         .arg(&output_template)

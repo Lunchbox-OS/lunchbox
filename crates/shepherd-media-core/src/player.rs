@@ -69,7 +69,7 @@ mod libmpv_backend {
     }
 
     impl LibmpvPlayer {
-        pub fn new() -> Result<Self, PlayerError> {
+        pub fn new(ytdl_format: &str) -> Result<Self, PlayerError> {
             std::fs::write(INPUT_CONF_PATH, INPUT_CONF_CONTENT)
                 .map_err(|e| PlayerError::Backend(format!("failed to write input-conf: {e}")))?;
 
@@ -85,10 +85,7 @@ mod libmpv_backend {
                 init.set_property("keep-open", "no")?;
                 init.set_property("fullscreen", "yes")?;
                 init.set_property("ytdl", "yes")?;
-                init.set_property(
-                    "ytdl-format",
-                    "bestvideo[height<=?1080]+bestaudio/best[height<=?1080]/best",
-                )?;
+                init.set_property("ytdl-format", ytdl_format)?;
                 Ok(())
             })
             .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;

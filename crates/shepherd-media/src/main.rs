@@ -43,13 +43,19 @@ fn main() -> ExitCode {
         )
         .init();
 
+    let ytdl_format = cli.quality.ytdl_format();
     let result = match &cli.command {
         Command::Validate { library } => run_validate(library),
-        Command::Play { library, item } => run_play(library, item, cli.no_protocol),
+        Command::Play { library, item } => run_play(library, item, cli.no_protocol, ytdl_format),
         Command::Browse {
             library,
             connectivity_check,
-        } => run_browse(library, cli.no_protocol, connectivity_check.as_deref()),
+        } => run_browse(
+            library,
+            cli.no_protocol,
+            connectivity_check.as_deref(),
+            ytdl_format,
+        ),
     };
 
     ExitCode::from(result)
@@ -91,7 +97,7 @@ fn run_validate(library_source: &str) -> u8 {
     }
 }
 
-fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
+fn run_play(library_source: &str, item_id: &str, no_protocol: bool, ytdl_format: &str) -> u8 {
     let library = match load_library_from_source(library_source) {
         Ok(l) => l,
         Err((code, msg)) => {
@@ -112,7 +118,7 @@ fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
         return EXIT_INVOCATION;
     }
 
-    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new() {
+    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new(ytdl_format) {
         Ok(p) => Box::new(p),
         Err(e) => {
             error!("failed to construct libmpv player: {e}");
@@ -121,7 +127,7 @@ fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
     };
 
     // Cache lookup only — no queue_all for single-shot play.
-    let player: Box<dyn shepherd_media_core::PlayerHandle> = match VideoCache::new() {
+    let player: Box<dyn shepherd_media_core::PlayerHandle> = match VideoCache::new(ytdl_format) {
         Some(cache) => Box::new(CachingPlayer::new(inner, cache, &library)),
         None => inner,
     };
@@ -156,7 +162,12 @@ fn run_play(library_source: &str, item_id: &str, no_protocol: bool) -> u8 {
     EXIT_OK
 }
 
-fn run_browse(library_source: &str, no_protocol: bool, connectivity_check: Option<&str>) -> u8 {
+fn run_browse(
+    library_source: &str,
+    no_protocol: bool,
+    connectivity_check: Option<&str>,
+    ytdl_format: &str,
+) -> u8 {
     let library = match load_library_from_source(library_source) {
         Ok(l) => l,
         Err((code, msg)) => {
@@ -165,7 +176,7 @@ fn run_browse(library_source: &str, no_protocol: bool, connectivity_check: Optio
         }
     };
 
-    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new() {
+    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new(ytdl_format) {
         Ok(p) => Box::new(p),
         Err(e) => {
             error!("failed to construct libmpv player: {e}");
@@ -175,7 +186,7 @@ fn run_browse(library_source: &str, no_protocol: bool, connectivity_check: Optio
 
     // Option A: queue every remote library item for background download so
     // subsequent plays serve from the local cache.
-    let cache = VideoCache::new();
+    let cache = VideoCache::new(ytdl_format);
     if let Some(ref c) = cache {
         c.queue_all(&library);
     }
