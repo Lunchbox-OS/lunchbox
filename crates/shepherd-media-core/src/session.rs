@@ -5,6 +5,8 @@
 //! of `shepherd-media-core` that has any opinion about the order in which
 //! things happen at runtime.
 
+use std::ffi::{CStr, c_void};
+
 use crate::library::{Item, Library, Source};
 use crate::player::{PlayerError, PlayerEvent, PlayerHandle};
 use crate::protocol::{ExitReason, ProtocolEmitter, ProtocolEvent, ReturnReason, UriClass};
@@ -90,6 +92,64 @@ impl Session {
     /// Find an item by id. The UI uses this to look up the user's selection.
     pub fn item_by_id(&self, id: &str) -> Option<&Item> {
         self.library.items.iter().find(|i| i.id == id)
+    }
+
+    // -----------------------------------------------------------------
+    // Transport delegation. These are thin pass-throughs to the player
+    // handle so the playback UI doesn't need to hold a separate borrow
+    // alongside the session.
+    // -----------------------------------------------------------------
+
+    pub fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+        self.player.set_paused(paused)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.player.is_paused()
+    }
+
+    pub fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+        self.player.seek_relative(delta_seconds)
+    }
+
+    pub fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+        self.player.seek_absolute(seconds)
+    }
+
+    pub fn position(&self) -> Option<f64> {
+        self.player.position()
+    }
+
+    pub fn duration(&self) -> Option<f64> {
+        self.player.duration()
+    }
+
+    pub fn set_volume(&mut self, percent: f64) -> Result<(), PlayerError> {
+        self.player.set_volume(percent)
+    }
+
+    pub fn volume(&self) -> Option<f64> {
+        self.player.volume()
+    }
+
+    // -----------------------------------------------------------------
+    // Embedded render hooks. Delegated to the player; see PlayerHandle
+    // docs for ordering requirements.
+    // -----------------------------------------------------------------
+
+    pub fn bind_gl(
+        &mut self,
+        get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+    ) -> Result<(), PlayerError> {
+        self.player.bind_gl(get_proc_address)
+    }
+
+    pub fn render(&self, fbo: i32, width: i32, height: i32) -> Result<(), PlayerError> {
+        self.player.render(fbo, width, height)
+    }
+
+    pub fn set_redraw_callback(&mut self, cb: Box<dyn Fn() + Send + Sync + 'static>) {
+        self.player.set_redraw_callback(cb);
     }
 
     pub fn handle_input(&mut self, input: SessionInput) {

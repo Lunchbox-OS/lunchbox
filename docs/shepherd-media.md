@@ -238,12 +238,37 @@ Once shepherdd grows protocol-reader support, the browse activity can opt
 into playback-only time accounting. Until then, browse-mode time counts as
 "in the activity" for as long as the process runs.
 
+## Playback UI
+
+`shepherd-media` embeds mpv into its egui shell rather than letting mpv
+spawn its own window. The same fullscreen surface hosts the poster grid
+in browse mode and the video + a touch- and controller-friendly control
+overlay during playback.
+
+Controls auto-hide after ~3 seconds of input silence. Any pointer
+activity (mouse or touch), key press, or gamepad input summons them
+back. While paused, the overlay stays visible.
+
+| Action            | Touch / Mouse                  | Keyboard            | Gamepad                         |
+|-------------------|--------------------------------|---------------------|---------------------------------|
+| Play / Pause      | Tap the play button            | `Space`, `K`        | A (south)                       |
+| Back to grid      | Tap the back button            | `Esc`, `Backspace`  | B (east), Start, Select         |
+| Skip −10 seconds  | Tap the « 10s button           | `←`, `J`            | D-pad left, LT                  |
+| Skip +10 seconds  | Tap the 10s » button           | `→`, `L`            | D-pad right, RT                 |
+| Scrub             | Drag the scrubber              | —                   | —                               |
+
+Volume is intentionally not bound in the playback overlay — `shepherd-hud`
+already exposes global volume controls that work the same everywhere.
+
+In direct-play mode the same UI opens straight into playback and the
+process exits once the item finishes; the grid is never shown.
+
 ## Non-features
 
 These are deliberately not implemented:
 
 - Playlists, queues, autoplay, "watch next", recommendations, history.
 - Library-file hot-reload. Edit the file, restart the activity.
-- Mouse support in the browse UI (kiosk inputs are keyboard and gamepad).
 - Subscription-service DRM playback.
-- Any animated/celebratory UI affordances.
+- Any animated/celebratory UI affordances (the touch overlay is plain;
+  the scrubber doesn't bounce, no on-completion confetti).

@@ -23,6 +23,7 @@
 //! Cache files live in `$XDG_CACHE_HOME/shepherd/media/videos/`.
 
 use std::collections::HashMap;
+use std::ffi::{CStr, c_void};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, mpsc};
@@ -237,6 +238,53 @@ impl PlayerHandle for CachingPlayer {
             self.cache.queue_after_play(item_id, source);
         }
         Some(event)
+    }
+
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+        self.inner.set_paused(paused)
+    }
+
+    fn is_paused(&self) -> bool {
+        self.inner.is_paused()
+    }
+
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+        self.inner.seek_relative(delta_seconds)
+    }
+
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+        self.inner.seek_absolute(seconds)
+    }
+
+    fn position(&self) -> Option<f64> {
+        self.inner.position()
+    }
+
+    fn duration(&self) -> Option<f64> {
+        self.inner.duration()
+    }
+
+    fn set_volume(&mut self, percent: f64) -> Result<(), PlayerError> {
+        self.inner.set_volume(percent)
+    }
+
+    fn volume(&self) -> Option<f64> {
+        self.inner.volume()
+    }
+
+    fn bind_gl(
+        &mut self,
+        get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+    ) -> Result<(), PlayerError> {
+        self.inner.bind_gl(get_proc_address)
+    }
+
+    fn render(&self, fbo: i32, width: i32, height: i32) -> Result<(), PlayerError> {
+        self.inner.render(fbo, width, height)
+    }
+
+    fn set_redraw_callback(&mut self, cb: Box<dyn Fn() + Send + Sync + 'static>) {
+        self.inner.set_redraw_callback(cb);
     }
 }
 

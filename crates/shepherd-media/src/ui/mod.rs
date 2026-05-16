@@ -1,6 +1,8 @@
-//! egui-based browse UI.
+//! egui-based UI: poster grid in `Browsing` state, embedded mpv player
+//! with a touch- and controller-friendly overlay in `Playing` state.
 
 mod grid;
+mod playback;
 mod theme;
 
 use std::sync::Arc;
@@ -23,11 +25,20 @@ pub enum ExitCause {
     Signal,
 }
 
+/// Where the session starts when the UI is launched. `Browsing` is the
+/// default (browse-mode activity); `Playing(item_id)` skips the grid for
+/// direct-play activities.
+pub enum StartMode {
+    Browsing,
+    Playing(String),
+}
+
 pub fn run(
-    mut session: Session,
+    session: Session,
     term: Arc<AtomicBool>,
     online: Arc<AtomicBool>,
     cache: Option<Arc<VideoCache>>,
+    start_mode: StartMode,
 ) -> Result<ExitCause, eframe::Error> {
     let posters = posters::prefetch(session.library());
 
@@ -39,8 +50,6 @@ pub fn run(
         ..Default::default()
     };
 
-    session.announce_ready();
-
     let signaled = Arc::new(AtomicBool::new(false));
     let signaled_clone = signaled.clone();
 
@@ -50,7 +59,46 @@ pub fn run(
         Box::new(move |cc| {
             theme::install(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(BrowseApp {
+
+            let mut session = session;
+            session.announce_ready();
+
+            // Bind mpv's render context to the host GL context. This must
+            // happen inside the eframe creation closure because that's
+            // where `get_proc_address` is available.
+            if let Some(get_proc) = cc.get_proc_address {
+                if let Err(e) = session.bind_gl(get_proc) {
+                    tracing::error!("bind_gl failed: {e}");
+                }
+            } else {
+                tracing::error!("eframe creation context did not expose get_proc_address");
+            }
+
+            // Mpv's wakeup fires on a background thread; flip an atomic
+            // and ask egui to repaint so we render the new frame.
+            let needs_render = Arc::new(AtomicBool::new(false));
+            let needs_render_for_cb = needs_render.clone();
+            let egui_ctx = cc.egui_ctx.clone();
+            session.set_redraw_callback(Box::new(move || {
+                needs_render_for_cb.store(true, Ordering::Relaxed);
+                egui_ctx.request_repaint();
+            }));
+
+            let gl = cc
+                .gl
+                .as_ref()
+                .expect("eframe must be configured with the glow backend")
+                .clone();
+            let playback = playback::PlaybackView::new(gl, needs_render);
+
+            // For direct-play activities, dispatch the initial select
+            // before the first frame so the UI opens in the playback
+            // view rather than flashing the grid.
+            if let StartMode::Playing(ref item_id) = start_mode {
+                session.handle_input(SessionInput::SelectItem(item_id.clone()));
+            }
+
+            Ok(Box::new(App {
                 session,
                 posters,
                 gilrs: gilrs::Gilrs::new().ok(),
@@ -60,6 +108,9 @@ pub fn run(
                 signaled: signaled_clone,
                 online,
                 cache,
+                playback,
+                exit_after_playback: matches!(start_mode, StartMode::Playing(_)),
+                playing_item: None,
             }))
         }),
     )?;
@@ -71,7 +122,7 @@ pub fn run(
     })
 }
 
-struct BrowseApp {
+struct App {
     session: Session,
     posters: PosterCache,
     gilrs: Option<gilrs::Gilrs>,
@@ -85,14 +136,19 @@ struct BrowseApp {
     online: Arc<AtomicBool>,
     /// Video cache used to determine which remote items are available offline.
     cache: Option<Arc<VideoCache>>,
+    playback: playback::PlaybackView,
+    /// When `true` (direct-play mode), exit the app after playback ends
+    /// rather than returning to the poster grid.
+    exit_after_playback: bool,
+    /// The item id currently being played, captured from the session state.
+    /// Used to fire `PlaybackView::note_item_started` exactly once per
+    /// playback rather than every frame (which would keep `last_input_at`
+    /// fresh and prevent the HUD from ever auto-hiding).
+    playing_item: Option<String>,
 }
 
-impl BrowseApp {
+impl App {
     /// Build the list of items to display for the current frame.
-    ///
-    /// When online, every item with a source for this platform is shown.
-    /// When offline, only items that can be played without network access are
-    /// shown: local-filesystem sources and previously cached remote items.
     fn visible_items(&self) -> Vec<Item> {
         let info = platform::current();
         let online = self.online.load(Ordering::Relaxed);
@@ -107,7 +163,6 @@ impl BrowseApp {
                 if online {
                     return true;
                 }
-                // Offline: only show items we can play without the network.
                 match &source.uri {
                     ClassifiedUri::Local(_) => true,
                     _ => self
@@ -120,43 +175,76 @@ impl BrowseApp {
             .cloned()
             .collect()
     }
+
+    fn collect_gamepad_events(&mut self) -> Vec<gilrs::EventType> {
+        let Some(gilrs) = self.gilrs.as_mut() else {
+            return Vec::new();
+        };
+        let mut ev = Vec::new();
+        while let Some(event) = gilrs.next_event() {
+            ev.push(event.event);
+        }
+        ev
+    }
 }
 
-impl eframe::App for BrowseApp {
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Drain SIGTERM.
         if self.term.swap(false, Ordering::SeqCst) {
             self.session.handle_input(SessionInput::SignalTerminate);
             self.signaled.store(true, Ordering::SeqCst);
         }
 
         self.session.tick();
-        self.poll_gamepad();
 
         if self.session.is_exiting() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
-        // While playback is active, hide the UI and let mpv own the screen.
+        let gamepad_events = self.collect_gamepad_events();
+
+        // Notice transitions into Playing so the playback overlay can
+        // grab the current item's title for its header. Fire only on
+        // transition (not every frame); otherwise the HUD's
+        // last_input_at would be reset every frame and the controls
+        // would never auto-hide.
+        let now_playing = match self.session.state() {
+            SessionState::Playing { item_id } => Some(item_id.clone()),
+            _ => None,
+        };
+        if now_playing != self.playing_item {
+            if let Some(ref id) = now_playing
+                && let Some(item) = self.session.item_by_id(id)
+            {
+                self.playback.note_item_started(&item.title);
+            }
+            self.playing_item = now_playing;
+        }
+
         if matches!(
             self.session.state(),
             SessionState::Playing { .. } | SessionState::Stopping { .. }
         ) {
-            egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(egui::Color32::BLACK))
-                .show(ctx, |_| {});
-            ctx.request_repaint_after(Duration::from_millis(100));
+            self.playback
+                .handle_input(ctx, &mut self.session, &gamepad_events);
+            self.playback.draw(ctx, frame, &mut self.session);
+            return;
+        }
+
+        // Browsing state: direct-play mode exits when the user lands
+        // back here (after the single requested item finishes).
+        if self.exit_after_playback {
+            self.session.handle_input(SessionInput::ExitSession);
             return;
         }
 
         let visible = self.visible_items();
-        // Clamp focus to the visible set (it may shrink when going offline).
         if !visible.is_empty() {
             self.focused = self.focused.min(visible.len() - 1);
         }
 
-        self.handle_keyboard(ctx, &visible);
+        self.handle_browse_input(ctx, &visible, &gamepad_events);
         grid::draw(
             ctx,
             &mut self.session,
@@ -167,18 +255,22 @@ impl eframe::App for BrowseApp {
         );
 
         ctx.request_repaint_after(Duration::from_millis(100));
-        let _ = frame;
     }
 }
 
-impl BrowseApp {
-    fn handle_keyboard(&mut self, ctx: &egui::Context, visible: &[Item]) {
+impl App {
+    fn handle_browse_input(
+        &mut self,
+        ctx: &egui::Context,
+        visible: &[Item],
+        gamepad_events: &[gilrs::EventType],
+    ) {
         let n = visible.len();
         if n == 0 {
             return;
         }
-
         let cols = self.columns.max(1);
+
         ctx.input(|input| {
             if input.key_pressed(egui::Key::ArrowRight) {
                 self.move_focus(1, n);
@@ -199,6 +291,21 @@ impl BrowseApp {
                 self.session.handle_input(SessionInput::ExitSession);
             }
         });
+
+        for ev in gamepad_events {
+            use gilrs::{Button, EventType};
+            if let EventType::ButtonPressed(btn, _) = ev {
+                match btn {
+                    Button::DPadLeft => self.move_focus_back(1),
+                    Button::DPadRight => self.move_focus(1, n),
+                    Button::DPadUp => self.move_focus_back(cols),
+                    Button::DPadDown => self.move_focus(cols, n),
+                    Button::South => self.activate(visible),
+                    Button::East => self.session.handle_input(SessionInput::ExitSession),
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn move_focus(&mut self, step: usize, len: usize) {
@@ -219,40 +326,5 @@ impl BrowseApp {
         }
         self.session
             .handle_input(SessionInput::SelectItem(item.id.clone()));
-    }
-
-    fn poll_gamepad(&mut self) {
-        // Collect events inside a block so the mutable borrow on self.gilrs
-        // ends before we call self.visible_items().
-        let events: Vec<gilrs::EventType> = {
-            let Some(gilrs) = self.gilrs.as_mut() else {
-                return;
-            };
-            let mut ev = Vec::new();
-            while let Some(event) = gilrs.next_event() {
-                ev.push(event.event);
-            }
-            ev
-        };
-        if events.is_empty() {
-            return;
-        }
-        let visible = self.visible_items();
-        let n = visible.len();
-        let cols = self.columns.max(1);
-        for ev in events {
-            use gilrs::{Button, EventType};
-            if let EventType::ButtonPressed(btn, _) = ev {
-                match btn {
-                    Button::DPadLeft => self.move_focus_back(1),
-                    Button::DPadRight => self.move_focus(1, n),
-                    Button::DPadUp => self.move_focus_back(cols),
-                    Button::DPadDown => self.move_focus(cols, n),
-                    Button::South => self.activate(&visible),
-                    Button::East => self.session.handle_input(SessionInput::ExitSession),
-                    _ => {}
-                }
-            }
-        }
     }
 }
