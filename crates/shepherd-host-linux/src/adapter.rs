@@ -1,7 +1,7 @@
 //! Linux host adapter implementation
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode};
+use shepherd_api::{EntryKind, InputCompatMode, WindowAction, WindowInfo};
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
     HostSessionHandle, SpawnOptions, StopMode,
@@ -18,7 +18,7 @@ use crate::process::{
     ManagedProcess, find_steam_game_pids, init, kill_by_command, kill_flatpak_cgroup,
     kill_snap_cgroup, kill_steam_game_processes,
 };
-use crate::sidecar::{spawn_touch_bridge, terminate_sidecar};
+use crate::sidecar::{GamepadPreset, spawn_gamepad_bridge, spawn_touch_bridge, terminate_sidecar};
 
 /// Expand `~` at the beginning of a path to the user's home directory
 fn expand_tilde(path: &str) -> String {
@@ -380,13 +380,25 @@ impl HostAdapter for LinuxHost {
 
         // Spawn any input-compat sidecars before the activity. We log
         // failures but don't propagate them — the activity should still
-        // launch even if (e.g.) no touchscreen is present.
+        // launch even if (e.g.) no touchscreen or gamepad is present.
         let mut session_sidecars: Vec<Child> = Vec::new();
-        if matches!(options.input_compat, Some(InputCompatMode::TouchToMouse)) {
-            match spawn_touch_bridge() {
-                Ok(child) => session_sidecars.push(child),
-                Err(e) => {
-                    warn!(error = %e, "Failed to spawn touch-to-mouse bridge; continuing without it")
+        for mode in &options.input_compat {
+            match mode {
+                InputCompatMode::TouchToMouse => match spawn_touch_bridge() {
+                    Ok(child) => session_sidecars.push(child),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to spawn touch-to-mouse bridge; continuing without it")
+                    }
+                },
+                InputCompatMode::GamepadProductivity | InputCompatMode::GamepadGpd => {
+                    let preset =
+                        GamepadPreset::from_mode(*mode).expect("gamepad mode maps to a preset");
+                    match spawn_gamepad_bridge(preset, &options.input_compat_options) {
+                        Ok(child) => session_sidecars.push(child),
+                        Err(e) => {
+                            warn!(error = %e, preset = preset.as_cli(), "Failed to spawn gamepad bridge; continuing without it")
+                        }
+                    }
                 }
             }
         }
@@ -622,6 +634,14 @@ impl HostAdapter for LinuxHost {
             Ok(_) => Ok(()),
             Err(e) => Err(HostError::Internal(format!("swaymsg exit failed: {e}"))),
         }
+    }
+
+    async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
+        crate::sway::list_windows().await
+    }
+
+    async fn act_on_window(&self, window_id: u64, action: WindowAction) -> HostResult<()> {
+        crate::sway::act_on_window(window_id, action).await
     }
 
     fn subscribe(&self) -> mpsc::UnboundedReceiver<HostEvent> {

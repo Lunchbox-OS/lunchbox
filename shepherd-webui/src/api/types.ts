@@ -147,3 +147,19 @@ export interface ServiceStateSnapshot {
   entry_count: number;
   entries: EntryView[];
 }
+
+export interface WindowInfo {
+  id: number;
+  name: string | null;
+  app_id: string | null;
+  window_class: string | null;
+  pid: number | null;
+  workspace: string | null;
+  in_scratchpad: boolean;
+  visible: boolean;
+  focused: boolean;
+}
+
+export interface WindowsResponse {
+  windows: WindowInfo[];
+}

@@ -17,18 +17,21 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import AppsIcon from "@mui/icons-material/Apps";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import SettingsIcon from "@mui/icons-material/Settings";
+import BugReportIcon from "@mui/icons-material/BugReport";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EntriesPage } from "./pages/EntriesPage";
 import { UsagePage } from "./pages/UsagePage";
 import { AdminPage } from "./pages/AdminPage";
+import { WindowsPage } from "./pages/WindowsPage";
 
-type Page = "dashboard" | "entries" | "usage" | "admin";
+type Page = "dashboard" | "entries" | "usage" | "admin" | "windows";
 
 const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [
   { id: "dashboard", label: "Now", Icon: PlayArrowIcon },
   { id: "entries", label: "Activities", Icon: AppsIcon },
   { id: "usage", label: "Usage", Icon: BarChartIcon },
   { id: "admin", label: "Admin", Icon: SettingsIcon },
+  { id: "windows", label: "Windows", Icon: BugReportIcon },
 ];
 
 const DRAWER_WIDTH = 200;
@@ -44,6 +47,7 @@ export function App() {
       {page === "entries" && <EntriesPage />}
       {page === "usage" && <UsagePage />}
       {page === "admin" && <AdminPage />}
+      {page === "windows" && <WindowsPage />}
     </>
   );
 

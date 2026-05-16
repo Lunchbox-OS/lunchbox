@@ -247,8 +247,9 @@ end = "20:00"
 # don't process Wayland touch events but otherwise work great on a
 # touchscreen. Setting `input_compat = "touch_to_mouse"` runs a sidecar
 # that grabs touchscreens and synthesizes mouse events for the duration of
-# the activity. Requires the user running shepherdd to be in the `input`
-# group; see docs/INSTALL.md.
+# the activity. `input_compat` also accepts a list, so touch and gamepad
+# bridges can be stacked on a handheld with both. Requires the user
+# running shepherdd to be in the `input` group; see docs/INSTALL.md.
 # https://store.steampowered.com/app/22000/World_of_Goo/
 [[entries]]
 id = "steam-world-of-goo"
@@ -261,6 +262,27 @@ app_id = 22000
 
 [entries.availability]
 always = true
+
+# Example of stacking touch + gamepad compatibility on the same activity
+# (useful on a gaming handheld). The `gamepad_productivity` preset is best
+# for non-first-person / point-and-click apps; `gamepad_gpd` is the GPD-style
+# FPS mapping (left stick = WASD, right stick = mouse). The
+# `[entries.input_compat_options]` block tunes the gamepad sidecar; all
+# fields are optional and the sidecar applies sensible defaults if absent.
+#
+# [[entries]]
+# id = "example-handheld"
+# label = "Example handheld activity"
+# input_compat = ["touch_to_mouse", "gamepad_productivity"]
+#
+# [entries.input_compat_options]
+# gamepad_deadzone = 0.15        # 0..1 fraction of full stick deflection
+# gamepad_mouse_speed = 800.0    # pixels/sec at full deflection
+# gamepad_scroll_speed = 10.0    # wheel notches/sec at full deflection
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/example"
 
 ## === Flatpak-based applications ===
 # Flatpak entries use the "flatpak" type for proper process management.

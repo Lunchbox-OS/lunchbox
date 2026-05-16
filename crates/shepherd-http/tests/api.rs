@@ -121,7 +121,8 @@ fn test_policy() -> Policy {
             disabled: false,
             disabled_reason: None,
             internet: Default::default(),
-            input_compat: None,
+            input_compat: vec![],
+            input_compat_options: Default::default(),
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
@@ -671,7 +672,8 @@ async fn overrides_enable_entry_outside_time_window() {
             disabled: false,
             disabled_reason: None,
             internet: Default::default(),
-            input_compat: None,
+            input_compat: vec![],
+            input_compat_options: Default::default(),
         }],
         default_warnings: vec![],
         default_max_run: None,
@@ -928,6 +930,33 @@ async fn config_reload_invalid_file_returns_422() {
     let (status, body) = send(&app, req_post("/api/v1/config/reload")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"], "config_error");
+}
+
+// ---------------------------------------------------------------------------
+// Debug
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn debug_windows_unsupported_returns_500() {
+    // MockHost does not implement list_windows, so the default trait impl
+    // returns HostError::Internal — surfaced as a 500 with a JSON error body.
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = send(&app, req_get("/api/v1/debug/windows")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"], "internal_error");
+}
+
+#[tokio::test]
+async fn debug_window_actions_unsupported_return_500() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    for path in ["close", "hide", "show"] {
+        let uri = format!("/api/v1/debug/windows/42/{path}");
+        let (status, body) = send(&app, req_post(&uri)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert_eq!(body["error"], "internal_error", "{path}");
+    }
 }
 
 #[tokio::test]

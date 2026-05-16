@@ -1,7 +1,7 @@
 //! Host adapter traits
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode};
+use shepherd_api::{EntryKind, InputCompatMode, InputCompatOptions, WindowAction, WindowInfo};
 use shepherd_util::SessionId;
 use std::time::Duration;
 use thiserror::Error;
@@ -71,9 +71,16 @@ pub struct SpawnOptions {
     /// Request foreground focus (if supported)
     pub foreground: bool,
 
-    /// Optional input compatibility mode (e.g., touch-to-mouse). The host
-    /// adapter is responsible for any sidecar processes this implies.
-    pub input_compat: Option<InputCompatMode>,
+    /// Input compatibility modes to apply (e.g., touch-to-mouse,
+    /// gamepad-to-mouse+keyboard). Empty = none. The host adapter is
+    /// responsible for any sidecar processes this implies and for spawning
+    /// at most one sidecar per mode.
+    pub input_compat: Vec<InputCompatMode>,
+
+    /// Per-activity tunables passed through to the sidecars (deadzones,
+    /// speeds, etc.). Sidecars use built-in defaults for any field left
+    /// `None`.
+    pub input_compat_options: InputCompatOptions,
 }
 
 /// Events from the host adapter
@@ -127,6 +134,19 @@ pub trait HostAdapter: Send + Sync {
 
     /// Log out the current user session (e.g., exit the Sway compositor session)
     async fn logout(&self) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
+    /// Optional: list the windows the compositor is aware of, including any
+    /// that have been moved to the scratchpad. Used by the management UI for
+    /// debugging the Sway tree.
+    async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
+    /// Optional: perform a debug action (close/hide/show) on a window
+    /// identified by the compositor id reported by [`list_windows`].
+    async fn act_on_window(&self, _window_id: u64, _action: WindowAction) -> HostResult<()> {
         Err(HostError::Internal("Not supported".into()))
     }
 

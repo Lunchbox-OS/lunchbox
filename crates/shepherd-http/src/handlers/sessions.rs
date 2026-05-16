@@ -71,7 +71,9 @@ pub async fn launch(
                 let eng = state.engine.lock().await;
                 let entry = eng.policy().get_entry(&entry_id);
                 let kind = entry.map(|e| e.kind.clone());
-                let input_compat = entry.and_then(|e| e.input_compat);
+                let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
+                let input_compat_options =
+                    entry.map(|e| e.input_compat_options).unwrap_or_default();
                 let opts = if eng.policy().service.capture_child_output {
                     let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
                     let filename = format!(
@@ -84,11 +86,13 @@ pub async fn launch(
                         capture_stderr: true,
                         log_path: Some(eng.policy().service.child_log_dir.join(filename)),
                         input_compat,
+                        input_compat_options,
                         ..Default::default()
                     }
                 } else {
                     SpawnOptions {
                         input_compat,
+                        input_compat_options,
                         ..Default::default()
                     }
                 };

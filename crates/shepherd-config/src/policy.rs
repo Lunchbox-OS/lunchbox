@@ -6,11 +6,13 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawConfig, RawEntry, RawEntryKind, RawInputCompat, RawInternetConfig, RawManagementApiConfig,
-    RawServiceConfig, RawVolumeConfig, RawWarningThreshold,
+    RawConfig, RawEntry, RawEntryKind, RawInputCompat, RawInputCompatOptions, RawInternetConfig,
+    RawManagementApiConfig, RawServiceConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_time};
-use shepherd_api::{EntryKind, InputCompatMode, WarningSeverity, WarningThreshold};
+use shepherd_api::{
+    EntryKind, InputCompatMode, InputCompatOptions, WarningSeverity, WarningThreshold,
+};
 use shepherd_util::{
     DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
     socket_path_without_env,
@@ -189,7 +191,10 @@ pub struct Entry {
     pub disabled: bool,
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
-    pub input_compat: Option<InputCompatMode>,
+    /// Input compatibility modes — orthogonal sidecars. Deduplicated and
+    /// validated (no conflicting gamepad presets) by `Entry::from_raw`.
+    pub input_compat: Vec<InputCompatMode>,
+    pub input_compat_options: InputCompatOptions,
 }
 
 impl Entry {
@@ -218,7 +223,13 @@ impl Entry {
             .unwrap_or_else(|| default_warnings.to_vec());
         let volume = raw.volume.as_ref().map(convert_volume_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
-        let input_compat = raw.input_compat.map(convert_input_compat);
+        let input_compat =
+            convert_input_compat_list(&raw.input_compat, &EntryId::new(raw.id.clone()));
+        let input_compat_options = raw
+            .input_compat_options
+            .as_ref()
+            .map(convert_input_compat_options)
+            .unwrap_or_default();
 
         Self {
             id: EntryId::new(raw.id),
@@ -233,6 +244,7 @@ impl Entry {
             disabled_reason: raw.disabled_reason,
             internet,
             input_compat,
+            input_compat_options,
         }
     }
 }
@@ -384,6 +396,42 @@ fn convert_internet_config(raw: Option<&RawInternetConfig>) -> InternetConfig {
 fn convert_input_compat(raw: RawInputCompat) -> InputCompatMode {
     match raw {
         RawInputCompat::TouchToMouse => InputCompatMode::TouchToMouse,
+        RawInputCompat::GamepadProductivity => InputCompatMode::GamepadProductivity,
+        RawInputCompat::GamepadGpd => InputCompatMode::GamepadGpd,
+    }
+}
+
+/// Convert and validate a list of input-compat modes. Duplicates are dropped;
+/// conflicting gamepad presets log a warning and the first one wins. This
+/// keeps invalid configs from silently launching two competing sidecars.
+fn convert_input_compat_list(raw: &[RawInputCompat], entry_id: &EntryId) -> Vec<InputCompatMode> {
+    let mut out: Vec<InputCompatMode> = Vec::new();
+    let mut have_gamepad = false;
+    for r in raw {
+        let mode = convert_input_compat(*r);
+        if mode.is_gamepad() {
+            if have_gamepad {
+                tracing::warn!(
+                    entry = %entry_id.as_str(),
+                    "Multiple gamepad input_compat presets configured; ignoring extras",
+                );
+                continue;
+            }
+            have_gamepad = true;
+        }
+        if out.contains(&mode) {
+            continue;
+        }
+        out.push(mode);
+    }
+    out
+}
+
+fn convert_input_compat_options(raw: &RawInputCompatOptions) -> InputCompatOptions {
+    InputCompatOptions {
+        gamepad_deadzone: raw.gamepad_deadzone,
+        gamepad_mouse_speed: raw.gamepad_mouse_speed,
+        gamepad_scroll_speed: raw.gamepad_scroll_speed,
     }
 }
 
@@ -481,6 +529,28 @@ mod tests {
 
         let dt = shepherd_util::now();
         assert!(policy.is_available(&dt));
+    }
+
+    #[test]
+    fn input_compat_dedups_and_resolves_conflicts() {
+        let id = EntryId::new("e");
+        // Duplicate touch → one entry. Both gamepad presets → only first kept.
+        let out = convert_input_compat_list(
+            &[
+                RawInputCompat::TouchToMouse,
+                RawInputCompat::TouchToMouse,
+                RawInputCompat::GamepadProductivity,
+                RawInputCompat::GamepadGpd,
+            ],
+            &id,
+        );
+        assert_eq!(
+            out,
+            vec![
+                InputCompatMode::TouchToMouse,
+                InputCompatMode::GamepadProductivity,
+            ]
+        );
     }
 
     #[test]
