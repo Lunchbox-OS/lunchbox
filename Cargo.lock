@@ -3791,6 +3791,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shepherd-media-core",
+ "shepherd-util",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",

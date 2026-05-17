@@ -7,12 +7,13 @@ mod theme;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use shepherd_media_core::{
     ClassifiedUri, Item, Session, SessionInput, SessionState, resolve_source,
 };
+use shepherd_util::gamepad_nav::{NavDir, StickNav};
 
 use crate::platform;
 use crate::posters::{self, PosterCache};
@@ -112,6 +113,7 @@ pub fn run(
                 playback,
                 exit_after_playback: matches!(start_mode, StartMode::Playing(_)),
                 playing_item: None,
+                stick_nav: StickNav::default(),
             }))
         }),
     )?;
@@ -147,6 +149,8 @@ struct App {
     /// playback rather than every frame (which would keep `last_input_at`
     /// fresh and prevent the HUD from ever auto-hiding).
     playing_item: Option<String>,
+    /// Analog left-stick navigation state for the browse grid.
+    stick_nav: StickNav,
 }
 
 impl App {
@@ -311,6 +315,37 @@ impl App {
                 }
             }
         }
+
+        // Left stick: same focus moves as the dpad, with auto-repeat while
+        // held. Request a repaint while the stick is past the deadzone so
+        // we keep ticking even when nothing else changes (the default
+        // 100ms idle repaint would still work, but the faster cadence
+        // matches the repeat interval).
+        if let Some((sx, sy)) = self.read_left_stick() {
+            let dir = self.stick_nav.tick(sx, sy, Instant::now());
+            if self.stick_nav.is_active() {
+                ctx.request_repaint_after(StickNav::REPEAT_INTERVAL);
+            }
+            if let Some(dir) = dir {
+                match dir {
+                    NavDir::Up => self.move_focus_back(cols),
+                    NavDir::Down => self.move_focus(cols, n),
+                    NavDir::Left => self.move_focus_back(1),
+                    NavDir::Right => self.move_focus(1, n),
+                }
+            }
+        }
+    }
+
+    /// Snapshot the connected gamepad's left stick. `None` if no gamepad is
+    /// connected or gilrs isn't initialized.
+    fn read_left_stick(&self) -> Option<(f32, f32)> {
+        let gilrs = self.gilrs.as_ref()?;
+        let (_id, gp) = gilrs.gamepads().next()?;
+        Some((
+            gp.value(gilrs::Axis::LeftStickX),
+            gp.value(gilrs::Axis::LeftStickY),
+        ))
     }
 
     fn move_focus(&mut self, step: usize, len: usize) {
