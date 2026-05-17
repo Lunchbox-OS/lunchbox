@@ -28,6 +28,9 @@ libgirepository1.0-dev
 # Layer shell for HUD overlay
 libgtk4-layer-shell-dev
 
+# libmpv (used by shepherd-media for in-process media playback)
+libmpv-dev
+
 # Required for rustup
 curl
 

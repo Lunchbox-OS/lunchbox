@@ -1,0 +1,9 @@
+#EXTM3U
+#EXTINF:596,Big Buck Bunny
+file:///srv/media/big-buck-bunny.mp4
+#EXTINF:888,Sintel
+file:///srv/media/sintel.mp4
+#EXTINF:-1,Lofi Beats (live)
+https://www.youtube.com/watch?v=jfKfPfyJRdk
+#EXTINF:240,Sample MP3
+https://example.com/audio/sample.mp3

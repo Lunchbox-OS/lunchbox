@@ -1,0 +1,11 @@
+schema_version = 1
+library_id = "typo"
+title = "Typo"
+
+[[items]]
+id = "bad"
+titel = "Wrong field name"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/a.mp4"

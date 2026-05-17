@@ -1,0 +1,11 @@
+schema_version = 1
+library_id = "drm-rejected"
+title = "DRM"
+
+[[items]]
+id = "blocked"
+title = "Netflix Blocked"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://www.netflix.com/watch/12345"

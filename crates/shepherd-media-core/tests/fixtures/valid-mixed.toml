@@ -1,0 +1,46 @@
+schema_version = 1
+library_id = "valid-mixed"
+title = "Mixed Library"
+
+[[items]]
+id = "local-video"
+title = "Local Video"
+kind = "video"
+poster = "posters/local.jpg"
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///srv/media/local.mp4"
+
+[[items]]
+id = "youtube-video"
+title = "YouTube Video"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://www.youtube.com/watch?v=YE7VzlLtp-4"
+
+[[items]]
+id = "direct-http"
+title = "Direct HTTP Stream"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://example.com/streams/movie.mp4"
+
+[[items]]
+id = "hls-stream"
+title = "HLS Live Stream"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://example.com/live/stream.m3u8"
+
+[[items]]
+id = "audio-track"
+title = "Audio Track"
+kind = "audio"
+poster = "https://example.com/cover.jpg"
+duration_seconds = 240
+[[items.sources]]
+platforms = ["*"]
+uri = "https://example.com/music/track.mp3"

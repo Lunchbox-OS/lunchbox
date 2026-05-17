@@ -1,0 +1,382 @@
+//! Playback backend abstraction.
+//!
+//! The `PlayerHandle` trait is the seam that lets the same session state
+//! machine drive Linux libmpv and a future Android JNI implementation.
+//! Keep libmpv-specific types out of every other module — they belong here
+//! and nowhere else.
+
+use std::ffi::{CStr, c_void};
+
+use thiserror::Error;
+
+use crate::library::Source;
+
+/// Function pointer lookup for OpenGL symbols, supplied by the host UI layer
+/// (e.g. eframe/glutin) and forwarded to libmpv's render backend.
+///
+/// Type alias form is `&'static`-defaulted by the language; the trait method
+/// in `PlayerHandle::bind_gl` takes `&dyn Fn(&CStr) -> *const c_void`
+/// inline so callers can pass non-`'static` borrows. This alias exists only
+/// for documentation in signatures that already supply a lifetime.
+pub type GetProcAddress<'a> = dyn Fn(&CStr) -> *const c_void + 'a;
+
+/// Operations on a media player. Calls are non-blocking with respect to
+/// playback: `play` returns once mpv has accepted the command, not when
+/// playback ends.
+///
+/// Transport-control methods and embedded-render hooks have default no-op
+/// implementations so adapters (e.g. caching wrappers) can opt in to
+/// delegating only the methods they care about.
+pub trait PlayerHandle: Send {
+    fn play(&mut self, source: &Source) -> Result<(), PlayerError>;
+    fn stop(&mut self) -> Result<(), PlayerError>;
+    fn is_playing(&self) -> bool;
+    fn poll_event(&mut self) -> Option<PlayerEvent>;
+
+    // -----------------------------------------------------------------
+    // Transport controls. The default impls cover backends that don't
+    // surface playback control to the UI.
+    // -----------------------------------------------------------------
+
+    fn set_paused(&mut self, _paused: bool) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
+    fn is_paused(&self) -> bool {
+        false
+    }
+
+    fn seek_relative(&mut self, _delta_seconds: f64) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
+    fn seek_absolute(&mut self, _seconds: f64) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
+    fn position(&self) -> Option<f64> {
+        None
+    }
+
+    fn duration(&self) -> Option<f64> {
+        None
+    }
+
+    fn set_volume(&mut self, _percent: f64) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
+    fn volume(&self) -> Option<f64> {
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Embedded rendering hooks. The host calls `bind_gl` once after its
+    // OpenGL context is current, registers a redraw callback so it
+    // knows when mpv has a new frame ready, and then drives `render`
+    // each draw cycle.
+    // -----------------------------------------------------------------
+
+    /// Bind mpv's render context to the host's OpenGL context. Must be
+    /// called from the GL thread, exactly once, before `render`.
+    fn bind_gl(
+        &mut self,
+        _get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+    ) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
+    /// Render the current frame into `fbo` (use 0 for the default
+    /// framebuffer). The host is expected to bind `fbo` itself before
+    /// calling; mpv re-binds the framebuffer it is told about.
+    fn render(&self, _fbo: i32, _width: i32, _height: i32) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
+    /// Register a callback that fires (potentially from a background
+    /// thread) when mpv has a new frame ready. The host should use this
+    /// to wake the UI thread so it can call `render`. Must be called
+    /// after `bind_gl`.
+    fn set_redraw_callback(&mut self, _cb: Box<dyn Fn() + Send + Sync + 'static>) {}
+}
+
+#[derive(Debug, Clone)]
+pub enum PlayerEvent {
+    Started,
+    EndOfFile,
+    Error(String),
+    Closed,
+}
+
+#[derive(Debug, Error)]
+pub enum PlayerError {
+    #[error("player backend error: {0}")]
+    Backend(String),
+
+    #[error("invalid source for backend: {0}")]
+    InvalidSource(String),
+}
+
+#[cfg(feature = "libmpv")]
+pub use libmpv_backend::LibmpvPlayer;
+
+#[cfg(feature = "libmpv")]
+mod libmpv_backend {
+    use std::ffi::{CStr, c_void};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use libmpv2::Mpv;
+    use libmpv2::events::{Event, PropertyData};
+    use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
+
+    use super::{PlayerError, PlayerEvent, PlayerHandle};
+    use crate::library::{ClassifiedUri, Source};
+
+    /// The libmpv2 init-params struct stores this as opaque context
+    /// alongside our trampoline so mpv can ask "what's the address of
+    /// glFoo?" during render context creation.
+    type ProcAddrFn = dyn Fn(&CStr) -> *const c_void + 'static;
+
+    // Threshold mpv log levels at which we surface a player Error event back
+    // to the session. mpv numbers log levels with FATAL=10, ERROR=20, WARN=30,
+    // INFO=40 and so on — lower is more severe.
+    const MPV_LOG_LEVEL_ERROR: u32 = 20;
+
+    /// Newtype holding the optional RenderContext so we can manually opt
+    /// into Send. libmpv documents the render context as safe to move
+    /// across threads; only `mpv_render_context_render` requires the GL
+    /// thread, which the host enforces by only calling `render` from the
+    /// UI thread.
+    struct RenderCtxHolder(Option<RenderContext>);
+
+    // SAFETY: see RenderCtxHolder comment. The raw pointer the
+    // RenderContext wraps is not actually thread-local; libmpv only
+    // restricts which thread calls `render`.
+    unsafe impl Send for RenderCtxHolder {}
+
+    /// libmpv-backed `PlayerHandle` that renders into a host OpenGL
+    /// framebuffer rather than mpv's own window. The session constructs
+    /// this up front; the UI layer calls `bind_gl` once a GL context is
+    /// current and then drives `render` on each draw cycle.
+    pub struct LibmpvPlayer {
+        mpv: Mpv,
+        playing: AtomicBool,
+        // Created lazily by `bind_gl` and consulted by every later
+        // `render` / `set_redraw_callback` call.
+        render_ctx: Mutex<RenderCtxHolder>,
+    }
+
+    impl LibmpvPlayer {
+        pub fn new(ytdl_format: &str) -> Result<Self, PlayerError> {
+            let mpv = Mpv::with_initializer(|init| {
+                // `vo=libmpv` disables mpv's own windowing — the host UI
+                // owns the surface and composites mpv's output via
+                // RenderContext.
+                init.set_property("vo", "libmpv")?;
+                init.set_property("osc", "no")?;
+                init.set_property("input-default-bindings", "no")?;
+                init.set_property("input-vo-keyboard", "no")?;
+                init.set_property("keep-open", "no")?;
+                init.set_property("ytdl", "yes")?;
+                init.set_property("ytdl-format", ytdl_format)?;
+                // Hardware-accelerated decode where available; fall back
+                // to software automatically.
+                init.set_property("hwdec", "auto-safe")?;
+                Ok(())
+            })
+            .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+
+            // Observe `idle-active` so we can detect mpv returning to idle
+            // (stop issued from the UI) as a Closed event.
+            mpv.observe_property("idle-active", libmpv2::Format::Flag, 0)
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+
+            Ok(Self {
+                mpv,
+                playing: AtomicBool::new(false),
+                render_ctx: Mutex::new(RenderCtxHolder(None)),
+            })
+        }
+
+        fn uri_for_source(source: &Source) -> Result<String, PlayerError> {
+            match &source.uri {
+                ClassifiedUri::Local(path) => {
+                    path.to_str().map(|s| s.to_string()).ok_or_else(|| {
+                        PlayerError::InvalidSource(format!("non-UTF-8 path: {}", path.display()))
+                    })
+                }
+                ClassifiedUri::DirectHttp(url)
+                | ClassifiedUri::YouTube(url)
+                | ClassifiedUri::Unknown(url) => Ok(url.to_string()),
+            }
+        }
+    }
+
+    /// libmpv's get_proc_address callback wraps a host-supplied
+    /// `dyn Fn(&CStr) -> *const c_void`. The wrapper signature mpv
+    /// expects takes a `&str`, so we re-CString here.
+    fn proc_address_trampoline(getter: &&'static ProcAddrFn, name: &str) -> *mut c_void {
+        let cname = match std::ffi::CString::new(name) {
+            Ok(c) => c,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        (getter)(&cname) as *mut c_void
+    }
+
+    impl PlayerHandle for LibmpvPlayer {
+        fn play(&mut self, source: &Source) -> Result<(), PlayerError> {
+            let uri = Self::uri_for_source(source)?;
+            self.mpv
+                .command("loadfile", &[&uri, "replace"])
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+            // Reset pause state on every new playback.
+            let _ = self.mpv.set_property("pause", false);
+            self.playing.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), PlayerError> {
+            self.mpv
+                .command("stop", &[])
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
+        }
+
+        fn is_playing(&self) -> bool {
+            self.playing.load(Ordering::SeqCst)
+        }
+
+        fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+            self.mpv
+                .set_property("pause", paused)
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
+        }
+
+        fn is_paused(&self) -> bool {
+            self.mpv.get_property::<bool>("pause").unwrap_or(false)
+        }
+
+        fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+            let arg = format!("{delta_seconds}");
+            self.mpv
+                .command("seek", &[&arg, "relative"])
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
+        }
+
+        fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+            let arg = format!("{seconds}");
+            self.mpv
+                .command("seek", &[&arg, "absolute"])
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
+        }
+
+        fn position(&self) -> Option<f64> {
+            self.mpv.get_property::<f64>("time-pos").ok()
+        }
+
+        fn duration(&self) -> Option<f64> {
+            self.mpv.get_property::<f64>("duration").ok()
+        }
+
+        fn set_volume(&mut self, percent: f64) -> Result<(), PlayerError> {
+            self.mpv
+                .set_property("volume", percent.clamp(0.0, 100.0))
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
+        }
+
+        fn volume(&self) -> Option<f64> {
+            self.mpv.get_property::<f64>("volume").ok()
+        }
+
+        fn bind_gl(
+            &mut self,
+            get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+        ) -> Result<(), PlayerError> {
+            // SAFETY: `OpenGLInitParams<C>` has no lifetime parameter, so the
+            // compiler insists `C` be `'static`. In practice libmpv2 boxes the
+            // params, hands them to mpv's `mpv_render_context_create`, and
+            // frees the box before `RenderContext::new` returns (regardless of
+            // success/failure). mpv itself resolves every GL function pointer
+            // it needs inside that create call and does not retain the
+            // get-proc-address callback. So the borrow is safely contained to
+            // this stack frame even though the type system can't express that.
+            let static_proc: &'static ProcAddrFn = unsafe { std::mem::transmute(get_proc_address) };
+
+            let ctx = RenderContext::new(
+                unsafe { self.mpv.ctx.as_mut() },
+                vec![
+                    RenderParam::ApiType(RenderParamApiType::OpenGl),
+                    RenderParam::InitParams(OpenGLInitParams {
+                        get_proc_address: proc_address_trampoline,
+                        ctx: static_proc,
+                    }),
+                ],
+            )
+            .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+
+            self.render_ctx.lock().unwrap().0 = Some(ctx);
+            Ok(())
+        }
+
+        fn render(&self, fbo: i32, width: i32, height: i32) -> Result<(), PlayerError> {
+            let guard = self.render_ctx.lock().unwrap();
+            let Some(ctx) = guard.0.as_ref() else {
+                return Err(PlayerError::Backend(
+                    "render called before bind_gl".to_string(),
+                ));
+            };
+            // `flip=false`: when rendering to the default GL framebuffer you
+            // pass `true` to compensate for GL's Y-up vs video Y-down. We
+            // render to an FBO that is then sampled by egui with UV (0,0) at
+            // the top, which already swaps Y back; passing `true` would
+            // double-flip and leave the video upside-down (the user reports
+            // it as "rotated 180 and mirrored", which is what an upside-down
+            // image with text inside looks like in everyday terms).
+            ctx.render::<&'static ProcAddrFn>(fbo, width, height, false)
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
+        }
+
+        fn set_redraw_callback(&mut self, cb: Box<dyn Fn() + Send + Sync + 'static>) {
+            if let Some(ctx) = self.render_ctx.lock().unwrap().0.as_mut() {
+                ctx.set_update_callback(cb);
+            }
+        }
+
+        fn poll_event(&mut self) -> Option<PlayerEvent> {
+            let event = self.mpv.wait_event(0.0)?;
+            match event {
+                Ok(ev) => match ev {
+                    Event::StartFile => Some(PlayerEvent::Started),
+                    Event::EndFile(_) => {
+                        self.playing.store(false, Ordering::SeqCst);
+                        Some(PlayerEvent::EndOfFile)
+                    }
+                    Event::Shutdown => {
+                        self.playing.store(false, Ordering::SeqCst);
+                        Some(PlayerEvent::Closed)
+                    }
+                    Event::PropertyChange { name, change, .. } => match (name, change) {
+                        ("idle-active", PropertyData::Flag(true)) => {
+                            // Reaching idle without an explicit EOF means the
+                            // UI issued a stop. Treat as Closed so the
+                            // session machine returns to Browsing.
+                            if self.playing.swap(false, Ordering::SeqCst) {
+                                Some(PlayerEvent::Closed)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    },
+                    Event::LogMessage {
+                        log_level, text, ..
+                    } if log_level <= MPV_LOG_LEVEL_ERROR => {
+                        Some(PlayerEvent::Error(text.to_owned()))
+                    }
+                    _ => None,
+                },
+                Err(e) => Some(PlayerEvent::Error(e.to_string())),
+            }
+        }
+    }
+}

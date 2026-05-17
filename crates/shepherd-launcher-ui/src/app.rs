@@ -2,9 +2,10 @@
 
 use gtk4::glib;
 use gtk4::prelude::*;
+use shepherd_util::gamepad_nav::{NavDir, StickNav};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -460,16 +461,19 @@ impl LauncherApp {
         let cmd_client = command_client.clone();
         let rt = runtime.clone();
         let state_clone = state.clone();
-        let mut axis_state = GamepadAxisState::default();
+        let mut stick_nav = StickNav::default();
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
-            while let Some(event) = gilrs.next_event() {
-                let Some(grid) = grid_weak.upgrade() else {
-                    return glib::ControlFlow::Break;
-                };
+            let Some(grid) = grid_weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
 
-                match event.event {
-                    gilrs::EventType::ButtonPressed(button, _) => match button {
+            // Drain button events. Drop axis events on the floor — we poll
+            // the stick directly below so we can drive auto-repeat from the
+            // timer rather than depending on AxisChanged deltas.
+            while let Some(event) = gilrs.next_event() {
+                if let gilrs::EventType::ButtonPressed(button, _) = event.event {
+                    match button {
                         gilrs::Button::DPadUp => grid.move_selection(0, -1),
                         gilrs::Button::DPadDown => grid.move_selection(0, 1),
                         gilrs::Button::DPadLeft => grid.move_selection(-1, 0),
@@ -485,11 +489,23 @@ impl LauncherApp {
                             );
                         }
                         _ => {}
-                    },
-                    gilrs::EventType::AxisChanged(axis, value, _) => {
-                        Self::handle_gamepad_axis(&grid, axis, value, &mut axis_state);
                     }
-                    _ => {}
+                }
+            }
+
+            // Left stick: shared analog-nav logic with shepherd-media so the
+            // two launcher UIs feel identical (deadzone crossing fires once,
+            // then waits, then auto-repeats).
+            if let Some((_id, gp)) = gilrs.gamepads().next() {
+                let x = gp.value(gilrs::Axis::LeftStickX);
+                let y = gp.value(gilrs::Axis::LeftStickY);
+                if let Some(dir) = stick_nav.tick(x, y, Instant::now()) {
+                    match dir {
+                        NavDir::Up => grid.move_selection(0, -1),
+                        NavDir::Down => grid.move_selection(0, 1),
+                        NavDir::Left => grid.move_selection(-1, 0),
+                        NavDir::Right => grid.move_selection(1, 0),
+                    }
                 }
             }
 
@@ -523,73 +539,6 @@ impl LauncherApp {
                 }
             }
         });
-    }
-
-    fn handle_gamepad_axis(
-        grid: &LauncherGrid,
-        axis: gilrs::Axis,
-        value: f32,
-        axis_state: &mut GamepadAxisState,
-    ) {
-        const THRESHOLD: f32 = 0.65;
-
-        match axis {
-            gilrs::Axis::LeftStickX | gilrs::Axis::DPadX => {
-                if value <= -THRESHOLD {
-                    if !axis_state.left {
-                        grid.move_selection(-1, 0);
-                    }
-                    axis_state.left = true;
-                    axis_state.right = false;
-                } else if value >= THRESHOLD {
-                    if !axis_state.right {
-                        grid.move_selection(1, 0);
-                    }
-                    axis_state.right = true;
-                    axis_state.left = false;
-                } else {
-                    axis_state.left = false;
-                    axis_state.right = false;
-                }
-            }
-            gilrs::Axis::LeftStickY => {
-                if value <= -THRESHOLD {
-                    if !axis_state.down {
-                        grid.move_selection(0, 1);
-                    }
-                    axis_state.down = true;
-                    axis_state.up = false;
-                } else if value >= THRESHOLD {
-                    if !axis_state.up {
-                        grid.move_selection(0, -1);
-                    }
-                    axis_state.up = true;
-                    axis_state.down = false;
-                } else {
-                    axis_state.up = false;
-                    axis_state.down = false;
-                }
-            }
-            gilrs::Axis::DPadY => {
-                if value <= -THRESHOLD {
-                    if !axis_state.up {
-                        grid.move_selection(0, -1);
-                    }
-                    axis_state.up = true;
-                    axis_state.down = false;
-                } else if value >= THRESHOLD {
-                    if !axis_state.down {
-                        grid.move_selection(0, 1);
-                    }
-                    axis_state.down = true;
-                    axis_state.up = false;
-                } else {
-                    axis_state.up = false;
-                    axis_state.down = false;
-                }
-            }
-            _ => {}
-        }
     }
 
     fn create_loading_view() -> gtk4::Box {
@@ -668,12 +617,4 @@ impl LauncherApp {
 
         (container, retry_button)
     }
-}
-
-#[derive(Default)]
-struct GamepadAxisState {
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
 }
