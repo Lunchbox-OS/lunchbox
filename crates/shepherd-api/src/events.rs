@@ -70,6 +70,16 @@ pub enum EventPayload {
     /// Volume status changed
     VolumeChanged { percent: u8, muted: bool },
 
+    /// HUD UI scale factor changed. The HUD is expected to multiply its
+    /// font/padding/height by `factor` on top of the compositor scale.
+    ///
+    /// Emitted by shepherdd when it temporarily drops the compositor's
+    /// output scale to 1.0 for an XWayland activity that cannot render at
+    /// the panel's native resolution otherwise; on entry start the factor
+    /// is the captured pre-launch output scale, and on entry exit it
+    /// returns to 1.0. Clients that don't care can ignore it.
+    HudScaleChanged { factor: f64 },
+
     /// Service is shutting down
     Shutdown,
 

@@ -125,6 +125,9 @@ impl SharedState {
             EventPayload::VolumeChanged { .. } => {
                 // Volume events are handled by HUD
             }
+            EventPayload::HudScaleChanged { .. } => {
+                // HUD-only event; ignored by the launcher.
+            }
         }
     }
 

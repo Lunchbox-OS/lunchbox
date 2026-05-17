@@ -2,7 +2,7 @@
 
 use shepherd_api::Event;
 use shepherd_core::CoreEngine;
-use shepherd_host_api::{HostAdapter, VolumeController};
+use shepherd_host_api::{HidpiController, HostAdapter, VolumeController};
 use shepherd_store::Store;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,4 +23,9 @@ pub struct AppState {
     /// flips this to `true`; the daemon's main loop and the HTTP server's
     /// `with_graceful_shutdown` future both observe it.
     pub shutdown_tx: watch::Sender<bool>,
+    /// XWayland HiDPI scale-toggle controller (issue #45). The HTTP launch
+    /// path uses this to apply/restore the workaround for entries that set
+    /// `xwayland_native_resolution = true`, in parity with the IPC launch
+    /// path. Defaults to `NoOpHidpiController` in tests.
+    pub hidpi: Arc<dyn HidpiController>,
 }

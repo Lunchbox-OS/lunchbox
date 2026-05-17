@@ -86,6 +86,12 @@ fn build_hud_window(
         .decorated(false)
         .build();
 
+    // CSS provider for the HUD's stylesheet. We install it once and rewrite
+    // its contents whenever the UI scale factor changes (see HudScaleChanged
+    // and `apply_scale` below) so font/padding sizes follow the factor
+    // without needing to reload a fresh provider on the display.
+    let css_provider = install_css_provider();
+
     // Initialize layer shell
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
@@ -112,20 +118,25 @@ fn build_hud_window(
         }
     }
 
-    // Set exclusive zone so other windows don't overlap
-    window.set_exclusive_zone(height);
-
-    // Load CSS
-    load_css();
-
-    // Build the HUD content
-    let content = build_hud_content(state);
+    // Build the HUD content. apply_scale (below) is responsible for the
+    // dynamic dimensions (default height, exclusive zone, font/padding) so
+    // they stay in sync with the current UI scale factor.
+    let content = build_hud_content(state.clone(), css_provider.clone(), window.clone(), height);
     window.set_child(Some(&content));
+
+    // Populate the stylesheet and set initial dimensions at scale 1.0
+    // before the window maps.
+    apply_scale(&css_provider, &window, height, 1.0);
 
     window
 }
 
-fn build_hud_content(state: SharedState) -> gtk4::Box {
+fn build_hud_content(
+    state: SharedState,
+    css_provider: gtk4::CssProvider,
+    window: gtk4::ApplicationWindow,
+    base_height: i32,
+) -> gtk4::Box {
     let container = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(16)
@@ -380,8 +391,28 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
     let slider_changing_for_update = slider_changing.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
+    // Track the most-recently-applied scale factor so we only rebuild the
+    // stylesheet when shepherdd sends a new HudScaleChanged value.
+    let applied_scale = std::rc::Rc::new(std::cell::Cell::new(1.0_f64));
+    let applied_scale_for_timer = applied_scale.clone();
+    let css_provider_for_timer = css_provider.clone();
+    let window_for_timer = window.clone();
 
     glib::timeout_add_local(Duration::from_millis(500), move || {
+        // Re-apply scaling if shepherdd has changed it since the last tick.
+        // The HUD bar height, exclusive zone, and stylesheet all derive from
+        // this factor.
+        let desired_scale = state.scale_factor();
+        if (desired_scale - applied_scale_for_timer.get()).abs() > f64::EPSILON {
+            apply_scale(
+                &css_provider_for_timer,
+                &window_for_timer,
+                base_height,
+                desired_scale,
+            );
+            applied_scale_for_timer.set(desired_scale);
+        }
+
         // Update wall clock display
         let current_time = shepherd_util::now();
         if clock_format_full {
@@ -508,8 +539,73 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
     container
 }
 
-fn load_css() {
-    let css = r#"
+/// Install an empty `CssProvider` at application priority and return it so
+/// the caller can refresh its contents on the fly via `apply_scale`.
+fn install_css_provider() -> gtk4::CssProvider {
+    let provider = gtk4::CssProvider::new();
+    gtk4::style_context_add_provider_for_display(
+        &gtk4::gdk::Display::default().expect("Could not get display"),
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    provider
+}
+
+/// Apply the current scale factor to the HUD: regenerate the stylesheet
+/// with px values multiplied by `factor`, and resize the window so its
+/// physical height stays consistent with the pre-scale value. Called once
+/// on construction and again every time shepherdd sends a HudScaleChanged.
+fn apply_scale(
+    provider: &gtk4::CssProvider,
+    window: &gtk4::ApplicationWindow,
+    base_height: i32,
+    factor: f64,
+) {
+    let scaled_height = ((base_height as f64) * factor).round() as i32;
+    window.set_default_height(scaled_height);
+    window.set_exclusive_zone(scaled_height);
+    provider.load_from_data(&css_for_scale(factor));
+}
+
+/// Build the HUD stylesheet with `factor`-scaled px values. Every `Npx`
+/// literal in `CSS_TEMPLATE` is multiplied by `factor` so the layer-shell
+/// surface stays a constant physical size when shepherdd drops the
+/// compositor scale to 1.0 for an XWayland activity (see the
+/// HudScaleChanged event in shepherd-api). Non-px numbers (timings,
+/// opacities, rgba components) are passed through unchanged.
+fn css_for_scale(factor: f64) -> String {
+    scale_px_literals(CSS_TEMPLATE, factor)
+}
+
+fn scale_px_literals(template: &str, factor: f64) -> String {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let num_str = &template[start..i];
+            if i + 1 < bytes.len() && &bytes[i..i + 2] == b"px" {
+                let n: f64 = num_str.parse().unwrap_or(0.0);
+                out.push_str(&((n * factor).round() as i32).to_string());
+                out.push_str("px");
+                i += 2;
+            } else {
+                out.push_str(num_str);
+            }
+        } else {
+            out.push(c as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+const CSS_TEMPLATE: &str = r#"
         :root {
             --hud-bg: rgba(30, 30, 30, 0.95);
             --text-primary: white;
@@ -679,16 +775,6 @@ fn load_css() {
             margin-left: 4px;
         }
     "#;
-
-    let provider = gtk4::CssProvider::new();
-    provider.load_from_data(css);
-
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().expect("Could not get display"),
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-}
 
 fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
     let rt = Runtime::new()?;

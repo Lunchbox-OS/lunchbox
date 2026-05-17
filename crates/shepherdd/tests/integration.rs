@@ -39,6 +39,7 @@ fn make_test_entry(id: &str) -> Entry {
         internet: Default::default(),
         input_compat: vec![],
         input_compat_options: Default::default(),
+        xwayland_native_resolution: false,
     }
 }
 
@@ -82,6 +83,7 @@ fn make_test_policy() -> Policy {
             internet: Default::default(),
             input_compat: vec![],
             input_compat_options: Default::default(),
+            xwayland_native_resolution: false,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),

@@ -195,6 +195,10 @@ pub struct Entry {
     /// validated (no conflicting gamepad presets) by `Entry::from_raw`.
     pub input_compat: Vec<InputCompatMode>,
     pub input_compat_options: InputCompatOptions,
+    /// Drop sway's output scale to 1.0 while this activity is running so
+    /// XWayland clients get the panel's native pixel grid. See the
+    /// corresponding field on [`RawEntry`] for the full rationale.
+    pub xwayland_native_resolution: bool,
 }
 
 impl Entry {
@@ -245,6 +249,7 @@ impl Entry {
             internet,
             input_compat,
             input_compat_options,
+            xwayland_native_resolution: raw.xwayland_native_resolution,
         }
     }
 }

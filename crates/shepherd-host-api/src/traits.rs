@@ -161,6 +161,38 @@ pub trait HostAdapter: Send + Sync {
     }
 }
 
+/// Per-activity compositor scale override (issue #45).
+///
+/// While an activity with `xwayland_native_resolution = true` is running,
+/// the controller drops the compositor's output scale to 1.0 so XWayland
+/// clients see the panel's native pixel grid, then restores it on exit.
+/// Both methods are idempotent: calling `restore` when nothing is captured
+/// (or `apply` twice in a row) is a no-op so callers don't need to track
+/// state.
+///
+/// Two implementations ship in the workspace:
+/// - `XwaylandHidpi` in `shepherdd` — the production sway-backed
+///   implementation that also broadcasts `HudScaleChanged` events.
+/// - [`NoOpHidpiController`] — for tests and HTTP-only contexts that
+///   don't have a compositor.
+#[async_trait]
+pub trait HidpiController: Send + Sync {
+    /// Apply the workaround for the next activity launch.
+    async fn apply(&self);
+    /// Restore the captured scale (and HUD scale factor).
+    async fn restore(&self);
+}
+
+/// No-op [`HidpiController`] used in tests and on hosts where the
+/// workaround does not apply.
+pub struct NoOpHidpiController;
+
+#[async_trait]
+impl HidpiController for NoOpHidpiController {
+    async fn apply(&self) {}
+    async fn restore(&self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

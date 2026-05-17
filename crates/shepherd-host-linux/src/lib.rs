@@ -15,4 +15,5 @@ mod volume;
 
 pub use adapter::*;
 pub use process::*;
+pub use sway::{OutputScale, get_outputs, set_output_scale};
 pub use volume::*;
