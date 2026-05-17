@@ -371,27 +371,18 @@ jobs:
 
   android-portability:
     name: Android portability (shepherd-media-core)
+    needs: image
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:25.10
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
-      - name: Install git
-        run: |
-          apt-get update
-          apt-get install -y git curl nodejs
-
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: ./scripts/shepherd deps install build
-
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
       - name: Add aarch64-linux-android target
-        run: |
-          . "$HOME/.cargo/env"
-          rustup target add aarch64-linux-android
+        run: rustup target add aarch64-linux-android
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -410,7 +401,6 @@ jobs:
       # to fail loudly if a Linux-specific dep gets added to the core.
       - name: Check shepherd-media-core for aarch64-linux-android
         run: |
-          . "$HOME/.cargo/env"
           cargo check \
             --target aarch64-linux-android \
             --no-default-features \
