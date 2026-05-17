@@ -17,6 +17,16 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
+/// Pixel size for all symbolic icons in the HUD bar at scale 1.0. The
+/// timer in `build_hud_content` multiplies this by the current HUD scale
+/// factor so icons stay at their usual physical size when shepherdd drops
+/// the compositor scale for an XWayland activity.
+const BASE_ICON_PIXEL_SIZE: i32 = 20;
+
+/// Logical-pixel width of the volume slider at scale 1.0, scaled the same
+/// way as the icon size above so the slider grows with the rest of the HUD.
+const BASE_VOLUME_SLIDER_WIDTH: i32 = 100;
+
 /// The HUD application
 pub struct HudApp {
     app: gtk4::Application,
@@ -171,7 +181,7 @@ fn build_hud_content(
         .build();
 
     let warning_icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
-    warning_icon.set_pixel_size(20);
+    warning_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     warning_box.append(&warning_icon);
 
     let warning_label = gtk4::Label::new(Some("Time running out!"));
@@ -219,9 +229,14 @@ fn build_hud_content(
         .build();
     volume_box.add_css_class("volume-control");
 
-    // Mute button
+    // Mute button. Use an explicit child Image so its pixel size follows
+    // the HUD scale factor (see `apply_scale`). `Button::set_icon_name`
+    // would replace this child, so the timer below updates `volume_icon`
+    // directly via `set_from_icon_name`.
+    let volume_icon = gtk4::Image::from_icon_name("audio-volume-medium-symbolic");
+    volume_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let volume_button = gtk4::Button::builder()
-        .icon_name("audio-volume-medium-symbolic")
+        .child(&volume_icon)
         .has_frame(false)
         .tooltip_text("Toggle mute")
         .build();
@@ -233,10 +248,11 @@ fn build_hud_content(
     });
     volume_box.append(&volume_button);
 
-    // Volume slider
+    // Volume slider. The `width_request` is rescaled by the timer below to
+    // follow the HUD scale factor (see `BASE_VOLUME_SLIDER_WIDTH`).
     let volume_slider = gtk4::Scale::builder()
         .orientation(gtk4::Orientation::Horizontal)
-        .width_request(100)
+        .width_request(BASE_VOLUME_SLIDER_WIDTH)
         .draw_value(false)
         .build();
     volume_slider.set_range(0.0, 100.0);
@@ -313,7 +329,7 @@ fn build_hud_content(
         .build();
 
     let battery_icon = gtk4::Image::from_icon_name("battery-good-symbolic");
-    battery_icon.set_pixel_size(20);
+    battery_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     battery_box.append(&battery_icon);
 
     let battery_label = gtk4::Label::new(Some("--%"));
@@ -322,9 +338,12 @@ fn build_hud_content(
 
     right_box.append(&battery_box);
 
-    // Action button: shows as "End session" when a session is active, "Log out" otherwise
+    // Action button: shows as "End session" when a session is active, "Log out" otherwise.
+    // Uses an explicit child Image for the same reason as `volume_button`.
+    let action_icon = gtk4::Image::from_icon_name("system-log-out-symbolic");
+    action_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let action_button = gtk4::Button::builder()
-        .icon_name("system-log-out-symbolic")
+        .child(&action_icon)
         .has_frame(false)
         .tooltip_text("Log out")
         .build();
@@ -386,11 +405,20 @@ fn build_hud_content(
     let battery_icon_clone = battery_icon.clone();
     let battery_label_clone = battery_label.clone();
     let volume_button_clone = volume_button.clone();
+    let volume_icon_clone = volume_icon.clone();
     let volume_slider_clone = volume_slider.clone();
     let volume_label_clone = volume_label.clone();
     let slider_changing_for_update = slider_changing.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
+    let action_icon_clone = action_icon.clone();
+    // All icons we resize when the HUD scale factor changes.
+    let scaled_icons: [gtk4::Image; 4] = [
+        warning_icon.clone(),
+        battery_icon.clone(),
+        volume_icon.clone(),
+        action_icon.clone(),
+    ];
     // Track the most-recently-applied scale factor so we only rebuild the
     // stylesheet when shepherdd sends a new HudScaleChanged value.
     let applied_scale = std::rc::Rc::new(std::cell::Cell::new(1.0_f64));
@@ -410,6 +438,12 @@ fn build_hud_content(
                 base_height,
                 desired_scale,
             );
+            let icon_size = (f64::from(BASE_ICON_PIXEL_SIZE) * desired_scale).round() as i32;
+            for icon in &scaled_icons {
+                icon.set_pixel_size(icon_size);
+            }
+            let slider_width = (f64::from(BASE_VOLUME_SLIDER_WIDTH) * desired_scale).round() as i32;
+            volume_slider_clone.set_width_request(slider_width);
             applied_scale_for_timer.set(desired_scale);
         }
 
@@ -425,10 +459,10 @@ fn build_hud_content(
         let session_state = state.session_state();
         let has_session = session_state.session_id().is_some();
         if has_session {
-            action_button_clone.set_icon_name("window-close-symbolic");
+            action_icon_clone.set_icon_name(Some("window-close-symbolic"));
             action_button_clone.set_tooltip_text(Some("End session"));
         } else {
-            action_button_clone.set_icon_name("system-log-out-symbolic");
+            action_icon_clone.set_icon_name(Some("system-log-out-symbolic"));
             action_button_clone.set_tooltip_text(Some("Log out"));
         }
         match &session_state {
@@ -509,7 +543,7 @@ fn build_hud_content(
 
         // Update volume from cached state (updated via events, no polling needed)
         if let Some(volume) = state.volume_info() {
-            volume_button_clone.set_icon_name(volume.icon_name());
+            volume_icon_clone.set_icon_name(Some(volume.icon_name()));
             volume_label_clone.set_text(&format!("{}%", volume.percent));
 
             // Only update slider if user is not actively dragging it

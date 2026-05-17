@@ -88,13 +88,25 @@ have a frame where the HUD is briefly oversized, which is more jarring.
 
 ### What the HUD does not scale
 
-`gtk4::Image::set_pixel_size(20)`, `Scale::width_request(100)`, and a
-few other hardcoded widget dimensions are not multiplied by factor.
-Doing so requires holding refs to all the widgets in the timer closure
-and updating each on change. Skipped because the primary HUD content
-(text and bar height) does follow the factor, and the icons being one
-size smaller at factor 1.5 is a cosmetic compromise. Easy to extend if
+A few hardcoded widget dimensions (mainly `gtk4::Box` spacings) are not
+multiplied by factor. Doing so requires holding refs to all the widgets in
+the timer closure and updating each on change. Skipped because the primary
+HUD content (text, bar height, icons, slider) does follow the factor, and
+the remaining items are minor cosmetic compromises. Easy to extend if
 needed.
+
+**Follow-up:** the original cut left `gtk4::Image::set_pixel_size(20)`
+and `Scale::width_request(100)` unscaled. On the kiosk panel at factor 1.5
+the four bar icons (warning, battery, volume mute, action button) and the
+volume slider were visibly undersized, so the scale-change branch of the
+timer was extended to update them too. The icon size and slider width
+moved to `BASE_ICON_PIXEL_SIZE` and `BASE_VOLUME_SLIDER_WIDTH` constants
+and the timer multiplies both by the current factor on change. The two
+icon-name buttons were rebuilt with explicit child `Image` widgets so
+their pixel size is reachable; dynamic icon swaps now go through
+`Image::set_icon_name(Some(..))` on the child Image (which keeps the same
+widget and just changes its `icon-name` property) instead of
+`Button::set_icon_name(..)` (which would replace the child entirely).
 
 ### HTTP launch path: shared via a trait
 
