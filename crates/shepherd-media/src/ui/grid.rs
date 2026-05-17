@@ -234,10 +234,20 @@ fn draw_tile(
     );
     if let Some(bytes) = poster {
         let uri = format!("bytes://poster-{id}");
-        egui::Image::from_bytes(uri, bytes.to_vec())
-            .maintain_aspect_ratio(true)
-            .fit_to_exact_size(image_rect.size())
-            .paint_at(ui, image_rect);
+        let image = egui::Image::from_bytes(uri, bytes.to_vec());
+        // `Image::paint_at` stretches the image to fill the given rect — it
+        // ignores `maintain_aspect_ratio`. Query the loaded texture's source
+        // size and shrink the paint rect to match its aspect, so a 16:9
+        // YouTube thumbnail isn't squashed into a near-square slot.
+        let source_size = image
+            .load_for_size(ui.ctx(), image_rect.size())
+            .ok()
+            .and_then(|t| t.size());
+        let paint_rect = match source_size {
+            Some(s) if s.x > 0.0 && s.y > 0.0 => fit_centered(image_rect, s),
+            _ => image_rect,
+        };
+        image.paint_at(ui, paint_rect);
     } else {
         painter.rect_filled(image_rect, 6.0, theme::BG);
         painter.text(
@@ -269,6 +279,14 @@ fn draw_tile(
     }
 
     response
+}
+
+/// Largest centered subrect of `container` whose aspect ratio matches
+/// `source_size`. Used to letterbox/pillarbox posters of varying aspects
+/// inside the fixed-size tile image slot.
+fn fit_centered(container: egui::Rect, source_size: egui::Vec2) -> egui::Rect {
+    let scale = (container.width() / source_size.x).min(container.height() / source_size.y);
+    egui::Rect::from_center_size(container.center(), source_size * scale)
 }
 
 fn initials(title: &str) -> String {
