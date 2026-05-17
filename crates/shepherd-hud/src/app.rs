@@ -311,21 +311,20 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
 
     right_box.append(&battery_box);
 
-    // Close button
-    let close_button = gtk4::Button::builder()
-        .icon_name("window-close-symbolic")
+    // Action button: shows as "End session" when a session is active, "Log out" otherwise
+    let action_button = gtk4::Button::builder()
+        .icon_name("system-log-out-symbolic")
         .has_frame(false)
-        .tooltip_text("End session")
+        .tooltip_text("Log out")
         .build();
-    close_button.add_css_class("close-button");
+    action_button.add_css_class("close-button");
 
-    let state_for_close = state.clone();
-    close_button.connect_clicked(move |_| {
-        let session_state = state_for_close.session_state();
+    let state_for_action = state.clone();
+    action_button.connect_clicked(move |_| {
+        let session_state = state_for_action.session_state();
+        let socket_path = default_socket_path();
         if let Some(session_id) = session_state.session_id() {
             tracing::info!("Requesting end session for {}", session_id);
-            // Send StopCurrent command to shepherdd
-            let socket_path = default_socket_path();
             std::thread::spawn(move || {
                 let rt = Runtime::new().expect("Failed to create runtime");
                 rt.block_on(async {
@@ -344,9 +343,26 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
                     }
                 });
             });
+        } else {
+            tracing::info!("Requesting logout");
+            std::thread::spawn(move || {
+                let rt = Runtime::new().expect("Failed to create runtime");
+                rt.block_on(async {
+                    match IpcClient::connect(&socket_path).await {
+                        Ok(mut client) => {
+                            if let Err(e) = client.send(Command::Logout).await {
+                                tracing::error!("Failed to send Logout: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to connect to shepherdd: {}", e);
+                        }
+                    }
+                });
+            });
         }
     });
-    right_box.append(&close_button);
+    right_box.append(&action_button);
 
     container.append(&right_box);
 
@@ -363,6 +379,7 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
     let volume_label_clone = volume_label.clone();
     let slider_changing_for_update = slider_changing.clone();
     let clock_label_clone = clock_label.clone();
+    let action_button_clone = action_button.clone();
 
     glib::timeout_add_local(Duration::from_millis(500), move || {
         // Update wall clock display
@@ -375,6 +392,14 @@ fn build_hud_content(state: SharedState) -> gtk4::Box {
 
         // Update session state
         let session_state = state.session_state();
+        let has_session = session_state.session_id().is_some();
+        if has_session {
+            action_button_clone.set_icon_name("window-close-symbolic");
+            action_button_clone.set_tooltip_text(Some("End session"));
+        } else {
+            action_button_clone.set_icon_name("system-log-out-symbolic");
+            action_button_clone.set_tooltip_text(Some("Log out"));
+        }
         match &session_state {
             SessionState::NoSession => {
                 app_label_clone.set_text("No session");

@@ -1,0 +1,33 @@
+schema_version = 1
+library_id = "valid-platform-fallback"
+title = "Platform Fallback"
+
+[[items]]
+id = "local-then-stream"
+title = "Local on Linux, Stream on Android"
+kind = "video"
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///srv/media/movie.mp4"
+[[items.sources]]
+platforms = ["android"]
+uri = "https://example.com/streams/movie.mp4"
+
+[[items]]
+id = "android-only"
+title = "Android Only"
+kind = "video"
+[[items.sources]]
+platforms = ["android"]
+uri = "file:///sdcard/Movies/movie.mp4"
+
+[[items]]
+id = "fallback-any"
+title = "Linux first, fallback to any"
+kind = "video"
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///srv/media/preferred.mp4"
+[[items.sources]]
+platforms = ["*"]
+uri = "https://www.youtube.com/watch?v=abcd1234"

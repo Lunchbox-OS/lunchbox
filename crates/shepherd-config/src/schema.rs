@@ -103,6 +103,17 @@ pub struct RawEntry {
     /// Network firewall rules applied while this entry is running
     #[serde(default)]
     pub firewall: Option<RawFirewallConfig>,
+
+    /// Input compatibility modes for this entry. Each mode runs an
+    /// orthogonal sidecar — touch-to-mouse and gamepad presets can be
+    /// stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
+    /// or a list (`input_compat = ["touch_to_mouse", "gamepad_productivity"]`).
+    #[serde(default, deserialize_with = "deserialize_input_compat_list")]
+    pub input_compat: Vec<RawInputCompat>,
+
+    /// Tunables for input-compat sidecars (analog deadzones, speeds).
+    #[serde(default)]
+    pub input_compat_options: Option<RawInputCompatOptions>,
 }
 
 /// Per-entry firewall configuration
@@ -131,6 +142,53 @@ pub struct RawFirewallConfig {
 
 fn default_firewall_default() -> String {
     "deny".to_string()
+}
+
+/// Input compatibility mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawInputCompat {
+    /// Translate touchscreen input into mouse events via a sidecar that
+    /// grabs touch devices and uses the Wayland virtual-pointer protocol.
+    TouchToMouse,
+    /// Productivity preset: triggers = LMB, shoulders = RMB, left stick =
+    /// mouse, right stick = scroll, stick-click toggles which stick drives
+    /// the mouse, D-pad = arrow keys, A = Enter, Start = Escape.
+    GamepadProductivity,
+    /// GPD/FPS preset: LT = LMB, RT = RMB, LB = MMB, left stick = WASD,
+    /// right stick = mouse, D-pad = scroll, A = Space, X = R, B = E, Y = F.
+    GamepadGpd,
+}
+
+/// Per-entry tunables forwarded to input-compat sidecars.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+pub struct RawInputCompatOptions {
+    /// Stick deadzone as a fraction of full deflection (0..1).
+    pub gamepad_deadzone: Option<f32>,
+    /// Mouse speed in pixels per second at full stick deflection.
+    pub gamepad_mouse_speed: Option<f32>,
+    /// Scroll speed in discrete wheel units per second at full deflection.
+    pub gamepad_scroll_speed: Option<f32>,
+}
+
+/// Accept either a single `RawInputCompat` value or a list of them. Empty
+/// list and missing field both deserialize to `vec![]`.
+fn deserialize_input_compat_list<'de, D>(deserializer: D) -> Result<Vec<RawInputCompat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(RawInputCompat),
+        Many(Vec<RawInputCompat>),
+    }
+
+    match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Ok(Vec::new()),
+        Some(OneOrMany::One(v)) => Ok(vec![v]),
+        Some(OneOrMany::Many(v)) => Ok(v),
+    }
 }
 
 /// Raw entry kind
@@ -352,6 +410,67 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.entries.len(), 1);
         assert_eq!(config.entries[0].id, "scummvm");
+    }
+
+    #[test]
+    fn parse_input_compat_scalar() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+            input_compat = "touch_to_mouse"
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.entries[0].input_compat,
+            vec![RawInputCompat::TouchToMouse]
+        );
+    }
+
+    #[test]
+    fn parse_input_compat_list() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+            input_compat = ["touch_to_mouse", "gamepad_productivity"]
+
+            [entries.input_compat_options]
+            gamepad_deadzone = 0.2
+            gamepad_mouse_speed = 600.0
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.entries[0].input_compat,
+            vec![
+                RawInputCompat::TouchToMouse,
+                RawInputCompat::GamepadProductivity
+            ]
+        );
+        let opts = config.entries[0].input_compat_options.unwrap();
+        assert_eq!(opts.gamepad_deadzone, Some(0.2));
+        assert_eq!(opts.gamepad_mouse_speed, Some(600.0));
+        assert_eq!(opts.gamepad_scroll_speed, None);
+    }
+
+    #[test]
+    fn parse_input_compat_absent() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.entries[0].input_compat.is_empty());
     }
 
     #[test]

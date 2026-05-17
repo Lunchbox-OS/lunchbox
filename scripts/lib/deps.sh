@@ -15,6 +15,52 @@ DEPS_DIR="$(get_repo_root)/scripts/deps"
 # Rust installation URL
 RUSTUP_URL="https://sh.rustup.rs"
 
+# yt-dlp virtualenv location and the symlink placed on PATH.
+# The venv is owned by root and lives outside /usr so that apt can never
+# silently downgrade or remove yt-dlp.
+YTDLP_VENV="/opt/shepherd/ytdlp-venv"
+YTDLP_LINK="/usr/local/bin/yt-dlp"
+
+# Check whether yt-dlp is available on PATH (covers both the venv symlink and
+# any pre-existing system installation).
+is_ytdlp_installed() {
+    command_exists yt-dlp
+}
+
+# Install or upgrade yt-dlp into a dedicated virtualenv.
+#
+# Using a venv rather than apt keeps yt-dlp at the latest release, which
+# matters because YouTube frequently changes the formats yt-dlp has to handle.
+# Re-running this function is idempotent and upgrades an existing installation.
+install_ytdlp() {
+    if is_ytdlp_installed; then
+        info "yt-dlp already available ($(yt-dlp --version 2>/dev/null || echo 'unknown version')); upgrading..."
+    else
+        info "Installing yt-dlp into virtualenv at $YTDLP_VENV..."
+    fi
+
+    # Ensure the venv parent directory exists.
+    maybe_sudo mkdir -p "$(dirname "$YTDLP_VENV")"
+
+    # Create the venv if it does not already exist.
+    if [[ ! -d "$YTDLP_VENV" ]]; then
+        maybe_sudo python3 -m venv "$YTDLP_VENV"
+    fi
+
+    # Install or upgrade yt-dlp inside the venv.
+    maybe_sudo "$YTDLP_VENV/bin/pip" install --quiet --upgrade yt-dlp
+
+    # Symlink the venv binary onto PATH so shepherd-media (and anything else)
+    # can find it as plain `yt-dlp`.
+    maybe_sudo ln -sf "$YTDLP_VENV/bin/yt-dlp" "$YTDLP_LINK"
+
+    if is_ytdlp_installed; then
+        success "yt-dlp installed ($(yt-dlp --version))"
+    else
+        die "yt-dlp installation failed — check pip output above"
+    fi
+}
+
 # Check if Rust is installed
 is_rust_installed() {
     command_exists rustc && command_exists cargo
@@ -160,7 +206,13 @@ deps_install() {
         install_rust
         install_bpf_toolchain
     fi
-    
+
+    # For run and dev sets, install yt-dlp into its virtualenv.
+    # This runs after apt so that python3-venv is already present.
+    if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
+        install_ytdlp
+    fi
+
     success "Installed $set_name dependencies"
 }
 
@@ -182,10 +234,18 @@ deps_check() {
         fi
     done <<< "$packages"
     
-    # For build and dev sets, also check Rust
+    # For build and dev sets, also check Rust.
     if [[ "$set_name" == "build" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_rust_installed; then
             warn "Rust is not installed"
+            return 1
+        fi
+    fi
+
+    # For run and dev sets, also check yt-dlp.
+    if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
+        if ! is_ytdlp_installed; then
+            warn "yt-dlp is not installed (run: shepherd deps install run)"
             return 1
         fi
     fi

@@ -9,6 +9,8 @@
 
 mod adapter;
 mod process;
+mod sidecar;
+mod sway;
 mod volume;
 
 pub use adapter::*;

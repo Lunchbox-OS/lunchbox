@@ -194,6 +194,87 @@ install_config() {
         maybe_sudo chmod 0644 "$dst_config"
         success "Installed user configuration for $user"
     fi
+
+    # The example config references `~/.config/shepherd/movies.toml` for the
+    # shepherd-media entries. If the user picked the default example config,
+    # also drop the matching example library so the entries don't 404 on
+    # first launch. The user is still expected to edit the URIs.
+    local source_library="$repo_root/movies-library.example.toml"
+    local dst_library="$user_config_dir/movies.toml"
+    if [[ -f "$source_library" ]]; then
+        if maybe_sudo test -f "$dst_library"; then
+            if [[ "$force" == "true" ]]; then
+                warn "Overwriting existing media library at $dst_library"
+                maybe_sudo cp "$source_library" "$dst_library"
+                maybe_sudo chown "$user:$user" "$dst_library"
+                maybe_sudo chmod 0644 "$dst_library"
+                success "Overwrote media library for $user"
+            else
+                info "Media library already exists at $dst_library, skipping"
+            fi
+        else
+            maybe_sudo cp "$source_library" "$dst_library"
+            maybe_sudo chown "$user:$user" "$dst_library"
+            maybe_sudo chmod 0644 "$dst_library"
+            success "Installed media library for $user (edit URIs before use)"
+        fi
+    fi
+}
+
+# Groups the kiosk user must belong to for shepherd-launcher features.
+#
+# - input: required by shepherd-touch-bridge and shepherd-gamepad-bridge
+#   (used when an entry has `input_compat = "touch_to_mouse"` or
+#   `gamepad_*`) so they can read /dev/input/event*.
+#
+# Add new groups here as features need them; install_user_groups walks the
+# array and skips memberships the user already has.
+SHEPHERD_REQUIRED_GROUPS=(
+    "input"
+)
+
+# Add the target user to all groups required by shepherd-launcher.
+# Idempotent: skips any group the user is already in.
+install_user_groups() {
+    local user="${1:-}"
+
+    if [[ -z "$user" ]]; then
+        die "Usage: shepherd install groups --user USER"
+    fi
+
+    require_root
+    validate_user "$user"
+
+    local current_groups
+    current_groups="$(id -nG "$user")"
+
+    local changed=false
+    for group in "${SHEPHERD_REQUIRED_GROUPS[@]}"; do
+        # Skip groups that don't exist on this system. We don't create
+        # them — they're expected to come from the distro.
+        if ! getent group "$group" >/dev/null 2>&1; then
+            warn "Group '$group' does not exist on this system; skipping"
+            continue
+        fi
+
+        # ` $group ` matches the group as a whole token in the space-
+        # separated list returned by `id -nG`.
+        if [[ " $current_groups " == *" $group "* ]]; then
+            info "User '$user' is already in group '$group'"
+            continue
+        fi
+
+        info "Adding user '$user' to group '$group'..."
+        usermod -aG "$group" "$user"
+        changed=true
+    done
+
+    if [[ "$changed" == "true" ]]; then
+        success "Updated group memberships for $user"
+        info "Group changes take effect on the user's next login."
+    else
+        success "User '$user' already has all required group memberships"
+    fi
 }
 
 # Install the firewall helper and its polkit assets.
@@ -275,21 +356,22 @@ install_all() {
     local user="${1:-}"
     local prefix="${2:-$DEFAULT_PREFIX}"
     local force="${3:-false}"
-    
+
     if [[ -z "$user" ]]; then
         die "Usage: shepherd install all --user USER [--prefix PREFIX] [--force]"
     fi
-    
+
     require_root
     validate_user "$user"
-    
+
     info "Installing shepherd-launcher (prefix: $prefix)..."
-    
+
     install_bins "$prefix"
     install_firewall "$user" "true"
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"
     install_config "$user" "" "$force"
+    install_user_groups "$user"
 
     success "Installation complete!"
     info ""
@@ -361,6 +443,9 @@ install_main() {
         desktop-entry)
             install_desktop_entry "$prefix"
             ;;
+        groups)
+            install_user_groups "$user"
+            ;;
         all)
             install_all "$user" "$prefix" "$force"
             ;;
@@ -374,11 +459,14 @@ Commands:
     config            Deploy user configuration
     sway-config       Install sway configuration
     desktop-entry     Install display manager desktop entry
+    groups            Add the target user to required groups (e.g. 'input'
+                      for touch-to-mouse compatibility)
     all               Install everything (incl. firewall helper)
 
 Options:
-    --user USER       Target user for config / firewall group (required for
-                      config / all; optional for firewall)
+    --user USER       Target user for config / groups / firewall group
+                      (required for config / groups / all; optional for
+                      firewall)
     --prefix PREFIX   Installation prefix (default: $DEFAULT_PREFIX)
     --source CONFIG   Source config file (default: config.example.toml)
     --force, -f       Overwrite existing configuration files
@@ -399,6 +487,7 @@ Examples:
     shepherd install bins --prefix /usr/local
     shepherd install firewall --user kiosk
     shepherd install config --user kiosk --force
+    shepherd install groups --user kiosk
     shepherd install all --user kiosk --prefix /usr
 EOF
             ;;

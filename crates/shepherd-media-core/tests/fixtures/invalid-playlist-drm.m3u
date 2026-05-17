@@ -1,0 +1,5 @@
+#EXTM3U
+#EXTINF:120,Allowed
+file:///srv/media/allowed.mp4
+#EXTINF:-1,Should be rejected
+https://www.netflix.com/watch/12345

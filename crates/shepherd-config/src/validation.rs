@@ -489,6 +489,8 @@ mod tests {
                     disabled_reason: None,
                     internet: None,
                     firewall: None,
+                    input_compat: vec![],
+                    input_compat_options: None,
                 },
                 RawEntry {
                     id: "game".into(),
@@ -508,6 +510,8 @@ mod tests {
                     disabled_reason: None,
                     internet: None,
                     firewall: None,
+                    input_compat: vec![],
+                    input_compat_options: None,
                 },
             ],
         };

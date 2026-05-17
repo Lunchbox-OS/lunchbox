@@ -144,6 +144,9 @@ pub enum Command {
     /// Extend the current session (admin only)
     ExtendCurrent { by: Duration },
 
+    /// Log out the current user session
+    Logout,
+
     /// Ping for keepalive
     Ping,
 }
@@ -178,6 +181,7 @@ pub enum ResponsePayload {
     VolumeDenied {
         reason: String,
     },
+    LoggedOut,
     Pong,
 }
 

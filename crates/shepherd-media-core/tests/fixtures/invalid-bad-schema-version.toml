@@ -1,0 +1,11 @@
+schema_version = 99
+library_id = "bad-schema"
+title = "Bad Schema"
+
+[[items]]
+id = "x"
+title = "X"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/x.mp4"

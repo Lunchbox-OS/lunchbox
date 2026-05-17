@@ -6,8 +6,10 @@
 //! - Error types
 //! - Rate limiting helpers
 //! - Default paths for socket, data, and log directories
+//! - Analog-stick navigation state machine shared by the launcher UIs
 
 mod error;
+pub mod gamepad_nav;
 mod ids;
 mod paths;
 mod rate_limit;

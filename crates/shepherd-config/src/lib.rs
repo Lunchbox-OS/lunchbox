@@ -6,6 +6,7 @@
 //! - Time windows, limits, and warnings
 //! - Validation with clear error messages
 
+mod icon;
 mod internet;
 mod policy;
 mod schema;

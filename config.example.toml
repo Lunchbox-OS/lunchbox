@@ -164,7 +164,7 @@ cooldown_seconds = 300  # 5 minute cooldown after each session
 [[entries]]
 id = "gcompris"
 label = "GCompris"
-icon = "~/Games/Icons/GCompris.png"  # Custom icon path
+# icon is autodetected from the snap's .desktop file (no need to specify)
 
 [entries.kind]
 type = "snap"
@@ -198,7 +198,8 @@ cooldown_seconds = 0  # No cooldown
 [[entries]]
 id = "steam-celeste"
 label = "Celeste"
-icon = "~/Games/Icons/Celeste.png"
+# icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_504230"
+# icon = "~/Games/Icons/Celeste.png"  # Override with a custom image if preferred
 
 [entries.kind]
 type = "steam"
@@ -223,7 +224,8 @@ end = "20:00"
 [[entries]]
 id = "steam-a-short-hike"
 label = "A Short Hike"
-icon = "~/Games/Icons/A_Short_Hike.png"
+# icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_1055540"
+# icon = "~/Games/Icons/A_Short_Hike.png"  # Override with a custom image if preferred
 
 [entries.kind]
 type = "steam"
@@ -240,6 +242,48 @@ days = "weekends"
 start = "10:00"
 end = "20:00"
 
+# World of Goo (original) via Steam.
+# Some games — notably the Tomorrow Corporation / 2D Boy titles below —
+# don't process Wayland touch events but otherwise work great on a
+# touchscreen. Setting `input_compat = "touch_to_mouse"` runs a sidecar
+# that grabs touchscreens and synthesizes mouse events for the duration of
+# the activity. `input_compat` also accepts a list, so touch and gamepad
+# bridges can be stacked on a handheld with both. Requires the user
+# running shepherdd to be in the `input` group; see docs/INSTALL.md.
+# https://store.steampowered.com/app/22000/World_of_Goo/
+[[entries]]
+id = "steam-world-of-goo"
+label = "World of Goo"
+input_compat = "touch_to_mouse"
+
+[entries.kind]
+type = "steam"
+app_id = 22000
+
+[entries.availability]
+always = true
+
+# Example of stacking touch + gamepad compatibility on the same activity
+# (useful on a gaming handheld). The `gamepad_productivity` preset is best
+# for non-first-person / point-and-click apps; `gamepad_gpd` is the GPD-style
+# FPS mapping (left stick = WASD, right stick = mouse). The
+# `[entries.input_compat_options]` block tunes the gamepad sidecar; all
+# fields are optional and the sidecar applies sensible defaults if absent.
+#
+# [[entries]]
+# id = "example-handheld"
+# label = "Example handheld activity"
+# input_compat = ["touch_to_mouse", "gamepad_productivity"]
+#
+# [entries.input_compat_options]
+# gamepad_deadzone = 0.15        # 0..1 fraction of full stick deflection
+# gamepad_mouse_speed = 800.0    # pixels/sec at full deflection
+# gamepad_scroll_speed = 10.0    # wheel notches/sec at full deflection
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/example"
+
 ## === Flatpak-based applications ===
 # Flatpak entries use the "flatpak" type for proper process management.
 # Similar to Snap, Flatpak apps run in sandboxed environments and use
@@ -250,7 +294,7 @@ end = "20:00"
 [[entries]]
 id = "prism-launcher"
 label = "Prism Launcher"
-icon = "org.prismlauncher.PrismLauncher"
+# icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
 type = "flatpak"
@@ -300,7 +344,7 @@ max_volume = 60  # Limit volume during gaming sessions
 [[entries]]
 id = "krita"
 label = "Krita"
-icon = "org.kde.krita"
+# icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
 type = "flatpak"
@@ -315,10 +359,27 @@ daily_quota_seconds = 0  # Unlimited
 cooldown_seconds = 0  # No cooldown
 
 ## === Media ===
-# Just use `mpv` to play media (for now).
-# Files can be local on your system or URLs (YouTube, etc).
+# `shepherd-media` reads a declarative `.toml` library file and either
+# direct-plays a single item or opens a poster-grid browser for a whole
+# collection. See docs/shepherd-media.md for the schema and authoring guide.
+# `shepherd-media validate <library.toml>` checks a file before you wire it
+# up here.
+#
+# Most entries below reference `~/.config/shepherd/movies.toml`. A starter
+# library that defines `big-buck-bunny`, `sintel`, `tears-of-steel`, and
+# `lofi-beats` is checked in at `movies-library.example.toml`; copy it and
+# update the `uri` paths to point at your own files:
+#
+#   cp movies-library.example.toml ~/.config/shepherd/movies.toml
+#   $EDITOR ~/.config/shepherd/movies.toml
+#   shepherd-media validate ~/.config/shepherd/movies.toml
+#
+# A YouTube playlist URL can be used in place of a library path; see the
+# `youtube-channel` entry at the end of this section.
 
-# "Big Buck Bunny" saved on local disk
+# "Big Buck Bunny" saved on local disk, registered as a single direct-play
+# activity. The same library file can host many items; only one is exposed
+# here.
 # Available for free as CC BY 3.0 at https://peach.blender.org/download/
 [[entries]]
 id = "big-buck-bunny"
@@ -326,9 +387,37 @@ label = "Big Buck Bunny"
 icon = "mpv"
 
 [entries.kind]
-type = "process"  # TODO: change to "media" type once supported
-command = "mpv"
-args = ["~/Videos/big_buck_bunny_720p_h264.mov"]  # Local file path
+type = "process"
+command = "shepherd-media"
+args = [
+    "play",
+    "--library", "~/.config/shepherd/movies.toml",
+    "--item", "big-buck-bunny",
+]
+
+[entries.availability]
+
+[[entries.availability.windows]]
+days = "weekdays"
+start = "15:00"
+end = "18:00"
+
+[[entries.availability.windows]]
+days = "weekends"
+start = "10:00"
+end = "20:00"
+
+# A whole library exposed as a single browse-mode activity. The user picks
+# items from a poster grid; each playback is internal to the process.
+[[entries]]
+id = "movies-library"
+label = "Movies"
+icon = "folder-videos"
+
+[entries.kind]
+type = "process"
+command = "shepherd-media"
+args = ["browse", "--library", "~/.config/shepherd/movies.toml"]
 
 [entries.availability]
 
@@ -349,9 +438,13 @@ label = "Lofi Beats"
 icon = "mpv"
 
 [entries.kind]
-type = "process"  # TODO: change to "media" type once supported
-command = "mpv"
-args = ["https://www.youtube.com/watch?v=jfKfPfyJRdk"]
+type = "process"
+command = "shepherd-media"
+args = [
+    "play",
+    "--library", "~/.config/shepherd/movies.toml",
+    "--item", "lofi-beats",
+]
 
 [entries.availability]
 always = true
@@ -360,6 +453,49 @@ always = true
 max_run_seconds = 0  # Unlimited: sleep/study aid
 daily_quota_seconds = 0  # Unlimited
 cooldown_seconds = 0  # No cooldown
+
+# A YouTube playlist exposed as a browse-mode activity. shepherd-media
+# fetches the playlist via yt-dlp at startup (cached for 6 hours under
+# $XDG_CACHE_HOME/shepherd/media/playlists/) and shows each video as a
+# poster tile. Replace the `list=` value with a playlist you control or
+# trust. See docs/shepherd-media.md for caching behavior and the rationale
+# for the recommended flags below.
+#
+# Recommended flags:
+# - `--connectivity-check`: every source is a YouTube URL, so the grid is
+#   unreachable when offline. The check empties the grid gracefully
+#   instead of failing on the first click. Any reachable HTTPS or
+#   `tcp://host:port` probe works.
+# - `--reverse`: a channel's "uploads" playlist (`UU…`) is returned
+#   newest-first by YouTube; reversing yields chronological viewing.
+#   Omit for hand-curated `PL…` playlists where the owner's order is
+#   already what you want.
+[[entries]]
+id = "youtube-channel"
+label = "Family YouTube Channel"
+icon = "folder-videos"
+
+[entries.kind]
+type = "process"
+command = "shepherd-media"
+args = [
+    "browse",
+    "--library", "https://www.youtube.com/playlist?list=PLREPLACE_WITH_YOUR_PLAYLIST_ID",
+    "--connectivity-check", "https://connectivitycheck.gstatic.com/generate_204",
+    "--reverse",
+]
+
+[entries.availability]
+
+[[entries.availability.windows]]
+days = "weekdays"
+start = "15:00"
+end = "18:00"
+
+[[entries.availability.windows]]
+days = "weekends"
+start = "10:00"
+end = "20:00"
 
 # Terminal for debugging only
 [[entries]]

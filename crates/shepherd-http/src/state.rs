@@ -6,7 +6,7 @@ use shepherd_host_api::{HostAdapter, VolumeController};
 use shepherd_store::Store;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -19,4 +19,8 @@ pub struct AppState {
     /// Equivalent to calling the daemon's internal `broadcast()` helper.
     pub broadcast_fn: Arc<dyn Fn(Event) + Send + Sync>,
     pub config_path: PathBuf,
+    /// Fires when shepherdd should begin graceful shutdown. The logout handler
+    /// flips this to `true`; the daemon's main loop and the HTTP server's
+    /// `with_graceful_shutdown` future both observe it.
+    pub shutdown_tx: watch::Sender<bool>,
 }

@@ -36,6 +36,9 @@ clang
 llvm-20-dev
 libpolly-20-dev
 
+# libmpv (used by shepherd-media for in-process media playback)
+libmpv-dev
+
 # Required for rustup
 curl
 

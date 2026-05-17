@@ -1,0 +1,21 @@
+[package]
+name = "shepherd-gamepad-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sidecar that grabs gamepads and emits Wayland virtual-pointer + virtual-keyboard events for activities that ignore raw gamepad input"
+
+[[bin]]
+name = "shepherd-gamepad-bridge"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
+gilrs = "0.11"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }

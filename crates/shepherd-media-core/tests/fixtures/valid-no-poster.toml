@@ -1,0 +1,19 @@
+schema_version = 1
+library_id = "valid-no-poster"
+title = "No Posters"
+
+[[items]]
+id = "no-poster-one"
+title = "Item Without Poster"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/media/one.mp4"
+
+[[items]]
+id = "no-poster-two"
+title = "Another Item Without Poster"
+kind = "audio"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/media/two.mp3"

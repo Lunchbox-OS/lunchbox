@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -122,6 +122,8 @@ fn test_policy() -> Policy {
             disabled_reason: None,
             internet: Default::default(),
             firewall: None,
+            input_compat: vec![],
+            input_compat_options: Default::default(),
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
@@ -144,6 +146,7 @@ fn make_app_with_policy(
     )));
     let (tx, _) = broadcast::channel::<Event>(64);
     let tx_for_fn = tx.clone();
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let state = AppState {
         engine,
         store,
@@ -154,6 +157,7 @@ fn make_app_with_policy(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        shutdown_tx,
     };
     handlers::router(state, auth_token.map(str::to_owned))
 }
@@ -670,6 +674,8 @@ async fn overrides_enable_entry_outside_time_window() {
             disabled_reason: None,
             internet: Default::default(),
             firewall: None,
+            input_compat: vec![],
+            input_compat_options: Default::default(),
         }],
         default_warnings: vec![],
         default_max_run: None,
@@ -926,6 +932,33 @@ async fn config_reload_invalid_file_returns_422() {
     let (status, body) = send(&app, req_post("/api/v1/config/reload")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"], "config_error");
+}
+
+// ---------------------------------------------------------------------------
+// Debug
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn debug_windows_unsupported_returns_500() {
+    // MockHost does not implement list_windows, so the default trait impl
+    // returns HostError::Internal — surfaced as a 500 with a JSON error body.
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = send(&app, req_get("/api/v1/debug/windows")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"], "internal_error");
+}
+
+#[tokio::test]
+async fn debug_window_actions_unsupported_return_500() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    for path in ["close", "hide", "show"] {
+        let uri = format!("/api/v1/debug/windows/42/{path}");
+        let (status, body) = send(&app, req_post(&uri)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+        assert_eq!(body["error"], "internal_error", "{path}");
+    }
 }
 
 #[tokio::test]

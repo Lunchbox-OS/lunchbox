@@ -38,6 +38,8 @@ fn make_test_entry(id: &str) -> Entry {
         disabled_reason: None,
         internet: Default::default(),
         firewall: None,
+        input_compat: vec![],
+        input_compat_options: Default::default(),
     }
 }
 
@@ -80,6 +82,8 @@ fn make_test_policy() -> Policy {
             disabled_reason: None,
             internet: Default::default(),
             firewall: None,
+            input_compat: vec![],
+            input_compat_options: Default::default(),
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),

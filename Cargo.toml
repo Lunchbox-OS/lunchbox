@@ -15,6 +15,10 @@ members = [
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
     "crates/shepherd-e2e",
+    "crates/shepherd-media-core",
+    "crates/shepherd-media",
+    "crates/shepherd-touch-bridge",
+    "crates/shepherd-gamepad-bridge",
 ]
 # shepherd-firewall-bpf targets bpfel-unknown-none on nightly and is built
 # separately by shepherd-firewall-helper's build.rs (via aya-build). Excluded

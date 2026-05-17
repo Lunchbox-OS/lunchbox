@@ -1,0 +1,19 @@
+schema_version = 1
+library_id = "duplicate"
+title = "Duplicate"
+
+[[items]]
+id = "same"
+title = "First"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/a.mp4"
+
+[[items]]
+id = "same"
+title = "Second"
+kind = "video"
+[[items.sources]]
+platforms = ["*"]
+uri = "file:///srv/b.mp4"
