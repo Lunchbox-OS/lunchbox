@@ -11,11 +11,11 @@ pub const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(0x80, 0x80, 0x80);
 pub const FOCUS_BORDER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xd1, 0x66);
 
 pub fn install(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.window_fill = BG;
     style.visuals.panel_fill = BG;
     style.spacing.item_spacing = egui::vec2(16.0, 16.0);
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }

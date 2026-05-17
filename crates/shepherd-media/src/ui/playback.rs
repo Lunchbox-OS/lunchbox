@@ -137,8 +137,9 @@ impl PlaybackView {
 
     /// Render mpv's current frame into our FBO and paint the egui scene
     /// (video texture + control overlay).
-    pub fn draw(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, session: &mut Session) {
-        let screen_pixels = ctx.screen_rect().size() * ctx.pixels_per_point();
+    pub fn draw(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, session: &mut Session) {
+        let ctx = ui.ctx().clone();
+        let screen_pixels = ctx.content_rect().size() * ctx.pixels_per_point();
         let target_size = [
             screen_pixels.x.max(1.0) as u32,
             screen_pixels.y.max(1.0) as u32,
@@ -176,8 +177,8 @@ impl PlaybackView {
         let texture_id = self.surface.as_ref().and_then(|s| s.texture_id);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(egui::Color32::BLACK))
-            .show(ctx, |ui| {
+            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+            .show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 if let Some(tex_id) = texture_id {
                     ui.painter().image(
@@ -238,7 +239,7 @@ impl PlaybackView {
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                None,
+                glow::PixelUnpackData::Slice(None),
             );
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -402,7 +403,7 @@ fn button(ui: &mut egui::Ui, label: &str, height: f32) -> egui::Response {
         egui::vec2(height * 2.0, height),
         egui::Button::new(text)
             .fill(theme::TILE_FOCUSED)
-            .rounding(12.0),
+            .corner_radius(12.0),
     )
 }
 

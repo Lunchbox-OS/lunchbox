@@ -66,8 +66,8 @@ pub fn run(
             // Bind mpv's render context to the host GL context. This must
             // happen inside the eframe creation closure because that's
             // where `get_proc_address` is available.
-            if let Some(get_proc) = cc.get_proc_address {
-                if let Err(e) = session.bind_gl(get_proc) {
+            if let Some(get_proc) = cc.get_proc_address.as_ref() {
+                if let Err(e) = session.bind_gl(get_proc.as_ref()) {
                     tracing::error!("bind_gl failed: {e}");
                 }
             } else {
@@ -104,6 +104,7 @@ pub fn run(
                 gilrs: gilrs::Gilrs::new().ok(),
                 focused: 0,
                 columns: 4,
+                grid_scroll: grid::ScrollState::default(),
                 term,
                 signaled: signaled_clone,
                 online,
@@ -129,6 +130,7 @@ struct App {
     /// Index into the *visible* item list for the current frame.
     focused: usize,
     columns: usize,
+    grid_scroll: grid::ScrollState,
     term: Arc<AtomicBool>,
     signaled: Arc<AtomicBool>,
     /// Latest connectivity status from the background check thread.
@@ -189,7 +191,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
         if self.term.swap(false, Ordering::SeqCst) {
             self.session.handle_input(SessionInput::SignalTerminate);
             self.signaled.store(true, Ordering::SeqCst);
@@ -228,7 +232,7 @@ impl eframe::App for App {
         ) {
             self.playback
                 .handle_input(ctx, &mut self.session, &gamepad_events);
-            self.playback.draw(ctx, frame, &mut self.session);
+            self.playback.draw(ui, frame, &mut self.session);
             return;
         }
 
@@ -246,7 +250,8 @@ impl eframe::App for App {
 
         self.handle_browse_input(ctx, &visible, &gamepad_events);
         grid::draw(
-            ctx,
+            ui,
+            &mut self.grid_scroll,
             &mut self.session,
             &visible,
             &mut self.focused,
