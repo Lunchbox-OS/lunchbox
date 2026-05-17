@@ -49,6 +49,37 @@ pub struct Cli {
     /// Maximum video quality for playback and background downloads.
     #[arg(long, value_enum, default_value = "1080p", global = true)]
     pub quality: Quality,
+
+    /// Field used to sort library items before display or lookup.
+    /// `library` preserves the order from the source file/playlist.
+    /// Sort is stable, so library order breaks ties.
+    #[arg(long, value_enum, default_value_t = SortBy::Library, global = true)]
+    pub sort_by: SortBy,
+
+    /// Reverse the final item order. Combines with `--sort-by`; on the
+    /// default `--sort-by library` this just flips the file order.
+    #[arg(long, global = true)]
+    pub reverse: bool,
+}
+
+/// How to order library items before display or lookup.
+///
+/// Items missing the chosen field (e.g. no `category` or `duration_seconds`)
+/// sort to the end in ascending order.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum SortBy {
+    /// Preserve the order from the library file or playlist (default).
+    Library,
+    /// Display title, case-insensitive.
+    Title,
+    /// Stable item id.
+    Id,
+    /// Item kind (audio before video).
+    Kind,
+    /// Optional category string, case-insensitive.
+    Category,
+    /// Optional duration in seconds, ascending.
+    Duration,
 }
 
 #[derive(Debug, Subcommand)]

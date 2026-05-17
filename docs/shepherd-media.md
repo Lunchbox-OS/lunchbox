@@ -165,9 +165,18 @@ shepherd-media browse --library <library.toml>
 Global flags:
 
 ```
---log-level <error|warn|info|debug|trace>   default: info
---no-protocol                               suppress stdout protocol
+--log-level <error|warn|info|debug|trace>                default: info
+--no-protocol                                            suppress stdout protocol
+--quality <best|1080p|720p|480p>                         default: 1080p
+--sort-by <library|title|id|kind|category|duration>      default: library
+--reverse                                                reverse item order
 ```
+
+`--sort-by library` preserves the order from the library file or playlist.
+The sort is stable, so library order breaks ties for any other key. Items
+missing the chosen field (no `category` or `duration_seconds`) sort to the
+end in ascending order. `--reverse` is applied after sorting; with the
+default `--sort-by library` it just flips the file order.
 
 Exit codes:
 

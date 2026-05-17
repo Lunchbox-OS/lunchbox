@@ -2,6 +2,7 @@
 
 mod cli;
 mod connectivity;
+mod ordering;
 mod platform;
 mod posters;
 mod ui;
@@ -22,7 +23,8 @@ use shepherd_media_core::{
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, SortBy};
+use crate::ordering::apply_ordering;
 use crate::ui::StartMode;
 use crate::video_cache::{CachingPlayer, VideoCache};
 
@@ -45,9 +47,18 @@ fn main() -> ExitCode {
         .init();
 
     let ytdl_format = cli.quality.ytdl_format();
+    let sort_by = cli.sort_by;
+    let reverse = cli.reverse;
     let result = match &cli.command {
-        Command::Validate { library } => run_validate(library),
-        Command::Play { library, item } => run_play(library, item, cli.no_protocol, ytdl_format),
+        Command::Validate { library } => run_validate(library, sort_by, reverse),
+        Command::Play { library, item } => run_play(
+            library,
+            item,
+            cli.no_protocol,
+            ytdl_format,
+            sort_by,
+            reverse,
+        ),
         Command::Browse {
             library,
             connectivity_check,
@@ -56,29 +67,38 @@ fn main() -> ExitCode {
             cli.no_protocol,
             connectivity_check.as_deref(),
             ytdl_format,
+            sort_by,
+            reverse,
         ),
     };
 
     ExitCode::from(result)
 }
 
-/// Load a library from either a file path or a YouTube playlist URL.
-fn load_library_from_source(source: &str) -> Result<Library, (u8, String)> {
-    if is_youtube_playlist_url(source) {
+/// Load a library from either a file path or a YouTube playlist URL,
+/// then apply the CLI-selected ordering.
+fn load_library_from_source(
+    source: &str,
+    sort_by: SortBy,
+    reverse: bool,
+) -> Result<Library, (u8, String)> {
+    let mut library = if is_youtube_playlist_url(source) {
         let info = youtube::fetch_playlist(source).map_err(|e| (EXIT_VALIDATION, e))?;
-        Ok(build_library_from_entries(
+        build_library_from_entries(
             source,
             info.title,
             info.playlist_id.as_deref(),
             &info.entries,
-        ))
+        )
     } else {
-        load_library(Path::new(source)).map_err(|e| (EXIT_VALIDATION, e.to_string()))
-    }
+        load_library(Path::new(source)).map_err(|e| (EXIT_VALIDATION, e.to_string()))?
+    };
+    apply_ordering(&mut library, sort_by, reverse);
+    Ok(library)
 }
 
-fn run_validate(library_source: &str) -> u8 {
-    match load_library_from_source(library_source) {
+fn run_validate(library_source: &str, sort_by: SortBy, reverse: bool) -> u8 {
+    match load_library_from_source(library_source, sort_by, reverse) {
         Ok(lib) => {
             println!(
                 "OK: library_id={} items={}",
@@ -94,8 +114,15 @@ fn run_validate(library_source: &str) -> u8 {
     }
 }
 
-fn run_play(library_source: &str, item_id: &str, no_protocol: bool, ytdl_format: &str) -> u8 {
-    let library = match load_library_from_source(library_source) {
+fn run_play(
+    library_source: &str,
+    item_id: &str,
+    no_protocol: bool,
+    ytdl_format: &str,
+    sort_by: SortBy,
+    reverse: bool,
+) -> u8 {
+    let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
         Err((code, msg)) => {
             eprintln!("validation failed: {msg}");
@@ -150,8 +177,10 @@ fn run_browse(
     no_protocol: bool,
     connectivity_check: Option<&str>,
     ytdl_format: &str,
+    sort_by: SortBy,
+    reverse: bool,
 ) -> u8 {
-    let library = match load_library_from_source(library_source) {
+    let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
         Err((code, msg)) => {
             eprintln!("validation failed: {msg}");
