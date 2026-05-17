@@ -29,6 +29,11 @@ pub struct ScrollState {
     /// Last pointer Y / timestamp during an active drag, used to derive
     /// release velocity without depending on egui's pointer.velocity().
     last_sample: Option<(f64, f32)>,
+    /// Focused index from the previous frame. We only `scroll_to_me` the
+    /// focused tile when the index changes (e.g., from a keyboard arrow or
+    /// gamepad dpad press) so the user can drag-to-browse without the view
+    /// snapping back to the focused tile each frame.
+    last_focused: Option<usize>,
 }
 
 struct DragStart {
@@ -84,6 +89,9 @@ pub fn draw(
             if let Some(offset) = override_offset {
                 area = area.vertical_scroll_offset(offset);
             }
+            let focus_changed = scroll.last_focused != Some(*focused);
+            scroll.last_focused = Some(*focused);
+
             let output = area.show(ui, |ui| {
                 egui::Grid::new("poster-grid")
                     .num_columns(*columns)
@@ -101,6 +109,9 @@ pub fn draw(
                                 playable,
                                 is_focused,
                             );
+                            if is_focused && focus_changed {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
                             if response.clicked() && playable {
                                 *focused = idx;
                                 to_select = Some(item.id.clone());
