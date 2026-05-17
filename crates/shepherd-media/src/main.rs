@@ -59,13 +59,10 @@ fn main() -> ExitCode {
             sort_by,
             reverse,
         ),
-        Command::Browse {
-            library,
-            connectivity_check,
-        } => run_browse(
+        Command::Browse { library } => run_browse(
             library,
             cli.no_protocol,
-            connectivity_check.as_deref(),
+            cli.connectivity_check.as_deref(),
             ytdl_format,
             sort_by,
             reverse,

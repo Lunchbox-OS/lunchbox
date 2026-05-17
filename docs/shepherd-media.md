@@ -69,8 +69,61 @@ Notes:
   played directly. Only the top-level file passed via `--library` is ever
   interpreted as a playlist.
 
+### YouTube playlist URLs
+
+`shepherd-media` also accepts a YouTube playlist URL anywhere a library path
+is required. The URL is detected by the presence of a `list=…` query
+parameter:
+
+- `https://www.youtube.com/playlist?list=PL…`
+- `https://www.youtube.com/watch?v=…&list=PL…`
+- `https://youtu.be/…?list=PL…`
+
+`yt-dlp` is invoked once at startup (in `--flat-playlist` mode) to fetch the
+title, video IDs, durations, and thumbnails. Results are cached under
+`$XDG_CACHE_HOME/shepherd/media/playlists/<list-id>.json` for 6 hours, so
+subsequent launches don't re-hit YouTube. A stale or missing cache
+transparently falls back to a fresh fetch.
+
+Notes:
+
+- `library_id` is derived from the `list=` value (e.g. `PLtest` →
+  `library_id = "pltest"`); `title` is whatever yt-dlp reports for the
+  playlist.
+- Item IDs are the YouTube video IDs, lowercased with `_` replaced by `-`
+  (e.g. `YE7VzlLtp-4` → `ye7vzlltp-4`), so you can pass them straight to
+  `--item` in direct-play mode.
+- Posters use the per-video thumbnail when yt-dlp returns one, otherwise
+  `https://i.ytimg.com/vi/<id>/hqdefault.jpg` is derived from the video ID.
+- All items get a single `platforms = ["*"]` source pointing at the
+  canonical `https://www.youtube.com/watch?v=<id>` URL.
+- `yt-dlp` is a required runtime dependency for this path; without it,
+  startup fails with an actionable error rather than partial results.
+
+#### Recommended options
+
+`yt-dlp` returns items in the playlist owner's order. For a hand-curated
+playlist that is usually what you want; for a channel's "uploads"
+playlist (`UU…`), which YouTube returns newest-first, add `--reverse` to
+get chronological viewing.
+
+Every source is a YouTube URL, so when the network is down the entire
+grid is unreachable. Pass `--connectivity-check <url>` so the grid empties
+itself out gracefully on a network drop instead of failing on the first
+click. Any reachable HTTPS target works (or a `tcp://host:port` probe);
+forwarding shepherdd's own `internet.check` value is the easiest choice.
+
+```
+shepherd-media browse \
+    --library 'https://www.youtube.com/playlist?list=UU...' \
+    --connectivity-check https://www.google.com \
+    --reverse
+```
+
+### TOML libraries
+
 If you need stable item IDs, posters, per-platform fallback sources, or
-multiple sources per item, convert the playlist to TOML.
+multiple sources per item, use a TOML library.
 
 ```toml
 schema_version = 1
@@ -149,14 +202,15 @@ DRM-protected playback is intentionally out of scope — see issues
 ## CLI
 
 ```
-shepherd-media validate <library.toml>
-    Parse and validate the library file. Exit 0 on success, 1 on error.
+shepherd-media validate <library-or-url>
+    Parse and validate the library file (`.toml`, `.m3u`, `.m3u8`) or
+    YouTube playlist URL. Exit 0 on success, 1 on error.
 
-shepherd-media play --library <library.toml> --item <item-id>
+shepherd-media play --library <library-or-url> --item <item-id>
     Direct-play mode. Resolve the item, hand off to mpv, exit when playback
     ends. Used when an item is registered as its own shepherdd activity.
 
-shepherd-media browse --library <library.toml>
+shepherd-media browse --library <library-or-url>
     Open the egui poster grid. Each playback is a state-machine transition;
     the process keeps running until the user exits or shepherdd sends
     SIGTERM.
@@ -170,6 +224,7 @@ Global flags:
 --quality <best|1080p|720p|480p>                         default: 1080p
 --sort-by <library|title|id|kind|category|duration>      default: library
 --reverse                                                reverse item order
+--connectivity-check <url>                               browse-mode online probe
 ```
 
 `--sort-by library` preserves the order from the library file or playlist.
@@ -177,6 +232,12 @@ The sort is stable, so library order breaks ties for any other key. Items
 missing the chosen field (no `category` or `duration_seconds`) sort to the
 end in ascending order. `--reverse` is applied after sorting; with the
 default `--sort-by library` it just flips the file order.
+
+`--connectivity-check <url>` is honored only by `browse`: the URL is
+probed every 10 seconds and items without a local source are hidden when
+the probe fails. `validate` and `play` accept the flag for invocation
+symmetry but ignore it. Accepts the same format as shepherdd's
+`internet.check` (e.g. `https://www.google.com` or `tcp://8.8.8.8:53`).
 
 Exit codes:
 
@@ -246,6 +307,31 @@ args = ["browse", "--library", "/etc/shepherd/movies.toml"]
 Once shepherdd grows protocol-reader support, the browse activity can opt
 into playback-only time accounting. Until then, browse-mode time counts as
 "in the activity" for as long as the process runs.
+
+### Browse a YouTube playlist
+
+A YouTube playlist URL is accepted wherever a library path is — no TOML
+file required.
+
+```toml
+[[entries]]
+id = "channel-uploads"
+label = "My Channel"
+icon = "video-x-generic"
+
+[entries.kind]
+type = "process"
+program = "shepherd-media"
+args = [
+    "browse",
+    "--library", "https://www.youtube.com/playlist?list=UU...",
+    "--connectivity-check", "https://www.google.com",
+    "--reverse",
+]
+```
+
+See [YouTube playlist URLs](#youtube-playlist-urls) for the caching
+behavior and why `--reverse` and `--connectivity-check` are recommended.
 
 ## Playback UI
 

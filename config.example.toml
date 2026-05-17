@@ -365,7 +365,7 @@ cooldown_seconds = 0  # No cooldown
 # `shepherd-media validate <library.toml>` checks a file before you wire it
 # up here.
 #
-# The entries below all reference `~/.config/shepherd/movies.toml`. A starter
+# Most entries below reference `~/.config/shepherd/movies.toml`. A starter
 # library that defines `big-buck-bunny`, `sintel`, `tears-of-steel`, and
 # `lofi-beats` is checked in at `movies-library.example.toml`; copy it and
 # update the `uri` paths to point at your own files:
@@ -373,6 +373,9 @@ cooldown_seconds = 0  # No cooldown
 #   cp movies-library.example.toml ~/.config/shepherd/movies.toml
 #   $EDITOR ~/.config/shepherd/movies.toml
 #   shepherd-media validate ~/.config/shepherd/movies.toml
+#
+# A YouTube playlist URL can be used in place of a library path; see the
+# `youtube-channel` entry at the end of this section.
 
 # "Big Buck Bunny" saved on local disk, registered as a single direct-play
 # activity. The same library file can host many items; only one is exposed
@@ -450,6 +453,49 @@ always = true
 max_run_seconds = 0  # Unlimited: sleep/study aid
 daily_quota_seconds = 0  # Unlimited
 cooldown_seconds = 0  # No cooldown
+
+# A YouTube playlist exposed as a browse-mode activity. shepherd-media
+# fetches the playlist via yt-dlp at startup (cached for 6 hours under
+# $XDG_CACHE_HOME/shepherd/media/playlists/) and shows each video as a
+# poster tile. Replace the `list=` value with a playlist you control or
+# trust. See docs/shepherd-media.md for caching behavior and the rationale
+# for the recommended flags below.
+#
+# Recommended flags:
+# - `--connectivity-check`: every source is a YouTube URL, so the grid is
+#   unreachable when offline. The check empties the grid gracefully
+#   instead of failing on the first click. Any reachable HTTPS or
+#   `tcp://host:port` probe works.
+# - `--reverse`: a channel's "uploads" playlist (`UU…`) is returned
+#   newest-first by YouTube; reversing yields chronological viewing.
+#   Omit for hand-curated `PL…` playlists where the owner's order is
+#   already what you want.
+[[entries]]
+id = "youtube-channel"
+label = "Family YouTube Channel"
+icon = "folder-videos"
+
+[entries.kind]
+type = "process"
+command = "shepherd-media"
+args = [
+    "browse",
+    "--library", "https://www.youtube.com/playlist?list=PLREPLACE_WITH_YOUR_PLAYLIST_ID",
+    "--connectivity-check", "https://connectivitycheck.gstatic.com/generate_204",
+    "--reverse",
+]
+
+[entries.availability]
+
+[[entries.availability.windows]]
+days = "weekdays"
+start = "15:00"
+end = "18:00"
+
+[[entries.availability.windows]]
+days = "weekends"
+start = "10:00"
+end = "20:00"
 
 # Terminal for debugging only
 [[entries]]

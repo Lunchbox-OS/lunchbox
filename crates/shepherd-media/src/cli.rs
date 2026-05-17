@@ -60,6 +60,17 @@ pub struct Cli {
     /// default `--sort-by library` this just flips the file order.
     #[arg(long, global = true)]
     pub reverse: bool,
+
+    /// URL used to probe internet connectivity (e.g. `https://example.com`
+    /// or `tcp://8.8.8.8:53`). When provided, browse mode polls
+    /// reachability every 10 seconds and hides library items that are only
+    /// available online when the check fails. Ignored by `validate` and
+    /// `play`. Accepts the same format as shepherdd's `internet.check`
+    /// config field, so the value can be forwarded directly from the
+    /// launcher. When absent, all items are shown regardless of
+    /// connectivity.
+    #[arg(long, global = true)]
+    pub connectivity_check: Option<String>,
 }
 
 /// How to order library items before display or lookup.
@@ -107,16 +118,6 @@ pub enum Command {
         /// YouTube URLs require `yt-dlp` to be installed.
         #[arg(long)]
         library: String,
-
-        /// URL used to probe internet connectivity (e.g.
-        /// `https://example.com` or `tcp://8.8.8.8:53`).  When provided,
-        /// shepherd-media polls reachability every 10 seconds and hides
-        /// library items that are only available online when the check fails.
-        /// Accepts the same format as shepherdd's `internet.check` config
-        /// field, so the value can be forwarded directly from the launcher.
-        /// When absent, all items are shown regardless of connectivity.
-        #[arg(long)]
-        connectivity_check: Option<String>,
     },
 }
 
