@@ -110,6 +110,16 @@ pub struct RawEntry {
     /// Tunables for input-compat sidecars (analog deadzones, speeds).
     #[serde(default)]
     pub input_compat_options: Option<RawInputCompatOptions>,
+
+    /// Drop the compositor output scale to 1.0 for the duration of this
+    /// activity so XWayland clients render at the panel's native resolution.
+    /// Sway doesn't pass scale through to XWayland (issue #45), so without
+    /// this an XWayland game at `output * scale 1.5` only fills 1280x720 of
+    /// a 1920x1080 panel. shepherdd compensates by telling the HUD to apply
+    /// a counter-scale factor so it stays a normal size while the activity
+    /// runs.
+    #[serde(default)]
+    pub xwayland_native_resolution: bool,
 }
 
 /// Input compatibility mode

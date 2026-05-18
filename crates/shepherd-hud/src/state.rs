@@ -75,19 +75,33 @@ pub struct SharedState {
     volume_tx: Arc<watch::Sender<Option<VolumeInfo>>>,
     /// Volume info receiver
     volume_rx: watch::Receiver<Option<VolumeInfo>>,
+    /// UI scale multiplier applied on top of the compositor scale. 1.0 by
+    /// default; shepherdd raises this for activities that disable sway's
+    /// compositor scale so the HUD stays a normal physical size. See
+    /// `EventPayload::HudScaleChanged`.
+    scale_tx: Arc<watch::Sender<f64>>,
+    scale_rx: watch::Receiver<f64>,
 }
 
 impl SharedState {
     pub fn new() -> Self {
         let (session_tx, session_rx) = watch::channel(SessionState::NoSession);
         let (volume_tx, volume_rx) = watch::channel(None);
+        let (scale_tx, scale_rx) = watch::channel(1.0_f64);
 
         Self {
             session_tx: Arc::new(session_tx),
             session_rx,
             volume_tx: Arc::new(volume_tx),
             volume_rx,
+            scale_tx: Arc::new(scale_tx),
+            scale_rx,
         }
+    }
+
+    /// Current UI scale factor (1.0 = unmodified).
+    pub fn scale_factor(&self) -> f64 {
+        *self.scale_rx.borrow()
     }
 
     /// Get the current session state
@@ -268,6 +282,17 @@ impl SharedState {
 
             EventPayload::VolumeChanged { percent, muted } => {
                 self.update_volume(*percent, *muted);
+            }
+
+            EventPayload::HudScaleChanged { factor } => {
+                // Reject obviously-broken factors (e.g. 0 or negative from a
+                // misconfigured output) so we don't render an invisible HUD.
+                let clamped = if factor.is_finite() && *factor > 0.0 {
+                    factor.clamp(0.5, 4.0)
+                } else {
+                    1.0
+                };
+                let _ = self.scale_tx.send(clamped);
             }
 
             _ => {}

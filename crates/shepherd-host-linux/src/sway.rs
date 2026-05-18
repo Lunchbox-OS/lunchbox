@@ -16,6 +16,24 @@ use shepherd_host_api::{HostError, HostResult};
 
 const SCRATCHPAD_WORKSPACE: &str = "__i3_scratch";
 
+/// Per-output scale snapshot returned by [`get_outputs`]. Used to capture
+/// the pre-launch scale so we can restore it after an XWayland activity
+/// exits (see issue #45).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputScale {
+    pub name: String,
+    pub scale: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawOutput {
+    name: String,
+    #[serde(default)]
+    scale: Option<f64>,
+    #[serde(default)]
+    active: bool,
+}
+
 /// Sway returns a JSON array of `{success, error?}` objects for run_command
 /// requests. Exit status is 0 even when the command failed against the tree,
 /// so we have to inspect the response.
@@ -63,6 +81,65 @@ pub async fn act_on_window(window_id: u64, action: WindowAction) -> HostResult<(
         WindowAction::Show => "scratchpad show",
     };
     let cmd = format!("[con_id={window_id}] {verb}");
+    let output = tokio::process::Command::new("swaymsg")
+        .arg(&cmd)
+        .output()
+        .await
+        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(HostError::Internal(format!(
+            "swaymsg exited non-zero: {stderr}"
+        )));
+    }
+    let replies: Vec<CommandReply> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg reply: {e}")))?;
+    for reply in replies {
+        if !reply.success {
+            let err = reply.error.unwrap_or_else(|| "unknown sway error".into());
+            return Err(HostError::Internal(format!(
+                "swaymsg `{cmd}` failed: {err}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run `swaymsg -t get_outputs` and return one [`OutputScale`] per active
+/// output. Inactive outputs (disconnected, off) are skipped because we have
+/// nothing to restore for them.
+pub async fn get_outputs() -> HostResult<Vec<OutputScale>> {
+    let output = tokio::process::Command::new("swaymsg")
+        .args(["-t", "get_outputs", "--raw"])
+        .output()
+        .await
+        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(HostError::Internal(format!(
+            "swaymsg get_outputs failed: {stderr}"
+        )));
+    }
+    parse_outputs(&output.stdout)
+}
+
+fn parse_outputs(raw: &[u8]) -> HostResult<Vec<OutputScale>> {
+    let raws: Vec<RawOutput> = serde_json::from_slice(raw)
+        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg outputs: {e}")))?;
+    Ok(raws
+        .into_iter()
+        .filter(|o| o.active)
+        .map(|o| OutputScale {
+            name: o.name,
+            scale: o.scale.unwrap_or(1.0),
+        })
+        .collect())
+}
+
+/// Set the scale on a named output via `swaymsg output <name> scale <s>`.
+/// Sway accepts fractional scales like 1.25; passing 1.0 disables scaling.
+pub async fn set_output_scale(name: &str, scale: f64) -> HostResult<()> {
+    let cmd = format!("output {name} scale {scale}");
     let output = tokio::process::Command::new("swaymsg")
         .arg(&cmd)
         .output()
@@ -201,6 +278,32 @@ mod tests {
         assert_eq!(steam.workspace.as_deref(), Some("__i3_scratch"));
         assert!(steam.in_scratchpad);
         assert!(!steam.visible);
+    }
+
+    #[test]
+    fn parses_active_outputs_with_scale() {
+        // The `--raw` flag yields a JSON array of outputs; inactive entries
+        // (disconnected, or `output * disable`d) lack a meaningful scale and
+        // are filtered out so we don't try to restore them later.
+        let json = br#"[
+          {"name": "HDMI-A-1", "active": true, "scale": 1.5},
+          {"name": "eDP-1", "active": false, "scale": 1.0},
+          {"name": "HDMI-A-2", "active": true}
+        ]"#;
+        let outputs = parse_outputs(json).unwrap();
+        assert_eq!(
+            outputs,
+            vec![
+                OutputScale {
+                    name: "HDMI-A-1".into(),
+                    scale: 1.5,
+                },
+                OutputScale {
+                    name: "HDMI-A-2".into(),
+                    scale: 1.0,
+                },
+            ]
+        );
     }
 
     #[test]

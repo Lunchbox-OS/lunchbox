@@ -18,7 +18,9 @@ use shepherd_api::{
 };
 use shepherd_config::{VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
-use shepherd_host_api::{HostAdapter, HostEvent, StopMode as HostStopMode, VolumeController};
+use shepherd_host_api::{
+    HidpiController, HostAdapter, HostEvent, StopMode as HostStopMode, VolumeController,
+};
 use shepherd_host_linux::{LinuxHost, LinuxVolumeController};
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
@@ -32,7 +34,10 @@ use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod hidpi;
 mod internet;
+
+use hidpi::XwaylandHidpi;
 
 /// shepherdd - Policy enforcement service for child-focused computing
 #[derive(Parser, Debug)]
@@ -189,6 +194,12 @@ impl Service {
         let host = self.host.clone();
         let volume = self.volume.clone();
         let store = self.store.clone();
+        // The hidpi manager owns both the IPC server handle and the SSE
+        // broadcast channel so it can fan `HudScaleChanged` events out to
+        // both subscriber populations without being passed them at each
+        // call site (the IPC and HTTP handlers can share the same
+        // controller via `Arc<dyn HidpiController>`).
+        let hidpi = Arc::new(XwaylandHidpi::new(ipc_ref.clone(), event_tx.clone()));
 
         // Start HTTP management API if configured
         let management_api_config = {
@@ -210,6 +221,7 @@ impl Service {
                 }),
                 config_path: config_path.clone(),
                 shutdown_tx: shutdown_tx.clone(),
+                hidpi: hidpi.clone() as Arc<dyn HidpiController>,
             };
             let http_server = HttpServer::new(http_state, api_cfg);
             let http_shutdown_rx = shutdown_rx.clone();
@@ -328,13 +340,13 @@ impl Service {
                     };
 
                     for event in events {
-                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, event, now_mono, now).await;
+                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, &hidpi, event, now_mono, now).await;
                     }
                 }
 
                 // Host events (process exit)
                 Some(host_event) = host_events.recv() => {
-                    Self::handle_host_event(&engine, &ipc_ref, &event_tx, host_event).await;
+                    Self::handle_host_event(&engine, &ipc_ref, &event_tx, &hidpi, host_event).await;
                 }
 
                 // Config file changed on disk
@@ -346,7 +358,7 @@ impl Service {
 
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &event_tx, &shutdown_tx, &config_path, msg).await;
+                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &event_tx, &shutdown_tx, &hidpi, &config_path, msg).await;
                 }
             }
         }
@@ -373,6 +385,11 @@ impl Service {
                 }
             }
         }
+
+        // Restore sway output scales if the XWayland HiDPI workaround was
+        // active for the session we just stopped. host.logout() below tears
+        // down sway anyway, but this keeps us tidy if logout fails.
+        hidpi.restore().await;
 
         // Stop preloaded Steam (if any) after active sessions are terminated
         host.stop_steam_preload();
@@ -449,11 +466,13 @@ impl Service {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_core_event(
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
+        hidpi: &Arc<XwaylandHidpi>,
         event: CoreEvent,
         _now_mono: MonotonicInstant,
         _now: chrono::DateTime<chrono::Local>,
@@ -553,6 +572,10 @@ impl Service {
                     }),
                 );
 
+                // Restore the compositor scale if an XWayland HiDPI workaround
+                // was in effect (no-op otherwise).
+                hidpi.restore().await;
+
                 // Broadcast state change
                 let state = {
                     let engine = engine.lock().await;
@@ -597,6 +620,7 @@ impl Service {
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
+        hidpi: &Arc<XwaylandHidpi>,
         event: HostEvent,
     ) {
         match event {
@@ -645,6 +669,10 @@ impl Service {
                         }),
                     );
 
+                    // Restore the compositor scale (and HUD factor) if an
+                    // XWayland HiDPI workaround was in effect for this session.
+                    hidpi.restore().await;
+
                     // Broadcast state change
                     let state = {
                         let engine = engine.lock().await;
@@ -667,6 +695,7 @@ impl Service {
 
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn handle_ipc_message(
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
@@ -676,6 +705,7 @@ impl Service {
         rate_limiter: &Arc<Mutex<RateLimiter>>,
         event_tx: &broadcast::Sender<Event>,
         shutdown_tx: &tokio::sync::watch::Sender<bool>,
+        hidpi: &Arc<XwaylandHidpi>,
         config_path: &Path,
         msg: ServerMessage,
     ) {
@@ -729,6 +759,7 @@ impl Service {
                     request.command,
                     event_tx,
                     shutdown_tx,
+                    hidpi,
                     config_path,
                 )
                 .await;
@@ -777,6 +808,7 @@ impl Service {
         command: Command,
         event_tx: &broadcast::Sender<Event>,
         shutdown_tx: &tokio::sync::watch::Sender<bool>,
+        hidpi: &Arc<XwaylandHidpi>,
         config_path: &Path,
     ) -> Response {
         let now = shepherd_util::now();
@@ -809,6 +841,7 @@ impl Service {
                             entry.map(|e| e.input_compat.clone()).unwrap_or_default();
                         let input_compat_options =
                             entry.map(|e| e.input_compat_options).unwrap_or_default();
+                        let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
 
                         // Build spawn options with log path if capture_child_output is enabled
                         let spawn_options = if eng.policy().service.capture_child_output {
@@ -838,6 +871,13 @@ impl Service {
                         };
 
                         drop(eng); // Release lock before spawning
+
+                        // Apply the XWayland HiDPI workaround before spawning
+                        // so the client sees the panel's native scale on its
+                        // first map. Restored below if the spawn fails.
+                        if needs_hidpi {
+                            hidpi.apply().await;
+                        }
 
                         if let Some(kind) = entry_kind {
                             match host
@@ -886,6 +926,11 @@ impl Service {
                                     }
                                 }
                                 Err(e) => {
+                                    // Spawn failed: roll back the scale
+                                    // change so the launcher comes back to a
+                                    // correctly-scaled HUD.
+                                    hidpi.restore().await;
+
                                     // Notify session ended with error and broadcast to subscribers
                                     let mut eng = engine.lock().await;
                                     if let Some(CoreEvent::SessionEnded {
@@ -976,6 +1021,12 @@ impl Service {
                         );
 
                         drop(eng); // Release lock before host operations
+
+                        // Restore output scales / HUD factor before the host
+                        // stops the process so the launcher reappears at its
+                        // normal size. (handle_host_event will see the engine
+                        // already transitioned and not double-restore.)
+                        hidpi.restore().await;
 
                         // Stop the actual process
                         if let Some(h) = handle {

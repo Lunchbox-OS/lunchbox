@@ -67,13 +67,14 @@ pub async fn launch(
             }
 
             // Determine spawn options
-            let (entry_kind, spawn_opts) = {
+            let (entry_kind, spawn_opts, needs_hidpi) = {
                 let eng = state.engine.lock().await;
                 let entry = eng.policy().get_entry(&entry_id);
                 let kind = entry.map(|e| e.kind.clone());
                 let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
                 let input_compat_options =
                     entry.map(|e| e.input_compat_options).unwrap_or_default();
+                let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
                 let opts = if eng.policy().service.capture_child_output {
                     let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
                     let filename = format!(
@@ -96,7 +97,7 @@ pub async fn launch(
                         ..Default::default()
                     }
                 };
-                (kind, opts)
+                (kind, opts, needs_hidpi)
             };
 
             let Some(kind) = entry_kind else {
@@ -112,6 +113,13 @@ pub async fn launch(
                 )
                     .into_response();
             };
+
+            // Apply the XWayland HiDPI workaround before spawning so the
+            // client sees the native scale on first map (mirror of the IPC
+            // launch path in shepherdd::main).
+            if needs_hidpi {
+                state.hidpi.apply().await;
+            }
 
             match state
                 .host
@@ -143,6 +151,9 @@ pub async fn launch(
                 }
                 Err(e) => {
                     warn!(error = %e, "Spawn failed from HTTP launch");
+                    // Roll back the scale change so the launcher reappears
+                    // with a correctly-sized HUD.
+                    state.hidpi.restore().await;
                     let mut eng = state.engine.lock().await;
                     eng.notify_session_exited(Some(-1), now_mono, now);
                     let snap = eng.get_state();
@@ -207,6 +218,11 @@ pub async fn stop_current(
             }));
             let snap = state.engine.lock().await.get_state();
             (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+
+            // Restore output scale / HUD factor before tearing down the
+            // process so the launcher reappears at its normal size; idempotent
+            // when no workaround was active.
+            state.hidpi.restore().await;
 
             if let Some(h) = handle {
                 let host_mode = match mode {

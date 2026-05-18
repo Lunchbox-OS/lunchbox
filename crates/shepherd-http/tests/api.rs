@@ -123,6 +123,7 @@ fn test_policy() -> Policy {
             internet: Default::default(),
             input_compat: vec![],
             input_compat_options: Default::default(),
+            xwayland_native_resolution: false,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
@@ -157,6 +158,7 @@ fn make_app_with_policy(
         }),
         config_path,
         shutdown_tx,
+        hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
     };
     handlers::router(state, auth_token.map(str::to_owned))
 }
@@ -674,6 +676,7 @@ async fn overrides_enable_entry_outside_time_window() {
             internet: Default::default(),
             input_compat: vec![],
             input_compat_options: Default::default(),
+            xwayland_native_resolution: false,
         }],
         default_warnings: vec![],
         default_max_run: None,
