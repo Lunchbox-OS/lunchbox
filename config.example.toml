@@ -284,6 +284,28 @@ always = true
 # type = "process"
 # command = "/usr/bin/example"
 
+# `xwayland_native_resolution = true` is a workaround for issue #45: sway
+# does not pass output scaling to XWayland clients, so an XWayland game on
+# a panel configured with `output * scale 1.5` only renders at 1280x720 of
+# a 1920x1080 panel and sway upscales the result (blurry). When this flag
+# is set, shepherdd drops sway's compositor scale to 1.0 for the duration
+# of the activity so the client sees the panel's native pixel grid; the
+# HUD compensates with a counter-scale so it stays a normal physical size.
+# Restored on exit.
+#
+# Only useful for XWayland activities on a HiDPI-scaled display. Native
+# Wayland apps already get the panel's native pixel grid and should leave
+# this `false` (the default).
+#
+# [[entries]]
+# id = "example-xwayland-game"
+# label = "Example XWayland Game"
+# xwayland_native_resolution = true
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/example-game"
+
 ## === Flatpak-based applications ===
 # Flatpak entries use the "flatpak" type for proper process management.
 # Similar to Snap, Flatpak apps run in sandboxed environments and use
