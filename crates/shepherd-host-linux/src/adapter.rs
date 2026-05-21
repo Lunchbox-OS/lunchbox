@@ -10,7 +10,7 @@ use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -71,7 +71,28 @@ struct SteamSession {
     pgid: u32,
     app_id: u32,
     seen_game: bool,
+    /// When we spawned `snap run steam steam://rungameid/<app_id>`. Used by
+    /// the launch watchdog (issue #50) to detect launches that hang because
+    /// Steam is blocked on a hidden offline / connection dialog.
+    started_at: Instant,
+    /// Whether the watchdog has already surfaced any hidden Steam dialogs
+    /// for this session — we only do it once per launch to avoid yanking
+    /// the user's focus repeatedly.
+    surfaced_dialogs: bool,
 }
+
+/// How long a Steam launch may run without `find_steam_game_pids` reporting
+/// a game process before the watchdog pulls any hidden Steam dialog out of
+/// the scratchpad. Generous because first-time launches can stall on
+/// shader precompilation or DRM checks (Steam shows a visible
+/// "Preparing to launch" overlay during that time).
+const STEAM_LAUNCH_SURFACE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a Steam launch may run before the watchdog gives up and ends
+/// the session, returning the user to the home screen. Set well past
+/// [`STEAM_LAUNCH_SURFACE_TIMEOUT`] so a child can read/dismiss any dialog
+/// we surfaced before the session is torn down.
+const STEAM_LAUNCH_ABORT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Linux host adapter
 pub struct LinuxHost {
@@ -222,6 +243,11 @@ impl LinuxHost {
                     { steam_sessions.lock().unwrap().values().cloned().collect() };
 
                 let mut ended = Vec::new();
+                // Sessions whose dialog watchdog needs to fire. We collect
+                // them here and run the (async) sway query outside the
+                // mutex-holding section below to avoid awaiting while
+                // holding a std::sync::Mutex.
+                let mut to_surface_dialogs: Vec<(u32, u32)> = Vec::new();
 
                 for session in &steam_snapshot {
                     let has_game = !find_steam_game_pids(session.app_id).is_empty();
@@ -230,8 +256,67 @@ impl LinuxHost {
                             map.entry(session.pid)
                                 .and_modify(|entry| entry.seen_game = true);
                         }
-                    } else if session.seen_game {
+                        continue;
+                    }
+                    if session.seen_game {
+                        // The game window mapped earlier but is now gone:
+                        // normal end-of-session.
                         ended.push((session.pid, session.pgid));
+                        continue;
+                    }
+
+                    // Game has never been seen yet — watchdog territory.
+                    // See issue #50: Steam can block on a hidden offline
+                    // dialog ("You appear to be offline — go offline?"),
+                    // leaving the user stuck on the home screen waiting
+                    // for a game window that never appears. After
+                    // `STEAM_LAUNCH_SURFACE_TIMEOUT` we pull any such
+                    // dialog out of the scratchpad; after
+                    // `STEAM_LAUNCH_ABORT_TIMEOUT` we give up and end the
+                    // session so the user gets back to a usable state.
+                    let elapsed = session.started_at.elapsed();
+                    if elapsed >= STEAM_LAUNCH_ABORT_TIMEOUT {
+                        warn!(
+                            pid = session.pid,
+                            app_id = session.app_id,
+                            elapsed_secs = elapsed.as_secs(),
+                            "Steam launch produced no game window before abort timeout; ending session"
+                        );
+                        ended.push((session.pid, session.pgid));
+                    } else if elapsed >= STEAM_LAUNCH_SURFACE_TIMEOUT && !session.surfaced_dialogs {
+                        to_surface_dialogs.push((session.pid, session.app_id));
+                    }
+                }
+
+                for (pid, app_id) in to_surface_dialogs {
+                    match crate::sway::surface_stuck_steam_dialogs().await {
+                        Ok(ids) if !ids.is_empty() => {
+                            warn!(
+                                pid = pid,
+                                app_id = app_id,
+                                surfaced = ids.len(),
+                                "Steam launch is taking too long; surfaced hidden Steam dialog(s)"
+                            );
+                        }
+                        Ok(_) => {
+                            warn!(
+                                pid = pid,
+                                app_id = app_id,
+                                "Steam launch is taking too long; no hidden Steam dialog found in scratchpad"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                pid = pid,
+                                app_id = app_id,
+                                error = %e,
+                                "Steam launch watchdog failed to query Sway tree"
+                            );
+                        }
+                    }
+                    if let Ok(mut map) = steam_sessions.lock() {
+                        map.entry(pid)
+                            .and_modify(|entry| entry.surfaced_dialogs = true);
                     }
                 }
 
@@ -545,6 +630,8 @@ impl HostAdapter for LinuxHost {
                     pgid,
                     app_id,
                     seen_game: false,
+                    started_at: Instant::now(),
+                    surfaced_dialogs: false,
                 },
             );
         }

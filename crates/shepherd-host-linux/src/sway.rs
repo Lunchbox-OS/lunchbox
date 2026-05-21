@@ -164,6 +164,56 @@ pub async fn set_output_scale(name: &str, scale: f64) -> HostResult<()> {
     Ok(())
 }
 
+/// Return true if `window` looks like a Steam dialog that is currently
+/// stranded in the scratchpad — i.e. it has the Steam X11 class but its
+/// title doesn't match the patterns we deliberately hide via `sway.conf`
+/// (`Steam` for the main client, `Steam - ...` for its sub-windows).
+///
+/// These are the dialogs that block `steam://rungameid/...` launches when
+/// Steam can't reach its servers ("You appear to be offline", "Connection
+/// Error", etc.). Anything matching this is a candidate to surface from
+/// the launch watchdog in the host adapter; see issue #50.
+fn is_stuck_steam_dialog(window: &WindowInfo) -> bool {
+    if !window.in_scratchpad {
+        return false;
+    }
+    let class_matches = window
+        .window_class
+        .as_deref()
+        .is_some_and(|c| c.eq_ignore_ascii_case("steam"));
+    if !class_matches {
+        return false;
+    }
+    let title_is_known_client = window
+        .name
+        .as_deref()
+        .is_some_and(|t| t == "Steam" || t.starts_with("Steam - "));
+    !title_is_known_client
+}
+
+/// Find any Steam dialog stuck in the scratchpad and pull each one out so
+/// the user can interact with it. Returns the number of windows surfaced.
+///
+/// Used by [`crate::adapter::LinuxHost`]'s launch watchdog: when a Steam
+/// `steam://rungameid/...` launch hasn't produced a game window in time,
+/// chances are the launch is blocked on a hidden modal (see issue #50).
+pub async fn surface_stuck_steam_dialogs() -> HostResult<Vec<u64>> {
+    let windows = list_windows().await?;
+    let stuck: Vec<u64> = windows
+        .iter()
+        .filter(|w| is_stuck_steam_dialog(w))
+        .map(|w| w.id)
+        .collect();
+    for id in &stuck {
+        // Best-effort: log and continue if a single window fails so we
+        // still try to surface the others.
+        if let Err(e) = act_on_window(*id, WindowAction::Show).await {
+            tracing::warn!(window_id = id, error = %e, "Failed to surface stuck Steam dialog");
+        }
+    }
+    Ok(stuck)
+}
+
 /// Run `swaymsg -t get_tree` and return a flattened window list.
 pub async fn list_windows() -> HostResult<Vec<WindowInfo>> {
     let output = tokio::process::Command::new("swaymsg")
@@ -304,6 +354,65 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn make_window(
+        id: u64,
+        name: Option<&str>,
+        class: Option<&str>,
+        in_scratchpad: bool,
+    ) -> WindowInfo {
+        WindowInfo {
+            id,
+            name: name.map(str::to_string),
+            app_id: None,
+            window_class: class.map(str::to_string),
+            pid: Some(1234),
+            workspace: if in_scratchpad {
+                Some(SCRATCHPAD_WORKSPACE.into())
+            } else {
+                Some("1".into())
+            },
+            in_scratchpad,
+            visible: !in_scratchpad,
+            focused: false,
+        }
+    }
+
+    #[test]
+    fn surfaces_unrecognized_steam_dialogs_only() {
+        // Main client and known sub-windows must stay hidden — they are
+        // intentionally moved to the scratchpad by sway.conf.
+        let main_client = make_window(1, Some("Steam"), Some("Steam"), true);
+        let news = make_window(2, Some("Steam - News"), Some("Steam"), true);
+        // Offline/connection-error dialogs are stuck in the scratchpad
+        // when sway's broad class-based rules catch them (pre-#50) or if
+        // Steam reuses the class for a new modal we don't know about.
+        let offline_dialog = make_window(3, Some("Connection Error"), Some("Steam"), true);
+        let sign_in = make_window(4, Some("Sign In"), Some("Steam"), true);
+        // A dialog Steam mapped without a title yet — surface it too, the
+        // user still needs to be able to dismiss it.
+        let untitled = make_window(5, None, Some("Steam"), true);
+        // Non-Steam scratchpadded windows must not be touched.
+        let other_app = make_window(6, Some("Whatever"), Some("Firefox"), true);
+        // A Steam dialog already on a real workspace doesn't need
+        // surfacing — it's already visible.
+        let visible_dialog = make_window(7, Some("Connection Error"), Some("Steam"), false);
+
+        assert!(!is_stuck_steam_dialog(&main_client));
+        assert!(!is_stuck_steam_dialog(&news));
+        assert!(is_stuck_steam_dialog(&offline_dialog));
+        assert!(is_stuck_steam_dialog(&sign_in));
+        assert!(is_stuck_steam_dialog(&untitled));
+        assert!(!is_stuck_steam_dialog(&other_app));
+        assert!(!is_stuck_steam_dialog(&visible_dialog));
+    }
+
+    #[test]
+    fn steam_class_match_is_case_insensitive() {
+        // Older Steam X11 builds report `steam` (lowercase) in WM_CLASS.
+        let dialog = make_window(1, Some("Connection Error"), Some("steam"), true);
+        assert!(is_stuck_steam_dialog(&dialog));
     }
 
     #[test]
