@@ -7,7 +7,10 @@
 //! Fetched playlist metadata is cached in
 //! `$XDG_CACHE_HOME/shepherd/media/playlists/<list-id>.json` (falling back to
 //! `~/.cache/…`). The cache is valid for [`CACHE_TTL_SECS`] seconds; a stale
-//! or absent cache causes a fresh yt-dlp fetch and a new cache write.
+//! or absent cache causes a fresh yt-dlp fetch and a new cache write. If the
+//! live fetch fails (typically because the network is unreachable) but a
+//! stale cache entry exists, the stale entry is returned so the launcher
+//! keeps working offline.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -133,12 +136,24 @@ fn playlist_cache_path(url: &str) -> Option<PathBuf> {
     )
 }
 
+/// Freshness of an on-disk cache hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheFreshness {
+    /// Cached entry is within [`CACHE_TTL_SECS`] of now.
+    Fresh,
+    /// Cached entry is older than [`CACHE_TTL_SECS`]; usable as an offline
+    /// fallback when a live fetch fails.
+    Stale,
+}
+
 /// Try to load playlist metadata from the on-disk cache.
 ///
-/// Returns `None` if the cache file is absent, unreadable, unparseable, or
-/// older than [`CACHE_TTL_SECS`]. All errors are logged at `warn` level and
-/// treated as cache misses so the caller can fall back to a live fetch.
-fn load_from_cache(url: &str) -> Option<PlaylistInfo> {
+/// Returns `None` if the cache file is absent, unreadable, or unparseable.
+/// All errors are logged at `warn` level and treated as cache misses so the
+/// caller can fall back to a live fetch. The returned [`CacheFreshness`]
+/// lets the caller decide whether to trust the entry directly or only use
+/// it as an offline fallback.
+fn load_from_cache(url: &str) -> Option<(PlaylistInfo, CacheFreshness)> {
     let path = playlist_cache_path(url)?;
     let bytes = std::fs::read(&path).ok()?;
     let cached: CachedPlaylist = match serde_json::from_slice(&bytes) {
@@ -153,13 +168,15 @@ fn load_from_cache(url: &str) -> Option<PlaylistInfo> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if now.saturating_sub(cached.fetched_at) >= CACHE_TTL_SECS {
+    let freshness = if now.saturating_sub(cached.fetched_at) >= CACHE_TTL_SECS {
         debug!("playlist cache stale for {url}");
-        return None;
-    }
+        CacheFreshness::Stale
+    } else {
+        debug!("playlist cache hit for {url} ({})", path.display());
+        CacheFreshness::Fresh
+    };
 
-    debug!("playlist cache hit for {url} ({})", path.display());
-    Some(PlaylistInfo {
+    let info = PlaylistInfo {
         title: cached.title,
         playlist_id: cached.playlist_id,
         entries: cached
@@ -167,7 +184,8 @@ fn load_from_cache(url: &str) -> Option<PlaylistInfo> {
             .into_iter()
             .map(CachedEntry::into_entry)
             .collect(),
-    })
+    };
+    Some((info, freshness))
 }
 
 /// Write playlist metadata to the on-disk cache.
@@ -216,17 +234,38 @@ fn save_to_cache(url: &str, info: &PlaylistInfo) {
 ///
 /// Checks the on-disk cache first; only invokes `yt-dlp` on a cache miss or
 /// when the cached entry has expired. A successful live fetch is written back
-/// to the cache before returning.
+/// to the cache before returning. If the live fetch fails but a stale cache
+/// entry exists, the stale entry is returned with a warning so the launcher
+/// remains usable offline.
 ///
 /// Returns an error string suitable for printing directly to stderr.
 ///
 /// The caller is responsible for having `yt-dlp` installed; see
 /// `docs/shepherd-media.md` for setup instructions.
 pub fn fetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
-    if let Some(cached) = load_from_cache(url) {
-        return Ok(cached);
+    let cached = load_from_cache(url);
+    if let Some((info, CacheFreshness::Fresh)) = cached {
+        return Ok(info);
     }
+    let stale = cached.map(|(info, _)| info);
 
+    match fetch_playlist_live(url) {
+        Ok(info) => {
+            save_to_cache(url, &info);
+            Ok(info)
+        }
+        Err(e) => match stale {
+            Some(info) => {
+                warn!("live playlist fetch failed for {url}: {e}; using stale cache");
+                Ok(info)
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Run `yt-dlp` to fetch fresh playlist metadata, with no cache interaction.
+fn fetch_playlist_live(url: &str) -> Result<PlaylistInfo, String> {
     ensure_ytdlp_available()?;
 
     let output = Command::new("yt-dlp")
@@ -252,9 +291,7 @@ pub fn fetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let info = parse_ytdlp_output(&stdout, url)?;
-    save_to_cache(url, &info);
-    Ok(info)
+    parse_ytdlp_output(&stdout, url)
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {
