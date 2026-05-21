@@ -1,0 +1,12 @@
+[build]
+target = "bpfel-unknown-none"
+
+[unstable]
+build-std = ["core"]
+
+# bpfel-unknown-none doesn't have a precompiled std; we bring our own core
+# via -Zbuild-std and hand-link with bpf-linker.
+[target.bpfel-unknown-none]
+rustflags = [
+    "-C", "link-arg=--btf",
+]

@@ -837,6 +837,13 @@ impl Service {
                         // Get the entry kind and any per-entry spawn metadata
                         let entry = eng.policy().get_entry(&entry_id);
                         let entry_kind = entry.map(|e| e.kind.clone());
+                        let firewall = entry.and_then(|e| e.firewall.clone()).map(|fw| {
+                            shepherd_host_api::FirewallSpec {
+                                default_deny: fw.default_deny,
+                                allow: fw.allow,
+                                deny: fw.deny,
+                            }
+                        });
                         let input_compat =
                             entry.map(|e| e.input_compat.clone()).unwrap_or_default();
                         let input_compat_options =
@@ -858,12 +865,14 @@ impl Service {
                                 capture_stdout: true,
                                 capture_stderr: true,
                                 log_path: Some(log_path),
+                                firewall,
                                 input_compat,
                                 input_compat_options,
                                 ..Default::default()
                             }
                         } else {
                             shepherd_host_api::SpawnOptions {
+                                firewall,
                                 input_compat,
                                 input_compat_options,
                                 ..Default::default()

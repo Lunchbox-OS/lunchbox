@@ -5,6 +5,7 @@ members = [
     "crates/shepherd-api",
     "crates/shepherd-host-api",
     "crates/shepherd-config",
+    "crates/shepherd-firewall-helper",
     "crates/shepherd-store",
     "crates/shepherd-core",
     "crates/shepherd-host-linux",
@@ -19,6 +20,10 @@ members = [
     "crates/shepherd-touch-bridge",
     "crates/shepherd-gamepad-bridge",
 ]
+# shepherd-firewall-bpf targets bpfel-unknown-none on nightly and is built
+# separately by shepherd-firewall-helper's build.rs (via aya-build). Excluded
+# so `cargo build` doesn't try to compile it for the host target.
+exclude = ["crates/shepherd-firewall-bpf"]
 
 [workspace.package]
 version = "0.1.0"

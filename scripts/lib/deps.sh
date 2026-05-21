@@ -89,6 +89,37 @@ install_rust() {
     fi
 }
 
+# Install the BPF authoring toolchain: nightly Rust (for `-Zbuild-std`),
+# rust-src (so the BPF crate can build core for bpfel-unknown-none), and
+# `bpf-linker` (which crates/shepherd-firewall-bpf uses to emit the
+# cgroup_skb program object embedded into shepherd-firewall-helper).
+# Idempotent: each step skips if already satisfied.
+install_bpf_toolchain() {
+    # Make sure rustup/cargo are on PATH if install_rust just placed them.
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env" 2>/dev/null || true
+
+    if ! command_exists rustup; then
+        die "rustup not on PATH; install_rust must succeed before install_bpf_toolchain"
+    fi
+
+    if rustup toolchain list 2>/dev/null | grep -q '^nightly-'; then
+        info "Rust nightly toolchain already installed"
+    else
+        info "Installing Rust nightly toolchain (with rust-src)..."
+        rustup toolchain install nightly --component rust-src --profile minimal
+    fi
+
+    if command_exists bpf-linker; then
+        info "bpf-linker already installed ($(bpf-linker --version 2>/dev/null || echo '?'))"
+    else
+        info "Installing bpf-linker (cargo install, ~1-2 min on first build)..."
+        # llvm-sys 201.x looks for $LLVM_SYS_201_PREFIX; Ubuntu's llvm-20-dev
+        # puts everything under /usr/lib/llvm-20.
+        LLVM_SYS_201_PREFIX=/usr/lib/llvm-20 cargo install bpf-linker
+    fi
+}
+
 # Read a package file, stripping comments and empty lines
 read_package_file() {
     local file="$1"
@@ -169,9 +200,11 @@ deps_install() {
     # shellcheck disable=SC2086
     maybe_sudo apt-get install -y $packages
     
-    # For build and dev sets, also install Rust.
+    # For build and dev sets, also install Rust + the BPF authoring
+    # toolchain (needed by crates/shepherd-firewall-bpf).
     if [[ "$set_name" == "build" ]] || [[ "$set_name" == "dev" ]]; then
         install_rust
+        install_bpf_toolchain
     fi
 
     # For run and dev sets, install yt-dlp into its virtualenv.

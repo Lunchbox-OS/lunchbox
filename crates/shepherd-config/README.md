@@ -176,6 +176,55 @@ required = true
 # check = "tcp://1.1.1.1:53"
 ```
 
+### Firewall
+
+Entries may apply a network allowlist/denylist enforced via systemd's BPF
+address filter (`IPAddressAllow=`/`IPAddressDeny=`). Rules are IP addresses,
+CIDR ranges, or systemd tokens (`any`, `localhost`, `link-local`,
+`multicast`). Hostnames are **not** resolved at this layer — pair with a
+browser-side allowlist (e.g. Chrome `URLAllowlist`) when hostname matching
+is required.
+
+```toml
+[entries.firewall]
+default = "deny"   # "deny" (default) or "allow"
+allow = [
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+]
+deny = []
+```
+
+Enforcement notes:
+- For `process` entries, the session is wrapped in a transient
+  `systemd-run --user --scope` with the firewall properties set up front.
+- For `flatpak` and `snap` entries, the runtime creates its own scope; the
+  firewall is applied via `systemctl --user --runtime set-property` once
+  that scope appears (small race window during early app startup).
+- Not yet supported for `steam` entries.
+
+#### Firewall caveats: single-instance apps
+
+The firewall applies to the cgroup of the launched activity. Programs that
+implement the single-instance / "open in existing window" pattern via D-Bus
+registration (most modern GTK/GApplication apps -- `ptyxis`,
+`gnome-terminal`, `nautilus`, `evince`, etc., plus browsers via their own
+remote-control protocol) **escape the scope**: the binary shepherdd launches
+forwards the request to a long-lived primary in `user@.service`, exits in
+~50ms, the scope is torn down, and the visible window is forked by the
+primary in a cgroup the BPF program is not attached to. The firewall block
+is silently a no-op.
+
+Workarounds:
+- Prefer non-daemonising alternatives (e.g. `foot` instead of `ptyxis`,
+  `xterm` instead of `gnome-terminal`).
+- For ptyxis specifically, `ptyxis -s` / `--standalone` runs the terminal
+  in-process and inherits the scope correctly.
+- Chromium/Firefox accept `--new-instance` / equivalent; verify with
+  `cat /proc/$$/cgroup` from inside the app that it sits under the
+  expected `user.slice/.../*.scope`.
+
 ## Validation
 
 The configuration is validated at load time. Validation catches:

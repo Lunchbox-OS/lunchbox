@@ -6,10 +6,11 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawConfig, RawEntry, RawEntryKind, RawInputCompat, RawInputCompatOptions, RawInternetConfig,
-    RawManagementApiConfig, RawServiceConfig, RawVolumeConfig, RawWarningThreshold,
+    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
+    RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawVolumeConfig,
+    RawWarningThreshold,
 };
-use crate::validation::{parse_days, parse_time};
+use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
     EntryKind, InputCompatMode, InputCompatOptions, WarningSeverity, WarningThreshold,
 };
@@ -191,6 +192,7 @@ pub struct Entry {
     pub disabled: bool,
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
+    pub firewall: Option<FirewallPolicy>,
     /// Input compatibility modes — orthogonal sidecars. Deduplicated and
     /// validated (no conflicting gamepad presets) by `Entry::from_raw`.
     pub input_compat: Vec<InputCompatMode>,
@@ -227,6 +229,7 @@ impl Entry {
             .unwrap_or_else(|| default_warnings.to_vec());
         let volume = raw.volume.as_ref().map(convert_volume_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
+        let firewall = raw.firewall.as_ref().map(convert_firewall_config);
         let input_compat =
             convert_input_compat_list(&raw.input_compat, &EntryId::new(raw.id.clone()));
         let input_compat_options = raw
@@ -247,6 +250,7 @@ impl Entry {
             disabled: raw.disabled,
             disabled_reason: raw.disabled_reason,
             internet,
+            firewall,
             input_compat,
             input_compat_options,
             xwayland_native_resolution: raw.xwayland_native_resolution,
@@ -292,6 +296,39 @@ pub struct LimitsPolicy {
     /// Daily quota. None means unlimited.
     pub daily_quota: Option<Duration>,
     pub cooldown: Option<Duration>,
+}
+
+/// Network firewall policy applied to a session at spawn time.
+///
+/// Rules are passed verbatim to systemd's `IPAddressAllow=`/`IPAddressDeny=`
+/// properties on the per-session scope. Validated at config load time:
+/// each rule is either a parseable CIDR or one of the systemd address tokens.
+#[derive(Debug, Clone)]
+pub struct FirewallPolicy {
+    /// If true, deny all traffic by default; only `allow` rules pass.
+    /// If false, allow all traffic by default; `deny` rules block.
+    pub default_deny: bool,
+    /// Allow rules (CIDR strings or systemd address tokens)
+    pub allow: Vec<String>,
+    /// Deny rules (applied after allow)
+    pub deny: Vec<String>,
+}
+
+fn convert_firewall_config(raw: &RawFirewallConfig) -> FirewallPolicy {
+    let default_deny = !raw.default.eq_ignore_ascii_case("allow");
+    // Rules were already validated by `validate_config`; canonicalize whitespace
+    // so the strings we hand to systemd are clean.
+    let normalize = |rules: &[String]| -> Vec<String> {
+        rules
+            .iter()
+            .map(|r| parse_firewall_rule(r).unwrap_or_else(|_| r.trim().to_string()))
+            .collect()
+    };
+    FirewallPolicy {
+        default_deny,
+        allow: normalize(&raw.allow),
+        deny: normalize(&raw.deny),
+    }
 }
 
 /// Volume control policy

@@ -15,8 +15,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::process::{
-    ManagedProcess, find_steam_game_pids, init, kill_by_command, kill_flatpak_cgroup,
-    kill_snap_cgroup, kill_steam_game_processes,
+    FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
+    build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
+    firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
+    kill_steam_game_processes, make_scope_name,
 };
 use crate::sidecar::{GamepadPreset, spawn_gamepad_bridge, spawn_touch_bridge, terminate_sidecar};
 
@@ -328,8 +330,18 @@ impl HostAdapter for LinuxHost {
                 (argv, env.clone(), None, None, None, Some(*app_id))
             }
             EntryKind::Flatpak { app_id, args, env } => {
-                // For Flatpak apps, we use 'flatpak run <app_id>' to launch them.
-                let mut argv = vec!["flatpak".to_string(), "run".to_string(), app_id.clone()];
+                // `flatpak run` strips most environment variables before
+                // exec'ing the sandboxed app; user-supplied
+                // `[entries.kind.env]` entries only reach the app via the
+                // explicit `--env=KEY=VAL` flag. Build them into the argv
+                // (sorted for deterministic ordering and easier debugging).
+                let mut argv = vec!["flatpak".to_string(), "run".to_string()];
+                let mut keys: Vec<&String> = env.keys().collect();
+                keys.sort();
+                for k in keys {
+                    argv.push(format!("--env={}={}", k, env[k]));
+                }
+                argv.push(app_id.clone());
                 argv.extend(expand_args(args));
                 (argv, env.clone(), None, None, Some(app_id.clone()), None)
             }
@@ -378,6 +390,48 @@ impl HostAdapter for LinuxHost {
         // Determine if this is a sandboxed app (snap or flatpak)
         let sandboxed_app_name = snap_name.clone().or_else(|| flatpak_app_id.clone());
 
+        // Apply firewall: for Process kind, hand the launch to the privileged
+        // helper via pkexec, which runs `systemd-run --scope` against the
+        // *system* manager (the one that can attach BPF cgroup programs).
+        // Snap/flatpak go through `apply_firewall_to_existing_scope` below;
+        // Steam isn't supported. If the helper isn't installed or polkit
+        // doesn't grant us, skip the wrapper rather than spawning under a
+        // silent no-op.
+        let final_argv = if let Some(ref spec) = options.firewall {
+            if sandboxed_app_name.is_none() && steam_app_id.is_none() {
+                match firewall_enforcement_status() {
+                    FirewallEnforcementStatus::Supported => {
+                        let scope_name = make_scope_name(&session_id.to_string());
+                        let activity_env = build_inherited_env(&env);
+                        let uid = nix::unistd::getuid().as_raw();
+                        let gid = nix::unistd::getgid().as_raw();
+                        let mut prefixed = firewall_helper_argv_prefix(
+                            spec,
+                            &scope_name,
+                            uid,
+                            gid,
+                            &activity_env,
+                            cwd.as_deref(),
+                        );
+                        prefixed.extend(argv);
+                        prefixed
+                    }
+                    FirewallEnforcementStatus::Unsupported { reason } => {
+                        warn!(
+                            command = ?argv.first(),
+                            reason = %reason,
+                            "Firewall configured but cannot be enforced; spawning without filter"
+                        );
+                        argv
+                    }
+                }
+            } else {
+                argv
+            }
+        } else {
+            argv
+        };
+
         // Spawn any input-compat sidecars before the activity. We log
         // failures but don't propagate them — the activity should still
         // launch even if (e.g.) no touchscreen or gamepad is present.
@@ -404,7 +458,7 @@ impl HostAdapter for LinuxHost {
         }
 
         let proc = ManagedProcess::spawn(
-            &argv,
+            &final_argv,
             &env,
             cwd.as_ref(),
             options.log_path.clone(),
@@ -416,6 +470,48 @@ impl HostAdapter for LinuxHost {
                 terminate_sidecar(child, "touch-bridge");
             }
         })?;
+
+        // For runtime-managed scopes (snap/flatpak), apply the firewall after
+        // the scope appears. Steam is not yet supported.
+        if let Some(spec) = options.firewall.clone() {
+            match firewall_enforcement_status() {
+                FirewallEnforcementStatus::Unsupported { reason } => {
+                    if snap_name.is_some() || flatpak_app_id.is_some() {
+                        warn!(
+                            reason = %reason,
+                            "Firewall configured but cannot be enforced; not applying to runtime scope"
+                        );
+                    } else if steam_app_id.is_some() {
+                        warn!("Firewall is not yet supported for Steam entries; ignoring");
+                    }
+                }
+                FirewallEnforcementStatus::Supported => {
+                    if let Some(ref snap) = snap_name {
+                        let pattern = format!("snap.{}.{}-", snap, snap);
+                        tokio::spawn(async move {
+                            apply_firewall_to_existing_scope(
+                                &pattern,
+                                &spec,
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                        });
+                    } else if let Some(ref app_id) = flatpak_app_id {
+                        let pattern = format!("app-flatpak-{}-", app_id);
+                        tokio::spawn(async move {
+                            apply_firewall_to_existing_scope(
+                                &pattern,
+                                &spec,
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                        });
+                    } else if steam_app_id.is_some() {
+                        warn!("Firewall is not yet supported for Steam entries; ignoring");
+                    }
+                }
+            }
+        }
 
         let pid = proc.pid;
         let pgid = proc.pgid;

@@ -519,7 +519,12 @@ days = "weekends"
 start = "10:00"
 end = "20:00"
 
-# Terminal for debugging only
+# Terminal for debugging only.
+# `foot` is used here (not `ptyxis`, `gnome-terminal`, etc.) because
+# single-instance GApplication terminals D-Bus-delegate new windows to a
+# long-lived primary that lives outside shepherdd's transient scope --
+# the [entries.firewall] block below would silently be a no-op. See the
+# "Firewall caveats" section in crates/shepherd-config/README.md.
 [[entries]]
 id = "terminal"
 label = "Terminal"
@@ -529,7 +534,15 @@ disabled_reason = "For debugging only"
 
 [entries.kind]
 type = "process"
-command = "ptyxis"
+command = "foot"
 
 [entries.availability]
 always = true
+
+[entries.firewall]
+default = "deny"  # "deny" (default) blocks all unmatched traffic; "allow" permits all
+allow = [
+    "127.0.0.0/8",
+    "::1/128",
+]
+deny = []

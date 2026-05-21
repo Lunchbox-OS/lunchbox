@@ -21,15 +21,61 @@ DEFAULT_DEV_RUNTIME="./dev-runtime"
 DEFAULT_DATA_DIR="$DEFAULT_DEV_RUNTIME/data"
 DEFAULT_SOCKET_PATH="$DEFAULT_DEV_RUNTIME/shepherd.sock"
 
-# Cleanup function for sway processes
+# Remove leftover wayland-N / sway-ipc.<uid>.<pid>.sock files in
+# $XDG_RUNTIME_DIR whose owner is no longer running. A new nested sway picks
+# the lowest free wayland-N slot via wl_display_add_socket_auto, but a leaked
+# socket *file* with no listener will still trip up clients (and any shell
+# whose WAYLAND_DISPLAY happens to be set to that name will see "Connection
+# refused" on the next launch). This is what cleans up after a previous
+# nested sway that was SIGKILL'd or whose parent died before the trap fired.
+sway_purge_stale_sockets() {
+    local rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    [[ -d "$rt" ]] || return 0
+
+    # sway IPC sockets encode the PID -- check the PID and unlink if dead.
+    local sock pid
+    for sock in "$rt"/sway-ipc.*.sock; do
+        [[ -e "$sock" ]] || continue
+        pid="${sock##*ipc.*([0-9]).}"; pid="${pid%.sock}"
+        if [[ -n "$pid" && ! -d "/proc/$pid" ]]; then
+            info "Removing stale sway IPC socket: $sock (pid $pid gone)"
+            rm -f "$sock"
+        fi
+    done
+
+    # Wayland sockets don't encode PID. Probe each wayland-N (N>=1) by
+    # connecting; if no listener, treat as stale and unlink the socket and
+    # its lock file. Skip wayland-0 -- that's usually the host compositor.
+    local n path
+    for n in $(seq 1 32); do
+        path="$rt/wayland-$n"
+        [[ -e "$path" ]] || continue
+        if ! python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(0.2)
+try: s.connect(sys.argv[1])
+except OSError: sys.exit(1)" "$path" 2>/dev/null; then
+            info "Removing stale wayland socket: $path (no listener)"
+            rm -f "$path" "$path.lock"
+        fi
+    done
+}
+
+# Cleanup function for sway processes. Runs from the EXIT/TERM/INT/HUP trap;
+# `extglob` is needed for the IPC-socket pattern in sway_purge_stale_sockets.
 sway_cleanup() {
     info "Cleaning up sway session..."
-    
+
     # Kill the nested sway - this will clean up everything inside it
     if [[ -n "${SWAY_PID:-}" ]]; then
         kill "$SWAY_PID" 2>/dev/null || true
+        # Give libwayland's atexit handler a moment to remove the socket
+        # files cleanly before we sweep them ourselves.
+        for _ in $(seq 1 20); do
+            kill -0 "$SWAY_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL "$SWAY_PID" 2>/dev/null || true
     fi
-    
+
     # Explicitly kill any shepherd processes that might have escaped
     pkill -x "shepherdd" 2>/dev/null || true
     pkill -x "shepherd-launcher" 2>/dev/null || true
@@ -40,6 +86,10 @@ sway_cleanup() {
     if [[ -n "${SHEPHERD_SOCKET:-}" ]]; then
         rm -f "$SHEPHERD_SOCKET"
     fi
+
+    # Sweep any wayland/sway-ipc sockets the kill above didn't unlink.
+    shopt -s extglob
+    sway_purge_stale_sockets
 }
 
 # Kill any existing dev instances
@@ -50,12 +100,17 @@ sway_kill_existing() {
     pkill -x "shepherd-launcher" 2>/dev/null || true
     pkill -x "shepherd-hud" 2>/dev/null || true
     pkill -x "shepherd-media" 2>/dev/null || true
-    
-    # Remove stale socket if it exists
+
+    # Remove stale shepherdd IPC socket
     if [[ -n "${SHEPHERD_SOCKET:-}" ]] && [[ -e "$SHEPHERD_SOCKET" ]]; then
         rm -f "$SHEPHERD_SOCKET"
     fi
-    
+
+    # Self-heal from prior unclean exits (orphaned wayland-N / sway-ipc
+    # socket files left when sway or its parent shell were SIGKILL'd).
+    shopt -s extglob
+    sway_purge_stale_sockets
+
     # Brief pause to allow cleanup
     sleep 0.5
 }
@@ -108,18 +163,31 @@ sway_start_nested() {
     local sway_config="$1"
     
     require_command sway
-    
+
     info "Starting nested sway session..."
-    
-    # Set up cleanup trap
+
+    # Cleanup trap. Trapping SIGTERM/SIGINT/SIGHUP in addition to EXIT is
+    # essential: bash's default action on those signals is to terminate
+    # *without* running the EXIT trap, which is exactly what was leaking
+    # nested-sway wayland sockets when the integration test (or anything
+    # else) sent SIGTERM to ./run-dev.
+    # shellcheck disable=SC2317,SC2329  # invoked indirectly via `trap` below
+    sway_handle_signal() {
+        # Re-trap to no-op so we don't recurse if the cleanup itself takes
+        # a signal, then exit -- this triggers the EXIT trap.
+        trap - EXIT TERM INT HUP
+        sway_cleanup
+        exit 130
+    }
     trap sway_cleanup EXIT
-    
+    trap sway_handle_signal TERM INT HUP
+
     # Start sway with wayland backend (nested in current session)
     WLR_BACKENDS=wayland WLR_LIBINPUT_NO_DEVICES=1 sway -c "$sway_config" --unsupported-gpu &
     SWAY_PID=$!
-    
+
     info "Sway started with PID $SWAY_PID"
-    
+
     # Wait for sway to exit
     wait "$SWAY_PID"
 }

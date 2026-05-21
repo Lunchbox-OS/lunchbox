@@ -71,6 +71,9 @@ pub struct SpawnOptions {
     /// Request foreground focus (if supported)
     pub foreground: bool,
 
+    /// Network firewall rules to apply to the session (if supported)
+    pub firewall: Option<FirewallSpec>,
+
     /// Input compatibility modes to apply (e.g., touch-to-mouse,
     /// gamepad-to-mouse+keyboard). Empty = none. The host adapter is
     /// responsible for any sidecar processes this implies and for spawning
@@ -81,6 +84,24 @@ pub struct SpawnOptions {
     /// speeds, etc.). Sidecars use built-in defaults for any field left
     /// `None`.
     pub input_compat_options: InputCompatOptions,
+}
+
+/// Network firewall specification for a session.
+///
+/// Hosts that support network filtering enforce this against the session's
+/// process tree (on Linux, via systemd `IPAddressAllow=`/`IPAddressDeny=`
+/// scope properties). Hostnames are not resolved at this layer; pair with a
+/// browser-side allowlist if hostname matching is needed.
+#[derive(Debug, Clone)]
+pub struct FirewallSpec {
+    /// If true, deny all traffic by default; only `allow` rules pass.
+    /// If false, allow all traffic by default; `deny` rules block.
+    pub default_deny: bool,
+    /// Allow rules (CIDR strings or systemd address tokens like
+    /// `any`, `localhost`, `link-local`, `multicast`)
+    pub allow: Vec<String>,
+    /// Deny rules (applied after `allow`)
+    pub deny: Vec<String>,
 }
 
 /// Events from the host adapter

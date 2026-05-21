@@ -66,11 +66,20 @@ pub async fn launch(
                 eng.start_session(plan, now, now_mono);
             }
 
-            // Determine spawn options
+            // Determine spawn options. Populate `firewall` from the entry's
+            // policy so per-entry firewall rules are actually applied -- this
+            // mirrors the IPC `Launch` path in shepherdd/src/main.rs.
             let (entry_kind, spawn_opts, needs_hidpi) = {
                 let eng = state.engine.lock().await;
                 let entry = eng.policy().get_entry(&entry_id);
                 let kind = entry.map(|e| e.kind.clone());
+                let firewall = entry.and_then(|e| e.firewall.clone()).map(|fw| {
+                    shepherd_host_api::FirewallSpec {
+                        default_deny: fw.default_deny,
+                        allow: fw.allow,
+                        deny: fw.deny,
+                    }
+                });
                 let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
                 let input_compat_options =
                     entry.map(|e| e.input_compat_options).unwrap_or_default();
@@ -86,12 +95,14 @@ pub async fn launch(
                         capture_stdout: true,
                         capture_stderr: true,
                         log_path: Some(eng.policy().service.child_log_dir.join(filename)),
+                        firewall,
                         input_compat,
                         input_compat_options,
                         ..Default::default()
                     }
                 } else {
                     SpawnOptions {
+                        firewall,
                         input_compat,
                         input_compat_options,
                         ..Default::default()

@@ -1,0 +1,23 @@
+[package]
+name = "shepherd-firewall-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged helper that applies per-activity firewall rules on shepherdd's behalf"
+build = "build.rs"
+
+[[bin]]
+name = "shepherd-firewall-helper"
+path = "src/main.rs"
+
+# The `apply-process` subcommand is std-only and remains the legacy `exec` path.
+# `apply-cgroup` (added for snap/flatpak) loads a cgroup_skb BPF program via
+# aya and attaches it directly to the runtime's scope cgroup. aya enlarges
+# the audit surface but is contained: only `apply-cgroup` uses it.
+[dependencies]
+aya = "0.13"
+libc = "0.2"
+
+[build-dependencies]
+# build.rs invokes `cargo build` on the sibling shepherd-firewall-bpf crate
+# and embeds the resulting BPF object via include_bytes!.
