@@ -2,7 +2,9 @@
 //!
 //! The HUD subscribes to events from shepherdd and tracks session state.
 
-use shepherd_api::{Event, EventPayload, VolumeInfo, VolumeRestrictions, WarningSeverity};
+use shepherd_api::{
+    Event, EventPayload, InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
+};
 use shepherd_util::{EntryId, SessionId};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -81,6 +83,11 @@ pub struct SharedState {
     /// `EventPayload::HudScaleChanged`.
     scale_tx: Arc<watch::Sender<f64>>,
     scale_rx: watch::Receiver<f64>,
+    /// Latest known status of each configured internet connectivity check.
+    /// Empty when no checks are configured; in that case the HUD hides the
+    /// indicator. Order matches the order in `ServiceStateSnapshot`.
+    internet_tx: Arc<watch::Sender<Vec<InternetStatusView>>>,
+    internet_rx: watch::Receiver<Vec<InternetStatusView>>,
 }
 
 impl SharedState {
@@ -88,6 +95,7 @@ impl SharedState {
         let (session_tx, session_rx) = watch::channel(SessionState::NoSession);
         let (volume_tx, volume_rx) = watch::channel(None);
         let (scale_tx, scale_rx) = watch::channel(1.0_f64);
+        let (internet_tx, internet_rx) = watch::channel(Vec::new());
 
         Self {
             session_tx: Arc::new(session_tx),
@@ -96,12 +104,40 @@ impl SharedState {
             volume_rx,
             scale_tx: Arc::new(scale_tx),
             scale_rx,
+            internet_tx: Arc::new(internet_tx),
+            internet_rx,
         }
     }
 
     /// Current UI scale factor (1.0 = unmodified).
     pub fn scale_factor(&self) -> f64 {
         *self.scale_rx.borrow()
+    }
+
+    /// Current internet connectivity check status, in the order reported by
+    /// shepherdd. Empty when no checks are configured.
+    pub fn internet_status(&self) -> Vec<InternetStatusView> {
+        self.internet_rx.borrow().clone()
+    }
+
+    /// Replace the full internet status list (called from `StateChanged`).
+    fn set_internet_status(&self, status: Vec<InternetStatusView>) {
+        let _ = self.internet_tx.send(status);
+    }
+
+    /// Update a single check's availability (called from
+    /// `InternetStatusChanged`). Adds the target if we haven't seen it yet.
+    fn update_internet_target(&self, target: &str, available: bool) {
+        self.internet_tx.send_modify(|list| {
+            if let Some(entry) = list.iter_mut().find(|e| e.target == target) {
+                entry.available = available;
+            } else {
+                list.push(InternetStatusView {
+                    target: target.to_string(),
+                    available,
+                });
+            }
+        });
     }
 
     /// Get the current session state
@@ -257,6 +293,7 @@ impl SharedState {
             }
 
             EventPayload::StateChanged(snapshot) => {
+                self.set_internet_status(snapshot.internet_status.clone());
                 if let Some(session) = &snapshot.current_session {
                     let now = shepherd_util::now();
                     // For unlimited sessions (deadline=None), time_remaining is None
@@ -282,6 +319,10 @@ impl SharedState {
 
             EventPayload::VolumeChanged { percent, muted } => {
                 self.update_volume(*percent, *muted);
+            }
+
+            EventPayload::InternetStatusChanged { target, available } => {
+                self.update_internet_target(target, *available);
             }
 
             EventPayload::HudScaleChanged { factor } => {

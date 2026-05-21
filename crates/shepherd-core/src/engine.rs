@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Local};
 use shepherd_api::{
-    API_VERSION, EntryView, ReasonCode, ServiceStateSnapshot, SessionEndReason, WarningSeverity,
+    API_VERSION, EntryView, InternetStatusView, ReasonCode, ServiceStateSnapshot, SessionEndReason,
+    WarningSeverity,
 };
 use shepherd_config::{Entry, InternetCheckTarget, Policy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -93,6 +94,37 @@ impl CoreEngine {
 
     fn internet_available(&self, target: &InternetCheckTarget) -> bool {
         self.internet_status.get(target).copied().unwrap_or(false)
+    }
+
+    /// List the configured internet connectivity checks and their latest
+    /// known status. Targets that have never been checked are reported as
+    /// unavailable. The list is empty when no checks are configured.
+    pub fn internet_status_views(&self) -> Vec<InternetStatusView> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut targets: Vec<&InternetCheckTarget> = Vec::new();
+
+        if let Some(target) = self.policy.service.internet.check.as_ref()
+            && seen.insert(target.original.as_str())
+        {
+            targets.push(target);
+        }
+
+        for entry in &self.policy.entries {
+            if entry.internet.required
+                && let Some(target) = entry.internet.check.as_ref()
+                && seen.insert(target.original.as_str())
+            {
+                targets.push(target);
+            }
+        }
+
+        targets
+            .into_iter()
+            .map(|target| InternetStatusView {
+                target: target.original.clone(),
+                available: self.internet_available(target),
+            })
+            .collect()
     }
 
     /// List all entries with availability status
@@ -588,6 +620,7 @@ impl CoreEngine {
             current_session,
             entry_count: self.policy.entries.len(),
             entries,
+            internet_status: self.internet_status_views(),
         }
     }
 

@@ -80,6 +80,10 @@ pub enum EventPayload {
     /// returns to 1.0. Clients that don't care can ignore it.
     HudScaleChanged { factor: f64 },
 
+    /// Internet connectivity check changed. `target` matches the
+    /// `InternetStatusView::target` field in `ServiceStateSnapshot`.
+    InternetStatusChanged { target: String, available: bool },
+
     /// Service is shutting down
     Shutdown,
 

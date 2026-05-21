@@ -265,6 +265,15 @@ pub struct SessionInfo {
     pub warnings_issued: Vec<u64>,
 }
 
+/// Status of a single internet connectivity check target
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InternetStatusView {
+    /// Original check string as configured (e.g. "https://example.com")
+    pub target: String,
+    /// Whether the last check succeeded
+    pub available: bool,
+}
+
 /// Full service state snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStateSnapshot {
@@ -275,6 +284,10 @@ pub struct ServiceStateSnapshot {
     /// Available entries for UI display
     #[serde(default)]
     pub entries: Vec<EntryView>,
+    /// Latest known status of each configured internet connectivity check.
+    /// Empty when no connectivity checks are configured.
+    #[serde(default)]
+    pub internet_status: Vec<InternetStatusView>,
 }
 
 /// Role for authorization

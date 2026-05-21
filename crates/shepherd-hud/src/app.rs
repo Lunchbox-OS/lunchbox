@@ -322,6 +322,23 @@ fn build_hud_content(
 
     right_box.append(&volume_box);
 
+    // Network connectivity indicator. Shown only when at least one
+    // connectivity check is configured. Icon reflects the worst status across
+    // all configured checks; the tooltip lists every check and its result so
+    // operators can see which target failed.
+    let network_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(4)
+        .visible(false)
+        .build();
+    network_box.add_css_class("network-indicator");
+
+    let network_icon = gtk4::Image::from_icon_name("network-offline-symbolic");
+    network_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    network_box.append(&network_icon);
+
+    right_box.append(&network_box);
+
     // Battery indicator
     let battery_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -412,12 +429,15 @@ fn build_hud_content(
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
+    let network_box_clone = network_box.clone();
+    let network_icon_clone = network_icon.clone();
     // All icons we resize when the HUD scale factor changes.
-    let scaled_icons: [gtk4::Image; 4] = [
+    let scaled_icons: [gtk4::Image; 5] = [
         warning_icon.clone(),
         battery_icon.clone(),
         volume_icon.clone(),
         action_icon.clone(),
+        network_icon.clone(),
     ];
     // Track the most-recently-applied scale factor so we only rebuild the
     // stylesheet when shepherdd sends a new HudScaleChanged value.
@@ -528,6 +548,34 @@ fn build_hud_content(
                 warning_label_clone.set_text(reason);
                 warning_box_clone.set_visible(true);
             }
+        }
+
+        // Update network connectivity indicator. The HUD aggregates every
+        // configured check: if any one is offline we surface the offline
+        // icon so the bar matches the user-visible behavior (entries that
+        // require internet are hidden as soon as any check fails).
+        let internet = state.internet_status();
+        if internet.is_empty() {
+            network_box_clone.set_visible(false);
+        } else {
+            network_box_clone.set_visible(true);
+            let any_offline = internet.iter().any(|s| !s.available);
+            network_box_clone.remove_css_class("network-online");
+            network_box_clone.remove_css_class("network-offline");
+            if any_offline {
+                network_icon_clone.set_icon_name(Some("network-offline-symbolic"));
+                network_box_clone.add_css_class("network-offline");
+            } else {
+                network_icon_clone.set_icon_name(Some("network-transmit-receive-symbolic"));
+                network_box_clone.add_css_class("network-online");
+            }
+            let mut tooltip = String::from("Internet connectivity checks:");
+            for status in &internet {
+                tooltip.push('\n');
+                tooltip.push_str(if status.available { "✓ " } else { "✗ " });
+                tooltip.push_str(&status.target);
+            }
+            network_box_clone.set_tooltip_text(Some(&tooltip));
         }
 
         // Update battery
@@ -754,6 +802,18 @@ const CSS_TEMPLATE: &str = r#"
             color: var(--text-primary);
         }
 
+        .network-indicator {
+            padding: 0 2px;
+        }
+
+        .network-indicator.network-online image {
+            color: var(--color-success);
+        }
+
+        .network-indicator.network-offline image {
+            color: var(--color-critical);
+        }
+
         .volume-control {
             padding: 0 4px;
         }
@@ -834,6 +894,25 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                         }
                         Err(e) => {
                             tracing::warn!("Failed to get initial volume: {}", e);
+                        }
+                    }
+
+                    // Pull a fresh service snapshot so the network indicator
+                    // (and any other state-derived UI) is populated even when
+                    // no event has fired since the HUD connected.
+                    match client.send(Command::GetState).await {
+                        Ok(response) => {
+                            if let shepherd_api::ResponseResult::Ok(
+                                shepherd_api::ResponsePayload::State(snapshot),
+                            ) = response.result
+                            {
+                                state.handle_event(&shepherd_api::Event::new(
+                                    shepherd_api::EventPayload::StateChanged(snapshot),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to get initial state: {}", e);
                         }
                     }
 

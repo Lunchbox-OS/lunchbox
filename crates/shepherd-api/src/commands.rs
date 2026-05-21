@@ -236,6 +236,7 @@ mod tests {
                 current_session: None,
                 entry_count: 5,
                 entries: vec![],
+                internet_status: vec![],
             }),
         );
 

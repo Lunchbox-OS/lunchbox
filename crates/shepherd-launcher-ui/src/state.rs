@@ -128,6 +128,11 @@ impl SharedState {
             EventPayload::HudScaleChanged { .. } => {
                 // HUD-only event; ignored by the launcher.
             }
+            EventPayload::InternetStatusChanged { .. } => {
+                // The launcher receives entry availability updates via
+                // EntryAvailabilityChanged / StateChanged; the raw check
+                // status is HUD-only.
+            }
         }
     }
 
