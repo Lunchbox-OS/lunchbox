@@ -1,11 +1,13 @@
 //! Internet connectivity monitoring for shepherdd.
 
+use shepherd_api::{Event, EventPayload};
 use shepherd_config::{InternetCheckScheme, InternetCheckTarget, Policy};
 use shepherd_core::CoreEngine;
+use shepherd_ipc::IpcServer;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tokio::time;
 use tracing::{debug, warn};
 
@@ -43,18 +45,28 @@ impl InternetMonitor {
         })
     }
 
-    pub async fn run(self, engine: Arc<Mutex<CoreEngine>>) {
+    pub async fn run(
+        self,
+        engine: Arc<Mutex<CoreEngine>>,
+        ipc: Arc<IpcServer>,
+        event_tx: broadcast::Sender<Event>,
+    ) {
         // Initial check
-        self.check_all(&engine).await;
+        self.check_all(&engine, &ipc, &event_tx).await;
 
         let mut interval = time::interval(self.interval);
         loop {
             interval.tick().await;
-            self.check_all(&engine).await;
+            self.check_all(&engine, &ipc, &event_tx).await;
         }
     }
 
-    async fn check_all(&self, engine: &Arc<Mutex<CoreEngine>>) {
+    async fn check_all(
+        &self,
+        engine: &Arc<Mutex<CoreEngine>>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+    ) {
         for target in &self.targets {
             let available = check_target(target, self.timeout).await;
             let changed = {
@@ -68,6 +80,13 @@ impl InternetMonitor {
                     available,
                     "Internet connectivity status changed"
                 );
+
+                let event = Event::new(EventPayload::InternetStatusChanged {
+                    target: target.original.clone(),
+                    available,
+                });
+                ipc.broadcast_event(event.clone());
+                let _ = event_tx.send(event);
             }
         }
     }

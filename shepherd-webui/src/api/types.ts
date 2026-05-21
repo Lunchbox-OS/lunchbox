@@ -140,12 +140,18 @@ export interface HealthStatus {
   store_ok: boolean;
 }
 
+export interface InternetStatusView {
+  target: string;
+  available: boolean;
+}
+
 export interface ServiceStateSnapshot {
   api_version: number;
   policy_loaded: boolean;
   current_session: SessionInfo | null;
   entry_count: number;
   entries: EntryView[];
+  internet_status: InternetStatusView[];
 }
 
 export interface WindowInfo {

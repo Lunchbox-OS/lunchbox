@@ -237,8 +237,12 @@ impl Service {
         // Start internet connectivity monitoring (if configured)
         if let Some(monitor) = self.internet_monitor {
             let engine_ref = engine.clone();
+            let ipc_for_monitor = ipc_ref.clone();
+            let event_tx_for_monitor = event_tx.clone();
             tokio::spawn(async move {
-                monitor.run(engine_ref).await;
+                monitor
+                    .run(engine_ref, ipc_for_monitor, event_tx_for_monitor)
+                    .await;
             });
         }
 
