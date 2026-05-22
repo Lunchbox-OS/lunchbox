@@ -80,3 +80,25 @@ Layers touched:
 - This dev machine has no backlight, so the HUD slider stays hidden as
   expected (`available=false` from the controller). Live UI verification on
   a laptop is still TODO.
+
+## Follow-up: hardware brightness keys
+
+Added support for `XF86MonBrightnessUp` / `XF86MonBrightnessDown` by
+mirroring the volume-key plumbing:
+
+- `Command::BrightnessUp { step }` and `Command::BrightnessDown { step }`
+  in `shepherd-api`. Same shape as `Volume{Up,Down}` so they reuse the
+  one-shot CLI helper.
+- `Service::handle_relative_brightness` in `shepherdd`: reads current
+  level, clamps to `BrightnessRestrictions`, calls `set_brightness`, and
+  broadcasts `BrightnessChanged`. Lifted from `handle_relative_volume`
+  almost verbatim.
+- `--brightness-up` / `--brightness-down` flags on `shepherd-launcher`
+  (default step 5%). The existing `send_volume_command` helper got
+  generalized to `send_media_command` so it accepts either
+  `Volume*`/`Brightness*` responses.
+- `sway.conf` binds `XF86MonBrightness{Up,Down}` to those flags with
+  `--locked` so they still work on the lock screen.
+
+No new HTTP routes — the keypress path is IPC-only, matching how the
+volume keys work.

@@ -1350,6 +1350,20 @@ impl Service {
                 Response::success(request_id, ResponsePayload::Brightness(info))
             }
 
+            Command::BrightnessUp { step } => {
+                Self::handle_relative_brightness(
+                    engine, brightness, ipc, event_tx, request_id, step, true,
+                )
+                .await
+            }
+
+            Command::BrightnessDown { step } => {
+                Self::handle_relative_brightness(
+                    engine, brightness, ipc, event_tx, request_id, step, false,
+                )
+                .await
+            }
+
             Command::SetBrightness { percent } => {
                 let restrictions = Self::get_current_brightness_restrictions(engine).await;
 
@@ -1458,6 +1472,73 @@ impl Service {
             Err(e) => Response::success(
                 request_id,
                 ResponsePayload::VolumeDenied {
+                    reason: e.to_string(),
+                },
+            ),
+        }
+    }
+
+    /// Apply a relative brightness change (up or down) respecting policy
+    /// restrictions. Shared by `BrightnessUp` and `BrightnessDown` so they
+    /// take the same enforcement and broadcast path as `SetBrightness`.
+    async fn handle_relative_brightness(
+        engine: &Arc<Mutex<CoreEngine>>,
+        brightness: &Arc<LinuxBrightnessController>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+        request_id: u64,
+        step: u8,
+        up: bool,
+    ) -> Response {
+        let restrictions = Self::get_current_brightness_restrictions(engine).await;
+
+        if !restrictions.allow_change {
+            return Response::success(
+                request_id,
+                ResponsePayload::BrightnessDenied {
+                    reason: "Brightness changes are not allowed".into(),
+                },
+            );
+        }
+
+        // Reading the current level can fail if the backlight disappeared
+        // (USB-DP dock unplugged, etc). Surface that the same way as a
+        // `SetBrightness` backend failure.
+        let current = match brightness.get_status().await {
+            Ok(status) => status,
+            Err(e) => {
+                return Response::success(
+                    request_id,
+                    ResponsePayload::BrightnessDenied {
+                        reason: e.to_string(),
+                    },
+                );
+            }
+        };
+
+        let raw = if up {
+            current.percent.saturating_add(step)
+        } else {
+            current.percent.saturating_sub(step)
+        };
+        let target = restrictions.clamp_brightness(raw);
+
+        match brightness.set_brightness(target).await {
+            Ok(()) => {
+                if let Ok(status) = brightness.get_status().await {
+                    Self::broadcast(
+                        ipc,
+                        event_tx,
+                        Event::new(EventPayload::BrightnessChanged {
+                            percent: status.percent,
+                        }),
+                    );
+                }
+                Response::success(request_id, ResponsePayload::BrightnessSet)
+            }
+            Err(e) => Response::success(
+                request_id,
+                ResponsePayload::BrightnessDenied {
                     reason: e.to_string(),
                 },
             ),

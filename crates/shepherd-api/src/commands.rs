@@ -153,6 +153,14 @@ pub enum Command {
     /// Set screen brightness to a specific percentage
     SetBrightness { percent: u8 },
 
+    /// Increase screen brightness by a step (relative). Used by hardware
+    /// `XF86MonBrightnessUp` keys via the launcher's `--brightness-up`
+    /// shim so the change goes through the configured min/max policy.
+    BrightnessUp { step: u8 },
+
+    /// Decrease screen brightness by a step (`XF86MonBrightnessDown`).
+    BrightnessDown { step: u8 },
+
     // Admin commands
     /// Extend the current session (admin only)
     ExtendCurrent { by: Duration },
@@ -259,6 +267,25 @@ mod tests {
                     assert_eq!(a, b);
                 }
                 _ => panic!("Volume command variant mismatch: {:?}", parsed.command),
+            }
+        }
+    }
+
+    #[test]
+    fn relative_brightness_commands_round_trip() {
+        for cmd in [
+            Command::BrightnessUp { step: 5 },
+            Command::BrightnessDown { step: 10 },
+        ] {
+            let req = Request::new(8, cmd);
+            let json = serde_json::to_string(&req).unwrap();
+            let parsed: Request = serde_json::from_str(&json).unwrap();
+            match (&req.command, &parsed.command) {
+                (Command::BrightnessUp { step: a }, Command::BrightnessUp { step: b })
+                | (Command::BrightnessDown { step: a }, Command::BrightnessDown { step: b }) => {
+                    assert_eq!(a, b);
+                }
+                _ => panic!("Brightness command variant mismatch: {:?}", parsed.command),
             }
         }
     }
