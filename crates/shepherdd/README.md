@@ -124,6 +124,9 @@ The service runs an async event loop that processes:
 | `SubscribeEvents` | Subscribe to event stream | Any |
 | `GetHealth` | Health check | Any |
 | `SetVolume` | Set system volume | Shell/Admin |
+| `VolumeUp` | Increase volume by a step (clamped to policy) | Shell/Admin |
+| `VolumeDown` | Decrease volume by a step (clamped to policy) | Shell/Admin |
+| `ToggleMute` | Toggle mute state | Shell/Admin |
 | `GetVolume` | Get volume info | Any |
 
 ### Response Flow

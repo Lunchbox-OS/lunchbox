@@ -12,10 +12,15 @@ mod tile;
 use crate::client::CommandClient;
 use anyhow::Result;
 use clap::Parser;
-use shepherd_api::{ErrorCode, ResponsePayload, ResponseResult};
+use shepherd_api::{Command, ErrorCode, ResponsePayload, ResponseResult};
+use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
+
+/// Default step (percent) for the volume up/down CLI flags. Matches the
+/// keyboard step most desktops use for XF86Audio* keys.
+const DEFAULT_VOLUME_STEP: u8 = 5;
 
 /// Shepherd Launcher - Child-friendly kiosk launcher
 #[derive(Parser, Debug)]
@@ -38,6 +43,41 @@ struct Args {
     /// is active (idle should be suppressed). Used by swayidle to gate DPMS.
     #[arg(long)]
     is_idle_allowed: bool,
+
+    /// Send VolumeUp to shepherdd and exit. Intended for compositor
+    /// keybindings on XF86AudioRaiseVolume so the change goes through the
+    /// configured volume policy.
+    #[arg(long, value_name = "STEP", num_args = 0..=1, default_missing_value = "5")]
+    volume_up: Option<u8>,
+
+    /// Send VolumeDown to shepherdd and exit (XF86AudioLowerVolume binding).
+    #[arg(long, value_name = "STEP", num_args = 0..=1, default_missing_value = "5")]
+    volume_down: Option<u8>,
+
+    /// Send ToggleMute to shepherdd and exit (XF86AudioMute binding).
+    #[arg(long)]
+    toggle_mute: bool,
+}
+
+/// Send a single one-shot command to shepherdd. Used by the volume-button
+/// CLI flags below: the keypress fires the launcher binary with `--volume-up`
+/// or similar, it connects, sends the command, and exits. shepherdd handles
+/// the policy clamp and broadcasts a VolumeChanged event so the HUD stays
+/// in sync.
+async fn send_volume_command(socket_path: &Path, command: Command) -> Result<()> {
+    let mut client = IpcClient::connect(socket_path).await?;
+    let response = client.send(command).await?;
+    match response.result {
+        ResponseResult::Ok(ResponsePayload::VolumeSet) => Ok(()),
+        ResponseResult::Ok(ResponsePayload::VolumeDenied { reason }) => {
+            tracing::info!("Volume change denied: {}", reason);
+            Ok(())
+        }
+        ResponseResult::Ok(payload) => {
+            anyhow::bail!("Unexpected volume response: {:?}", payload)
+        }
+        ResponseResult::Err(err) => anyhow::bail!("Volume request failed: {}", err.message),
+    }
 }
 
 fn main() -> Result<()> {
@@ -79,6 +119,32 @@ fn main() -> Result<()> {
                 Err(e) => anyhow::bail!("Failed to send StopCurrent: {}", e),
             }
         })?;
+        return Ok(());
+    }
+
+    if let Some(step) = args.volume_up {
+        let step = if step == 0 { DEFAULT_VOLUME_STEP } else { step };
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(send_volume_command(
+            &socket_path,
+            Command::VolumeUp { step },
+        ))?;
+        return Ok(());
+    }
+
+    if let Some(step) = args.volume_down {
+        let step = if step == 0 { DEFAULT_VOLUME_STEP } else { step };
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(send_volume_command(
+            &socket_path,
+            Command::VolumeDown { step },
+        ))?;
+        return Ok(());
+    }
+
+    if args.toggle_mute {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(send_volume_command(&socket_path, Command::ToggleMute))?;
         return Ok(());
     }
 

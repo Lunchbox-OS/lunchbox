@@ -58,6 +58,18 @@ shepherd-launcher --socket /custom/path/shepherdd.sock
 |--------|---------|-------------|
 | `-s, --socket` | `$XDG_RUNTIME_DIR/shepherdd/shepherdd.sock` | Service socket path |
 | `-l, --log-level` | `info` | Log verbosity |
+| `--stop-current` | — | One-shot: send `StopCurrent` to shepherdd and exit |
+| `--is-idle-allowed` | — | One-shot: exit 0 if no session, 1 if active (for swayidle) |
+| `--volume-up [STEP]` | step `5` | One-shot: send `VolumeUp` to shepherdd (XF86AudioRaiseVolume binding) |
+| `--volume-down [STEP]` | step `5` | One-shot: send `VolumeDown` to shepherdd (XF86AudioLowerVolume binding) |
+| `--toggle-mute` | — | One-shot: send `ToggleMute` to shepherdd (XF86AudioMute binding) |
+
+The volume one-shots are wired up in `sway.conf` so that pressing
+`XF86AudioRaiseVolume` / `XF86AudioLowerVolume` / `XF86AudioMute` on a
+keyboard or handheld device's hardware volume buttons goes through
+shepherdd. The service applies the configured `[volume]` policy
+(`max_volume`, `min_volume`, `allow_mute`, `allow_change`) and broadcasts
+a `VolumeChanged` event so the HUD slider follows the change.
 
 ## Grid Behavior
 
