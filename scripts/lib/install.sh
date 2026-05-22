@@ -226,11 +226,17 @@ install_config() {
 # - input: required by shepherd-touch-bridge and shepherd-gamepad-bridge
 #   (used when an entry has `input_compat = "touch_to_mouse"` or
 #   `gamepad_*`) so they can read /dev/input/event*.
+# - video: required by the brightness slider. `brightnessctl`'s udev rule
+#   grants `video` write access to /sys/class/backlight/*/brightness; the
+#   daemon runs as the desktop user, so without this membership every
+#   brightness write fails with EACCES even though brightnessctl is
+#   installed.
 #
 # Add new groups here as features need them; install_user_groups walks the
 # array and skips memberships the user already has.
 SHEPHERD_REQUIRED_GROUPS=(
     "input"
+    "video"
 )
 
 # Add the target user to all groups required by shepherd-launcher.

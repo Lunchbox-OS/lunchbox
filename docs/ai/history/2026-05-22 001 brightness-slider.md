@@ -102,3 +102,17 @@ mirroring the volume-key plumbing:
 
 No new HTTP routes — the keypress path is IPC-only, matching how the
 volume keys work.
+
+## Follow-up: `video` group on install
+
+First test on real hardware (a launch Surface Pro running shepherdd as
+`shepherd-admin`) showed every brightness write failing with
+`Permission denied` even though `brightnessctl` was installed and the
+udev rule had set `intel_backlight/brightness` to `root:video 0664`. The
+gap was that `SHEPHERD_REQUIRED_GROUPS` in `scripts/lib/install.sh` only
+listed `input`, so `shepherd install groups` never put the desktop user
+in `video`. GNOME masked the symptom because gnome-settings-daemon
+writes via `org.freedesktop.login1.Session.SetBrightness` (runs as root
+in logind, no group needed) rather than touching sysfs directly. Added
+`video` to the required-groups list so a fresh install gets it; existing
+installs need `sudo usermod -aG video <user>` and a re-login.
