@@ -134,6 +134,12 @@ pub enum Command {
     /// Set volume to a specific percentage
     SetVolume { percent: u8 },
 
+    /// Increase volume by a step (relative)
+    VolumeUp { step: u8 },
+
+    /// Decrease volume by a step (relative)
+    VolumeDown { step: u8 },
+
     /// Toggle mute state
     ToggleMute,
 
@@ -224,6 +230,25 @@ mod tests {
 
         assert_eq!(parsed.request_id, 1);
         assert!(matches!(parsed.command, Command::GetState));
+    }
+
+    #[test]
+    fn relative_volume_commands_round_trip() {
+        for cmd in [
+            Command::VolumeUp { step: 5 },
+            Command::VolumeDown { step: 10 },
+        ] {
+            let req = Request::new(7, cmd);
+            let json = serde_json::to_string(&req).unwrap();
+            let parsed: Request = serde_json::from_str(&json).unwrap();
+            match (&req.command, &parsed.command) {
+                (Command::VolumeUp { step: a }, Command::VolumeUp { step: b })
+                | (Command::VolumeDown { step: a }, Command::VolumeDown { step: b }) => {
+                    assert_eq!(a, b);
+                }
+                _ => panic!("Volume command variant mismatch: {:?}", parsed.command),
+            }
+        }
     }
 
     #[test]

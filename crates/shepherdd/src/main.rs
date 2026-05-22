@@ -1226,6 +1226,16 @@ impl Service {
                 }
             }
 
+            Command::VolumeUp { step } => {
+                Self::handle_relative_volume(engine, volume, ipc, event_tx, request_id, step, true)
+                    .await
+            }
+
+            Command::VolumeDown { step } => {
+                Self::handle_relative_volume(engine, volume, ipc, event_tx, request_id, step, false)
+                    .await
+            }
+
             Command::ToggleMute => {
                 let restrictions = Self::get_current_volume_restrictions(engine).await;
 
@@ -1303,6 +1313,74 @@ impl Service {
             }
 
             Command::Ping => Response::success(request_id, ResponsePayload::Pong),
+        }
+    }
+
+    /// Apply a relative volume change (up or down) respecting policy
+    /// restrictions. Shared by `VolumeUp` and `VolumeDown` so they take the
+    /// same enforcement and broadcast path as `SetVolume`.
+    async fn handle_relative_volume(
+        engine: &Arc<Mutex<CoreEngine>>,
+        volume: &Arc<LinuxVolumeController>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+        request_id: u64,
+        step: u8,
+        up: bool,
+    ) -> Response {
+        let restrictions = Self::get_current_volume_restrictions(engine).await;
+
+        if !restrictions.allow_change {
+            return Response::success(
+                request_id,
+                ResponsePayload::VolumeDenied {
+                    reason: "Volume changes are not allowed".into(),
+                },
+            );
+        }
+
+        // Resolve the target percent based on the current status. Errors here
+        // mean we couldn't talk to the audio backend at all, which is the
+        // same failure mode `SetVolume` surfaces as `VolumeDenied`.
+        let current = match volume.get_status().await {
+            Ok(status) => status,
+            Err(e) => {
+                return Response::success(
+                    request_id,
+                    ResponsePayload::VolumeDenied {
+                        reason: e.to_string(),
+                    },
+                );
+            }
+        };
+
+        let raw = if up {
+            current.percent.saturating_add(step)
+        } else {
+            current.percent.saturating_sub(step)
+        };
+        let target = restrictions.clamp_volume(raw);
+
+        match volume.set_volume(target).await {
+            Ok(()) => {
+                if let Ok(status) = volume.get_status().await {
+                    Self::broadcast(
+                        ipc,
+                        event_tx,
+                        Event::new(EventPayload::VolumeChanged {
+                            percent: status.percent,
+                            muted: status.muted,
+                        }),
+                    );
+                }
+                Response::success(request_id, ResponsePayload::VolumeSet)
+            }
+            Err(e) => Response::success(
+                request_id,
+                ResponsePayload::VolumeDenied {
+                    reason: e.to_string(),
+                },
+            ),
         }
     }
 
