@@ -402,6 +402,62 @@ impl VolumeInfo {
     }
 }
 
+/// Screen brightness status information
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrightnessInfo {
+    /// Brightness percentage (0-100)
+    pub percent: u8,
+    /// Whether brightness control is available on this host
+    pub available: bool,
+    /// The detected brightness backend (e.g. "sysfs", "brightnessctl")
+    pub backend: Option<String>,
+    /// Name of the backlight device being controlled, if any
+    pub device: Option<String>,
+    /// Current restrictions on brightness
+    pub restrictions: BrightnessRestrictions,
+}
+
+/// Brightness restrictions that are currently in effect
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrightnessRestrictions {
+    /// Maximum brightness percentage allowed
+    pub max_brightness: Option<u8>,
+    /// Minimum brightness percentage allowed
+    pub min_brightness: Option<u8>,
+    /// Whether brightness changes are allowed at all
+    pub allow_change: bool,
+}
+
+impl BrightnessRestrictions {
+    /// Create unrestricted brightness settings
+    pub fn unrestricted() -> Self {
+        Self {
+            max_brightness: None,
+            min_brightness: None,
+            allow_change: true,
+        }
+    }
+
+    /// Clamp a brightness value to the allowed range
+    pub fn clamp_brightness(&self, percent: u8) -> u8 {
+        let min = self.min_brightness.unwrap_or(0);
+        let max = self.max_brightness.unwrap_or(100);
+        percent.clamp(min, max)
+    }
+}
+
+impl BrightnessInfo {
+    /// Get an icon name for the current brightness status.
+    //
+    // Adwaita and Yaru only ship a single `display-brightness-symbolic`
+    // glyph; the percentage-tiered `*-low/medium/high-symbolic` names
+    // that older GNOME themes used no longer resolve, so the HUD would
+    // render the missing-image placeholder if we returned those.
+    pub fn icon_name(&self) -> &'static str {
+        "display-brightness-symbolic"
+    }
+}
+
 /// A parent-set daily override for a single entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyOverride {

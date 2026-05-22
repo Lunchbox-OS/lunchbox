@@ -28,6 +28,8 @@ All routes are under `/api/v1/`. An optional Bearer token can be configured for 
 | `GET` | `/usage/{entry_id}` | Stats for one entry |
 | `GET` | `/volume` | Current volume |
 | `PUT` | `/volume` | Set volume or mute |
+| `GET` | `/brightness` | Current screen brightness (returns `available=false` on hosts with no backlight) |
+| `PUT` | `/brightness` | Set screen brightness (body: `{"percent": 0..100}`) |
 | `POST` | `/config/reload` | Hot-reload configuration |
 | `POST` | `/user/logout` | End the user's desktop session |
 | `GET` | `/debug/windows` | Read-only list of compositor windows (Sway) |

@@ -1,5 +1,6 @@
 import axios from "axios";
 import type {
+  BrightnessInfo,
   DailyOverride,
   EntryView,
   LaunchResponse,
@@ -132,6 +133,14 @@ export const setVolumeMuted = (muted: boolean) =>
   req<VolumeInfo>("/volume", {
     method: "PUT",
     data: { muted },
+  });
+
+// Brightness
+export const getBrightness = () => req<BrightnessInfo>("/brightness");
+export const setBrightnessPercent = (percent: number) =>
+  req<BrightnessInfo>("/brightness", {
+    method: "PUT",
+    data: { percent },
   });
 
 // Config

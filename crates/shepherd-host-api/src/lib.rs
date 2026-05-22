@@ -3,12 +3,14 @@
 //! This crate defines the capability-based interface between the shepherdd service
 //! and platform-specific implementations. It contains no platform code itself.
 
+mod brightness;
 mod capabilities;
 mod handle;
 mod mock;
 mod traits;
 mod volume;
 
+pub use brightness::*;
 pub use capabilities::*;
 pub use handle::*;
 pub use mock::*;

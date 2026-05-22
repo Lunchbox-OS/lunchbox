@@ -13,15 +13,17 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use shepherd_api::{
-    Command, EntryKind, ErrorCode, ErrorInfo, Event, EventPayload, HealthStatus, Response,
-    ResponsePayload, SessionEndReason, StopMode, VolumeInfo, VolumeRestrictions,
+    BrightnessInfo, BrightnessRestrictions, Command, EntryKind, ErrorCode, ErrorInfo, Event,
+    EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo,
+    VolumeRestrictions,
 };
-use shepherd_config::{VolumePolicy, load_config};
+use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
 use shepherd_host_api::{
-    HidpiController, HostAdapter, HostEvent, StopMode as HostStopMode, VolumeController,
+    BrightnessController, HidpiController, HostAdapter, HostEvent, StopMode as HostStopMode,
+    VolumeController,
 };
-use shepherd_host_linux::{LinuxHost, LinuxVolumeController};
+use shepherd_host_linux::{LinuxBrightnessController, LinuxHost, LinuxVolumeController};
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
@@ -67,6 +69,7 @@ struct Service {
     engine: CoreEngine,
     host: Arc<LinuxHost>,
     volume: Arc<LinuxVolumeController>,
+    brightness: Arc<LinuxBrightnessController>,
     ipc: Arc<IpcServer>,
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
@@ -126,6 +129,14 @@ impl Service {
             warn!("No sound backend detected, volume control unavailable");
         }
 
+        // Initialize brightness controller. Logged at debug level on hosts
+        // without a backlight (most desktops) so it doesn't spam warnings;
+        // the controller itself already logs an info line when one is found.
+        let brightness = Arc::new(LinuxBrightnessController::new());
+        if !brightness.capabilities().available {
+            debug!("No backlight detected, brightness control unavailable");
+        }
+
         // Initialize core engine
         let engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
 
@@ -146,6 +157,7 @@ impl Service {
             engine,
             host,
             volume,
+            brightness,
             ipc: Arc::new(ipc),
             store,
             rate_limiter,
@@ -193,6 +205,7 @@ impl Service {
         let rate_limiter = Arc::new(Mutex::new(self.rate_limiter));
         let host = self.host.clone();
         let volume = self.volume.clone();
+        let brightness = self.brightness.clone();
         let store = self.store.clone();
         // The hidpi manager owns both the IPC server handle and the SSE
         // broadcast channel so it can fan `HudScaleChanged` events out to
@@ -214,6 +227,7 @@ impl Service {
                 store: store.clone(),
                 host: host.clone() as Arc<dyn HostAdapter>,
                 volume: volume.clone() as Arc<dyn VolumeController>,
+                brightness: brightness.clone() as Arc<dyn BrightnessController>,
                 event_tx: event_tx.clone(),
                 broadcast_fn: Arc::new(move |event: Event| {
                     ipc_for_broadcast.broadcast_event(event.clone());
@@ -362,7 +376,7 @@ impl Service {
 
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&engine, &host, &volume, &ipc_ref, &store, &rate_limiter, &event_tx, &shutdown_tx, &hidpi, &config_path, msg).await;
+                    Self::handle_ipc_message(&engine, &host, &volume, &brightness, &ipc_ref, &store, &rate_limiter, &event_tx, &shutdown_tx, &hidpi, &config_path, msg).await;
                 }
             }
         }
@@ -704,6 +718,7 @@ impl Service {
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
         volume: &Arc<LinuxVolumeController>,
+        brightness: &Arc<LinuxBrightnessController>,
         ipc: &Arc<IpcServer>,
         store: &Arc<dyn Store>,
         rate_limiter: &Arc<Mutex<RateLimiter>>,
@@ -756,6 +771,7 @@ impl Service {
                     engine,
                     host,
                     volume,
+                    brightness,
                     ipc,
                     store,
                     &client_id,
@@ -805,6 +821,7 @@ impl Service {
         engine: &Arc<Mutex<CoreEngine>>,
         host: &Arc<LinuxHost>,
         volume: &Arc<LinuxVolumeController>,
+        brightness: &Arc<LinuxBrightnessController>,
         ipc: &Arc<IpcServer>,
         store: &Arc<dyn Store>,
         client_id: &ClientId,
@@ -1306,6 +1323,83 @@ impl Service {
                 }
             }
 
+            Command::GetBrightness => {
+                let restrictions = Self::get_current_brightness_restrictions(engine).await;
+                let caps = brightness.capabilities();
+                let info = match brightness.get_status().await {
+                    Ok(status) => BrightnessInfo {
+                        percent: status.percent,
+                        available: caps.available,
+                        backend: caps.backend.clone(),
+                        device: caps.device.clone(),
+                        restrictions,
+                    },
+                    Err(e) => {
+                        if caps.available {
+                            warn!(error = %e, "Failed to read brightness");
+                        }
+                        BrightnessInfo {
+                            percent: 0,
+                            available: caps.available,
+                            backend: caps.backend.clone(),
+                            device: caps.device.clone(),
+                            restrictions,
+                        }
+                    }
+                };
+                Response::success(request_id, ResponsePayload::Brightness(info))
+            }
+
+            Command::BrightnessUp { step } => {
+                Self::handle_relative_brightness(
+                    engine, brightness, ipc, event_tx, request_id, step, true,
+                )
+                .await
+            }
+
+            Command::BrightnessDown { step } => {
+                Self::handle_relative_brightness(
+                    engine, brightness, ipc, event_tx, request_id, step, false,
+                )
+                .await
+            }
+
+            Command::SetBrightness { percent } => {
+                let restrictions = Self::get_current_brightness_restrictions(engine).await;
+
+                if !restrictions.allow_change {
+                    return Response::success(
+                        request_id,
+                        ResponsePayload::BrightnessDenied {
+                            reason: "Brightness changes are not allowed".into(),
+                        },
+                    );
+                }
+
+                let clamped = restrictions.clamp_brightness(percent);
+
+                match brightness.set_brightness(clamped).await {
+                    Ok(()) => {
+                        if let Ok(status) = brightness.get_status().await {
+                            Self::broadcast(
+                                ipc,
+                                event_tx,
+                                Event::new(EventPayload::BrightnessChanged {
+                                    percent: status.percent,
+                                }),
+                            );
+                        }
+                        Response::success(request_id, ResponsePayload::BrightnessSet)
+                    }
+                    Err(e) => Response::success(
+                        request_id,
+                        ResponsePayload::BrightnessDenied {
+                            reason: e.to_string(),
+                        },
+                    ),
+                }
+            }
+
             Command::Logout => {
                 info!("Logout requested via IPC");
                 let _ = shutdown_tx.send(true);
@@ -1384,6 +1478,73 @@ impl Service {
         }
     }
 
+    /// Apply a relative brightness change (up or down) respecting policy
+    /// restrictions. Shared by `BrightnessUp` and `BrightnessDown` so they
+    /// take the same enforcement and broadcast path as `SetBrightness`.
+    async fn handle_relative_brightness(
+        engine: &Arc<Mutex<CoreEngine>>,
+        brightness: &Arc<LinuxBrightnessController>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+        request_id: u64,
+        step: u8,
+        up: bool,
+    ) -> Response {
+        let restrictions = Self::get_current_brightness_restrictions(engine).await;
+
+        if !restrictions.allow_change {
+            return Response::success(
+                request_id,
+                ResponsePayload::BrightnessDenied {
+                    reason: "Brightness changes are not allowed".into(),
+                },
+            );
+        }
+
+        // Reading the current level can fail if the backlight disappeared
+        // (USB-DP dock unplugged, etc). Surface that the same way as a
+        // `SetBrightness` backend failure.
+        let current = match brightness.get_status().await {
+            Ok(status) => status,
+            Err(e) => {
+                return Response::success(
+                    request_id,
+                    ResponsePayload::BrightnessDenied {
+                        reason: e.to_string(),
+                    },
+                );
+            }
+        };
+
+        let raw = if up {
+            current.percent.saturating_add(step)
+        } else {
+            current.percent.saturating_sub(step)
+        };
+        let target = restrictions.clamp_brightness(raw);
+
+        match brightness.set_brightness(target).await {
+            Ok(()) => {
+                if let Ok(status) = brightness.get_status().await {
+                    Self::broadcast(
+                        ipc,
+                        event_tx,
+                        Event::new(EventPayload::BrightnessChanged {
+                            percent: status.percent,
+                        }),
+                    );
+                }
+                Response::success(request_id, ResponsePayload::BrightnessSet)
+            }
+            Err(e) => Response::success(
+                request_id,
+                ResponsePayload::BrightnessDenied {
+                    reason: e.to_string(),
+                },
+            ),
+        }
+    }
+
     /// Get the current volume restrictions based on policy and active session
     async fn get_current_volume_restrictions(
         engine: &Arc<Mutex<CoreEngine>>,
@@ -1407,6 +1568,30 @@ impl Service {
             max_volume: policy.max_volume,
             min_volume: policy.min_volume,
             allow_mute: policy.allow_mute,
+            allow_change: policy.allow_change,
+        }
+    }
+
+    /// Get the current brightness restrictions based on policy and active session
+    async fn get_current_brightness_restrictions(
+        engine: &Arc<Mutex<CoreEngine>>,
+    ) -> BrightnessRestrictions {
+        let eng = engine.lock().await;
+
+        if let Some(session) = eng.current_session()
+            && let Some(entry) = eng.policy().get_entry(&session.plan.entry_id)
+            && let Some(ref br_policy) = entry.brightness
+        {
+            return Self::convert_brightness_policy(br_policy);
+        }
+
+        Self::convert_brightness_policy(&eng.policy().brightness)
+    }
+
+    fn convert_brightness_policy(policy: &BrightnessPolicy) -> BrightnessRestrictions {
+        BrightnessRestrictions {
+            max_brightness: policy.max_brightness,
+            min_brightness: policy.min_brightness,
             allow_change: policy.allow_change,
         }
     }

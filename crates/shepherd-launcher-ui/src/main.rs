@@ -22,6 +22,10 @@ use tracing_subscriber::EnvFilter;
 /// keyboard step most desktops use for XF86Audio* keys.
 const DEFAULT_VOLUME_STEP: u8 = 5;
 
+/// Default step (percent) for the brightness up/down CLI flags. 5% per
+/// press mirrors what GNOME/KDE use for XF86MonBrightness* keys.
+const DEFAULT_BRIGHTNESS_STEP: u8 = 5;
+
 /// Shepherd Launcher - Child-friendly kiosk launcher
 #[derive(Parser, Debug)]
 #[command(name = "shepherd-launcher")]
@@ -57,26 +61,42 @@ struct Args {
     /// Send ToggleMute to shepherdd and exit (XF86AudioMute binding).
     #[arg(long)]
     toggle_mute: bool,
+
+    /// Send BrightnessUp to shepherdd and exit. Intended for compositor
+    /// keybindings on XF86MonBrightnessUp so the change goes through the
+    /// configured brightness policy.
+    #[arg(long, value_name = "STEP", num_args = 0..=1, default_missing_value = "5")]
+    brightness_up: Option<u8>,
+
+    /// Send BrightnessDown to shepherdd and exit (XF86MonBrightnessDown
+    /// binding).
+    #[arg(long, value_name = "STEP", num_args = 0..=1, default_missing_value = "5")]
+    brightness_down: Option<u8>,
 }
 
-/// Send a single one-shot command to shepherdd. Used by the volume-button
-/// CLI flags below: the keypress fires the launcher binary with `--volume-up`
-/// or similar, it connects, sends the command, and exits. shepherdd handles
-/// the policy clamp and broadcasts a VolumeChanged event so the HUD stays
-/// in sync.
-async fn send_volume_command(socket_path: &Path, command: Command) -> Result<()> {
+/// Send a single one-shot command to shepherdd. Used by the volume- and
+/// brightness-button CLI flags below: the keypress fires the launcher
+/// binary with `--volume-up` or `--brightness-up`, it connects, sends the
+/// command, and exits. shepherdd handles the policy clamp and broadcasts
+/// the corresponding `*Changed` event so the HUD stays in sync.
+///
+/// `kind` is a short string used only in logs/errors so volume and
+/// brightness failures are distinguishable in the journal.
+async fn send_media_command(socket_path: &Path, kind: &str, command: Command) -> Result<()> {
     let mut client = IpcClient::connect(socket_path).await?;
     let response = client.send(command).await?;
     match response.result {
-        ResponseResult::Ok(ResponsePayload::VolumeSet) => Ok(()),
-        ResponseResult::Ok(ResponsePayload::VolumeDenied { reason }) => {
-            tracing::info!("Volume change denied: {}", reason);
+        ResponseResult::Ok(ResponsePayload::VolumeSet)
+        | ResponseResult::Ok(ResponsePayload::BrightnessSet) => Ok(()),
+        ResponseResult::Ok(ResponsePayload::VolumeDenied { reason })
+        | ResponseResult::Ok(ResponsePayload::BrightnessDenied { reason }) => {
+            tracing::info!("{} change denied: {}", kind, reason);
             Ok(())
         }
         ResponseResult::Ok(payload) => {
-            anyhow::bail!("Unexpected volume response: {:?}", payload)
+            anyhow::bail!("Unexpected {} response: {:?}", kind, payload)
         }
-        ResponseResult::Err(err) => anyhow::bail!("Volume request failed: {}", err.message),
+        ResponseResult::Err(err) => anyhow::bail!("{} request failed: {}", kind, err.message),
     }
 }
 
@@ -125,8 +145,9 @@ fn main() -> Result<()> {
     if let Some(step) = args.volume_up {
         let step = if step == 0 { DEFAULT_VOLUME_STEP } else { step };
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_volume_command(
+        runtime.block_on(send_media_command(
             &socket_path,
+            "Volume",
             Command::VolumeUp { step },
         ))?;
         return Ok(());
@@ -135,8 +156,9 @@ fn main() -> Result<()> {
     if let Some(step) = args.volume_down {
         let step = if step == 0 { DEFAULT_VOLUME_STEP } else { step };
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_volume_command(
+        runtime.block_on(send_media_command(
             &socket_path,
+            "Volume",
             Command::VolumeDown { step },
         ))?;
         return Ok(());
@@ -144,7 +166,41 @@ fn main() -> Result<()> {
 
     if args.toggle_mute {
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_volume_command(&socket_path, Command::ToggleMute))?;
+        runtime.block_on(send_media_command(
+            &socket_path,
+            "Volume",
+            Command::ToggleMute,
+        ))?;
+        return Ok(());
+    }
+
+    if let Some(step) = args.brightness_up {
+        let step = if step == 0 {
+            DEFAULT_BRIGHTNESS_STEP
+        } else {
+            step
+        };
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(send_media_command(
+            &socket_path,
+            "Brightness",
+            Command::BrightnessUp { step },
+        ))?;
+        return Ok(());
+    }
+
+    if let Some(step) = args.brightness_down {
+        let step = if step == 0 {
+            DEFAULT_BRIGHTNESS_STEP
+        } else {
+            step
+        };
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(send_media_command(
+            &socket_path,
+            "Brightness",
+            Command::BrightnessDown { step },
+        ))?;
         return Ok(());
     }
 

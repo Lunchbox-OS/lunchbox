@@ -34,6 +34,7 @@ fn make_test_entry(id: &str) -> Entry {
         },
         warnings: vec![],
         volume: None,
+        brightness: None,
         disabled: false,
         disabled_reason: None,
         internet: Default::default(),
@@ -79,6 +80,7 @@ fn make_test_policy() -> Policy {
                 },
             ],
             volume: None,
+            brightness: None,
             disabled: false,
             disabled_reason: None,
             internet: Default::default(),
@@ -90,6 +92,7 @@ fn make_test_policy() -> Policy {
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
         volume: Default::default(),
+        brightness: Default::default(),
     }
 }
 
@@ -371,6 +374,7 @@ fn test_reload_policy_emits_event() {
         default_warnings: vec![],
         default_max_run: None,
         volume: Default::default(),
+        brightness: Default::default(),
     };
 
     let event = engine.reload_policy(new_policy);
@@ -402,6 +406,7 @@ fn test_reload_policy_updates_entry_list() {
         default_warnings: vec![],
         default_max_run: None,
         volume: Default::default(),
+        brightness: Default::default(),
     };
     engine.reload_policy(new_policy);
 
@@ -442,6 +447,7 @@ fn test_reload_policy_preserves_active_session() {
         default_warnings: vec![],
         default_max_run: None,
         volume: Default::default(),
+        brightness: Default::default(),
     };
     engine.reload_policy(new_policy);
 

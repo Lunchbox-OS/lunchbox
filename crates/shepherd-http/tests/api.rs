@@ -7,10 +7,11 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use shepherd_api::{EntryKind, Event};
 use shepherd_config::{
-    AvailabilityPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy,
+    AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy,
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
+    BrightnessCapabilities, BrightnessController, BrightnessResult, BrightnessStatus,
     HostCapabilities, MockHost, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
 };
 use shepherd_http::{AppState, handlers};
@@ -91,6 +92,44 @@ impl VolumeController for MockVolume {
 }
 
 // ---------------------------------------------------------------------------
+// MockBrightness
+// ---------------------------------------------------------------------------
+
+struct MockBrightness {
+    capabilities: BrightnessCapabilities,
+    status: std::sync::Mutex<BrightnessStatus>,
+}
+
+impl MockBrightness {
+    fn new() -> Self {
+        Self {
+            capabilities: BrightnessCapabilities {
+                available: true,
+                backend: Some("mock".into()),
+                device: Some("mock0".into()),
+            },
+            status: std::sync::Mutex::new(BrightnessStatus { percent: 50 }),
+        }
+    }
+}
+
+#[async_trait]
+impl BrightnessController for MockBrightness {
+    fn capabilities(&self) -> &BrightnessCapabilities {
+        &self.capabilities
+    }
+
+    async fn get_status(&self) -> BrightnessResult<BrightnessStatus> {
+        Ok(self.status.lock().unwrap().clone())
+    }
+
+    async fn set_brightness(&self, percent: u8) -> BrightnessResult<()> {
+        self.status.lock().unwrap().percent = percent;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test fixtures
 // ---------------------------------------------------------------------------
 
@@ -118,6 +157,7 @@ fn test_policy() -> Policy {
             },
             warnings: vec![],
             volume: None,
+            brightness: None,
             disabled: false,
             disabled_reason: None,
             internet: Default::default(),
@@ -129,6 +169,7 @@ fn test_policy() -> Policy {
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
         volume: VolumePolicy::default(),
+        brightness: BrightnessPolicy::default(),
     }
 }
 
@@ -140,6 +181,7 @@ fn make_app_with_policy(
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
     let volume = Arc::new(MockVolume::new());
+    let brightness = Arc::new(MockBrightness::new());
     let engine = Arc::new(Mutex::new(CoreEngine::new(
         policy,
         store.clone(),
@@ -153,6 +195,7 @@ fn make_app_with_policy(
         store,
         host,
         volume,
+        brightness,
         event_tx: tx,
         broadcast_fn: Arc::new(move |event: Event| {
             let _ = tx_for_fn.send(event);
@@ -672,6 +715,7 @@ async fn overrides_enable_entry_outside_time_window() {
             },
             warnings: vec![],
             volume: None,
+            brightness: None,
             disabled: false,
             disabled_reason: None,
             internet: Default::default(),
@@ -683,6 +727,7 @@ async fn overrides_enable_entry_outside_time_window() {
         default_warnings: vec![],
         default_max_run: None,
         volume: VolumePolicy::default(),
+        brightness: BrightnessPolicy::default(),
     };
 
     let cfg = temp_config();

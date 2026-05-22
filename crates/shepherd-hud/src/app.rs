@@ -27,6 +27,10 @@ const BASE_ICON_PIXEL_SIZE: i32 = 20;
 /// way as the icon size above so the slider grows with the rest of the HUD.
 const BASE_VOLUME_SLIDER_WIDTH: i32 = 100;
 
+/// Logical-pixel width of the brightness slider at scale 1.0. Matches the
+/// volume slider so the two indicators line up.
+const BASE_BRIGHTNESS_SLIDER_WIDTH: i32 = 100;
+
 /// The HUD application
 pub struct HudApp {
     app: gtk4::Application,
@@ -322,6 +326,79 @@ fn build_hud_content(
 
     right_box.append(&volume_box);
 
+    // Brightness control. Hidden when the host has no backlight (every
+    // desktop machine, plus laptops missing `/sys/class/backlight/*`); on
+    // hosts with one this is the laptop-style screen-dimmer slider.
+    let brightness_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(4)
+        .visible(false)
+        .build();
+    brightness_box.add_css_class("brightness-control");
+
+    let brightness_icon = gtk4::Image::from_icon_name("display-brightness-symbolic");
+    brightness_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    brightness_box.append(&brightness_icon);
+
+    let brightness_slider = gtk4::Scale::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .width_request(BASE_BRIGHTNESS_SLIDER_WIDTH)
+        .draw_value(false)
+        .build();
+    brightness_slider.set_range(0.0, 100.0);
+    brightness_slider.set_increments(5.0, 10.0);
+    brightness_slider.add_css_class("brightness-slider");
+
+    if let Some(info) = crate::brightness::get_brightness_status() {
+        brightness_slider.set_value(info.percent as f64);
+    }
+
+    // Debounce brightness changes the same way as volume: the slider can
+    // emit dozens of events per second while the user drags it, and the
+    // sysfs/`brightnessctl` write is fast but not free.
+    let (brightness_tx, brightness_rx_chan) = mpsc::channel::<u8>();
+    std::thread::spawn(move || {
+        const DEBOUNCE_MS: u64 = 50;
+
+        while let Ok(mut latest_percent) = brightness_rx_chan.recv() {
+            loop {
+                match brightness_rx_chan.recv_timeout(std::time::Duration::from_millis(DEBOUNCE_MS))
+                {
+                    Ok(percent) => {
+                        latest_percent = percent;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+
+            if let Err(e) = crate::brightness::set_brightness(latest_percent) {
+                tracing::error!("Failed to set brightness: {}", e);
+            }
+        }
+    });
+
+    let brightness_changing = std::rc::Rc::new(std::cell::Cell::new(false));
+    let brightness_changing_clone = brightness_changing.clone();
+
+    brightness_slider.connect_change_value(move |slider, _, value| {
+        brightness_changing_clone.set(true);
+        let percent = value.clamp(0.0, 100.0) as u8;
+
+        let _ = brightness_tx.send(percent);
+        slider.set_value(value);
+        glib::Propagation::Stop
+    });
+
+    brightness_box.append(&brightness_slider);
+
+    let brightness_label = gtk4::Label::new(Some("--%"));
+    brightness_label.add_css_class("brightness-label");
+    brightness_label.set_width_chars(4);
+    brightness_box.append(&brightness_label);
+
+    right_box.append(&brightness_box);
+
     // Network connectivity indicator. Shown only when at least one
     // connectivity check is configured. Icon reflects the worst status across
     // all configured checks; the tooltip lists every check and its result so
@@ -426,16 +503,22 @@ fn build_hud_content(
     let volume_slider_clone = volume_slider.clone();
     let volume_label_clone = volume_label.clone();
     let slider_changing_for_update = slider_changing.clone();
+    let brightness_box_clone = brightness_box.clone();
+    let brightness_icon_clone = brightness_icon.clone();
+    let brightness_slider_clone = brightness_slider.clone();
+    let brightness_label_clone = brightness_label.clone();
+    let brightness_changing_for_update = brightness_changing.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
     // All icons we resize when the HUD scale factor changes.
-    let scaled_icons: [gtk4::Image; 5] = [
+    let scaled_icons: [gtk4::Image; 6] = [
         warning_icon.clone(),
         battery_icon.clone(),
         volume_icon.clone(),
+        brightness_icon.clone(),
         action_icon.clone(),
         network_icon.clone(),
     ];
@@ -464,6 +547,9 @@ fn build_hud_content(
             }
             let slider_width = (f64::from(BASE_VOLUME_SLIDER_WIDTH) * desired_scale).round() as i32;
             volume_slider_clone.set_width_request(slider_width);
+            let brightness_slider_width =
+                (f64::from(BASE_BRIGHTNESS_SLIDER_WIDTH) * desired_scale).round() as i32;
+            brightness_slider_clone.set_width_request(brightness_slider_width);
             applied_scale_for_timer.set(desired_scale);
         }
 
@@ -613,6 +699,31 @@ fn build_hud_content(
         } else {
             volume_label_clone.set_text("--%");
             volume_slider_clone.set_sensitive(false);
+        }
+
+        // Update brightness slider from cached state. Hidden entirely on
+        // hosts that don't expose a backlight (`available=false`).
+        if let Some(brightness) = state.brightness_info() {
+            if brightness.available {
+                brightness_box_clone.set_visible(true);
+                brightness_icon_clone.set_icon_name(Some(brightness.icon_name()));
+                brightness_label_clone.set_text(&format!("{}%", brightness.percent));
+
+                if !brightness_changing_for_update.get() {
+                    brightness_slider_clone.set_value(brightness.percent as f64);
+                }
+                brightness_changing_for_update.set(false);
+
+                brightness_slider_clone.set_sensitive(brightness.restrictions.allow_change);
+
+                let min = brightness.restrictions.min_brightness.unwrap_or(0) as f64;
+                let max = brightness.restrictions.max_brightness.unwrap_or(100) as f64;
+                brightness_slider_clone.set_range(min, max);
+            } else {
+                brightness_box_clone.set_visible(false);
+            }
+        } else {
+            brightness_box_clone.set_visible(false);
         }
 
         glib::ControlFlow::Continue
@@ -856,6 +967,48 @@ const CSS_TEMPLATE: &str = r#"
             text-align: right;
         }
 
+        .brightness-control {
+            padding: 0 4px;
+        }
+
+        .brightness-slider {
+            min-width: 80px;
+        }
+
+        .brightness-slider trough {
+            min-height: 4px;
+            border-radius: 2px;
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .brightness-slider highlight {
+            min-height: 4px;
+            border-radius: 2px;
+            background-color: var(--color-warning);
+        }
+
+        .brightness-slider slider {
+            min-width: 12px;
+            min-height: 12px;
+            border-radius: 50%;
+            background-color: var(--text-primary);
+        }
+
+        .brightness-slider:disabled trough {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .brightness-slider:disabled highlight {
+            background-color: rgba(235, 203, 139, 0.5);
+        }
+
+        .brightness-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            min-width: 3em;
+            text-align: right;
+        }
+
         .clock-label {
             font-family: monospace;
             font-size: 14px;
@@ -894,6 +1047,28 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                         }
                         Err(e) => {
                             tracing::warn!("Failed to get initial volume: {}", e);
+                        }
+                    }
+
+                    // Same for brightness. Returns available=false when the
+                    // host has no backlight, which is the signal to the UI
+                    // that it should hide the slider entirely.
+                    match client.send(Command::GetBrightness).await {
+                        Ok(response) => {
+                            if let shepherd_api::ResponseResult::Ok(
+                                shepherd_api::ResponsePayload::Brightness(info),
+                            ) = response.result
+                            {
+                                tracing::debug!(
+                                    "Got initial brightness: {}% (available={})",
+                                    info.percent,
+                                    info.available,
+                                );
+                                state.set_initial_brightness(info);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to get initial brightness: {}", e);
                         }
                     }
 

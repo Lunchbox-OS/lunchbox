@@ -70,6 +70,9 @@ pub enum EventPayload {
     /// Volume status changed
     VolumeChanged { percent: u8, muted: bool },
 
+    /// Screen brightness changed
+    BrightnessChanged { percent: u8 },
+
     /// HUD UI scale factor changed. The HUD is expected to multiply its
     /// font/padding/height by `factor` on top of the compositor scale.
     ///
