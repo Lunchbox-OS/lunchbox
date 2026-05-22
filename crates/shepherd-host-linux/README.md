@@ -12,6 +12,10 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
 - **Snap application support** via systemd scope-based management
 - **stdout/stderr capture** to log files
 - **Volume control** with auto-detection of sound systems (PipeWire, PulseAudio, ALSA)
+- **Screen brightness control** via `/sys/class/backlight` for reads and
+  `brightnessctl` for writes (required runtime dep — its udev rules grant
+  the `video` group write access, which is the only supported path for an
+  unprivileged shepherdd). Skipped on hosts without a backlight.
 
 ## Capabilities
 

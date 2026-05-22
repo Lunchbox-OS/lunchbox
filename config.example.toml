@@ -30,6 +30,17 @@ max_volume = 80      # Maximum volume percentage (0-100)
 allow_mute = true    # Whether mute toggle is allowed
 allow_change = true  # Whether volume changes are allowed at all
 
+# Global screen-brightness restrictions (optional)
+# Applied when the host exposes a backlight under /sys/class/backlight
+# (typically a laptop or convertible). The HUD hides its brightness slider
+# entirely on hosts without a backlight, so these settings are no-ops on
+# most desktops. Set `min_brightness` to keep children from driving the
+# panel all the way to 0% (which most panels interpret as "off").
+[service.brightness]
+# max_brightness = 100   # Maximum brightness percentage (0-100)
+min_brightness = 10      # Don't let brightness drop below 10%
+allow_change = true      # Whether brightness changes are allowed at all
+
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.
 # Supported schemes: https://, http://, tcp://
@@ -360,6 +371,12 @@ message = "30 seconds! Save NOW!"
 # Entry-specific volume restrictions (overrides global)
 [entries.volume]
 max_volume = 60  # Limit volume during gaming sessions
+
+# Entry-specific brightness restrictions (overrides global). Same shape as
+# [service.brightness]; you can dim the screen for bedtime activities by
+# capping it here.
+# [entries.brightness]
+# max_brightness = 50
 
 # Krita - digital painting (Flatpak)
 # Install: flatpak install flathub org.kde.krita

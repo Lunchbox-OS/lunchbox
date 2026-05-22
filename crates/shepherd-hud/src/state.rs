@@ -3,7 +3,8 @@
 //! The HUD subscribes to events from shepherdd and tracks session state.
 
 use shepherd_api::{
-    Event, EventPayload, InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
+    BrightnessInfo, BrightnessRestrictions, Event, EventPayload, InternetStatusView, VolumeInfo,
+    VolumeRestrictions, WarningSeverity,
 };
 use shepherd_util::{EntryId, SessionId};
 use std::sync::Arc;
@@ -77,6 +78,10 @@ pub struct SharedState {
     volume_tx: Arc<watch::Sender<Option<VolumeInfo>>>,
     /// Volume info receiver
     volume_rx: watch::Receiver<Option<VolumeInfo>>,
+    /// Brightness info sender (updated via events, not polling)
+    brightness_tx: Arc<watch::Sender<Option<BrightnessInfo>>>,
+    /// Brightness info receiver
+    brightness_rx: watch::Receiver<Option<BrightnessInfo>>,
     /// UI scale multiplier applied on top of the compositor scale. 1.0 by
     /// default; shepherdd raises this for activities that disable sway's
     /// compositor scale so the HUD stays a normal physical size. See
@@ -94,6 +99,7 @@ impl SharedState {
     pub fn new() -> Self {
         let (session_tx, session_rx) = watch::channel(SessionState::NoSession);
         let (volume_tx, volume_rx) = watch::channel(None);
+        let (brightness_tx, brightness_rx) = watch::channel(None);
         let (scale_tx, scale_rx) = watch::channel(1.0_f64);
         let (internet_tx, internet_rx) = watch::channel(Vec::new());
 
@@ -102,6 +108,8 @@ impl SharedState {
             session_rx,
             volume_tx: Arc::new(volume_tx),
             volume_rx,
+            brightness_tx: Arc::new(brightness_tx),
+            brightness_rx,
             scale_tx: Arc::new(scale_tx),
             scale_rx,
             internet_tx: Arc::new(internet_tx),
@@ -180,6 +188,34 @@ impl SharedState {
                     available: true,
                     backend: None,
                     restrictions: VolumeRestrictions::unrestricted(),
+                });
+            }
+        });
+    }
+
+    /// Get current brightness info (cached from events)
+    pub fn brightness_info(&self) -> Option<BrightnessInfo> {
+        self.brightness_rx.borrow().clone()
+    }
+
+    /// Set initial brightness info (called once on connect)
+    pub fn set_initial_brightness(&self, info: BrightnessInfo) {
+        let _ = self.brightness_tx.send(Some(info));
+    }
+
+    /// Update brightness from BrightnessChanged event (preserves
+    /// restrictions/backend/device from the initial fetch).
+    fn update_brightness(&self, percent: u8) {
+        self.brightness_tx.send_modify(|br| {
+            if let Some(b) = br {
+                b.percent = percent;
+            } else {
+                *br = Some(BrightnessInfo {
+                    percent,
+                    available: true,
+                    backend: None,
+                    device: None,
+                    restrictions: BrightnessRestrictions::unrestricted(),
                 });
             }
         });
@@ -319,6 +355,10 @@ impl SharedState {
 
             EventPayload::VolumeChanged { percent, muted } => {
                 self.update_volume(*percent, *muted);
+            }
+
+            EventPayload::BrightnessChanged { percent } => {
+                self.update_brightness(*percent);
             }
 
             EventPayload::InternetStatusChanged { target, available } => {

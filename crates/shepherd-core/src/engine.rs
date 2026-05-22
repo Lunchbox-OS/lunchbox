@@ -764,6 +764,7 @@ mod tests {
                 },
                 warnings: vec![],
                 volume: None,
+                brightness: None,
                 disabled: false,
                 disabled_reason: None,
                 internet: Default::default(),
@@ -775,6 +776,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
+            brightness: Default::default(),
         }
     }
 
@@ -852,6 +854,7 @@ mod tests {
                     message_template: Some("1 minute left".into()),
                 }],
                 volume: None,
+                brightness: None,
                 disabled: false,
                 disabled_reason: None,
                 internet: Default::default(),
@@ -864,6 +867,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
+            brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -941,6 +945,7 @@ mod tests {
                     message_template: None,
                 }],
                 volume: None,
+                brightness: None,
                 disabled: false,
                 disabled_reason: None,
                 internet: Default::default(),
@@ -953,6 +958,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
+            brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1038,6 +1044,7 @@ mod tests {
                 },
                 warnings: vec![],
                 volume: None,
+                brightness: None,
                 disabled: false,
                 disabled_reason: None,
                 internet: Default::default(),
@@ -1050,6 +1057,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
+            brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1111,6 +1119,7 @@ mod tests {
                 },
                 warnings: vec![],
                 volume: None,
+                brightness: None,
                 disabled: false,
                 disabled_reason: None,
                 internet: Default::default(),
@@ -1122,6 +1131,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
+            brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1201,6 +1211,7 @@ mod tests {
                 },
                 warnings: vec![],
                 volume: None,
+                brightness: None,
                 disabled: false,
                 disabled_reason: None,
                 internet: Default::default(),
@@ -1212,6 +1223,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
+            brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1274,6 +1286,7 @@ mod tests {
                 },
                 warnings: vec![],
                 volume: None,
+                brightness: None,
                 disabled: true,
                 disabled_reason: Some("under review".into()),
                 internet: Default::default(),
@@ -1285,6 +1298,7 @@ mod tests {
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
+            brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());

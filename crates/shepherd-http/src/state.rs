@@ -2,7 +2,7 @@
 
 use shepherd_api::Event;
 use shepherd_core::CoreEngine;
-use shepherd_host_api::{HidpiController, HostAdapter, VolumeController};
+use shepherd_host_api::{BrightnessController, HidpiController, HostAdapter, VolumeController};
 use shepherd_store::Store;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ pub struct AppState {
     pub store: Arc<dyn Store>,
     pub host: Arc<dyn HostAdapter>,
     pub volume: Arc<dyn VolumeController>,
+    pub brightness: Arc<dyn BrightnessController>,
     pub event_tx: broadcast::Sender<Event>,
     /// Broadcasts an event to all subscribers: both IPC clients (HUD) and HTTP SSE clients.
     /// Equivalent to calling the daemon's internal `broadcast()` helper.

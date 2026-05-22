@@ -5,6 +5,7 @@
 
 mod app;
 mod battery;
+mod brightness;
 mod state;
 mod time_display;
 mod volume;

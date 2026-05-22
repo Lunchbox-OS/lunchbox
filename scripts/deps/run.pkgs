@@ -23,3 +23,11 @@ mpv
 # yt-dlp itself is installed via pip into /opt/shepherd/ytdlp-venv so it
 # stays up-to-date independent of the Ubuntu package archive.
 python3-venv
+
+# Screen brightness control — used by shepherdd's brightness adapter to
+# write `/sys/class/backlight/<dev>/brightness` from an unprivileged user.
+# Apt installs udev rules that grant the `video` group write access, which
+# is the only supported path; a direct sysfs write would silently fail in
+# production. On hosts with no backlight (most desktops) the package is
+# installed but never invoked.
+brightnessctl

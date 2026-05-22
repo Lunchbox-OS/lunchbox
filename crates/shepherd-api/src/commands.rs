@@ -146,6 +146,13 @@ pub enum Command {
     /// Set mute state explicitly
     SetMute { muted: bool },
 
+    // Brightness control commands
+    /// Get current screen brightness status
+    GetBrightness,
+
+    /// Set screen brightness to a specific percentage
+    SetBrightness { percent: u8 },
+
     // Admin commands
     /// Extend the current session (admin only)
     ExtendCurrent { by: Duration },
@@ -185,6 +192,11 @@ pub enum ResponsePayload {
     Volume(crate::VolumeInfo),
     VolumeSet,
     VolumeDenied {
+        reason: String,
+    },
+    Brightness(crate::BrightnessInfo),
+    BrightnessSet,
+    BrightnessDenied {
         reason: String,
     },
     LoggedOut,

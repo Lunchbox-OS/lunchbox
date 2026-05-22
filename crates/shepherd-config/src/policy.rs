@@ -6,9 +6,9 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
-    RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawVolumeConfig,
-    RawWarningThreshold,
+    RawBrightnessConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat,
+    RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
+    RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -40,6 +40,9 @@ pub struct Policy {
 
     /// Global volume restrictions
     pub volume: VolumePolicy,
+
+    /// Global screen-brightness restrictions
+    pub brightness: BrightnessPolicy,
 }
 
 impl Policy {
@@ -66,10 +69,25 @@ impl Policy {
             .map(convert_volume_config)
             .unwrap_or_default();
 
+        let global_brightness = raw
+            .service
+            .brightness
+            .as_ref()
+            .map(convert_brightness_config)
+            .unwrap_or_default();
+
         let entries = raw
             .entries
             .into_iter()
-            .map(|e| Entry::from_raw(e, &default_warnings, default_max_run, &global_volume))
+            .map(|e| {
+                Entry::from_raw(
+                    e,
+                    &default_warnings,
+                    default_max_run,
+                    &global_volume,
+                    &global_brightness,
+                )
+            })
             .collect();
 
         Self {
@@ -78,6 +96,7 @@ impl Policy {
             default_warnings,
             default_max_run,
             volume: global_volume,
+            brightness: global_brightness,
         }
     }
 
@@ -189,6 +208,7 @@ pub struct Entry {
     pub limits: LimitsPolicy,
     pub warnings: Vec<WarningThreshold>,
     pub volume: Option<VolumePolicy>,
+    pub brightness: Option<BrightnessPolicy>,
     pub disabled: bool,
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
@@ -209,6 +229,7 @@ impl Entry {
         default_warnings: &[WarningThreshold],
         default_max_run: Option<Duration>,
         _global_volume: &VolumePolicy,
+        _global_brightness: &BrightnessPolicy,
     ) -> Self {
         let kind = convert_entry_kind(raw.kind);
         let availability = raw
@@ -228,6 +249,7 @@ impl Entry {
             .map(|w| w.into_iter().map(convert_warning).collect())
             .unwrap_or_else(|| default_warnings.to_vec());
         let volume = raw.volume.as_ref().map(convert_volume_config);
+        let brightness = raw.brightness.as_ref().map(convert_brightness_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
         let firewall = raw.firewall.as_ref().map(convert_firewall_config);
         let input_compat =
@@ -247,6 +269,7 @@ impl Entry {
             limits,
             warnings,
             volume,
+            brightness,
             disabled: raw.disabled,
             disabled_reason: raw.disabled_reason,
             internet,
@@ -363,6 +386,35 @@ impl VolumePolicy {
     }
 }
 
+/// Screen-brightness control policy
+#[derive(Debug, Clone, Default)]
+pub struct BrightnessPolicy {
+    /// Maximum brightness percentage allowed
+    pub max_brightness: Option<u8>,
+    /// Minimum brightness percentage allowed
+    pub min_brightness: Option<u8>,
+    /// Whether brightness changes are allowed at all
+    pub allow_change: bool,
+}
+
+impl BrightnessPolicy {
+    /// Create unrestricted brightness settings
+    pub fn unrestricted() -> Self {
+        Self {
+            max_brightness: None,
+            min_brightness: None,
+            allow_change: true,
+        }
+    }
+
+    /// Clamp a brightness value to the allowed range
+    pub fn clamp_brightness(&self, percent: u8) -> u8 {
+        let min = self.min_brightness.unwrap_or(0);
+        let max = self.max_brightness.unwrap_or(100);
+        percent.clamp(min, max)
+    }
+}
+
 // Conversion helpers
 
 fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
@@ -413,6 +465,14 @@ fn convert_volume_config(raw: &RawVolumeConfig) -> VolumePolicy {
         max_volume: raw.max_volume,
         min_volume: raw.min_volume,
         allow_mute: raw.allow_mute,
+        allow_change: raw.allow_change,
+    }
+}
+
+fn convert_brightness_config(raw: &RawBrightnessConfig) -> BrightnessPolicy {
+    BrightnessPolicy {
+        max_brightness: raw.max_brightness,
+        min_brightness: raw.min_brightness,
         allow_change: raw.allow_change,
     }
 }

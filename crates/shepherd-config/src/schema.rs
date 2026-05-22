@@ -49,6 +49,10 @@ pub struct RawServiceConfig {
     #[serde(default)]
     pub volume: Option<RawVolumeConfig>,
 
+    /// Global screen-brightness restrictions
+    #[serde(default)]
+    pub brightness: Option<RawBrightnessConfig>,
+
     /// Internet connectivity check settings
     #[serde(default)]
     pub internet: Option<RawInternetConfig>,
@@ -88,6 +92,10 @@ pub struct RawEntry {
     /// Volume restrictions for this entry (overrides global)
     #[serde(default)]
     pub volume: Option<RawVolumeConfig>,
+
+    /// Screen-brightness restrictions for this entry (overrides global)
+    #[serde(default)]
+    pub brightness: Option<RawBrightnessConfig>,
 
     /// Explicitly disabled
     #[serde(default)]
@@ -391,6 +399,22 @@ pub struct RawVolumeConfig {
     pub allow_mute: bool,
 
     /// Whether volume changes are allowed at all (default: true)
+    #[serde(default = "default_true")]
+    pub allow_change: bool,
+}
+
+/// Screen-brightness control configuration
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawBrightnessConfig {
+    /// Maximum brightness percentage allowed (0-100)
+    pub max_brightness: Option<u8>,
+
+    /// Minimum brightness percentage allowed (0-100).
+    /// Use this to prevent the screen from being driven all the way to 0%
+    /// (which most panels interpret as "off" — confusing for a child user).
+    pub min_brightness: Option<u8>,
+
+    /// Whether brightness changes are allowed at all (default: true)
     #[serde(default = "default_true")]
     pub allow_change: bool,
 }

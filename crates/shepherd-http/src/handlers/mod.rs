@@ -1,5 +1,6 @@
 //! HTTP route definitions
 
+pub mod brightness;
 pub mod config;
 pub mod debug;
 pub mod entries;
@@ -41,6 +42,10 @@ pub fn router(state: AppState, auth_token: Option<String>) -> Router {
         .route("/usage", get(usage::get_usage_all))
         .route("/usage/{entry_id}", get(usage::get_usage_entry))
         .route("/volume", get(volume::get_volume).put(volume::set_volume))
+        .route(
+            "/brightness",
+            get(brightness::get_brightness).put(brightness::set_brightness),
+        )
         .route("/config/reload", axum::routing::post(config::reload_config))
         .route("/user/logout", axum::routing::post(logout::logout))
         .route("/debug/windows", get(debug::list_windows))
