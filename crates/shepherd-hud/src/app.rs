@@ -336,7 +336,7 @@ fn build_hud_content(
         .build();
     brightness_box.add_css_class("brightness-control");
 
-    let brightness_icon = gtk4::Image::from_icon_name("display-brightness-medium-symbolic");
+    let brightness_icon = gtk4::Image::from_icon_name("display-brightness-symbolic");
     brightness_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     brightness_box.append(&brightness_icon);
 

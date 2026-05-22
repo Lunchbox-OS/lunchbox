@@ -64,10 +64,12 @@ Layers touched:
   policy knobs are `max_brightness`, `min_brightness`, `allow_change`.
   Setting `min_brightness = 10` is the kid-friendly default suggested in
   the example config so the screen never goes fully dark.
-- The HUD's brightness icon palette is the standard freedesktop
-  `display-brightness-{low,medium,high}-symbolic`. The slider's `highlight`
-  fill uses the existing `--color-warning` (warm/amber) to visually
-  distinguish it from the volume slider's `--color-info` (cool/blue).
+- The HUD uses the single `display-brightness-symbolic` glyph (the
+  `*-low/medium/high-symbolic` variants are no longer shipped by Adwaita
+  or Yaru, so requesting them rendered the missing-image placeholder).
+  The slider's `highlight` fill uses the existing `--color-warning`
+  (warm/amber) to visually distinguish it from the volume slider's
+  `--color-info` (cool/blue).
 - Per-tick HUD update is the same pattern as volume: read cached state, push
   it to the widget unless the user is actively dragging. No polling on the
   brightness controller itself — `BrightnessChanged` events drive the cache.

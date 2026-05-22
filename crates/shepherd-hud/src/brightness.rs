@@ -72,32 +72,18 @@ mod tests {
     use shepherd_api::BrightnessRestrictions;
 
     #[test]
-    fn test_brightness_icon_names() {
-        let info = shepherd_api::BrightnessInfo {
-            percent: 10,
-            available: true,
-            backend: Some("test".into()),
-            device: Some("test0".into()),
-            restrictions: BrightnessRestrictions::unrestricted(),
-        };
-        assert_eq!(info.icon_name(), "display-brightness-low-symbolic");
-
-        let info = shepherd_api::BrightnessInfo {
-            percent: 50,
-            available: true,
-            backend: Some("test".into()),
-            device: Some("test0".into()),
-            restrictions: BrightnessRestrictions::unrestricted(),
-        };
-        assert_eq!(info.icon_name(), "display-brightness-medium-symbolic");
-
-        let info = shepherd_api::BrightnessInfo {
-            percent: 90,
-            available: true,
-            backend: Some("test".into()),
-            device: Some("test0".into()),
-            restrictions: BrightnessRestrictions::unrestricted(),
-        };
-        assert_eq!(info.icon_name(), "display-brightness-high-symbolic");
+    fn test_brightness_icon_name() {
+        // Adwaita/Yaru only ship a single `display-brightness-symbolic`,
+        // so the icon name does not vary with the percentage.
+        for percent in [0u8, 10, 50, 90, 100] {
+            let info = shepherd_api::BrightnessInfo {
+                percent,
+                available: true,
+                backend: Some("test".into()),
+                device: Some("test0".into()),
+                restrictions: BrightnessRestrictions::unrestricted(),
+            };
+            assert_eq!(info.icon_name(), "display-brightness-symbolic");
+        }
     }
 }

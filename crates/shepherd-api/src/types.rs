@@ -447,15 +447,14 @@ impl BrightnessRestrictions {
 }
 
 impl BrightnessInfo {
-    /// Get an icon name for the current brightness status
+    /// Get an icon name for the current brightness status.
+    //
+    // Adwaita and Yaru only ship a single `display-brightness-symbolic`
+    // glyph; the percentage-tiered `*-low/medium/high-symbolic` names
+    // that older GNOME themes used no longer resolve, so the HUD would
+    // render the missing-image placeholder if we returned those.
     pub fn icon_name(&self) -> &'static str {
-        if self.percent < 33 {
-            "display-brightness-low-symbolic"
-        } else if self.percent < 66 {
-            "display-brightness-medium-symbolic"
-        } else {
-            "display-brightness-high-symbolic"
-        }
+        "display-brightness-symbolic"
     }
 }
 
