@@ -132,6 +132,20 @@ export interface VolumeInfo {
   restrictions: VolumeRestrictions;
 }
 
+export interface BrightnessRestrictions {
+  max_brightness: number | null;
+  min_brightness: number | null;
+  allow_change: boolean;
+}
+
+export interface BrightnessInfo {
+  percent: number;
+  available: boolean;
+  backend: string | null;
+  device: string | null;
+  restrictions: BrightnessRestrictions;
+}
+
 export interface HealthStatus {
   live: boolean;
   ready: boolean;

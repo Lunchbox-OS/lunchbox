@@ -105,6 +105,18 @@ mirroring the volume-key plumbing:
 No new HTTP routes — the keypress path is IPC-only, matching how the
 volume keys work.
 
+## Follow-up: management UI card
+
+Added a Brightness card on `AdminPage.tsx`, mirroring the Volume card:
+new `BrightnessInfo` / `BrightnessRestrictions` types in
+`shepherd-webui/src/api/types.ts`, `getBrightness` /
+`setBrightnessPercent` in `client.ts`, and a `useQuery` /
+`useMutation` pair driving a slider clamped to the policy's
+`min/max_brightness`. No mute toggle (there isn't one for brightness)
+and no live percentage drag debouncing — TanStack Query's automatic
+SSE-driven invalidation in `useEvents` keeps the slider in sync after
+each PUT. Hidden when `available === false`.
+
 ## Follow-up: `video` group on install
 
 First test on real hardware (a launch Surface Pro running shepherdd as

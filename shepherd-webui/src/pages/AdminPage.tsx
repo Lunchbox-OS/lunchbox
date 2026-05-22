@@ -12,11 +12,14 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import VolumeOffIcon from "@mui/icons-material/VolumeOff";
 import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
+import BrightnessHighIcon from "@mui/icons-material/BrightnessHigh";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  getBrightness,
   getVolume,
   logoutUser,
   reloadConfig,
+  setBrightnessPercent,
   setVolumeMuted,
   setVolumePercent,
 } from "../api/client";
@@ -29,6 +32,10 @@ export function AdminPage() {
   const { data: volume, isPending: volLoading } = useQuery({
     queryKey: ["volume"],
     queryFn: getVolume,
+  });
+  const { data: brightness, isPending: brightLoading } = useQuery({
+    queryKey: ["brightness"],
+    queryFn: getBrightness,
   });
 
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -53,6 +60,12 @@ export function AdminPage() {
     onError: (e) => flash(String(e), false),
   });
 
+  const setBrightnessMutation = useMutation({
+    mutationFn: setBrightnessPercent,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["brightness"] }),
+    onError: (e) => flash(String(e), false),
+  });
+
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: (res) => flash(`Config reloaded (${res.entry_count} entries)`),
@@ -66,6 +79,7 @@ export function AdminPage() {
   });
 
   const busyVol = setPercentMutation.isPending || setMutedMutation.isPending;
+  const busyBright = setBrightnessMutation.isPending;
 
   const VolumeIcon = !volume || volume.muted
     ? VolumeOffIcon
@@ -121,6 +135,41 @@ export function AdminPage() {
               </Box>
               {volume.backend && (
                 <Typography variant="caption" color="text.disabled">Backend: {volume.backend}</Typography>
+              )}
+            </Stack>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      {/* Brightness */}
+      <Card variant="outlined">
+        <CardContent>
+          <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 600 }}>Brightness</Typography>
+          {brightLoading && !brightness ? (
+            <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}><Spinner /></Box>
+          ) : brightness && !brightness.available ? (
+            <Typography variant="body2" color="text.secondary">
+              Brightness control not available on this device
+            </Typography>
+          ) : brightness ? (
+            <Stack spacing={1}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <BrightnessHighIcon fontSize="small" color="action" />
+                <Slider
+                  min={brightness.restrictions.min_brightness ?? 0}
+                  max={brightness.restrictions.max_brightness ?? 100}
+                  value={brightness.percent}
+                  disabled={busyBright || !brightness.restrictions.allow_change}
+                  onChange={(_, v) => setBrightnessMutation.mutate(v as number)}
+                  aria-label="Brightness"
+                  sx={{ flex: 1 }}
+                />
+                <Typography variant="body2" color="text.secondary" sx={{ minWidth: 40, textAlign: "right" }}>
+                  {`${brightness.percent}%`}
+                </Typography>
+              </Box>
+              {brightness.backend && (
+                <Typography variant="caption" color="text.disabled">Backend: {brightness.backend}</Typography>
               )}
             </Stack>
           ) : null}
