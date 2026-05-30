@@ -47,10 +47,16 @@ pub fn gamepad_bridge_binary() -> PathBuf {
 }
 
 /// Spawn the touch-to-mouse bridge as a child of the daemon.
-pub fn spawn_touch_bridge() -> std::io::Result<Child> {
+///
+/// `output_scale` is the compositor's current output scale; the bridge
+/// divides its absolute coordinates by it so the synthesized cursor lands in
+/// logical (scaled) coordinates. Pass `1.0` when scaling is unknown.
+pub fn spawn_touch_bridge(output_scale: f64) -> std::io::Result<Child> {
     let bin = touch_bridge_binary();
-    debug!(binary = %bin.display(), "Launching touch-to-mouse bridge");
+    debug!(binary = %bin.display(), output_scale, "Launching touch-to-mouse bridge");
     let child = Command::new(&bin)
+        .arg("--output-scale")
+        .arg(format!("{output_scale}"))
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

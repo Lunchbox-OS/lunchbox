@@ -62,6 +62,14 @@ pub struct UinputSink {
     /// First emit error since the last [`flush`](OutputSink::flush), surfaced
     /// there so the caller can react.
     error: Option<anyhow::Error>,
+    /// Compositor output scale applied to absolute coordinates. libinput maps
+    /// the device's `0..=ABS_MAX` range onto the output's physical pixels, but
+    /// the cursor lives in logical (scaled) coordinates, so a full-surface
+    /// sweep would overshoot by the scale factor (touching `1/scale` of the
+    /// pad would already cover the whole screen). Dividing emitted absolute
+    /// coordinates by the scale corrects this. `1.0` for relative devices and
+    /// unscaled outputs, where it is a no-op.
+    abs_scale: f64,
 }
 
 impl UinputSink {
@@ -84,11 +92,14 @@ impl UinputSink {
             .build()
             .context("create uinput virtual device")?;
 
-        Ok(Self::ready(device))
+        Ok(Self::ready(device, 1.0))
     }
 
     /// Build an absolute pointer device (touch bridge).
-    pub fn new_absolute() -> Result<Self> {
+    ///
+    /// `output_scale` is the compositor's output scale (e.g. `1.5`); pass
+    /// `1.0` when scaling is unknown or disabled. See [`UinputSink::abs_scale`].
+    pub fn new_absolute(output_scale: f64) -> Result<Self> {
         let abs_info = AbsInfo::new(0, 0, ABS_MAX, 0, 0, 0);
         let abs_x = UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_info);
         let abs_y = UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_info);
@@ -106,10 +117,10 @@ impl UinputSink {
             .build()
             .context("create uinput virtual device")?;
 
-        Ok(Self::ready(device))
+        Ok(Self::ready(device, output_scale))
     }
 
-    fn ready(device: VirtualDevice) -> Self {
+    fn ready(device: VirtualDevice, abs_scale: f64) -> Self {
         // Give udev/the compositor a moment to bind the new node before any
         // events are emitted.
         thread::sleep(SETTLE);
@@ -117,6 +128,7 @@ impl UinputSink {
             device,
             pending: Vec::new(),
             error: None,
+            abs_scale,
         }
     }
 }
@@ -140,10 +152,17 @@ impl OutputSink for UinputSink {
                 x_extent,
                 y_extent,
             } => {
-                self.pending
-                    .push(InputEvent::new(EV_ABS, ABS_X, rescale_abs(x, x_extent)));
-                self.pending
-                    .push(InputEvent::new(EV_ABS, ABS_Y, rescale_abs(y, y_extent)));
+                let scale = self.abs_scale;
+                self.pending.push(InputEvent::new(
+                    EV_ABS,
+                    ABS_X,
+                    rescale_abs(x, x_extent, scale),
+                ));
+                self.pending.push(InputEvent::new(
+                    EV_ABS,
+                    ABS_Y,
+                    rescale_abs(y, y_extent, scale),
+                ));
             }
             OutputEvent::PointerButton { button, pressed } => {
                 self.pending
@@ -189,13 +208,18 @@ impl OutputSink for UinputSink {
 }
 
 /// Rescale a raw absolute coordinate in `0..=extent` into the device's
-/// declared `0..=ABS_MAX` range.
-fn rescale_abs(value: u32, extent: u32) -> i32 {
+/// declared `0..=ABS_MAX` range, dividing by the compositor `scale` so the
+/// mapped position lands in logical (scaled) coordinates rather than physical
+/// pixels. At `scale == 1.0` this is the plain range remap. The result is
+/// clamped to the declared range (relevant for downscaling, `scale < 1.0`).
+fn rescale_abs(value: u32, extent: u32, scale: f64) -> i32 {
     if extent == 0 {
         return 0;
     }
-    let v = u64::from(value.min(extent)) * (ABS_MAX as u64) / u64::from(extent);
-    v as i32
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let frac = f64::from(value.min(extent)) / f64::from(extent);
+    let v = (frac / scale * f64::from(ABS_MAX)).round();
+    v.clamp(0.0, f64::from(ABS_MAX)) as i32
 }
 
 /// The full set of keys a keyboard+mouse device may emit. We register
@@ -226,16 +250,46 @@ fn insert_mouse_buttons(keys: &mut AttributeSet<KeyCode>) {
 mod tests {
     use super::*;
 
+    /// Assert `a` and `b` are within 1 unit — the rounding in `rescale_abs`
+    /// can land on either side of an exact half.
+    fn near(a: i32, b: i32) {
+        assert!((a - b).abs() <= 1, "{a} not within 1 of {b}");
+    }
+
     #[test]
     fn rescale_maps_endpoints_and_midpoint() {
-        assert_eq!(rescale_abs(0, 1000), 0);
-        assert_eq!(rescale_abs(1000, 1000), ABS_MAX);
-        assert_eq!(rescale_abs(500, 1000), ABS_MAX / 2);
+        assert_eq!(rescale_abs(0, 1000, 1.0), 0);
+        assert_eq!(rescale_abs(1000, 1000, 1.0), ABS_MAX);
+        near(rescale_abs(500, 1000, 1.0), ABS_MAX / 2);
     }
 
     #[test]
     fn rescale_clamps_and_guards_zero_extent() {
-        assert_eq!(rescale_abs(2000, 1000), ABS_MAX); // clamped to extent
-        assert_eq!(rescale_abs(5, 0), 0); // degenerate range
+        assert_eq!(rescale_abs(2000, 1000, 1.0), ABS_MAX); // clamped to extent
+        assert_eq!(rescale_abs(5, 0, 1.0), 0); // degenerate range
+    }
+
+    #[test]
+    fn rescale_divides_by_scale() {
+        // Under output scale, a full-surface sweep must reach only
+        // `1/scale` of the device range so the cursor lands at the logical
+        // (not physical) screen edge.
+        near(rescale_abs(1000, 1000, 2.0), ABS_MAX / 2);
+        near(
+            rescale_abs(1000, 1000, 1.5),
+            (f64::from(ABS_MAX) / 1.5) as i32,
+        );
+        near(rescale_abs(500, 1000, 2.0), ABS_MAX / 4);
+    }
+
+    #[test]
+    fn rescale_downscale_clamps() {
+        // scale < 1.0 would push a full sweep past the declared range; clamp.
+        assert_eq!(rescale_abs(1000, 1000, 0.5), ABS_MAX);
+    }
+
+    #[test]
+    fn rescale_nonpositive_scale_treated_as_one() {
+        assert_eq!(rescale_abs(1000, 1000, 0.0), ABS_MAX);
     }
 }
