@@ -46,25 +46,9 @@ pub mod btncode {
     pub const BTN_MIDDLE: u32 = 0x112;
 }
 
-/// Scroll axes as represented in the wlr-virtual-pointer protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollAxis {
-    Vertical,
-    Horizontal,
-}
-
-/// One output event ready to be sent on the Wayland side.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum OutputEvent {
-    /// Relative pointer motion, in compositor pixels.
-    PointerMotion { dx: f32, dy: f32 },
-    /// Mouse button press/release. `button` is an evdev code (BTN_LEFT, …).
-    PointerButton { button: u32, pressed: bool },
-    /// Discrete wheel scroll. `discrete` is in notches (positive = down/right).
-    PointerScroll { axis: ScrollAxis, discrete: i32 },
-    /// Keyboard key press/release. `keycode` is the Linux evdev code.
-    Key { keycode: u32, pressed: bool },
-}
+// The output event vocabulary and scroll-axis type live in the shared
+// `shepherd-bridge` crate, since both sidecars feed the same uinput backend.
+pub use shepherd_bridge::{OutputEvent, ScrollAxis};
 
 /// Tunables forwarded from the host adapter.
 #[derive(Debug, Clone, Copy)]

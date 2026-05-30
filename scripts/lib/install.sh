@@ -36,6 +36,12 @@ FIREWALL_POLICY_NAME="org.shepherd.firewall.policy"
 FIREWALL_RULES_NAME="50-shepherd-firewall.rules"
 FIREWALL_GROUP="shepherd-firewall"
 
+# udev rules. Installed to a fixed system location regardless of --prefix
+# (udev only reads /etc/udev/rules.d and /usr/lib/udev/rules.d). Currently
+# just the /dev/uinput access rule the input-compat sidecars need.
+UDEV_RULES_DIR="/etc/udev/rules.d"
+UINPUT_RULES_NAME="71-shepherd-uinput.rules"
+
 # Install release binaries
 install_bins() {
     local prefix="${1:-$DEFAULT_PREFIX}"
@@ -225,7 +231,9 @@ install_config() {
 #
 # - input: required by shepherd-touch-bridge and shepherd-gamepad-bridge
 #   (used when an entry has `input_compat = "touch_to_mouse"` or
-#   `gamepad_*`) so they can read /dev/input/event*.
+#   `gamepad_*`) so they can read /dev/input/event* and write /dev/uinput.
+#   The uinput write access also needs the udev rule installed by
+#   `install_udev`; see that function and dist/udev/.
 # - video: required by the brightness slider. `brightnessctl`'s udev rule
 #   grants `video` write access to /sys/class/backlight/*/brightness; the
 #   daemon runs as the desktop user, so without this membership every
@@ -281,6 +289,48 @@ install_user_groups() {
     else
         success "User '$user' already has all required group memberships"
     fi
+}
+
+# Install the udev rules shepherd-launcher needs.
+#
+# Currently just the /dev/uinput access rule. The input-compat sidecars
+# synthesize their mouse/keyboard output through /dev/uinput, which is
+# root-only by default; the rule grants the 'input' group access (the same
+# group `install_user_groups` already adds the user to). This is what lets
+# the sidecars run on any Wayland compositor, not just wlroots ones.
+install_udev() {
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    require_root
+
+    local rules_src="$repo_root/dist/udev/$UINPUT_RULES_NAME"
+    local rules_dst="$destdir$UDEV_RULES_DIR/$UINPUT_RULES_NAME"
+
+    if [[ ! -f "$rules_src" ]]; then
+        die "udev rule missing at $rules_src"
+    fi
+
+    info "Installing udev rule to $rules_dst..."
+    ensure_dir "$(dirname "$rules_dst")" 0755
+    install -m 0644 -o root -g root "$rules_src" "$rules_dst"
+
+    # Reload + apply only on a real (non-packaging) install. Under DESTDIR
+    # these would touch the build host, which is wrong for packaging.
+    if [[ -z "$destdir" ]]; then
+        if command -v udevadm >/dev/null 2>&1; then
+            info "Reloading udev rules so the new rule takes effect"
+            udevadm control --reload-rules 2>/dev/null \
+                || warn "Could not reload udev rules; reboot for the rule to apply"
+            # Nudge the static node into existence with the new ownership.
+            udevadm trigger /dev/uinput 2>/dev/null || true
+        else
+            warn "udevadm not found; reboot for the /dev/uinput rule to apply"
+        fi
+    fi
+
+    success "Installed udev rule"
 }
 
 # Install the firewall helper and its polkit assets.
@@ -378,6 +428,7 @@ install_all() {
     install_desktop_entry "$prefix"
     install_config "$user" "" "$force"
     install_user_groups "$user"
+    install_udev
 
     success "Installation complete!"
     info ""
@@ -452,6 +503,9 @@ install_main() {
         groups)
             install_user_groups "$user"
             ;;
+        udev)
+            install_udev
+            ;;
         all)
             install_all "$user" "$prefix" "$force"
             ;;
@@ -467,6 +521,8 @@ Commands:
     desktop-entry     Install display manager desktop entry
     groups            Add the target user to required groups (e.g. 'input'
                       for touch-to-mouse compatibility)
+    udev              Install udev rules (e.g. /dev/uinput access for the
+                      input-compat sidecars)
     all               Install everything (incl. firewall helper)
 
 Options:
@@ -494,6 +550,7 @@ Examples:
     shepherd install firewall --user kiosk
     shepherd install config --user kiosk --force
     shepherd install groups --user kiosk
+    shepherd install udev
     shepherd install all --user kiosk --prefix /usr
 EOF
             ;;

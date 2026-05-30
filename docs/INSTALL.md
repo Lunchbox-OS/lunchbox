@@ -63,17 +63,22 @@ Activities can opt into one or more input-compat sidecars via the
 - `gamepad_productivity` / `gamepad_gpd` — remap a gamepad to mouse +
   keyboard for activities that ignore gamepad input.
 
-The sidecars read `/dev/input/event*`, which requires the user to be in
-the `input` group.
+The sidecars read `/dev/input/event*` and synthesize their output through a
+`/dev/uinput` virtual device. Both require the user to be in the `input`
+group, plus a udev rule granting that group access to `/dev/uinput`. Using
+uinput is what lets the sidecars work on any Wayland compositor (GNOME/Mutter,
+KWin, …), not just wlroots ones like Sway.
 
-`shepherd install all` adds this group automatically. To add it to an
-existing install, run:
+`shepherd install all` adds the group and installs the udev rule
+automatically. To set them up on an existing install, run:
 
 ```sh
 sudo ./scripts/shepherd install groups --user kiosk
+sudo ./scripts/shepherd install udev
 ```
 
-The change takes effect on the user's next login.
+The group change takes effect on the user's next login; the udev rule applies
+after the next `/dev/uinput` access (or a reboot).
 
 ## Kiosk hardening (optional)
 

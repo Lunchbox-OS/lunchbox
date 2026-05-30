@@ -17,6 +17,7 @@ members = [
     "crates/shepherd-e2e",
     "crates/shepherd-media-core",
     "crates/shepherd-media",
+    "crates/shepherd-bridge",
     "crates/shepherd-touch-bridge",
     "crates/shepherd-gamepad-bridge",
 ]
@@ -43,6 +44,7 @@ shepherd-core = { path = "crates/shepherd-core" }
 shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
 shepherd-http = { path = "crates/shepherd-http" }
+shepherd-bridge = { path = "crates/shepherd-bridge" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

@@ -1,0 +1,10 @@
+# Grant the 'input' group read/write access to /dev/uinput so an unprivileged
+# shepherd user can create virtual input devices. The touch-to-mouse and
+# gamepad sidecars (shepherd-touch-bridge, shepherd-gamepad-bridge) synthesize
+# mouse/keyboard input through uinput, which works on any Wayland compositor
+# (and X11), unlike the wlroots-only protocols used before (issue #58).
+#
+# Membership in the 'input' group is granted by `shepherd install groups`.
+# static_node ensures the node exists with these permissions even though
+# uinput is usually an on-demand kernel module loaded only when first opened.
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

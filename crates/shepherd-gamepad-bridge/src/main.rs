@@ -4,13 +4,12 @@
 //! Run alongside an activity that doesn't process raw gamepad input, or
 //! for which the gamepad doesn't match the activity's interaction model.
 //! The bridge polls gilrs for gamepad events, translates them per the
-//! configured preset on a 125 Hz tick, and emits the results through the
-//! wlroots virtual-pointer protocol and the unstable virtual-keyboard
-//! protocol.
+//! configured preset on a 125 Hz tick, and emits the results through a
+//! `/dev/uinput` virtual mouse + keyboard, which works on any Wayland
+//! compositor (and X11).
 
 mod gamepad;
 mod preset;
-mod wl;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,8 +21,9 @@ use clap::Parser;
 use gilrs::EventType;
 use tracing::info;
 
+use shepherd_bridge::{OutputSink, UinputSink};
+
 use crate::preset::{Preset, PresetState, Tunables};
-use crate::wl::WaylandOutputs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -136,7 +136,7 @@ fn main() -> Result<()> {
     let mut gilrs = gamepad::init()?;
     gamepad::log_connected(&gilrs);
 
-    let mut outputs = WaylandOutputs::connect()?;
+    let mut outputs = UinputSink::new_relative()?;
     info!("Gamepad bridge ready");
 
     let mut state = PresetState::new(preset, tunables);
@@ -200,6 +200,5 @@ fn main() -> Result<()> {
         outputs.frame();
     }
     let _ = outputs.flush();
-    outputs.destroy();
     Ok(())
 }
