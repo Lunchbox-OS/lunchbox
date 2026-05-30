@@ -309,10 +309,10 @@ impl PresetState {
         self.emit_button(btncode::BTN_LEFT, lmb, &mut out);
         self.emit_button(btncode::BTN_RIGHT, rmb, &mut out);
 
-        // D-pad → arrow keys. gilrs reports D-pad as screen-coord
-        // (positive Y = down), so negative Y is "up".
-        let hat_x = self.gamepad.axis(Axis::DPadX);
-        let hat_y = self.gamepad.axis(Axis::DPadY);
+        // D-pad → arrow keys. Screen-coord convention: positive Y = down,
+        // so negative Y is "up". `dpad()` reads whichever form gilrs
+        // delivers (hat axis or DPad buttons).
+        let (hat_x, hat_y) = self.dpad();
         self.emit_key(keycode::KEY_LEFT, hat_x < -0.5, &mut out);
         self.emit_key(keycode::KEY_RIGHT, hat_x > 0.5, &mut out);
         self.emit_key(keycode::KEY_UP, hat_y < -0.5, &mut out);
@@ -353,10 +353,10 @@ impl PresetState {
         self.emit_key(keycode::KEY_A, lx < -t, &mut out);
         self.emit_key(keycode::KEY_D, lx > t, &mut out);
 
-        // D-pad = scroll. Hat values are screen-coord and already
-        // discrete, so we can drive scroll directly without flipping.
-        let hat_x = self.gamepad.axis(Axis::DPadX);
-        let hat_y = self.gamepad.axis(Axis::DPadY);
+        // D-pad = scroll. Values are screen-coord and already discrete, so
+        // we can drive scroll directly without flipping. `dpad()` reads
+        // whichever form gilrs delivers (hat axis or DPad buttons).
+        let (hat_x, hat_y) = self.dpad();
         if hat_y != 0.0 {
             self.scroll_v_accum += hat_y * self.tunables.scroll_speed * dt;
         }
@@ -387,6 +387,35 @@ impl PresetState {
     }
 
     // ---- Shared helpers --------------------------------------------------
+
+    /// Resolve the D-pad as an `(x, y)` pair in `{-1.0, 0.0, 1.0}` using the
+    /// screen-coordinate convention (positive x = right, positive y = down).
+    ///
+    /// gilrs delivers the D-pad in one of two forms depending on the
+    /// controller, and we must read both:
+    ///   * As the `Axis::DPadX`/`DPadY` hat axes, or
+    ///   * As `Button::DPad{Up,Down,Left,Right}` — gilrs's default
+    ///     `axis_dpad_to_button` filter rewrites a hat-only D-pad (e.g. the
+    ///     Legion Go S, whose D-pad is `ABS_HAT0X/0Y` with no D-pad buttons)
+    ///     into button events and drops the original axis event. Reading only
+    ///     the axes would miss the D-pad entirely on those controllers.
+    ///
+    /// A pressed button wins over the axis so either delivery form works.
+    fn dpad(&self) -> (f32, f32) {
+        let mut x = self.gamepad.axis(Axis::DPadX);
+        let mut y = self.gamepad.axis(Axis::DPadY);
+        if self.gamepad.button(Button::DPadRight) {
+            x = 1.0;
+        } else if self.gamepad.button(Button::DPadLeft) {
+            x = -1.0;
+        }
+        if self.gamepad.button(Button::DPadDown) {
+            y = 1.0;
+        } else if self.gamepad.button(Button::DPadUp) {
+            y = -1.0;
+        }
+        (x, y)
+    }
 
     fn emit_mouse_from_stick(
         &mut self,
@@ -656,6 +685,58 @@ mod tests {
         assert!(out.iter().any(
             |e| matches!(e, OutputEvent::Key { keycode, pressed: true } if *keycode == keycode::KEY_UP)
         ));
+    }
+
+    #[test]
+    fn productivity_dpad_button_up_emits_up_arrow() {
+        // Controllers whose hat D-pad gilrs rewrites to buttons (e.g. Legion
+        // Go S) deliver Button::DPadUp instead of an axis change. The preset
+        // must still emit the up arrow.
+        let mut state = PresetState::new(Preset::Productivity, tunables());
+        state.ingest_button(Button::DPadUp, true);
+        let out = state.tick(Duration::from_millis(10));
+        assert!(out.iter().any(
+            |e| matches!(e, OutputEvent::Key { keycode, pressed: true } if *keycode == keycode::KEY_UP)
+        ));
+    }
+
+    #[test]
+    fn productivity_dpad_button_right_emits_right_arrow() {
+        let mut state = PresetState::new(Preset::Productivity, tunables());
+        state.ingest_button(Button::DPadRight, true);
+        let out = state.tick(Duration::from_millis(10));
+        assert!(out.iter().any(
+            |e| matches!(e, OutputEvent::Key { keycode, pressed: true } if *keycode == keycode::KEY_RIGHT)
+        ));
+    }
+
+    #[test]
+    fn productivity_dpad_button_release_emits_arrow_release() {
+        let mut state = PresetState::new(Preset::Productivity, tunables());
+        state.ingest_button(Button::DPadUp, true);
+        let _ = state.tick(Duration::from_millis(10));
+        state.ingest_button(Button::DPadUp, false);
+        let out = state.tick(Duration::from_millis(10));
+        assert!(out.iter().any(
+            |e| matches!(e, OutputEvent::Key { keycode, pressed: false } if *keycode == keycode::KEY_UP)
+        ));
+    }
+
+    #[test]
+    fn gpd_dpad_button_down_scrolls() {
+        // GPD preset maps the D-pad to scroll; the button-delivery form must
+        // produce a downward vertical scroll notch.
+        let mut state = PresetState::new(Preset::Gpd, tunables());
+        state.ingest_button(Button::DPadDown, true);
+        // scroll_speed=10/s, so 0.2s accrues 2 notches (>=1 flushes).
+        let out = state.tick(Duration::from_millis(200));
+        assert!(out.iter().any(|e| matches!(
+            e,
+            OutputEvent::PointerScroll {
+                axis: ScrollAxis::Vertical,
+                discrete
+            } if *discrete > 0
+        )));
     }
 
     #[test]
