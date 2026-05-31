@@ -22,6 +22,27 @@ use crate::process::{
 };
 use crate::sidecar::{GamepadPreset, spawn_gamepad_bridge, spawn_touch_bridge, terminate_sidecar};
 
+/// Best-effort query of the compositor output scale for the touch bridge.
+///
+/// The touch bridge maps absolute coordinates onto the output and must divide
+/// by the scale to land in logical pixels. Returns the largest active-output
+/// scale (matching the XWayland HiDPI convention in `shepherdd::hidpi`), or
+/// `1.0` if sway can't be queried — in which case the bridge behaves as it did
+/// before scale support, i.e. correct on unscaled outputs.
+///
+/// Limitation: the scale is sampled once at spawn. If an output's scale
+/// changes mid-session (e.g. the XWayland native-resolution workaround drops
+/// it to 1.0), the mapping won't follow until the bridge is restarted.
+async fn touch_output_scale() -> f64 {
+    match crate::sway::get_outputs().await {
+        Ok(outputs) => outputs.iter().map(|o| o.scale).fold(1.0_f64, f64::max),
+        Err(e) => {
+            warn!(error = %e, "Failed to query sway output scale for touch bridge; assuming 1.0");
+            1.0
+        }
+    }
+}
+
 /// Expand `~` at the beginning of a path to the user's home directory
 fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
@@ -438,12 +459,15 @@ impl HostAdapter for LinuxHost {
         let mut session_sidecars: Vec<Child> = Vec::new();
         for mode in &options.input_compat {
             match mode {
-                InputCompatMode::TouchToMouse => match spawn_touch_bridge() {
-                    Ok(child) => session_sidecars.push(child),
-                    Err(e) => {
-                        warn!(error = %e, "Failed to spawn touch-to-mouse bridge; continuing without it")
+                InputCompatMode::TouchToMouse => {
+                    let scale = touch_output_scale().await;
+                    match spawn_touch_bridge(scale) {
+                        Ok(child) => session_sidecars.push(child),
+                        Err(e) => {
+                            warn!(error = %e, "Failed to spawn touch-to-mouse bridge; continuing without it")
+                        }
                     }
-                },
+                }
                 InputCompatMode::GamepadProductivity | InputCompatMode::GamepadGpd => {
                     let preset =
                         GamepadPreset::from_mode(*mode).expect("gamepad mode maps to a preset");

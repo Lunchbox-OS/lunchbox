@@ -1,9 +1,12 @@
-//! shepherd-touch-bridge: translate touchscreen input to Wayland mouse events.
+//! shepherd-touch-bridge: translate touchscreen input to synthetic mouse
+//! events.
 //!
 //! Run alongside an activity that ignores raw touch events; the bridge grabs
-//! every touchscreen, converts touch events to `motion_absolute` and
-//! `BTN_LEFT` press/release events on a `zwlr_virtual_pointer_v1`, and exits
-//! on SIGTERM. Releasing the grabs is handled by the kernel when the file
+//! every touchscreen, converts touch events to absolute pointer motion and
+//! `BTN_LEFT` press/release events on a `/dev/uinput` virtual pointer, and
+//! exits on SIGTERM. The uinput backend works on any Wayland compositor (and
+//! X11), unlike the wlroots-only virtual-pointer protocol used before (issue
+//! #58). Releasing the grabs is handled by the kernel when the file
 //! descriptors close at process exit.
 
 use std::path::{Path, PathBuf};
@@ -16,15 +19,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, SynchronizationCode};
+use shepherd_bridge::{OutputEvent, OutputSink, UinputSink};
 use tracing::{debug, info, warn};
-use wayland_client::{
-    Connection, Dispatch, QueueHandle,
-    protocol::{wl_pointer, wl_registry, wl_seat},
-};
-use wayland_protocols_wlr::virtual_pointer::v1::client::{
-    zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
-    zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
-};
 
 const BTN_LEFT: u32 = 0x110;
 
@@ -38,6 +34,12 @@ struct Args {
     /// every touchscreen under /dev/input is auto-detected.
     #[arg(long = "device", value_name = "PATH")]
     devices: Vec<PathBuf>,
+
+    /// Compositor output scale (e.g. 1.5). Absolute coordinates are divided
+    /// by this so the cursor lands in logical, not physical, pixels. Defaults
+    /// to 1.0 (no scaling); shepherd-launcher passes the live sway scale.
+    #[arg(long = "output-scale", default_value_t = 1.0)]
+    output_scale: f64,
 }
 
 /// Touch state update emitted by reader threads.
@@ -224,87 +226,6 @@ fn device_loop(
     }
 }
 
-/// Wayland client state.
-#[derive(Default)]
-struct WaylandState {
-    seat: Option<wl_seat::WlSeat>,
-    manager: Option<ZwlrVirtualPointerManagerV1>,
-    pointer: Option<ZwlrVirtualPointerV1>,
-    /// Set if the compositor reports a fatal error on the registry.
-    failed: Option<String>,
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
-    fn event(
-        state: &mut Self,
-        registry: &wl_registry::WlRegistry,
-        event: wl_registry::Event,
-        _: &(),
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_str() {
-                "wl_seat" => {
-                    let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(7), qh, ());
-                    state.seat = Some(seat);
-                }
-                "zwlr_virtual_pointer_manager_v1" => {
-                    let manager = registry.bind::<ZwlrVirtualPointerManagerV1, _, _>(
-                        name,
-                        version.min(2),
-                        qh,
-                        (),
-                    );
-                    state.manager = Some(manager);
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
-    fn event(
-        _: &mut Self,
-        _: &wl_seat::WlSeat,
-        _: wl_seat::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwlrVirtualPointerManagerV1, ()> for WaylandState {
-    fn event(
-        _: &mut Self,
-        _: &ZwlrVirtualPointerManagerV1,
-        _: <ZwlrVirtualPointerManagerV1 as wayland_client::Proxy>::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwlrVirtualPointerV1, ()> for WaylandState {
-    fn event(
-        _: &mut Self,
-        _: &ZwlrVirtualPointerV1,
-        _: <ZwlrVirtualPointerV1 as wayland_client::Proxy>::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
 fn install_signal_handlers(shutdown: Arc<AtomicBool>) -> Result<()> {
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
@@ -395,53 +316,22 @@ fn main() -> Result<()> {
 
     let device_range = device_range.ok_or_else(|| anyhow!("no usable device range"))?;
 
-    let conn = Connection::connect_to_env().context("failed to connect to Wayland display")?;
-    let display = conn.display();
-    let mut event_queue = conn.new_event_queue::<WaylandState>();
-    let qh = event_queue.handle();
-    let _registry = display.get_registry(&qh, ());
-
-    let mut state = WaylandState::default();
-    event_queue
-        .roundtrip(&mut state)
-        .context("Wayland registry roundtrip failed")?;
-
-    if let Some(err) = state.failed.take() {
-        return Err(anyhow!("Wayland error: {err}"));
-    }
-    let manager = state
-        .manager
-        .clone()
-        .ok_or_else(|| anyhow!("compositor does not support zwlr_virtual_pointer_v1"))?;
-
-    let pointer = manager.create_virtual_pointer(state.seat.as_ref(), &qh, ());
-    state.pointer = Some(pointer.clone());
-    event_queue.flush()?;
+    let mut sink =
+        UinputSink::new_absolute(args.output_scale).context("failed to create uinput pointer")?;
 
     info!("Touch-to-mouse bridge ready");
 
     let start = Instant::now();
-    run_main_loop(
-        rx,
-        &mut event_queue,
-        &mut state,
-        &pointer,
-        device_range,
-        start,
-        &shutdown,
-    )?;
+    run_main_loop(rx, &mut sink, device_range, start, &shutdown)?;
 
     info!("Shutting down touch-to-mouse bridge");
-    pointer.destroy();
-    let _ = event_queue.flush();
+    let _ = sink.flush();
     Ok(())
 }
 
 fn run_main_loop(
     rx: Receiver<TouchUpdate>,
-    event_queue: &mut wayland_client::EventQueue<WaylandState>,
-    state: &mut WaylandState,
-    pointer: &ZwlrVirtualPointerV1,
+    sink: &mut UinputSink,
     range: DeviceRange,
     start: Instant,
     shutdown: &AtomicBool,
@@ -450,14 +340,11 @@ fn run_main_loop(
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(update) => {
                 let time = millis_since(start);
-                emit_update(pointer, range, time, update);
-                event_queue.flush()?;
+                emit_update(sink, range, time, update);
+                sink.flush()?;
             }
             Err(RecvTimeoutError::Timeout) => {
-                event_queue.flush()?;
-                event_queue
-                    .dispatch_pending(state)
-                    .context("Wayland dispatch failed")?;
+                sink.flush()?;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 debug!("All device readers exited; shutting down");
@@ -468,22 +355,50 @@ fn run_main_loop(
     Ok(())
 }
 
-fn emit_update(pointer: &ZwlrVirtualPointerV1, range: DeviceRange, time: u32, update: TouchUpdate) {
+fn emit_update(sink: &mut UinputSink, range: DeviceRange, time: u32, update: TouchUpdate) {
     match update {
         TouchUpdate::Down { x, y } => {
             let (nx, ny, xe, ye) = range.normalize(x, y);
-            pointer.motion_absolute(time, nx, ny, xe, ye);
-            pointer.button(time, BTN_LEFT, wl_pointer::ButtonState::Pressed);
-            pointer.frame();
+            sink.dispatch(
+                OutputEvent::PointerMotionAbsolute {
+                    x: nx,
+                    y: ny,
+                    x_extent: xe,
+                    y_extent: ye,
+                },
+                time,
+            );
+            sink.dispatch(
+                OutputEvent::PointerButton {
+                    button: BTN_LEFT,
+                    pressed: true,
+                },
+                time,
+            );
+            sink.frame();
         }
         TouchUpdate::Move { x, y } => {
             let (nx, ny, xe, ye) = range.normalize(x, y);
-            pointer.motion_absolute(time, nx, ny, xe, ye);
-            pointer.frame();
+            sink.dispatch(
+                OutputEvent::PointerMotionAbsolute {
+                    x: nx,
+                    y: ny,
+                    x_extent: xe,
+                    y_extent: ye,
+                },
+                time,
+            );
+            sink.frame();
         }
         TouchUpdate::Up => {
-            pointer.button(time, BTN_LEFT, wl_pointer::ButtonState::Released);
-            pointer.frame();
+            sink.dispatch(
+                OutputEvent::PointerButton {
+                    button: BTN_LEFT,
+                    pressed: false,
+                },
+                time,
+            );
+            sink.frame();
         }
     }
 }

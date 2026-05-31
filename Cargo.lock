@@ -3663,6 +3663,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "evdev",
+ "tracing",
+]
+
+[[package]]
 name = "shepherd-config"
 version = "0.1.0"
 dependencies = [
@@ -3729,11 +3738,9 @@ dependencies = [
  "clap",
  "gilrs",
  "nix 0.29.0",
+ "shepherd-bridge",
  "tracing",
  "tracing-subscriber",
- "wayland-client",
- "wayland-protocols-misc",
- "wayland-protocols-wlr",
 ]
 
 [[package]]
@@ -3911,10 +3918,9 @@ dependencies = [
  "clap",
  "evdev",
  "nix 0.29.0",
+ "shepherd-bridge",
  "tracing",
  "tracing-subscriber",
- "wayland-client",
- "wayland-protocols-wlr",
 ]
 
 [[package]]

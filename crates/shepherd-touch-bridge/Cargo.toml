@@ -3,18 +3,17 @@ name = "shepherd-touch-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Sidecar that grabs touchscreens and emits Wayland virtual-pointer events for activities that ignore raw touch input"
+description = "Sidecar that grabs touchscreens and emits synthetic mouse events (via /dev/uinput) for activities that ignore raw touch input"
 
 [[bin]]
 name = "shepherd-touch-bridge"
 path = "src/main.rs"
 
 [dependencies]
+shepherd-bridge = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 nix = { workspace = true }
 evdev = "0.13"
-wayland-client = "0.31"
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
