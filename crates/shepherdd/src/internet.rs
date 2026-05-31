@@ -7,9 +7,11 @@ use shepherd_ipc::IpcServer;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, warn};
+
+use crate::system_events::RecheckTrigger;
 
 pub struct InternetMonitor {
     targets: Vec<InternetCheckTarget>,
@@ -50,14 +52,32 @@ impl InternetMonitor {
         engine: Arc<Mutex<CoreEngine>>,
         ipc: Arc<IpcServer>,
         event_tx: broadcast::Sender<Event>,
+        mut recheck_rx: mpsc::UnboundedReceiver<RecheckTrigger>,
     ) {
         // Initial check
         self.check_all(&engine, &ipc, &event_tx).await;
 
         let mut interval = time::interval(self.interval);
+        // The first tick of a fresh interval is immediate; consume it so we
+        // don't re-check right after the initial check above.
+        interval.tick().await;
         loop {
-            interval.tick().await;
-            self.check_all(&engine, &ipc, &event_tx).await;
+            tokio::select! {
+                _ = interval.tick() => {
+                    self.check_all(&engine, &ipc, &event_tx).await;
+                }
+                // A system event (resume from suspend, network adapter change)
+                // asks us to re-check connectivity immediately.
+                Some(trigger) = recheck_rx.recv() => {
+                    // Coalesce a burst of triggers into a single re-check.
+                    while recheck_rx.try_recv().is_ok() {}
+                    debug!(?trigger, "Re-running internet checks due to system event");
+                    self.check_all(&engine, &ipc, &event_tx).await;
+                    // Restart the periodic cadence from this event.
+                    interval.reset();
+                }
+                else => break,
+            }
         }
     }
 

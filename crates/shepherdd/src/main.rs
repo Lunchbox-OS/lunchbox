@@ -38,6 +38,7 @@ use tracing_subscriber::EnvFilter;
 
 mod hidpi;
 mod internet;
+mod system_events;
 
 use hidpi::XwaylandHidpi;
 
@@ -248,14 +249,24 @@ impl Service {
             None
         };
 
-        // Start internet connectivity monitoring (if configured)
+        // Start internet connectivity monitoring (if configured). System
+        // events (resume from suspend, network adapter changes) push a
+        // re-check through the channel so status updates immediately instead of
+        // waiting for the next poll interval.
         if let Some(monitor) = self.internet_monitor {
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
+            let (recheck_tx, recheck_rx) = tokio::sync::mpsc::unbounded_channel();
+            system_events::spawn_recheck_watchers(recheck_tx);
             tokio::spawn(async move {
                 monitor
-                    .run(engine_ref, ipc_for_monitor, event_tx_for_monitor)
+                    .run(
+                        engine_ref,
+                        ipc_for_monitor,
+                        event_tx_for_monitor,
+                        recheck_rx,
+                    )
                     .await;
             });
         }

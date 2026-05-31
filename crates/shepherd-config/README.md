@@ -176,6 +176,11 @@ required = true
 # check = "tcp://1.1.1.1:53"
 ```
 
+In addition to the `interval_seconds` poll, connectivity is re-checked
+immediately when the machine resumes from suspend (logind `PrepareForSleep`) and
+when a network adapter changes state (NetworkManager), so status reflects
+reality without waiting for the next interval.
+
 ### Firewall
 
 Entries may apply a network allowlist/denylist enforced via systemd's BPF
