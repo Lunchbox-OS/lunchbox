@@ -57,6 +57,10 @@ pub struct RawServiceConfig {
     #[serde(default)]
     pub internet: Option<RawInternetConfig>,
 
+    /// Steam-specific behaviour
+    #[serde(default)]
+    pub steam: Option<RawSteamConfig>,
+
     /// Management HTTP API settings
     #[serde(default)]
     pub management_api: Option<RawManagementApiConfig>,
@@ -346,6 +350,24 @@ pub struct RawInternetConfig {
 
     /// Timeout per check (milliseconds)
     pub timeout_ms: Option<u64>,
+}
+
+/// Steam-specific service configuration
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawSteamConfig {
+    /// When a Steam game is launched while the host is offline, Steam can block
+    /// the launch behind an "Unable to Sync" Steam Cloud modal. When enabled,
+    /// shepherdd detects that modal via Steam's CEF remote-debugging endpoint
+    /// and clicks "Play anyway" so the game opens. This also causes the
+    /// `.cef-enable-remote-debugging` flag to be created for the preloaded
+    /// Steam (loopback-only debug port). When disabled, the debug port is never
+    /// enabled and an offline launch that stalls behind the modal simply ends
+    /// with an error.
+    pub offline_autoresolve_cloud: Option<bool>,
+
+    /// How long to wait for a Steam game window/process to appear after launch
+    /// before giving up and ending the session with an error (seconds).
+    pub launch_timeout_seconds: Option<u64>,
 }
 
 /// Per-entry internet requirement

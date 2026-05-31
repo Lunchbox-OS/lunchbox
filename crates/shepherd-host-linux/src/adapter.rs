@@ -9,10 +9,12 @@ use shepherd_host_api::{
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::time::Instant;
+use tracing::{debug, info, warn};
 
 use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
@@ -21,6 +23,7 @@ use crate::process::{
     kill_steam_game_processes, make_scope_name,
 };
 use crate::sidecar::{GamepadPreset, spawn_gamepad_bridge, spawn_touch_bridge, terminate_sidecar};
+use crate::steam_cloud::{self, DEFAULT_CEF_PORT, ResolveOutcome};
 
 /// Best-effort query of the compositor output scale for the touch bridge.
 ///
@@ -108,6 +111,14 @@ pub struct LinuxHost {
     sidecars: Arc<Mutex<HashMap<u32, Vec<Child>>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
+    /// Whether the host currently has no internet (set by the internet monitor
+    /// in shepherdd). Steam's offline cloud-sync modal only appears offline, so
+    /// the launch watchdog is only armed when this is true.
+    host_offline: Arc<AtomicBool>,
+    /// Auto-dismiss the offline Steam Cloud modal via CEF (see [`steam_cloud`]).
+    steam_autoresolve_cloud: Arc<AtomicBool>,
+    /// Watchdog deadline for a Steam game to appear, in milliseconds.
+    steam_launch_timeout_ms: Arc<AtomicU64>,
 }
 
 impl LinuxHost {
@@ -126,7 +137,93 @@ impl LinuxHost {
             sidecars: Arc::new(Mutex::new(HashMap::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
+            host_offline: Arc::new(AtomicBool::new(false)),
+            steam_autoresolve_cloud: Arc::new(AtomicBool::new(true)),
+            steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
         }
+    }
+
+    /// Shared offline flag for the internet monitor to update. The monitor
+    /// stores `true` whenever the host's connectivity check is failing.
+    pub fn host_offline_handle(&self) -> Arc<AtomicBool> {
+        self.host_offline.clone()
+    }
+
+    /// Apply `[service.steam]` config. Call before [`preload_steam`] so the CEF
+    /// debug flag is created (only) when auto-resolve is enabled.
+    pub fn configure_steam(&self, offline_autoresolve_cloud: bool, launch_timeout: Duration) {
+        self.steam_autoresolve_cloud
+            .store(offline_autoresolve_cloud, Ordering::Relaxed);
+        self.steam_launch_timeout_ms
+            .store(launch_timeout.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Watch an offline Steam launch: poll for the game process, auto-dismiss
+    /// the cloud-sync modal via CEF if enabled, and — if no game appears before
+    /// the deadline — tear the launch down and emit an error exit so the
+    /// session ends (back to the launcher) instead of hanging on the spinner.
+    /// The Steam window is never surfaced.
+    fn spawn_offline_steam_watchdog(&self, handle: HostSessionHandle, pid: u32, app_id: u32) {
+        let steam_sessions = self.steam_sessions.clone();
+        let processes = self.processes.clone();
+        let sidecars = self.sidecars.clone();
+        let event_tx = self.event_tx.clone();
+        let autoresolve = self.steam_autoresolve_cloud.load(Ordering::Relaxed);
+        let timeout_ms = self.steam_launch_timeout_ms.load(Ordering::Relaxed);
+
+        tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            let mut clicked = false;
+
+            loop {
+                tokio::time::sleep(Duration::from_millis(750)).await;
+
+                // The game launched — the regular monitor owns it now.
+                if !find_steam_game_pids(app_id).is_empty() {
+                    return;
+                }
+                // The session was stopped/removed out from under us.
+                if !steam_sessions.lock().unwrap().contains_key(&pid) {
+                    return;
+                }
+
+                if autoresolve && !clicked {
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        steam_cloud::try_resolve_cloud_modal(DEFAULT_CEF_PORT),
+                    )
+                    .await
+                    {
+                        Ok(Ok(ResolveOutcome::Clicked)) => {
+                            info!(app_id, "Dismissed offline Steam Cloud modal (Play anyway)");
+                            // Keep waiting for the game to actually come up.
+                            clicked = true;
+                        }
+                        Ok(Ok(ResolveOutcome::NoModal)) => {}
+                        Ok(Err(e)) => debug!(error = %e, "Steam CEF modal check failed"),
+                        Err(_) => debug!("Steam CEF modal check timed out"),
+                    }
+                }
+
+                if Instant::now() >= deadline {
+                    warn!(
+                        app_id,
+                        pid,
+                        "Steam game did not launch offline within timeout; ending session with error"
+                    );
+                    // Best-effort teardown of the stuck launch.
+                    kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGKILL);
+                    steam_sessions.lock().unwrap().remove(&pid);
+                    processes.lock().unwrap().remove(&pid);
+                    reap_sidecars(&sidecars, pid);
+                    let _ = event_tx.send(HostEvent::Exited {
+                        handle,
+                        status: ExitStatus::with_code(75),
+                    });
+                    return;
+                }
+            }
+        });
     }
 
     /// Spawn Steam in the background so it is ready when a game is launched.
@@ -135,6 +232,14 @@ impl LinuxHost {
     /// can run a game. By starting Steam at daemon startup, these steps complete
     /// in the background and game launches feel nearly instant.
     pub fn preload_steam(&self) {
+        // Enable the loopback CEF debug endpoint so the launch watchdog can
+        // dismiss the offline cloud-sync modal. Only do this when auto-resolve
+        // is enabled — the endpoint is a control surface we don't open
+        // otherwise. The flag is read by Steam at startup, hence before launch.
+        if self.steam_autoresolve_cloud.load(Ordering::Relaxed) {
+            steam_cloud::ensure_cef_debug_enabled();
+        }
+
         // -silent tells Steam not to show its main window on startup
         let argv = vec![
             "snap".to_string(),
@@ -571,6 +676,15 @@ impl HostAdapter for LinuxHost {
                     seen_game: false,
                 },
             );
+
+            // When launching a Steam game while offline, Steam may block behind
+            // the "Unable to Sync" cloud modal that is invisible in the kiosk.
+            // Arm a watchdog that auto-dismisses it (if enabled) and, failing
+            // that, ends the session with an error instead of hanging forever.
+            // We never surface the Steam window itself.
+            if self.host_offline.load(Ordering::Relaxed) {
+                self.spawn_offline_steam_watchdog(handle.clone(), pid, app_id);
+            }
         }
 
         info!(pid = pid, pgid = pgid, "Spawned process");

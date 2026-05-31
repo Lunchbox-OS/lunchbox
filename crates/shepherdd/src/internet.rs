@@ -5,6 +5,7 @@ use shepherd_config::{InternetCheckScheme, InternetCheckTarget, Policy};
 use shepherd_core::CoreEngine;
 use shepherd_ipc::IpcServer;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -15,6 +16,9 @@ use crate::system_events::RecheckTrigger;
 
 pub struct InternetMonitor {
     targets: Vec<InternetCheckTarget>,
+    /// The service-level check target, if configured. Its availability defines
+    /// the host's overall online/offline state (mirrored into `host_offline`).
+    service_target: Option<InternetCheckTarget>,
     interval: Duration,
     timeout: Duration,
 }
@@ -23,7 +27,8 @@ impl InternetMonitor {
     pub fn from_policy(policy: &Policy) -> Option<Self> {
         let mut targets = Vec::new();
 
-        if let Some(check) = policy.service.internet.check.clone() {
+        let service_target = policy.service.internet.check.clone();
+        if let Some(check) = service_target.clone() {
             targets.push(check);
         }
 
@@ -42,6 +47,7 @@ impl InternetMonitor {
 
         Some(Self {
             targets,
+            service_target,
             interval: policy.service.internet.interval,
             timeout: policy.service.internet.timeout,
         })
@@ -52,10 +58,12 @@ impl InternetMonitor {
         engine: Arc<Mutex<CoreEngine>>,
         ipc: Arc<IpcServer>,
         event_tx: broadcast::Sender<Event>,
+        host_offline: Arc<AtomicBool>,
         mut recheck_rx: mpsc::UnboundedReceiver<RecheckTrigger>,
     ) {
         // Initial check
-        self.check_all(&engine, &ipc, &event_tx).await;
+        self.check_all(&engine, &ipc, &event_tx, &host_offline)
+            .await;
 
         let mut interval = time::interval(self.interval);
         // The first tick of a fresh interval is immediate; consume it so we
@@ -64,7 +72,7 @@ impl InternetMonitor {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    self.check_all(&engine, &ipc, &event_tx).await;
+                    self.check_all(&engine, &ipc, &event_tx, &host_offline).await;
                 }
                 // A system event (resume from suspend, network adapter change)
                 // asks us to re-check connectivity immediately.
@@ -72,7 +80,7 @@ impl InternetMonitor {
                     // Coalesce a burst of triggers into a single re-check.
                     while recheck_rx.try_recv().is_ok() {}
                     debug!(?trigger, "Re-running internet checks due to system event");
-                    self.check_all(&engine, &ipc, &event_tx).await;
+                    self.check_all(&engine, &ipc, &event_tx, &host_offline).await;
                     // Restart the periodic cadence from this event.
                     interval.reset();
                 }
@@ -86,9 +94,17 @@ impl InternetMonitor {
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
+        host_offline: &Arc<AtomicBool>,
     ) {
         for target in &self.targets {
             let available = check_target(target, self.timeout).await;
+
+            // The service-level target defines host-wide connectivity, which the
+            // Steam launch watchdog reads to decide whether to arm itself.
+            if self.service_target.as_ref() == Some(target) {
+                host_offline.store(!available, Ordering::Relaxed);
+            }
+
             let changed = {
                 let mut eng = engine.lock().await;
                 eng.set_internet_status(target.clone(), available)

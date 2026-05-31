@@ -283,19 +283,65 @@ scratchpad all Steam windows**. What each stage inherits:
   [login=false]` in `cloud_log.txt`) so we only act when a sync-failure modal is
   confidently the blocker.
 
-### Fallback ladder
+### Fallback ladder (as implemented)
 
-1. **CEF available** → detect + auto-click Play anyway (invisible, default).
-2. **CEF unavailable / detection fails / `offline_autoresolve_cloud = false`** →
-   surface the main Steam window for manual acknowledgement; re-hide when the
-   game window/PID appears (the earlier sketch).
-3. **Watchdog deadline hit** → `Exited{LaunchStalled}`: return to the launcher
-   with an error instead of spinning forever.
+We deliberately do **not** surface the Steam window in any fallback — exposing
+the full Steam client in the kiosk is a potential sandbox-escape surface. The
+ladder is:
+
+1. **CEF available + auto-resolve on** → detect + auto-click Play anyway
+   (invisible, default).
+2. **Prevention via config** → mark internet-dependent games `internet.required`
+   so the existing gating hides them when offline (the launcher already skips
+   disabled entries), and they never reach the modal.
+3. **Anything else** (CEF unavailable, `offline_autoresolve_cloud = false`, modal
+   un-dismissable) → the watchdog ends the session with a non-zero exit so it
+   returns to the launcher instead of spinning forever. Steam is never surfaced.
 
 Net change to the pipeline is small in surface area — a flag file at preload, an
 `AtomicBool` of offline state, and one watcher task per offline Steam session —
 but it converts the pipeline from "blocks indefinitely on an invisible modal" to
 "resolves it, or fails cleanly with a reason."
+
+## Implementation (landed)
+
+Built on branch `u/albert/fix/recheck-network-on-change`:
+
+- **Config** — `[service.steam]` with `offline_autoresolve_cloud` (default
+  `true`) and `launch_timeout_seconds` (default 30). `RawSteamConfig` in
+  `schema.rs`, validated `SteamConfig` in `policy.rs`, documented in
+  `config.example.toml`.
+- **CEF client** — `crates/shepherd-host-linux/src/steam_cloud.rs`: a hand-rolled
+  `GET /json` over `TcpStream` plus a `tokio-tungstenite` WebSocket that runs a
+  `Runtime.evaluate` per page target to detect the "Unable to Sync" modal and
+  click "Play anyway". Added `tokio-tungstenite` + `futures-util` deps.
+- **Host** — `LinuxHost` gained `host_offline`/`steam_autoresolve_cloud`/
+  `steam_launch_timeout_ms`, a `configure_steam()` setter, and
+  `host_offline_handle()`. `preload_steam()` creates
+  `.cef-enable-remote-debugging` **only** when auto-resolve is enabled (so the
+  debug port is never opened otherwise). On an offline Steam launch it arms
+  `spawn_offline_steam_watchdog`, which polls for the game PID, auto-resolves the
+  modal, and on deadline tears the launch down and emits `Exited` with a non-zero
+  code. The Steam window is never surfaced.
+- **shepherdd** — `InternetMonitor` now mirrors the service-level check into
+  `host_offline`; `main.rs` calls `configure_steam()` before preload and hands
+  the offline handle to the monitor.
+
+Two bugs surfaced only under live verification against real Steam (both fixed):
+
+1. `GET /json` with `read_to_end` hung forever — CEF uses HTTP keep-alive and
+   ignored `Connection: close`. Fixed by reading incrementally and returning as
+   soon as the body parses, under a `TARGET_TIMEOUT`.
+2. CEF builds each target's `webSocketDebuggerUrl` from the request's `Host`
+   header; sending `Host: localhost` (no port) yielded portless `ws://localhost/…`
+   URLs that connect-refused. Fixed by sending `Host: 127.0.0.1:<port>`.
+
+Verified end-to-end on the live VM: cgroup-scoped egress block → dirty save →
+launch VVVVVV → the real `try_resolve_cloud_modal` clicked "Play anyway" and the
+game launched. An `#[ignore]`d `live_resolve_clicks` test in `steam_cloud.rs`
+captures this (run with `--ignored` while the modal is showing). `cargo build`,
+`clippy --all-targets -D warnings`, `fmt --check`, and `test --all-targets` all
+pass, and `config.example.toml` validates.
 
 ## Reproduction recipe (condensed)
 

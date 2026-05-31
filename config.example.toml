@@ -49,6 +49,20 @@ check = "https://connectivitycheck.gstatic.com/generate_204"
 interval_seconds = 300  # Keep this high to avoid excessive network requests
 timeout_ms = 1500
 
+# Steam-specific behaviour (optional)
+# Steam supports offline play, but when launched offline it can block the game
+# behind an "Unable to Sync" Steam Cloud modal that is invisible inside the
+# kiosk. With offline_autoresolve_cloud enabled (the default), shepherdd watches
+# Steam's loopback CEF remote-debugging endpoint and clicks "Play anyway" so the
+# game opens; this is the only thing that enables that debug port. If you'd
+# rather a game never run while offline, mark its entry `internet.required` so it
+# is hidden when offline. If the modal cannot be auto-resolved (debug port off,
+# or this disabled), an offline launch that stalls ends with an error rather than
+# ever surfacing the Steam window.
+[service.steam]
+offline_autoresolve_cloud = true
+launch_timeout_seconds = 30
+
 # HTTP management API (optional)
 # Exposes a REST API for remote control, usage analytics, and daily overrides.
 # Intended for local/LAN use (e.g. a parent's phone on the same network).

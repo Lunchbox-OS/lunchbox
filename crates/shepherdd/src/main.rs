@@ -141,6 +141,13 @@ impl Service {
         // Initialize core engine
         let engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
 
+        // Apply Steam config to the host before any preload so the CEF debug
+        // flag is created (only) when offline cloud auto-resolve is enabled.
+        host.configure_steam(
+            engine.policy().service.steam.offline_autoresolve_cloud,
+            engine.policy().service.steam.launch_timeout,
+        );
+
         // Initialize internet connectivity monitor (if configured)
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
@@ -257,6 +264,7 @@ impl Service {
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
+            let host_offline = self.host.host_offline_handle();
             let (recheck_tx, recheck_rx) = tokio::sync::mpsc::unbounded_channel();
             system_events::spawn_recheck_watchers(recheck_tx);
             tokio::spawn(async move {
@@ -265,6 +273,7 @@ impl Service {
                         engine_ref,
                         ipc_for_monitor,
                         event_tx_for_monitor,
+                        host_offline,
                         recheck_rx,
                     )
                     .await;

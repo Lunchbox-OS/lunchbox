@@ -93,5 +93,10 @@ gtk4-layer-shell = "0.4"
 axum = { version = "0.8", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
+# WebSocket client (Steam CEF DevTools / Chrome DevTools Protocol).
+# Default features give a non-TLS ws:// client; we only talk to loopback.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
 # Testing
 tempfile = "3.9"

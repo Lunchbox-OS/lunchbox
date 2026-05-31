@@ -8,7 +8,7 @@ use crate::internet::{
 use crate::schema::{
     RawBrightnessConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat,
     RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawVolumeConfig, RawWarningThreshold,
+    RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -118,6 +118,8 @@ pub struct ServiceConfig {
     pub child_log_dir: PathBuf,
     /// Internet connectivity configuration
     pub internet: InternetConfig,
+    /// Steam-specific behaviour
+    pub steam: SteamConfig,
     /// Management HTTP API configuration (None = disabled)
     pub management_api: Option<ManagementApiConfig>,
 }
@@ -129,6 +131,7 @@ impl ServiceConfig {
             .child_log_dir
             .unwrap_or_else(|| log_dir.join("sessions"));
         let internet = convert_internet_config(raw.internet.as_ref());
+        let steam = SteamConfig::from_raw(raw.steam.as_ref());
         let management_api = raw
             .management_api
             .as_ref()
@@ -141,7 +144,43 @@ impl ServiceConfig {
             child_log_dir,
             data_dir: raw.data_dir.unwrap_or_else(default_data_dir),
             internet,
+            steam,
             management_api,
+        }
+    }
+}
+
+/// Default Steam launch watchdog timeout.
+pub const DEFAULT_STEAM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Validated Steam-specific configuration
+#[derive(Debug, Clone)]
+pub struct SteamConfig {
+    /// Auto-dismiss the offline "Unable to Sync" Steam Cloud modal via CEF.
+    pub offline_autoresolve_cloud: bool,
+    /// How long to wait for a Steam game to appear before ending with an error.
+    pub launch_timeout: Duration,
+}
+
+impl SteamConfig {
+    fn from_raw(raw: Option<&RawSteamConfig>) -> Self {
+        Self {
+            offline_autoresolve_cloud: raw
+                .and_then(|c| c.offline_autoresolve_cloud)
+                .unwrap_or(true),
+            launch_timeout: raw
+                .and_then(|c| c.launch_timeout_seconds)
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_STEAM_LAUNCH_TIMEOUT),
+        }
+    }
+}
+
+impl Default for SteamConfig {
+    fn default() -> Self {
+        Self {
+            offline_autoresolve_cloud: true,
+            launch_timeout: DEFAULT_STEAM_LAUNCH_TIMEOUT,
         }
     }
 }
@@ -192,6 +231,7 @@ impl Default for ServiceConfig {
                 DEFAULT_INTERNET_CHECK_INTERVAL,
                 DEFAULT_INTERNET_CHECK_TIMEOUT,
             ),
+            steam: SteamConfig::default(),
             management_api: None,
         }
     }
