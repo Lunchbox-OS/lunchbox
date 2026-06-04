@@ -343,6 +343,90 @@ captures this (run with `--ignored` while the modal is showing). `cargo build`,
 `clippy --all-targets -D warnings`, `fmt --check`, and `test --all-targets` all
 pass, and `config.example.toml` validates.
 
+## Follow-up: the controller interstitial, and generalizing the fix
+
+The cloud modal turned out to be one instance of a broader pattern. Steam shows
+a family of blocking pre-launch modals it internally calls **interstitials**
+(`ControllerConfigurator_Interstitial_*` in `steamui/`), queued via
+`AddInterstitialToQueue({eInterstitial, appid, onOK, onCancel})`. Known kinds
+include cloud-sync, `ControllerRecommended`, `ControllerRequired`,
+`SteamInputIntro`, `VrRequired`, plus Deck-ergonomics ones. They share the same
+CEF machinery as the cloud modal. Community-documented (no formal Valve doc):
+the "connect a controller" popup is a Steam-level, launch-blocking modal with a
+"don't show again on future games" checkbox.
+
+### Live reproduction (A Short Hike, appid 1055540)
+
+Launching a **controller-recommended** game with no controller connected
+blocked the launch behind a separate `"Steam Dialog"` (700×480) CEF target:
+
+> **Grab a controller and kick back!** This game needs a controller for best
+> experience. So grab an Xbox controller, a DualSense controller, or really any
+> kind of controller-looking device that can connect to your PC. **[ OK ]**
+
+A single "OK" button (no Cancel; closing aborts the launch). Clicking OK via CEF
+dismissed it and the game launched.
+
+Key findings, several correcting earlier assumptions:
+
+- **Same interstitial/CEF mechanism** as the cloud modal, but rendered as a
+  dedicated `"Steam Dialog"` popup (the cloud one was in the main `"Steam"`
+  target), and the affirmative button is **"OK"**, not "Play anyway".
+- **The trigger is narrower than "full controller support."** VVVVVV (category
+  28, full controller) does *not* fire it; A Short Hike does. The distinguishing
+  flag is a **client-internal store category** (one of the high-numbered
+  categories the public store API doesn't expose) — the genuine
+  "controller-recommended/preferred" designation. My earlier "90 full-controller
+  games" set was an overcount; the real recommended subset is smaller.
+- **The SPICE `js0` tablet does not mask it** — Steam doesn't count it as a
+  gamepad, so the no-controller condition is genuine on the VM.
+- **It's network-independent** — fires online too, so an offline-gated watchdog
+  would never even arm for it.
+- **The "seen" state persists once acknowledged**, even across a Steam restart —
+  so after dismissing it once, that game won't re-prompt without resetting the
+  persisted interstitial-seen state (which the client tracks via
+  `ClearAllInterstitialsSeen`, not reachable from a window global).
+
+### Generalization (landed, supersedes the offline-only design above)
+
+The offline-cloud-only handling was reworked into a config-gated **recognizer
+catalog**:
+
+- **`shepherd-api`** — `InterstitialKind` enum (`cloud_sync`,
+  `controller_recommended`, `steam_input_intro`, `controller_required`,
+  `vr_required`) with `slug`/`from_slug`/`is_risky` and a default benign set.
+  Single source of truth shared by config and host.
+- **config** — `offline_autoresolve_cloud` bool replaced by
+  `service.steam.auto_dismiss_interstitials` (an allowlist of slugs) plus
+  `allow_risky_dismiss`. Validation rejects unknown slugs and refuses risky
+  kinds (`controller_required`/`vr_required` — they launch an unusable game)
+  unless explicitly allowed. Empty list disables the feature and the CEF port.
+- **host** — `steam_cloud.rs` → `steam_interstitial.rs`. Per-kind DOM signatures
+  (body text + affirmative-button text, matched in-browser) live here;
+  `try_dismiss_interstitials(port, enabled)` sweeps all page targets for any
+  enabled kind. The body pattern is the discriminator (so we never click the
+  wrong dialog); the button pattern is just which control.
+- **watchdog** — arms on **every** Steam launch when the allowlist is non-empty
+  (no longer offline-gated; the `host_offline` plumbing was removed). A blocker
+  that isn't allowlisted is left alone and the launch times out to a clean error
+  exit. Steam is still never surfaced.
+
+Only `cloud_sync` and `controller_recommended` have **verified** signatures; the
+other three are best-effort and marked as such in code.
+
+Verified: the refactored `try_dismiss_interstitials` returned `Dismissed(
+CloudSync)` against a real "Unable to Sync" modal on the live VM (an `#[ignore]`d
+`live_dismiss` test captures it). The controller path is verified by composition
+— the manual "OK" click launched A Short Hike, and its "grab a controller" text
+matches the `controller_recommended` signature — since the persisted seen-state
+prevented getting a fresh controller modal to drive the function against.
+`build` / `clippy -D warnings` / `fmt` / `test` all green; example validates.
+
+One behaviour change to keep in mind: the launch-timeout error-exit now applies
+to **every** Steam launch while auto-dismiss is enabled, not just offline ones.
+30 s is generous (the reaper PID appears within seconds), but a genuinely slow
+first-time launch could trip it.
+
 ## Reproduction recipe (condensed)
 
 ```sh
@@ -364,6 +448,14 @@ systemd-run --user --scope /snap/bin/steam steam://rungameid/70300
 # 5b. cleanup: sudo nft delete table inet steamblock; truncate the save back;
 #     rm .cef-enable-remote-debugging
 ```
+
+Controller interstitial variant (network-independent): install a
+controller-*recommended* game (e.g. A Short Hike, 1055540 — *not* VVVVVV, which
+is only full-controller), ensure no real gamepad is connected and the
+interstitial hasn't been acknowledged before, then launch it. It blocks on the
+`"Steam Dialog"` "Grab a controller…" popup; dismiss by clicking its **OK**
+button via the same CEF path. Note Steam persists the "seen" state per game once
+acknowledged (even across restarts).
 
 ## Environment cleanup performed
 
