@@ -355,15 +355,21 @@ pub struct RawInternetConfig {
 /// Steam-specific service configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawSteamConfig {
-    /// When a Steam game is launched while the host is offline, Steam can block
-    /// the launch behind an "Unable to Sync" Steam Cloud modal. When enabled,
-    /// shepherdd detects that modal via Steam's CEF remote-debugging endpoint
-    /// and clicks "Play anyway" so the game opens. This also causes the
-    /// `.cef-enable-remote-debugging` flag to be created for the preloaded
-    /// Steam (loopback-only debug port). When disabled, the debug port is never
-    /// enabled and an offline launch that stalls behind the modal simply ends
-    /// with an error.
-    pub offline_autoresolve_cloud: Option<bool>,
+    /// Known Steam launch interstitials (blocking modals between launch and the
+    /// game starting) to auto-dismiss by clicking their affirmative button, so
+    /// they don't hang the kiosk on a modal it can't show. Each value is an
+    /// interstitial slug (e.g. "cloud_sync", "controller_recommended"). Only
+    /// listed kinds are dismissed; an empty list disables the feature entirely
+    /// (and the CEF remote-debugging port is never opened). When unset, a safe
+    /// default set of verified, benign kinds is used.
+    pub auto_dismiss_interstitials: Option<Vec<String>>,
+
+    /// Allow "risky" interstitial kinds (those whose dismissal launches a game
+    /// that can't actually be used without missing hardware, e.g.
+    /// "controller_required") to appear in `auto_dismiss_interstitials`. Without
+    /// this, listing a risky kind is a configuration error.
+    #[serde(default)]
+    pub allow_risky_dismiss: bool,
 
     /// How long to wait for a Steam game window/process to appear after launch
     /// before giving up and ending the session with an error (seconds).

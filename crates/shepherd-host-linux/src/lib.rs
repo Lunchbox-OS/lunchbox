@@ -12,7 +12,7 @@ mod adapter;
 mod brightness;
 mod process;
 mod sidecar;
-mod steam_cloud;
+mod steam_interstitial;
 mod sway;
 mod volume;
 

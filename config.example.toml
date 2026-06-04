@@ -50,17 +50,27 @@ interval_seconds = 300  # Keep this high to avoid excessive network requests
 timeout_ms = 1500
 
 # Steam-specific behaviour (optional)
-# Steam supports offline play, but when launched offline it can block the game
-# behind an "Unable to Sync" Steam Cloud modal that is invisible inside the
-# kiosk. With offline_autoresolve_cloud enabled (the default), shepherdd watches
-# Steam's loopback CEF remote-debugging endpoint and clicks "Play anyway" so the
-# game opens; this is the only thing that enables that debug port. If you'd
-# rather a game never run while offline, mark its entry `internet.required` so it
-# is hidden when offline. If the modal cannot be auto-resolved (debug port off,
-# or this disabled), an offline launch that stalls ends with an error rather than
-# ever surfacing the Steam window.
+# Steam can block a game launch behind an "interstitial" — a modal it shows
+# between the launch request and the game starting (e.g. the offline "Unable to
+# Sync" cloud warning, or a "connect a controller" advisory). These render
+# inside Steam's hidden CEF UI, so on a kiosk the launch just hangs forever.
+# shepherdd watches Steam's loopback CEF remote-debugging endpoint and clicks the
+# affirmative button for the interstitials you list here. Only listed kinds are
+# dismissed; an empty list disables the feature and the debug port is never
+# opened. When this key is omitted, the safe default set below is used.
+#   cloud_sync             - "Unable to Sync" offline save warning (Play anyway)
+#   controller_recommended - "connect a controller" advisory (OK)
+#   steam_input_intro      - first-launch Steam Input intro (OK)
+#   controller_required    - game REQUIRES a controller   (risky)
+#   vr_required            - game REQUIRES a VR headset    (risky)
+# "Risky" kinds launch a game that can't be used without the missing hardware;
+# listing one requires allow_risky_dismiss = true. To instead keep a game from
+# running at all in some condition, mark its entry `internet.required` (hidden
+# when offline). If a blocker can't be (or isn't allowed to be) dismissed, the
+# launch stalls out and ends with an error rather than surfacing the Steam window.
 [service.steam]
-offline_autoresolve_cloud = true
+auto_dismiss_interstitials = ["cloud_sync", "controller_recommended"]
+allow_risky_dismiss = false
 launch_timeout_seconds = 30
 
 # HTTP management API (optional)
