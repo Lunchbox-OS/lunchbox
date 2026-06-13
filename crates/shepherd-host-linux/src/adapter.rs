@@ -1,7 +1,7 @@
 //! Linux host adapter implementation
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode, WindowAction, WindowInfo};
+use shepherd_api::{EntryKind, InputCompatMode, InterstitialKind, WindowAction, WindowInfo};
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
     HostSessionHandle, SpawnOptions, StopMode,
@@ -9,10 +9,12 @@ use shepherd_host_api::{
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
 use std::process::Child;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::time::Instant;
+use tracing::{debug, info, warn};
 
 use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
@@ -21,6 +23,7 @@ use crate::process::{
     kill_steam_game_processes, make_scope_name,
 };
 use crate::sidecar::{GamepadPreset, spawn_gamepad_bridge, spawn_touch_bridge, terminate_sidecar};
+use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
 
 /// Best-effort query of the compositor output scale for the touch bridge.
 ///
@@ -108,6 +111,11 @@ pub struct LinuxHost {
     sidecars: Arc<Mutex<HashMap<u32, Vec<Child>>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
+    /// Steam launch interstitials we're allowed to auto-dismiss via CEF (see
+    /// [`steam_interstitial`]). Empty disables the launch watchdog entirely.
+    steam_auto_dismiss: Arc<Mutex<HashSet<InterstitialKind>>>,
+    /// Watchdog deadline for a Steam game to appear, in milliseconds.
+    steam_launch_timeout_ms: Arc<AtomicU64>,
 }
 
 impl LinuxHost {
@@ -126,7 +134,93 @@ impl LinuxHost {
             sidecars: Arc::new(Mutex::new(HashMap::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
+            steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
+            steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
         }
+    }
+
+    /// Apply `[service.steam]` config. Call before [`preload_steam`] so the CEF
+    /// debug flag is created (only) when at least one interstitial is enabled.
+    pub fn configure_steam(
+        &self,
+        auto_dismiss: HashSet<InterstitialKind>,
+        launch_timeout: Duration,
+    ) {
+        *self.steam_auto_dismiss.lock().unwrap() = auto_dismiss;
+        self.steam_launch_timeout_ms
+            .store(launch_timeout.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Watch a Steam launch: poll for the game process, auto-dismiss any enabled
+    /// interstitial via CEF, and — if no game appears before the deadline — tear
+    /// the launch down and emit an error exit so the session ends (back to the
+    /// launcher) instead of hanging on the spinner. The Steam window is never
+    /// surfaced; a blocker we're not allowed to dismiss simply times out.
+    fn spawn_steam_launch_watchdog(
+        &self,
+        handle: HostSessionHandle,
+        pid: u32,
+        app_id: u32,
+        auto_dismiss: HashSet<InterstitialKind>,
+    ) {
+        let steam_sessions = self.steam_sessions.clone();
+        let processes = self.processes.clone();
+        let sidecars = self.sidecars.clone();
+        let event_tx = self.event_tx.clone();
+        let timeout_ms = self.steam_launch_timeout_ms.load(Ordering::Relaxed);
+
+        tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+            loop {
+                tokio::time::sleep(Duration::from_millis(750)).await;
+
+                // The game launched — the regular monitor owns it now.
+                if !find_steam_game_pids(app_id).is_empty() {
+                    return;
+                }
+                // The session was stopped/removed out from under us.
+                if !steam_sessions.lock().unwrap().contains_key(&pid) {
+                    return;
+                }
+
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    steam_interstitial::try_dismiss_interstitials(DEFAULT_CEF_PORT, &auto_dismiss),
+                )
+                .await
+                {
+                    Ok(Ok(DismissOutcome::Dismissed(kind))) => {
+                        info!(
+                            app_id,
+                            kind = kind.slug(),
+                            "Dismissed Steam launch interstitial"
+                        );
+                        // Keep waiting for the game to actually come up.
+                    }
+                    Ok(Ok(DismissOutcome::NoModal)) => {}
+                    Ok(Err(e)) => debug!(error = %e, "Steam CEF interstitial check failed"),
+                    Err(_) => debug!("Steam CEF interstitial check timed out"),
+                }
+
+                if Instant::now() >= deadline {
+                    warn!(
+                        app_id,
+                        pid, "Steam game did not launch within timeout; ending session with error"
+                    );
+                    // Best-effort teardown of the stuck launch.
+                    kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGKILL);
+                    steam_sessions.lock().unwrap().remove(&pid);
+                    processes.lock().unwrap().remove(&pid);
+                    reap_sidecars(&sidecars, pid);
+                    let _ = event_tx.send(HostEvent::Exited {
+                        handle,
+                        status: ExitStatus::with_code(75),
+                    });
+                    return;
+                }
+            }
+        });
     }
 
     /// Spawn Steam in the background so it is ready when a game is launched.
@@ -135,6 +229,14 @@ impl LinuxHost {
     /// can run a game. By starting Steam at daemon startup, these steps complete
     /// in the background and game launches feel nearly instant.
     pub fn preload_steam(&self) {
+        // Enable the loopback CEF debug endpoint so the launch watchdog can
+        // dismiss interstitials. Only do this when at least one interstitial is
+        // enabled — the endpoint is a control surface we don't open otherwise.
+        // The flag is read by Steam at startup, hence before launch.
+        if !self.steam_auto_dismiss.lock().unwrap().is_empty() {
+            steam_interstitial::ensure_cef_debug_enabled();
+        }
+
         // -silent tells Steam not to show its main window on startup
         let argv = vec![
             "snap".to_string(),
@@ -571,6 +673,16 @@ impl HostAdapter for LinuxHost {
                     seen_game: false,
                 },
             );
+
+            // Steam may block a launch behind an interstitial (cloud-sync
+            // warning, "connect a controller" advisory, …) that is invisible in
+            // the kiosk. When any interstitial is enabled, arm a watchdog that
+            // auto-dismisses it and, failing that, ends the session with an
+            // error instead of hanging forever. We never surface Steam itself.
+            let auto_dismiss = self.steam_auto_dismiss.lock().unwrap().clone();
+            if !auto_dismiss.is_empty() {
+                self.spawn_steam_launch_watchdog(handle.clone(), pid, app_id, auto_dismiss);
+            }
         }
 
         info!(pid = pid, pgid = pgid, "Spawned process");

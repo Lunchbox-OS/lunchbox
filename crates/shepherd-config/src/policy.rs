@@ -8,16 +8,18 @@ use crate::internet::{
 use crate::schema::{
     RawBrightnessConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat,
     RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawVolumeConfig, RawWarningThreshold,
+    RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
-    EntryKind, InputCompatMode, InputCompatOptions, WarningSeverity, WarningThreshold,
+    EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
+    WarningThreshold,
 };
 use shepherd_util::{
     DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
     socket_path_without_env,
 };
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -118,6 +120,8 @@ pub struct ServiceConfig {
     pub child_log_dir: PathBuf,
     /// Internet connectivity configuration
     pub internet: InternetConfig,
+    /// Steam-specific behaviour
+    pub steam: SteamConfig,
     /// Management HTTP API configuration (None = disabled)
     pub management_api: Option<ManagementApiConfig>,
 }
@@ -129,6 +133,7 @@ impl ServiceConfig {
             .child_log_dir
             .unwrap_or_else(|| log_dir.join("sessions"));
         let internet = convert_internet_config(raw.internet.as_ref());
+        let steam = SteamConfig::from_raw(raw.steam.as_ref());
         let management_api = raw
             .management_api
             .as_ref()
@@ -141,7 +146,55 @@ impl ServiceConfig {
             child_log_dir,
             data_dir: raw.data_dir.unwrap_or_else(default_data_dir),
             internet,
+            steam,
             management_api,
+        }
+    }
+}
+
+/// Default Steam launch watchdog timeout.
+pub const DEFAULT_STEAM_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Validated Steam-specific configuration
+#[derive(Debug, Clone)]
+pub struct SteamConfig {
+    /// Known launch interstitials to auto-dismiss via CEF. Empty disables the
+    /// feature (and the CEF debug port). Slug strings are validated against
+    /// [`InterstitialKind`] by `validate_config` before this is built.
+    pub auto_dismiss: HashSet<InterstitialKind>,
+    /// How long to wait for a Steam game to appear before ending with an error.
+    pub launch_timeout: Duration,
+}
+
+impl SteamConfig {
+    fn from_raw(raw: Option<&RawSteamConfig>) -> Self {
+        let allow_risky = raw.map(|c| c.allow_risky_dismiss).unwrap_or(false);
+        let auto_dismiss = match raw.and_then(|c| c.auto_dismiss_interstitials.as_ref()) {
+            // Unset → the safe default set.
+            None => InterstitialKind::DEFAULT_AUTO_DISMISS.into_iter().collect(),
+            // Set (incl. empty) → exactly what's listed. Unknown/risky slugs are
+            // rejected by validation, so parse leniently here.
+            Some(list) => list
+                .iter()
+                .filter_map(|s| InterstitialKind::from_slug(s))
+                .filter(|k| allow_risky || !k.is_risky())
+                .collect(),
+        };
+        Self {
+            auto_dismiss,
+            launch_timeout: raw
+                .and_then(|c| c.launch_timeout_seconds)
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_STEAM_LAUNCH_TIMEOUT),
+        }
+    }
+}
+
+impl Default for SteamConfig {
+    fn default() -> Self {
+        Self {
+            auto_dismiss: InterstitialKind::DEFAULT_AUTO_DISMISS.into_iter().collect(),
+            launch_timeout: DEFAULT_STEAM_LAUNCH_TIMEOUT,
         }
     }
 }
@@ -192,6 +245,7 @@ impl Default for ServiceConfig {
                 DEFAULT_INTERNET_CHECK_INTERVAL,
                 DEFAULT_INTERNET_CHECK_TIMEOUT,
             ),
+            steam: SteamConfig::default(),
             management_api: None,
         }
     }

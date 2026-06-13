@@ -65,6 +65,35 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
+    // Validate Steam interstitial auto-dismiss slugs.
+    if let Some(steam) = &config.service.steam
+        && let Some(list) = &steam.auto_dismiss_interstitials
+    {
+        for slug in list {
+            match shepherd_api::InterstitialKind::from_slug(slug) {
+                None => {
+                    let known: Vec<&str> = shepherd_api::InterstitialKind::ALL
+                        .iter()
+                        .map(|k| k.slug())
+                        .collect();
+                    errors.push(ValidationError::GlobalError(format!(
+                        "Unknown steam interstitial '{}' in auto_dismiss_interstitials (known: {})",
+                        slug,
+                        known.join(", ")
+                    )));
+                }
+                Some(kind) if kind.is_risky() && !steam.allow_risky_dismiss => {
+                    errors.push(ValidationError::GlobalError(format!(
+                        "Steam interstitial '{}' is risky (launches an unusable game); set \
+                         service.steam.allow_risky_dismiss = true to enable it",
+                        slug
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
     // Check for duplicate entry IDs
     let mut seen_ids = HashSet::new();
     for entry in &config.entries {

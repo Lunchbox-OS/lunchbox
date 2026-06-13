@@ -141,6 +141,13 @@ impl Service {
         // Initialize core engine
         let engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
 
+        // Apply Steam config to the host before any preload so the CEF debug
+        // flag is created (only) when interstitial auto-dismiss is enabled.
+        host.configure_steam(
+            engine.policy().service.steam.auto_dismiss.clone(),
+            engine.policy().service.steam.launch_timeout,
+        );
+
         // Initialize internet connectivity monitor (if configured)
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
