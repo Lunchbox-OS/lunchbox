@@ -229,9 +229,10 @@ install_config() {
 
 # Groups the kiosk user must belong to for shepherd-launcher features.
 #
-# - input: required by shepherd-touch-bridge and shepherd-gamepad-bridge
-#   (used when an entry has `input_compat = "touch_to_mouse"` or
-#   `gamepad_*`) so they can read /dev/input/event* and write /dev/uinput.
+# - input: required by shepherd-touch-bridge, shepherd-tablet-bridge, and
+#   shepherd-gamepad-bridge (used when an entry has `input_compat =
+#   "touch_to_mouse"`, `"tablet_to_touch"`, or `gamepad_*`) so they can read
+#   /dev/input/event* and write /dev/uinput.
 #   The uinput write access also needs the udev rule installed by
 #   `install_udev`; see that function and dist/udev/.
 # - video: required by the brightness slider. `brightnessctl`'s udev rule

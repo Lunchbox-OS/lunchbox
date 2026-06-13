@@ -498,6 +498,7 @@ fn convert_internet_config(raw: Option<&RawInternetConfig>) -> InternetConfig {
 fn convert_input_compat(raw: RawInputCompat) -> InputCompatMode {
     match raw {
         RawInputCompat::TouchToMouse => InputCompatMode::TouchToMouse,
+        RawInputCompat::TabletToTouch => InputCompatMode::TabletToTouch,
         RawInputCompat::GamepadProductivity => InputCompatMode::GamepadProductivity,
         RawInputCompat::GamepadGpd => InputCompatMode::GamepadGpd,
     }
@@ -520,6 +521,22 @@ fn convert_input_compat_list(raw: &[RawInputCompat], entry_id: &EntryId) -> Vec<
                 continue;
             }
             have_gamepad = true;
+        }
+        // `touch_to_mouse` and `tablet_to_touch` invert each other; running
+        // both would form a loop (tablet → synthetic touchscreen → mouse).
+        // Keep the first-configured direction and drop the conflicting one.
+        let conflicts = match mode {
+            InputCompatMode::TouchToMouse => out.contains(&InputCompatMode::TabletToTouch),
+            InputCompatMode::TabletToTouch => out.contains(&InputCompatMode::TouchToMouse),
+            _ => false,
+        };
+        if conflicts {
+            tracing::warn!(
+                entry = %entry_id.as_str(),
+                "input_compat has both touch_to_mouse and tablet_to_touch, which \
+                 invert each other; ignoring the later one",
+            );
+            continue;
         }
         if out.contains(&mode) {
             continue;
@@ -653,6 +670,35 @@ mod tests {
                 InputCompatMode::GamepadProductivity,
             ]
         );
+    }
+
+    #[test]
+    fn input_compat_drops_inverse_pointer_touch_pair() {
+        let id = EntryId::new("e");
+        // touch_to_mouse and tablet_to_touch invert each other; the later one
+        // is dropped while a stacked gamepad preset survives.
+        let out = convert_input_compat_list(
+            &[
+                RawInputCompat::TouchToMouse,
+                RawInputCompat::TabletToTouch,
+                RawInputCompat::GamepadProductivity,
+            ],
+            &id,
+        );
+        assert_eq!(
+            out,
+            vec![
+                InputCompatMode::TouchToMouse,
+                InputCompatMode::GamepadProductivity,
+            ]
+        );
+
+        // Order-independent: whichever direction is configured first wins.
+        let out = convert_input_compat_list(
+            &[RawInputCompat::TabletToTouch, RawInputCompat::TouchToMouse],
+            &id,
+        );
+        assert_eq!(out, vec![InputCompatMode::TabletToTouch]);
     }
 
     #[test]

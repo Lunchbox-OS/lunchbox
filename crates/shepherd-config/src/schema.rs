@@ -169,6 +169,10 @@ pub enum RawInputCompat {
     /// Translate touchscreen input into mouse events via a sidecar that
     /// grabs touch devices and uses the Wayland virtual-pointer protocol.
     TouchToMouse,
+    /// Translate absolute pointer / tablet input into touch events via a
+    /// sidecar that grabs the device and emits a virtual touchscreen. The
+    /// inverse of `TouchToMouse`; the two must not be combined.
+    TabletToTouch,
     /// Productivity preset: triggers = LMB, shoulders = RMB, left stick =
     /// mouse, right stick = scroll, stick-click toggles which stick drives
     /// the mouse, D-pad = arrow keys, A = Enter, Start = Escape.

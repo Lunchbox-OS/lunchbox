@@ -35,4 +35,26 @@ pub enum OutputEvent {
     PointerScroll { axis: ScrollAxis, discrete: i32 },
     /// Keyboard key press/release. `keycode` is the Linux evdev code.
     Key { keycode: u32, pressed: bool },
+    /// A touch contact begins (tablet bridge). `slot` identifies the contact
+    /// (`0` for the first finger). `x`/`y` are raw absolute values in
+    /// `0..=*_extent`; the sink rescales into its device's declared range, the
+    /// same convention as [`PointerMotionAbsolute`](Self::PointerMotionAbsolute).
+    TouchDown {
+        slot: u32,
+        x: u32,
+        y: u32,
+        x_extent: u32,
+        y_extent: u32,
+    },
+    /// An existing contact moves. Same coordinate convention as
+    /// [`TouchDown`](Self::TouchDown).
+    TouchMotion {
+        slot: u32,
+        x: u32,
+        y: u32,
+        x_extent: u32,
+        y_extent: u32,
+    },
+    /// A contact lifts.
+    TouchUp { slot: u32 },
 }

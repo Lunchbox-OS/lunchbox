@@ -4028,6 +4028,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-tablet-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "evdev",
+ "nix 0.29.0",
+ "shepherd-bridge",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "shepherd-touch-bridge"
 version = "0.1.0"
 dependencies = [

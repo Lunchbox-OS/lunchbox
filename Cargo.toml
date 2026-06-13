@@ -19,6 +19,7 @@ members = [
     "crates/shepherd-media",
     "crates/shepherd-bridge",
     "crates/shepherd-touch-bridge",
+    "crates/shepherd-tablet-bridge",
     "crates/shepherd-gamepad-bridge",
 ]
 # shepherd-firewall-bpf targets bpfel-unknown-none on nightly and is built
