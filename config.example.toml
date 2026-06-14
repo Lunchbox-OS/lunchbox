@@ -285,6 +285,12 @@ end = "20:00"
 # the activity. `input_compat` also accepts a list, so touch and gamepad
 # bridges can be stacked on a handheld with both. Requires the user
 # running shepherdd to be in the `input` group; see docs/INSTALL.md.
+#
+# The inverse, `input_compat = "tablet_to_touch"`, grabs an absolute pointer
+# or tablet and synthesizes touch events instead — for activities that only
+# handle touch, when developing touch support on mouse/pen-only hardware, or
+# in a VM whose pointer is an absolute tablet (QEMU/SPICE). It cannot be
+# combined with `touch_to_mouse` (they invert each other).
 # https://store.steampowered.com/app/22000/World_of_Goo/
 [[entries]]
 id = "steam-world-of-goo"

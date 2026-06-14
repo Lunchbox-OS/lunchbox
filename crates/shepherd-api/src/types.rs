@@ -159,15 +159,22 @@ pub enum EntryKind {
 /// Input compatibility mode for an activity.
 ///
 /// Some activities don't process raw touch or gamepad events from Wayland and
-/// need a shim to translate input at the compositor level. Modes are
-/// orthogonal: an activity can stack `TouchToMouse` with one of the
-/// `Gamepad*` modes if the device has both a touchscreen and a gamepad.
+/// need a shim to translate input at the compositor level. Modes are mostly
+/// orthogonal: an activity can stack `TouchToMouse` (or `TabletToTouch`) with
+/// one of the `Gamepad*` modes. The two pointer↔touch directions are the
+/// exception — `TouchToMouse` and `TabletToTouch` invert each other and must
+/// not be combined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputCompatMode {
     /// Grab touchscreens and emit synthesized pointer events via
     /// `zwlr_virtual_pointer_v1` for the lifetime of the activity.
     TouchToMouse,
+    /// Grab absolute pointers / tablets and emit synthesized touch events for
+    /// activities that only handle touch input — the inverse of
+    /// `TouchToMouse`. Useful for developing touch support against
+    /// mouse/pen-only hardware, or VMs whose pointer is an absolute tablet.
+    TabletToTouch,
     /// Remap a gamepad to mouse + keyboard using the productivity preset:
     /// triggers = LMB, shoulders = RMB, left stick = mouse, right stick =
     /// scroll, stick-click toggles which stick drives the mouse, D-pad =

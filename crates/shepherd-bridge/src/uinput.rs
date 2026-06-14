@@ -12,14 +12,15 @@
 //! relative and an absolute pointer without confusing libinput, hence the
 //! split.
 
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode,
-    UinputAbsSetup,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, PropType,
+    RelativeAxisCode, UinputAbsSetup,
 };
 
 use crate::event::{OutputEvent, ScrollAxis};
@@ -38,15 +39,23 @@ const REL_HWHEEL: u16 = 0x06;
 const REL_WHEEL: u16 = 0x08;
 const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
+const ABS_MT_SLOT: u16 = 0x2f;
+const ABS_MT_POSITION_X: u16 = 0x35;
+const ABS_MT_POSITION_Y: u16 = 0x36;
+const ABS_MT_TRACKING_ID: u16 = 0x39;
 const SYN_REPORT: u16 = 0x00;
 
 // Mouse button range (BTN_LEFT..BTN_TASK).
 const BTN_MOUSE_FIRST: u16 = 0x110;
 const BTN_MOUSE_LAST: u16 = 0x117;
+const BTN_TOUCH: u16 = 0x14a;
 
 /// Logical resolution of the absolute pointer. Touch coordinates are rescaled
 /// into `0..=ABS_MAX` so the device can declare a fixed range up front.
 const ABS_MAX: i32 = 65535;
+
+/// Highest multitouch slot the virtual touchscreen advertises (10 contacts).
+const MAX_SLOT: i32 = 9;
 
 /// How long to wait after creating the device for udev/libinput to bind it.
 /// Events emitted before the compositor opens the node are silently dropped,
@@ -70,6 +79,14 @@ pub struct UinputSink {
     /// coordinates by the scale corrects this. `1.0` for relative devices and
     /// unscaled outputs, where it is a no-op.
     abs_scale: f64,
+    /// Active multitouch contacts: slot → assigned tracking ID, for the MT
+    /// type-B protocol on a touchscreen device. Empty for pointer/keyboard
+    /// devices, which never emit `Touch*` events. Drives the `BTN_TOUCH`
+    /// transitions (set on first contact, cleared when the last lifts).
+    touch_tracking: BTreeMap<u32, i32>,
+    /// Monotonic source of MT tracking IDs; each new contact gets a fresh one
+    /// in `1..=u16::MAX` (the declared `ABS_MT_TRACKING_ID` range).
+    next_tracking_id: i32,
 }
 
 impl UinputSink {
@@ -120,6 +137,61 @@ impl UinputSink {
         Ok(Self::ready(device, output_scale))
     }
 
+    /// Build a multitouch touchscreen device (tablet bridge).
+    ///
+    /// Emits the MT type-B protocol and declares `INPUT_PROP_DIRECT`, so
+    /// libinput classifies the device as a touchscreen and the compositor
+    /// delivers real `wl_touch` events to activities — not pointer events.
+    /// `output_scale` has the same meaning as in [`UinputSink::new_absolute`].
+    pub fn new_touchscreen(output_scale: f64) -> Result<Self> {
+        let abs_info = AbsInfo::new(0, 0, ABS_MAX, 0, 0, 0);
+        let slot_info = AbsInfo::new(0, 0, MAX_SLOT, 0, 0, 0);
+        let id_info = AbsInfo::new(0, 0, i32::from(u16::MAX), 0, 0, 0);
+
+        let mut props = AttributeSet::<PropType>::new();
+        props.insert(PropType::DIRECT);
+
+        let mut keys = AttributeSet::<KeyCode>::new();
+        keys.insert(KeyCode::BTN_TOUCH);
+
+        let builder = VirtualDevice::builder()
+            .context("open /dev/uinput (is the user allowed to write it?)")?;
+        let device = builder
+            .name("shepherd-bridge virtual touchscreen")
+            .with_properties(&props)
+            .context("register uinput INPUT_PROP_DIRECT")?
+            .with_keys(&keys)
+            .context("register uinput BTN_TOUCH")?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_info))
+            .context("register uinput ABS_X")?
+            .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_info))
+            .context("register uinput ABS_Y")?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_POSITION_X,
+                abs_info,
+            ))
+            .context("register uinput ABS_MT_POSITION_X")?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_POSITION_Y,
+                abs_info,
+            ))
+            .context("register uinput ABS_MT_POSITION_Y")?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_SLOT,
+                slot_info,
+            ))
+            .context("register uinput ABS_MT_SLOT")?
+            .with_absolute_axis(&UinputAbsSetup::new(
+                AbsoluteAxisCode::ABS_MT_TRACKING_ID,
+                id_info,
+            ))
+            .context("register uinput ABS_MT_TRACKING_ID")?
+            .build()
+            .context("create uinput virtual device")?;
+
+        Ok(Self::ready(device, output_scale))
+    }
+
     fn ready(device: VirtualDevice, abs_scale: f64) -> Self {
         // Give udev/the compositor a moment to bind the new node before any
         // events are emitted.
@@ -129,7 +201,29 @@ impl UinputSink {
             pending: Vec::new(),
             error: None,
             abs_scale,
+            touch_tracking: BTreeMap::new(),
+            next_tracking_id: 0,
         }
+    }
+
+    /// Select the active MT slot for the events that follow in this frame.
+    fn push_touch_slot(&mut self, slot: u32) {
+        self.pending
+            .push(InputEvent::new(EV_ABS, ABS_MT_SLOT, slot as i32));
+    }
+
+    /// Emit a contact position on both the MT axes and the single-touch
+    /// `ABS_X`/`ABS_Y` axes (the latter keeps non-MT consumers in sync).
+    fn push_touch_position(&mut self, x: u32, y: u32, x_extent: u32, y_extent: u32) {
+        let scale = self.abs_scale;
+        let rx = rescale_abs(x, x_extent, scale);
+        let ry = rescale_abs(y, y_extent, scale);
+        self.pending
+            .push(InputEvent::new(EV_ABS, ABS_MT_POSITION_X, rx));
+        self.pending
+            .push(InputEvent::new(EV_ABS, ABS_MT_POSITION_Y, ry));
+        self.pending.push(InputEvent::new(EV_ABS, ABS_X, rx));
+        self.pending.push(InputEvent::new(EV_ABS, ABS_Y, ry));
     }
 }
 
@@ -182,6 +276,49 @@ impl OutputSink for UinputSink {
             OutputEvent::Key { keycode, pressed } => {
                 self.pending
                     .push(InputEvent::new(EV_KEY, keycode as u16, pressed as i32));
+            }
+            OutputEvent::TouchDown {
+                slot,
+                x,
+                y,
+                x_extent,
+                y_extent,
+            } => {
+                let first_contact = self.touch_tracking.is_empty();
+                self.next_tracking_id = self.next_tracking_id % i32::from(u16::MAX) + 1;
+                let id = self.next_tracking_id;
+                self.touch_tracking.insert(slot, id);
+                self.push_touch_slot(slot);
+                self.pending
+                    .push(InputEvent::new(EV_ABS, ABS_MT_TRACKING_ID, id));
+                self.push_touch_position(x, y, x_extent, y_extent);
+                if first_contact {
+                    self.pending.push(InputEvent::new(EV_KEY, BTN_TOUCH, 1));
+                }
+            }
+            OutputEvent::TouchMotion {
+                slot,
+                x,
+                y,
+                x_extent,
+                y_extent,
+            } => {
+                // Ignore motion for a contact we never saw go down; the MT
+                // protocol requires a live tracking ID in the slot first.
+                if self.touch_tracking.contains_key(&slot) {
+                    self.push_touch_slot(slot);
+                    self.push_touch_position(x, y, x_extent, y_extent);
+                }
+            }
+            OutputEvent::TouchUp { slot } => {
+                if self.touch_tracking.remove(&slot).is_some() {
+                    self.push_touch_slot(slot);
+                    self.pending
+                        .push(InputEvent::new(EV_ABS, ABS_MT_TRACKING_ID, -1));
+                    if self.touch_tracking.is_empty() {
+                        self.pending.push(InputEvent::new(EV_KEY, BTN_TOUCH, 0));
+                    }
+                }
             }
         }
     }
