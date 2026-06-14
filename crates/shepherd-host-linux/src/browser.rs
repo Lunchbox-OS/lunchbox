@@ -1,21 +1,33 @@
-//! Supervised-browser policy materialization.
+//! Supervised-browser policy materialization for the `com.google.Chrome`
+//! Flatpak.
 //!
-//! Translates a [`BrowserSpec`] into the two documented controls we use to
-//! wrap Chrome (no patching, no DRM circumvention):
+//! Translates a [`BrowserSpec`] into the documented controls we use to wrap
+//! Chrome (no patching, no DRM circumvention):
 //!
 //! 1. A Chromium [managed-policy JSON][policies] file written under the
-//!    com.google.Chrome Flatpak's per-app config dir, enforcing the URL
-//!    allow/blocklist and lockdown switches.
+//!    Flatpak's own per-user config dir, enforcing the URL allow/blocklist and
+//!    lockdown switches.
 //! 2. A set of Chrome command-line flags (`--kiosk`, `--app=<url>`, …) derived
 //!    from the window mode and start URL.
 //!
+//! **Policy injection is per-user, not system-wide.** Google Chrome only reads
+//! managed policy from the root-owned, machine-wide `/etc/opt/chrome/policies/`
+//! — writing there would hijack Chrome for every user on the box. The Flatpak's
+//! launch wrapper, however, populates that path *inside its own sandbox* (an
+//! ephemeral, per-launch filesystem). So instead of touching the host's
+//! `/etc`, [`chrome_flatpak_argv`] launches Chrome through a tiny shim that
+//! symlinks our per-user policy file into the sandbox's `/etc/opt/chrome/
+//! policies/managed/` and then execs the Flatpak's normal entry point. The
+//! policy applies only to that launch, only for this user.
+//!
 //! Profile management is layered on top: [`user_data_dir`] selects a
 //! per-`profile_id` on-disk directory passed via `--user-data-dir`, and
-//! [`wipe_profile_dir`] removes it after the session ends when
-//! `wipe_on_exit` is set.
+//! [`wipe_profile_dir`] removes it after the session ends when `wipe_on_exit`
+//! is set.
 //!
 //! [policies]: https://chromeenterprise.google/policies/
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -23,14 +35,26 @@ use serde_json::{Value, json};
 use shepherd_api::BrowserMode;
 use shepherd_host_api::BrowserSpec;
 
-/// Managed-policy directory, relative to the user's home, for the official
-/// `com.google.Chrome` Flatpak. Chrome inside the sandbox sees this as
-/// `$XDG_CONFIG_HOME/chromium/policies/managed`.
-///
-/// NOTE: this path is the one documented in the design and is the single knob
-/// to adjust if a real Flatpak Chrome turns out to read managed policy from a
-/// different location (verified during manual on-device testing).
-const MANAGED_POLICY_SUBDIR: &str = ".var/app/com.google.Chrome/config/chromium/policies/managed";
+/// The only Flatpak app id this browser support targets. The launch shim and
+/// the in-sandbox policy path (`/etc/opt/chrome/...`, `/app/bin/chrome`) are
+/// specific to the Flathub Google Chrome package.
+pub const SUPPORTED_BROWSER_FLATPAK: &str = "com.google.Chrome";
+
+/// Directory, relative to the user's home, where we stash the policy JSON for
+/// the Chrome Flatpak. It lives in the app's own per-user config tree (so it's
+/// visible inside the sandbox at the same path) and is symlinked into the
+/// sandbox's `/etc/opt/chrome/policies/managed/` at launch — never written to
+/// the host's machine-wide `/etc`.
+const POLICY_FILE_SUBDIR: &str = ".var/app/com.google.Chrome/config/shepherd-policies";
+
+/// Shell run inside the sandbox by [`chrome_flatpak_argv`]: seed the sandbox's
+/// own (ephemeral) managed-policy dir with our file, then hand off to the
+/// Flatpak's normal launcher (`/app/bin/chrome`), which re-runs its host-policy
+/// merge harmlessly, sets up Widevine, and execs the browser. `$SHEPHERD_POLICY`
+/// is passed via `--env=`; `"$@"` is the Chrome flag list.
+const POLICY_INJECT_SCRIPT: &str = "mkdir -p /etc/opt/chrome/policies/managed; \
+     ln -sf \"$SHEPHERD_POLICY\" /etc/opt/chrome/policies/managed/shepherd.json; \
+     exec /app/bin/chrome \"$@\"";
 
 /// Per-profile user-data-dir parent, relative to the user's home, for the
 /// com.google.Chrome Flatpak. The path string is identical inside and outside
@@ -90,23 +114,63 @@ fn build_policy_json(spec: &BrowserSpec) -> Value {
     Value::Object(map)
 }
 
-/// Compute the managed-policy file path for an entry under `home`.
-fn managed_policy_path(home: &Path, policy_id: &str) -> PathBuf {
-    home.join(MANAGED_POLICY_SUBDIR)
+/// Compute the per-user policy-file path for an entry under `home`.
+fn policy_file_path(home: &Path, policy_id: &str) -> PathBuf {
+    home.join(POLICY_FILE_SUBDIR)
         .join(format!("{}.json", sanitize_filename(policy_id)))
 }
 
 /// Write (or overwrite) the Chromium managed-policy JSON for `spec` under
-/// `root` (normally the user's home), returning the path written. Regenerated
-/// on every spawn so config edits take effect.
-pub fn write_managed_policy(root: &Path, spec: &BrowserSpec) -> io::Result<PathBuf> {
-    let path = managed_policy_path(root, &spec.policy_id);
+/// `root` (normally the user's home), returning the path written. The file is
+/// later symlinked into the sandbox at launch by [`chrome_flatpak_argv`].
+/// Regenerated on every spawn so config edits take effect.
+pub fn write_policy_file(root: &Path, spec: &BrowserSpec) -> io::Result<PathBuf> {
+    let path = policy_file_path(root, &spec.policy_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let body = serde_json::to_string_pretty(&build_policy_json(spec))?;
     std::fs::write(&path, body)?;
     Ok(path)
+}
+
+/// True if `app_id` is the Flatpak this browser support targets.
+pub fn is_supported_browser_flatpak(app_id: &str) -> bool {
+    app_id == SUPPORTED_BROWSER_FLATPAK
+}
+
+/// Build the full `flatpak run …` argv that launches the Chrome Flatpak with
+/// our per-user managed policy injected into its sandbox (see the module docs).
+///
+/// `policy_file` is the host path written by [`write_policy_file`] (visible at
+/// the same path inside the sandbox); `env` is the entry's user environment,
+/// mirrored as `--env=` flags so the sandboxed app sees it; `chrome_flags` are
+/// the browser arguments (`--user-data-dir`, kiosk/app/url).
+pub fn chrome_flatpak_argv(
+    app_id: &str,
+    policy_file: &Path,
+    env: &HashMap<String, String>,
+    chrome_flags: &[String],
+) -> Vec<String> {
+    let mut argv = vec![
+        "flatpak".to_string(),
+        "run".to_string(),
+        "--command=bash".to_string(),
+        format!("--env=SHEPHERD_POLICY={}", policy_file.display()),
+    ];
+    // Mirror the user env into the sandbox (sorted for determinism), matching
+    // the plain-flatpak spawn path.
+    let mut keys: Vec<&String> = env.keys().collect();
+    keys.sort();
+    for k in keys {
+        argv.push(format!("--env={}={}", k, env[k]));
+    }
+    argv.push(app_id.to_string());
+    argv.push("-c".to_string());
+    argv.push(POLICY_INJECT_SCRIPT.to_string());
+    argv.push("bash".to_string()); // $0 for the inner shell
+    argv.extend(chrome_flags.iter().cloned());
+    argv
 }
 
 /// Compute the per-profile user-data-dir under `home`.
@@ -350,37 +414,70 @@ mod tests {
     }
 
     #[test]
-    fn managed_policy_path_is_under_chrome_config() {
-        let p = managed_policy_path(Path::new("/home/kid"), "chrome-school");
+    fn policy_file_path_is_under_per_user_config() {
+        let p = policy_file_path(Path::new("/home/kid"), "chrome-school");
         assert_eq!(
             p,
             Path::new(
-                "/home/kid/.var/app/com.google.Chrome/config/chromium/policies/managed/chrome-school.json"
+                "/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/chrome-school.json"
             )
         );
     }
 
+    #[test]
+    fn chrome_flatpak_argv_injects_policy_and_flags() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let argv = chrome_flatpak_argv(
+            "com.google.Chrome",
+            Path::new("/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/e.json"),
+            &env,
+            &["--user-data-dir=/x".to_string(), "--kiosk".to_string()],
+        );
+        assert_eq!(&argv[0..3], &["flatpak", "run", "--command=bash"]);
+        assert!(argv.contains(
+            &"--env=SHEPHERD_POLICY=/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/e.json"
+                .to_string()
+        ));
+        assert!(argv.contains(&"--env=FOO=bar".to_string()));
+        // app id precedes the `-c <script> bash <flags>` tail.
+        let app_at = argv.iter().position(|a| a == "com.google.Chrome").unwrap();
+        assert_eq!(argv[app_at + 1], "-c");
+        assert_eq!(argv[app_at + 2], POLICY_INJECT_SCRIPT);
+        assert_eq!(argv[app_at + 3], "bash");
+        assert_eq!(&argv[app_at + 4..], &["--user-data-dir=/x", "--kiosk"]);
+        // The shim seeds the sandbox's own /etc, never the host's.
+        assert!(POLICY_INJECT_SCRIPT.contains("/etc/opt/chrome/policies/managed"));
+        assert!(POLICY_INJECT_SCRIPT.contains("exec /app/bin/chrome"));
+    }
+
+    #[test]
+    fn supported_flatpak_gate() {
+        assert!(is_supported_browser_flatpak("com.google.Chrome"));
+        assert!(!is_supported_browser_flatpak("org.chromium.Chromium"));
+    }
+
     // --- Real-Chrome gated test (manual; needs the com.google.Chrome flatpak) ---
     //
-    // Everything above verifies the shepherd side. This test verifies the two
-    // assumptions only real Chrome can confirm: that our managed-policy path is
-    // the one Flatpak Chrome actually reads (so the URL allow/blocklist is
-    // enforced), and that `--user-data-dir` lands where we later wipe.
+    // Everything above verifies the shepherd side. This test verifies what only
+    // real Chrome can confirm: that the per-user policy injection
+    // ([`chrome_flatpak_argv`]) is actually honored (URL allow/blocklist
+    // enforced) **without** touching the host's machine-wide /etc, and that
+    // `--user-data-dir` lands where we later wipe.
     //
     // It is `#[ignore]` and self-skips when the flatpak isn't installed, so a
-    // normal `cargo test` run never touches it. Run via
+    // normal `cargo test` never touches it. Run via
     // `scripts/integration-tests/test-browser-flatpak.sh`, or directly:
     //   cargo test -p shepherd-host-linux --lib -- --ignored --nocapture \
     //       browser::tests::real_flatpak_chrome
     //
-    // Mechanism: HOME is redirected to a tempdir so `~/.var/app/com.google.Chrome`
-    // (and thus the managed-policy dir + the profile) live under the test root,
-    // never touching the user's real Chrome config. XDG_DATA_HOME stays at the
-    // real `~/.local/share` so `flatpak run` still finds the user-installed app.
-    // Two loopback HTTP servers both serve a unique marker; only one origin is
-    // allowlisted. If the policy is read, the blocked origin renders the policy
-    // interstitial (no marker); if it isn't, the blocked page renders the marker
-    // and the test fails — pointing at a wrong path const.
+    // Mechanism: build the real launch argv with `chrome_flatpak_argv` and add
+    // headless `--dump-dom` flags. The policy + profile live in the *real*
+    // ~/.var/app/com.google.Chrome (under throwaway ids, cleaned up) — the
+    // injection targets the sandbox's own /etc, so the host /etc is never
+    // written. Two loopback servers each serve a marker; only one origin is
+    // allowlisted. Policy honored ⇒ the blocked origin renders the interstitial
+    // (no marker); not honored ⇒ its marker appears and the test fails.
 
     fn chrome_skip_reason(app_id: &str) -> Option<String> {
         use std::process::Command;
@@ -401,58 +498,59 @@ mod tests {
     }
 
     /// A throwaway loopback HTTP server that answers every request with an HTML
-    /// page containing `marker`. Returns the bound port; the thread is detached
-    /// and dies with the test process.
+    /// page containing `marker`. Returns the bound port; threads are detached
+    /// and die with the test process.
+    ///
+    /// Each connection is handled on its own thread with a read timeout —
+    /// headless Chrome opens speculative/preconnect sockets that send nothing,
+    /// and a single-threaded blocking `read()` would wedge on those and never
+    /// serve the real request.
     fn spawn_marker_server(marker: &'static str) -> std::io::Result<u16> {
         use std::io::{Read, Write};
+        use std::time::Duration;
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let body = format!(
-                    "<!doctype html><html><head><title>{marker}</title></head>\
-                     <body>{marker}</body></html>"
-                );
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(resp.as_bytes());
-                let _ = stream.flush();
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf); // ignore timeout/EOF on idle sockets
+                    let body = format!(
+                        "<!doctype html><html><head><title>{marker}</title></head>\
+                         <body>{marker}</body></html>"
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                });
             }
         });
         Ok(port)
     }
 
-    /// Run flatpak Chrome headless against `url` with HOME redirected to `root`,
-    /// returning the dumped DOM. Wrapped in `timeout` so a stuck launch can't
-    /// hang the suite.
-    fn run_headless_chrome(
-        app_id: &str,
-        root: &Path,
-        xdg_data_home: &str,
-        udd: &Path,
-        url: &str,
-    ) -> String {
+    /// Run the real Chrome Flatpak (via `chrome_flatpak_argv`) headless against
+    /// `url`, returning the dumped DOM. `timeout` guards a stuck launch.
+    fn run_headless_chrome(app_id: &str, policy_file: &Path, udd: &Path, url: &str) -> String {
         use std::process::Command;
+        let flags = vec![
+            format!("--user-data-dir={}", udd.display()),
+            "--headless=new".to_string(),
+            "--disable-gpu".to_string(),
+            "--no-first-run".to_string(),
+            "--dump-dom".to_string(),
+            url.to_string(),
+        ];
+        let argv = chrome_flatpak_argv(app_id, policy_file, &HashMap::new(), &flags);
         let out = Command::new("timeout")
             .arg("60")
-            .arg("flatpak")
-            .arg("run")
-            .arg(app_id)
-            .arg("--headless=new")
-            .arg("--disable-gpu")
-            .arg("--no-first-run")
-            .arg(format!("--user-data-dir={}", udd.display()))
-            .arg("--dump-dom")
-            .arg(url)
-            .env("HOME", root)
-            .env("XDG_DATA_HOME", xdg_data_home)
+            .args(&argv)
             .output()
             .expect("exec flatpak run");
         String::from_utf8_lossy(&out.stdout).into_owned()
@@ -468,80 +566,85 @@ mod tests {
             return;
         }
 
-        // Redirected HOME root (never the user's real ~/.var/app/...).
+        // The policy + profile live under the REAL home (so they're visible
+        // inside the sandbox), under throwaway ids cleaned up below.
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME set"));
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("shepherd-chrome-real-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        let uid = format!(
+            "shepherd-real-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
 
-        // flatpak finds the user-installed app via the *real* XDG_DATA_HOME.
-        let real_home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        let xdg_data_home =
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{real_home}/.local/share"));
-
-        let allow_port = spawn_marker_server("SHEPHERD_ALLOW_MARKER").unwrap();
-        let block_port = spawn_marker_server("SHEPHERD_BLOCK_MARKER").unwrap();
+        let allow_port = spawn_marker_server("SHEPHERDALLOWMARK").unwrap();
+        let block_port = spawn_marker_server("SHEPHERDBLOCKMARK").unwrap();
 
         let spec = BrowserSpec {
-            policy_id: "shepherd-real-test".into(),
-            profile_id: "realtest".into(),
+            policy_id: uid.clone(),
+            profile_id: uid.clone(),
             mode: BrowserMode::Windowed,
             start_url: None,
             // Allowlist only the allow origin; build_policy_json adds the
             // catch-all "*" blocklist, so the block origin must be refused.
-            url_allowlist: vec![format!("127.0.0.1:{allow_port}")],
+            url_allowlist: vec![format!("http://127.0.0.1:{allow_port}")],
             url_blocklist: vec![],
-            disable_dev_tools: true,
+            // NB: `DeveloperToolsAvailability=2` (what disable_dev_tools emits)
+            // breaks this headless probe — headless Chrome drives itself over
+            // the DevTools protocol, so `--dump-dom` produces nothing. It is
+            // correct and desirable for the real (windowed/kiosk) launch, so we
+            // simply omit it here and still exercise the other lockdowns.
+            disable_dev_tools: false,
             disable_incognito: true,
             disable_extensions: true,
             wipe_on_exit: false,
         };
-        let policy_path = write_managed_policy(&root, &spec).expect("write managed policy");
-        let udd = user_data_dir(&root, &spec);
+        let policy_path = write_policy_file(&home, &spec).expect("write policy file");
+        let udd = user_data_dir(&home, &spec);
 
         let allow_dom = run_headless_chrome(
             &app_id,
-            &root,
-            &xdg_data_home,
+            &policy_path,
             &udd,
             &format!("http://127.0.0.1:{allow_port}/"),
         );
         let block_dom = run_headless_chrome(
             &app_id,
-            &root,
-            &xdg_data_home,
+            &policy_path,
             &udd,
             &format!("http://127.0.0.1:{block_port}/"),
         );
+
+        // Capture outcomes, then clean up before asserting (so a failure still
+        // leaves the home tidy). The host /etc must never have been written.
+        let host_etc_touched = Path::new("/etc/opt/chrome").exists();
+        let udd_created = udd.exists();
+        wipe_profile_dir(&udd);
+        let udd_wiped = !udd.exists();
+        let _ = std::fs::remove_file(&policy_path);
+
         eprintln!(
             "---- allow DOM ----\n{allow_dom}\n---- block DOM ----\n{block_dom}\n-------------------"
         );
 
         assert!(
-            allow_dom.contains("SHEPHERD_ALLOW_MARKER"),
-            "allowlisted origin did NOT render. Either Chrome failed to launch, or the managed \
-             policy at {} was read and is over-blocking. allow DOM:\n{allow_dom}",
-            policy_path.display()
+            allow_dom.contains("SHEPHERDALLOWMARK"),
+            "allowlisted origin did NOT render — Chrome failed to launch or the policy over-blocks. allow DOM:\n{allow_dom}"
         );
         assert!(
-            !block_dom.contains("SHEPHERD_BLOCK_MARKER"),
-            "blocked origin rendered the page — URLAllowlist/URLBlocklist was NOT enforced, so \
-             Chrome did not read the managed policy at {}. The MANAGED_POLICY_SUBDIR const is \
-             likely wrong for this Chrome. block DOM:\n{block_dom}",
-            policy_path.display()
+            !block_dom.contains("SHEPHERDBLOCKMARK"),
+            "blocked origin rendered — URL allow/blocklist NOT enforced, so the per-user policy \
+             injection failed. block DOM:\n{block_dom}"
         );
-
-        // Chrome must have created the profile exactly where we wipe.
         assert!(
-            udd.exists(),
-            "Chrome did not create --user-data-dir at {}; USER_DATA_SUBDIR may be wrong",
+            !host_etc_touched,
+            "injection must not create host /etc/opt/chrome"
+        );
+        assert!(
+            udd_created,
+            "Chrome did not create --user-data-dir at {}",
             udd.display()
         );
-        wipe_profile_dir(&udd);
-        assert!(!udd.exists(), "wipe failed to remove {}", udd.display());
-
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(udd_wiped, "wipe failed");
     }
 }

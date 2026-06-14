@@ -209,32 +209,47 @@ network filter via systemd's BPF address controls
 
 ## Browser policy
 
-When `SpawnOptions::browser` is set and the entry is a Chromium-capable kind
-(`flatpak` — the supported `com.google.Chrome` path — or `process`), the
-adapter materializes the policy before spawning (`browser.rs`):
+When `SpawnOptions::browser` is set and the entry is the supported
+`com.google.Chrome` flatpak, the adapter materializes the policy before
+spawning (`browser.rs`). Other entry kinds (and other flatpaks) are not
+supported — a warning is logged and the browser policy ignored.
 
-- **Managed-policy JSON**: a `<policy_id>.json` file is written (regenerated
-  each spawn) under
-  `~/.var/app/com.google.Chrome/config/chromium/policies/managed/`, carrying
-  `URLAllowlist`/`URLBlocklist` and the lockdown switches
+- **Per-user policy injection (not system-wide).** Google Chrome only reads
+  managed policy from the root-owned, machine-wide `/etc/opt/chrome/policies/`
+  — writing there would hijack Chrome for *every* user on the box. But the
+  flatpak's launch wrapper populates that path *inside its own sandbox* (an
+  ephemeral, per-launch filesystem). So shepherd writes a `<policy_id>.json`
+  (regenerated each spawn) into the app's own per-user tree
+  (`~/.var/app/com.google.Chrome/config/shepherd-policies/`) and rebuilds the
+  launch as:
+
+  ```
+  flatpak run --command=bash --env=SHEPHERD_POLICY=<file> com.google.Chrome \
+    -c 'mkdir -p /etc/opt/chrome/policies/managed;
+        ln -sf "$SHEPHERD_POLICY" /etc/opt/chrome/policies/managed/shepherd.json;
+        exec /app/bin/chrome "$@"' bash <chrome flags>
+  ```
+
+  The shim symlinks our policy into the sandbox's own `/etc` and then execs the
+  flatpak's normal launcher. The policy applies only to that launch, only for
+  this user; the host `/etc` is never touched. (Verified end-to-end against
+  real Chrome by the gated test.)
+
+- **Policy contents**: `URLAllowlist`/`URLBlocklist` plus the lockdown switches
   (`DeveloperToolsAvailability`, `IncognitoModeAvailability`,
-  `ExtensionInstallBlocklist`). A non-empty allowlist injects a catch-all
-  `"*"` blocklist so the allowlist is authoritative.
+  `ExtensionInstallBlocklist`). A non-empty allowlist injects a catch-all `"*"`
+  blocklist so the allowlist is authoritative.
 - **Launch flags**: the window mode + start URL become Chrome flags
-  (`--kiosk <url>`, `--app=<url>`, or a bare `<url>`), appended to the argv.
-  For `process` kind these flags ride inside the firewall helper's wrapped
-  argv; for flatpak they follow the app id as app arguments.
+  (`--kiosk <url>`, `--app=<url>`, or a bare `<url>`), plus `--user-data-dir`.
 - **Profile**: `profile_id` selects a per-profile user-data-dir under
-  `~/.var/app/com.google.Chrome/config/google-chrome/<profile_id>/`, passed as
-  `--user-data-dir`. Entries sharing a `profile_id` share cookies/logins; each
-  unique id is isolated. The path string is identical inside and outside the
-  flatpak sandbox, so it works for both flatpak and `process` Chromium.
+  `~/.var/app/com.google.Chrome/config/google-chrome/<profile_id>/`. Entries
+  sharing a `profile_id` share cookies/logins; each unique id is isolated.
 - **`wipe_on_exit`**: when set, the user-data-dir is recorded against the
   activity's pid and deleted once the activity exits (detected by the process
-  monitor, so for flatpak the wipe waits for the Chrome instance to be gone).
-  Wiping happens in the host adapter, never inside Chrome.
+  monitor, so the wipe waits for the Chrome instance to be gone). Wiping
+  happens in the host adapter, never inside Chrome.
 
-A failed policy write is logged and the launch continues.
+A failed policy write is logged and Chrome launches without the policy.
 
 ## Future Enhancements
 

@@ -1,15 +1,16 @@
 //! End-to-end test for the supervised-browser activity wiring.
 //!
-//! CI cannot run real Chrome, but it *can* verify everything shepherdd does
-//! around it: on launch the daemon must (1) write the Chromium managed-policy
-//! JSON under the browser root, (2) append the `--user-data-dir` / `--kiosk` /
-//! start-URL flags to the activity's argv, and (3) wipe the per-profile
-//! user-data-dir after the activity exits when `wipe_on_exit` is set.
+//! CI can't run real Chrome, but it *can* verify everything shepherdd does
+//! around it. On launch of a `com.google.Chrome` flatpak entry with
+//! `[entries.browser]`, the daemon must (1) write the managed-policy JSON under
+//! the browser root, (2) rebuild the launch into the policy-injection form
+//! (`flatpak run --command=bash --env=SHEPHERD_POLICY=… com.google.Chrome -c
+//! <shim> bash <chrome flags>`), and (3) wipe the per-profile user-data-dir
+//! after the activity exits when `wipe_on_exit` is set.
 //!
-//! A `process`-kind entry stands in for `flatpak run com.google.Chrome` (the
-//! browser materialization path fires for both), with a fake "chrome" script
-//! that records its argv. `SHEPHERD_BROWSER_ROOT` redirects all writes into a
-//! tempdir so the test never touches a real `~/.var/app/...`.
+//! A stub `flatpak` on `PATH` records the argv it was invoked with and exits,
+//! so no real Chrome (or flatpak) is needed. `SHEPHERD_BROWSER_ROOT` redirects
+//! all writes into a tempdir.
 //!
 //! Run alongside the other e2e tests with
 //! `cargo test -p shepherd-e2e -- --include-ignored --test-threads=1`.
@@ -38,8 +39,8 @@ bind = "127.0.0.1"
 id = "chrome-school"
 label = "School"
 [entries.kind]
-type = "process"
-command = "@SCRIPT@"
+type = "flatpak"
+app_id = "com.google.Chrome"
 [entries.kind.env]
 SHEPHERD_TEST_ARGV = "@ARGV@"
 [entries.availability]
@@ -51,9 +52,6 @@ profile_id = "school"
 mode = "kiosk"
 start_url = "https://classroom.google.com"
 url_allowlist = ["https://*.google.com/*"]
-disable_dev_tools = true
-disable_incognito = true
-disable_extensions = true
 wipe_on_exit = true
 "#;
 
@@ -87,14 +85,14 @@ async fn wait_for_gone(path: &Path, timeout: Duration) -> Result<()> {
     anyhow::bail!("path still present after {:?}: {}", timeout, path.display())
 }
 
-/// Full-stack browser wiring: managed policy written, launch flags appended,
-/// and the ephemeral profile wiped on exit — all driven through the HTTP API.
+/// Full-stack browser wiring: managed policy written, launch rebuilt into the
+/// injection form, and the ephemeral profile wiped on exit — all through the
+/// HTTP API, with a stub `flatpak` standing in for real Chrome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn browser_materializes_policy_flags_and_wipes_profile() -> Result<()> {
-    // `work` holds the fake chrome + argv log; `root` is the redirected
-    // browser root. Keep them separate so wiping the profile never deletes the
-    // argv log.
+async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()> {
+    // `work` holds the stub flatpak + argv log; `root` is the redirected
+    // browser root. Separate so wiping the profile never deletes the argv log.
     let work = tempfile::Builder::new()
         .prefix("shepherd-e2e-browser-work-")
         .tempdir()
@@ -104,30 +102,32 @@ async fn browser_materializes_policy_flags_and_wipes_profile() -> Result<()> {
         .tempdir()
         .context("create browser root")?;
 
-    let script = work.path().join("fake-chrome.sh");
-    let argv_log = work.path().join("argv.log");
-    // Record argv (one element per line), then linger briefly so the session is
-    // observably running before it exits and the wipe fires.
+    let argv_log = work.path().join("flatpak-argv.log");
+    // Stub flatpak: record argv (one per line), then exit so the monitor fires
+    // the wipe. `$SHEPHERD_TEST_ARGV` is set from [entries.kind.env].
     write_executable(
-        &script,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SHEPHERD_TEST_ARGV\"\nsleep 1\n",
+        &work.path().join("flatpak"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SHEPHERD_TEST_ARGV\"\n",
     )?;
+    let augmented_path = format!(
+        "{}:{}",
+        work.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
 
-    // The per-profile user-data-dir, as the daemon will compute it. Pre-create
-    // it to stand in for Chrome having written a profile there.
+    // Pre-create the per-profile user-data-dir, standing in for Chrome's.
     let user_data_dir = root
         .path()
         .join(".var/app/com.google.Chrome/config/google-chrome/school");
     fs::create_dir_all(user_data_dir.join("Default")).context("precreate profile")?;
     fs::write(user_data_dir.join("Default/Cookies"), b"x").context("seed profile")?;
 
-    let config = BROWSER_CONFIG
-        .replace("@SCRIPT@", &script.display().to_string())
-        .replace("@ARGV@", &argv_log.display().to_string());
+    let config = BROWSER_CONFIG.replace("@ARGV@", &argv_log.display().to_string());
 
     let h = TestHarness::builder()
         .config_toml(config)
         .shepherdd_env("SHEPHERD_BROWSER_ROOT", root.path().display().to_string())
+        .shepherdd_env("PATH", augmented_path)
         .start()
         .await?;
     let http = h.http();
@@ -138,35 +138,52 @@ async fn browser_materializes_policy_flags_and_wipes_profile() -> Result<()> {
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
     assert_eq!(json_body(&resp)?["result"], json!("approved"));
 
-    // (1) The managed-policy JSON is written under the browser root.
+    // (1) The managed-policy JSON is written under the per-user policy dir.
     let policy = root
         .path()
-        .join(".var/app/com.google.Chrome/config/chromium/policies/managed/chrome-school.json");
+        .join(".var/app/com.google.Chrome/config/shepherd-policies/chrome-school.json");
     wait_for_file(&policy, Duration::from_secs(5)).await?;
     let policy_body = fs::read_to_string(&policy)?;
     assert!(
         policy_body.contains("URLAllowlist"),
         "policy missing URLAllowlist:\n{policy_body}"
     );
-    assert!(
-        policy_body.contains("\"*\""),
-        "policy missing catch-all blocklist:\n{policy_body}"
-    );
 
-    // (2) The launch flags reach the activity's argv.
+    // (2) The launch is the injection form. The stub records the flatpak argv.
     wait_for_file(&argv_log, Duration::from_secs(5)).await?;
     let argv = fs::read_to_string(&argv_log)?;
-    assert!(
-        argv.lines()
-            .any(|l| l == format!("--user-data-dir={}", user_data_dir.display())),
-        "missing --user-data-dir; argv:\n{argv}"
-    );
-    for needle in ["--kiosk", "https://classroom.google.com"] {
+    let lines: Vec<&str> = argv.lines().collect();
+    for needle in [
+        "run",
+        "--command=bash",
+        "com.google.Chrome",
+        "-c",
+        "bash",
+        "--kiosk",
+        "https://classroom.google.com",
+    ] {
         assert!(
-            argv.lines().any(|l| l == needle),
+            lines.contains(&needle),
             "missing argv element {needle:?}; argv:\n{argv}"
         );
     }
+    assert!(
+        lines
+            .iter()
+            .any(|l| *l == format!("--env=SHEPHERD_POLICY={}", policy.display())),
+        "missing --env=SHEPHERD_POLICY; argv:\n{argv}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| *l == format!("--user-data-dir={}", user_data_dir.display())),
+        "missing --user-data-dir; argv:\n{argv}"
+    );
+    // The shim seeds the *sandbox's* /etc and execs the flatpak's own launcher.
+    assert!(
+        argv.contains("/etc/opt/chrome/policies/managed") && argv.contains("exec /app/bin/chrome"),
+        "argv shim not the policy-injection form:\n{argv}"
+    );
 
     // (3) When the activity exits, the ephemeral profile is wiped.
     wait_for_gone(&user_data_dir, Duration::from_secs(10)).await?;
