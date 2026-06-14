@@ -260,6 +260,12 @@ Notes:
   segment (ASCII letters, digits, `-`, `_`, `.`; not `.`/`..`).
 - Hostname allowlisting is enforced by Chrome via `URLAllowlist`/`URLBlocklist`
   (no extensions). The firewall is coarse IP-layer defense-in-depth.
+- `url_allowlist`/`url_blocklist` entries use Chrome's [URL-filter format][urlf]
+  and should be **scheme-qualified** (`https://host/...`): a bare `host` or
+  `host:port` is not reliably matched and would be caught by the authoritative
+  catch-all block.
+
+[urlf]: https://chromeenterprise.google/policies/url-blocking/
 - `wipe_on_exit` clears the profile directory in the host adapter's post-exit
   cleanup, not in Chrome.
 - Validation rejects unknown `mode`, non-http(s) `start_url`, empty/whitespace

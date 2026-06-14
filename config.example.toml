@@ -452,6 +452,10 @@ mode = "kiosk"
 start_url = "https://classroom.google.com"
 # Hostname allowlisting is enforced by Chrome itself (no extensions needed).
 # A non-empty allowlist is authoritative: everything not matched is blocked.
+# Entries use Chrome's URL-filter format and should be SCHEME-QUALIFIED
+# ("https://host/..."): a bare "host" or "host:port" without a scheme is not
+# reliably matched, so the entry would be blocked by the catch-all. See
+# https://chromeenterprise.google/policies/url-blocking/ for the full format.
 url_allowlist = [
     "https://*.google.com/*",
     "https://*.googleusercontent.com/*",
