@@ -116,6 +116,12 @@ pub struct RawEntry {
     #[serde(default)]
     pub firewall: Option<RawFirewallConfig>,
 
+    /// Supervised-browser policy (Chromium enterprise policy + profile).
+    /// Compose with `kind = { type = "flatpak", app_id = "com.google.Chrome" }`
+    /// and an optional `[entries.firewall]` to build the web-browser activity.
+    #[serde(default)]
+    pub browser: Option<RawBrowserConfig>,
+
     /// Input compatibility modes for this entry. Each mode runs an
     /// orthogonal sidecar — touch-to-mouse and gamepad presets can be
     /// stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
@@ -164,6 +170,63 @@ pub struct RawFirewallConfig {
 
 fn default_firewall_default() -> String {
     "deny".to_string()
+}
+
+/// Per-entry supervised-browser policy.
+///
+/// Materialized at spawn time into a Chromium [managed-policy JSON][policies]
+/// file plus a set of Chrome command-line flags. Hostname allowlisting is
+/// enforced by the browser itself via `URLAllowlist`/`URLBlocklist` (no
+/// extensions); pair with [`RawFirewallConfig`] for coarse IP-layer
+/// defense-in-depth. shepherd-launcher only wraps Chrome through documented
+/// controls — it does not patch the browser or circumvent any protections.
+///
+/// [policies]: https://chromeenterprise.google/policies/
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawBrowserConfig {
+    /// Filesystem segment selecting the on-disk user-data-dir. Entries that
+    /// share a `profile_id` share cookies/logins; each unique id is isolated.
+    /// Must be a single safe path segment (no separators, not `.`/`..`).
+    pub profile_id: String,
+
+    /// Window mode: "kiosk" (fullscreen, no browser chrome), "app" (single
+    /// app window), or "windowed" (normal browser window). Default "kiosk".
+    #[serde(default = "default_browser_mode")]
+    pub mode: String,
+
+    /// URL opened on launch. Must be an http(s) URL when set.
+    pub start_url: Option<String>,
+
+    /// Chromium `URLAllowlist` patterns. Empty = no allowlist (all URLs
+    /// permitted, subject to `url_blocklist`).
+    #[serde(default)]
+    pub url_allowlist: Vec<String>,
+
+    /// Chromium `URLBlocklist` patterns, applied after the allowlist.
+    #[serde(default)]
+    pub url_blocklist: Vec<String>,
+
+    /// Disable DevTools (`DeveloperToolsDisabled`). Default true.
+    #[serde(default = "default_true")]
+    pub disable_dev_tools: bool,
+
+    /// Disable incognito mode (`IncognitoModeAvailability`). Default true.
+    #[serde(default = "default_true")]
+    pub disable_incognito: bool,
+
+    /// Block extension installation (`ExtensionInstallBlocklist = ["*"]`).
+    /// Default true.
+    #[serde(default = "default_true")]
+    pub disable_extensions: bool,
+
+    /// Wipe the on-disk profile directory after the session ends (handled by
+    /// the host adapter's post-exit cleanup, not by Chrome). Default false.
+    #[serde(default)]
+    pub wipe_on_exit: bool,
+}
+
+fn default_browser_mode() -> String {
+    "kiosk".to_string()
 }
 
 /// Input compatibility mode
@@ -533,6 +596,39 @@ mod tests {
         "#;
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert!(config.entries[0].input_compat.is_empty());
+    }
+
+    #[test]
+    fn parse_browser_entry() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "chrome-school"
+            label = "School"
+            kind = { type = "flatpak", app_id = "com.google.Chrome" }
+
+            [entries.browser]
+            profile_id = "school"
+            mode = "kiosk"
+            start_url = "https://classroom.google.com"
+            url_allowlist = ["https://*.google.com/*"]
+        "#;
+
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        let browser = config.entries[0].browser.as_ref().unwrap();
+        assert_eq!(browser.profile_id, "school");
+        assert_eq!(browser.mode, "kiosk");
+        assert_eq!(
+            browser.start_url.as_deref(),
+            Some("https://classroom.google.com")
+        );
+        assert_eq!(browser.url_allowlist, vec!["https://*.google.com/*"]);
+        // Lockdown defaults are on; wipe defaults off.
+        assert!(browser.disable_dev_tools);
+        assert!(browser.disable_incognito);
+        assert!(browser.disable_extensions);
+        assert!(!browser.wipe_on_exit);
     }
 
     #[test]

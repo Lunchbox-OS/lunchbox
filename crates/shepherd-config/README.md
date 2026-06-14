@@ -230,6 +230,41 @@ Workarounds:
   `cat /proc/$$/cgroup` from inside the app that it sits under the
   expected `user.slice/.../*.scope`.
 
+### Browser
+
+Entries may carry a supervised-browser policy that wraps Chrome through
+documented controls only — a Chromium [enterprise-policy][policies] JSON file
+plus Chrome command-line flags, materialized at spawn time. It is a
+*composition* layer: pair it with `kind = { type = "flatpak", app_id =
+"com.google.Chrome" }` (the sandboxed Chrome) and an optional
+`[entries.firewall]` block. There is no dedicated browser entry kind.
+
+```toml
+[entries.browser]
+profile_id = "school"        # on-disk user-data-dir segment (shareable)
+mode = "kiosk"               # "kiosk" (default) | "app" | "windowed"
+start_url = "https://classroom.google.com"
+url_allowlist = ["https://*.google.com/*"]
+url_blocklist = []           # applied after the allowlist
+disable_dev_tools = true     # default true
+disable_incognito = true     # default true
+disable_extensions = true    # default true
+wipe_on_exit = false         # default false
+```
+
+[policies]: https://chromeenterprise.google/policies/
+
+Notes:
+- `profile_id` is the persistence key. Entries sharing an id share
+  cookies/logins; each unique id is isolated. It must be a single safe path
+  segment (ASCII letters, digits, `-`, `_`, `.`; not `.`/`..`).
+- Hostname allowlisting is enforced by Chrome via `URLAllowlist`/`URLBlocklist`
+  (no extensions). The firewall is coarse IP-layer defense-in-depth.
+- `wipe_on_exit` clears the profile directory in the host adapter's post-exit
+  cleanup, not in Chrome.
+- Validation rejects unknown `mode`, non-http(s) `start_url`, empty/whitespace
+  URL patterns, and unsafe `profile_id` values.
+
 ## Validation
 
 The configuration is validated at load time. Validation catches:
