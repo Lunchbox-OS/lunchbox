@@ -8,6 +8,7 @@ use shepherd_host_api::{
 };
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -109,6 +110,10 @@ pub struct LinuxHost {
     /// Per-activity sidecar processes (touch-bridge, etc.), keyed by the
     /// activity's pid so the monitor can reap them on natural exit too.
     sidecars: Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+    /// Ephemeral browser profile dirs to delete when their activity exits
+    /// (`wipe_on_exit`), keyed by the activity's pid. The monitor (or `stop`)
+    /// removes the entry and wipes the dir exactly once.
+    profile_wipes: Arc<Mutex<HashMap<u32, PathBuf>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
     /// Steam launch interstitials we're allowed to auto-dismiss via CEF (see
@@ -132,6 +137,7 @@ impl LinuxHost {
             steam_sessions: Arc::new(Mutex::new(HashMap::new())),
             steam_preload_pids: Arc::new(Mutex::new(HashSet::new())),
             sidecars: Arc::new(Mutex::new(HashMap::new())),
+            profile_wipes: Arc::new(Mutex::new(HashMap::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
@@ -285,6 +291,7 @@ impl LinuxHost {
         let steam_sessions = self.steam_sessions.clone();
         let steam_preload_pids = self.steam_preload_pids.clone();
         let sidecars = self.sidecars.clone();
+        let profile_wipes = self.profile_wipes.clone();
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -329,6 +336,12 @@ impl LinuxHost {
                     info!(pid = pid, pgid = pgid, status = ?status, "Process exited - sending HostEvent::Exited");
 
                     reap_sidecars(&sidecars, pid);
+
+                    // Wipe an ephemeral browser profile now that the activity
+                    // (and, for flatpak, its Chrome instance) is fully gone.
+                    if let Some(dir) = profile_wipes.lock().unwrap().remove(&pid) {
+                        crate::browser::wipe_profile_dir(&dir);
+                    }
 
                     // We don't have the session_id here, so we use a placeholder
                     // The service should track the mapping
@@ -519,6 +532,7 @@ impl HostAdapter for LinuxHost {
         // com.google.Chrome flatpak, but a `process`-kind Chromium binary works
         // too. A failure to write the policy file is logged, not fatal.
         let mut argv = argv;
+        let mut pending_wipe: Option<PathBuf> = None;
         if let Some(ref browser) = options.browser {
             if matches!(
                 entry_kind,
@@ -532,7 +546,27 @@ impl HostAdapter for LinuxHost {
                         warn!(error = %e, "Failed to write Chromium managed policy; continuing")
                     }
                 }
-                argv.extend(crate::browser::chrome_flags(browser));
+                // Resolve the per-profile user-data-dir so each profile is
+                // isolated on disk and so we know what to wipe on exit.
+                let user_data_dir = match crate::browser::user_data_dir(browser) {
+                    Ok(dir) => Some(dir),
+                    Err(e) => {
+                        warn!(error = %e, "Could not resolve browser user-data-dir; using Chrome default");
+                        None
+                    }
+                };
+                argv.extend(crate::browser::chrome_flags(
+                    browser,
+                    user_data_dir.as_deref(),
+                ));
+                if browser.wipe_on_exit {
+                    match user_data_dir {
+                        Some(dir) => pending_wipe = Some(dir),
+                        None => warn!(
+                            "browser.wipe_on_exit set but user-data-dir is unknown; cannot wipe"
+                        ),
+                    }
+                }
             } else {
                 warn!("Browser policy set on a non-Chromium entry kind; ignoring");
             }
@@ -669,6 +703,11 @@ impl HostAdapter for LinuxHost {
 
         if !session_sidecars.is_empty() {
             self.sidecars.lock().unwrap().insert(pid, session_sidecars);
+        }
+
+        // Register the ephemeral browser profile for wiping when this pid exits.
+        if let Some(dir) = pending_wipe {
+            self.profile_wipes.lock().unwrap().insert(pid, dir);
         }
 
         // Store the session info so we can use it for killing even after process exits

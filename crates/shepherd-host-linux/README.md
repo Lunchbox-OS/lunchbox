@@ -224,9 +224,17 @@ adapter materializes the policy before spawning (`browser.rs`):
   (`--kiosk <url>`, `--app=<url>`, or a bare `<url>`), appended to the argv.
   For `process` kind these flags ride inside the firewall helper's wrapped
   argv; for flatpak they follow the app id as app arguments.
+- **Profile**: `profile_id` selects a per-profile user-data-dir under
+  `~/.var/app/com.google.Chrome/config/google-chrome/<profile_id>/`, passed as
+  `--user-data-dir`. Entries sharing a `profile_id` share cookies/logins; each
+  unique id is isolated. The path string is identical inside and outside the
+  flatpak sandbox, so it works for both flatpak and `process` Chromium.
+- **`wipe_on_exit`**: when set, the user-data-dir is recorded against the
+  activity's pid and deleted once the activity exits (detected by the process
+  monitor, so for flatpak the wipe waits for the Chrome instance to be gone).
+  Wiping happens in the host adapter, never inside Chrome.
 
-A failed policy write is logged and the launch continues. Profile management
-(`--user-data-dir`, `wipe_on_exit`) is a separate step and not yet wired here.
+A failed policy write is logged and the launch continues.
 
 ## Future Enhancements
 

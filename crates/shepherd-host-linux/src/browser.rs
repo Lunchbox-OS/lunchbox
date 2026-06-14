@@ -9,8 +9,10 @@
 //! 2. A set of Chrome command-line flags (`--kiosk`, `--app=<url>`, …) derived
 //!    from the window mode and start URL.
 //!
-//! Profile management (`--user-data-dir`, `wipe_on_exit`) is layered on top in
-//! a later step; this module only covers policy + launch flags.
+//! Profile management is layered on top: [`user_data_dir`] selects a
+//! per-`profile_id` on-disk directory passed via `--user-data-dir`, and
+//! [`wipe_profile_dir`] removes it after the session ends when
+//! `wipe_on_exit` is set.
 //!
 //! [policies]: https://chromeenterprise.google/policies/
 
@@ -29,6 +31,12 @@ use shepherd_host_api::BrowserSpec;
 /// to adjust if a real Flatpak Chrome turns out to read managed policy from a
 /// different location (verified during manual on-device testing).
 const MANAGED_POLICY_SUBDIR: &str = ".var/app/com.google.Chrome/config/chromium/policies/managed";
+
+/// Per-profile user-data-dir parent, relative to the user's home, for the
+/// com.google.Chrome Flatpak. The path string is identical inside and outside
+/// the sandbox (flatpak passes `~/.var/app/<id>` through unchanged), so it can
+/// be handed straight to `--user-data-dir`.
+const USER_DATA_SUBDIR: &str = ".var/app/com.google.Chrome/config/google-chrome";
 
 /// Reduce an entry id to a safe single-segment filename stem.
 fn sanitize_filename(id: &str) -> String {
@@ -102,10 +110,41 @@ pub fn write_managed_policy(spec: &BrowserSpec) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Derive the Chrome command-line flags for a browser spec's window mode and
-/// start URL. These are appended to the app's argument list at spawn time.
-pub fn chrome_flags(spec: &BrowserSpec) -> Vec<String> {
+/// Compute the per-profile user-data-dir under `home`.
+fn user_data_dir_at(home: &Path, profile_id: &str) -> PathBuf {
+    home.join(USER_DATA_SUBDIR)
+        .join(sanitize_filename(profile_id))
+}
+
+/// Resolve the absolute per-profile user-data-dir for `spec`. The directory is
+/// not created here — Chrome creates it on first launch; we only need the path
+/// for the `--user-data-dir` flag and for [`wipe_profile_dir`].
+pub fn user_data_dir(spec: &BrowserSpec) -> io::Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
+    Ok(user_data_dir_at(&home, &spec.profile_id))
+}
+
+/// Remove a per-profile user-data-dir after a session ends (`wipe_on_exit`).
+/// A missing directory is fine; other errors are logged, not propagated.
+pub fn wipe_profile_dir(dir: &Path) {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => tracing::info!(dir = %dir.display(), "Wiped browser profile"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %dir.display(), "Failed to wipe browser profile")
+        }
+    }
+}
+
+/// Derive the Chrome command-line flags for a browser spec. `user_data_dir`,
+/// when provided, becomes `--user-data-dir=<path>` so each profile is isolated
+/// on disk. The window mode and start URL follow.
+pub fn chrome_flags(spec: &BrowserSpec, user_data_dir: Option<&Path>) -> Vec<String> {
     let mut args = Vec::new();
+    if let Some(dir) = user_data_dir {
+        args.push(format!("--user-data-dir={}", dir.display()));
+    }
     match spec.mode {
         BrowserMode::Kiosk => {
             args.push("--kiosk".to_string());
@@ -200,7 +239,7 @@ mod tests {
     #[test]
     fn kiosk_flags() {
         assert_eq!(
-            chrome_flags(&spec()),
+            chrome_flags(&spec(), None),
             vec![
                 "--kiosk".to_string(),
                 "https://classroom.google.com".to_string()
@@ -213,7 +252,7 @@ mod tests {
         let mut s = spec();
         s.mode = BrowserMode::App;
         assert_eq!(
-            chrome_flags(&s),
+            chrome_flags(&s, None),
             vec!["--app=https://classroom.google.com".to_string()]
         );
     }
@@ -223,7 +262,7 @@ mod tests {
         let mut s = spec();
         s.mode = BrowserMode::App;
         s.start_url = None;
-        assert!(chrome_flags(&s).is_empty());
+        assert!(chrome_flags(&s, None).is_empty());
     }
 
     #[test]
@@ -231,8 +270,36 @@ mod tests {
         let mut s = spec();
         s.mode = BrowserMode::Windowed;
         assert_eq!(
-            chrome_flags(&s),
+            chrome_flags(&s, None),
             vec!["https://classroom.google.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn user_data_dir_flag_comes_first() {
+        let dir = Path::new("/home/kid/.var/app/com.google.Chrome/config/google-chrome/school");
+        assert_eq!(
+            chrome_flags(&spec(), Some(dir)),
+            vec![
+                "--user-data-dir=/home/kid/.var/app/com.google.Chrome/config/google-chrome/school"
+                    .to_string(),
+                "--kiosk".to_string(),
+                "https://classroom.google.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn user_data_dir_is_per_profile_and_sanitized() {
+        assert_eq!(
+            user_data_dir_at(Path::new("/home/kid"), "school"),
+            Path::new("/home/kid/.var/app/com.google.Chrome/config/google-chrome/school")
+        );
+        // Defense-in-depth: a traversal-y profile id collapses to one safe
+        // component (slashes become underscores) and can't escape the parent.
+        assert_eq!(
+            user_data_dir_at(Path::new("/home/kid"), "../../etc"),
+            Path::new("/home/kid/.var/app/com.google.Chrome/config/google-chrome/.._.._etc")
         );
     }
 
@@ -242,6 +309,25 @@ mod tests {
         assert_eq!(sanitize_filename(".."), "entry");
         assert_eq!(sanitize_filename(""), "entry");
         assert_eq!(sanitize_filename("ok-1.2_3"), "ok-1.2_3");
+    }
+
+    #[test]
+    fn wipe_profile_dir_removes_tree_and_tolerates_missing() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("shepherd-wipe-test-{}-{n}", std::process::id()));
+
+        // Populate a nested tree, then wipe it.
+        std::fs::create_dir_all(root.join("Default/Cache")).unwrap();
+        std::fs::write(root.join("Default/Cookies"), b"x").unwrap();
+        assert!(root.exists());
+        wipe_profile_dir(&root);
+        assert!(!root.exists());
+
+        // Wiping an already-absent dir is a no-op (no panic).
+        wipe_profile_dir(&root);
     }
 
     #[test]
