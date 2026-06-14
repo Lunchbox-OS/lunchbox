@@ -207,6 +207,27 @@ network filter via systemd's BPF address controls
   early app startup.
 - **Steam**: not yet supported (logged as a warning).
 
+## Browser policy
+
+When `SpawnOptions::browser` is set and the entry is a Chromium-capable kind
+(`flatpak` — the supported `com.google.Chrome` path — or `process`), the
+adapter materializes the policy before spawning (`browser.rs`):
+
+- **Managed-policy JSON**: a `<policy_id>.json` file is written (regenerated
+  each spawn) under
+  `~/.var/app/com.google.Chrome/config/chromium/policies/managed/`, carrying
+  `URLAllowlist`/`URLBlocklist` and the lockdown switches
+  (`DeveloperToolsAvailability`, `IncognitoModeAvailability`,
+  `ExtensionInstallBlocklist`). A non-empty allowlist injects a catch-all
+  `"*"` blocklist so the allowlist is authoritative.
+- **Launch flags**: the window mode + start URL become Chrome flags
+  (`--kiosk <url>`, `--app=<url>`, or a bare `<url>`), appended to the argv.
+  For `process` kind these flags ride inside the firewall helper's wrapped
+  argv; for flatpak they follow the app id as app arguments.
+
+A failed policy write is logged and the launch continues. Profile management
+(`--user-data-dir`, `wipe_on_exit`) is a separate step and not yet wired here.
+
 ## Future Enhancements
 
 Planned features (hooks are designed in):

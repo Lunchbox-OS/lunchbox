@@ -186,6 +186,22 @@ impl InputCompatMode {
     }
 }
 
+/// How a supervised browser activity launches its window.
+///
+/// Translated by the host adapter into Chrome command-line flags. Shared by
+/// `shepherd-config`'s validated `BrowserPolicy` and `shepherd-host-api`'s
+/// `BrowserSpec` so there is a single source of truth for the mode vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserMode {
+    /// Fullscreen, no browser chrome (`--kiosk`).
+    Kiosk,
+    /// Single application window (`--app=<url>`).
+    App,
+    /// Normal browser window.
+    Windowed,
+}
+
 /// Per-activity tunables for input compatibility sidecars.
 ///
 /// All fields are optional; sidecars apply their own defaults when a field is

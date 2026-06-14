@@ -12,7 +12,7 @@ use crate::schema::{
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
-    EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
+    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
     WarningThreshold,
 };
 use shepherd_util::{
@@ -411,17 +411,6 @@ fn convert_firewall_config(raw: &RawFirewallConfig) -> FirewallPolicy {
         allow: normalize(&raw.allow),
         deny: normalize(&raw.deny),
     }
-}
-
-/// Browser window mode, controlling how Chrome is launched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrowserMode {
-    /// Fullscreen, no browser chrome (`--kiosk`).
-    Kiosk,
-    /// Single application window (`--app=<url>`).
-    App,
-    /// Normal browser window.
-    Windowed,
 }
 
 /// Validated supervised-browser policy applied to an entry at spawn time.

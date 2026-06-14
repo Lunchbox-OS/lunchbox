@@ -513,6 +513,31 @@ impl HostAdapter for LinuxHost {
         // Determine if this is a sandboxed app (snap or flatpak)
         let sandboxed_app_name = snap_name.clone().or_else(|| flatpak_app_id.clone());
 
+        // Materialize browser policy before spawning: write the Chromium
+        // managed-policy JSON and append Chrome launch flags to the argv. Only
+        // meaningful for Chromium-based apps — the supported path is the
+        // com.google.Chrome flatpak, but a `process`-kind Chromium binary works
+        // too. A failure to write the policy file is logged, not fatal.
+        let mut argv = argv;
+        if let Some(ref browser) = options.browser {
+            if matches!(
+                entry_kind,
+                EntryKind::Flatpak { .. } | EntryKind::Process { .. }
+            ) {
+                match crate::browser::write_managed_policy(browser) {
+                    Ok(path) => {
+                        info!(policy = %path.display(), "Wrote Chromium managed policy")
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to write Chromium managed policy; continuing")
+                    }
+                }
+                argv.extend(crate::browser::chrome_flags(browser));
+            } else {
+                warn!("Browser policy set on a non-Chromium entry kind; ignoring");
+            }
+        }
+
         // Apply firewall: for Process kind, hand the launch to the privileged
         // helper via pkexec, which runs `systemd-run --scope` against the
         // *system* manager (the one that can attach BPF cgroup programs).
