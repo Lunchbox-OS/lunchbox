@@ -66,6 +66,16 @@ fn expand_args(args: &[String]) -> Vec<String> {
     args.iter().map(|arg| expand_tilde(arg)).collect()
 }
 
+/// Resolve the base directory under which browser policy/profile dirs are
+/// materialized. Honors `SHEPHERD_BROWSER_ROOT` (used by tests to redirect
+/// writes away from the real `~/.var/app/...`), otherwise the user's home.
+fn resolve_browser_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("SHEPHERD_BROWSER_ROOT") {
+        return PathBuf::from(root);
+    }
+    dirs::home_dir().unwrap_or_default()
+}
+
 /// Pop any sidecars registered for `pid` and terminate them on a blocking
 /// thread so the async monitor isn't stalled by SIGTERM/SIGKILL waits.
 fn reap_sidecars(sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>, pid: u32) {
@@ -114,6 +124,9 @@ pub struct LinuxHost {
     /// (`wipe_on_exit`), keyed by the activity's pid. The monitor (or `stop`)
     /// removes the entry and wipes the dir exactly once.
     profile_wipes: Arc<Mutex<HashMap<u32, PathBuf>>>,
+    /// Base dir for browser policy/profile materialization (the user's home in
+    /// production; redirected in tests). Empty if no home could be resolved.
+    browser_root: PathBuf,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
     /// Steam launch interstitials we're allowed to auto-dismiss via CEF (see
@@ -138,6 +151,7 @@ impl LinuxHost {
             steam_preload_pids: Arc::new(Mutex::new(HashSet::new())),
             sidecars: Arc::new(Mutex::new(HashMap::new())),
             profile_wipes: Arc::new(Mutex::new(HashMap::new())),
+            browser_root: resolve_browser_root(),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
@@ -534,11 +548,15 @@ impl HostAdapter for LinuxHost {
         let mut argv = argv;
         let mut pending_wipe: Option<PathBuf> = None;
         if let Some(ref browser) = options.browser {
-            if matches!(
+            if !matches!(
                 entry_kind,
                 EntryKind::Flatpak { .. } | EntryKind::Process { .. }
             ) {
-                match crate::browser::write_managed_policy(browser) {
+                warn!("Browser policy set on a non-Chromium entry kind; ignoring");
+            } else if self.browser_root.as_os_str().is_empty() {
+                warn!("Browser policy set but no home directory could be resolved; ignoring");
+            } else {
+                match crate::browser::write_managed_policy(&self.browser_root, browser) {
                     Ok(path) => {
                         info!(policy = %path.display(), "Wrote Chromium managed policy")
                     }
@@ -546,29 +564,13 @@ impl HostAdapter for LinuxHost {
                         warn!(error = %e, "Failed to write Chromium managed policy; continuing")
                     }
                 }
-                // Resolve the per-profile user-data-dir so each profile is
-                // isolated on disk and so we know what to wipe on exit.
-                let user_data_dir = match crate::browser::user_data_dir(browser) {
-                    Ok(dir) => Some(dir),
-                    Err(e) => {
-                        warn!(error = %e, "Could not resolve browser user-data-dir; using Chrome default");
-                        None
-                    }
-                };
-                argv.extend(crate::browser::chrome_flags(
-                    browser,
-                    user_data_dir.as_deref(),
-                ));
+                // Per-profile user-data-dir: isolates the profile on disk and is
+                // what we wipe on exit when `wipe_on_exit` is set.
+                let user_data_dir = crate::browser::user_data_dir(&self.browser_root, browser);
+                argv.extend(crate::browser::chrome_flags(browser, Some(&user_data_dir)));
                 if browser.wipe_on_exit {
-                    match user_data_dir {
-                        Some(dir) => pending_wipe = Some(dir),
-                        None => warn!(
-                            "browser.wipe_on_exit set but user-data-dir is unknown; cannot wipe"
-                        ),
-                    }
+                    pending_wipe = Some(user_data_dir);
                 }
-            } else {
-                warn!("Browser policy set on a non-Chromium entry kind; ignoring");
             }
         }
 
@@ -1017,5 +1019,165 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // --- Browser materialization wiring (no real Chrome needed) ---
+
+    use shepherd_api::BrowserMode;
+    use shepherd_host_api::BrowserSpec;
+    use std::path::Path;
+
+    fn unique_tmp(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("shepherd-browser-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn write_exec(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn browser_spec() -> BrowserSpec {
+        BrowserSpec {
+            policy_id: "chrome-school".into(),
+            profile_id: "school".into(),
+            mode: BrowserMode::Kiosk,
+            start_url: Some("https://classroom.google.com".into()),
+            url_allowlist: vec!["https://*.google.com/*".into()],
+            url_blocklist: vec![],
+            disable_dev_tools: true,
+            disable_incognito: true,
+            disable_extensions: true,
+            wipe_on_exit: false,
+        }
+    }
+
+    /// `spawn` must write the managed-policy JSON under the browser root and
+    /// append the `--user-data-dir` / `--kiosk` / start-URL flags to the real
+    /// argv the activity is launched with. A fake "chrome" records its argv.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_spawn_writes_policy_and_appends_flags() {
+        let root = unique_tmp("policy");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("fake-chrome.sh");
+        let argv_out = root.join("argv.txt");
+        write_exec(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SHEPHERD_TEST_ARGV\"\n",
+        );
+
+        let mut host = LinuxHost::new();
+        host.browser_root = root.clone();
+        let _rx = host.subscribe();
+
+        let mut env = HashMap::new();
+        env.insert(
+            "SHEPHERD_TEST_ARGV".to_string(),
+            argv_out.display().to_string(),
+        );
+        let entry = EntryKind::Process {
+            command: script.display().to_string(),
+            args: vec![],
+            env,
+            cwd: None,
+        };
+        let opts = SpawnOptions {
+            browser: Some(browser_spec()),
+            ..Default::default()
+        };
+        host.spawn(SessionId::new(), &entry, opts).await.unwrap();
+
+        // The managed policy is written synchronously before the spawn, so it
+        // already exists at the documented path under the injected root.
+        let policy = root
+            .join(".var/app/com.google.Chrome/config/chromium/policies/managed/chrome-school.json");
+        assert!(
+            policy.exists(),
+            "managed policy not written at {}",
+            policy.display()
+        );
+        let body = std::fs::read_to_string(&policy).unwrap();
+        assert!(body.contains("URLAllowlist"), "policy body: {body}");
+        assert!(
+            body.contains("\"*\""),
+            "catch-all blocklist missing: {body}"
+        );
+
+        // The fake chrome records the argv it was launched with.
+        for _ in 0..100 {
+            if argv_out.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let argv = std::fs::read_to_string(&argv_out).expect("fake chrome did not record argv");
+        let udd = root.join(".var/app/com.google.Chrome/config/google-chrome/school");
+        assert!(
+            argv.lines()
+                .any(|l| l == format!("--user-data-dir={}", udd.display())),
+            "missing --user-data-dir; argv:\n{argv}"
+        );
+        assert!(argv.lines().any(|l| l == "--kiosk"), "argv:\n{argv}");
+        assert!(
+            argv.lines().any(|l| l == "https://classroom.google.com"),
+            "argv:\n{argv}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With `wipe_on_exit`, the per-profile user-data-dir is removed once the
+    /// activity exits — driven through the process monitor, end to end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_wipe_on_exit_removes_profile_dir() {
+        let root = unique_tmp("wipe");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut spec = browser_spec();
+        spec.profile_id = "ephemeral".into();
+        spec.mode = BrowserMode::Windowed;
+        spec.start_url = None;
+        spec.wipe_on_exit = true;
+
+        // Simulate Chrome having created the profile dir.
+        let udd = crate::browser::user_data_dir(&root, &spec);
+        std::fs::create_dir_all(udd.join("Default")).unwrap();
+        std::fs::write(udd.join("Default/Cookies"), b"x").unwrap();
+        assert!(udd.exists());
+
+        let mut host = LinuxHost::new();
+        host.browser_root = root.clone();
+        let _rx = host.subscribe();
+        let _monitor = host.start_monitor();
+
+        let entry = EntryKind::Process {
+            command: "true".into(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: None,
+        };
+        let opts = SpawnOptions {
+            browser: Some(spec),
+            ..Default::default()
+        };
+        host.spawn(SessionId::new(), &entry, opts).await.unwrap();
+
+        // `true` exits immediately; the monitor detects the exit and wipes.
+        let mut gone = false;
+        for _ in 0..150 {
+            if !udd.exists() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "user-data-dir was not wiped: {}", udd.display());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

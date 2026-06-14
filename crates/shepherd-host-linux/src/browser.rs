@@ -96,12 +96,11 @@ fn managed_policy_path(home: &Path, policy_id: &str) -> PathBuf {
         .join(format!("{}.json", sanitize_filename(policy_id)))
 }
 
-/// Write (or overwrite) the Chromium managed-policy JSON for `spec`, returning
-/// the path written. Regenerated on every spawn so config edits take effect.
-pub fn write_managed_policy(spec: &BrowserSpec) -> io::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
-    let path = managed_policy_path(&home, &spec.policy_id);
+/// Write (or overwrite) the Chromium managed-policy JSON for `spec` under
+/// `root` (normally the user's home), returning the path written. Regenerated
+/// on every spawn so config edits take effect.
+pub fn write_managed_policy(root: &Path, spec: &BrowserSpec) -> io::Result<PathBuf> {
+    let path = managed_policy_path(root, &spec.policy_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -116,13 +115,12 @@ fn user_data_dir_at(home: &Path, profile_id: &str) -> PathBuf {
         .join(sanitize_filename(profile_id))
 }
 
-/// Resolve the absolute per-profile user-data-dir for `spec`. The directory is
-/// not created here — Chrome creates it on first launch; we only need the path
-/// for the `--user-data-dir` flag and for [`wipe_profile_dir`].
-pub fn user_data_dir(spec: &BrowserSpec) -> io::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
-    Ok(user_data_dir_at(&home, &spec.profile_id))
+/// Resolve the absolute per-profile user-data-dir for `spec` under `root`
+/// (normally the user's home). The directory is not created here — Chrome
+/// creates it on first launch; we only need the path for the `--user-data-dir`
+/// flag and for [`wipe_profile_dir`].
+pub fn user_data_dir(root: &Path, spec: &BrowserSpec) -> PathBuf {
+    user_data_dir_at(root, &spec.profile_id)
 }
 
 /// Remove a per-profile user-data-dir after a session ends (`wipe_on_exit`).
@@ -214,6 +212,27 @@ mod tests {
         let json = build_policy_json(&s);
         assert!(json.get("URLAllowlist").is_none());
         assert_eq!(json["URLBlocklist"], json!(["https://evil.example/*"]));
+    }
+
+    /// Golden snapshot of the whole managed-policy document for a fully-locked
+    /// spec. Locks the exact policy keys/values (and the `URLBlocklist: ["*"]`
+    /// injection) so an accidental change to the security-sensitive mapping
+    /// fails loudly rather than silently weakening the kiosk.
+    #[test]
+    fn policy_json_golden() {
+        let mut s = spec();
+        s.url_allowlist = vec!["https://*.google.com/*".into()];
+        s.url_blocklist = vec!["https://*.google.com/ads/*".into()];
+        assert_eq!(
+            build_policy_json(&s),
+            json!({
+                "URLAllowlist": ["https://*.google.com/*"],
+                "URLBlocklist": ["*", "https://*.google.com/ads/*"],
+                "DeveloperToolsAvailability": 2,
+                "IncognitoModeAvailability": 1,
+                "ExtensionInstallBlocklist": ["*"],
+            })
+        );
     }
 
     #[test]
