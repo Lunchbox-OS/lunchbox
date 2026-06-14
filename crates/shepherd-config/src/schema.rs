@@ -57,6 +57,10 @@ pub struct RawServiceConfig {
     #[serde(default)]
     pub internet: Option<RawInternetConfig>,
 
+    /// Steam-specific behaviour
+    #[serde(default)]
+    pub steam: Option<RawSteamConfig>,
+
     /// Management HTTP API settings
     #[serde(default)]
     pub management_api: Option<RawManagementApiConfig>,
@@ -350,6 +354,30 @@ pub struct RawInternetConfig {
 
     /// Timeout per check (milliseconds)
     pub timeout_ms: Option<u64>,
+}
+
+/// Steam-specific service configuration
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawSteamConfig {
+    /// Known Steam launch interstitials (blocking modals between launch and the
+    /// game starting) to auto-dismiss by clicking their affirmative button, so
+    /// they don't hang the kiosk on a modal it can't show. Each value is an
+    /// interstitial slug (e.g. "cloud_sync", "controller_recommended"). Only
+    /// listed kinds are dismissed; an empty list disables the feature entirely
+    /// (and the CEF remote-debugging port is never opened). When unset, a safe
+    /// default set of verified, benign kinds is used.
+    pub auto_dismiss_interstitials: Option<Vec<String>>,
+
+    /// Allow "risky" interstitial kinds (those whose dismissal launches a game
+    /// that can't actually be used without missing hardware, e.g.
+    /// "controller_required") to appear in `auto_dismiss_interstitials`. Without
+    /// this, listing a risky kind is a configuration error.
+    #[serde(default)]
+    pub allow_risky_dismiss: bool,
+
+    /// How long to wait for a Steam game window/process to appear after launch
+    /// before giving up and ending the session with an error (seconds).
+    pub launch_timeout_seconds: Option<u64>,
 }
 
 /// Per-entry internet requirement

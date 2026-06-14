@@ -20,6 +20,76 @@ pub enum EntryKindTag {
     Custom,
 }
 
+/// A known Steam "launch interstitial" — one of the blocking modals Steam can
+/// show between a launch request and the game actually starting (cloud-sync
+/// warnings, controller advisories, etc.). The kiosk can be configured to
+/// auto-dismiss specific kinds; see `service.steam.auto_dismiss_interstitials`.
+///
+/// This enum is the canonical catalog: config validates against it, and the
+/// host adapter attaches the per-kind CEF detection signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterstitialKind {
+    /// "Unable to Sync" Steam Cloud warning shown when launching offline with
+    /// un-uploaded saves. Affirmative action: "Play anyway". (Verified.)
+    CloudSync,
+    /// "Grab a controller…" advisory for controller-recommended games launched
+    /// without a controller. Affirmative action: "OK". (Verified.)
+    ControllerRecommended,
+    /// First-launch "intro to Steam Input" notice. Affirmative action: "OK".
+    /// (Best-effort signature.)
+    SteamInputIntro,
+    /// Game *requires* a controller. Dismissing launches a game that cannot be
+    /// played without one, so this is risky. (Best-effort signature.)
+    ControllerRequired,
+    /// Game requires a VR headset. Dismissing launches something unusable
+    /// without VR hardware, so this is risky. (Best-effort signature.)
+    VrRequired,
+}
+
+impl InterstitialKind {
+    /// Every known kind, in catalog order.
+    pub const ALL: [InterstitialKind; 5] = [
+        InterstitialKind::CloudSync,
+        InterstitialKind::ControllerRecommended,
+        InterstitialKind::SteamInputIntro,
+        InterstitialKind::ControllerRequired,
+        InterstitialKind::VrRequired,
+    ];
+
+    /// The kinds auto-dismissed by default: the verified, benign ones.
+    pub const DEFAULT_AUTO_DISMISS: [InterstitialKind; 2] = [
+        InterstitialKind::CloudSync,
+        InterstitialKind::ControllerRecommended,
+    ];
+
+    /// Stable config slug for this kind (matches the serde snake_case name).
+    pub fn slug(self) -> &'static str {
+        match self {
+            InterstitialKind::CloudSync => "cloud_sync",
+            InterstitialKind::ControllerRecommended => "controller_recommended",
+            InterstitialKind::SteamInputIntro => "steam_input_intro",
+            InterstitialKind::ControllerRequired => "controller_required",
+            InterstitialKind::VrRequired => "vr_required",
+        }
+    }
+
+    /// Parse a config slug into a kind.
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        InterstitialKind::ALL.into_iter().find(|k| k.slug() == slug)
+    }
+
+    /// Whether auto-dismissing this kind launches something the user likely
+    /// can't actually use (missing required hardware). Risky kinds require an
+    /// explicit opt-in to enable.
+    pub fn is_risky(self) -> bool {
+        matches!(
+            self,
+            InterstitialKind::ControllerRequired | InterstitialKind::VrRequired
+        )
+    }
+}
+
 /// Entry kind with launch details
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

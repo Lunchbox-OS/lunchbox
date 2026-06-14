@@ -49,6 +49,30 @@ check = "https://connectivitycheck.gstatic.com/generate_204"
 interval_seconds = 300  # Keep this high to avoid excessive network requests
 timeout_ms = 1500
 
+# Steam-specific behaviour (optional)
+# Steam can block a game launch behind an "interstitial" — a modal it shows
+# between the launch request and the game starting (e.g. the offline "Unable to
+# Sync" cloud warning, or a "connect a controller" advisory). These render
+# inside Steam's hidden CEF UI, so on a kiosk the launch just hangs forever.
+# shepherdd watches Steam's loopback CEF remote-debugging endpoint and clicks the
+# affirmative button for the interstitials you list here. Only listed kinds are
+# dismissed; an empty list disables the feature and the debug port is never
+# opened. When this key is omitted, the safe default set below is used.
+#   cloud_sync             - "Unable to Sync" offline save warning (Play anyway)
+#   controller_recommended - "connect a controller" advisory (OK)
+#   steam_input_intro      - first-launch Steam Input intro (OK)
+#   controller_required    - game REQUIRES a controller   (risky)
+#   vr_required            - game REQUIRES a VR headset    (risky)
+# "Risky" kinds launch a game that can't be used without the missing hardware;
+# listing one requires allow_risky_dismiss = true. To instead keep a game from
+# running at all in some condition, mark its entry `internet.required` (hidden
+# when offline). If a blocker can't be (or isn't allowed to be) dismissed, the
+# launch stalls out and ends with an error rather than surfacing the Steam window.
+[service.steam]
+auto_dismiss_interstitials = ["cloud_sync", "controller_recommended"]
+allow_risky_dismiss = false
+launch_timeout_seconds = 30
+
 # HTTP management API (optional)
 # Exposes a REST API for remote control, usage analytics, and daily overrides.
 # Intended for local/LAN use (e.g. a parent's phone on the same network).
