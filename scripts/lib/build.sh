@@ -16,6 +16,7 @@ SHEPHERD_BINARIES=(
     "shepherd-hud"
     "shepherd-media"
     "shepherd-touch-bridge"
+    "shepherd-tablet-bridge"
     "shepherd-gamepad-bridge"
 )
 

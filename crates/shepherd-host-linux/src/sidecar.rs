@@ -41,6 +41,11 @@ pub fn touch_bridge_binary() -> PathBuf {
     sidecar_binary("shepherd-touch-bridge", "SHEPHERD_TOUCH_BRIDGE_BIN")
 }
 
+/// Locate the `shepherd-tablet-bridge` binary.
+pub fn tablet_bridge_binary() -> PathBuf {
+    sidecar_binary("shepherd-tablet-bridge", "SHEPHERD_TABLET_BRIDGE_BIN")
+}
+
 /// Locate the `shepherd-gamepad-bridge` binary.
 pub fn gamepad_bridge_binary() -> PathBuf {
     sidecar_binary("shepherd-gamepad-bridge", "SHEPHERD_GAMEPAD_BRIDGE_BIN")
@@ -62,6 +67,25 @@ pub fn spawn_touch_bridge(output_scale: f64) -> std::io::Result<Child> {
         .stderr(Stdio::inherit())
         .spawn()?;
     info!(pid = child.id(), "Touch-to-mouse bridge spawned");
+    Ok(child)
+}
+
+/// Spawn the tablet-to-touch bridge as a child of the daemon.
+///
+/// `output_scale` is the compositor's current output scale; the bridge divides
+/// its absolute coordinates by it so synthesized contacts land in logical
+/// (scaled) coordinates. Pass `1.0` when scaling is unknown.
+pub fn spawn_tablet_bridge(output_scale: f64) -> std::io::Result<Child> {
+    let bin = tablet_bridge_binary();
+    debug!(binary = %bin.display(), output_scale, "Launching tablet-to-touch bridge");
+    let child = Command::new(&bin)
+        .arg("--output-scale")
+        .arg(format!("{output_scale}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    info!(pid = child.id(), "Tablet-to-touch bridge spawned");
     Ok(child)
 }
 
@@ -122,7 +146,7 @@ impl GamepadPreset {
         match mode {
             InputCompatMode::GamepadProductivity => Some(Self::Productivity),
             InputCompatMode::GamepadGpd => Some(Self::Gpd),
-            InputCompatMode::TouchToMouse => None,
+            InputCompatMode::TouchToMouse | InputCompatMode::TabletToTouch => None,
         }
     }
 

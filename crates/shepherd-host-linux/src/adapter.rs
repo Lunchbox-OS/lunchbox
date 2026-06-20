@@ -23,7 +23,9 @@ use crate::process::{
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
     kill_steam_game_processes, make_scope_name,
 };
-use crate::sidecar::{GamepadPreset, spawn_gamepad_bridge, spawn_touch_bridge, terminate_sidecar};
+use crate::sidecar::{
+    GamepadPreset, spawn_gamepad_bridge, spawn_tablet_bridge, spawn_touch_bridge, terminate_sidecar,
+};
 use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
 
 /// Best-effort query of the compositor output scale for the touch bridge.
@@ -641,6 +643,15 @@ impl HostAdapter for LinuxHost {
                         Ok(child) => session_sidecars.push(child),
                         Err(e) => {
                             warn!(error = %e, "Failed to spawn touch-to-mouse bridge; continuing without it")
+                        }
+                    }
+                }
+                InputCompatMode::TabletToTouch => {
+                    let scale = touch_output_scale().await;
+                    match spawn_tablet_bridge(scale) {
+                        Ok(child) => session_sidecars.push(child),
+                        Err(e) => {
+                            warn!(error = %e, "Failed to spawn tablet-to-touch bridge; continuing without it")
                         }
                     }
                 }
