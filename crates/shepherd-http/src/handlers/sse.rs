@@ -12,7 +12,7 @@ use crate::state::AppState;
 pub async fn sse_handler(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
-    let rx = state.event_tx.subscribe();
+    let rx = state.svc.subscribe_events();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(event) => serde_json::to_string(&event)
             .ok()

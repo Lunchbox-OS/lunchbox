@@ -3958,6 +3958,7 @@ dependencies = [
  "shepherd-config",
  "shepherd-core",
  "shepherd-host-api",
+ "shepherd-management",
  "shepherd-store",
  "shepherd-util",
  "tempfile",
@@ -4020,6 +4021,25 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "shepherd-management"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "shepherd-api",
+ "shepherd-config",
+ "shepherd-core",
+ "shepherd-host-api",
+ "shepherd-store",
+ "shepherd-util",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4134,6 +4154,7 @@ dependencies = [
  "shepherd-host-linux",
  "shepherd-http",
  "shepherd-ipc",
+ "shepherd-management",
  "shepherd-store",
  "shepherd-util",
  "tempfile",

@@ -9,6 +9,6 @@ use crate::state::AppState;
 
 pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
     info!("Logout requested via HTTP");
-    let _ = state.shutdown_tx.send(true);
+    state.svc.logout().await;
     StatusCode::NO_CONTENT
 }

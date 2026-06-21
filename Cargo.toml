@@ -10,6 +10,7 @@ members = [
     "crates/shepherd-core",
     "crates/shepherd-host-linux",
     "crates/shepherd-ipc",
+    "crates/shepherd-management",
     "crates/shepherd-http",
     "crates/shepherdd",
     "crates/shepherd-launcher-ui",
@@ -44,6 +45,7 @@ shepherd-store = { path = "crates/shepherd-store" }
 shepherd-core = { path = "crates/shepherd-core" }
 shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
+shepherd-management = { path = "crates/shepherd-management" }
 shepherd-http = { path = "crates/shepherd-http" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
 

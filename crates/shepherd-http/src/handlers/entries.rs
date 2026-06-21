@@ -9,7 +9,7 @@ use serde::Deserialize;
 use shepherd_api::EntryView;
 use shepherd_util::EntryId;
 
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -22,8 +22,7 @@ pub async fn list_entries(
     Query(q): Query<AtTimeQuery>,
 ) -> ApiResult<Json<Vec<EntryView>>> {
     let now = q.at.unwrap_or_else(shepherd_util::now);
-    let eng = state.engine.lock().await;
-    Ok(Json(eng.list_entries(now)))
+    Ok(Json(state.svc.list_entries(now).await))
 }
 
 pub async fn get_entry(
@@ -33,11 +32,5 @@ pub async fn get_entry(
 ) -> ApiResult<Json<EntryView>> {
     let now = q.at.unwrap_or_else(shepherd_util::now);
     let entry_id = EntryId::new(id);
-    let eng = state.engine.lock().await;
-
-    eng.list_entries(now)
-        .into_iter()
-        .find(|e| e.entry_id == entry_id)
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("No entry with id '{entry_id}'")))
+    Ok(Json(state.svc.get_entry(&entry_id, now).await?))
 }

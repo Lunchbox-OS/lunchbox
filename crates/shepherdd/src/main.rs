@@ -26,6 +26,7 @@ use shepherd_host_api::{
 use shepherd_host_linux::{LinuxBrightnessController, LinuxHost, LinuxVolumeController};
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
+use shepherd_management::DefaultManagementService;
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{ClientId, MonotonicInstant, RateLimiter, default_config_path};
 use std::path::{Path, PathBuf};
@@ -230,7 +231,7 @@ impl Service {
         let http_handle = if let Some(api_cfg) = management_api_config {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();
-            let http_state = HttpAppState {
+            let svc = Arc::new(DefaultManagementService {
                 engine: engine.clone(),
                 store: store.clone(),
                 host: host.clone() as Arc<dyn HostAdapter>,
@@ -244,7 +245,8 @@ impl Service {
                 config_path: config_path.clone(),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
-            };
+            });
+            let http_state = HttpAppState { svc };
             let http_server = HttpServer::new(http_state, api_cfg);
             let http_shutdown_rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {

@@ -8,7 +8,7 @@ use axum::{
 };
 use chrono::NaiveDate;
 use serde::Deserialize;
-use shepherd_api::{DailyOverride, Event, EventPayload};
+use shepherd_api::DailyOverride;
 use shepherd_util::EntryId;
 
 use crate::error::{ApiError, ApiResult};
@@ -24,11 +24,7 @@ pub async fn list_overrides(
     Query(q): Query<DateQuery>,
 ) -> ApiResult<Json<Vec<DailyOverride>>> {
     let date = q.date.unwrap_or_else(|| shepherd_util::now().date_naive());
-    let overrides = state
-        .store
-        .list_daily_overrides(date)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(overrides))
+    Ok(Json(state.svc.list_overrides(date).await?))
 }
 
 pub async fn get_override(
@@ -38,11 +34,7 @@ pub async fn get_override(
 ) -> ApiResult<Json<Option<DailyOverride>>> {
     let date = q.date.unwrap_or_else(|| shepherd_util::now().date_naive());
     let id = EntryId::new(entry_id);
-    let ov = state
-        .store
-        .get_daily_override(&id, date)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(ov))
+    Ok(Json(state.svc.get_override(&id, date).await?))
 }
 
 #[derive(Deserialize)]
@@ -61,24 +53,12 @@ pub async fn upsert_override(
         .date
         .unwrap_or_else(|| shepherd_util::now().date_naive());
     let id = EntryId::new(entry_id);
-
-    // Validate that at least one field is set
-    if body.availability.is_none() && body.quota_delta_seconds.is_none() {
-        return Err(ApiError::BadRequest(
-            "At least one of 'availability' or 'quota_delta_seconds' must be provided".into(),
-        ));
-    }
-
-    let ov = state
-        .store
-        .upsert_daily_override(&id, date, body.availability, body.quota_delta_seconds)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // Broadcast state change so UIs update immediately
-    let snap = state.engine.lock().await.get_state();
-    (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
-
-    Ok(Json(ov))
+    Ok(Json(
+        state
+            .svc
+            .upsert_override(&id, date, body.availability, body.quota_delta_seconds)
+            .await?,
+    ))
 }
 
 pub async fn delete_override(
@@ -89,21 +69,13 @@ pub async fn delete_override(
     let date = q.date.unwrap_or_else(|| shepherd_util::now().date_naive());
     let id = EntryId::new(entry_id);
 
-    match state.store.clear_daily_override(&id, date) {
-        Ok(true) => {
-            let snap = state.engine.lock().await.get_state();
-            (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
-            StatusCode::NO_CONTENT.into_response()
-        }
+    match state.svc.delete_override(&id, date).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not_found", "message": "No override found for this entry and date" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "internal_error", "message": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => ApiError::from(e).into_response(),
     }
 }

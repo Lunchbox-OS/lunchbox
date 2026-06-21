@@ -1,0 +1,23 @@
+[package]
+name = "shepherd-management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Transport-agnostic management service trait shared by shepherd-http and (planned) shepherd-ble"
+
+[dependencies]
+shepherd-util = { workspace = true }
+shepherd-api = { workspace = true }
+shepherd-host-api = { workspace = true }
+shepherd-config = { workspace = true }
+shepherd-store = { workspace = true }
+shepherd-core = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"

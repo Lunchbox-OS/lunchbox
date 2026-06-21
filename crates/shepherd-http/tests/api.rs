@@ -15,6 +15,7 @@ use shepherd_host_api::{
     HostCapabilities, MockHost, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
 };
 use shepherd_http::{AppState, handlers};
+use shepherd_management::DefaultManagementService;
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
 use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
@@ -190,7 +191,7 @@ fn make_app_with_policy(
     let (tx, _) = broadcast::channel::<Event>(64);
     let tx_for_fn = tx.clone();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    let state = AppState {
+    let svc = Arc::new(DefaultManagementService {
         engine,
         store,
         host,
@@ -203,7 +204,8 @@ fn make_app_with_policy(
         config_path,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
-    };
+    });
+    let state = AppState { svc };
     handlers::router(state, auth_token.map(str::to_owned))
 }
 

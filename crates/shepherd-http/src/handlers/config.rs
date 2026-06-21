@@ -1,36 +1,25 @@
 //! Config reload handler
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use shepherd_api::{Event, EventPayload};
-use shepherd_config::load_config;
-use tracing::warn;
 
+use crate::error::ApiError;
 use crate::state::AppState;
 
 pub async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
-    match load_config(&state.config_path) {
-        Ok(policy) => {
-            let entry_count = policy.entries.len();
-            {
-                let mut eng = state.engine.lock().await;
-                eng.reload_policy(policy);
-            }
-            let snap = state.engine.lock().await.get_state();
-            (state.broadcast_fn)(Event::new(EventPayload::PolicyReloaded { entry_count }));
-            (state.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "entry_count": entry_count })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            warn!(error = %e, "Config reload failed via HTTP API");
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({ "error": "config_error", "message": e.to_string() })),
-            )
-                .into_response()
-        }
+    match state.svc.reload_config().await {
+        Ok(entry_count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "entry_count": entry_count })),
+        )
+            .into_response(),
+        // The underlying load_config error is surfaced as Unprocessable; map
+        // to the existing 422 + {"error": "config_error", ...} wire shape so
+        // existing clients continue to recognise the failure code.
+        Err(shepherd_management::ManagementError::Unprocessable(msg)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "config_error", "message": msg })),
+        )
+            .into_response(),
+        Err(other) => ApiError::from(other).into_response(),
     }
 }
