@@ -64,6 +64,11 @@ pub struct RawServiceConfig {
     /// Management HTTP API settings
     #[serde(default)]
     pub management_api: Option<RawManagementApiConfig>,
+
+    /// Bluetooth LE management transport. Designed as the primary admin
+    /// path (works without IP autodiscovery or static IP). See
+    /// `docs/ai/history/2026-06-20 002 ble-management.md`.
+    pub ble_management: Option<RawBleManagementConfig>,
 }
 
 /// Raw entry definition
@@ -415,6 +420,29 @@ pub struct RawManagementApiConfig {
 
     /// Optional Bearer token for authentication. If absent, all LAN clients are trusted.
     pub auth_token: Option<String>,
+}
+
+/// Bluetooth LE management transport configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawBleManagementConfig {
+    /// Whether the BLE management transport is enabled (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Advertised local name and the device name returned in `DeviceInfo`.
+    /// Defaults to `"shepherd"`. Pick something the companion app can
+    /// disambiguate when multiple shepherd devices are in range.
+    pub device_name: Option<String>,
+
+    /// Where the admin record (`AdminRecord` TOML) is persisted.
+    /// Defaults to `<data_dir>/admin.toml`.
+    pub admin_record_path: Option<PathBuf>,
+
+    /// Sentinel file path. When present at daemon startup, the admin
+    /// record is wiped and the device returns to the unclaimed state
+    /// (and the file is removed). Defaults to
+    /// `<data_dir>/.factory-reset-ble`.
+    pub reset_sentinel_path: Option<PathBuf>,
 }
 
 /// Volume control configuration

@@ -4342,6 +4342,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shepherd-api",
+ "shepherd-ble",
  "shepherd-config",
  "shepherd-core",
  "shepherd-host-api",

@@ -17,6 +17,7 @@ use shepherd_api::{
     EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo,
     VolumeRestrictions,
 };
+use shepherd_ble::{BleServer, BleServerConfig, NoopPairingDisplay};
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
 use shepherd_host_api::{
@@ -26,7 +27,7 @@ use shepherd_host_api::{
 use shepherd_host_linux::{LinuxBrightnessController, LinuxHost, LinuxVolumeController};
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
-use shepherd_management::DefaultManagementService;
+use shepherd_management::{DefaultManagementService, ManagementService};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{ClientId, MonotonicInstant, RateLimiter, default_config_path};
 use std::path::{Path, PathBuf};
@@ -223,39 +224,82 @@ impl Service {
         // controller via `Arc<dyn HidpiController>`).
         let hidpi = Arc::new(XwaylandHidpi::new(ipc_ref.clone(), event_tx.clone()));
 
-        // Start HTTP management API if configured
-        let management_api_config = {
+        // Start management transports (HTTP and/or BLE). Both speak the
+        // same shepherd_management::ManagementService, so the service is
+        // constructed once and shared.
+        let (management_api_config, ble_management_config) = {
             let eng = engine.lock().await;
-            eng.policy().service.management_api.clone()
+            (
+                eng.policy().service.management_api.clone(),
+                eng.policy().service.ble_management.clone(),
+            )
         };
-        let http_handle = if let Some(api_cfg) = management_api_config {
-            let ipc_for_broadcast = ipc_ref.clone();
-            let event_tx_for_broadcast = event_tx.clone();
-            let svc = Arc::new(DefaultManagementService {
-                engine: engine.clone(),
-                store: store.clone(),
-                host: host.clone() as Arc<dyn HostAdapter>,
-                volume: volume.clone() as Arc<dyn VolumeController>,
-                brightness: brightness.clone() as Arc<dyn BrightnessController>,
-                event_tx: event_tx.clone(),
-                broadcast_fn: Arc::new(move |event: Event| {
-                    ipc_for_broadcast.broadcast_event(event.clone());
-                    let _ = event_tx_for_broadcast.send(event);
-                }),
-                config_path: config_path.clone(),
-                shutdown_tx: shutdown_tx.clone(),
-                hidpi: hidpi.clone() as Arc<dyn HidpiController>,
-            });
-            let http_state = HttpAppState { svc };
-            let http_server = HttpServer::new(http_state, api_cfg);
-            let http_shutdown_rx = shutdown_rx.clone();
-            Some(tokio::spawn(async move {
-                if let Err(e) = http_server.run(http_shutdown_rx).await {
-                    error!(error = %e, "HTTP management API error");
+
+        let svc: Option<Arc<dyn ManagementService>> =
+            if management_api_config.is_some() || ble_management_config.is_some() {
+                let ipc_for_broadcast = ipc_ref.clone();
+                let event_tx_for_broadcast = event_tx.clone();
+                Some(Arc::new(DefaultManagementService {
+                    engine: engine.clone(),
+                    store: store.clone(),
+                    host: host.clone() as Arc<dyn HostAdapter>,
+                    volume: volume.clone() as Arc<dyn VolumeController>,
+                    brightness: brightness.clone() as Arc<dyn BrightnessController>,
+                    event_tx: event_tx.clone(),
+                    broadcast_fn: Arc::new(move |event: Event| {
+                        ipc_for_broadcast.broadcast_event(event.clone());
+                        let _ = event_tx_for_broadcast.send(event);
+                    }),
+                    config_path: config_path.clone(),
+                    shutdown_tx: shutdown_tx.clone(),
+                    hidpi: hidpi.clone() as Arc<dyn HidpiController>,
+                }))
+            } else {
+                None
+            };
+
+        let http_handle = match (management_api_config, svc.as_ref()) {
+            (Some(api_cfg), Some(svc)) => {
+                let http_state = HttpAppState { svc: svc.clone() };
+                let http_server = HttpServer::new(http_state, api_cfg);
+                let http_shutdown_rx = shutdown_rx.clone();
+                Some(tokio::spawn(async move {
+                    if let Err(e) = http_server.run(http_shutdown_rx).await {
+                        error!(error = %e, "HTTP management API error");
+                    }
+                }))
+            }
+            _ => None,
+        };
+
+        let ble_handle = match (ble_management_config, svc.as_ref()) {
+            (Some(ble_cfg), Some(svc)) => {
+                let bsc = BleServerConfig {
+                    device_name: ble_cfg.device_name,
+                    firmware_version: env!("CARGO_PKG_VERSION").to_string(),
+                    admin_record_path: ble_cfg.admin_record_path,
+                    reset_sentinel_path: ble_cfg.reset_sentinel_path,
+                };
+                // PairingDisplay is a no-op until the Sway overlay
+                // sidecar lands; advertising and the GATT app still
+                // come up, pairing just lacks an on-device visual.
+                let display = Arc::new(NoopPairingDisplay);
+                match BleServer::new(bsc, svc.clone(), display) {
+                    Ok(server) => {
+                        let rx = shutdown_rx.clone();
+                        Some(tokio::spawn(async move {
+                            if let Err(e) = server.run(rx).await {
+                                error!(error = %e, "BLE management server error");
+                            }
+                        }))
+                    }
+                    Err(e) => {
+                        error!(error = %e, "BLE management server failed to initialize");
+                        None
+                    }
                 }
-            }))
-        } else {
-            None
+            }
+            _ => None,
         };
 
         // Start internet connectivity monitoring (if configured). System
@@ -449,6 +493,20 @@ impl Service {
                 Ok(Err(e)) => warn!(error = %e, "HTTP server task failed during shutdown"),
                 Err(_) => {
                     warn!("HTTP server did not drain within 3s; aborting");
+                    handle.abort();
+                }
+            }
+        }
+
+        // Same drain treatment for the BLE server. The bluer adapter
+        // release happens in `BleServer::run`'s drop guards on
+        // ApplicationHandle / AdvertisementHandle / AgentHandle.
+        if let Some(mut handle) = ble_handle {
+            match tokio::time::timeout(Duration::from_secs(3), &mut handle).await {
+                Ok(Ok(())) => info!("BLE server drained"),
+                Ok(Err(e)) => warn!(error = %e, "BLE server task failed during shutdown"),
+                Err(_) => {
+                    warn!("BLE server did not drain within 3s; aborting");
                     handle.abort();
                 }
             }
