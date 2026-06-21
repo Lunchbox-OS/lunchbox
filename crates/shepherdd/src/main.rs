@@ -258,21 +258,14 @@ impl Service {
                 None
             };
 
-        let http_handle = match (management_api_config, svc.as_ref()) {
-            (Some(api_cfg), Some(svc)) => {
-                let http_state = HttpAppState { svc: svc.clone() };
-                let http_server = HttpServer::new(http_state, api_cfg);
-                let http_shutdown_rx = shutdown_rx.clone();
-                Some(tokio::spawn(async move {
-                    if let Err(e) = http_server.run(http_shutdown_rx).await {
-                        error!(error = %e, "HTTP management API error");
-                    }
-                }))
-            }
-            _ => None,
-        };
-
-        let ble_handle = match (ble_management_config, svc.as_ref()) {
+        // Construct the BLE server first so its ClaimMachine can be
+        // handed to HttpServer as the source of unified admin bearer
+        // tokens. If BLE isn't configured, HTTP falls back to its
+        // static-token-only auth.
+        let (ble_handle, admin_authority): (
+            Option<tokio::task::JoinHandle<()>>,
+            Option<Arc<dyn shepherd_management::AdminAuthority>>,
+        ) = match (ble_management_config, svc.as_ref()) {
             (Some(ble_cfg), Some(svc)) => {
                 let bsc = BleServerConfig {
                     device_name: ble_cfg.device_name,
@@ -286,18 +279,36 @@ impl Service {
                 let display = Arc::new(NoopPairingDisplay);
                 match BleServer::new(bsc, svc.clone(), display) {
                     Ok(server) => {
+                        let authority =
+                            server.claim_machine() as Arc<dyn shepherd_management::AdminAuthority>;
                         let rx = shutdown_rx.clone();
-                        Some(tokio::spawn(async move {
+                        let handle = tokio::spawn(async move {
                             if let Err(e) = server.run(rx).await {
                                 error!(error = %e, "BLE management server error");
                             }
-                        }))
+                        });
+                        (Some(handle), Some(authority))
                     }
                     Err(e) => {
                         error!(error = %e, "BLE management server failed to initialize");
-                        None
+                        (None, None)
                     }
                 }
+            }
+            _ => (None, None),
+        };
+
+        let http_handle = match (management_api_config, svc.as_ref()) {
+            (Some(api_cfg), Some(svc)) => {
+                let http_state = HttpAppState { svc: svc.clone() };
+                let http_server =
+                    HttpServer::new(http_state, api_cfg).with_admin_authority(admin_authority);
+                let http_shutdown_rx = shutdown_rx.clone();
+                Some(tokio::spawn(async move {
+                    if let Err(e) = http_server.run(http_shutdown_rx).await {
+                        error!(error = %e, "HTTP management API error");
+                    }
+                }))
             }
             _ => None,
         };

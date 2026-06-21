@@ -93,6 +93,15 @@ impl BleServer {
         })
     }
 
+    /// Borrow the claim machine so other transports (e.g.
+    /// `shepherd-http`) can consult the admin record for the unified
+    /// bearer-token auth path. Returns a clone of the same `Arc` the
+    /// server holds, so updates from BLE-side claim/factory_reset RPCs
+    /// are visible to HTTP immediately.
+    pub fn claim_machine(&self) -> Arc<ClaimMachine> {
+        self.claim.clone()
+    }
+
     /// Run the server until `shutdown_rx` flips to `true`. Sequence:
     ///
     /// 1. Open the default BlueZ adapter and bring it up + powered on.
@@ -212,7 +221,7 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
                 let claim = claim.clone();
                 let config = config.clone();
                 async move {
-                    let claim_state = if claim.is_claimed().await {
+                    let claim_state = if claim.is_claimed() {
                         ClaimStateTag::Claimed
                     } else {
                         ClaimStateTag::Unclaimed
@@ -341,10 +350,10 @@ async fn dispatch_frame(
     let response = match request.method.as_str() {
         "claim" => handle_claim_rpc(id, request.params, peer, claim).await,
         "factory_reset" => handle_factory_reset_rpc(id, peer, claim).await,
-        _ => match claim.authorize(peer).await {
+        _ => match claim.authorize(peer) {
             AuthDecision::Allow => dispatch_management(svc.as_ref(), request).await,
             AuthDecision::Deny { reason } => {
-                let code = if claim.is_claimed().await {
+                let code = if claim.is_claimed() {
                     ErrorCode::PermissionDenied
                 } else {
                     ErrorCode::NotClaimed
@@ -370,7 +379,7 @@ async fn handle_claim_rpc(
         Ok(p) => p,
         Err(e) => return RpcResponse::err(id, ErrorCode::InvalidParams, e.to_string()),
     };
-    match claim.claim(peer.clone(), parsed.device_name).await {
+    match claim.claim(peer.clone(), parsed.device_name) {
         Ok(record) => match serde_json::to_value(&record) {
             Ok(v) => RpcResponse::ok(id, v),
             Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
@@ -389,15 +398,15 @@ async fn handle_factory_reset_rpc(
 ) -> RpcResponse {
     // factory_reset is admin-gated: only the current admin (or no admin,
     // in which case it's a no-op) may invoke it.
-    match claim.authorize(peer).await {
-        AuthDecision::Allow => match claim.factory_reset().await {
+    match claim.authorize(peer) {
+        AuthDecision::Allow => match claim.factory_reset() {
             Ok(_) => RpcResponse::ok(id, serde_json::Value::Null),
             Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
         },
         AuthDecision::Deny { reason } => {
             // If unclaimed, factory_reset is a no-op success; otherwise
             // deny the non-admin peer.
-            if !claim.is_claimed().await {
+            if !claim.is_claimed() {
                 RpcResponse::ok(id, serde_json::Value::Null)
             } else {
                 RpcResponse::err(id, ErrorCode::PermissionDenied, reason)

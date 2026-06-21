@@ -14,10 +14,16 @@ pub mod volume;
 
 use axum::{Router, middleware, routing::get};
 
+use crate::auth::AuthSources;
 use crate::state::AppState;
 
-/// Build the full API router under `/api/v1`
-pub fn router(state: AppState, auth_token: Option<String>) -> Router {
+/// Build the full API router under `/api/v1`.
+///
+/// `auth_sources` carries the static config token (if any) and the
+/// optional admin authority that sources BLE-derived tokens at request
+/// time. Pass `AuthSources::default()` to leave the API open (legacy
+/// behaviour when neither auth source is configured).
+pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
     let api = Router::new()
         .route("/health", get(health::get_health))
         .route("/state", get(health::get_state))
@@ -65,9 +71,9 @@ pub fn router(state: AppState, auth_token: Option<String>) -> Router {
         .with_state(state)
         .layer(middleware::from_fn(
             move |mut req: axum::extract::Request, next: middleware::Next| {
-                let token = auth_token.clone();
+                let sources = auth_sources.clone();
                 async move {
-                    req.extensions_mut().insert(token);
+                    req.extensions_mut().insert(sources);
                     crate::auth::require_auth(req, next).await
                 }
             },

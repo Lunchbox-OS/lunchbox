@@ -206,11 +206,58 @@ fn make_app_with_policy(
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
     });
     let state = AppState { svc };
-    handlers::router(state, auth_token.map(str::to_owned))
+    handlers::router(
+        state,
+        shepherd_http::AuthSources {
+            static_token: auth_token.map(str::to_owned),
+            admin: None,
+        },
+    )
 }
 
 fn make_app(auth_token: Option<&str>, config_path: PathBuf) -> axum::Router {
     make_app_with_policy(test_policy(), auth_token, config_path)
+}
+
+fn make_app_with_admin(
+    auth_token: Option<&str>,
+    config_path: PathBuf,
+    admin: Option<Arc<dyn shepherd_management::AdminAuthority>>,
+) -> axum::Router {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let host = Arc::new(MockHost::new());
+    let volume = Arc::new(MockVolume::new());
+    let brightness = Arc::new(MockBrightness::new());
+    let engine = Arc::new(Mutex::new(CoreEngine::new(
+        test_policy(),
+        store.clone(),
+        HostCapabilities::minimal(),
+    )));
+    let (tx, _) = broadcast::channel::<Event>(64);
+    let tx_for_fn = tx.clone();
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let svc = Arc::new(DefaultManagementService {
+        engine,
+        store,
+        host,
+        volume,
+        brightness,
+        event_tx: tx,
+        broadcast_fn: Arc::new(move |event: Event| {
+            let _ = tx_for_fn.send(event);
+        }),
+        config_path,
+        shutdown_tx,
+        hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
+    });
+    let state = AppState { svc };
+    handlers::router(
+        state,
+        shepherd_http::AuthSources {
+            static_token: auth_token.map(str::to_owned),
+            admin,
+        },
+    )
 }
 
 /// Write a minimal valid config to a temp file
@@ -337,6 +384,64 @@ async fn auth_correct_token_passes() {
     let cfg = temp_config();
     let app = make_app(Some("secret"), cfg.path().to_path_buf());
     let (status, _) = send(&app, req_get_auth("/api/v1/health", "secret")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn auth_admin_authority_token_passes() {
+    use shepherd_management::AdminAuthority;
+    use std::sync::Mutex;
+
+    /// Trivial in-test admin authority. When `token` is `Some`, the
+    /// HTTP middleware should accept that bearer; when `None` (mock of
+    /// "device unclaimed"), it should reject.
+    struct MockAdmin(Mutex<Option<String>>);
+    impl AdminAuthority for MockAdmin {
+        fn current_http_token(&self) -> Option<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    let cfg = temp_config();
+    let admin: Arc<dyn AdminAuthority> =
+        Arc::new(MockAdmin(Mutex::new(Some("admin-tok".to_string()))));
+    let app = make_app_with_admin(None, cfg.path().to_path_buf(), Some(admin.clone()));
+
+    // Admin token accepted.
+    let (status, _) = send(&app, req_get_auth("/api/v1/health", "admin-tok")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Wrong token rejected even when admin is claimed.
+    let (status, _) = send(&app, req_get_auth("/api/v1/health", "wrong")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Missing header rejected (admin is claimed → auth required).
+    let (status, _) = send(&app, req_get("/api/v1/health")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_static_and_admin_tokens_both_accepted() {
+    use shepherd_management::AdminAuthority;
+    use std::sync::Mutex;
+
+    struct MockAdmin(Mutex<Option<String>>);
+    impl AdminAuthority for MockAdmin {
+        fn current_http_token(&self) -> Option<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    let cfg = temp_config();
+    let admin: Arc<dyn AdminAuthority> =
+        Arc::new(MockAdmin(Mutex::new(Some("admin-tok".to_string()))));
+    let app = make_app_with_admin(Some("static"), cfg.path().to_path_buf(), Some(admin));
+
+    // Static token accepted.
+    let (status, _) = send(&app, req_get_auth("/api/v1/health", "static")).await;
+    assert_eq!(status, StatusCode::OK);
+    // Admin token accepted.
+    let (status, _) = send(&app, req_get_auth("/api/v1/health", "admin-tok")).await;
     assert_eq!(status, StatusCode::OK);
 }
 

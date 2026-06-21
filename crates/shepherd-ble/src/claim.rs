@@ -6,9 +6,9 @@
 //! accommodates additional roles when it lands.
 
 use crate::admin::{AdminRecord, AdminStore, AdminStoreError};
-use std::sync::Arc;
+use shepherd_management::AdminAuthority;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 /// Stable peer identity as resolved by BlueZ post-pairing.
@@ -58,6 +58,11 @@ pub enum ClaimError {
     Store(#[from] AdminStoreError),
 }
 
+/// State machine uses [`std::sync::RwLock`] so that synchronous
+/// consumers (notably the HTTP auth middleware, via
+/// [`AdminAuthority`]) can check the current admin token without
+/// blocking on an async lock. All operations hold the lock only for
+/// brief in-memory updates plus an atomic file write on claim/reset.
 pub struct ClaimMachine {
     state: RwLock<ClaimState>,
     store: AdminStore,
@@ -84,22 +89,28 @@ impl ClaimMachine {
         Ok(Self::new(store, initial))
     }
 
-    pub async fn snapshot(&self) -> ClaimState {
-        self.state.read().await.clone()
+    pub fn snapshot(&self) -> ClaimState {
+        self.state
+            .read()
+            .expect("claim state lock poisoned")
+            .clone()
     }
 
-    pub async fn is_claimed(&self) -> bool {
-        self.state.read().await.is_claimed()
+    pub fn is_claimed(&self) -> bool {
+        self.state
+            .read()
+            .expect("claim state lock poisoned")
+            .is_claimed()
     }
 
     /// Claim the device for `peer` under `device_name`. Idempotent for
     /// the same peer (returns the existing record); rejected otherwise.
-    pub async fn claim(
+    pub fn claim(
         &self,
         peer: PeerIdentity,
         device_name: String,
     ) -> Result<AdminRecord, ClaimError> {
-        let mut state = self.state.write().await;
+        let mut state = self.state.write().expect("claim state lock poisoned");
         match &*state {
             ClaimState::Claimed(existing) if peer.matches(existing) => {
                 // Same peer re-issuing claim — idempotent.
@@ -123,8 +134,8 @@ impl ClaimMachine {
     /// Wipe the admin record and bond. Returns the previously-claimed
     /// record (if any) so callers can ask BlueZ to forget the bonded
     /// device.
-    pub async fn factory_reset(&self) -> Result<Option<AdminRecord>, ClaimError> {
-        let mut state = self.state.write().await;
+    pub fn factory_reset(&self) -> Result<Option<AdminRecord>, ClaimError> {
+        let mut state = self.state.write().expect("claim state lock poisoned");
         let previous = match std::mem::replace(&mut *state, ClaimState::Unclaimed) {
             ClaimState::Unclaimed => None,
             ClaimState::Claimed(r) => Some(r),
@@ -145,8 +156,8 @@ impl ClaimMachine {
 
     /// Gate every non-claim RPC. Called by the dispatcher before
     /// invoking the underlying `ManagementService` method.
-    pub async fn authorize(&self, peer: &PeerIdentity) -> AuthDecision {
-        match &*self.state.read().await {
+    pub fn authorize(&self, peer: &PeerIdentity) -> AuthDecision {
+        match &*self.state.read().expect("claim state lock poisoned") {
             ClaimState::Unclaimed => AuthDecision::Deny {
                 reason: "device is not claimed".into(),
             },
@@ -157,6 +168,15 @@ impl ClaimMachine {
                     reason: "peer is not the admin".into(),
                 }
             }
+        }
+    }
+}
+
+impl AdminAuthority for ClaimMachine {
+    fn current_http_token(&self) -> Option<String> {
+        match &*self.state.read().expect("claim state lock poisoned") {
+            ClaimState::Unclaimed => None,
+            ClaimState::Claimed(record) => Some(record.http_token.clone()),
         }
     }
 }
@@ -187,87 +207,87 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn unclaimed_loads_when_no_record() {
+    #[test]
+    fn unclaimed_loads_when_no_record() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        assert!(!m.is_claimed().await);
+        assert!(!m.is_claimed());
+        assert!(m.current_http_token().is_none());
     }
 
-    #[tokio::test]
-    async fn claim_persists_and_transitions() {
+    #[test]
+    fn claim_persists_and_transitions() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        let record = m.claim(peer_a(), "iPhone".into()).await.unwrap();
+        let record = m.claim(peer_a(), "iPhone".into()).unwrap();
         assert_eq!(record.device_name, "iPhone");
-        assert!(m.is_claimed().await);
+        assert!(m.is_claimed());
+        assert_eq!(
+            m.current_http_token().as_deref(),
+            Some(record.http_token.as_str())
+        );
 
         // Reload from disk: state is preserved.
         let again = ClaimMachine::load(store(&dir)).unwrap();
-        assert!(again.is_claimed().await);
+        assert!(again.is_claimed());
     }
 
-    #[tokio::test]
-    async fn claim_is_idempotent_for_same_peer() {
+    #[test]
+    fn claim_is_idempotent_for_same_peer() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        let a = m.claim(peer_a(), "iPhone".into()).await.unwrap();
-        let b = m.claim(peer_a(), "iPhone (renamed)".into()).await.unwrap();
+        let a = m.claim(peer_a(), "iPhone".into()).unwrap();
+        let b = m.claim(peer_a(), "iPhone (renamed)".into()).unwrap();
         // Same record returned — re-claim does not overwrite device_name
         // for the established admin.
         assert_eq!(a.http_token, b.http_token);
         assert_eq!(b.device_name, "iPhone");
     }
 
-    #[tokio::test]
-    async fn claim_rejects_different_peer() {
+    #[test]
+    fn claim_rejects_different_peer() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        m.claim(peer_a(), "A".into()).await.unwrap();
-        let err = m.claim(peer_b(), "B".into()).await.unwrap_err();
+        m.claim(peer_a(), "A".into()).unwrap();
+        let err = m.claim(peer_b(), "B".into()).unwrap_err();
         assert!(matches!(err, ClaimError::AlreadyClaimed));
     }
 
-    #[tokio::test]
-    async fn authorize_unclaimed_denies_everyone() {
+    #[test]
+    fn authorize_unclaimed_denies_everyone() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        assert!(matches!(
-            m.authorize(&peer_a()).await,
-            AuthDecision::Deny { .. }
-        ));
+        assert!(matches!(m.authorize(&peer_a()), AuthDecision::Deny { .. }));
     }
 
-    #[tokio::test]
-    async fn authorize_claimed_allows_admin_only() {
+    #[test]
+    fn authorize_claimed_allows_admin_only() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        m.claim(peer_a(), "A".into()).await.unwrap();
-        assert_eq!(m.authorize(&peer_a()).await, AuthDecision::Allow);
-        assert!(matches!(
-            m.authorize(&peer_b()).await,
-            AuthDecision::Deny { .. }
-        ));
+        m.claim(peer_a(), "A".into()).unwrap();
+        assert_eq!(m.authorize(&peer_a()), AuthDecision::Allow);
+        assert!(matches!(m.authorize(&peer_b()), AuthDecision::Deny { .. }));
     }
 
-    #[tokio::test]
-    async fn factory_reset_returns_previous_and_clears_store() {
+    #[test]
+    fn factory_reset_returns_previous_and_clears_store() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        m.claim(peer_a(), "A".into()).await.unwrap();
-        let prev = m.factory_reset().await.unwrap();
+        m.claim(peer_a(), "A".into()).unwrap();
+        let prev = m.factory_reset().unwrap();
         assert!(prev.is_some());
-        assert!(!m.is_claimed().await);
+        assert!(!m.is_claimed());
+        assert!(m.current_http_token().is_none());
 
         // Reload from disk confirms persistence.
         let again = ClaimMachine::load(store(&dir)).unwrap();
-        assert!(!again.is_claimed().await);
+        assert!(!again.is_claimed());
     }
 
-    #[tokio::test]
-    async fn factory_reset_on_unclaimed_is_noop() {
+    #[test]
+    fn factory_reset_on_unclaimed_is_noop() {
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
-        assert!(m.factory_reset().await.unwrap().is_none());
+        assert!(m.factory_reset().unwrap().is_none());
     }
 }
