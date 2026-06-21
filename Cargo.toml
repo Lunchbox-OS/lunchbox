@@ -12,6 +12,7 @@ members = [
     "crates/shepherd-ipc",
     "crates/shepherd-management",
     "crates/shepherd-http",
+    "crates/shepherd-ble",
     "crates/shepherdd",
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
@@ -47,6 +48,7 @@ shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
 shepherd-management = { path = "crates/shepherd-management" }
 shepherd-http = { path = "crates/shepherd-http" }
+shepherd-ble = { path = "crates/shepherd-ble" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
 
 # Serialization
