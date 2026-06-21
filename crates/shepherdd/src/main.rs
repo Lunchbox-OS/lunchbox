@@ -17,7 +17,7 @@ use shepherd_api::{
     EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo,
     VolumeRestrictions,
 };
-use shepherd_ble::{BleServer, BleServerConfig, NoopPairingDisplay};
+use shepherd_ble::{BleServer, BleServerConfig};
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
 use shepherd_host_api::{
@@ -40,6 +40,7 @@ use tracing_subscriber::EnvFilter;
 
 mod hidpi;
 mod internet;
+mod pairing_display;
 mod system_events;
 
 use hidpi::XwaylandHidpi;
@@ -273,10 +274,12 @@ impl Service {
                     admin_record_path: ble_cfg.admin_record_path,
                     reset_sentinel_path: ble_cfg.reset_sentinel_path,
                 };
-                // PairingDisplay is a no-op until the Sway overlay
-                // sidecar lands; advertising and the GATT app still
-                // come up, pairing just lacks an on-device visual.
-                let display = Arc::new(NoopPairingDisplay);
+                // `shepherd-pairing-display` is spawned per pairing
+                // attempt to render the Numeric Comparison passkey on
+                // the TV. If the binary is missing the pairing path
+                // still completes — the user just won't have an
+                // on-device visual to compare against.
+                let display = Arc::new(pairing_display::SwayPairingDisplay::new());
                 match BleServer::new(bsc, svc.clone(), display) {
                     Ok(server) => {
                         let authority =

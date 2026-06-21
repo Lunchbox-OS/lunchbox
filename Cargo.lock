@@ -4276,6 +4276,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-pairing-display"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gtk4",
+ "gtk4-layer-shell",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "shepherd-store"
 version = "0.1.0"
 dependencies = [
