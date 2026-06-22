@@ -20,6 +20,7 @@ members = [
     "crates/shepherd-bridge",
     "crates/shepherd-keyboard-core",
     "crates/shepherd-keyboard-wlroots",
+    "crates/shepherd-keyboard-gnome-daemon",
     "crates/shepherd-touch-bridge",
     "crates/shepherd-tablet-bridge",
     "crates/shepherd-gamepad-bridge",

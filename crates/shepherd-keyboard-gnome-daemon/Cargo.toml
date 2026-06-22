@@ -1,0 +1,19 @@
+[package]
+name = "shepherd-keyboard-gnome-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless D-Bus decode daemon for the GNOME swipe-keyboard backend, wrapping shepherd-keyboard-core"
+
+[[bin]]
+name = "shepherd-keyboard-gnome-daemon"
+path = "src/main.rs"
+
+[dependencies]
+shepherd-keyboard-core = { workspace = true }
+zbus = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }

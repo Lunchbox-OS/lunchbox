@@ -95,23 +95,51 @@ unsigned-bundle fail-closed and password-gate tests satisfy the Phase 1 gate.
 (core unit tests pass incl. password-gate + unsigned-bundle fail-closed). `cargo build
 --workspace`, fmt, and clippy are clean.
 
+## Phase 2 — wlroots backend (`crates/shepherd-keyboard-wlroots`, done; one gate item residual)
+
+A standalone `smithay-client-toolkit` Wayland client (binary), thin adapter over the core.
+
+- SCTK turned out to wrap `input-method-v2` natively (`InputMethod` + `InputMethodHandler` +
+  `delegate_input_method!`) and provides `touch`/`layer-shell`/`shm`; only
+  `zwp_virtual_keyboard_v1` is bound manually (no events). This is why the backend is far
+  smaller than the spec implied.
+- `input-method-v2` text I/O (activate/deactivate, `content_type`, surrounding text →
+  `commit_string`/`set_preedit_string`/`commit`); `virtual-keyboard` for Enter/Backspace/Tab
+  with an uploaded US xkb keymap; bottom-anchored `wlr-layer-shell` surface with exclusive
+  zone; software SHM render of letter grid + suggestion bar + function row (fontdue labels
+  from a system TTF); `wl_touch` capture (pointer fallback) → core `GestureBuilder`.
+  Content purpose/hint map to the core's `ContentType`; the `InputMethodHandler` is `&self`
+  so the latest IM state is recorded into a `RefCell` and drained by the main loop.
+- Fails closed to tap-only with the vendored fallback layout when no bundle verifies.
+- **Gate status:** compiles clippy-clean; `scripts/smoke-keyboard-wlroots.sh` (headless
+  `sway`) confirms it loads the bundle, binds `input_method_manager_v2`, and renders without
+  crashing. **Residual:** an automated headless test asserting a *synthesized swipe commits
+  the right word into a focused `text-input-v3` client* (and password ⇒ tap-only) is not yet
+  wired — it needs a text-input test client + synthetic touch injection (headless sway has no
+  input devices). The commit/gating logic itself is covered by the core's e2e tests.
+
+## Phase 3 — GNOME decode daemon (`crates/shepherd-keyboard-gnome-daemon`, done)
+
+A headless zbus D-Bus service over the core. Bus `com.armeafamily.ShepherdSwipe`, interface
+`com.armeafamily.ShepherdSwipe1`: `Decode(s,s)→a(sd)`, `Available` (b), `Profile` (s). The
+GJS extension (Phase 4) will commit via GNOME's IM object and call this only for candidates.
+
+- **Gate met:** the daemon's decode matches the core path on the shared `hello` fixture
+  (`#[ignore]`d parity test) and a live `dbus-run-session` + `gdbus` call returns
+  `[('hello', -9.52), ('help', …)]` — identical to wlroots. Fail-closed (no decoder ⇒ empty)
+  unit-tested. clippy-clean.
+
 ## Remaining phases (not yet started)
 
-- **Phase 2 — wlroots backend** (new crate, e.g. `shepherd-keyboard-wlroots`): a
-  `smithay-client-toolkit` client binding `zwp_input_method_manager_v2` +
-  `zwlr_layer_shell_v1` + `zwp_virtual_keyboard_manager_v1`, an SHM software-rendered surface,
-  `wl_touch` capture feeding `GestureBuilder`, and `content_type`→`set_content_type`. Map
-  `HostAction` to `commit_string`/`set_preedit_string`/`delete_surrounding_text` + the
-  virtual-keyboard keysyms. Gate: headless wlroots integration — a swipe commits the correct
-  word into a test `text-input` client; a password field is tap-only. (Largest single phase;
-  needs a headless Sway/wlroots harness like the repo's e2e tests use.)
-- **Phase 3 — GNOME decoder daemon** (D-Bus over `shepherd-keyboard-core`).
+- **Phase 2 residual:** the automated headless swipe-commit/password integration test above.
 - **Phase 4 — GNOME GJS Shell extension** (suppress built-in OSK, render, commit via the IM
-  object, correct `session-modes`; reliable input-purpose gating is a release blocker).
+  object, call the daemon, correct `session-modes`; reliable input-purpose gating is a release
+  blocker). Needs a real GNOME Shell; not unit-testable here.
 - **Phase 5 — Profile/safety/packaging:** add `[service.keyboard]` to `shepherd-config`
   (profile, bundle root, trust-anchor key path), wire profile to launcher policy, fetch/stage
   bundles at install, choose the production trust anchor location (root-owned / verified boot).
-- **Phase 6 — Docs, extractability check, CI** for the new crates.
+- **Phase 6 — Docs, extractability check, CI** for the new crates (incl. running the
+  bundle-gated decode tests in CI after `scripts/fetch-swipe-bundles.sh`).
 
 ## Open questions still to resolve (spec §9)
 
