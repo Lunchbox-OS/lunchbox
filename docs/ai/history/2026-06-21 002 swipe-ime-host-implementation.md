@@ -129,22 +129,42 @@ GJS extension (Phase 4) will commit via GNOME's IM object and call this only for
   `[('hello', -9.52), ('help', …)]` — identical to wlroots. Fail-closed (no decoder ⇒ empty)
   unit-tested. clippy-clean.
 
-## Remaining phases (not yet started)
+## Phase 5 — config wiring (`crates/shepherd-config`, done; launch/packaging residual)
 
-- **Phase 2 residual:** the automated headless swipe-commit/password integration test above.
-- **Phase 4 — GNOME GJS Shell extension** (suppress built-in OSK, render, commit via the IM
-  object, call the daemon, correct `session-modes`; reliable input-purpose gating is a release
-  blocker). Needs a real GNOME Shell; not unit-testable here.
-- **Phase 5 — Profile/safety/packaging:** add `[service.keyboard]` to `shepherd-config`
-  (profile, bundle root, trust-anchor key path), wire profile to launcher policy, fetch/stage
-  bundles at install, choose the production trust anchor location (root-owned / verified boot).
-- **Phase 6 — Docs, extractability check, CI** for the new crates (incl. running the
-  bundle-gated decode tests in CI after `scripts/fetch-swipe-bundles.sh`).
+Added `[service.keyboard]` so a session resolves its keyboard profile/backend via policy.
+
+- `RawKeyboardConfig` (schema) → `KeyboardPolicy` + `KeyboardProfile`/`KeyboardBackend` enums
+  on `ServiceConfig` (kept `Default`-safe so existing `Policy` test literals using
+  `service: Default::default()` are unaffected). Validation rejects unknown
+  `profile`/`backend` and zero `height`. `config.example.toml` documents the section and still
+  validates clean (`validate-config`).
+- **Gate met (config portion):** `cargo test -p shepherd-config` (37 tests incl. 3 new),
+  clippy-clean, example validates. **Residual Phase 5:** actually *launching* the backend
+  (sway.conf exec / shepherdd spawn), richer session-identity wiring, and staging bundles +
+  the production trust anchor at install.
+
+## Phase 6 — extractability check (done; CI wiring residual)
+
+`scripts/check-keyboard-extractability.sh` (cargo-metadata based) asserts the keyboard crates
+depend on no shepherd-launcher internal crate. **Passes:** keyboard-core → only
+serde/serde_json/shepherd-swipe-core/thiserror/tracing; both backends → only
+shepherd-keyboard-core + external Wayland/D-Bus/CLI crates. **Residual:** add the new crates
+(and the bundle-gated decode tests, after `scripts/fetch-swipe-bundles.sh`) to CI, and run the
+extractability + smoke scripts there.
+
+## Remaining work
+
+- **Phase 2 residual:** automated headless test — synthesized swipe commits the right word into
+  a focused `text-input-v3` client; password ⇒ tap-only.
+- **Phase 4 — GNOME GJS Shell extension** (suppress built-in OSK, render, capture touch, commit
+  via GNOME's input-method object, call the daemon's `Decode`, correct `session-modes`; reliable
+  input-purpose gating is a release blocker). Needs a real GNOME Shell; not unit-testable here.
+- **Phase 5 residual:** launch/packaging + production trust anchor (root-owned / verified boot).
+- **Phase 6 residual:** CI jobs for the new crates + scripts.
 
 ## Open questions still to resolve (spec §9)
 
 - Target GNOME Shell version(s) and whether a `gdm` login keyboard is needed.
-- Confirm GNOME reliably exposes input purpose + surrounding text + commit (gates the
-  password-safety guarantee).
+- Confirm GNOME reliably exposes input purpose + surrounding text + commit on that version.
 - Production bundle trust-anchor location and how it's protected from the child.
 - Bundle update/rollback policy; whether physical-keyboard `grab` is needed in v1.
