@@ -1,0 +1,16 @@
+[package]
+name = "shepherd-keyboard-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backend-agnostic host logic for the swipe keyboard: bundle loading, gesture assembly, candidate/commit policy, editing-key semantics, safety gates, and profile resolution"
+
+[dependencies]
+shepherd-swipe-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

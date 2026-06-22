@@ -18,6 +18,7 @@ members = [
     "crates/shepherd-media-core",
     "crates/shepherd-media",
     "crates/shepherd-bridge",
+    "crates/shepherd-keyboard-core",
     "crates/shepherd-touch-bridge",
     "crates/shepherd-tablet-bridge",
     "crates/shepherd-gamepad-bridge",
@@ -46,6 +47,12 @@ shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
 shepherd-http = { path = "crates/shepherd-http" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
+shepherd-keyboard-core = { path = "crates/shepherd-keyboard-core" }
+
+# Swipe-typing decoder (external, host-agnostic). Pinned to a signed release tag;
+# consumes downloaded signed bundles (see scripts/fetch-swipe-bundles.sh). The crate
+# verifies each bundle's minisign signature + per-file hashes on load.
+shepherd-swipe-core = { git = "https://git.armeafamily.com/albert/shepherd-swipe", tag = "v0.1.0" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

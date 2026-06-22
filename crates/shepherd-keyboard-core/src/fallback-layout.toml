@@ -1,0 +1,40 @@
+# Rendering-only fallback QWERTY geometry, used ONLY for tap-only degraded mode when no
+# signed bundle could be verified. It is never used for decoding (degraded mode has no
+# predictions); it only gives key positions so a child can still tap letters. Geometry
+# mirrors the bundle's qwerty-en-v1 layout (key centers in normalized [0,1], origin
+# top-left). Keep in sync if the bundle layout changes; drift only affects tap hit-testing.
+layout_id = "qwerty-en-v1"
+key_width = 0.1
+key_height = 0.3333
+proximity_sigma = 0.08
+
+keys = [
+  { label = "a", x = 0.10047, y = 0.5 },
+  { label = "b", x = 0.60047, y = 0.83333 },
+  { label = "c", x = 0.40047, y = 0.83333 },
+  { label = "d", x = 0.30047, y = 0.5 },
+  { label = "e", x = 0.25, y = 0.16667 },
+  { label = "f", x = 0.40047, y = 0.5 },
+  { label = "g", x = 0.50047, y = 0.5 },
+  { label = "h", x = 0.60047, y = 0.5 },
+  { label = "i", x = 0.75, y = 0.16667 },
+  { label = "j", x = 0.70047, y = 0.5 },
+  { label = "k", x = 0.80047, y = 0.5 },
+  { label = "l", x = 0.90047, y = 0.5 },
+  { label = "m", x = 0.80047, y = 0.83333 },
+  { label = "n", x = 0.70047, y = 0.83333 },
+  { label = "o", x = 0.85, y = 0.16667 },
+  { label = "p", x = 0.95, y = 0.16667 },
+  { label = "q", x = 0.05, y = 0.16667 },
+  { label = "r", x = 0.35, y = 0.16667 },
+  { label = "s", x = 0.20047, y = 0.5 },
+  { label = "t", x = 0.45, y = 0.16667 },
+  { label = "u", x = 0.65, y = 0.16667 },
+  { label = "v", x = 0.50047, y = 0.83333 },
+  { label = "w", x = 0.15, y = 0.16667 },
+  { label = "x", x = 0.30047, y = 0.83333 },
+  { label = "y", x = 0.55, y = 0.16667 },
+  { label = "z", x = 0.20047, y = 0.83333 },
+  { label = "'", x = 0.97, y = 0.5 },
+  { label = "-", x = 0.86, y = 0.83333 },
+]
