@@ -99,6 +99,22 @@ The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
 
+### Android companion app
+
+The BLE management companion app lives in [`companion-android/`](companion-android/)
+and is independent of the Rust build. Install its toolchain (JDK + Android SDK
+into `/opt/android-sdk`) with the dedicated deps set, then build:
+
+```sh
+./scripts/shepherd deps install android   # JDK 21 + Android SDK
+cd companion-android
+./gradlew :app:assembleDebug               # debug APK (sideload-friendly)
+./gradlew :app:testDebugUnitTest           # unit tests
+```
+
+See [`companion-android/README.md`](companion-android/README.md) for the
+architecture and the BLE protocol it speaks.
+
 ### Testing and linting
 
 Run the test suite:

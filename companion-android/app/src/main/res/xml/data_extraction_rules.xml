@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The per-device admin record holds the HTTP bearer token, which is a
+     secret minted by the device. It must never leave the phone via cloud
+     backup or device-to-device transfer. Exclude all app data. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>
