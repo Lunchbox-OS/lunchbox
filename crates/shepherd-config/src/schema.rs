@@ -64,6 +64,10 @@ pub struct RawServiceConfig {
     /// Management HTTP API settings
     #[serde(default)]
     pub management_api: Option<RawManagementApiConfig>,
+
+    /// On-screen swipe keyboard settings
+    #[serde(default)]
+    pub keyboard: Option<RawKeyboardConfig>,
 }
 
 /// Raw entry definition
@@ -449,6 +453,34 @@ pub struct RawBrightnessConfig {
     /// Whether brightness changes are allowed at all (default: true)
     #[serde(default = "default_true")]
     pub allow_change: bool,
+}
+
+/// On-screen swipe keyboard configuration (`[service.keyboard]`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawKeyboardConfig {
+    /// Whether the on-screen swipe keyboard is enabled (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Safety profile selecting which signed bundle to load (`"adult"` | `"child"`).
+    /// Resolved by policy and **not** user-flippable in a child session. Defaults to
+    /// `"adult"`.
+    pub profile: Option<String>,
+
+    /// Which backend to launch (`"wlroots"` | `"gnome"`). Defaults to `"wlroots"`.
+    pub backend: Option<String>,
+
+    /// Bundle root directory containing `adult/` and `child/` (default:
+    /// `dev-runtime/swipe-bundles`, populated by `scripts/fetch-swipe-bundles.sh`).
+    pub bundle_dir: Option<PathBuf>,
+
+    /// Trusted minisign public key file (the production trust anchor). When unset, the
+    /// decoder's committed dev key is used — appropriate for development, never for a
+    /// shipped child session.
+    pub public_key: Option<PathBuf>,
+
+    /// Surface height in pixels for the wlroots backend (default: 320).
+    pub height: Option<u32>,
 }
 
 fn default_true() -> bool {

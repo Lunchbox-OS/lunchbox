@@ -41,6 +41,19 @@ allow_change = true  # Whether volume changes are allowed at all
 min_brightness = 10      # Don't let brightness drop below 10%
 allow_change = true      # Whether brightness changes are allowed at all
 
+# On-screen swipe keyboard (optional). Disabled by default.
+# The backend renders the keyboard and commits text via standard Wayland protocols
+# (wlroots input-method-v2) or GNOME's input-method object. The signed decoder bundle
+# is fetched with scripts/fetch-swipe-bundles.sh; in a child session the profile is
+# resolved here and is not user-flippable.
+[service.keyboard]
+enabled = false          # Set true to launch the on-screen swipe keyboard
+profile = "adult"        # "adult" or "child" (which signed bundle to load)
+backend = "wlroots"      # "wlroots" or "gnome"
+# bundle_dir = "/var/lib/shepherd/swipe-bundles"  # Contains adult/ and child/
+# public_key = "/etc/shepherd/swipe-bundle.pub"   # Production trust anchor (root-owned)
+height = 320             # Surface height in pixels (wlroots backend)
+
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.
 # Supported schemes: https://, http://, tcp://

@@ -7,8 +7,8 @@ use crate::internet::{
 };
 use crate::schema::{
     RawBrightnessConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat,
-    RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
+    RawInputCompatOptions, RawInternetConfig, RawKeyboardConfig, RawManagementApiConfig,
+    RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -124,6 +124,8 @@ pub struct ServiceConfig {
     pub steam: SteamConfig,
     /// Management HTTP API configuration (None = disabled)
     pub management_api: Option<ManagementApiConfig>,
+    /// On-screen swipe keyboard configuration
+    pub keyboard: KeyboardPolicy,
 }
 
 impl ServiceConfig {
@@ -148,6 +150,7 @@ impl ServiceConfig {
             internet,
             steam,
             management_api,
+            keyboard: convert_keyboard_config(raw.keyboard.as_ref()),
         }
     }
 }
@@ -247,7 +250,109 @@ impl Default for ServiceConfig {
             ),
             steam: SteamConfig::default(),
             management_api: None,
+            keyboard: KeyboardPolicy::default(),
         }
+    }
+}
+
+/// Safety profile selecting which signed swipe-keyboard bundle a session loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyboardProfile {
+    /// Full adult vocabulary.
+    #[default]
+    Adult,
+    /// Child-safe closed vocabulary.
+    Child,
+}
+
+impl KeyboardProfile {
+    /// The id passed to the keyboard binary (`--profile`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyboardProfile::Adult => "adult",
+            KeyboardProfile::Child => "child",
+        }
+    }
+
+    /// Parse a profile id case-insensitively.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "adult" => Some(KeyboardProfile::Adult),
+            "child" => Some(KeyboardProfile::Child),
+            _ => None,
+        }
+    }
+}
+
+/// Which swipe-keyboard backend to launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyboardBackend {
+    /// wlroots input-method-v2 client.
+    #[default]
+    Wlroots,
+    /// GNOME decode daemon (+ GJS shell extension).
+    Gnome,
+}
+
+impl KeyboardBackend {
+    /// The backend id (matches the crate/binary family).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyboardBackend::Wlroots => "wlroots",
+            KeyboardBackend::Gnome => "gnome",
+        }
+    }
+
+    /// Parse a backend id case-insensitively.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wlroots" => Some(KeyboardBackend::Wlroots),
+            "gnome" => Some(KeyboardBackend::Gnome),
+            _ => None,
+        }
+    }
+}
+
+/// Validated on-screen swipe-keyboard configuration. The launcher uses this to decide
+/// whether to start a keyboard backend, which profile bundle it loads, and where the bundle
+/// and trust anchor live. Invalid `profile`/`backend` strings are rejected by validation;
+/// this struct only ever holds resolved values.
+#[derive(Debug, Clone, Default)]
+pub struct KeyboardPolicy {
+    /// Whether the on-screen swipe keyboard is enabled.
+    pub enabled: bool,
+    /// Safety profile (which signed bundle to load).
+    pub profile: KeyboardProfile,
+    /// Backend to launch.
+    pub backend: KeyboardBackend,
+    /// Bundle root directory (contains `adult/` and `child/`).
+    pub bundle_dir: Option<std::path::PathBuf>,
+    /// Trusted minisign public key file (production trust anchor; dev key when None).
+    pub public_key: Option<std::path::PathBuf>,
+    /// Surface height in pixels (wlroots backend).
+    pub height: Option<u32>,
+}
+
+fn convert_keyboard_config(raw: Option<&RawKeyboardConfig>) -> KeyboardPolicy {
+    let Some(raw) = raw else {
+        return KeyboardPolicy::default();
+    };
+    KeyboardPolicy {
+        enabled: raw.enabled,
+        // Validation rejects unknown values; default defensively if one slips through.
+        profile: raw
+            .profile
+            .as_deref()
+            .and_then(KeyboardProfile::parse)
+            .unwrap_or_default(),
+        backend: raw
+            .backend
+            .as_deref()
+            .and_then(KeyboardBackend::parse)
+            .unwrap_or_default(),
+        bundle_dir: raw.bundle_dir.clone(),
+        public_key: raw.public_key.clone(),
+        height: raw.height,
     }
 }
 

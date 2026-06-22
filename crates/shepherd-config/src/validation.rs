@@ -94,6 +94,29 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
+    // Validate the on-screen keyboard config.
+    if let Some(keyboard) = &config.service.keyboard {
+        if let Some(profile) = &keyboard.profile
+            && crate::KeyboardProfile::parse(profile).is_none()
+        {
+            errors.push(ValidationError::GlobalError(format!(
+                "Invalid keyboard profile '{profile}' (expected 'adult' or 'child')"
+            )));
+        }
+        if let Some(backend) = &keyboard.backend
+            && crate::KeyboardBackend::parse(backend).is_none()
+        {
+            errors.push(ValidationError::GlobalError(format!(
+                "Invalid keyboard backend '{backend}' (expected 'wlroots' or 'gnome')"
+            )));
+        }
+        if keyboard.height == Some(0) {
+            errors.push(ValidationError::GlobalError(
+                "keyboard height must be > 0".into(),
+            ));
+        }
+    }
+
     // Check for duplicate entry IDs
     let mut seen_ids = HashSet::new();
     for entry in &config.entries {
@@ -554,6 +577,60 @@ mod tests {
             errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::DuplicateEntryId(_)))
+        );
+    }
+
+    fn parse(toml_str: &str) -> RawConfig {
+        toml::from_str(toml_str).expect("config parses")
+    }
+
+    #[test]
+    fn keyboard_valid_config_has_no_errors() {
+        let config = parse(
+            r#"
+            config_version = 1
+            [service.keyboard]
+            enabled = true
+            profile = "child"
+            backend = "wlroots"
+            height = 320
+            "#,
+        );
+        assert!(validate_config(&config).is_empty());
+    }
+
+    #[test]
+    fn keyboard_rejects_unknown_profile_and_backend() {
+        let config = parse(
+            r#"
+            config_version = 1
+            [service.keyboard]
+            profile = "teen"
+            backend = "kde"
+            "#,
+        );
+        let errors = validate_config(&config);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| matches!(
+            e,
+            ValidationError::GlobalError(m) if m.contains("keyboard")
+        )));
+    }
+
+    #[test]
+    fn keyboard_rejects_zero_height() {
+        let config = parse(
+            r#"
+            config_version = 1
+            [service.keyboard]
+            height = 0
+            "#,
+        );
+        let errors = validate_config(&config);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::GlobalError(m) if m.contains("height")))
         );
     }
 }
