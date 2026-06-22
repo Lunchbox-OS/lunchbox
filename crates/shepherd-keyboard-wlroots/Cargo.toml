@@ -1,0 +1,29 @@
+[package]
+name = "shepherd-keyboard-wlroots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wlroots backend for the swipe keyboard: an input-method-v2 + layer-shell + virtual-keyboard Wayland client over shepherd-keyboard-core"
+
+[[bin]]
+name = "shepherd-keyboard-wlroots"
+path = "src/main.rs"
+
+[dependencies]
+shepherd-keyboard-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+# Wayland client + protocols. smithay-client-toolkit provides shm/seat/layer-shell;
+# wayland-protocols-misc provides input-method-v2 + virtual-keyboard (not in sctk).
+smithay-client-toolkit = "0.20"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.9"
+tempfile = { workspace = true }
+# Pure-Rust glyph rasterization for key labels; rendered onto the SHM buffer. A system
+# TTF is located at runtime; labels are skipped if none is found.
+fontdue = "0.9"
