@@ -1,0 +1,24 @@
+/* Shepherd Swipe Keyboard actor styling (scaffold). Refine alongside the actor in
+   extension.js once the Shell-specific rendering is implemented. */
+.shepherd-swipe-keyboard {
+    background-color: rgba(32, 32, 32, 0.96);
+    padding: 6px;
+}
+
+.shepherd-swipe-key {
+    background-color: #3a3a3a;
+    color: #f0f0f0;
+    border-radius: 6px;
+    margin: 2px;
+}
+
+.shepherd-swipe-key:active {
+    background-color: #585858;
+}
+
+.shepherd-swipe-suggestion {
+    background-color: #303038;
+    color: #f0f0f0;
+    border-radius: 6px;
+    margin: 2px;
+}
