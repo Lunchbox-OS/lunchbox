@@ -204,7 +204,7 @@ async fn register_agent(
     session: &bluer::Session,
     display: Arc<dyn PairingDisplay>,
 ) -> bluer::Result<AgentHandle> {
-    let agent = build_agent(display);
+    let agent = build_agent(session.clone(), display);
     session.register_agent(agent).await
 }
 
