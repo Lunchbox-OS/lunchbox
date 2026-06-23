@@ -715,7 +715,16 @@ fields follow.
 
 Subscribe to `EVENTS_CHAR` notifications after connecting. Each
 notification is the same framed JSON described in §2.2; the decoded
-JSON is an `Event`:
+JSON is an `Event`.
+
+**The first notification after every subscribe is always a
+`state_changed` event** carrying the current `ServiceStateSnapshot`.
+The companion can use that to populate its UI without having to send
+a separate `service_state` RPC. (The device synthesises this initial
+event in the subscribe handler — see
+`crates/shepherd-ble/src/server.rs::events_characteristic`.)
+
+Example payload of the initial frame:
 
 ```json
 {
@@ -763,9 +772,13 @@ JSON is an `Event`:
 
 If the BLE link drops while the app is in the foreground, attempt
 silent reconnect up to ~3 times with backoff, then surface the
-disconnection in the UI. On reconnect, **re-subscribe** to
-`EVENTS_CHAR` and immediately issue `service_state` to repopulate; the
-device does not replay events the app missed while disconnected.
+disconnection in the UI. On reconnect, re-subscribe to `EVENTS_CHAR`
+— the device's initial `state_changed` push (see above) will
+repopulate the UI automatically, so you do **not** need to issue an
+explicit `service_state` RPC. The device does not replay other
+events the app missed while disconnected; UI that displays
+running-session state should refresh on any future event rather than
+assume the snapshot is still current.
 
 ## 6. App UI
 
