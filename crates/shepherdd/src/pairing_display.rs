@@ -59,8 +59,13 @@ impl PairingDisplay for SwayPairingDisplay {
             method_arg,
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // Inherit stdout/stderr so the sidecar's tracing output (and
+        // any GTK / Wayland errors) lands in shepherdd's journal.
+        // Silently swallowing stderr previously cost us a debug cycle
+        // when a GLib option-parser error killed the sidecar before
+        // its activate handler could fire.
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
 
         match cmd.spawn() {
             Ok(child) => {

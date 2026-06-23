@@ -67,7 +67,14 @@ fn main() -> Result<()> {
         build_overlay_window(app, passkey, &device, method);
     });
 
-    let exit_code = app.run();
+    // Pass an empty argv to GTK so its GLib option parser doesn't see
+    // the clap flags we already consumed above and reject them with
+    // "Unknown option --passkey" — which would silently exit 0 before
+    // the activate callback ever fires. Anything we want GTK itself to
+    // see (e.g. GTK debug flags) would need to be split off from argv
+    // before clap; we don't have any today, so empty is fine.
+    let empty: [&str; 0] = [];
+    let exit_code = app.run_with_args(&empty);
     std::process::exit(exit_code.into());
 }
 
