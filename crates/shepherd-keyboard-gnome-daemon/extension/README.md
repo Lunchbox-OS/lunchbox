@@ -17,11 +17,16 @@ connections there.
 - `decoder.js` — D-Bus proxy to the daemon, the safety `gate()` (mirrors
   `shepherd-keyboard-core::safety`), the `qwerty-en-v1` geometry (verbatim from the bundle, so
   captured swipe coordinates align with decode geometry), and the v1 `gesture.json` builder.
-- `extension.js` — builds the keyboard actor (suggestion bar + letter grid + function row) in
-  `Main.layoutManager.keyboardBox`; tap → `Main.inputMethod.commit`; swipe → normalized
-  `gesture.json` → daemon `Decode` → suggestion bar → tap-to-commit; Enter/Backspace via
-  `Main.inputMethod.handleVirtualKey`; reads purpose/hints from `Main.inputMethod` and applies
-  the gate; suppresses the built-in OSK by overriding `Main.keyboard.open`.
+- `extension.js` — builds the keyboard actor (suggestion bar + letter grid + function row) as a
+  bottom-docked `addChrome` surface (reserves space via struts); tap → `Main.inputMethod.commit`;
+  swipe → normalized `gesture.json` → daemon `Decode` → suggestion bar → tap-to-commit;
+  Enter/Backspace via `Main.inputMethod.handleVirtualKey`; reads purpose/hints from
+  `Main.inputMethod` and applies the gate; suppresses the built-in OSK by overriding
+  `Main.keyboard.open`.
+- **Focus-driven show/hide:** the keyboard starts hidden and shows when a text field is focused,
+  hiding on blur. GNOME 50 has no IM focus signal, so it tracks `Main.inputMethod.currentFocus`
+  driven by the `cursor-location-changed` / `surrounding-text-set` IM signals and
+  `global.display notify::focus-window`.
 
 Confirmed GNOME 50 APIs (empirically, since `Eval`/unsafe-mode is off): `inputMethod.commit`,
 `inputMethod.handleVirtualKey`, `inputMethod.getSurroundingText`, `inputMethod._purpose` /
@@ -34,12 +39,14 @@ PASSWORD or DIGITS+sensitive), `layoutManager.keyboardBox`, `keyboard.open`.
 on a private bus, enables the extension with its built-in self-test, and asserts every check
 passes. Confirmed in **both** `user` and `gdm` modes: the extension enables cleanly
 (`state=ENABLED`, no error), the actor renders (28 keys, on stage), the commit + virtual-key
-APIs are present, the safety gate forces tap-only for password/sensitive fields, and a gesture
-decodes through the daemon to top candidate `hello` (parity with wlroots).
+APIs are present, the safety gate forces tap-only for password/sensitive fields, a gesture
+decodes through the daemon to top candidate `hello` (parity with wlroots), and the keyboard
+**starts hidden** with working show/hide mechanics.
 
-**Still needs an interactive session** (input devices + a focused app — not coverable headless):
-a real touch-driven swipe committing into an app field, built-in-OSK-suppression behavior, and
-focus-driven show/hide. The manual checklist below covers these.
+**Still needs an interactive session** (input devices + a focused app — not coverable headless,
+which has no app to focus): show-on-real-focus / hide-on-blur end to end, a touch-driven swipe
+committing into an app field, and built-in-OSK-suppression behavior. The manual checklist below
+covers these.
 
 ## Login-screen (gdm) keyboard
 

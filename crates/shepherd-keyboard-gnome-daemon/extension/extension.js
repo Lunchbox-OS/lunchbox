@@ -36,9 +36,13 @@ export default class ShepherdSwipeExtension extends Extension {
         this._proxy = makeDecoderProxy();
         this._shift = false;
         this._gesture = null; // {points: [{x,y,t}], t0}
+        this._visible = false;
+        this._focusIds = [];
 
         this._buildKeyboard();
         this._suppressBuiltinOsk();
+        this._connectFocus();
+        this._syncVisibility(); // hidden unless a field is already focused
 
         if (GLib.getenv('SHEPHERD_SWIPE_SELFTEST'))
             this._selfTest();
@@ -46,8 +50,11 @@ export default class ShepherdSwipeExtension extends Extension {
 
     disable() {
         this._restoreBuiltinOsk();
+        for (const [obj, id] of this._focusIds ?? [])
+            obj.disconnect(id);
+        this._focusIds = [];
         if (this._root) {
-            Main.layoutManager.keyboardBox.remove_child(this._root);
+            Main.layoutManager.removeChrome(this._root);
             this._root.destroy();
             this._root = null;
         }
@@ -128,7 +135,63 @@ export default class ShepherdSwipeExtension extends Extension {
         }
         this._root.add_child(fnRow);
 
-        Main.layoutManager.keyboardBox.add_child(this._root);
+        // Self-managed bottom-docked surface (reserves space via struts), shown on text
+        // focus. Using addChrome rather than keyboardBox keeps full control of visibility.
+        this._root.hide();
+        Main.layoutManager.addChrome(this._root, {
+            affectsStruts: true,
+            trackFullscreen: true,
+        });
+        this._positionAtBottom();
+    }
+
+    _positionAtBottom() {
+        const m = Main.layoutManager.primaryMonitor;
+        if (m && this._root)
+            this._root.set_position(m.x, m.y + m.height - this._root.height);
+    }
+
+    // --- focus-driven show / hide -----------------------------------------------------
+
+    _connectFocus() {
+        const im = Main.inputMethod;
+        const sync = () => this._syncVisibility();
+        // cursor-location-changed / surrounding-text-set fire when an editable is focused or
+        // updated; notify::focus-window catches window switches and closes (blur). currentFocus
+        // is the source of truth (no GObject focus signal exists on GNOME 50).
+        this._focusIds.push([im, im.connect('cursor-location-changed', sync)]);
+        this._focusIds.push([im, im.connect('surrounding-text-set', sync)]);
+        this._focusIds.push([
+            global.display,
+            global.display.connect('notify::focus-window', sync),
+        ]);
+    }
+
+    _syncVisibility() {
+        if (Main.inputMethod?.currentFocus != null)
+            this._showKeyboard();
+        else
+            this._hideKeyboard();
+    }
+
+    _showKeyboard() {
+        if (!this._root)
+            return;
+        this._positionAtBottom();
+        this._root.show(); // always assert visibility (addChrome can re-show on its own)
+        this._visible = true;
+    }
+
+    _hideKeyboard() {
+        if (!this._root)
+            return;
+        this._root.hide();
+        if (this._visible) {
+            // Side-effects only on a real show→hide transition.
+            this._showSuggestions([]);
+            this._gesture = null;
+        }
+        this._visible = false;
     }
 
     _wireSwipeCapture(width, keyH) {
@@ -264,6 +327,17 @@ export default class ShepherdSwipeExtension extends Extension {
         T('actor-built', !!this._root && this._keyArea.get_n_children() === LAYOUT.keys.length,
             `keys=${this._keyArea?.get_n_children()}`);
         T('on-stage', this._root?.get_stage() !== null);
+
+        // Focus-driven show/hide: starts hidden, and the show/hide mechanics work. (A real
+        // focus-in can't be simulated headless, so drive the handlers directly.)
+        T('focus-signals-connected', this._focusIds.length === 3, `n=${this._focusIds.length}`);
+        // No app is focused in the headless harness, so the keyboard must be hidden after the
+        // initial sync; then verify the show/hide mechanics directly.
+        T('starts-hidden', !this._root.visible);
+        this._showKeyboard();
+        const shown = this._root.visible;
+        this._hideKeyboard();
+        T('show-then-hide', shown && !this._root.visible);
 
         const normalGate = gate(0, 0);
         T('gate-normal-allows-swipe', normalGate.swipe && normalGate.useSurrounding);

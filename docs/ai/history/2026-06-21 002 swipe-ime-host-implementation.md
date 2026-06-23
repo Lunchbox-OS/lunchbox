@@ -174,10 +174,16 @@ sensitive hint (128), and a gesture decodes through the daemon to top candidate 
 with wlroots). The earlier gdm `ServiceUnknown` was a daemon-startup race — fixed by waiting for
 the bus name; it reinforces the gdm requirement that a daemon instance must be up on the gdm bus.
 
-**Residual (needs an interactive session — not coverable headless):** a real touch-driven swipe
-committing into a focused app, built-in-OSK-suppression behavior, focus-driven show/hide; and
-gdm **packaging** (system-wide install + gdm dconf enable + a daemon instance on the gdm bus,
-adult profile).
+**Focus-driven show/hide** is implemented: the keyboard is a bottom-docked `addChrome` surface
+(struts reserve space), starts hidden, and shows/hides on `Main.inputMethod.currentFocus`
+(GNOME 50 has no IM focus signal, so it's driven by `cursor-location-changed` /
+`surrounding-text-set` + `global.display notify::focus-window`). The self-test asserts
+`starts-hidden` and the show/hide mechanics.
+
+**Residual (needs an interactive session — not coverable headless, which has no app to focus):**
+show-on-real-focus / hide-on-blur end to end, a touch-driven swipe committing into a focused app,
+built-in-OSK-suppression behavior; and gdm **packaging** (system-wide install + gdm dconf enable
++ a daemon instance on the gdm bus, adult profile).
 
 ## Remaining work
 
