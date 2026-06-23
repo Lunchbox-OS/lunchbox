@@ -1,4 +1,4 @@
-# Shepherd Swipe Keyboard — GNOME Shell extension (Phase 4 scaffold)
+# Shepherd Swipe Keyboard — GNOME Shell extension
 
 The GNOME half of the swipe keyboard. GNOME exposes neither `input-method-v2`,
 `virtual-keyboard`, nor `layer-shell`, so this is a GJS Shell extension paired with the Rust
@@ -7,25 +7,39 @@ reads input purpose + surrounding text, and commits text through **GNOME's own i
 object**; it calls the daemon's `Decode` over D-Bus for candidates, so GNOME and wlroots
 decode through the identical core path.
 
-## Status: SCAFFOLD — not yet verified on a real GNOME Shell
+Targets **GNOME Shell 50** (`metadata.json` `shell-version: ["50"]`); re-pin if the host moves.
+`session-modes: ["user", "gdm"]` — a login-screen keyboard is wanted, so `gdm` is included;
+`unlock-dialog` stays excluded per GNOME review guidelines that disallow keyboard-signal
+connections there.
 
-Targets **GNOME Shell 50** (the version shepherd-launcher's host runs;
-`metadata.json` `shell-version: ["50"]`). Re-pin if the host moves.
+## Implementation
 
-Concrete and reviewable here: `metadata.json` (`session-modes: ["user", "gdm"]` — a login-screen
-keyboard is wanted, so `gdm` is included; `unlock-dialog` stays excluded per GNOME review
-guidelines that disallow keyboard-signal connections there), the D-Bus proxy + `Decode` wiring
-to the daemon, and the safety-gate decision (mirrors `shepherd-keyboard-core::safety`).
+- `decoder.js` — D-Bus proxy to the daemon, the safety `gate()` (mirrors
+  `shepherd-keyboard-core::safety`), the `qwerty-en-v1` geometry (verbatim from the bundle, so
+  captured swipe coordinates align with decode geometry), and the v1 `gesture.json` builder.
+- `extension.js` — builds the keyboard actor (suggestion bar + letter grid + function row) in
+  `Main.layoutManager.keyboardBox`; tap → `Main.inputMethod.commit`; swipe → normalized
+  `gesture.json` → daemon `Decode` → suggestion bar → tap-to-commit; Enter/Backspace via
+  `Main.inputMethod.handleVirtualKey`; reads purpose/hints from `Main.inputMethod` and applies
+  the gate; suppresses the built-in OSK by overriding `Main.keyboard.open`.
 
-**Not done** (marked `TODO(shell)` in `extension.js`) — needs a real GNOME Shell to write and
-verify, because GJS/Shell APIs drift across releases:
+Confirmed GNOME 50 APIs (empirically, since `Eval`/unsafe-mode is off): `inputMethod.commit`,
+`inputMethod.handleVirtualKey`, `inputMethod.getSurroundingText`, `inputMethod._purpose` /
+`._hints` (purpose `PASSWORD=8`, hint `SENSITIVE_DATA=128`; **no PIN purpose** — PIN arrives as
+PASSWORD or DIGITS+sensitive), `layoutManager.keyboardBox`, `keyboard.open`.
 
-1. Suppress GNOME's built-in OSK while active.
-2. Render the keyboard actor (grid + suggestion bar) and show/hide it on focus/touch.
-3. Capture touch on the actor and assemble a v1 `gesture.json` (same coordinate convention as
-   the core's `GestureBuilder`).
-4. Commit candidates/taps through GNOME's input-method object.
-5. Read input purpose + content hint + surrounding text from the IM object and apply `gate()`.
+## Validated on GNOME Shell 50 (user + gdm)
+
+`scripts/validate-keyboard-gnome.sh [user|gdm]` runs the daemon + a nested headless `gnome-shell`
+on a private bus, enables the extension with its built-in self-test, and asserts every check
+passes. Confirmed in **both** `user` and `gdm` modes: the extension enables cleanly
+(`state=ENABLED`, no error), the actor renders (28 keys, on stage), the commit + virtual-key
+APIs are present, the safety gate forces tap-only for password/sensitive fields, and a gesture
+decodes through the daemon to top candidate `hello` (parity with wlroots).
+
+**Still needs an interactive session** (input devices + a focused app — not coverable headless):
+a real touch-driven swipe committing into an app field, built-in-OSK-suppression behavior, and
+focus-driven show/hide. The manual checklist below covers these.
 
 ## Login-screen (gdm) keyboard
 

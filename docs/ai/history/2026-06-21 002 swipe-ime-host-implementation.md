@@ -152,26 +152,48 @@ shepherd-keyboard-core + external Wayland/D-Bus/CLI crates. **Residual:** add th
 (and the bundle-gated decode tests, after `scripts/fetch-swipe-bundles.sh`) to CI, and run the
 extractability + smoke scripts there.
 
+## Phase 4 — GNOME GJS extension (validated on GNOME Shell 50: user + gdm)
+
+Targets **GNOME 50** (the host runs 50.1), `session-modes: ["user", "gdm"]` — login-screen
+keyboard wanted. `decoder.js` (D-Bus proxy + safety gate + `qwerty-en-v1` geometry + gesture
+builder) and `extension.js` (actor in `keyboardBox`; tap → `inputMethod.commit`; swipe →
+`gesture.json` → daemon `Decode` → suggestions → tap-to-commit; Enter/Backspace via
+`handleVirtualKey`; purpose/hints gate; built-in OSK suppressed via `keyboard.open` override).
+
+The GNOME 50 API surface was confirmed **empirically** (unsafe-mode/`Eval` is off): a throwaway
+probe extension run inside a nested headless `gnome-shell` revealed `inputMethod.commit` /
+`handleVirtualKey` / `getSurroundingText`, that purpose/hints are readable via the (private)
+`inputMethod._purpose` / `._hints` (only signal is `surrounding-text-set`; **no PIN purpose** —
+`PASSWORD=8`, `SENSITIVE_DATA=128`), and `layoutManager.keyboardBox` / `keyboard.open`.
+
+**Validated** via `scripts/validate-keyboard-gnome.sh [user|gdm]` (nested headless shell + daemon
+on a private bus, GNOME analog of the wlroots smoke test). In **both** modes the extension
+enables cleanly (`state=ENABLED`, no error) and every self-test passes: actor renders (28 keys,
+on stage), commit/virtual-key APIs present, gate forces tap-only for password (8) and the
+sensitive hint (128), and a gesture decodes through the daemon to top candidate `hello` (parity
+with wlroots). The earlier gdm `ServiceUnknown` was a daemon-startup race — fixed by waiting for
+the bus name; it reinforces the gdm requirement that a daemon instance must be up on the gdm bus.
+
+**Residual (needs an interactive session — not coverable headless):** a real touch-driven swipe
+committing into a focused app, built-in-OSK-suppression behavior, focus-driven show/hide; and
+gdm **packaging** (system-wide install + gdm dconf enable + a daemon instance on the gdm bus,
+adult profile).
+
 ## Remaining work
 
 - **Phase 2 residual:** automated headless test — synthesized swipe commits the right word into
   a focused `text-input-v3` client; password ⇒ tap-only.
-- **Phase 4 — GNOME GJS Shell extension** (suppress built-in OSK, render, capture touch, commit
-  via GNOME's input-method object, call the daemon's `Decode`, correct `session-modes`; reliable
-  input-purpose gating is a release blocker). Needs a real GNOME Shell; not unit-testable here.
-  **Target settled: GNOME Shell 50** (the host runs 50.1, `mode=ubuntu`), `session-modes:
-  ["user", "gdm"]` — a **login-screen keyboard is wanted**. gdm adds: install system-wide +
-  enable for gdm's dconf profile; run a daemon instance on the gdm session bus; the greeter has
-  no user identity so it runs the **adult** profile (password fields stay tap-only regardless).
-- **Phase 5 residual:** launch/packaging (incl. the gdm daemon unit + system-wide extension
-  install) + production trust anchor (root-owned / verified boot).
+- **Phase 4 residual:** interactive touch/commit verification + gdm packaging (above).
+- **Phase 5 residual:** launch/packaging (sway exec / shepherdd spawn for wlroots; gdm daemon
+  unit + system-wide extension for GNOME) + production trust anchor (root-owned / verified boot).
 - **Phase 6 residual:** CI jobs for the new crates + scripts.
 
 ## Open questions still to resolve (spec §9)
 
 - ~~Target GNOME Shell version + gdm login keyboard~~ — **resolved: GNOME 50, gdm keyboard wanted.**
-- Confirm GNOME 50 reliably exposes input purpose + content hint + surrounding text + commit
-  (without an IBus engine) in **both** `user` and `gdm` modes — the password-safety release gate.
+- ~~Confirm GNOME exposes input purpose + hint + surrounding text + commit~~ — **resolved:
+  confirmed on GNOME 50 in user + gdm modes (`inputMethod._purpose`/`._hints`, `commit`,
+  `getSurroundingText`); the password gate is validated.**
 - Production bundle trust-anchor location and how it's protected from the child (and a bundle
   readable by the `gdm` user for the login keyboard).
 - Bundle update/rollback policy; whether physical-keyboard `grab` is needed in v1.

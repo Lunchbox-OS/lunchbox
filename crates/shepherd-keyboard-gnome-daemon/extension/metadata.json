@@ -1,7 +1,7 @@
 {
   "uuid": "shepherd-swipe@armeafamily.com",
   "name": "Shepherd Swipe Keyboard",
-  "description": "On-screen swipe keyboard for shepherd-launcher child sessions. Decodes gestures via shepherd-keyboard-gnome-daemon over D-Bus and commits text through GNOME's own input method. SCAFFOLD: the Shell-specific glue (OSK suppression, keyboard actor, IM commit) needs completion and verification on the target GNOME Shell version.",
+  "description": "On-screen swipe keyboard for shepherd-launcher child sessions. Decodes gestures via shepherd-keyboard-gnome-daemon over D-Bus and commits text through GNOME's own input method. Validated on GNOME Shell 50 (user + gdm) via an automated nested-shell self-test.",
   "shell-version": ["50"],
   "session-modes": ["user", "gdm"],
   "url": "https://git.armeafamily.com/albert/shepherd-launcher"

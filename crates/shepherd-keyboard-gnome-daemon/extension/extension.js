@@ -1,88 +1,287 @@
-// Shepherd Swipe Keyboard — GNOME Shell extension (SCAFFOLD).
+// Shepherd Swipe Keyboard — GNOME Shell extension (GNOME 50).
 //
-// GNOME exposes neither input-method-v2, virtual-keyboard, nor layer-shell, so the GNOME
-// backend is this Shell extension plus the Rust decode daemon (shepherd-keyboard-gnome-daemon):
-// the extension renders the keyboard, captures touch, reads input purpose + surrounding text,
-// and commits text through GNOME's own input-method object; it calls the daemon over D-Bus
-// only for candidates, so GNOME and wlroots decode through the identical core path.
+// The GNOME half of the swipe keyboard. GNOME exposes neither input-method-v2,
+// virtual-keyboard, nor layer-shell, so this Shell extension renders the keyboard, captures
+// touch, reads input purpose + surrounding text, and commits text through GNOME's own
+// input-method object (Main.inputMethod); it calls the Rust decode daemon
+// (shepherd-keyboard-gnome-daemon) over D-Bus only for candidates, so GNOME and wlroots
+// decode through the identical core path.
 //
-// STATUS: the D-Bus wiring to the daemon and the safety-gate decision below are concrete and
-// reviewable. The Shell-specific glue (suppressing the built-in OSK, rendering the keyboard
-// actor, capturing touch on it, and committing through the IM object) is marked `TODO(shell)`
-// and MUST be completed and verified on the target GNOME Shell version — GJS/Shell APIs drift
-// across releases. See README.md for the manual verification checklist (the Phase 4 gate).
+// API surface confirmed empirically on GNOME Shell 50 (see the daemon README):
+//   - Main.inputMethod.commit(text)            commit text into the focused field
+//   - Main.inputMethod.handleVirtualKey(keyval) emit Enter/Backspace/Tab
+//   - Main.inputMethod.getSurroundingText()     preceding text (skipped in sensitive fields)
+//   - Main.inputMethod._purpose / ._hints       focused field purpose/hints (gate input)
+//   - Main.layoutManager.keyboardBox            the OSK slot (reflows apps)
+//   - Main.keyboard.open                        overridden to suppress the built-in OSK
 
-import Gio from 'gi://Gio';
+import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
+import St from 'gi://St';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const BUS_NAME = 'com.armeafamily.ShepherdSwipe';
-const BUS_PATH = '/com/armeafamily/ShepherdSwipe';
+import {
+    LAYOUT, arcLength, gate, makeDecoderProxy, nearestKey, toGestureJson,
+} from './decoder.js';
 
-// Matches the daemon's interface (com.armeafamily.ShepherdSwipe1).
-const DECODER_IFACE = `
-<node>
-  <interface name="com.armeafamily.ShepherdSwipe1">
-    <method name="Decode">
-      <arg type="s" direction="in" name="gesture_json"/>
-      <arg type="s" direction="in" name="preceding_text"/>
-      <arg type="a(sd)" direction="out" name="candidates"/>
-    </method>
-    <property name="Available" type="b" access="read"/>
-    <property name="Profile" type="s" access="read"/>
-  </interface>
-</node>`;
-
-const DecoderProxy = Gio.DBusProxy.makeProxyWrapper(DECODER_IFACE);
-
-// GNOME input purposes that force plain tap-only entry (mirrors the Rust core's safety gate:
-// no swipe, no suggestions, no surrounding-text reads). Keep in lockstep with
-// shepherd-keyboard-core::safety. St/Clutter expose these as Gtk.InputPurpose values.
-const SENSITIVE_PURPOSES = new Set(['password', 'pin']);
+const KEYBOARD_HEIGHT = 320;
+const SUGGESTION_FRACTION = 0.18;
+const FUNCTION_FRACTION = 0.24;
+const TAP_MAX_PATH = 0.12; // normalized; matches the core's GestureBuilder
+const SUGGESTION_SLOTS = 4;
 
 export default class ShepherdSwipeExtension extends Extension {
     enable() {
-        this._proxy = DecoderProxy(Gio.DBus.session, BUS_NAME, BUS_PATH);
+        this._proxy = makeDecoderProxy();
+        this._shift = false;
+        this._gesture = null; // {points: [{x,y,t}], t0}
 
-        // TODO(shell): suppress GNOME's built-in OSK while this extension is active
-        // (Main.keyboard) so the two keyboards don't both appear.
-        // TODO(shell): build the keyboard actor (St.Widget grid + suggestion bar) and add it
-        // to the Shell, shown on text-field focus / touch and hidden on blur.
-        // TODO(shell): capture touch on the actor, normalize points against the rendered key
-        // area, and assemble a v1 gesture.json (same coordinate convention as the core's
-        // GestureBuilder), then call `this.decode(...)`.
-        // TODO(shell): commit candidates / taps through GNOME's input-method object (the same
-        // channel the built-in OSK uses — no IBus engine, no uinput), honoring `this.gate()`.
-        console.log('shepherd-swipe: enabled (scaffold); daemon proxy created');
+        this._buildKeyboard();
+        this._suppressBuiltinOsk();
+
+        if (GLib.getenv('SHEPHERD_SWIPE_SELFTEST'))
+            this._selfTest();
     }
 
     disable() {
-        // TODO(shell): tear down the actor, restore the built-in OSK, disconnect focus signals.
-        this._proxy = null;
-    }
-
-    /// Safety gate (host spec §4.4): in a sensitive field, do not swipe, do not show
-    /// suggestions, and do not read surrounding text. The caller MUST honor `useSurrounding`
-    /// before reading any surrounding text from the IM object.
-    ///
-    /// `purpose` is the focused field's input purpose (lowercased name) and `sensitiveHint`
-    /// the "sensitive data" content hint, both read from the Shell input-method object.
-    gate(purpose, sensitiveHint) {
-        const tapOnly = SENSITIVE_PURPOSES.has(purpose) || !!sensitiveHint;
-        return {tapOnly, swipe: !tapOnly, suggestions: !tapOnly, useSurrounding: !tapOnly};
-    }
-
-    /// Decode a gesture (v1 gesture.json) into ranked [word, score] pairs via the daemon.
-    /// `precedingText` MUST be '' in a sensitive field (see `gate`). Returns [] on error so
-    /// the caller falls back to letter entry.
-    async decode(gestureJson, precedingText) {
-        if (!this._proxy)
-            return [];
-        try {
-            const [candidates] = await this._proxy.DecodeAsync(gestureJson, precedingText ?? '');
-            return candidates; // array of [word, score]
-        } catch (e) {
-            console.warn(`shepherd-swipe: decode failed: ${e}`);
-            return [];
+        this._restoreBuiltinOsk();
+        if (this._root) {
+            Main.layoutManager.keyboardBox.remove_child(this._root);
+            this._root.destroy();
+            this._root = null;
         }
+        this._keyArea = null;
+        this._suggestionButtons = null;
+        this._proxy = null;
+        this._gesture = null;
+    }
+
+    // --- UI ---------------------------------------------------------------------------
+
+    _buildKeyboard() {
+        const monitor = Main.layoutManager.primaryMonitor;
+        const width = monitor ? monitor.width : 1080;
+        const height = KEYBOARD_HEIGHT;
+        const sugH = Math.round(height * SUGGESTION_FRACTION);
+        const fnH = Math.round(height * FUNCTION_FRACTION);
+        const keyH = height - sugH - fnH;
+
+        this._root = new St.BoxLayout({
+            vertical: true,
+            style_class: 'shepherd-swipe-keyboard',
+            width,
+            height,
+        });
+
+        // Suggestion bar.
+        const bar = new St.BoxLayout({width, height: sugH});
+        this._suggestionButtons = [];
+        for (let i = 0; i < SUGGESTION_SLOTS; i++) {
+            const b = new St.Button({
+                style_class: 'shepherd-swipe-suggestion',
+                label: '',
+                x_expand: true,
+            });
+            b.connect('clicked', () => this._onSuggestion(i));
+            bar.add_child(b);
+            this._suggestionButtons.push(b);
+        }
+        this._root.add_child(bar);
+
+        // Letter grid (absolute positioning from normalized geometry).
+        this._keyArea = new St.Widget({
+            width,
+            height: keyH,
+            reactive: true,
+            layout_manager: new Clutter.FixedLayout(),
+        });
+        const kw = LAYOUT.keyWidth * width;
+        const kh = LAYOUT.keyHeight * keyH;
+        for (const key of LAYOUT.keys) {
+            const btn = new St.Button({style_class: 'shepherd-swipe-key', label: key.l});
+            this._keyArea.add_child(btn);
+            btn.set_size(Math.round(kw * 0.92), Math.round(kh * 0.92));
+            btn.set_position(
+                Math.round(key.x * width - kw / 2),
+                Math.round(key.y * keyH - kh / 2)
+            );
+            btn.connect('clicked', () => this._commitChar(key.l));
+        }
+        this._wireSwipeCapture(width, keyH);
+        this._root.add_child(this._keyArea);
+
+        // Function row.
+        const fnRow = new St.BoxLayout({width, height: fnH});
+        const fnKeys = [
+            ['Shift', () => (this._shift = !this._shift)],
+            ['123', () => {}],
+            ['space', () => this._commit(' '), 3],
+            ['⌫', () => this._key(Clutter.KEY_BackSpace)],
+            ['↵', () => this._key(Clutter.KEY_Return)],
+        ];
+        for (const [label, fn, expand = 1] of fnKeys) {
+            const b = new St.Button({style_class: 'shepherd-swipe-key', label, x_expand: true});
+            b.set_width(Math.round((width / 7) * expand));
+            b.connect('clicked', () => fn());
+            fnRow.add_child(b);
+        }
+        this._root.add_child(fnRow);
+
+        Main.layoutManager.keyboardBox.add_child(this._root);
+    }
+
+    _wireSwipeCapture(width, keyH) {
+        const norm = event => {
+            const [sx, sy] = event.get_coords();
+            const [ax, ay] = this._keyArea.get_transformed_position();
+            return {x: (sx - ax) / width, y: (sy - ay) / keyH, t: event.get_time()};
+        };
+        const begin = event => {
+            const p = norm(event);
+            this._gesture = {points: [p], t0: p.t};
+            return Clutter.EVENT_PROPAGATE; // let St.Button still receive a plain tap
+        };
+        const extend = event => {
+            if (!this._gesture)
+                return Clutter.EVENT_PROPAGATE;
+            const p = norm(event);
+            this._gesture.points.push({x: p.x, y: p.y, t: p.t - this._gesture.t0});
+            return Clutter.EVENT_PROPAGATE;
+        };
+        const finish = () => {
+            const g = this._gesture;
+            this._gesture = null;
+            if (g)
+                this._onStrokeEnd(g.points);
+            return Clutter.EVENT_PROPAGATE;
+        };
+        this._keyArea.connect('button-press-event', (_a, e) => begin(e));
+        this._keyArea.connect('motion-event', (_a, e) => extend(e));
+        this._keyArea.connect('button-release-event', () => finish());
+        this._keyArea.connect('touch-event', (_a, e) => {
+            switch (e.type()) {
+            case Clutter.EventType.TOUCH_BEGIN: return begin(e);
+            case Clutter.EventType.TOUCH_UPDATE: return extend(e);
+            case Clutter.EventType.TOUCH_END: return finish();
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+    }
+
+    // --- input handling ---------------------------------------------------------------
+
+    /** Current safety gate from the focused field's purpose/hints. */
+    _gate() {
+        const im = Main.inputMethod;
+        return gate(im?._purpose ?? 0, im?._hints ?? 0);
+    }
+
+    _onStrokeEnd(points) {
+        // A short path is a tap; the St.Button 'clicked' already handled the letter, so only
+        // act on genuine swipes here.
+        if (points.length < 2 || arcLength(points) < TAP_MAX_PATH)
+            return;
+        const g = this._gate();
+        if (!g.swipe)
+            return; // sensitive field: tap only, no decode
+        const preceding = g.useSurrounding ? this._precedingText() : '';
+        this._proxy.DecodeRemote(toGestureJson(points), preceding, ([candidates]) => {
+            this._showSuggestions((candidates ?? []).map(c => c[0]));
+        });
+    }
+
+    _precedingText() {
+        try {
+            const r = Main.inputMethod.getSurroundingText();
+            // GNOME returns [text, cursor, anchor]; preceding = text up to cursor.
+            if (r && r.length >= 2 && typeof r[0] === 'string')
+                return r[0].slice(0, r[1] | 0);
+        } catch (_e) {}
+        return '';
+    }
+
+    _showSuggestions(words) {
+        this._suggestions = words;
+        for (let i = 0; i < this._suggestionButtons.length; i++)
+            this._suggestionButtons[i].label = words[i] ?? '';
+    }
+
+    _onSuggestion(index) {
+        const word = this._suggestions?.[index];
+        if (word) {
+            this._commit(`${word} `);
+            this._showSuggestions([]);
+        }
+    }
+
+    _commitChar(ch) {
+        this._commit(this._shift ? ch.toUpperCase() : ch);
+        this._shift = false;
+        this._showSuggestions([]);
+    }
+
+    _commit(text) {
+        try {
+            Main.inputMethod.commit(text);
+        } catch (e) {
+            console.warn(`shepherd-swipe: commit failed: ${e}`);
+        }
+    }
+
+    _key(keyval) {
+        try {
+            Main.inputMethod.handleVirtualKey(keyval);
+        } catch (e) {
+            console.warn(`shepherd-swipe: handleVirtualKey failed: ${e}`);
+        }
+    }
+
+    // --- built-in OSK suppression -----------------------------------------------------
+
+    _suppressBuiltinOsk() {
+        try {
+            this._savedOpen = Main.keyboard.open;
+            Main.keyboard.open = () => {};
+        } catch (_e) {}
+    }
+
+    _restoreBuiltinOsk() {
+        try {
+            if (this._savedOpen)
+                Main.keyboard.open = this._savedOpen;
+        } catch (_e) {}
+        this._savedOpen = null;
+    }
+
+    // --- dev self-test (SHEPHERD_SWIPE_SELFTEST=1) -------------------------------------
+
+    _selfTest() {
+        const T = (name, ok, detail = '') =>
+            console.log(`SHEPHERD-SELFTEST ${ok ? 'PASS' : 'FAIL'} ${name} ${detail}`);
+        T('commit-is-fn', typeof Main.inputMethod?.commit === 'function');
+        T('handleVirtualKey-is-fn', typeof Main.inputMethod?.handleVirtualKey === 'function');
+        T('actor-built', !!this._root && this._keyArea.get_n_children() === LAYOUT.keys.length,
+            `keys=${this._keyArea?.get_n_children()}`);
+        T('on-stage', this._root?.get_stage() !== null);
+
+        const normalGate = gate(0, 0);
+        T('gate-normal-allows-swipe', normalGate.swipe && normalGate.useSurrounding);
+        const pwGate = gate(8, 0);
+        T('gate-password-taponly', pwGate.tapOnly && !pwGate.swipe && !pwGate.useSurrounding);
+        const hintGate = gate(0, 128);
+        T('gate-sensitive-hint-taponly', hintGate.tapOnly && !hintGate.swipe);
+
+        const hello = GLib.getenv('SHEPHERD_HELLO');
+        if (hello) {
+            try {
+                const [cands] = this._proxy.DecodeSync(hello, '');
+                T('daemon-decode-hello', cands.length > 0 && cands[0][0] === 'hello',
+                    `n=${cands.length} top=${cands[0]?.[0]} profile=${this._proxy.Profile}`);
+            } catch (e) {
+                T('daemon-decode-hello', false, `${e}`);
+            }
+        }
+        console.log('SHEPHERD-SELFTEST DONE');
     }
 }
