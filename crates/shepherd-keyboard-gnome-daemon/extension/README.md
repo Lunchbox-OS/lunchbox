@@ -9,10 +9,13 @@ decode through the identical core path.
 
 ## Status: SCAFFOLD — not yet verified on a real GNOME Shell
 
-Concrete and reviewable here: `metadata.json` (incl. `session-modes: ["user"]` — `unlock-dialog`
-deliberately excluded, per GNOME review guidelines that disallow keyboard-signal connections
-there), the D-Bus proxy + `Decode` wiring to the daemon, and the safety-gate decision (mirrors
-`shepherd-keyboard-core::safety`).
+Targets **GNOME Shell 50** (the version shepherd-launcher's host runs;
+`metadata.json` `shell-version: ["50"]`). Re-pin if the host moves.
+
+Concrete and reviewable here: `metadata.json` (`session-modes: ["user", "gdm"]` — a login-screen
+keyboard is wanted, so `gdm` is included; `unlock-dialog` stays excluded per GNOME review
+guidelines that disallow keyboard-signal connections there), the D-Bus proxy + `Decode` wiring
+to the daemon, and the safety-gate decision (mirrors `shepherd-keyboard-core::safety`).
 
 **Not done** (marked `TODO(shell)` in `extension.js`) — needs a real GNOME Shell to write and
 verify, because GJS/Shell APIs drift across releases:
@@ -24,12 +27,33 @@ verify, because GJS/Shell APIs drift across releases:
 4. Commit candidates/taps through GNOME's input-method object.
 5. Read input purpose + content hint + surrounding text from the IM object and apply `gate()`.
 
+## Login-screen (gdm) keyboard
+
+A login-screen keyboard is in scope (`session-modes` includes `gdm`), which adds requirements
+beyond the user-session keyboard:
+
+- **The extension must be installed system-wide and enabled for gdm**, not just for the user.
+  Install under `/usr/share/gnome-shell/extensions/shepherd-swipe@armeafamily.com` and add the
+  uuid to gdm's enabled list (e.g. a gdm dconf profile setting
+  `org.gnome.shell enabled-extensions`), since `~/.local/share` isn't read in the gdm session.
+- **A daemon instance must run on the gdm session bus.** The greeter runs as the `gdm` user with
+  its own session bus, so a `shepherd-keyboard-gnome-daemon` must be started there (e.g. a
+  systemd user unit in the gdm slice, or D-Bus activation). It loads a bundle readable by the
+  `gdm` user from a root-owned location.
+- **Profile at the login screen:** there is no logged-in user yet, so the greeter has no
+  child/adult identity — run the gdm daemon with the **adult** profile (or a dedicated neutral
+  one). The password field is still tap-only via the safety gate, so no password text is
+  decoded or fed to the context LM regardless of profile.
+- `gdm` mode imposes the same `unlock-dialog` review constraints; keep keyboard-signal handling
+  out of any locked mode.
+
 ## Open questions before this can ship (spec §9)
 
-- **Target GNOME Shell version(s)** — pin and verify; update `metadata.json` `shell-version`.
-- **Confirm GNOME reliably exposes input purpose + surrounding text + commit** on that version
-  without an IBus engine. Per the spec this gates the password-safety guarantee: if purpose
-  can't be reliably detected, that is a **release blocker**, not a silent degrade.
+- **Confirm GNOME 50 reliably exposes input purpose + content hint + surrounding text + commit**
+  through the Shell input-method object without an IBus engine — in **both** `user` and `gdm`
+  modes. Per the spec this gates the password-safety guarantee: if purpose can't be reliably
+  detected, that is a **release blocker**, not a silent degrade. (Target version and the
+  login-screen requirement are now settled: GNOME 50, gdm keyboard wanted.)
 
 ## Manual verification checklist (the Phase 4 gate)
 
@@ -45,12 +69,25 @@ On the target GNOME Shell version, with the daemon running (`shepherd-keyboard-g
 - [ ] A **password/PIN field is tap-only**: no swipe, no suggestions, and surrounding text is
       never read (verify via logs that `Decode` is not called and preceding text is `''`).
 - [ ] In a child session there is no profile-switch UI.
+- [ ] **Login screen (gdm):** the keyboard appears at the GNOME greeter, the password field is
+      tap-only, and the keyboard commits the username into the user field.
 
 ## Install (development)
+
+User session:
 
 ```sh
 ln -s "$PWD/crates/shepherd-keyboard-gnome-daemon/extension" \
   ~/.local/share/gnome-shell/extensions/shepherd-swipe@armeafamily.com
-# restart GNOME Shell, then:
+# restart GNOME Shell (log out/in on Wayland), then:
 gnome-extensions enable shepherd-swipe@armeafamily.com
+```
+
+Login screen (gdm) — system-wide, since `~/.local/share` isn't read in the gdm session:
+
+```sh
+sudo cp -r "$PWD/crates/shepherd-keyboard-gnome-daemon/extension" \
+  /usr/share/gnome-shell/extensions/shepherd-swipe@armeafamily.com
+# enable for gdm via its dconf profile (org.gnome.shell enabled-extensions),
+# and arrange a daemon instance on the gdm session bus (see "Login-screen keyboard").
 ```

@@ -159,12 +159,19 @@ extractability + smoke scripts there.
 - **Phase 4 — GNOME GJS Shell extension** (suppress built-in OSK, render, capture touch, commit
   via GNOME's input-method object, call the daemon's `Decode`, correct `session-modes`; reliable
   input-purpose gating is a release blocker). Needs a real GNOME Shell; not unit-testable here.
-- **Phase 5 residual:** launch/packaging + production trust anchor (root-owned / verified boot).
+  **Target settled: GNOME Shell 50** (the host runs 50.1, `mode=ubuntu`), `session-modes:
+  ["user", "gdm"]` — a **login-screen keyboard is wanted**. gdm adds: install system-wide +
+  enable for gdm's dconf profile; run a daemon instance on the gdm session bus; the greeter has
+  no user identity so it runs the **adult** profile (password fields stay tap-only regardless).
+- **Phase 5 residual:** launch/packaging (incl. the gdm daemon unit + system-wide extension
+  install) + production trust anchor (root-owned / verified boot).
 - **Phase 6 residual:** CI jobs for the new crates + scripts.
 
 ## Open questions still to resolve (spec §9)
 
-- Target GNOME Shell version(s) and whether a `gdm` login keyboard is needed.
-- Confirm GNOME reliably exposes input purpose + surrounding text + commit on that version.
-- Production bundle trust-anchor location and how it's protected from the child.
+- ~~Target GNOME Shell version + gdm login keyboard~~ — **resolved: GNOME 50, gdm keyboard wanted.**
+- Confirm GNOME 50 reliably exposes input purpose + content hint + surrounding text + commit
+  (without an IBus engine) in **both** `user` and `gdm` modes — the password-safety release gate.
+- Production bundle trust-anchor location and how it's protected from the child (and a bundle
+  readable by the `gdm` user for the login keyboard).
 - Bundle update/rollback policy; whether physical-keyboard `grab` is needed in v1.
