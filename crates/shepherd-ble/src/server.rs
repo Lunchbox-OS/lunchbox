@@ -113,10 +113,28 @@ impl BleServer {
     /// 5. Start LE advertising under the configured device name.
     /// 6. Wait for shutdown.
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
-        let session = bluer::Session::new().await?;
-        let adapter = session.default_adapter().await?;
-        adapter.set_powered(true).await?;
-        adapter.set_pairable(true).await?;
+        let session = bluer::Session::new().await.map_err(|e| {
+            anyhow::anyhow!(
+                "BlueZ D-Bus session unavailable ({e}); is bluetoothd running and reachable on the system bus?"
+            )
+        })?;
+        let adapter = session.default_adapter().await.map_err(|e| {
+            anyhow::anyhow!(
+                "No default Bluetooth adapter ({e}); check `bluetoothctl show` and that an HCI controller is attached"
+            )
+        })?;
+        adapter.set_powered(true).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to power on Bluetooth adapter '{}' ({e}); this usually means the daemon user lacks the `bluetooth` group (BlueZ polkit requires it for Adapter1.Set*)",
+                adapter.name(),
+            )
+        })?;
+        adapter.set_pairable(true).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to mark adapter '{}' pairable ({e}); same root cause as set_powered — confirm the daemon user is in the `bluetooth` group",
+                adapter.name(),
+            )
+        })?;
         info!(adapter = %adapter.name(), "BLE management server starting");
 
         // Best-effort bond removal after a sentinel-triggered reset.
@@ -128,7 +146,13 @@ impl BleServer {
             warn!(error = %e, "BlueZ bond removal after reset failed (best-effort)");
         }
 
-        let _agent_handle = register_agent(&session, self.display.clone()).await?;
+        let _agent_handle = register_agent(&session, self.display.clone())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to register BlueZ pairing agent ({e}); without this, pairing falls back to a PIN entry on the phone and no Numeric Comparison overlay appears on the TV. Likely cause: the daemon user lacks the `bluetooth` group."
+                )
+            })?;
         let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>(NOTIFY_QUEUE_DEPTH);
         let (events_tx, events_rx) = mpsc::channel::<Vec<u8>>(EVENTS_QUEUE_DEPTH);
 

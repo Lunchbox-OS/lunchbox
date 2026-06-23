@@ -240,12 +240,18 @@ install_config() {
 #   daemon runs as the desktop user, so without this membership every
 #   brightness write fails with EACCES even though brightnessctl is
 #   installed.
+# - bluetooth: required by the BLE management transport (shepherd-ble).
+#   BlueZ's polkit rules grant the `bluetooth` group permission to call
+#   org.bluez.Adapter1.SetPairable and AgentManager1.RegisterAgent over
+#   the system bus; without membership the BLE startup fails on the
+#   first adapter call and the daemon never advertises.
 #
 # Add new groups here as features need them; install_user_groups walks the
 # array and skips memberships the user already has.
 SHEPHERD_REQUIRED_GROUPS=(
     "input"
     "video"
+    "bluetooth"
 )
 
 # Add the target user to all groups required by shepherd-launcher.
