@@ -189,9 +189,20 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun refreshAll() {
         val c = client ?: return
-        runCatching { c.serviceState() }.onSuccess { snap ->
-            _state.update { it.copy(snapshot = snap, currentSession = snap.currentSession) }
-        }
+        // service_state populates the entry list — if it fails we used
+        // to swallow the error silently, which is exactly what made
+        // "the list doesn't appear on reopen" so hard to spot. Surface
+        // the message; the device's initial StateChanged push (see
+        // shepherd-ble's events_characteristic) is the redundant
+        // backup that usually fills the UI in regardless.
+        runCatching { c.serviceState() }.fold(
+            onSuccess = { snap ->
+                _state.update { it.copy(snapshot = snap, currentSession = snap.currentSession) }
+            },
+            onFailure = { e ->
+                _message.value = "Couldn't fetch device state: ${e.message ?: e::class.simpleName}"
+            },
+        )
         runCatching { c.getVolume() }.onSuccess { v -> _state.update { it.copy(volume = v) } }
         runCatching { c.getBrightness() }.onSuccess { b -> _state.update { it.copy(brightness = b) } }
     }

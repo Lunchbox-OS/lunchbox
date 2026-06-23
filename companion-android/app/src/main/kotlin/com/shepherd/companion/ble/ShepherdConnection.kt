@@ -61,7 +61,15 @@ class ShepherdConnection private constructor(
     @Volatile
     private var chunkSize: Int = 20
 
-    private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 64)
+    // replay = 1 so a collector that attaches a tick after a notification
+    // arrives still sees that event. Important for the device's
+    // "initial StateChanged on every Events subscribe" push (see
+    // crates/shepherd-ble/src/server.rs::events_characteristic): the
+    // CCCD-enable + first notify can arrive on the BLE thread before
+    // ShepherdViewModel.eventsJob has attached, and without replay
+    // that snapshot — the one the UI uses to populate its list —
+    // would be silently dropped.
+    private val _events = MutableSharedFlow<Event>(replay = 1, extraBufferCapacity = 64)
     val events: SharedFlow<Event> = _events
 
     val state: StateFlow<State> get() = peripheral.state
