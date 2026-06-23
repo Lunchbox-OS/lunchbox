@@ -25,6 +25,20 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::info;
 
+/// Which SMP pairing method we landed in, so the display can render
+/// the right instruction copy. The number on screen is the same
+/// either way; only the user action differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingMethod {
+    /// LESC Numeric Comparison — both sides display, user confirms
+    /// match on the phone.
+    Compare,
+    /// Passkey Entry, responder-displays — we display, user types
+    /// the number into the phone. Selected on LE Legacy Pairing and
+    /// on some LESC IO-cap combinations.
+    Enter,
+}
+
 /// Visual surface for the 6-digit pairing passkey.
 ///
 /// Implementations should render the passkey somewhere the user can
@@ -39,7 +53,7 @@ use tracing::info;
 /// Implementations must be `Send + Sync` because the agent owns its
 /// own task.
 pub trait PairingDisplay: Send + Sync + 'static {
-    fn show(&self, device_address: &str, passkey: u32);
+    fn show(&self, device_address: &str, passkey: u32, method: PairingMethod);
     fn hide(&self);
 }
 
@@ -50,7 +64,7 @@ pub trait PairingDisplay: Send + Sync + 'static {
 pub struct NoopPairingDisplay;
 
 impl PairingDisplay for NoopPairingDisplay {
-    fn show(&self, _device_address: &str, _passkey: u32) {}
+    fn show(&self, _device_address: &str, _passkey: u32, _method: PairingMethod) {}
     fn hide(&self) {}
 }
 
@@ -112,7 +126,7 @@ async fn handle_request_confirmation(
         passkey,
         "Numeric Comparison pairing requested; displaying passkey on TV",
     );
-    display.show(&device_address, passkey);
+    display.show(&device_address, passkey, PairingMethod::Compare);
     spawn_hide_after_hold(display, hide_lock);
     Ok(())
 }
@@ -128,7 +142,7 @@ async fn handle_display_passkey(
         passkey,
         "Passkey Entry pairing requested; displaying passkey on TV (phone will prompt for entry)",
     );
-    display.show(&device_address, passkey);
+    display.show(&device_address, passkey, PairingMethod::Enter);
     spawn_hide_after_hold(display, hide_lock);
     Ok(())
 }
@@ -174,11 +188,13 @@ mod tests {
     struct CountingDisplay {
         shown: AtomicU32,
         hidden: AtomicU32,
+        last_method: std::sync::Mutex<Option<PairingMethod>>,
     }
 
     impl PairingDisplay for CountingDisplay {
-        fn show(&self, _addr: &str, _passkey: u32) {
+        fn show(&self, _addr: &str, _passkey: u32, method: PairingMethod) {
             self.shown.fetch_add(1, Ordering::SeqCst);
+            *self.last_method.lock().unwrap() = Some(method);
         }
         fn hide(&self) {
             self.hidden.fetch_add(1, Ordering::SeqCst);
@@ -194,7 +210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirmation_handler_shows_and_returns_ok() {
+    async fn confirmation_handler_shows_compare() {
         let display = Arc::new(CountingDisplay::default());
         let hide_lock = Arc::new(Mutex::new(()));
         let result = handle_request_confirmation(
@@ -206,10 +222,14 @@ mod tests {
         .await;
         assert!(result.is_ok());
         assert_eq!(display.shown.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *display.last_method.lock().unwrap(),
+            Some(PairingMethod::Compare)
+        );
     }
 
     #[tokio::test]
-    async fn display_passkey_handler_shows_and_returns_ok() {
+    async fn display_passkey_handler_shows_enter() {
         let display = Arc::new(CountingDisplay::default());
         let hide_lock = Arc::new(Mutex::new(()));
         let result = handle_display_passkey(
@@ -221,6 +241,10 @@ mod tests {
         .await;
         assert!(result.is_ok());
         assert_eq!(display.shown.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *display.last_method.lock().unwrap(),
+            Some(PairingMethod::Enter)
+        );
     }
 
     #[test]

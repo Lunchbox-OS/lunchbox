@@ -7,7 +7,7 @@
 //! launch the overlay as a child process so we don't have to drag
 //! GTK into the daemon; killing the child tears the overlay down.
 
-use shepherd_ble::PairingDisplay;
+use shepherd_ble::{PairingDisplay, PairingMethod};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -38,11 +38,16 @@ impl Default for SwayPairingDisplay {
 }
 
 impl PairingDisplay for SwayPairingDisplay {
-    fn show(&self, device_address: &str, passkey: u32) {
+    fn show(&self, device_address: &str, passkey: u32, method: PairingMethod) {
         // Replace any previous overlay first — a second pairing attempt
         // before the first hide timed out should still show the new
         // passkey rather than stack windows.
         self.hide();
+
+        let method_arg = match method {
+            PairingMethod::Compare => "compare",
+            PairingMethod::Enter => "enter",
+        };
 
         let mut cmd = Command::new(BINARY);
         cmd.args([
@@ -50,6 +55,8 @@ impl PairingDisplay for SwayPairingDisplay {
             &passkey.to_string(),
             "--device",
             device_address,
+            "--method",
+            method_arg,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -59,7 +66,7 @@ impl PairingDisplay for SwayPairingDisplay {
             Ok(child) => {
                 info!(
                     pid = child.id(),
-                    passkey, device = %device_address,
+                    passkey, device = %device_address, method = method_arg,
                     "Spawned pairing-display overlay",
                 );
                 *self.current.lock().expect("display lock poisoned") = Some(child);

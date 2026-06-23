@@ -9,7 +9,7 @@ pub mod rpc;
 pub mod server;
 
 pub use admin::{AdminRecord, AdminRole, AdminStore, check_reset_sentinel};
-pub use agent::{NoopPairingDisplay, PairingDisplay};
+pub use agent::{NoopPairingDisplay, PairingDisplay, PairingMethod};
 pub use claim::{AuthDecision, ClaimMachine, ClaimState, PeerIdentity};
 pub use protocol::{
     ErrorCode, RpcError, RpcRequest, RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID,

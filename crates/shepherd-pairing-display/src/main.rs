@@ -1,20 +1,19 @@
 //! shepherd-pairing-display
 //!
 //! Full-screen Sway / `wlr-layer-shell` overlay that shows the BLE
-//! Numeric Comparison passkey during pairing. Launched as a
-//! short-lived subprocess by `shepherdd` and killed when the pairing
-//! window closes. See the crate README and
+//! pairing passkey. Launched as a short-lived subprocess by `shepherdd`
+//! and killed when the pairing window closes. See the crate README and
 //! `docs/ai/history/2026-06-20 002 ble-management.md`.
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "shepherd-pairing-display")]
-#[command(about = "Fullscreen passkey overlay for BLE Numeric Comparison pairing", long_about = None)]
+#[command(about = "Fullscreen passkey overlay for BLE pairing", long_about = None)]
 struct Args {
     /// 6-digit passkey BlueZ passed to the pairing agent. Rendered as a
     /// zero-padded string so a low passkey (e.g. 42) still shows as
@@ -27,10 +26,25 @@ struct Args {
     #[arg(long)]
     device: String,
 
+    /// Pairing method the agent selected, so the instruction copy
+    /// matches what the phone is actually asking the user to do.
+    /// Numeric Comparison (LESC) → `compare`; Passkey Entry
+    /// (LE Legacy or some LESC IO-cap combinations) → `enter`.
+    #[arg(long, value_enum)]
+    method: PairingMethodArg,
+
     /// Log level for the overlay's own logs (separate from the GTK
     /// stderr noise).
     #[arg(short, long, default_value = "info")]
     log_level: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PairingMethodArg {
+    /// LESC Numeric Comparison — user confirms the number matches.
+    Compare,
+    /// Passkey Entry — user types the number into the phone.
+    Enter,
 }
 
 fn main() -> Result<()> {
@@ -48,15 +62,21 @@ fn main() -> Result<()> {
 
     let passkey = args.passkey;
     let device = args.device;
+    let method = args.method;
     app.connect_activate(move |app| {
-        build_overlay_window(app, passkey, &device);
+        build_overlay_window(app, passkey, &device, method);
     });
 
     let exit_code = app.run();
     std::process::exit(exit_code.into());
 }
 
-fn build_overlay_window(app: &gtk4::Application, passkey: u32, device: &str) {
+fn build_overlay_window(
+    app: &gtk4::Application,
+    passkey: u32,
+    device: &str,
+    method: PairingMethodArg,
+) {
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
@@ -77,12 +97,12 @@ fn build_overlay_window(app: &gtk4::Application, passkey: u32, device: &str) {
 
     install_css();
 
-    let content = build_content(passkey, device);
+    let content = build_content(passkey, device, method);
     window.set_child(Some(&content));
     window.present();
 }
 
-fn build_content(passkey: u32, device: &str) -> gtk4::Box {
+fn build_content(passkey: u32, device: &str, method: PairingMethodArg) -> gtk4::Box {
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 24);
     outer.set_halign(gtk4::Align::Center);
     outer.set_valign(gtk4::Align::Center);
@@ -103,16 +123,26 @@ fn build_content(passkey: u32, device: &str) -> gtk4::Box {
     passkey_label.set_selectable(true);
     outer.append(&passkey_label);
 
-    let instruction = gtk4::Label::new(Some(
-        "If this number matches the one on your phone, tap MATCH on the phone.\n\
-         If it does not match, tap DON'T MATCH and tell whoever is in charge of this device.",
-    ));
+    let instruction = gtk4::Label::new(Some(instruction_for(method)));
     instruction.add_css_class("pairing-instruction");
     instruction.set_justify(gtk4::Justification::Center);
     instruction.set_wrap(true);
     outer.append(&instruction);
 
     outer
+}
+
+fn instruction_for(method: PairingMethodArg) -> &'static str {
+    match method {
+        PairingMethodArg::Compare => {
+            "If this number matches the one on your phone, tap PAIR (or MATCH) on the phone.\n\
+             If it does not match, tap CANCEL (or DON'T MATCH) and tell whoever is in charge of this device."
+        }
+        PairingMethodArg::Enter => {
+            "Type this number into the prompt on your phone to complete pairing.\n\
+             If you did not initiate this pairing, tap CANCEL on the phone and tell whoever is in charge of this device."
+        }
+    }
 }
 
 fn install_css() {
