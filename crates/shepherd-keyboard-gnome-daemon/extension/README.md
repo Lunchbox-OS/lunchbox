@@ -104,11 +104,18 @@ ln -s "$PWD/crates/shepherd-keyboard-gnome-daemon/extension" \
 gnome-extensions enable shepherd-swipe@armeafamily.com
 ```
 
-Login screen (gdm) — system-wide, since `~/.local/share` isn't read in the gdm session:
+Login screen (gdm) — use the reproducible packaging script (it installs the extension
+system-wide, installs the daemon to `/usr/libexec`, stages the bundle under `/var/lib/shepherd`,
+registers the daemon as a D-Bus activated service on the greeter bus, and enables the extension
+in gdm's dconf):
 
 ```sh
-sudo cp -r "$PWD/crates/shepherd-keyboard-gnome-daemon/extension" \
-  /usr/share/gnome-shell/extensions/shepherd-swipe@armeafamily.com
-# enable for gdm via its dconf profile (org.gnome.shell enabled-extensions),
-# and arrange a daemon instance on the gdm session bus (see "Login-screen keyboard").
+cargo build --release -p shepherd-keyboard-gnome-daemon
+scripts/fetch-swipe-bundles.sh
+sudo scripts/install-keyboard-gnome-gdm.sh install      # --dry-run to preview; `status` / `uninstall`
+sudo systemctl restart gdm                              # applies it — logs out the current session!
 ```
+
+The packaging is validated end-to-end on GNOME 50: a nested `--mode=gdm` shell reading the
+installed gdm dconf auto-enables the system extension, and its first decode D-Bus-activates the
+staged daemon (`top=hello`, parity with wlroots).

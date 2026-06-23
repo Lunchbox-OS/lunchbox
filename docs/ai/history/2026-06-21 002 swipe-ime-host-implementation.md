@@ -180,18 +180,30 @@ the bus name; it reinforces the gdm requirement that a daemon instance must be u
 `surrounding-text-set` + `global.display notify::focus-window`). The self-test asserts
 `starts-hidden` and the show/hide mechanics.
 
+**gdm packaging** is done and validated via `scripts/install-keyboard-gnome-gdm.sh`
+(install/uninstall/status, `--dry-run`): system-wide extension install, daemon to
+`/usr/libexec`, bundle staged under `/var/lib/shepherd` (gdm-readable), daemon registered as a
+**D-Bus activated** service (so it starts on the greeter bus on demand; adult profile — password
+fields stay tap-only), and the extension enabled in gdm's dconf via an `/etc/dconf/profile`
+override (adds `system-db:gdm`, preserving Ubuntu's `file-db` greeter defaults) + a
+`/etc/dconf/db/gdm.d` keyfile. Validated end-to-end: a nested `--mode=gdm` shell reading the
+installed gdm dconf auto-enables the system extension, and its first decode D-Bus-activates the
+staged daemon (`top=hello`). For a logged-in **child** session, shepherd-launcher should start a
+`--profile child` daemon at session start (owning the bus name first) so the adult activation
+never triggers there — that user-session launch is the remaining Phase 5 piece.
+
 **Residual (needs an interactive session — not coverable headless, which has no app to focus):**
 show-on-real-focus / hide-on-blur end to end, a touch-driven swipe committing into a focused app,
-built-in-OSK-suppression behavior; and gdm **packaging** (system-wide install + gdm dconf enable
-+ a daemon instance on the gdm bus, adult profile).
+and built-in-OSK-suppression behavior.
 
 ## Remaining work
 
 - **Phase 2 residual:** automated headless test — synthesized swipe commits the right word into
   a focused `text-input-v3` client; password ⇒ tap-only.
 - **Phase 4 residual:** interactive touch/commit verification + gdm packaging (above).
-- **Phase 5 residual:** launch/packaging (sway exec / shepherdd spawn for wlroots; gdm daemon
-  unit + system-wide extension for GNOME) + production trust anchor (root-owned / verified boot).
+- **Phase 5 residual:** user-session launch (sway exec / shepherdd spawn for wlroots; start the
+  `--profile child` daemon at child-session start for GNOME) + production trust anchor (root-owned
+  / verified boot). gdm packaging itself is done (`scripts/install-keyboard-gnome-gdm.sh`).
 - **Phase 6 residual:** CI jobs for the new crates + scripts.
 
 ## Open questions still to resolve (spec §9)
