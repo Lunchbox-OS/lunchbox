@@ -266,8 +266,17 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
     }
 }
 
-/// `Request`: client writes length-prefixed JSON-RPC frames. Encrypted
-/// + authenticated link required (LESC + MITM bonding).
+/// `Request`: client writes length-prefixed JSON-RPC frames.
+/// Authenticated-encrypted link required (i.e. MITM-protected bonding).
+///
+/// We intentionally do **not** require `secure_write` (LE Secure
+/// Connections). LESC needs a BT 4.2+ controller, and the leibniz
+/// dev box is BT 4.0. With `secure_write: true` BlueZ silently
+/// rejects all writes from peers bonded via LE Legacy Pairing, even
+/// though the link is MITM-protected via Passkey Entry. The
+/// `encrypt_authenticated_write` flag is satisfied by Legacy MITM
+/// pairing too — that gives us the property we actually want
+/// (encrypted + authenticated link) without requiring LESC.
 fn request_characteristic(
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
@@ -285,7 +294,6 @@ fn request_characteristic(
             write: true,
             write_without_response: true,
             encrypt_authenticated_write: true,
-            secure_write: true,
             method: CharacteristicWriteMethod::Fun(Box::new(move |chunk, req| {
                 let svc = svc.clone();
                 let claim = claim.clone();
@@ -321,6 +329,12 @@ async fn handle_write(
     svc: Arc<dyn ManagementService>,
     response_tx: mpsc::Sender<Vec<u8>>,
 ) -> bluer::gatt::local::ReqResult<()> {
+    debug!(
+        peer = %peer.address,
+        chunk_len = chunk.len(),
+        "BLE request chunk arrived"
+    );
+
     // Reset the reader if the peer changed mid-flight — keeps a stuck
     // half-frame from one client from polluting the next client's
     // first request.
@@ -364,6 +378,12 @@ async fn dispatch_frame(
     let request: RpcRequest = match serde_json::from_slice(frame) {
         Ok(r) => r,
         Err(e) => {
+            warn!(
+                peer = %peer.address,
+                frame_len = frame.len(),
+                error = %e,
+                "Dropping BLE frame: not valid JSON-RPC"
+            );
             let resp = RpcResponse::err(0, ErrorCode::ParseError, e.to_string());
             push_response(response_tx, &resp).await;
             return;
@@ -371,6 +391,11 @@ async fn dispatch_frame(
     };
 
     let id = request.id;
+    info!(
+        peer = %peer.address,
+        id, method = %request.method,
+        "BLE RPC received"
+    );
     let response = match request.method.as_str() {
         "claim" => handle_claim_rpc(id, request.params, peer, claim).await,
         "factory_reset" => handle_factory_reset_rpc(id, peer, claim).await,
@@ -386,6 +411,12 @@ async fn dispatch_frame(
             }
         },
     };
+    info!(
+        peer = %peer.address,
+        id,
+        ok = response.error.is_none(),
+        "BLE RPC response queued"
+    );
     push_response(response_tx, &response).await;
 }
 
@@ -462,6 +493,7 @@ fn response_characteristic(rx: mpsc::Receiver<Vec<u8>>) -> Characteristic {
             method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
                 let rx = rx.clone();
                 async move {
+                    info!("BLE Response notify subscribed");
                     let mut rx = match rx.lock().await.take() {
                         Some(rx) => rx,
                         None => {
@@ -473,6 +505,11 @@ fn response_characteristic(rx: mpsc::Receiver<Vec<u8>>) -> Characteristic {
                     };
                     let chunk_size = negotiated_chunk_size(&notifier);
                     while let Some(payload) = rx.recv().await {
+                        info!(
+                            payload_len = payload.len(),
+                            chunk_size,
+                            "BLE Response notify sending payload"
+                        );
                         for fragment in chunk_payload(&payload, chunk_size) {
                             if let Err(e) = notifier.notify(fragment).await {
                                 debug!(error = %e, "Response notifier ended");
