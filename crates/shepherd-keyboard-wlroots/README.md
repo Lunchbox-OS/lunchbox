@@ -40,6 +40,23 @@ A headless connectivity smoke test (starts `sway --headless`, runs the client, a
 `input_method_manager_v2` and renders without crashing) lives at
 `scripts/smoke-keyboard-wlroots.sh`.
 
+## Try it out (out-of-band dev harness)
+
+`scripts/dev-keyboard-wlroots.sh` opens a **nested Sway window** running the swipe keyboard plus a
+text field, so you can swipe-type with the mouse (the pointer fallback stands in for touch) and
+watch words commit — with no gdm and no shepherd-launcher:
+
+```sh
+scripts/fetch-swipe-bundles.sh
+cargo build -p shepherd-keyboard-wlroots
+scripts/dev-keyboard-wlroots.sh                       # --profile child, --app zenity, etc.
+# In the window: swipe/tap to type; commits land in the text app. Quit with Alt+q.
+```
+
+The keyboard commits via `input-method-v2`, so the target must be a GTK/`text-input-v3` app
+(`gnome-text-editor`, `zenity`) — a terminal only shows that the keyboard renders. `SWAY_HEADLESS=1`
+runs the same bring-up without a window (for a CI/wiring check; combine with a `timeout`).
+
 ## Status
 
 Implemented and clippy-clean; the connectivity smoke test passes against headless `sway`. The
