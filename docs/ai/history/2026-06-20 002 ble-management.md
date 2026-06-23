@@ -49,24 +49,39 @@ deliberately separated:
 
 ## Auth choices
 
-### Link layer: Numeric Comparison (LESC)
+### Link layer: 6-digit passkey, controller-dependent method
 
-- 6-digit code shown on both sides; user confirms match on the phone.
-- Authenticated key exchange — MITM-resistant.
-- Requires a display on both sides. **Commits us to "TV/Sway must be up
-  during pairing."** A device that crashes before Sway is up cannot be
-  re-paired; recovery requires the filesystem reset path (below).
+- 6-digit number shown on the TV via the `shepherd-pairing-display`
+  overlay. The user either compares it (Numeric Comparison, LESC) or
+  types it on the phone (Passkey Entry); either way the security
+  property is the same MITM-protected exchange.
+- The actual method is **negotiated at pairing time and depends on
+  the controller**:
+  - **LE Secure Connections (LESC)** — added in Bluetooth 4.2. With
+    our `DisplayYesNo` IO capability and a typical phone's
+    `KeyboardDisplay`, this lands on **Numeric Comparison** (both
+    sides display, user confirms match).
+  - **LE Legacy Pairing** — the only option on Bluetooth 4.0/4.1
+    controllers (the leibniz dev box has one). Same IO caps and MITM
+    flag drop us into **Passkey Entry, responder-displays**: we
+    display the 6-digit passkey on the TV, the phone prompts the
+    user to type it in.
+- **The agent handles both paths** (`request_confirmation` for
+  Numeric Comparison, `display_passkey` for Passkey Entry). The
+  pairing-display overlay is identical in either case — it just
+  shows the number.
+- **Commits us to "TV/Sway must be up during pairing."** A device
+  that crashes before Sway is up cannot be re-paired; recovery
+  requires the filesystem reset path (below).
 
 Rejected alternatives:
 
-- **Just Works** — anonymous ECDH, MITM-vulnerable during the pairing window.
-  Unacceptable for a device that controls system policy.
-- **Passkey Entry** — equivalent display requirement, slightly worse UX
-  (user types the code instead of confirming).
+- **Just Works** — anonymous ECDH, MITM-vulnerable during the pairing
+  window. Unacceptable for a device that controls system policy.
 - **OOB (QR code on a sticker)** — viable and removes the display
-  requirement, but requires printing/regenerating a physical artifact and
-  adds a QR-generation path to the admin app. Defer; revisit if "TV must be
-  up during pairing" turns out to be a real blocker.
+  requirement, but requires printing/regenerating a physical artifact
+  and adds a QR-generation path to the admin app. Defer; revisit if
+  "TV must be up during pairing" turns out to be a real blocker.
 
 ### App layer: TOFU, single admin (v1)
 
