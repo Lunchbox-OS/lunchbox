@@ -226,8 +226,11 @@ impl CoreEngine {
             });
         }
 
-        // Check daily quota (adjusted by any parent-set delta)
-        if let Some(quota) = entry.limits.daily_quota
+        // Check daily quota (adjusted by any parent-set delta).
+        // Skipped when an enable-today override is set: a force-enable bypasses
+        // the daily limit entirely, just as it bypasses the availability window.
+        if !manually_enabled
+            && let Some(quota) = entry.limits.daily_quota
             && let Ok(used) = self.store.get_usage(&entry.id, today)
         {
             let effective_quota = apply_quota_delta(quota, quota_delta);
@@ -279,8 +282,10 @@ impl CoreEngine {
             });
         }
 
-        // Limit by daily quota remaining (adjusted by override delta)
-        if let Some(quota) = entry.limits.daily_quota {
+        // Limit by daily quota remaining (adjusted by override delta), unless an
+        // admin override bypasses the daily limit. A bare per-session max_run still
+        // applies; only the daily quota cap is lifted.
+        if !manually_enabled && let Some(quota) = entry.limits.daily_quota {
             let today = now.date_naive();
             if let Ok(used) = self.store.get_usage(&entry.id, today) {
                 let effective_quota = apply_quota_delta(quota, quota_delta);
@@ -1339,6 +1344,103 @@ mod tests {
             entries[0].reasons.is_empty(),
             "no reasons when enabled: {:?}",
             entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Approved(_)
+        ));
+    }
+
+    #[test]
+    fn test_enable_override_bypasses_daily_quota() {
+        use chrono::TimeZone;
+        use shepherd_api::ReasonCode;
+
+        let entry_id = EntryId::new("quota-limited");
+        let policy = Policy {
+            service: Default::default(),
+            entries: vec![Entry {
+                id: entry_id.clone(),
+                label: "Quota Limited".into(),
+                icon_ref: None,
+                kind: EntryKind::Process {
+                    command: "game".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                availability: AvailabilityPolicy::default(),
+                limits: LimitsPolicy {
+                    max_run: None,
+                    daily_quota: Some(Duration::from_secs(3600)),
+                    cooldown: None,
+                },
+                warnings: vec![],
+                volume: None,
+                brightness: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: Default::default(),
+                firewall: None,
+                input_compat: vec![],
+                input_compat_options: Default::default(),
+                xwayland_native_resolution: false,
+            }],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+            brightness: Default::default(),
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let engine = CoreEngine::new(policy, store.clone(), caps);
+
+        let noon = chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap();
+        let today = noon.date_naive();
+
+        // Burn the full daily quota.
+        store
+            .add_usage(&entry_id, today, Duration::from_secs(3600))
+            .unwrap();
+
+        // Without override: disabled by exhausted quota.
+        let entries = engine.list_entries(noon);
+        assert!(!entries[0].enabled, "should be disabled by exhausted quota");
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::QuotaExhausted { .. }))
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, noon),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Set availability=true override for today.
+        store
+            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .unwrap();
+
+        // With override: enabled despite the exhausted quota, and the daily cap
+        // no longer limits the session (unlimited, since max_run is None).
+        let entries = engine.list_entries(noon);
+        assert!(
+            entries[0].enabled,
+            "should be enabled with override despite exhausted quota"
+        );
+        assert!(
+            entries[0].reasons.is_empty(),
+            "no reasons when enabled: {:?}",
+            entries[0].reasons
+        );
+        assert!(
+            entries[0].max_run_if_started_now.is_none(),
+            "daily quota should not cap the session when overridden: {:?}",
+            entries[0].max_run_if_started_now
         );
         assert!(matches!(
             engine.request_launch(&entry_id, noon),
