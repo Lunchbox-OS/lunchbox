@@ -1,0 +1,163 @@
+//! Manual end-to-end test for the Android (Waydroid) activity kind.
+//!
+//! Drives the real `LinuxHost` adapter against a live Waydroid session and a
+//! live Sway compositor: it spawns an Android app, waits for the
+//! `HostEvent::WindowReady`, confirms the `waydroid.<pkg>` toplevel is present
+//! and fullscreen, then stops the session and confirms `HostEvent::Exited` and
+//! that the window is gone.
+//!
+//! It cannot run in CI — Waydroid installed + a booted session, a Sway
+//! compositor (`SWAYSOCK`/`WAYLAND_DISPLAY`), and (for process reclamation) the
+//! invoking user in the `shepherd-waydroid` group with the helper installed are
+//! all prerequisites. When any is missing the test prints a `[SKIP]` line and
+//! returns, so `cargo test --include-ignored` is safe everywhere.
+//!
+//! Run via the orchestrator (which sets up nested Sway + a session):
+//!   ./scripts/integration-tests/test-waydroid.sh
+//!
+//! Or directly, against an already-running session + sway:
+//!   cargo test -p shepherd-host-linux --test waydroid_real -- \
+//!       --ignored --nocapture
+
+use std::process::Command;
+use std::time::Duration;
+
+use shepherd_api::EntryKind;
+use shepherd_host_api::{HostAdapter, HostEvent, SpawnOptions, StopMode};
+use shepherd_host_linux::LinuxHost;
+use shepherd_util::SessionId;
+
+/// A built-in LineageOS app present in the vanilla Waydroid image.
+const TEST_PACKAGE: &str = "com.android.calculator2";
+
+fn skip(reason: &str) {
+    println!("[SKIP] waydroid_real: {reason}");
+}
+
+/// Run a command and return whether it exited successfully.
+fn cmd_ok(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// stdout of a command (lossy), or empty on failure.
+fn cmd_stdout(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether sway has an on-screen window whose app_id is `waydroid.<pkg>`.
+fn android_window_present(package: &str) -> bool {
+    let needle = format!("\"app_id\": \"waydroid.{package}\"");
+    cmd_stdout("swaymsg", &["-t", "get_tree", "--raw"]).contains(&needle)
+}
+
+/// Await a host event matching `pred`, up to `timeout`.
+async fn wait_for_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<HostEvent>,
+    timeout: Duration,
+    pred: impl Fn(&HostEvent) -> bool,
+) -> Option<HostEvent> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(ev)) => {
+                if pred(&ev) {
+                    return Some(ev);
+                }
+            }
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Waydroid + a booted session + Sway; run via test-waydroid.sh"]
+async fn waydroid_launch_and_stop() {
+    // --- prerequisites ---
+    if !cmd_ok("waydroid", &["--version"]) {
+        skip("waydroid CLI not available");
+        return;
+    }
+    if std::env::var_os("SWAYSOCK").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        skip("no SWAYSOCK/WAYLAND_DISPLAY (need a running sway)");
+        return;
+    }
+    if !cmd_ok("swaymsg", &["-t", "get_version"]) {
+        skip("swaymsg cannot reach a compositor");
+        return;
+    }
+    // The adapter requires a running session (preboot). The orchestrator starts
+    // one; if it isn't up we skip rather than fail.
+    if !cmd_stdout("waydroid", &["status"]).contains("RUNNING") {
+        skip("waydroid session is not running (start it / run preboot first)");
+        return;
+    }
+
+    let host = LinuxHost::new();
+    let mut rx = host.subscribe();
+    let entry = EntryKind::Android {
+        package_name: TEST_PACKAGE.into(),
+        args: vec![],
+    };
+
+    // --- spawn ---
+    let handle = host
+        .spawn(SessionId::new(), &entry, SpawnOptions::default())
+        .await
+        .expect("spawn(Android) should succeed against a running session");
+
+    // The adapter emits WindowReady once the toplevel appears.
+    let ready = wait_for_event(&mut rx, Duration::from_secs(25), |ev| {
+        matches!(ev, HostEvent::WindowReady { .. })
+    })
+    .await;
+    assert!(
+        ready.is_some(),
+        "expected HostEvent::WindowReady for the Android app"
+    );
+
+    // The window should be present and fullscreened by the for_window rule.
+    assert!(
+        android_window_present(TEST_PACKAGE),
+        "expected a waydroid.{TEST_PACKAGE} toplevel on screen after WindowReady"
+    );
+    println!("[OK] Android app launched, window present: waydroid.{TEST_PACKAGE}");
+
+    // --- stop ---
+    host.stop(&handle, StopMode::Force)
+        .await
+        .expect("stop(Android) should succeed");
+
+    // The window-watch task emits Exited once the toplevel is gone.
+    let exited = wait_for_event(&mut rx, Duration::from_secs(15), |ev| {
+        matches!(ev, HostEvent::Exited { .. })
+    })
+    .await;
+    assert!(
+        exited.is_some(),
+        "expected HostEvent::Exited after stopping the Android session"
+    );
+
+    // And the window should actually be gone.
+    let mut gone = false;
+    for _ in 0..10 {
+        if !android_window_present(TEST_PACKAGE) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(gone, "Android window should be gone after stop()");
+    println!("[OK] Android session stopped, window gone, Exited emitted");
+}
