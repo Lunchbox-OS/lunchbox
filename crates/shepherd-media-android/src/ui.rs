@@ -280,11 +280,20 @@ impl MediaApp {
     /// Returns a screen to navigate to, if the user requested one.
     fn switcher(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
         let mut next = None;
+        // Single top row: app title (+ status) on the left, Settings on the right.
+        let mut settings_resp = None;
         ui.horizontal(|ui| {
-            ui.heading("Libraries");
-            if ui.button("⚙ Settings").clicked() {
-                next = Some(Screen::Settings);
+            ui.heading("shepherd-media");
+            if let Some(status) = &self.status {
+                ui.colored_label(ui.visuals().warn_fg_color, status);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let resp = ui.button("⚙ Settings");
+                if resp.clicked() {
+                    next = Some(Screen::Settings);
+                }
+                settings_resp = Some(resp);
+            });
         });
         ui.separator();
 
@@ -296,7 +305,11 @@ impl MediaApp {
             return next;
         }
 
+        // On entry, focus the first *library* (not Settings), so the remote lands
+        // on content. Captured during the loop and requested after.
+        let nothing_focused = ui.ctx().memory(|m| m.focused().is_none());
         let active = self.settings.active_library.clone();
+        let mut first_lib: Option<egui::Response> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Snapshot ids so we can mutate `settings` (set_active) while iterating.
             let entries: Vec<(String, String)> = self
@@ -312,16 +325,40 @@ impl MediaApp {
                 } else {
                     label
                 };
-                if ui
-                    .add(egui::Button::new(text).min_size(egui::vec2(240.0, 36.0)))
-                    .clicked()
-                {
+                let resp = ui.add(egui::Button::new(text).min_size(egui::vec2(240.0, 36.0)));
+                if first_lib.is_none() {
+                    first_lib = Some(resp.clone());
+                }
+                if resp.clicked() {
                     // Selecting a library makes it active and opens its grid.
                     let _ = self.settings.set_active(&id);
                     next = Some(Screen::Grid(id));
                 }
             }
         });
+        if nothing_focused {
+            if let Some(resp) = &first_lib {
+                resp.request_focus();
+            }
+        } else if let (Some(s), Some(f)) = (&settings_resp, &first_lib) {
+            // Bridge the top-right Settings button and the library column for the
+            // D-pad: egui's spatial focus can't connect them (different rows), so
+            // wire Up-from-first-library → Settings and Down-from-Settings → list.
+            // Cancel egui's own pending move afterward, or it would step one
+            // further from the widget we just focused.
+            let to_focus = if f.has_focus() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                Some(s)
+            } else if s.has_focus() && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                Some(f)
+            } else {
+                None
+            };
+            if let Some(target) = to_focus {
+                target.request_focus();
+                ui.ctx()
+                    .memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+            }
+        }
         next
     }
 
@@ -929,16 +966,22 @@ impl eframe::App for MediaApp {
             });
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         } else {
-            self.top_bar(ui);
+            // The switcher draws its own collapsed header (title + Settings); the
+            // other screens get the shared top bar.
+            if !matches!(self.screen, Screen::Switcher) {
+                self.top_bar(ui);
+            }
 
             // D-pad / remote support (Fire TV, Google TV): egui moves focus with
             // the arrow keys (Android maps the D-pad to them) but can't bootstrap
             // focus from nothing, so keep one widget focused at all times. This
             // also auto-focuses the first control when a screen appears.
             // DPAD_CENTER arrives as Enter, which activates the focused widget.
-            // The browse grid manages its own focus by index (its tiles are
-            // custom-painted), so only bootstrap egui focus on the other screens.
-            if !matches!(self.screen, Screen::Grid(_)) && ui.ctx().memory(|m| m.focused().is_none())
+            // The browse grid manages its own focus by index (custom-painted
+            // tiles), and the switcher focuses its first library explicitly, so
+            // only bootstrap egui focus on the remaining screens.
+            if !matches!(self.screen, Screen::Grid(_) | Screen::Switcher)
+                && ui.ctx().memory(|m| m.focused().is_none())
             {
                 ui.ctx()
                     .memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
