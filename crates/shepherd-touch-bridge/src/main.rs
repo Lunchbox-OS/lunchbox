@@ -8,6 +8,11 @@
 //! X11), unlike the wlroots-only virtual-pointer protocol used before (issue
 //! #58). Releasing the grabs is handled by the kernel when the file
 //! descriptors close at process exit.
+//!
+//! With `--grab-only` the bridge instead just grabs every touchscreen and
+//! discards its events, with no synthetic output at all — effectively
+//! disabling the touchscreen for the duration of an activity (issue #68). No
+//! `/dev/uinput` access is needed in this mode.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +45,13 @@ struct Args {
     /// to 1.0 (no scaling); shepherd-launcher passes the live sway scale.
     #[arg(long = "output-scale", default_value_t = 1.0)]
     output_scale: f64,
+
+    /// Grab every touchscreen and discard its events instead of translating
+    /// them to pointer motion. Disables the touchscreen for the lifetime of
+    /// the bridge; no synthetic events are emitted and no `/dev/uinput`
+    /// access is required.
+    #[arg(long = "grab-only", default_value_t = false)]
+    grab_only: bool,
 }
 
 /// Touch state update emitted by reader threads.
@@ -314,6 +326,16 @@ fn main() -> Result<()> {
         return Err(anyhow!("failed to grab any touchscreen device"));
     }
 
+    // In grab-only mode the grabs alone disable the touchscreen; we just hold
+    // them and drain (discard) the reader updates until shutdown. No uinput
+    // device is created, so this mode works without /dev/uinput access.
+    if args.grab_only {
+        info!("Touchscreen disabled (grab-only); discarding all touch events");
+        run_grab_only_loop(rx, &shutdown);
+        info!("Releasing touchscreen grab");
+        return Ok(());
+    }
+
     let device_range = device_range.ok_or_else(|| anyhow!("no usable device range"))?;
 
     let mut sink =
@@ -327,6 +349,23 @@ fn main() -> Result<()> {
     info!("Shutting down touch-to-mouse bridge");
     let _ = sink.flush();
     Ok(())
+}
+
+/// Grab-only main loop: wait until shutdown, discarding every touch update the
+/// reader threads produce. The kernel `EVIOCGRAB` (held by the readers) keeps
+/// the touchscreen events from reaching the activity; we simply throw them
+/// away rather than synthesizing anything.
+fn run_grab_only_loop(rx: Receiver<TouchUpdate>, shutdown: &AtomicBool) {
+    while !shutdown.load(Ordering::SeqCst) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(_) => {} // Discard: the point is to swallow touch input.
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                debug!("All device readers exited; shutting down");
+                return;
+            }
+        }
+    }
 }
 
 fn run_main_loop(
