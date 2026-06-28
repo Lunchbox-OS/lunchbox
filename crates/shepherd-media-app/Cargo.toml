@@ -1,0 +1,11 @@
+[package]
+name = "shepherd-media-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-agnostic application layer for shepherd-media: persistent multi-library settings and management"
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
