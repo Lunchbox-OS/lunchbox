@@ -562,6 +562,8 @@ pub struct WaydroidConfig {
     pub suspend_when_idle: bool,
     /// How long to wait for the session to report ready.
     pub boot_ready_timeout: Duration,
+    /// Whether to harden launched sessions against leaving the kiosk app.
+    pub lock_down: bool,
 }
 
 impl WaydroidConfig {
@@ -574,6 +576,7 @@ impl WaydroidConfig {
                 .and_then(|c| c.boot_ready_timeout_seconds)
                 .map(Duration::from_secs)
                 .unwrap_or(DEFAULT_WAYDROID_BOOT_READY_TIMEOUT),
+            lock_down: raw.and_then(|c| c.lock_down).unwrap_or(true),
         }
     }
 }

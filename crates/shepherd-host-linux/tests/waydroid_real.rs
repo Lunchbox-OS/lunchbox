@@ -101,8 +101,8 @@ async fn waydroid_preboot_enables_multi_window() {
     }
 
     let host = LinuxHost::new();
-    // Short per-attempt boot timeout; preboot does up to two session starts.
-    host.configure_waydroid(true, true, Duration::from_secs(90));
+    // multi_window=true, suspend=true, 90s boot timeout, lock_down=true.
+    host.configure_waydroid(true, true, Duration::from_secs(90), true);
     host.preboot_waydroid();
 
     // Poll for the end state: a running session with multi-window enabled.

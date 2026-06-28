@@ -330,6 +330,18 @@ struct WaydroidSettings {
     multi_window: bool,
     suspend_when_idle: bool,
     boot_ready_timeout: Duration,
+    lock_down: bool,
+}
+
+impl Default for WaydroidSettings {
+    fn default() -> Self {
+        Self {
+            multi_window: true,
+            suspend_when_idle: true,
+            boot_ready_timeout: Duration::from_secs(60),
+            lock_down: true,
+        }
+    }
 }
 
 /// Linux host adapter
@@ -538,11 +550,13 @@ impl LinuxHost {
         multi_window: bool,
         suspend_when_idle: bool,
         boot_ready_timeout: Duration,
+        lock_down: bool,
     ) {
         *self.waydroid_settings.lock().unwrap() = Some(WaydroidSettings {
             multi_window,
             suspend_when_idle,
             boot_ready_timeout,
+            lock_down,
         });
     }
 
@@ -551,15 +565,7 @@ impl LinuxHost {
     /// session, and enable idle-suspend. Fire-and-forget, like [`preload_steam`]
     /// — all steps are best-effort and logged.
     pub fn preboot_waydroid(&self) {
-        let settings = self
-            .waydroid_settings
-            .lock()
-            .unwrap()
-            .unwrap_or(WaydroidSettings {
-                multi_window: true,
-                suspend_when_idle: true,
-                boot_ready_timeout: Duration::from_secs(60),
-            });
+        let settings = self.waydroid_settings.lock().unwrap().unwrap_or_default();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -1967,6 +1973,19 @@ impl LinuxHost {
         let _ = self.event_tx.send(HostEvent::WindowReady {
             handle: handle.clone(),
         });
+
+        // Harden the session against the child leaving the app (disable the
+        // notification shade / nav buttons). Re-applied per launch because the
+        // flags reset on a SystemUI restart.
+        let lock_down = self
+            .waydroid_settings
+            .lock()
+            .unwrap()
+            .unwrap_or_default()
+            .lock_down;
+        if lock_down {
+            waydroid::lock_down().await;
+        }
 
         self.spawn_android_window_watch(handle.clone(), app_id, package_name.to_string());
 

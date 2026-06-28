@@ -1089,6 +1089,12 @@ pub struct RawWaydroidConfig {
     /// How long to wait for "Android with user 0 is ready" after starting the
     /// session before giving up (seconds). Default 60.
     pub boot_ready_timeout_seconds: Option<u64>,
+
+    /// Harden launched Android sessions against a child leaving the kiosk app:
+    /// disable the notification shade / quick settings (which can reach Android
+    /// Settings) and the nav-bar home/recents/search buttons. Default true.
+    /// Requires the privileged helper (`shepherd install waydroid`).
+    pub lock_down: Option<bool>,
 }
 
 /// Per-entry internet requirement

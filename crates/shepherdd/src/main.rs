@@ -1057,6 +1057,7 @@ impl Service {
             engine.policy().service.waydroid.multi_window,
             engine.policy().service.waydroid.suspend_when_idle,
             engine.policy().service.waydroid.boot_ready_timeout,
+            engine.policy().service.waydroid.lock_down,
         );
 
         // Initialize internet connectivity monitor (if configured)

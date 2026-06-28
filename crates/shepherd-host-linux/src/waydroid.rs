@@ -147,6 +147,27 @@ pub async fn preboot_container() {
     }
 }
 
+/// Best-effort: harden the running Android session against the child leaving
+/// the kiosk app, via the privileged helper (`pkexec shepherd-waydroid-helper
+/// lock-down` → `cmd statusbar send-disable-flag …`). Disables the notification
+/// shade / quick settings (the route to Android Settings) and the nav-bar
+/// home/recents/search buttons. System-wide and persistent until SystemUI
+/// restarts, so the adapter re-applies it per launch.
+pub async fn lock_down() {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("lock-down")
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!("applied Waydroid kiosk lock-down"),
+        Ok(status) => {
+            debug!(%status, "lock-down helper did not succeed (helper not installed or polkit denied?)")
+        }
+        Err(e) => warn!(error = %e, "failed to invoke lock-down helper"),
+    }
+}
+
 /// Read a persistent Waydroid property (session user), trimmed. `None` on any
 /// failure or empty value.
 pub async fn get_prop(key: &str) -> Option<String> {

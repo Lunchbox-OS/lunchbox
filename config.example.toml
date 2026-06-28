@@ -200,6 +200,9 @@ launch_timeout_seconds = 30
 multi_window = true           # Each app gets its own Wayland window (app_id "waydroid.<pkg>")
 suspend_when_idle = true      # Freeze the container when idle to save CPU/RAM
 boot_ready_timeout_seconds = 60
+lock_down = true              # Harden against a child leaving the app: disable the
+                              # notification shade / quick settings (route to Settings)
+                              # and nav-bar home/recents. Needs `shepherd install waydroid`.
 
 # HTTP management API (optional)
 # Exposes a REST API for remote control, usage analytics, and daily overrides.

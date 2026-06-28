@@ -34,15 +34,28 @@ fn die(msg: impl AsRef<str>) -> ! {
     std::process::exit(2);
 }
 
+/// The fixed StatusBarManager disable flags `lock-down` applies. These block the
+/// child's routes out of the kiosk app: the notification shade / quick settings
+/// (which can reach Android Settings), notification peeking, and the nav-bar
+/// home/recents/search buttons. Hardcoded — no caller input.
+const LOCK_DOWN_FLAGS: &[&str] = &[
+    "home",
+    "recents",
+    "statusbar-expansion",
+    "notification-peek",
+    "search",
+];
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("force-stop") => force_stop(args),
         Some("preboot") => preboot(args),
+        Some("lock-down") => lock_down(args),
         Some(other) => die(format!(
-            "unknown subcommand '{other}' (expected 'force-stop' or 'preboot')"
+            "unknown subcommand '{other}' (expected 'force-stop', 'preboot', or 'lock-down')"
         )),
-        None => die("missing subcommand (expected 'force-stop' or 'preboot')"),
+        None => die("missing subcommand (expected 'force-stop', 'preboot', or 'lock-down')"),
     }
 }
 
@@ -87,4 +100,18 @@ fn preboot(mut args: impl Iterator<Item = String>) -> ExitCode {
         .args(["start", CONTAINER_UNIT])
         .exec();
     die(format!("failed to exec systemctl: {err}"));
+}
+
+/// `lock-down` → `waydroid shell cmd statusbar send-disable-flag <flags>`.
+/// Hardens the running session against the child leaving the kiosk app. Flags
+/// are a fixed compile-time set; takes no arguments.
+fn lock_down(mut args: impl Iterator<Item = String>) -> ExitCode {
+    if let Some(extra) = args.next() {
+        die(format!("'lock-down' takes no arguments, got '{extra}'"));
+    }
+    let err = Command::new("waydroid")
+        .args(["shell", "cmd", "statusbar", "send-disable-flag"])
+        .args(LOCK_DOWN_FLAGS)
+        .exec();
+    die(format!("failed to exec waydroid: {err}"));
 }

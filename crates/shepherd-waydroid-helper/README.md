@@ -9,6 +9,7 @@ invoked via `pkexec` under a polkit rule.
 ```
 shepherd-waydroid-helper force-stop --package <android.package.name>
 shepherd-waydroid-helper preboot
+shepherd-waydroid-helper lock-down
 ```
 
 - `force-stop` → `waydroid shell am force-stop <pkg>`. Reclaims the cached
@@ -16,6 +17,11 @@ shepherd-waydroid-helper preboot
 - `preboot` → `systemctl start waydroid-container`. Brings the root LXC
   container service up so shepherdd can then start the user-level session.
   Takes no arguments; the unit name is hardcoded.
+- `lock-down` → `waydroid shell cmd statusbar send-disable-flag <flags>`.
+  Hardens the running session against a child leaving the kiosk app: disables
+  the notification shade / quick settings (which can reach Android Settings) and
+  the nav-bar home/recents/search buttons. Takes no arguments; the flag set is
+  hardcoded.
 
 ## Trust boundary
 

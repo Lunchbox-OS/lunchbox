@@ -121,3 +121,15 @@ WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" SWAYSOCK="$SWA
     waydroid session start >"$SESSION_LOG" 2>&1 &
 wait_session_ready || skip "Waydroid session did not become ready"
 run_test waydroid_launch_and_stop
+
+# The launch above applied lock-down via the adapter (default on) ->
+# waydroid::lock_down -> pkexec helper -> `cmd statusbar send-disable-flag`.
+# The flags are system-wide and persist after the app stopped, so check them.
+info "Verifying kiosk lock-down (statusbar disable flags)..."
+DIS="$(sudo waydroid --details-to-stdout shell dumpsys statusbar 2>/dev/null \
+    | grep -o 'mDisabled1=0x[0-9a-fA-F]*' | head -1)"
+if [[ -n "$DIS" && "$DIS" != "mDisabled1=0x0" ]]; then
+    info "[OK] lock-down active: $DIS (shade/nav disabled)"
+else
+    echo "[WARN] lock-down flags not detected ($DIS)"
+fi
