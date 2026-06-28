@@ -36,14 +36,26 @@ pub struct PlaylistInfo {
     pub entries: Vec<YoutubePlaylistEntry>,
 }
 
-/// yt-dlp's `--format` selector for a quality preset, preferring a single
-/// progressive (muxed) stream so `-g` yields one playable URL. YouTube only
-/// offers progressive up to 720p, so higher presets effectively cap there for
-/// single-URL playback.
+/// yt-dlp's `--format` selector for a quality preset.
+///
+/// YouTube no longer reliably offers a single progressive (muxed) file: the
+/// player clients youtubedl-android can use either expose only DASH (separate
+/// video-only and audio-only tracks) or an HLS manifest. So we ask for
+/// `bv*+ba` — best video up to the height cap *plus* best audio — and let `-g`
+/// print the two URLs ([`resolve_stream_url`] hands the audio one to the player
+/// as an external track).
+///
+/// We require an H.264 video track (`vcodec^=avc1`): YouTube's best DASH video
+/// is usually VP9/AV1, which fails to decode on many mobile GPUs (audio plays,
+/// video stays black), whereas H.264 hardware-decodes reliably. The
+/// `/bv*+ba/b` tails fall back to any codec, then a muxed format, if no H.264
+/// track exists.
 pub fn stream_format(quality: Quality) -> &'static str {
     match quality {
-        Quality::Q480 => "best[height<=?480]",
-        Quality::Q720 | Quality::Q1080 | Quality::Best => "best[height<=?720]",
+        Quality::Q480 => "bv*[vcodec^=avc1][height<=?480]+ba/bv*[height<=?480]+ba/b[height<=?480]",
+        Quality::Q720 | Quality::Q1080 | Quality::Best => {
+            "bv*[vcodec^=avc1][height<=?720]+ba/bv*[height<=?720]+ba/b[height<=?720]"
+        }
     }
 }
 
@@ -56,12 +68,20 @@ pub fn fetch_playlist(ytdlp: &dyn YtDlp, url: &str) -> Result<PlaylistInfo, Stri
     parse_flat_playlist(&stdout, url)
 }
 
-/// Resolve a single watch URL to a direct media URL for the player.
+/// A resolved playable stream: a video URL and, when the format is DASH
+/// (separate tracks), the matching audio URL to attach as an external track.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StreamUrls {
+    pub video: String,
+    pub audio: Option<String>,
+}
+
+/// Resolve a watch URL to its playable stream URL(s) for the player.
 pub fn resolve_stream_url(
     ytdlp: &dyn YtDlp,
     watch_url: &str,
     quality: Quality,
-) -> Result<String, String> {
+) -> Result<StreamUrls, String> {
     let stdout = ytdlp.run(
         watch_url,
         &[
@@ -73,7 +93,7 @@ pub fn resolve_stream_url(
             "--no-warnings",
         ],
     )?;
-    parse_stream_url(&stdout, watch_url)
+    parse_stream_urls(&stdout, watch_url)
 }
 
 /// One video object from `yt-dlp --dump-json --flat-playlist`. Only the fields
@@ -133,14 +153,17 @@ pub fn parse_flat_playlist(stdout: &str, url: &str) -> Result<PlaylistInfo, Stri
     })
 }
 
-/// Pick the first non-empty line from `yt-dlp -g` output as the stream URL.
-pub fn parse_stream_url(stdout: &str, watch_url: &str) -> Result<String, String> {
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
+/// Parse `yt-dlp -g` output. With a `bv*+ba` selection it prints two URLs (video
+/// then audio); a muxed fallback prints one. The first non-empty line is the
+/// video (or muxed) URL; a second, if present, is the audio track.
+pub fn parse_stream_urls(stdout: &str, watch_url: &str) -> Result<StreamUrls, String> {
+    let mut lines = stdout.lines().map(str::trim).filter(|l| !l.is_empty());
+    let video = lines
+        .next()
         .map(str::to_string)
-        .ok_or_else(|| format!("yt-dlp returned no stream URL for {watch_url}"))
+        .ok_or_else(|| format!("yt-dlp returned no stream URL for {watch_url}"))?;
+    let audio = lines.next().map(str::to_string);
+    Ok(StreamUrls { video, audio })
 }
 
 /// The yt-dlp provider for this platform, if any.
@@ -182,8 +205,41 @@ mod jni_impl {
 
     impl YtDlp for JniYtDlp {
         fn run(&self, url: &str, options: &[&str]) -> Result<String, String> {
-            run_jni(url, options).map_err(|e| format!("youtubedl-android error: {e}"))
+            run_jni(url, options).map_err(|e| format!("youtubedl-android: {e}"))
         }
+    }
+
+    fn jni_err(e: jni::errors::Error) -> String {
+        format!("JNI error: {e}")
+    }
+
+    /// If a Java exception is pending, return its message and **clear** it.
+    ///
+    /// Critical for correctness: yt-dlp surfaces failures (unavailable format,
+    /// private/blocked video, network) as a `YoutubeDLException`. Left pending,
+    /// it would propagate uncaught when this Rust-spawned worker thread detaches
+    /// and kill the whole process — so any throwing JNI call must funnel through
+    /// here to turn the exception into a recoverable `Err`.
+    fn take_pending_exception(env: &mut jni::JNIEnv) -> Option<String> {
+        if !env.exception_check().unwrap_or(false) {
+            return None;
+        }
+        // Grab the Throwable before clearing — no other JNI call may run while
+        // an exception is pending.
+        let throwable = env.exception_occurred().ok();
+        let _ = env.exception_clear();
+        let msg = throwable.and_then(|t| {
+            let m = env
+                .call_method(&t, "getMessage", "()Ljava/lang/String;", &[])
+                .ok()?
+                .l()
+                .ok()?;
+            if m.is_null() {
+                return None;
+            }
+            env.get_string(&JString::from(m)).ok().map(Into::into)
+        });
+        Some(msg.unwrap_or_else(|| "Java exception".to_string()))
     }
 
     /// Resolve a class by its dotted name through the application classloader.
@@ -210,28 +266,32 @@ mod jni_impl {
         Ok(JClass::from(cls))
     }
 
-    fn run_jni(url: &str, options: &[&str]) -> Result<String, jni::errors::Error> {
+    fn run_jni(url: &str, options: &[&str]) -> Result<String, String> {
         let ctx = ndk_context::android_context();
-        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast())? };
-        let mut env = vm.attach_current_thread()?;
+        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(jni_err)?;
+        let mut env = vm.attach_current_thread().map_err(jni_err)?;
         let context = unsafe { JObject::from_raw(ctx.context().cast()) };
 
         // Resolve the youtubedl-android classes via the *application*
         // classloader (see `load_class`); the implicit `FindClass` would use the
         // bootstrap loader on this worker thread and abort the process.
         let loader = env
-            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-            .l()?;
+            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(jni_err)?
+            .l()
+            .map_err(jni_err)?;
         let youtube_dl = load_class(
             &mut env,
             &loader,
             "com.yausername.youtubedl_android.YoutubeDL",
-        )?;
+        )
+        .map_err(jni_err)?;
         let request_cls = load_class(
             &mut env,
             &loader,
             "com.yausername.youtubedl_android.YoutubeDLRequest",
-        )?;
+        )
+        .map_err(jni_err)?;
 
         // One-time init: extracts the bundled Python/yt-dlp into app storage.
         INIT.call_once(|| {
@@ -267,23 +327,26 @@ mod jni_impl {
         });
 
         // request = new YoutubeDLRequest(url)
-        let jurl: JString = env.new_string(url)?;
-        let request = env.new_object(
-            &request_cls,
-            "(Ljava/lang/String;)V",
-            &[JValue::Object(&jurl)],
-        )?;
+        let jurl: JString = env.new_string(url).map_err(jni_err)?;
+        let request = env
+            .new_object(
+                &request_cls,
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&jurl)],
+            )
+            .map_err(jni_err)?;
 
         // request.addOption(opt) for each flag (and its value, passed as its
         // own arg — youtubedl-android treats each token as a separate option).
         for opt in options {
-            let jopt: JString = env.new_string(opt)?;
+            let jopt: JString = env.new_string(opt).map_err(jni_err)?;
             env.call_method(
                 &request,
                 "addOption",
                 "(Ljava/lang/String;)Lcom/yausername/youtubedl_android/YoutubeDLRequest;",
                 &[JValue::Object(&jopt)],
-            )?;
+            )
+            .map_err(jni_err)?;
         }
 
         // response = YoutubeDL.getInstance().execute(request)
@@ -293,28 +356,39 @@ mod jni_impl {
                 "getInstance",
                 "()Lcom/yausername/youtubedl_android/YoutubeDL;",
                 &[],
-            )?
-            .l()?;
-        let response = env
-            .call_method(
-                &instance,
-                "execute",
-                "(Lcom/yausername/youtubedl_android/YoutubeDLRequest;)\
-                 Lcom/yausername/youtubedl_android/YoutubeDLResponse;",
-                &[JValue::Object(&request)],
-            )?
-            .l()?;
-
-        if env.exception_check()? {
-            env.exception_clear()?;
-            return Err(jni::errors::Error::JavaException);
+            )
+            .map_err(jni_err)?
+            .l()
+            .map_err(jni_err)?;
+        // execute() throws YoutubeDLException on any yt-dlp failure. Catch it
+        // and clear the pending exception (see take_pending_exception) so the
+        // worker thread doesn't crash the process when it detaches.
+        let response = match env.call_method(
+            &instance,
+            "execute",
+            "(Lcom/yausername/youtubedl_android/YoutubeDLRequest;)\
+             Lcom/yausername/youtubedl_android/YoutubeDLResponse;",
+            &[JValue::Object(&request)],
+        ) {
+            Ok(v) => v.l().map_err(jni_err)?,
+            Err(_) => {
+                return Err(take_pending_exception(&mut env)
+                    .unwrap_or_else(|| "yt-dlp execution failed".to_string()));
+            }
+        };
+        // Defensive: surface (and clear) any exception left pending even when
+        // the call reported success.
+        if let Some(msg) = take_pending_exception(&mut env) {
+            return Err(msg);
         }
 
         // response.getOut()
         let out = env
-            .call_method(&response, "getOut", "()Ljava/lang/String;", &[])?
-            .l()?;
-        let out: String = env.get_string(&JString::from(out))?.into();
+            .call_method(&response, "getOut", "()Ljava/lang/String;", &[])
+            .map_err(jni_err)?
+            .l()
+            .map_err(jni_err)?;
+        let out: String = env.get_string(&JString::from(out)).map_err(jni_err)?.into();
         Ok(out)
     }
 }
@@ -369,22 +443,40 @@ mod tests {
     }
 
     #[test]
-    fn parses_stream_url() {
-        let out = "\nhttps://rr3.googlevideo.com/videoplayback?abc\n";
+    fn parses_video_and_audio_urls() {
+        let out = "\nhttps://rr3.googlevideo.com/videoplayback?v=1\nhttps://rr3.googlevideo.com/videoplayback?a=1\n";
+        let urls = parse_stream_urls(out, "w").unwrap();
+        assert_eq!(urls.video, "https://rr3.googlevideo.com/videoplayback?v=1");
         assert_eq!(
-            parse_stream_url(out, "w").unwrap(),
-            "https://rr3.googlevideo.com/videoplayback?abc"
+            urls.audio.as_deref(),
+            Some("https://rr3.googlevideo.com/videoplayback?a=1")
         );
     }
 
     #[test]
-    fn missing_stream_url_is_an_error() {
-        assert!(parse_stream_url("   \n", "w").is_err());
+    fn parses_single_muxed_url_without_audio() {
+        let out = "https://rr3.googlevideo.com/videoplayback?muxed\n";
+        let urls = parse_stream_urls(out, "w").unwrap();
+        assert_eq!(
+            urls.video,
+            "https://rr3.googlevideo.com/videoplayback?muxed"
+        );
+        assert_eq!(urls.audio, None);
     }
 
     #[test]
-    fn stream_format_prefers_progressive() {
-        assert_eq!(stream_format(Quality::Q480), "best[height<=?480]");
-        assert_eq!(stream_format(Quality::Best), "best[height<=?720]");
+    fn missing_stream_url_is_an_error() {
+        assert!(parse_stream_urls("   \n", "w").is_err());
+    }
+
+    #[test]
+    fn stream_format_selects_video_plus_audio() {
+        // Must request a video track (with audio), not a bare `best` that can
+        // resolve to an audio-only DASH stream (black screen).
+        let q480 = stream_format(Quality::Q480);
+        assert!(q480.starts_with("bv*"), "{q480}");
+        assert!(q480.contains("+ba"), "{q480}");
+        assert!(q480.contains("height<=?480"), "{q480}");
+        assert!(stream_format(Quality::Best).contains("height<=?720"));
     }
 }

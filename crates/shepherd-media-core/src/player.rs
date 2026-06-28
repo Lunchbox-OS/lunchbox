@@ -70,6 +70,13 @@ pub trait PlayerHandle: Send {
         None
     }
 
+    /// Attach an external audio track to the *next* [`play`](Self::play) call,
+    /// or clear it with `None`. Needed for sources whose video and audio are
+    /// separate streams (e.g. a YouTube DASH video-only URL paired with an
+    /// audio-only URL), where the platform resolves both and the player must
+    /// mux them at playback. Applies once and is consumed by the next `play`.
+    fn set_external_audio(&mut self, _url: Option<String>) {}
+
     // -----------------------------------------------------------------
     // Embedded rendering hooks. The host calls `bind_gl` once after its
     // OpenGL context is current, registers a redraw callback so it
@@ -165,6 +172,9 @@ mod libmpv_backend {
         // Created lazily by `bind_gl` and consulted by every later
         // `render` / `set_redraw_callback` call.
         render_ctx: Mutex<RenderCtxHolder>,
+        // An external audio URL to attach to the next `play`, consumed there.
+        // Used for separate video/audio streams (e.g. YouTube DASH).
+        external_audio: Option<String>,
     }
 
     impl LibmpvPlayer {
@@ -183,6 +193,11 @@ mod libmpv_backend {
                 // Hardware-accelerated decode where available; fall back
                 // to software automatically.
                 init.set_property("hwdec", "auto-safe")?;
+                // Optional verbose mpv log to a file, for on-device debugging.
+                if let Ok(path) = std::env::var("SHEPHERD_MPV_LOG") {
+                    let _ = init.set_property("msg-level", "all=v");
+                    let _ = init.set_property("log-file", path.as_str());
+                }
                 Ok(())
             })
             .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
@@ -196,6 +211,7 @@ mod libmpv_backend {
                 mpv,
                 playing: AtomicBool::new(false),
                 render_ctx: Mutex::new(RenderCtxHolder(None)),
+                external_audio: None,
             })
         }
 
@@ -227,9 +243,23 @@ mod libmpv_backend {
     impl PlayerHandle for LibmpvPlayer {
         fn play(&mut self, source: &Source) -> Result<(), PlayerError> {
             let uri = Self::uri_for_source(source)?;
-            self.mpv
-                .command("loadfile", &[&uri, "replace"])
-                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+            // An external audio track (separate video/audio streams) is attached
+            // via the loadfile per-file options. The value is length-prefix
+            // quoted (`%<len>%<str>`) so commas/colons in the URL don't get
+            // parsed as option separators.
+            match self.external_audio.take() {
+                Some(audio) => {
+                    let opts = format!("audio-file=%{}%{}", audio.len(), audio);
+                    self.mpv
+                        .command("loadfile", &[&uri, "replace", "0", &opts])
+                        .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+                }
+                None => {
+                    self.mpv
+                        .command("loadfile", &[&uri, "replace"])
+                        .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+                }
+            }
             // Reset pause state on every new playback.
             let _ = self.mpv.set_property("pause", false);
             self.playing.store(true, Ordering::SeqCst);
@@ -286,6 +316,10 @@ mod libmpv_backend {
 
         fn volume(&self) -> Option<f64> {
             self.mpv.get_property::<f64>("volume").ok()
+        }
+
+        fn set_external_audio(&mut self, url: Option<String>) {
+            self.external_audio = url;
         }
 
         fn bind_gl(

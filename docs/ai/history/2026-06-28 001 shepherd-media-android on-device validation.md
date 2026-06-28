@@ -101,34 +101,75 @@ After the fix:
   and the grid listed both videos with real titles and decoded YouTube
   thumbnails.
 - **Stream resolution works.** Tapping Play showed "Resolving YouTube stream…",
-  `yt-dlp -f best[height<=?480] -g` resolved a direct URL over JNI, mpv opened
-  it, and audio played (`AHal::Stream`, ~36 s observed). No crash; the app
-  returns to the grid gracefully.
+  yt-dlp `-g` resolved a stream over JNI, mpv opened it, and audio played
+  (`AHal::Stream`). No crash; the app returns to the grid gracefully.
 
-### Remaining issue (new, separate from the two caveats): YouTube video is black
+### Second crash found and fixed: an uncaught yt-dlp exception
 
-YouTube playback produces **audio but a black video frame**, with the scrubber
-stuck at `0:00 / 0:00`, then ends early. libmpv emits `libsigchain` signal
-backtraces from its decoder threads during this. The local H.264 clip renders
-perfectly through the *same* GL/eframe path, so this is not the rendering
-pipeline — most likely `best[height<=?480]` resolves to a VP9/webm stream the
-vendored ffmpeg can't decode on this device (or a googlevideo/DASH/headers
-issue). Suggested follow-up: constrain the format selector to an H.264/mp4
-progressive stream (e.g. `best[ext=mp4][height<=?480]` / prefer `avc1`) and/or
-raise libmpv's log level to capture the decoder error, then re-test. Not fixed
-here because it's outside the two flagged caveats and the fix needs its own
-verification.
+Tightening the format selector exposed a second hard crash: a
+`com.yausername.youtubedl_android.YoutubeDLException` (e.g. "Requested format is
+not available") propagated **uncaught** as a Java `FATAL EXCEPTION` and killed
+the process. Cause: when `execute()` throws, the `jni` crate returns `Err` via
+`?` *before* the code clears the pending exception, so the worker thread detaches
+with an exception still pending → ART aborts. This affected *any* yt-dlp failure
+(private/blocked video, network, bad format), not just the format change.
+
+**Fix:** funnel throwing JNI calls through `take_pending_exception`, which reads
+the Throwable's message and **clears** the exception, turning it into a
+recoverable `Err` surfaced in the status bar. Verified on device: a format error
+now shows "youtubedl-android: ERROR …" in the top bar with the app still running.
+
+### Root cause of the black video: only audio formats are available
+
+After the JNI path was solid, YouTube playback still showed **audio + a black
+frame**. Walked it down with on-device evidence:
+
+1. Logged the resolved URL: `itag=139`, `mime=audio/mp4` — an **audio-only**
+   track (dur≈33 s matched the clip). Not a codec or render bug.
+2. Implemented **separate video+audio streams** (the right architecture, since
+   YouTube no longer offers progressive muxed files): core gained
+   `PlayerHandle::set_external_audio` (libmpv attaches it via the `loadfile`
+   per-file `audio-file=%<len>%<url>` option, length-quoted so commas/colons in
+   the URL don't break parsing); the resolver now parses both `-g` URLs
+   (`bv*[vcodec^=avc1]+ba/…`, preferring H.264 since the device can't decode the
+   VP9/AV1 `bv*`).
+3. Still audio-only. A verbose libmpv log (env-gated `SHEPHERD_MPV_LOG`) showed
+   the loaded file was itag 139 with `video=eof`, and `yt-dlp -F` was conclusive:
+   **the only media formats offered are `139` / `139-drc` (audio-only m4a) plus
+   storyboards — there are no video formats at all.**
+
+So the black video is a **dependency limitation, not an app bug**: the bundled
+`youtubedl-android` 0.18.1 (old yt-dlp) gets only the audio format from YouTube's
+clients — modern YouTube gates video formats behind PO tokens / SABR. Every
+selector necessarily falls back to audio-only. The separate-stream + H.264
+plumbing added here is correct and will produce video as soon as a video format
+is obtainable.
+
+**Follow-up (dependency-level, not Rust):** bump `youtubedl-android` / its bundled
+yt-dlp and add a PO-token provider (or a client config that still serves video),
+then re-test — the app side is ready. Also noted: libmpv logs
+`ao/audiotrack: No Java virtual machine has been registered` (audio still plays
+via a fallback AO); registering the JVM with libav (`av_jni_set_java_vm`) would
+silence it and is worth doing for the audiotrack AO.
 
 ## Net status of the README "What works / caveats"
 
-- "on-device video rendering has not been run on hardware yet" → **verified.**
-- "the JNI execution path is unverified on hardware" → **verified, and the
-  predicted classloader crash fixed.** YouTube playlist + stream resolution now
-  function on device.
-- New follow-up logged: YouTube video decode (black frame) — see above.
+- "on-device video rendering has not been run on hardware yet" → **verified
+  working** (local HTTP clip: video + audio + transport + cache).
+- "the JNI execution path is unverified on hardware" → **verified**; two crashes
+  found and fixed (classloader, uncaught exception). Playlist + stream resolution
+  run over JNI; the app no longer crashes on any yt-dlp failure.
+- YouTube *video* playback is blocked upstream (audio-only formats from the
+  bundled yt-dlp); app-side plumbing is in place — see above.
 
-## Code change
+## Code changes (this branch)
 
-- `crates/shepherd-media-android/src/youtube.rs`: app-classloader resolution for
-  the youtubedl-android JNI bridge (`load_class`) + pending-exception clearing.
-  Host tests (27) pass; `cargo fmt` + android-target clippy clean.
+- `crates/shepherd-media-android/src/youtube.rs`: app-classloader class
+  resolution for the JNI bridge (`load_class`); `take_pending_exception` so
+  yt-dlp errors surface instead of crashing; separate video+audio resolution
+  (`StreamUrls`, `parse_stream_urls`) with an H.264-preferring `bv*+ba` selector.
+- `crates/shepherd-media-core/src/player.rs`: `PlayerHandle::set_external_audio`
+  (libmpv attaches an external audio track via length-quoted `loadfile` options);
+  env-gated `SHEPHERD_MPV_LOG` verbose log for on-device debugging.
+- Host tests pass (core 28, app 25, android 50); `cargo fmt` + android-target
+  clippy clean; APK builds and installs.

@@ -177,9 +177,9 @@ pub struct MediaApp {
     player: Option<Box<dyn PlayerHandle>>,
     playback: Option<PlaybackView>,
     playing: Option<PlayingItem>,
-    /// A YouTube item whose stream URL is being resolved on a worker thread
+    /// A YouTube item whose stream URLs are being resolved on a worker thread
     /// before playback can start: (display title, result receiver).
-    playback_pending: Option<(String, Receiver<Result<String, String>>)>,
+    playback_pending: Option<(String, Receiver<Result<crate::youtube::StreamUrls, String>>)>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
 }
@@ -833,14 +833,14 @@ impl MediaApp {
             Err(TryRecvError::Disconnected) => Err("YouTube resolver thread died.".to_string()),
         };
         let (title, _) = self.playback_pending.take().unwrap();
-        let stream_url = match result {
+        let streams = match result {
             Ok(u) => u,
             Err(e) => {
                 self.status = Some(e);
                 return;
             }
         };
-        let url = match Url::parse(&stream_url) {
+        let url = match Url::parse(&streams.video) {
             Ok(u) => u,
             Err(e) => {
                 self.status = Some(format!("Bad stream URL: {e}"));
@@ -853,15 +853,20 @@ impl MediaApp {
             player_hint: None,
         };
         match self.player.as_mut() {
-            Some(p) => match p.play(&src) {
-                Ok(()) => {
-                    if let Some(pv) = self.playback.as_mut() {
-                        pv.note_started();
+            Some(p) => {
+                // YouTube DASH gives separate tracks: attach the audio URL as an
+                // external track so the video-only stream plays with sound.
+                p.set_external_audio(streams.audio);
+                match p.play(&src) {
+                    Ok(()) => {
+                        if let Some(pv) = self.playback.as_mut() {
+                            pv.note_started();
+                        }
+                        self.playing = Some(PlayingItem { title, cache: None });
                     }
-                    self.playing = Some(PlayingItem { title, cache: None });
+                    Err(e) => self.status = Some(format!("Playback failed: {e}")),
                 }
-                Err(e) => self.status = Some(format!("Playback failed: {e}")),
-            },
+            }
             None => self.status = Some("No player available on this platform.".to_string()),
         }
     }
