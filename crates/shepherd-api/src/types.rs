@@ -160,10 +160,11 @@ pub enum EntryKind {
 ///
 /// Some activities don't process raw touch or gamepad events from Wayland and
 /// need a shim to translate input at the compositor level. Modes are mostly
-/// orthogonal: an activity can stack `TouchToMouse` (or `TabletToTouch`) with
-/// one of the `Gamepad*` modes. The two pointer↔touch directions are the
-/// exception — `TouchToMouse` and `TabletToTouch` invert each other and must
-/// not be combined.
+/// orthogonal: an activity can stack `TouchToMouse` (or `TabletToTouch`, or
+/// `DisableTouch`) with one of the `Gamepad*` modes. The touch-handling modes
+/// are the exception — `TouchToMouse`, `TabletToTouch`, and `DisableTouch` all
+/// grab or produce the touchscreen, so at most one of them can be active at a
+/// time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputCompatMode {
@@ -175,6 +176,11 @@ pub enum InputCompatMode {
     /// `TouchToMouse`. Useful for developing touch support against
     /// mouse/pen-only hardware, or VMs whose pointer is an absolute tablet.
     TabletToTouch,
+    /// Grab every touchscreen and discard its events for the lifetime of the
+    /// activity, effectively disabling the touchscreen. Unlike `TouchToMouse`
+    /// it emits nothing — useful for activities that misbehave on touch input
+    /// but should still be playable with a mouse or gamepad.
+    DisableTouch,
     /// Remap a gamepad to mouse + keyboard using the productivity preset:
     /// triggers = LMB, shoulders = RMB, left stick = mouse, right stick =
     /// scroll, stick-click toggles which stick drives the mouse, D-pad =
@@ -190,6 +196,16 @@ impl InputCompatMode {
     /// True if this mode is one of the gamepad presets.
     pub fn is_gamepad(self) -> bool {
         matches!(self, Self::GamepadProductivity | Self::GamepadGpd)
+    }
+
+    /// True if this mode grabs or produces the touchscreen. Such modes are
+    /// mutually exclusive — stacking two of them would have them fight over
+    /// the same devices (e.g. two `EVIOCGRAB`s) or form a loop.
+    pub fn handles_touch(self) -> bool {
+        matches!(
+            self,
+            Self::TouchToMouse | Self::TabletToTouch | Self::DisableTouch
+        )
     }
 }
 

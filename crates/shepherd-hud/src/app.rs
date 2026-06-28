@@ -553,12 +553,22 @@ fn build_hud_content(
             applied_scale_for_timer.set(desired_scale);
         }
 
+        // While suspending (or awaiting fresh state on resume) the time,
+        // battery, and network indicators show placeholders instead of live
+        // values, so the frame frozen across the suspend/resume gap is never a
+        // stale status (issue #73).
+        let suspended = state.is_suspended();
+
         // Update wall clock display
-        let current_time = shepherd_util::now();
-        if clock_format_full {
-            clock_label_clone.set_text(&shepherd_util::format_datetime_full(&current_time));
+        if suspended {
+            clock_label_clone.set_text("--:--");
         } else {
-            clock_label_clone.set_text(&shepherd_util::format_clock_time(&current_time));
+            let current_time = shepherd_util::now();
+            if clock_format_full {
+                clock_label_clone.set_text(&shepherd_util::format_datetime_full(&current_time));
+            } else {
+                clock_label_clone.set_text(&shepherd_util::format_clock_time(&current_time));
+            }
         }
 
         // Update session state
@@ -641,7 +651,16 @@ fn build_hud_content(
         // icon so the bar matches the user-visible behavior (entries that
         // require internet are hidden as soon as any check fails).
         let internet = state.internet_status();
-        if internet.is_empty() {
+        if suspended {
+            // The cached connectivity can't be trusted across a suspend; show
+            // a neutral "checking" placeholder until the post-resume re-check
+            // delivers a fresh StateChanged.
+            network_box_clone.set_visible(true);
+            network_box_clone.remove_css_class("network-online");
+            network_box_clone.remove_css_class("network-offline");
+            network_icon_clone.set_icon_name(Some("content-loading-symbolic"));
+            network_box_clone.set_tooltip_text(Some("Checking connectivity…"));
+        } else if internet.is_empty() {
             network_box_clone.set_visible(false);
         } else {
             network_box_clone.set_visible(true);
@@ -665,13 +684,20 @@ fn build_hud_content(
         }
 
         // Update battery
-        let battery = BatteryStatus::read();
-        let has_battery = battery.percent.is_some();
-        battery_box_clone.set_visible(has_battery);
-        if has_battery {
-            battery_icon_clone.set_icon_name(Some(battery.icon_name()));
-            if let Some(percent) = battery.percent {
-                battery_label_clone.set_text(&format!("{}%", percent));
+        if suspended {
+            // Placeholder so a stale charge level isn't frozen on screen.
+            battery_box_clone.set_visible(true);
+            battery_icon_clone.set_icon_name(Some("battery-missing-symbolic"));
+            battery_label_clone.set_text("--%");
+        } else {
+            let battery = BatteryStatus::read();
+            let has_battery = battery.percent.is_some();
+            battery_box_clone.set_visible(has_battery);
+            if has_battery {
+                battery_icon_clone.set_icon_name(Some(battery.icon_name()));
+                if let Some(percent) = battery.percent {
+                    battery_label_clone.set_text(&format!("{}%", percent));
+                }
             }
         }
 

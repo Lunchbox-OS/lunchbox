@@ -316,16 +316,18 @@ impl Service {
             _ => None,
         };
 
-        // Start internet connectivity monitoring (if configured). System
-        // events (resume from suspend, network adapter changes) push a
-        // re-check through the channel so status updates immediately instead of
-        // waiting for the next poll interval.
-        if let Some(monitor) = self.internet_monitor {
+        // System event watcher (logind + NetworkManager). Always running so the
+        // suspend cover (issue #73) works regardless of internet gating: it
+        // broadcasts SystemSuspending/SystemResumed and asks for a fresh state
+        // snapshot on resume via `resume_rx`. When an internet monitor is
+        // configured it also nudges it to re-check immediately on resume /
+        // network change instead of waiting for the next poll interval.
+        let (resume_tx, mut resume_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let recheck_tx = if let Some(monitor) = self.internet_monitor {
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
             let (recheck_tx, recheck_rx) = tokio::sync::mpsc::unbounded_channel();
-            system_events::spawn_recheck_watchers(recheck_tx);
             tokio::spawn(async move {
                 monitor
                     .run(
@@ -336,6 +338,18 @@ impl Service {
                     )
                     .await;
             });
+            Some(recheck_tx)
+        } else {
+            None
+        };
+        {
+            let ipc_for_sys = ipc_ref.clone();
+            let event_tx_for_sys = event_tx.clone();
+            let broadcast: system_events::BroadcastFn = Arc::new(move |event: Event| {
+                ipc_for_sys.broadcast_event(event.clone());
+                let _ = event_tx_for_sys.send(event);
+            });
+            system_events::spawn_system_event_watchers(broadcast, recheck_tx, resume_tx);
         }
 
         // Spawn IPC accept task
@@ -443,6 +457,16 @@ impl Service {
                 // Host events (process exit)
                 Some(host_event) = host_events.recv() => {
                     Self::handle_host_event(&engine, &ipc_ref, &event_tx, &hidpi, host_event).await;
+                }
+
+                // Resumed from suspend - push a fresh state snapshot so clients
+                // can drop the suspend cover with up-to-date content.
+                Some(()) = resume_rx.recv() => {
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(&ipc_ref, &event_tx, Event::new(EventPayload::StateChanged(state)));
                 }
 
                 // Config file changed on disk

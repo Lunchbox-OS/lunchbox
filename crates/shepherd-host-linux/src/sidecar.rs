@@ -70,6 +70,25 @@ pub fn spawn_touch_bridge(output_scale: f64) -> std::io::Result<Child> {
     Ok(child)
 }
 
+/// Spawn the touch bridge in grab-only mode as a child of the daemon.
+///
+/// This grabs every touchscreen and discards its events, disabling the
+/// touchscreen for the lifetime of the activity. It reuses the touch-bridge
+/// binary's device discovery and grab logic but emits no synthetic events, so
+/// no `/dev/uinput` access is required.
+pub fn spawn_disable_touch() -> std::io::Result<Child> {
+    let bin = touch_bridge_binary();
+    debug!(binary = %bin.display(), "Launching touchscreen grab (disable touch)");
+    let child = Command::new(&bin)
+        .arg("--grab-only")
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    info!(pid = child.id(), "Touchscreen-disable grab spawned");
+    Ok(child)
+}
+
 /// Spawn the tablet-to-touch bridge as a child of the daemon.
 ///
 /// `output_scale` is the compositor's current output scale; the bridge divides
@@ -146,7 +165,9 @@ impl GamepadPreset {
         match mode {
             InputCompatMode::GamepadProductivity => Some(Self::Productivity),
             InputCompatMode::GamepadGpd => Some(Self::Gpd),
-            InputCompatMode::TouchToMouse | InputCompatMode::TabletToTouch => None,
+            InputCompatMode::TouchToMouse
+            | InputCompatMode::TabletToTouch
+            | InputCompatMode::DisableTouch => None,
         }
     }
 

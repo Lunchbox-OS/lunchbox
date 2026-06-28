@@ -590,6 +590,7 @@ fn convert_input_compat(raw: RawInputCompat) -> InputCompatMode {
     match raw {
         RawInputCompat::TouchToMouse => InputCompatMode::TouchToMouse,
         RawInputCompat::TabletToTouch => InputCompatMode::TabletToTouch,
+        RawInputCompat::DisableTouch => InputCompatMode::DisableTouch,
         RawInputCompat::GamepadProductivity => InputCompatMode::GamepadProductivity,
         RawInputCompat::GamepadGpd => InputCompatMode::GamepadGpd,
     }
@@ -613,19 +614,17 @@ fn convert_input_compat_list(raw: &[RawInputCompat], entry_id: &EntryId) -> Vec<
             }
             have_gamepad = true;
         }
-        // `touch_to_mouse` and `tablet_to_touch` invert each other; running
-        // both would form a loop (tablet → synthetic touchscreen → mouse).
-        // Keep the first-configured direction and drop the conflicting one.
-        let conflicts = match mode {
-            InputCompatMode::TouchToMouse => out.contains(&InputCompatMode::TabletToTouch),
-            InputCompatMode::TabletToTouch => out.contains(&InputCompatMode::TouchToMouse),
-            _ => false,
-        };
-        if conflicts {
+        // The touch-handling modes (touch_to_mouse, tablet_to_touch,
+        // disable_touch) all grab or produce the touchscreen, so stacking two
+        // of them would have them fight over the same devices or form a loop
+        // (tablet → synthetic touchscreen → mouse). Keep the first-configured
+        // one and drop any later conflicting mode.
+        if mode.handles_touch() && out.iter().any(|m| m.handles_touch()) {
             tracing::warn!(
                 entry = %entry_id.as_str(),
-                "input_compat has both touch_to_mouse and tablet_to_touch, which \
-                 invert each other; ignoring the later one",
+                "input_compat has multiple touch-handling modes (touch_to_mouse, \
+                 tablet_to_touch, disable_touch), which are mutually exclusive; \
+                 ignoring the later one",
             );
             continue;
         }
@@ -790,6 +789,43 @@ mod tests {
             &id,
         );
         assert_eq!(out, vec![InputCompatMode::TabletToTouch]);
+    }
+
+    #[test]
+    fn input_compat_disable_touch_excludes_other_touch_modes() {
+        let id = EntryId::new("e");
+        // disable_touch is mutually exclusive with the other touch-handling
+        // modes; the first-configured touch mode wins and a stacked gamepad
+        // preset survives.
+        let out = convert_input_compat_list(
+            &[
+                RawInputCompat::DisableTouch,
+                RawInputCompat::TouchToMouse,
+                RawInputCompat::TabletToTouch,
+                RawInputCompat::GamepadGpd,
+            ],
+            &id,
+        );
+        assert_eq!(
+            out,
+            vec![InputCompatMode::DisableTouch, InputCompatMode::GamepadGpd]
+        );
+
+        // disable_touch stacks fine with a gamepad preset on its own.
+        let out = convert_input_compat_list(
+            &[
+                RawInputCompat::GamepadProductivity,
+                RawInputCompat::DisableTouch,
+            ],
+            &id,
+        );
+        assert_eq!(
+            out,
+            vec![
+                InputCompatMode::GamepadProductivity,
+                InputCompatMode::DisableTouch,
+            ]
+        );
     }
 
     #[test]
