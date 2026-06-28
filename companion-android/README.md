@@ -44,7 +44,7 @@ sideload-friendly (`adb install`).
 
 ### Decisions (spec §11 open questions)
 
-1. **Package / name** — `com.shepherd.companion` / "Shepherd Companion".
+1. **Package / name** — `com.armeafamily.shepherd.companion` / "Shepherd Companion".
 2. **BLE library** — **Kable** (coroutine-native), not Nordic, per the
    project owner's instruction. Apache-2.0, GPL-compatible. Bonding
    itself is OS-driven (`BluetoothDevice.createBond`); Kable handles

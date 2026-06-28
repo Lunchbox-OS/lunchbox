@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.shepherd.companion"
+    namespace = "com.armeafamily.shepherd.companion"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.shepherd.companion"
+        applicationId = "com.armeafamily.shepherd.companion"
         minSdk = 31
         targetSdk = 35
         versionCode = 1
