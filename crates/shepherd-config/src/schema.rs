@@ -240,6 +240,10 @@ pub enum RawInputCompat {
     /// sidecar that grabs the device and emits a virtual touchscreen. The
     /// inverse of `TouchToMouse`; the two must not be combined.
     TabletToTouch,
+    /// Grab every touchscreen and discard its events, disabling the
+    /// touchscreen for the duration of the activity. Mutually exclusive with
+    /// `TouchToMouse` and `TabletToTouch`.
+    DisableTouch,
     /// Productivity preset: triggers = LMB, shoulders = RMB, left stick =
     /// mouse, right stick = scroll, stick-click toggles which stick drives
     /// the mouse, D-pad = arrow keys, A = Enter, Start = Escape.
@@ -556,6 +560,24 @@ mod tests {
         assert_eq!(
             config.entries[0].input_compat,
             vec![RawInputCompat::TouchToMouse]
+        );
+    }
+
+    #[test]
+    fn parse_input_compat_disable_touch() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+            input_compat = "disable_touch"
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.entries[0].input_compat,
+            vec![RawInputCompat::DisableTouch]
         );
     }
 

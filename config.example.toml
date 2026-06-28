@@ -291,6 +291,13 @@ end = "20:00"
 # handle touch, when developing touch support on mouse/pen-only hardware, or
 # in a VM whose pointer is an absolute tablet (QEMU/SPICE). It cannot be
 # combined with `touch_to_mouse` (they invert each other).
+#
+# A third option, `input_compat = "disable_touch"`, grabs every touchscreen
+# and discards its events for the duration of the activity — useful for games
+# that misbehave on touch input but are still playable with a mouse or gamepad.
+# It emits nothing (so it needs the `input` group but not `/dev/uinput`) and,
+# like the two modes above, is mutually exclusive with them (all three grab or
+# produce the touchscreen). It still stacks with a `gamepad_*` preset.
 # https://store.steampowered.com/app/22000/World_of_Goo/
 [[entries]]
 id = "steam-world-of-goo"

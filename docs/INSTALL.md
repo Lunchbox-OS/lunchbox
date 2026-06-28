@@ -60,14 +60,21 @@ Activities can opt into one or more input-compat sidecars via the
 `input_compat` entry (see `config.example.toml`):
 
 - `touch_to_mouse` — for games that ignore raw touch events.
+- `tablet_to_touch` — the inverse: synthesize touch from an absolute pointer
+  or tablet, for activities that only handle touch.
+- `disable_touch` — grab and discard all touch input, disabling the
+  touchscreen for activities that misbehave on touch but still work with a
+  mouse or gamepad.
 - `gamepad_productivity` / `gamepad_gpd` — remap a gamepad to mouse +
   keyboard for activities that ignore gamepad input.
 
-The sidecars read `/dev/input/event*` and synthesize their output through a
-`/dev/uinput` virtual device. Both require the user to be in the `input`
+Most sidecars read `/dev/input/event*` and synthesize their output through a
+`/dev/uinput` virtual device. They require the user to be in the `input`
 group, plus a udev rule granting that group access to `/dev/uinput`. Using
 uinput is what lets the sidecars work on any Wayland compositor (GNOME/Mutter,
-KWin, …), not just wlroots ones like Sway.
+KWin, …), not just wlroots ones like Sway. (`disable_touch` is the exception —
+it only grabs input and emits nothing, so it needs the `input` group but not
+`/dev/uinput`.)
 
 `shepherd install all` adds the group and installs the udev rule
 automatically. To set them up on an existing install, run:

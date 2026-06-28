@@ -24,7 +24,8 @@ use crate::process::{
     kill_steam_game_processes, make_scope_name,
 };
 use crate::sidecar::{
-    GamepadPreset, spawn_gamepad_bridge, spawn_tablet_bridge, spawn_touch_bridge, terminate_sidecar,
+    GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
+    spawn_touch_bridge, terminate_sidecar,
 };
 use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
 
@@ -655,6 +656,12 @@ impl HostAdapter for LinuxHost {
                         }
                     }
                 }
+                InputCompatMode::DisableTouch => match spawn_disable_touch() {
+                    Ok(child) => session_sidecars.push(child),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to spawn touchscreen-disable grab; continuing without it")
+                    }
+                },
                 InputCompatMode::GamepadProductivity | InputCompatMode::GamepadGpd => {
                     let preset =
                         GamepadPreset::from_mode(*mode).expect("gamepad mode maps to a preset");
