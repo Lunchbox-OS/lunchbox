@@ -447,8 +447,7 @@ fn outbox_read_characteristic(
                     // bytes from the *next* response.
                     let max_chunk = (req.mtu as usize)
                         .saturating_sub(1)
-                        .min(GATT_MAX_ATTR_VALUE)
-                        .max(20);
+                        .clamp(20, GATT_MAX_ATTR_VALUE);
                     let bytes = outbox.read(max_chunk).await;
                     if !bytes.is_empty() {
                         debug!(
@@ -469,6 +468,7 @@ fn outbox_read_characteristic(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_write(
     peer: &PeerIdentity,
     chunk: Vec<u8>,
