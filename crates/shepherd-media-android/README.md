@@ -26,16 +26,32 @@ the full design and roadmap.
 - Poster thumbnails in the grid: loaded and decoded (JPEG/PNG/WebP) on worker
   threads and uploaded as egui textures, honoring `PosterPolicy` (`Never` skips;
   `WifiOnly` currently behaves like `Always` pending the connectivity bridge).
+- libmpv playback: tapping an item resolves its platform source and plays it
+  through core's libmpv `PlayerHandle`, composited into the eframe GL surface
+  with a touch/keyboard control overlay (play/pause, ±10s, scrub, back). libmpv
+  + ffmpeg are vendored under [`vendor/libmpv/`](./vendor/libmpv) and packaged
+  into the APK. **Caveat:** the build, link, and packaging are verified, but
+  on-device video rendering has not been run on hardware yet.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
 ## Not yet wired (next steps)
 
-- libmpv-backed `PlayerHandle` and embedded playback (today a `StubPlayer`).
 - On-disk poster/video caching honoring the per-library size cap (posters are
   currently fetched per session, not persisted).
 - YouTube resolution via youtubedl-android.
 - JNI bridges for the SAF file picker, connectivity policy, and storage paths.
+- Per-library quality applied to the libmpv `ytdl-format` (currently a single
+  default is set at startup).
+
+## Vendored libmpv
+
+`vendor/libmpv/arm64-v8a/` holds the prebuilt `libmpv.so` plus its ffmpeg
+dependencies, extracted from the `dev.jdtech.mpv:libmpv` AAR (Maven Central).
+`build.rs` adds that directory to the link search path so the `-lmpv` from
+`libmpv2-sys` resolves, and the Gradle project packages the same `.so` into the
+APK's `jniLibs`. To add another ABI, extract its libraries into a sibling dir
+(e.g. `x86_64/`) and add the ABI to `rustAbis` in `android/app/build.gradle.kts`.
 
 ## Develop on the host
 

@@ -10,14 +10,43 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
-use shepherd_media_core::{ItemKind, Library, PosterRef};
+use shepherd_media_core::{
+    ItemKind, Library, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef, resolve_source,
+};
 
+use crate::playback::PlaybackView;
 use crate::resolve::{ResolveError, resolve};
+
+/// The item currently playing (its id and display title for the overlay).
+struct PlayingItem {
+    title: String,
+}
+
+/// Construct the playback backend for this platform: libmpv on Android, a no-op
+/// stub elsewhere (so the playback path still compiles and runs on the host).
+fn make_player() -> Option<Box<dyn PlayerHandle>> {
+    #[cfg(target_os = "android")]
+    {
+        match shepherd_media_core::LibmpvPlayer::new(Quality::default().ytdl_format()) {
+            Ok(p) => Some(Box::new(p)),
+            Err(e) => {
+                log::error!("libmpv init failed: {e}");
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Some(Box::new(crate::player::StubPlayer::default()))
+    }
+}
 
 /// A decoded poster delivered from a worker thread to the UI thread.
 type PosterMsg = (String, Option<egui::ColorImage>);
@@ -134,6 +163,11 @@ pub struct MediaApp {
     posters: HashMap<String, PosterSlot>,
     poster_tx: Sender<PosterMsg>,
     poster_rx: Receiver<PosterMsg>,
+    /// The playback backend (libmpv on Android), GL-bound once at startup, plus
+    /// the view that composites it and the currently-playing item.
+    player: Option<Box<dyn PlayerHandle>>,
+    playback: Option<PlaybackView>,
+    playing: Option<PlayingItem>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
 }
@@ -151,6 +185,30 @@ impl MediaApp {
             ),
         };
         let (poster_tx, poster_rx) = std::sync::mpsc::channel();
+
+        // Build the player and bind it to the host GL context. bind_gl must
+        // happen here because the proc-address loader is only exposed on the
+        // creation context.
+        let needs_render = Arc::new(AtomicBool::new(false));
+        let mut player = make_player();
+        if let Some(p) = player.as_mut() {
+            if let Some(get_proc) = cc.get_proc_address.as_ref()
+                && let Err(e) = p.bind_gl(get_proc.as_ref())
+            {
+                log::error!("bind_gl failed: {e}");
+            }
+            let flag = needs_render.clone();
+            let egui_ctx = cc.egui_ctx.clone();
+            p.set_redraw_callback(Box::new(move || {
+                flag.store(true, Ordering::Relaxed);
+                egui_ctx.request_repaint();
+            }));
+        }
+        let playback = cc
+            .gl
+            .as_ref()
+            .map(|gl| PlaybackView::new(gl.clone(), needs_render.clone()));
+
         Self {
             settings_path,
             settings,
@@ -160,6 +218,9 @@ impl MediaApp {
             posters: HashMap::new(),
             poster_tx,
             poster_rx,
+            player,
+            playback,
+            playing: None,
             status,
         }
     }
@@ -514,6 +575,7 @@ impl MediaApp {
         self.prefetch_posters(ui, library_id);
 
         let mut next = None;
+        let mut play_request: Option<String> = None;
         ui.horizontal(|ui| {
             if ui.button("⬅ Back").clicked() {
                 next = Some(Screen::Switcher);
@@ -572,20 +634,100 @@ impl MediaApp {
                                     if let Some(category) = &item.category {
                                         ui.label(format!("Category: {category}"));
                                     }
+                                    if ui.button("▶ Play").clicked() {
+                                        play_request = Some(item.id.clone());
+                                    }
                                 });
                             });
                         });
                     }
                 });
-                ui.add_space(8.0);
-                ui.weak(
-                    "Tapping an item to play needs the libmpv backend, which is \
-                     the next step.",
-                );
             }
             None => {}
         }
+
+        if let Some(item_id) = play_request {
+            self.start_playback(&item_id);
+        }
         next
+    }
+
+    /// Resolve the platform source for `item_id` in the loaded library and hand
+    /// it to the player. Sets the playing item on success.
+    fn start_playback(&mut self, item_id: &str) {
+        let Some(GridView {
+            state: GridState::Loaded(lib),
+            ..
+        }) = self.grid.as_ref()
+        else {
+            return;
+        };
+        let Some(item) = lib.items.iter().find(|it| it.id == item_id) else {
+            return;
+        };
+        let info = PlatformInfo::current();
+        let Some(source) = resolve_source(item, &info) else {
+            self.status = Some(format!("No source for `{}` on this platform.", item.title));
+            return;
+        };
+        let title = item.title.clone();
+        let source = source.clone();
+        match self.player.as_mut() {
+            Some(p) => match p.play(&source) {
+                Ok(()) => {
+                    if let Some(pv) = self.playback.as_mut() {
+                        pv.note_started();
+                    }
+                    self.playing = Some(PlayingItem { title });
+                }
+                Err(e) => self.status = Some(format!("Playback failed: {e}")),
+            },
+            None => self.status = Some("No player available on this platform.".to_string()),
+        }
+    }
+
+    /// Drive playback for a frame: drain player events (ending playback on
+    /// EOF/close/error) and composite the video + overlay. Returns to the grid
+    /// when playback ends or the user leaves.
+    fn run_playback(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Drain events without holding a borrow across the mutation.
+        let mut ended = false;
+        if let Some(p) = self.player.as_mut() {
+            while let Some(ev) = p.poll_event() {
+                match ev {
+                    PlayerEvent::EndOfFile | PlayerEvent::Closed | PlayerEvent::Error(_) => {
+                        ended = true;
+                    }
+                    PlayerEvent::Started => {}
+                }
+            }
+        }
+        if ended {
+            if let Some(p) = self.player.as_mut() {
+                let _ = p.stop();
+            }
+            self.playing = None;
+            return;
+        }
+
+        let title = self
+            .playing
+            .as_ref()
+            .map(|x| x.title.clone())
+            .unwrap_or_default();
+        let leave = match (self.playback.as_mut(), self.player.as_mut()) {
+            (Some(pv), Some(p)) => pv.draw(ui, frame, p.as_mut(), &title),
+            _ => {
+                ui.label("No player available on this platform.");
+                ui.button("⬅ Back").clicked()
+            }
+        };
+        if leave {
+            if let Some(p) = self.player.as_mut() {
+                let _ = p.stop();
+            }
+            self.playing = None;
+        }
     }
 }
 
@@ -597,21 +739,26 @@ fn item_kind_glyph(kind: ItemKind) -> &'static str {
 }
 
 impl eframe::App for MediaApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Diff settings across the frame so any mutation persists automatically.
         let before = self.settings.clone();
 
-        self.top_bar(ui);
+        // Playback takes over the whole surface while an item is playing.
+        if self.playing.is_some() {
+            self.run_playback(ui, frame);
+        } else {
+            self.top_bar(ui);
 
-        let next = match self.screen.clone() {
-            Screen::Switcher => self.switcher(ui),
-            Screen::Settings => self.settings_screen(ui),
-            Screen::AddLibrary => self.add_library_screen(ui),
-            Screen::Grid(id) => self.grid_screen(ui, &id),
-        };
+            let next = match self.screen.clone() {
+                Screen::Switcher => self.switcher(ui),
+                Screen::Settings => self.settings_screen(ui),
+                Screen::AddLibrary => self.add_library_screen(ui),
+                Screen::Grid(id) => self.grid_screen(ui, &id),
+            };
 
-        if let Some(screen) = next {
-            self.screen = screen;
+            if let Some(screen) = next {
+                self.screen = screen;
+            }
         }
 
         if self.settings != before {

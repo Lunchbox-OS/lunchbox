@@ -33,6 +33,7 @@ eframe = { version = "0.34", default-features = false, features = [
     "android-native-activity",
 ] }
 egui = "0.34"
+glow = "0.17"
 # Decode poster bytes into egui textures (formats match the Linux binary).
 image = { version = "0.25", default-features = false, features = [
     "jpeg",
@@ -46,6 +47,10 @@ image = { version = "0.25", default-features = false, features = [
 android_logger = "0.14"
 android-activity = { version = "0.6", features = ["native-activity"] }
 jni = "0.21"
+# Enable the libmpv-backed PlayerHandle from core on Android. It links against
+# the vendored libmpv under vendor/libmpv/ (see build.rs); the runtime .so are
+# packaged from there into the APK's jniLibs (see android/app/build.gradle.kts).
+shepherd-media-core = { path = "../shepherd-media-core", features = ["libmpv"] }
 
 [dev-dependencies]
 url = "2.5"

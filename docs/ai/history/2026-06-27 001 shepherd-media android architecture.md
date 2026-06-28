@@ -208,11 +208,24 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   honoring `PosterPolicy`). 13 crate tests; the whole thing (incl. rustls/ring
   and the image decoders) cross-compiles for `aarch64-linux-android` and the APK
   still builds.
-- Remaining: libmpv-backed `PlayerHandle` + embedded playback (the long pole —
-  needs a prebuilt Android `libmpv.so` from an mpv/ffmpeg cross-compile);
-  on-disk poster/video caching honoring the per-library size cap; YouTube
-  resolution via youtubedl-android; and the SAF / connectivity / storage-path
-  JNI bridges.
+- **Step 4 — libmpv playback wired (vendored): done at build/link/package
+  level.** Decision: vendor a prebuilt `libmpv.so` rather than build mpv/ffmpeg
+  from source. The arm64 `libmpv.so` + ffmpeg deps are extracted from the
+  `dev.jdtech.mpv:libmpv` AAR into `vendor/libmpv/arm64-v8a/`. `build.rs` adds
+  that to the link search path so the `-lmpv` from `libmpv2-sys` resolves; the
+  Gradle project packages the same `.so` into `jniLibs`. The Android crate
+  enables core's `libmpv` feature (target-gated) and reuses core's existing
+  `LibmpvPlayer` + the GL render path; a trimmed `PlaybackView` (adapted from
+  the Linux `ui/playback.rs`, touch+keyboard) composites mpv into the eframe GL
+  surface. Tapping a grid item resolves its platform source and plays it. The
+  player is constructed and GL-bound once at startup (when eframe exposes the
+  proc-address loader) and reused across libraries. Verified: host clippy/13
+  tests clean; the cdylib cross-compiles and now has `NEEDED libmpv.so`; the
+  37 MB APK packages our cdylib + libmpv + ffmpeg + libc++_shared. **Not yet
+  verified: actual video playback on a physical device / GPU.**
+- Remaining: on-device playback verification; on-disk poster/video caching with
+  the per-library size cap; YouTube resolution via youtubedl-android; per-library
+  quality applied to mpv; and the SAF / connectivity / storage-path JNI bridges.
 
 ## Key source references
 

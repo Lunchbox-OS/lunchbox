@@ -32,9 +32,12 @@ android {
 
     // No Java/Kotlin sources: the app is a pure NativeActivity that loads the
     // Rust cdylib (libshepherd_media_android.so) built by cargo-ndk below.
+    // jniLibs come from two places: our cargo-ndk output, and the vendored
+    // libmpv + ffmpeg shared libraries the Rust cdylib links against.
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(layout.buildDirectory.dir("rustJniLibs"))
+            jniLibs.srcDir(rootProject.projectDir.parentFile.resolve("vendor/libmpv"))
         }
     }
 }
