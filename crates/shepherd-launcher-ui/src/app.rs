@@ -393,6 +393,14 @@ impl LauncherApp {
                         error_label.set_text(&message);
                         stack.set_visible_child_name("error");
                     }
+                    LauncherState::Suspending => {
+                        // Static cover drawn before the screen freezes on
+                        // suspend; replaced by fresh state on resume (issue #73).
+                        if let Some(ref win) = window {
+                            win.set_visible(true);
+                        }
+                        stack.set_visible_child_name("loading");
+                    }
                 }
             }
         });

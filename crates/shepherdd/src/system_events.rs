@@ -1,24 +1,46 @@
-//! System event sources that trigger an immediate internet re-check.
+//! System event sources from logind and NetworkManager.
 //!
-//! The [`InternetMonitor`](crate::internet::InternetMonitor) polls on a fixed
-//! interval, which means connectivity status can lag reality by up to one
-//! interval after the machine wakes from suspend or a network adapter changes
-//! state. To close that gap we subscribe to two system D-Bus signals and nudge
-//! the monitor to re-check immediately:
+//! This watcher serves two purposes, both driven off the same system D-Bus
+//! signals:
+//!
+//! 1. **Suspend cover (issue #73).** On suspend/resume the compositor cannot
+//!    draw for seconds, leaving a stale frame (old clock, battery, activity
+//!    list) frozen on screen. We listen for logind's `PrepareForSleep` and
+//!    broadcast [`EventPayload::SystemSuspending`] / [`EventPayload::SystemResumed`]
+//!    so clients can cover the screen with a static frame across the gap. To
+//!    guarantee that cover frame is actually committed *before* the screen
+//!    freezes, we hold a logind **delay** inhibitor and only release it after a
+//!    short grace period once `SystemSuspending` has been emitted.
+//!
+//! 2. **Internet re-check.** The [`InternetMonitor`](crate::internet::InternetMonitor)
+//!    polls on a fixed interval, so connectivity status can lag reality after a
+//!    resume or an adapter change. When an internet monitor is configured we
+//!    nudge it to re-check immediately on those events.
+//!
+//! Signals watched (both on the system bus, which shepherdd can read from
+//! inside the kiosk session):
 //!
 //! - `org.freedesktop.login1.Manager.PrepareForSleep` (fires with `start =
-//!   false` on resume).
+//!   true` just before sleep and `start = false` on resume).
 //! - `org.freedesktop.NetworkManager.StateChanged` (fires on adapter /
 //!   connectivity transitions).
 //!
-//! Both signals live on the system bus, which shepherdd can read from inside
-//! the kiosk session. Missing D-Bus or NetworkManager is non-fatal: the watcher
-//! logs and retries, and the periodic checks keep working regardless.
+//! Missing D-Bus / NetworkManager / logind is non-fatal: the watcher logs and
+//! retries, and the periodic internet checks keep working regardless. If the
+//! inhibitor cannot be acquired the cover events are still broadcast, just
+//! without the guaranteed pre-sleep draw window.
 
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
+
+use shepherd_api::{Event, EventPayload};
+
+/// Broadcasts an event to all subscribers (IPC + HTTP SSE). Supplied by the
+/// service so this module does not need to know about either transport.
+pub type BroadcastFn = Arc<dyn Fn(Event) + Send + Sync>;
 
 /// Why an immediate internet re-check was requested. Used for logging only.
 #[derive(Debug, Clone, Copy)]
@@ -32,12 +54,29 @@ pub enum RecheckTrigger {
 /// Delay before reconnecting to the system bus after an error.
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
+/// How long shepherdd holds the logind delay inhibitor after emitting
+/// `SystemSuspending`, giving clients time to draw the cover before the screen
+/// freezes. Must stay well under logind's `InhibitDelayMaxSec` (5s default).
+const SUSPEND_COVER_GRACE: Duration = Duration::from_millis(750);
+
 #[zbus::proxy(
     interface = "org.freedesktop.login1.Manager",
     default_service = "org.freedesktop.login1",
     default_path = "/org/freedesktop/login1"
 )]
 trait LogindManager {
+    /// Take an inhibitor lock. With `mode = "delay"` logind defers the action
+    /// (here: sleep) until the returned fd is closed or `InhibitDelayMaxSec`
+    /// elapses, whichever comes first.
+    #[zbus(name = "Inhibit")]
+    fn inhibit(
+        &self,
+        what: &str,
+        who: &str,
+        why: &str,
+        mode: &str,
+    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
+
     /// Emitted with `start = true` just before sleep and `start = false`
     /// after the system resumes.
     #[zbus(signal)]
@@ -56,21 +95,34 @@ trait NetworkManager {
     fn state_changed(&self, state: u32) -> zbus::Result<()>;
 }
 
-/// Spawn a background task that watches logind and NetworkManager signals and
-/// sends a [`RecheckTrigger`] on `tx` whenever connectivity should be
-/// re-evaluated. The task reconnects with a fixed backoff on any error.
-pub fn spawn_recheck_watchers(tx: mpsc::UnboundedSender<RecheckTrigger>) {
+/// Spawn a background task that watches logind and NetworkManager and:
+///
+/// - broadcasts suspend/resume cover events via `broadcast`,
+/// - on resume, sends `()` on `resume_tx` so the service can push a fresh
+///   `StateChanged` (clients drop the cover once up-to-date content arrives),
+/// - on resume / network change, nudges the internet monitor through
+///   `recheck_tx` if one is configured.
+///
+/// The task reconnects with a fixed backoff on any error and runs for the
+/// lifetime of the service (the suspend cover is useful regardless of whether
+/// internet gating is configured).
+pub fn spawn_system_event_watchers(
+    broadcast: BroadcastFn,
+    recheck_tx: Option<mpsc::UnboundedSender<RecheckTrigger>>,
+    resume_tx: mpsc::UnboundedSender<()>,
+) {
     tokio::spawn(async move {
         loop {
-            if let Err(err) = watch_once(&tx).await {
+            if let Err(err) = watch_once(&broadcast, &recheck_tx, &resume_tx).await {
                 warn!(
                     error = %err,
                     "System event watcher disconnected; retrying after backoff"
                 );
             }
-            // If the receiver is gone (monitor stopped), there is no reason to
+            // The resume channel lives as long as the service main loop; once
+            // it is gone shepherdd is shutting down and there is no reason to
             // keep retrying.
-            if tx.is_closed() {
+            if resume_tx.is_closed() {
                 return;
             }
             tokio::time::sleep(RECONNECT_DELAY).await;
@@ -78,9 +130,41 @@ pub fn spawn_recheck_watchers(tx: mpsc::UnboundedSender<RecheckTrigger>) {
     });
 }
 
-/// Connect to the system bus, subscribe to both signals, and forward triggers
+/// Acquire a logind delay inhibitor for sleep. Returns `None` (and logs) on
+/// failure so the caller can carry on with best-effort cover broadcasts.
+async fn acquire_sleep_inhibitor(
+    logind: &LogindManagerProxy<'_>,
+) -> Option<zbus::zvariant::OwnedFd> {
+    match logind
+        .inhibit(
+            "sleep",
+            "shepherdd",
+            "Show suspend cover before sleep",
+            "delay",
+        )
+        .await
+    {
+        Ok(fd) => {
+            debug!("Acquired logind sleep delay inhibitor");
+            Some(fd)
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "Failed to acquire logind sleep inhibitor; suspend cover may not draw before sleep"
+            );
+            None
+        }
+    }
+}
+
+/// Connect to the system bus, subscribe to both signals, and handle events
 /// until an error occurs (at which point the caller reconnects).
-async fn watch_once(tx: &mpsc::UnboundedSender<RecheckTrigger>) -> zbus::Result<()> {
+async fn watch_once(
+    broadcast: &BroadcastFn,
+    recheck_tx: &Option<mpsc::UnboundedSender<RecheckTrigger>>,
+    resume_tx: &mpsc::UnboundedSender<()>,
+) -> zbus::Result<()> {
     let connection = zbus::Connection::system().await?;
 
     let logind = LogindManagerProxy::new(&connection).await?;
@@ -89,26 +173,45 @@ async fn watch_once(tx: &mpsc::UnboundedSender<RecheckTrigger>) -> zbus::Result<
     let mut sleep_signals = logind.receive_prepare_for_sleep().await?;
     let mut nm_signals = nm.receive_state_changed().await?;
 
-    info!("Watching logind and NetworkManager for internet re-check triggers");
+    // Hold a delay inhibitor so we get a brief, guaranteed window to draw the
+    // suspend cover before the screen freezes. Re-armed after each resume.
+    let mut inhibitor = acquire_sleep_inhibitor(&logind).await;
+
+    info!("Watching logind and NetworkManager for system events");
 
     loop {
         tokio::select! {
             signal = sleep_signals.next() => {
                 let Some(signal) = signal else { break };
                 let args = signal.args()?;
-                // Only the resume edge matters; ignore the pre-sleep edge.
-                if !args.start {
-                    debug!("Resumed from sleep; requesting internet re-check");
-                    if tx.send(RecheckTrigger::ResumedFromSleep).is_err() {
-                        return Ok(());
+                if args.start {
+                    // About to sleep: tell clients to show the cover, give them
+                    // a moment to commit a frame, then release the inhibitor so
+                    // the system proceeds to sleep.
+                    debug!("Preparing for sleep; broadcasting SystemSuspending");
+                    broadcast(Event::new(EventPayload::SystemSuspending));
+                    tokio::time::sleep(SUSPEND_COVER_GRACE).await;
+                    drop(inhibitor.take());
+                } else {
+                    // Resumed: announce it, ask the service for a fresh state
+                    // snapshot (so clients drop the cover with current content),
+                    // nudge the internet monitor, and re-arm the inhibitor.
+                    debug!("Resumed from sleep; broadcasting SystemResumed");
+                    broadcast(Event::new(EventPayload::SystemResumed));
+                    let _ = resume_tx.send(());
+                    if let Some(tx) = recheck_tx {
+                        let _ = tx.send(RecheckTrigger::ResumedFromSleep);
+                    }
+                    if inhibitor.is_none() {
+                        inhibitor = acquire_sleep_inhibitor(&logind).await;
                     }
                 }
             }
             signal = nm_signals.next() => {
                 let Some(_signal) = signal else { break };
-                debug!("NetworkManager state changed; requesting internet re-check");
-                if tx.send(RecheckTrigger::NetworkChanged).is_err() {
-                    return Ok(());
+                if let Some(tx) = recheck_tx {
+                    debug!("NetworkManager state changed; requesting internet re-check");
+                    let _ = tx.send(RecheckTrigger::NetworkChanged);
                 }
             }
         }

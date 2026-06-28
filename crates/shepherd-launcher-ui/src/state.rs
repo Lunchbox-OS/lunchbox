@@ -30,6 +30,10 @@ pub enum LauncherState {
     },
     /// Error state
     Error { message: String },
+    /// System is suspending: show a static cover so the frozen frame across
+    /// the suspend/resume gap isn't stale. Held until the fresh `StateChanged`
+    /// that shepherdd broadcasts on resume replaces it (issue #73).
+    Suspending,
 }
 
 /// Shared state container
@@ -114,6 +118,17 @@ impl SharedState {
             EventPayload::EntryAvailabilityChanged { .. } => {
                 // Request fresh state
                 self.set(LauncherState::Connecting);
+            }
+            EventPayload::SystemSuspending => {
+                // Cover the screen before it freezes so the stale clock /
+                // activity list isn't what's frozen on resume.
+                tracing::info!("System suspending; showing cover");
+                self.set(LauncherState::Suspending);
+            }
+            EventPayload::SystemResumed => {
+                // Keep the cover up; the StateChanged shepherdd broadcasts on
+                // resume replaces it with fresh content.
+                tracing::info!("System resumed; awaiting fresh state");
             }
             EventPayload::Shutdown => {
                 // Service is shutting down
