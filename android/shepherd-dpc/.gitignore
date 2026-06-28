@@ -1,0 +1,4 @@
+build/
+shepherd-dpc.apk
+*.idsig
+dpc.keystore

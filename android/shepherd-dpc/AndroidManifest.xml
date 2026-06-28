@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Shepherd DPC: a minimal Device Policy Controller for Waydroid kiosk lock-in.
+
+  Provisioned as Device Owner (no Google account needed on a fresh Waydroid):
+    adb shell dpm set-device-owner com.shepherd.dpc/.AdminReceiver
+
+  Once it is device owner, shepherd launches a kiosk app *pinned* (Lock Task
+  Mode) by starting LaunchActivity with the target package, which allowlists it
+  and launches it with ActivityOptions.setLockTaskEnabled(true) — pinning even
+  apps that don't call startLockTask themselves (Calculator, M365, …).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.shepherd.dpc">
+
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="33" />
+
+    <!-- A DPC must resolve launch intents for arbitrary kiosk packages; Android
+         11+ package visibility otherwise hides them. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application
+        android:label="Shepherd DPC"
+        android:allowBackup="false">
+
+        <receiver
+            android:name=".AdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- No-UI entry point shepherd invokes via `am start` with a pkg extra. -->
+        <activity
+            android:name=".LaunchActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <!-- Clears Lock Task so a session can be ended. Invoked via an
+             `am broadcast` to this receiver with a string extra action=unlock. -->
+        <receiver
+            android:name=".ControlReceiver"
+            android:exported="true" />
+    </application>
+</manifest>

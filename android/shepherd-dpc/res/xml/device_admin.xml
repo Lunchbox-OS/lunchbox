@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Device-admin policy declaration. A device owner doesn't strictly need these
+     for Lock Task, but a minimal set is declared for completeness. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <wipe-data />
+        <disable-keyguard-features />
+    </uses-policies>
+</device-admin>
