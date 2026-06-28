@@ -406,6 +406,49 @@ jobs:
             --no-default-features \
             -p shepherd-media-core
 
+  android-companion:
+    name: Android companion (unit tests)
+    needs: image
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    env:
+      # AGP resolves the SDK from this env var. local.properties (the
+      # other option) is gitignored and absent in CI, and it matches
+      # where `deps install android` drops the SDK.
+      ANDROID_SDK_ROOT: /opt/android-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CI image is the Rust image — it has no JDK or Android SDK
+      # (android.pkgs is deliberately excluded from the image hash so the
+      # ~1 GB SDK doesn't bloat every other job). Cache the SDK tree and
+      # the Gradle dep/wrapper caches across runs; the install step below
+      # is idempotent and no-ops the SDK download on a cache hit.
+      - name: Cache Android SDK + Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/android-sdk
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-android-${{ hashFiles('scripts/deps/android.pkgs', 'scripts/lib/deps.sh', 'companion-android/gradle/libs.versions.toml', 'companion-android/gradle/wrapper/gradle-wrapper.properties', 'companion-android/**/build.gradle.kts') }}
+          restore-keys: |
+            ${{ runner.os }}-android-
+
+      - name: Install Android toolchain (JDK + SDK)
+        run: ./scripts/shepherd deps install android
+
+      # JVM unit tests only (the hardware-independent framing codec +
+      # wire-decode of every sampled spec payload). No emulator; the live
+      # pair/claim path stays a manual smoke test.
+      - name: Run companion-android unit tests
+        working-directory: companion-android
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
