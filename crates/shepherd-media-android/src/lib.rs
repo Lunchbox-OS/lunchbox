@@ -27,11 +27,12 @@ fn android_main(app: android_activity::AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
-    // Persist settings in the app's private storage.
-    let settings_path = app
+    // Persist settings and caches in the app's private storage.
+    let data_dir = app
         .internal_data_path()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("settings.toml");
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let settings_path = data_dir.join("settings.toml");
+    let cache_dir = data_dir.join("cache");
 
     let options = eframe::NativeOptions {
         android_app: Some(app),
@@ -41,7 +42,7 @@ fn android_main(app: android_activity::AndroidApp) {
     if let Err(e) = eframe::run_native(
         "shepherd-media",
         options,
-        Box::new(move |cc| Ok(Box::new(MediaApp::new(cc, settings_path)))),
+        Box::new(move |cc| Ok(Box::new(MediaApp::new(cc, settings_path, cache_dir)))),
     ) {
         log::error!("eframe exited with error: {e}");
     }

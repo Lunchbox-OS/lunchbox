@@ -16,10 +16,11 @@ fn main() -> eframe::Result<()> {
     let dir = std::env::temp_dir().join("shepherd-media-preview");
     std::fs::create_dir_all(&dir).ok();
     let settings_path: PathBuf = dir.join("settings.toml");
+    let cache_dir: PathBuf = dir.join("cache");
 
     eframe::run_native(
         "shepherd-media (preview)",
         eframe::NativeOptions::default(),
-        Box::new(move |cc| Ok(Box::new(MediaApp::new(cc, settings_path)))),
+        Box::new(move |cc| Ok(Box::new(MediaApp::new(cc, settings_path, cache_dir)))),
     )
 }

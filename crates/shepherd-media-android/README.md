@@ -26,6 +26,8 @@ the full design and roadmap.
 - Poster thumbnails in the grid: loaded and decoded (JPEG/PNG/WebP) on worker
   threads and uploaded as egui textures, honoring `PosterPolicy` (`Never` skips;
   `WifiOnly` currently behaves like `Always` pending the connectivity bridge).
+  Remote posters are cached on disk (6 h TTL, stale-as-offline-fallback) so they
+  persist across launches.
 - libmpv playback: tapping an item resolves its platform source and plays it
   through core's libmpv `PlayerHandle`, composited into the eframe GL surface
   with a touch/keyboard control overlay (play/pause, ±10s, scrub, back). libmpv
@@ -37,8 +39,8 @@ the full design and roadmap.
 
 ## Not yet wired (next steps)
 
-- On-disk poster/video caching honoring the per-library size cap (posters are
-  currently fetched per session, not persisted).
+- On-disk *video* caching honoring the per-library size cap and cache mode
+  (poster caching is done; video download/eviction is not).
 - YouTube resolution via youtubedl-android.
 - JNI bridges for the SAF file picker, connectivity policy, and storage paths.
 - Per-library quality applied to the libmpv `ytdl-format` (currently a single

@@ -223,9 +223,18 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   tests clean; the cdylib cross-compiles and now has `NEEDED libmpv.so`; the
   37 MB APK packages our cdylib + libmpv + ffmpeg + libc++_shared. **Not yet
   verified: actual video playback on a physical device / GPU.**
-- Remaining: on-device playback verification; on-disk poster/video caching with
-  the per-library size cap; YouTube resolution via youtubedl-android; per-library
-  quality applied to mpv; and the SAF / connectivity / storage-path JNI bridges.
+- **Step 5 — on-disk poster cache: done.** Remote posters are cached under the
+  app's cache dir (6 h TTL, stale-as-offline-fallback, mirroring the Linux
+  binary) so they persist across launches and survive going offline. `PosterRef`
+  loading goes through a cheap-to-clone `PosterCache` handed to each worker
+  thread; local posters are read straight from disk. 15 crate tests; cross-
+  compiles and APK builds.
+- Remaining: on-device playback verification (needs hardware — the jdtech AAR
+  ships no x86_64 libmpv, so an x86_64 emulator can't load it, and an arm64
+  emulator on an x86 host has no KVM acceleration); on-disk *video* caching with
+  the per-library size cap and cache mode; YouTube resolution via
+  youtubedl-android; per-library quality applied to mpv; and the SAF /
+  connectivity / storage-path JNI bridges.
 
 ## Key source references
 

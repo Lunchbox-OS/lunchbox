@@ -152,6 +152,8 @@ impl Default for NewLibraryForm {
 
 pub struct MediaApp {
     settings_path: PathBuf,
+    /// Base directory for on-disk caches (posters today, videos later).
+    cache_dir: PathBuf,
     settings: AppSettings,
     screen: Screen,
     form: NewLibraryForm,
@@ -174,8 +176,13 @@ pub struct MediaApp {
 
 impl MediaApp {
     /// Build the app, loading persisted settings from `settings_path` (a missing
-    /// file yields empty settings — the normal first-launch case).
-    pub fn new(cc: &eframe::CreationContext<'_>, settings_path: PathBuf) -> Self {
+    /// file yields empty settings — the normal first-launch case). `cache_dir`
+    /// is the base directory for on-disk caches.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        settings_path: PathBuf,
+        cache_dir: PathBuf,
+    ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let (settings, status) = match AppSettings::load(&settings_path) {
             Ok(s) => (s, None),
@@ -211,6 +218,7 @@ impl MediaApp {
 
         Self {
             settings_path,
+            cache_dir,
             settings,
             screen: Screen::Switcher,
             form: NewLibraryForm::default(),
@@ -547,14 +555,16 @@ impl MediaApp {
             Vec::new()
         };
 
+        let cache = crate::posters::PosterCache::new(self.cache_dir.join("posters"));
         for (id, poster) in pending {
             match poster {
                 Some(poster) if load => {
                     self.posters.insert(id.clone(), PosterSlot::Pending);
                     let tx = self.poster_tx.clone();
                     let ctx = ui.ctx().clone();
+                    let cache = cache.clone();
                     std::thread::spawn(move || {
-                        let img = crate::posters::load_and_decode(&poster);
+                        let img = cache.load_and_decode(&poster);
                         let _ = tx.send((id, img));
                         ctx.request_repaint();
                     });
