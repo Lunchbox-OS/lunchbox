@@ -17,7 +17,11 @@ the full design and roadmap.
 
 - Cross-platform egui UI: library switcher, settings (add / remove / reorder /
   select-active, per-library cache mode, quality, poster policy, and size cap),
-  add-library form, and a placeholder browse grid.
+  add-library form, and a browse grid.
+- The browse grid is the **shared `shepherd-media-ui` poster grid** — the same
+  responsive poster-tile view the Linux binary uses, so the two front-ends stay
+  in sync. The Android app supplies the items, poster bytes, and focus input;
+  the crate renders the tiles.
 - TV remote / D-pad navigation (Fire TV, Google TV): the Android D-pad maps to
   egui arrow-key focus movement; the app keeps a widget focused at all times
   (auto-focusing the first control on each screen), draws a prominent focus

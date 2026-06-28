@@ -15,6 +15,8 @@ crate-type = ["cdylib", "rlib"]
 # Android player backend is plugged in separately (libmpv via JNI, later).
 shepherd-media-core = { path = "../shepherd-media-core", default-features = false }
 shepherd-media-app = { path = "../shepherd-media-app" }
+# Shared egui browse UI (poster grid), used by both the Linux binary and here.
+shepherd-media-ui = { path = "../shepherd-media-ui" }
 
 log = "0.4"
 thiserror = { workspace = true }
@@ -37,6 +39,8 @@ eframe = { version = "0.34", default-features = false, features = [
     "android-native-activity",
 ] }
 egui = "0.34"
+# Image loader for the shared poster grid (decodes the bytes:// poster URIs).
+egui_extras = { version = "0.34", features = ["image"] }
 glow = "0.17"
 url = "2.5"
 # Decode poster bytes into egui textures (formats match the Linux binary).

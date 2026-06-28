@@ -4100,6 +4100,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shepherd-media-core",
+ "shepherd-media-ui",
  "shepherd-util",
  "thiserror 1.0.69",
  "tracing",
@@ -4116,6 +4117,7 @@ dependencies = [
  "android_logger",
  "eframe",
  "egui",
+ "egui_extras",
  "filetime",
  "glow",
  "image",
@@ -4126,6 +4128,7 @@ dependencies = [
  "serde_json",
  "shepherd-media-app",
  "shepherd-media-core",
+ "shepherd-media-ui",
  "thiserror 1.0.69",
  "ureq",
  "url",
@@ -4152,6 +4155,14 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "shepherd-media-ui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "shepherd-media-core",
 ]
 
 [[package]]

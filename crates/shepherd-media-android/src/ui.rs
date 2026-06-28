@@ -1,6 +1,6 @@
 //! The egui application: a library switcher, a settings page for managing
-//! libraries and their caching options, an add-library form, and a placeholder
-//! browse grid.
+//! libraries and their caching options, an add-library form, and a browse grid
+//! (the shared `shepherd-media-ui` poster grid, same as the Linux binary).
 //!
 //! `MediaApp` is cross-platform `eframe::App` code so it can run on the host via
 //! the `desktop_preview` example for fast iteration, and on Android via the
@@ -19,9 +19,10 @@ use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
 use shepherd_media_core::{
-    ClassifiedUri, ItemKind, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef,
-    Source, resolve_source,
+    ClassifiedUri, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef, Source,
+    resolve_source,
 };
+use shepherd_media_ui::grid;
 use url::Url;
 
 use crate::playback::PlaybackView;
@@ -55,13 +56,15 @@ fn make_player() -> Option<Box<dyn PlayerHandle>> {
     }
 }
 
-/// A decoded poster delivered from a worker thread to the UI thread.
-type PosterMsg = (String, Option<egui::ColorImage>);
+/// Encoded poster bytes delivered from a worker thread to the UI thread. The
+/// shared grid renders them via egui's image loader (egui_extras), so we pass
+/// the raw bytes through rather than decoding to a texture ourselves.
+type PosterMsg = (String, Option<Vec<u8>>);
 
 /// Per-item poster state in the grid.
 enum PosterSlot {
     Pending,
-    Ready(egui::TextureHandle),
+    Ready(Vec<u8>),
     Unavailable,
 }
 
@@ -74,7 +77,7 @@ enum Screen {
     Settings,
     /// Form for adding a new library.
     AddLibrary,
-    /// Browse a library's contents (placeholder until resolution/playback land).
+    /// Browse a library's contents as a poster grid.
     Grid(String),
 }
 
@@ -132,10 +135,17 @@ enum GridState {
     Failed(String),
 }
 
-/// The grid's current target library and its resolution state.
+/// The grid's current target library and its resolution state, plus the
+/// browse focus/scroll state for the shared poster grid (reset per library).
 struct GridView {
     library_id: String,
     state: GridState,
+    /// Index of the focused tile, moved by D-pad / arrow keys.
+    focused: usize,
+    /// Columns the grid laid out last frame (set by `grid::draw`); used to step
+    /// focus by a row.
+    columns: usize,
+    scroll: grid::ScrollState,
 }
 
 /// Mutable buffer behind the add-library form.
@@ -194,6 +204,9 @@ impl MediaApp {
         cache_dir: PathBuf,
     ) -> Self {
         cc.egui_ctx.set_visuals(tv_visuals());
+        // The shared poster grid renders thumbnails via egui's image widget,
+        // which needs egui_extras' loaders installed on the context.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let (settings, status) = match AppSettings::load(&settings_path) {
             Ok(s) => (s, None),
             Err(e) => (
@@ -502,6 +515,9 @@ impl MediaApp {
         self.grid = Some(GridView {
             library_id: library_id.to_string(),
             state,
+            focused: 0,
+            columns: 4,
+            scroll: grid::ScrollState::default(),
         });
     }
 
@@ -529,14 +545,13 @@ impl MediaApp {
         }
     }
 
-    /// Upload any posters that workers have finished decoding.
-    fn poll_posters(&mut self, ctx: &egui::Context) {
-        while let Ok((id, image)) = self.poster_rx.try_recv() {
-            let slot = match image {
-                Some(img) => {
-                    let tex = ctx.load_texture(id.as_str(), img, egui::TextureOptions::LINEAR);
-                    PosterSlot::Ready(tex)
-                }
+    /// Store any poster bytes that workers have finished fetching. egui's image
+    /// loader decodes + uploads them on demand (keyed by the `bytes://` URI the
+    /// grid builds), so we only hold the encoded bytes here.
+    fn poll_posters(&mut self, _ctx: &egui::Context) {
+        while let Ok((id, bytes)) = self.poster_rx.try_recv() {
+            let slot = match bytes {
+                Some(b) => PosterSlot::Ready(b),
                 None => PosterSlot::Unavailable,
             };
             self.posters.insert(id, slot);
@@ -575,8 +590,8 @@ impl MediaApp {
                     let ctx = ui.ctx().clone();
                     let cache = cache.clone();
                     std::thread::spawn(move || {
-                        let img = cache.load_and_decode(&poster);
-                        let _ = tx.send((id, img));
+                        let bytes = cache.load(&poster);
+                        let _ = tx.send((id, bytes));
                         ctx.request_repaint();
                     });
                 }
@@ -595,87 +610,90 @@ impl MediaApp {
         self.poll_posters(ui.ctx());
         self.prefetch_posters(ui, library_id);
 
-        let mut next = None;
-        let mut play_request: Option<String> = None;
-        ui.horizontal(|ui| {
-            if ui.button("⬅ Back").clicked() {
-                next = Some(Screen::Switcher);
-            }
-            let title = self
-                .settings
-                .get(library_id)
-                .map(|e| e.label.clone())
-                .unwrap_or_else(|| library_id.to_string());
-            ui.heading(title);
-        });
-        if let Some(entry) = self.settings.get(library_id) {
-            ui.label(source_summary(&entry.source));
-        }
-        ui.separator();
+        let title = self
+            .settings
+            .get(library_id)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| library_id.to_string());
 
-        match self.grid.as_ref().map(|g| &g.state) {
-            Some(GridState::Loading(_)) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Loading…");
-                });
+        // Loading / failed render simply; a loaded library uses the shared
+        // poster grid (the same view as the Linux binary).
+        let loaded = matches!(
+            self.grid.as_ref().map(|g| &g.state),
+            Some(GridState::Loaded(_))
+        );
+        if !loaded {
+            match self.grid.as_ref().map(|g| &g.state) {
+                Some(GridState::Loading(_)) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Loading {title}…"));
+                    });
+                }
+                Some(GridState::Failed(msg)) => {
+                    let color = ui.visuals().error_fg_color;
+                    ui.colored_label(color, msg.clone());
+                }
+                _ => {}
             }
-            Some(GridState::Failed(msg)) => {
-                let color = ui.visuals().error_fg_color;
-                ui.colored_label(color, msg);
-            }
-            Some(GridState::Loaded(lib)) => {
-                ui.label(format!("{} item(s)", lib.items.len()));
-                ui.add_space(8.0);
-                let posters = &self.posters;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for item in &lib.items {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                match posters.get(&item.id) {
-                                    Some(PosterSlot::Ready(tex)) => {
-                                        let sized = egui::load::SizedTexture::from_handle(tex);
-                                        ui.add(
-                                            egui::Image::new(sized)
-                                                .fit_to_exact_size(egui::vec2(120.0, 68.0)),
-                                        );
-                                    }
-                                    Some(PosterSlot::Pending) => {
-                                        ui.add_sized([120.0, 68.0], egui::Spinner::new());
-                                    }
-                                    _ => {
-                                        ui.add_sized(
-                                            [120.0, 68.0],
-                                            egui::Label::new(item_kind_glyph(item.kind)),
-                                        );
-                                    }
-                                }
-                                ui.vertical(|ui| {
-                                    ui.strong(&item.title);
-                                    if let Some(category) = &item.category {
-                                        ui.label(format!("Category: {category}"));
-                                    }
-                                    let play = ui.button("▶ Play");
-                                    // Keep the D-pad-focused item scrolled into view.
-                                    if play.gained_focus() {
-                                        play.scroll_to_me(Some(egui::Align::Center));
-                                    }
-                                    if play.clicked() {
-                                        play_request = Some(item.id.clone());
-                                    }
-                                });
-                            });
-                        });
+            return None;
+        }
+
+        // Move the focus index with the D-pad / arrow keys (the grid tiles are
+        // custom-painted, so they don't use egui's own focus), then draw. The
+        // center button (Enter) and a tap both select the focused/clicked item.
+        let mut selected: Option<String> = None;
+        {
+            let posters = &self.posters;
+            if let Some(g) = self.grid.as_mut()
+                && let GridState::Loaded(lib) = &g.state
+            {
+                let n = lib.items.len();
+                if n > 0 {
+                    let cols = g.columns.max(1);
+                    ui.input(|i| {
+                        if i.key_pressed(egui::Key::ArrowRight) {
+                            g.focused = (g.focused + 1).min(n - 1);
+                        }
+                        if i.key_pressed(egui::Key::ArrowLeft) {
+                            g.focused = g.focused.saturating_sub(1);
+                        }
+                        if i.key_pressed(egui::Key::ArrowDown) {
+                            g.focused = (g.focused + cols).min(n - 1);
+                        }
+                        if i.key_pressed(egui::Key::ArrowUp) {
+                            g.focused = g.focused.saturating_sub(cols);
+                        }
+                    });
+                    g.focused = g.focused.min(n - 1);
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && let Some(item) = lib.items.get(g.focused)
+                        && resolve_source(item, &PlatformInfo::current()).is_some()
+                    {
+                        selected = Some(item.id.clone());
                     }
-                });
+                    let clicked = grid::draw(
+                        ui,
+                        &mut g.scroll,
+                        &title,
+                        &lib.items,
+                        &mut g.focused,
+                        &mut g.columns,
+                        &|id| match posters.get(id) {
+                            Some(PosterSlot::Ready(b)) => Some(b.clone()),
+                            _ => None,
+                        },
+                    );
+                    if clicked.is_some() {
+                        selected = clicked;
+                    }
+                }
             }
-            None => {}
         }
-
-        if let Some(item_id) = play_request {
-            self.start_playback(ui.ctx(), &item_id);
+        if let Some(id) = selected {
+            self.start_playback(ui.ctx(), &id);
         }
-        next
+        None
     }
 
     /// Resolve the platform source for `item_id` in the loaded library, prefer a
@@ -891,13 +909,6 @@ fn tv_visuals() -> egui::Visuals {
     visuals
 }
 
-fn item_kind_glyph(kind: ItemKind) -> &'static str {
-    match kind {
-        ItemKind::Video => "🎬",
-        ItemKind::Audio => "🎵",
-    }
-}
-
 impl eframe::App for MediaApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Diff settings across the frame so any mutation persists automatically.
@@ -925,7 +936,10 @@ impl eframe::App for MediaApp {
             // focus from nothing, so keep one widget focused at all times. This
             // also auto-focuses the first control when a screen appears.
             // DPAD_CENTER arrives as Enter, which activates the focused widget.
-            if ui.ctx().memory(|m| m.focused().is_none()) {
+            // The browse grid manages its own focus by index (its tiles are
+            // custom-painted), so only bootstrap egui focus on the other screens.
+            if !matches!(self.screen, Screen::Grid(_)) && ui.ctx().memory(|m| m.focused().is_none())
+            {
                 ui.ctx()
                     .memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
             }

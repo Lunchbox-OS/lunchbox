@@ -1,9 +1,10 @@
 //! egui-based UI: poster grid in `Browsing` state, embedded mpv player
 //! with a touch- and controller-friendly overlay in `Playing` state.
 
-mod grid;
 mod playback;
 mod theme;
+
+use shepherd_media_ui::grid;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -253,15 +254,20 @@ impl eframe::App for App {
         }
 
         self.handle_browse_input(ctx, &visible, &gamepad_events);
-        grid::draw(
+        let title = self.session.library().title.clone();
+        let posters = &self.posters;
+        let selected = grid::draw(
             ui,
             &mut self.grid_scroll,
-            &mut self.session,
+            &title,
             &visible,
             &mut self.focused,
             &mut self.columns,
-            &self.posters,
+            &|id| posters.get(id).cloned(),
         );
+        if let Some(id) = selected {
+            self.session.handle_input(SessionInput::SelectItem(id));
+        }
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }
