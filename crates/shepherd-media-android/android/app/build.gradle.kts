@@ -9,11 +9,11 @@ plugins {
 val rustAbis = listOf("arm64-v8a")
 
 android {
-    namespace = "com.armeafamily.shepherdmedia"
+    namespace = "com.armeafamily.shepherd.media"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.armeafamily.shepherdmedia"
+        applicationId = "com.armeafamily.shepherd.media"
         minSdk = 24
         targetSdk = 35
         versionCode = 1
