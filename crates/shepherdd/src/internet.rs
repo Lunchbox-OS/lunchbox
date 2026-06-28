@@ -75,6 +75,15 @@ impl InternetMonitor {
                     self.check_all(&engine, &ipc, &event_tx).await;
                     // Restart the periodic cadence from this event.
                     interval.reset();
+                    // Broadcast a fresh full snapshot. `check_all` only emits
+                    // InternetStatusChanged for targets that flipped, but on a
+                    // resume re-check clients (the launcher cover and HUD
+                    // suspend placeholders) need a StateChanged with the
+                    // freshly-probed connectivity even when nothing changed.
+                    let snapshot = engine.lock().await.get_state();
+                    let event = Event::new(EventPayload::StateChanged(snapshot));
+                    ipc.broadcast_event(event.clone());
+                    let _ = event_tx.send(event);
                 }
                 else => break,
             }
