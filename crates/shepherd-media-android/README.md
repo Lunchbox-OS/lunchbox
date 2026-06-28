@@ -19,14 +19,18 @@ the full design and roadmap.
   select-active, per-library cache mode, quality, poster policy, and size cap),
   add-library form, and a placeholder browse grid.
 - Settings persisted as TOML to the app's private storage.
+- Source resolution (`resolve` module): local/`file://` TOML, HTTP(S) TOML, and
+  `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
+  and the grid lists the real items. `content://` SAF and YouTube sources report
+  a typed "unsupported yet" error.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
 ## Not yet wired (next steps)
 
-- Resolving a `LibrarySource` into a `Library` (HTTP/SAF file reads, yt-dlp via
-  youtubedl-android).
 - libmpv-backed `PlayerHandle` and embedded playback (today a `StubPlayer`).
+- Poster images in the grid (fetch + cache, honoring `PosterPolicy`).
+- YouTube resolution via youtubedl-android.
 - JNI bridges for the SAF file picker, connectivity policy, and storage paths.
 
 ## Develop on the host

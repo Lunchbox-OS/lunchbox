@@ -11,6 +11,7 @@
 //! `desktop_preview` example for fast UI iteration.
 
 pub mod player;
+pub mod resolve;
 pub mod ui;
 
 pub use player::StubPlayer;

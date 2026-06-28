@@ -196,10 +196,19 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   and the pure-`NativeActivity` Gradle project under `android/` builds an
   installable APK end-to-end (Rust → cargo-ndk → AGP), verified with NDK
   27.2.12479018 / cargo-ndk 4.1.2 / Gradle 8.10.2 / AGP 8.7.3.
-- Steps 3–5 (libmpv `PlayerHandle` + embedded playback, on-device cache wiring,
-  source resolution incl. youtubedl-android and the SAF/connectivity JNI
-  bridges) still require a prebuilt Android `libmpv.so` and the
-  youtubedl-android dependency; not yet implemented.
+- **Step 3 (partial) — source resolution + real browse grid: done.** A
+  `resolve` module turns a `LibrarySource` into a parsed
+  `shepherd_media_core::Library` for the tractable kinds: local/`file://` TOML,
+  HTTP(S) TOML, and `.m3u`/`.m3u8` (local or HTTP), via `ureq`+rustls. It runs
+  on a worker thread (Android forbids network on the UI thread), and the grid
+  screen polls the result and lists the real items with a loading/error state.
+  `content://` SAF and YouTube sources return a typed `Unsupported` error
+  pending their bridges. 9 crate tests; the resolver (incl. rustls/ring)
+  cross-compiles for `aarch64-linux-android` and the APK still builds.
+- Remaining: libmpv-backed `PlayerHandle` + embedded playback (the long pole —
+  needs a prebuilt Android `libmpv.so` from an mpv/ffmpeg cross-compile); poster
+  image fetching/caching in the grid; YouTube resolution via youtubedl-android;
+  and the SAF / connectivity / storage-path JNI bridges.
 
 ## Key source references
 

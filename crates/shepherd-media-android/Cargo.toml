@@ -17,6 +17,11 @@ shepherd-media-core = { path = "../shepherd-media-core", default-features = fals
 shepherd-media-app = { path = "../shepherd-media-app" }
 
 log = "0.4"
+thiserror = { workspace = true }
+
+# Synchronous HTTP with rustls (no OpenSSL), matching the Linux binary's choice
+# so it cross-compiles cleanly for Android. Used off the UI thread.
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
 
 # eframe/egui are cross-platform: the same MediaApp renders on the host (for the
 # desktop preview example) and on Android (via the native-activity backend).

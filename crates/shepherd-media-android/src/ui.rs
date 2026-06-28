@@ -9,10 +9,14 @@
 //! persists to disk when they change.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
+use shepherd_media_core::{ItemKind, Library};
+
+use crate::resolve::{ResolveError, resolve};
 
 /// Which screen is currently shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +76,21 @@ impl FormKind {
     }
 }
 
+/// Resolution state for the browse grid. Resolution runs on a worker thread
+/// (network must not touch the Android UI thread), so the grid holds either the
+/// in-flight receiver, the resolved library, or an error.
+enum GridState {
+    Loading(Receiver<Result<Library, ResolveError>>),
+    Loaded(Library),
+    Failed(String),
+}
+
+/// The grid's current target library and its resolution state.
+struct GridView {
+    library_id: String,
+    state: GridState,
+}
+
 /// Mutable buffer behind the add-library form.
 struct NewLibraryForm {
     id: String,
@@ -96,6 +115,9 @@ pub struct MediaApp {
     settings: AppSettings,
     screen: Screen,
     form: NewLibraryForm,
+    /// Cached resolution for the browse grid (also acts as a 1-entry cache so
+    /// re-opening the same library doesn't re-resolve).
+    grid: Option<GridView>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
 }
@@ -117,6 +139,7 @@ impl MediaApp {
             settings,
             screen: Screen::Switcher,
             form: NewLibraryForm::default(),
+            grid: None,
             status,
         }
     }
@@ -353,7 +376,63 @@ impl MediaApp {
         next
     }
 
+    /// Start resolving `library_id` on a worker thread unless the grid is
+    /// already showing (or loading) it.
+    fn ensure_grid_loading(&mut self, ui: &egui::Ui, library_id: &str) {
+        let already = self
+            .grid
+            .as_ref()
+            .is_some_and(|g| g.library_id == library_id);
+        if already {
+            return;
+        }
+        let state = match self.settings.get(library_id) {
+            Some(entry) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let source = entry.source.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(resolve(&source));
+                    ctx.request_repaint(); // wake the UI when the result lands
+                });
+                GridState::Loading(rx)
+            }
+            None => GridState::Failed("This library no longer exists.".to_string()),
+        };
+        self.grid = Some(GridView {
+            library_id: library_id.to_string(),
+            state,
+        });
+    }
+
+    /// Advance a loading grid if its worker has produced a result.
+    fn poll_grid(&mut self) {
+        if let Some(GridView {
+            state: GridState::Loading(rx),
+            ..
+        }) = self.grid.as_ref()
+        {
+            match rx.try_recv() {
+                Ok(Ok(lib)) => self.set_grid_state(GridState::Loaded(lib)),
+                Ok(Err(e)) => self.set_grid_state(GridState::Failed(e.to_string())),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.set_grid_state(GridState::Failed("resolver thread died".to_string()))
+                }
+            }
+        }
+    }
+
+    fn set_grid_state(&mut self, state: GridState) {
+        if let Some(g) = self.grid.as_mut() {
+            g.state = state;
+        }
+    }
+
     fn grid_screen(&mut self, ui: &mut egui::Ui, library_id: &str) -> Option<Screen> {
+        self.ensure_grid_loading(ui, library_id);
+        self.poll_grid();
+
         let mut next = None;
         ui.horizontal(|ui| {
             if ui.button("⬅ Back").clicked() {
@@ -366,23 +445,54 @@ impl MediaApp {
                 .unwrap_or_else(|| library_id.to_string());
             ui.heading(title);
         });
+        if let Some(entry) = self.settings.get(library_id) {
+            ui.label(source_summary(&entry.source));
+        }
         ui.separator();
 
-        match self.settings.get(library_id) {
-            Some(entry) => {
-                ui.label(source_summary(&entry.source));
-                ui.add_space(12.0);
-                ui.label(
-                    "Browsing this library is not wired up yet. Resolving the \
-                     source into items (network / SAF / yt-dlp) and embedded \
-                     libmpv playback are the next steps in the Android build.",
+        match self.grid.as_ref().map(|g| &g.state) {
+            Some(GridState::Loading(_)) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading…");
+                });
+            }
+            Some(GridState::Failed(msg)) => {
+                let color = ui.visuals().error_fg_color;
+                ui.colored_label(color, msg);
+            }
+            Some(GridState::Loaded(lib)) => {
+                ui.label(format!("{} item(s)", lib.items.len()));
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for item in &lib.items {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(item_kind_glyph(item.kind));
+                                ui.strong(&item.title);
+                            });
+                            if let Some(category) = &item.category {
+                                ui.label(format!("Category: {category}"));
+                            }
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+                ui.weak(
+                    "Tapping an item to play needs the libmpv backend, which is \
+                     the next step.",
                 );
             }
-            None => {
-                ui.label("This library no longer exists.");
-            }
+            None => {}
         }
         next
+    }
+}
+
+fn item_kind_glyph(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::Video => "🎬",
+        ItemKind::Audio => "🎵",
     }
 }
 
