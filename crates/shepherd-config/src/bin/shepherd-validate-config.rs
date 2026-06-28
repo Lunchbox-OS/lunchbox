@@ -66,6 +66,9 @@ fn main() -> ExitCode {
                         EntryKind::Flatpak { app_id, .. } => {
                             format!("flatpak ({})", app_id)
                         }
+                        EntryKind::Android { package_name, .. } => {
+                            format!("android ({})", package_name)
+                        }
                         EntryKind::Vm { driver, .. } => {
                             format!("vm ({})", driver)
                         }

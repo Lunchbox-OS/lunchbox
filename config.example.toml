@@ -190,6 +190,17 @@ auto_dismiss_interstitials = ["cloud_sync", "controller_recommended"]
 allow_risky_dismiss = false
 launch_timeout_seconds = 30
 
+# Waydroid (Android activity kind, optional)
+# Settings for the single global Android container shared by all `type = "android"`
+# entries. Requires Waydroid to be installed and initialized on the host; see
+# docs/ai/history/2026-06-28 001 android-activity-kind-scoping.md.
+[service.waydroid]
+# preboot = true              # Start + keep Android warm at daemon startup. When
+                              # unset, preboots iff any android entry is configured.
+multi_window = true           # Each app gets its own Wayland window (app_id "waydroid.<pkg>")
+suspend_when_idle = true      # Freeze the container when idle to save CPU/RAM
+boot_ready_timeout_seconds = 60
+
 # HTTP management API (optional)
 # Exposes a REST API for remote control, usage analytics, and daily overrides.
 # Intended for local/LAN use (e.g. a parent's phone on the same network).
@@ -1194,3 +1205,23 @@ allow = [
     "::1/128",
 ]
 deny = []
+
+# Android app via Waydroid.
+# Requires Waydroid installed and initialized on the host, multi-window mode
+# enabled, and the app (here a built-in LineageOS app) present in the container.
+# `package_name` is the Android package; find it with `waydroid app list`.
+# Android app icons live inside the container, so set `icon` explicitly (there
+# is nothing to autodetect on the host). Note: all Android entries share one
+# global Android container, so per-entry firewall rules do NOT scope an
+# individual app's traffic — see the scoping doc under docs/ai/history.
+[[entries]]
+id = "android-calculator"
+label = "Calculator"
+icon = "accessories-calculator"
+
+[entries.kind]
+type = "android"
+package_name = "com.android.calculator2"
+
+[entries.availability]
+always = true

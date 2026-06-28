@@ -10,7 +10,7 @@ use crate::schema::{
     RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawHudOrientation, RawInputCompat,
     RawInputCompatOptions, RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawMediaMode,
     RawMediaQuality, RawMediaSortBy, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
-    RawWarningThreshold,
+    RawWarningThreshold, RawWaydroidConfig,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -338,6 +338,8 @@ pub struct ServiceConfig {
     pub internet: InternetConfig,
     /// Steam-specific behaviour
     pub steam: SteamConfig,
+    /// Waydroid (Android activity kind) behaviour
+    pub waydroid: WaydroidConfig,
     /// Management HTTP API configuration (None = disabled)
     pub management_api: Option<ManagementApiConfig>,
     /// Bluetooth LE management transport configuration (None = disabled).
@@ -443,6 +445,7 @@ impl ServiceConfig {
             .unwrap_or_else(|| log_dir.join("sessions"));
         let internet = convert_internet_config(raw.internet.as_ref());
         let steam = SteamConfig::from_raw(raw.steam.as_ref());
+        let waydroid = WaydroidConfig::from_raw(raw.waydroid.as_ref());
         let management_api = raw
             .management_api
             .as_ref()
@@ -484,6 +487,7 @@ impl ServiceConfig {
             data_dir,
             internet,
             steam,
+            waydroid,
             management_api,
             ble_management,
             display,
@@ -536,6 +540,47 @@ impl Default for SteamConfig {
             auto_dismiss: InterstitialKind::DEFAULT_AUTO_DISMISS.into_iter().collect(),
             launch_timeout: DEFAULT_STEAM_LAUNCH_TIMEOUT,
         }
+    }
+}
+
+/// Default Waydroid session-ready timeout.
+pub const DEFAULT_WAYDROID_BOOT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Validated Waydroid (Android activity kind) configuration.
+///
+/// `preboot` is an `Option` because its default is dynamic: when unset, the
+/// daemon preboots iff at least one Android entry is configured. The other
+/// fields resolve to concrete defaults here.
+#[derive(Debug, Clone)]
+pub struct WaydroidConfig {
+    /// Explicit preboot choice; `None` means "decide from whether any Android
+    /// entry exists".
+    pub preboot: Option<bool>,
+    /// Whether to enforce multi-window mode on the container.
+    pub multi_window: bool,
+    /// Whether to freeze the container when idle.
+    pub suspend_when_idle: bool,
+    /// How long to wait for the session to report ready.
+    pub boot_ready_timeout: Duration,
+}
+
+impl WaydroidConfig {
+    fn from_raw(raw: Option<&RawWaydroidConfig>) -> Self {
+        Self {
+            preboot: raw.and_then(|c| c.preboot),
+            multi_window: raw.and_then(|c| c.multi_window).unwrap_or(true),
+            suspend_when_idle: raw.and_then(|c| c.suspend_when_idle).unwrap_or(true),
+            boot_ready_timeout: raw
+                .and_then(|c| c.boot_ready_timeout_seconds)
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_WAYDROID_BOOT_READY_TIMEOUT),
+        }
+    }
+}
+
+impl Default for WaydroidConfig {
+    fn default() -> Self {
+        Self::from_raw(None)
     }
 }
 
@@ -719,6 +764,7 @@ impl Default for ServiceConfig {
                 DEFAULT_INTERNET_CHECK_TIMEOUT,
             ),
             steam: SteamConfig::default(),
+            waydroid: WaydroidConfig::default(),
             management_api: None,
             ble_management: None,
             display: DisplayConfig::default(),
@@ -1180,6 +1226,7 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
         },
         RawEntryKind::Steam { app_id, args, env } => EntryKind::Steam { app_id, args, env },
         RawEntryKind::Flatpak { app_id, args, env } => EntryKind::Flatpak { app_id, args, env },
+        RawEntryKind::Android { package_name, args } => EntryKind::Android { package_name, args },
         RawEntryKind::Vm { driver, args } => EntryKind::Vm { driver, args },
         RawEntryKind::Media {
             library,

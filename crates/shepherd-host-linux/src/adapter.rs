@@ -2024,6 +2024,13 @@ impl HostAdapter for LinuxHost {
                 merged.extend(env.clone());
                 (launch.argv, merged, None, None, None, None)
             }
+            EntryKind::Android { .. } => {
+                // Waydroid launch wiring lands in Phase 2; until then the kind
+                // parses and validates but is not spawnable. `linux_full()`
+                // does not advertise Android, so the core rejects launches
+                // before reaching here — this arm keeps the match exhaustive.
+                return Err(HostError::UnsupportedKind);
+            }
             EntryKind::Custom {
                 type_name: _,
                 payload: _,

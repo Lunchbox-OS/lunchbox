@@ -112,6 +112,10 @@ pub struct RawServiceConfig {
     #[serde(default)]
     pub steam: Option<RawSteamConfig>,
 
+    /// Waydroid (Android activity kind) behaviour
+    #[serde(default)]
+    pub waydroid: Option<RawWaydroidConfig>,
+
     /// Management HTTP API settings
     #[serde(default)]
     pub management_api: Option<RawManagementApiConfig>,
@@ -569,6 +573,15 @@ pub enum RawEntryKind {
         /// Additional environment variables
         #[serde(default)]
         env: HashMap<String, String>,
+    },
+    /// Android application launched inside Waydroid (Linux)
+    Android {
+        /// The Android package name (e.g., "com.android.calculator2")
+        package_name: String,
+        /// Additional arguments forwarded to the launch (reserved for future
+        /// intent extras; unused today)
+        #[serde(default)]
+        args: Vec<String>,
     },
     Vm {
         driver: String,
@@ -1051,6 +1064,33 @@ pub struct RawSteamConfig {
     pub launch_timeout_seconds: Option<u64>,
 }
 
+/// Waydroid (Android activity kind) service configuration.
+///
+/// Waydroid runs a single global Android container shared by every Android
+/// entry, so these knobs are service-level rather than per-entry. See
+/// `docs/ai/history/2026-06-28 001 android-activity-kind-scoping.md`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RawWaydroidConfig {
+    /// Start the Waydroid session at daemon startup and keep it warm, so the
+    /// first Android launch doesn't pay the full boot cost. When unset, the
+    /// daemon preboots automatically iff at least one Android entry exists.
+    pub preboot: Option<bool>,
+
+    /// Ensure `persist.waydroid.multi_windows` is enabled (each app gets its
+    /// own Wayland toplevel with `app_id="waydroid.<package>"`, which the
+    /// kiosk needs to fullscreen and track individual apps). Default true.
+    pub multi_window: Option<bool>,
+
+    /// Freeze the container when idle (`persist.waydroid.suspend`) to drop CPU
+    /// and RAM while keeping the session warm. Default true.
+    pub suspend_when_idle: Option<bool>,
+
+    /// How long to wait for "Android with user 0 is ready" after starting the
+    /// session before giving up (seconds). Default 60.
+    pub boot_ready_timeout_seconds: Option<u64>,
+}
+
 /// Per-entry internet requirement
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1303,6 +1343,28 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.entries.len(), 1);
         assert_eq!(config.entries[0].id, "scummvm");
+    }
+
+    #[test]
+    fn parse_android_entry() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "khan-kids"
+            label = "Khan Academy Kids"
+            kind = { type = "android", package_name = "org.khanacademy.android.kids" }
+        "#;
+
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.entries.len(), 1);
+        match &config.entries[0].kind {
+            RawEntryKind::Android { package_name, args } => {
+                assert_eq!(package_name, "org.khanacademy.android.kids");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected android kind, got {other:?}"),
+        }
     }
 
     #[test]

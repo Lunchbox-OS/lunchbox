@@ -81,6 +81,7 @@ impl LauncherTile {
             shepherd_api::EntryKindTag::Snap => "application-x-executable",
             shepherd_api::EntryKindTag::Steam => "application-x-executable",
             shepherd_api::EntryKindTag::Flatpak => "application-x-executable",
+            shepherd_api::EntryKindTag::Android => "phone",
             shepherd_api::EntryKindTag::Vm => "computer",
             shepherd_api::EntryKindTag::Media => "video-x-generic",
             shepherd_api::EntryKindTag::Retroarch => "applications-games",

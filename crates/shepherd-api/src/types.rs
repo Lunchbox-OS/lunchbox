@@ -16,6 +16,7 @@ pub enum EntryKindTag {
     Snap,
     Steam,
     Flatpak,
+    Android,
     Vm,
     Media,
     Retroarch,
@@ -29,11 +30,12 @@ impl EntryKindTag {
     /// Exists so the per-kind defaults below can be *enumerated* rather than
     /// mirrored: the config editor needs the same answers, and
     /// `shepherd-wire-codegen` walks this list to generate them.
-    pub const ALL: [EntryKindTag; 9] = [
+    pub const ALL: [EntryKindTag; 10] = [
         EntryKindTag::Process,
         EntryKindTag::Snap,
         EntryKindTag::Steam,
         EntryKindTag::Flatpak,
+        EntryKindTag::Android,
         EntryKindTag::Vm,
         EntryKindTag::Media,
         EntryKindTag::Retroarch,
@@ -48,6 +50,7 @@ impl EntryKindTag {
             EntryKindTag::Snap => "snap",
             EntryKindTag::Steam => "steam",
             EntryKindTag::Flatpak => "flatpak",
+            EntryKindTag::Android => "android",
             EntryKindTag::Vm => "vm",
             EntryKindTag::Media => "media",
             EntryKindTag::Retroarch => "retroarch",
@@ -312,6 +315,15 @@ pub enum EntryKind {
         /// Additional environment variables
         #[serde(default)]
         env: HashMap<String, String>,
+    },
+    /// Android application launched inside Waydroid (Linux).
+    Android {
+        /// The Android package name (e.g., "com.android.calculator2").
+        package_name: String,
+        /// Additional arguments forwarded to the launch (reserved for future
+        /// intent extras; unused today).
+        #[serde(default)]
+        args: Vec<String>,
     },
     Vm {
         driver: String,
@@ -728,6 +740,7 @@ impl EntryKind {
             EntryKind::Snap { .. } => EntryKindTag::Snap,
             EntryKind::Steam { .. } => EntryKindTag::Steam,
             EntryKind::Flatpak { .. } => EntryKindTag::Flatpak,
+            EntryKind::Android { .. } => EntryKindTag::Android,
             EntryKind::Vm { .. } => EntryKindTag::Vm,
             EntryKind::Media { .. } => EntryKindTag::Media,
             EntryKind::Retroarch { .. } => EntryKindTag::Retroarch,

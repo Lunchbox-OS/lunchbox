@@ -401,6 +401,16 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
                 });
             }
         }
+        RawEntryKind::Android { package_name, .. } => {
+            if !is_valid_android_package(package_name) {
+                errors.push(ValidationError::EntryError {
+                    entry_id: entry.id.clone(),
+                    message: "package_name must be a valid Android package name \
+                              (e.g. com.example.app)"
+                        .into(),
+                });
+            }
+        }
         RawEntryKind::Vm { driver, .. } => {
             if driver.is_empty() {
                 errors.push(ValidationError::EntryError {
@@ -738,6 +748,28 @@ fn validate_tokens(
     }
 
     errors
+}
+
+/// Check that a string is a plausible Android package name: at least two
+/// dot-separated segments, each starting with an ASCII letter and otherwise
+/// containing only ASCII letters, digits, or underscores. This is the same
+/// shape the Android framework enforces, and it keeps the value safe to splice
+/// into `waydroid app launch <pkg>` / `am force-stop <pkg>` without quoting
+/// surprises.
+fn is_valid_android_package(pkg: &str) -> bool {
+    let mut segments = 0;
+    for segment in pkg.split('.') {
+        segments += 1;
+        let mut chars = segment.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() => {}
+            _ => return false,
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+    }
+    segments >= 2
 }
 
 fn validate_time_window(window: &RawTimeWindow, entry_id: &str) -> Vec<ValidationError> {
@@ -2253,5 +2285,33 @@ mod tests {
                     bind = \"0.0.0.0\"\n[service.management_api.tls]\nmode = \"off\"\n";
         let cfg: RawConfig = toml::from_str(toml).expect("parses");
         assert!(validate_config(&cfg).is_empty());
+    }
+
+    #[test]
+    fn android_package_accepts_valid_names() {
+        assert!(is_valid_android_package("com.android.calculator2"));
+        assert!(is_valid_android_package("org.khanacademy.android.kids"));
+        assert!(is_valid_android_package("com.mojang.minecraftpe"));
+        assert!(is_valid_android_package("a.b"));
+        assert!(is_valid_android_package("com.example.my_app"));
+    }
+
+    #[test]
+    fn android_package_rejects_invalid_names() {
+        assert!(!is_valid_android_package(""), "empty");
+        assert!(!is_valid_android_package("noseparator"), "single segment");
+        assert!(!is_valid_android_package("com."), "trailing dot");
+        assert!(!is_valid_android_package(".com.app"), "leading dot");
+        assert!(!is_valid_android_package("com..app"), "empty segment");
+        assert!(
+            !is_valid_android_package("com.1app.x"),
+            "segment starts with digit"
+        );
+        assert!(!is_valid_android_package("com.app-name.x"), "hyphen");
+        assert!(!is_valid_android_package("com.app name.x"), "space");
+        assert!(
+            !is_valid_android_package("com.app;rm -rf.x"),
+            "shell metacharacters"
+        );
     }
 }

@@ -71,7 +71,11 @@ pub(crate) fn autodetect_icon(kind: &EntryKind) -> Option<String> {
             }
             .to_string(),
         ),
-        EntryKind::Vm { .. } | EntryKind::Custom { .. } => None,
+        // Android app icons live inside the Waydroid container, not in any
+        // host icon theme, so there is nothing to autodetect — entries should
+        // set an explicit `icon` in config. Fall through to the UI's generic
+        // fallback tile.
+        EntryKind::Android { .. } | EntryKind::Vm { .. } | EntryKind::Custom { .. } => None,
     }
 }
 
