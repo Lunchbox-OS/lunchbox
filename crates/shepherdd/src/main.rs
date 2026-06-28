@@ -1507,13 +1507,8 @@ impl Service {
             .entries
             .iter()
             .any(|e| matches!(e.kind, EntryKind::Android { .. }));
-        let should_preboot = self
-            .engine
-            .policy()
-            .service
-            .waydroid
-            .preboot
-            .unwrap_or(has_android);
+        let should_preboot =
+            should_preboot_waydroid(self.engine.policy().service.waydroid.preboot, has_android);
         if should_preboot {
             info!("Pre-booting Android (Waydroid) in background");
             self.host.preboot_waydroid();
@@ -3348,5 +3343,32 @@ mod harden_diagnostic_tests {
             shepherd_state_proto::state_dir("kiosk"),
             std::path::Path::new("/var/lib/shepherdd/state/kiosk")
         );
+    }
+}
+
+/// Decide whether to pre-boot Android at startup. An explicit
+/// `[service.waydroid] preboot` wins; when unset, pre-boot iff at least one
+/// Android entry is configured (so a kiosk with no Android activities pays no
+/// Waydroid cost).
+fn should_preboot_waydroid(configured: Option<bool>, has_android: bool) -> bool {
+    configured.unwrap_or(has_android)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preboot_defaults_to_presence_of_android_entries() {
+        assert!(should_preboot_waydroid(None, true));
+        assert!(!should_preboot_waydroid(None, false));
+    }
+
+    #[test]
+    fn explicit_preboot_overrides_either_way() {
+        // Forced on even with no Android entries...
+        assert!(should_preboot_waydroid(Some(true), false));
+        // ...and forced off even when Android entries exist.
+        assert!(!should_preboot_waydroid(Some(false), true));
     }
 }

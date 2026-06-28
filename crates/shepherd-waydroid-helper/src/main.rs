@@ -1,9 +1,9 @@
 //! Privileged helper for the Android (Waydroid) activity kind.
 //!
-//! shepherdd runs unprivileged but two Waydroid operations need root. This
+//! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly two narrow, fixed actions:
+//! and exposes exactly three narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -11,12 +11,13 @@
 //!   as config, then passed as a single argv element — no shell.
 //! - `preboot`: `systemctl start waydroid-container` to bring the (root) LXC
 //!   container service up so shepherdd can then start the user-level session.
-//!   Takes no arguments; the unit name is hardcoded, so the action cannot be
-//!   pointed at any other service.
+//! - `lock-down`: `waydroid shell cmd statusbar send-disable-flag <flags>` to
+//!   harden the session against the child leaving the kiosk app.
 //!
-//! Both subcommands `exec()` a fixed command with a fixed argv. The helper does
-//! not read config, env, or any caller-controlled data beyond the validated
-//! package name. See README.md for the trust boundary.
+//! `preboot`/`lock-down` take no arguments and every action `exec`s a fixed
+//! command (the only caller-controlled value is the validated package name).
+//! Parsing/validation is split into the pure [`parse_args`] + [`Action`] so the
+//! trust boundary is unit-tested without exec. See README.md.
 
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
@@ -28,11 +29,6 @@ const HELPER_NAME: &str = "shepherd-waydroid-helper";
 /// The one systemd unit `preboot` is allowed to start. Hardcoded so the
 /// privileged action can never be aimed at another service.
 const CONTAINER_UNIT: &str = "waydroid-container";
-
-fn die(msg: impl AsRef<str>) -> ! {
-    eprintln!("{HELPER_NAME}: {}", msg.as_ref());
-    std::process::exit(2);
-}
 
 /// The fixed StatusBarManager disable flags `lock-down` applies. These block the
 /// child's routes out of the kiosk app: the notification shade / quick settings
@@ -46,72 +42,191 @@ const LOCK_DOWN_FLAGS: &[&str] = &[
     "search",
 ];
 
-fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("force-stop") => force_stop(args),
-        Some("preboot") => preboot(args),
-        Some("lock-down") => lock_down(args),
-        Some(other) => die(format!(
-            "unknown subcommand '{other}' (expected 'force-stop', 'preboot', or 'lock-down')"
-        )),
-        None => die("missing subcommand (expected 'force-stop', 'preboot', or 'lock-down')"),
+const USAGE: &str = "expected 'force-stop', 'preboot', or 'lock-down'";
+
+/// A validated, ready-to-exec privileged action.
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    ForceStop { package: String },
+    Preboot,
+    LockDown,
+}
+
+impl Action {
+    /// The exact `(program, argv)` this action runs. Fixed and shell-free; the
+    /// only variable is the already-validated package name.
+    fn command(&self) -> (&'static str, Vec<String>) {
+        match self {
+            Action::ForceStop { package } => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "am".into(),
+                    "force-stop".into(),
+                    package.clone(),
+                ],
+            ),
+            Action::Preboot => ("systemctl", vec!["start".into(), CONTAINER_UNIT.into()]),
+            Action::LockDown => {
+                let mut argv = vec![
+                    "shell".into(),
+                    "cmd".into(),
+                    "statusbar".into(),
+                    "send-disable-flag".into(),
+                ];
+                argv.extend(LOCK_DOWN_FLAGS.iter().map(|f| f.to_string()));
+                ("waydroid", argv)
+            }
+        }
     }
 }
 
-/// `force-stop --package <pkg>` → `waydroid shell am force-stop <pkg>`.
-fn force_stop(mut args: impl Iterator<Item = String>) -> ExitCode {
+fn die(msg: impl AsRef<str>) -> ! {
+    eprintln!("{HELPER_NAME}: {}", msg.as_ref());
+    std::process::exit(2);
+}
+
+/// Parse argv (after the program name) into an [`Action`], or an error message.
+/// Pure — no exec, no process exit — so the dispatch and the package-name trust
+/// boundary are unit-testable.
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> {
+    match args.next().as_deref() {
+        Some("force-stop") => parse_force_stop(args),
+        Some("preboot") => no_extra_args(args, "preboot").map(|()| Action::Preboot),
+        Some("lock-down") => no_extra_args(args, "lock-down").map(|()| Action::LockDown),
+        Some(other) => Err(format!("unknown subcommand '{other}' ({USAGE})")),
+        None => Err(format!("missing subcommand ({USAGE})")),
+    }
+}
+
+fn parse_force_stop(mut args: impl Iterator<Item = String>) -> Result<Action, String> {
     let mut package: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--package" => {
                 package = Some(
                     args.next()
-                        .unwrap_or_else(|| die("--package needs a value")),
+                        .ok_or_else(|| "--package needs a value".to_string())?,
                 );
             }
-            other => die(format!("unexpected argument '{other}'")),
+            other => return Err(format!("unexpected argument '{other}'")),
         }
     }
-    let package = package.unwrap_or_else(|| die("--package is required"));
+    let package = package.ok_or_else(|| "--package is required".to_string())?;
 
     // The trust boundary: never run `am force-stop` on an unvalidated string.
     // The strict rule forbids leading '-', whitespace, and shell metacharacters,
-    // so passing it as a single argv element below is injection-safe.
+    // so passing it as a single argv element is injection-safe.
     if !is_valid_android_package(&package) {
-        die(format!("invalid package name '{package}'"));
+        return Err(format!("invalid package name '{package}'"));
     }
-
-    // Fixed argv, no shell. exec() replaces this process; it only returns on
-    // failure to launch `waydroid`.
-    let err = Command::new("waydroid")
-        .args(["shell", "am", "force-stop"])
-        .arg(&package)
-        .exec();
-    die(format!("failed to exec waydroid: {err}"));
+    Ok(Action::ForceStop { package })
 }
 
-/// `preboot` → `systemctl start waydroid-container` (idempotent).
-fn preboot(mut args: impl Iterator<Item = String>) -> ExitCode {
-    if let Some(extra) = args.next() {
-        die(format!("'preboot' takes no arguments, got '{extra}'"));
+fn no_extra_args(mut args: impl Iterator<Item = String>, name: &str) -> Result<(), String> {
+    match args.next() {
+        Some(extra) => Err(format!("'{name}' takes no arguments, got '{extra}'")),
+        None => Ok(()),
     }
-    let err = Command::new("systemctl")
-        .args(["start", CONTAINER_UNIT])
-        .exec();
-    die(format!("failed to exec systemctl: {err}"));
 }
 
-/// `lock-down` → `waydroid shell cmd statusbar send-disable-flag <flags>`.
-/// Hardens the running session against the child leaving the kiosk app. Flags
-/// are a fixed compile-time set; takes no arguments.
-fn lock_down(mut args: impl Iterator<Item = String>) -> ExitCode {
-    if let Some(extra) = args.next() {
-        die(format!("'lock-down' takes no arguments, got '{extra}'"));
+fn main() -> ExitCode {
+    let action = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| die(e));
+    let (program, args) = action.command();
+    // exec() replaces this process; it only returns on failure to launch.
+    let err = Command::new(program).args(&args).exec();
+    die(format!("failed to exec {program}: {err}"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Action, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
     }
-    let err = Command::new("waydroid")
-        .args(["shell", "cmd", "statusbar", "send-disable-flag"])
-        .args(LOCK_DOWN_FLAGS)
-        .exec();
-    die(format!("failed to exec waydroid: {err}"));
+
+    #[test]
+    fn force_stop_accepts_valid_package() {
+        assert_eq!(
+            parse(&["force-stop", "--package", "com.android.calculator2"]),
+            Ok(Action::ForceStop {
+                package: "com.android.calculator2".into()
+            })
+        );
+    }
+
+    #[test]
+    fn force_stop_rejects_unsafe_package() {
+        // Same trust boundary as config — shell metacharacters, leading dash,
+        // and single-segment names are all rejected before any exec.
+        assert!(parse(&["force-stop", "--package", "com.app;rm -rf"]).is_err());
+        assert!(parse(&["force-stop", "--package", "-rf"]).is_err());
+        assert!(parse(&["force-stop", "--package", "noseparator"]).is_err());
+        assert!(parse(&["force-stop", "--package", "com..app"]).is_err());
+    }
+
+    #[test]
+    fn force_stop_requires_package_with_value() {
+        assert!(parse(&["force-stop"]).is_err());
+        assert!(parse(&["force-stop", "--package"]).is_err());
+    }
+
+    #[test]
+    fn force_stop_rejects_extra_arguments() {
+        assert!(parse(&["force-stop", "--package", "a.b", "extra"]).is_err());
+        assert!(parse(&["force-stop", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn preboot_and_lock_down_take_no_args() {
+        assert_eq!(parse(&["preboot"]), Ok(Action::Preboot));
+        assert_eq!(parse(&["lock-down"]), Ok(Action::LockDown));
+        assert!(parse(&["preboot", "x"]).is_err());
+        assert!(parse(&["lock-down", "x"]).is_err());
+    }
+
+    #[test]
+    fn unknown_or_missing_subcommand_is_error() {
+        assert!(parse(&["frobnicate"]).is_err());
+        assert!(parse(&[]).is_err());
+    }
+
+    /// argv as `&str`s, for ergonomic comparison.
+    fn cmd_of(action: Action) -> (&'static str, Vec<String>) {
+        action.command()
+    }
+
+    #[test]
+    fn commands_are_fixed_and_shell_free() {
+        let (prog, argv) = cmd_of(Action::Preboot);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "systemctl");
+        assert_eq!(argv, ["start", "waydroid-container"]);
+
+        let (prog, argv) = cmd_of(Action::ForceStop {
+            package: "com.x.y".into(),
+        });
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(argv, ["shell", "am", "force-stop", "com.x.y"]);
+
+        let (prog, argv) = cmd_of(Action::LockDown);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(
+            argv,
+            [
+                "shell",
+                "cmd",
+                "statusbar",
+                "send-disable-flag",
+                "home",
+                "recents",
+                "statusbar-expansion",
+                "notification-peek",
+                "search",
+            ]
+        );
+    }
 }
