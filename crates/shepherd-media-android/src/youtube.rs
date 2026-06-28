@@ -156,20 +156,23 @@ pub fn provider() -> Option<Box<dyn YtDlp>> {
 
 /// JNI bridge to youtubedl-android (`com.yausername.youtubedl_android`).
 ///
-/// NOTE: this path can only be exercised on a device — it depends on the JVM,
-/// the youtubedl-android AAR, and its bundled Python being extracted at
-/// runtime. It is written to the documented youtubedl-android API but has not
-/// been run on hardware; expect to debug it on-device. Known likely issue:
-/// `find_class`/`new_object` from this worker thread resolves against the
-/// *bootstrap* classloader, which can't see app/library classes — the robust
-/// fix is to cache the `YoutubeDL`/`YoutubeDLRequest` `jclass` (or the app
-/// classloader) on a JVM thread at startup and use those here.
+/// This path can only be exercised on a device — it depends on the JVM, the
+/// youtubedl-android AAR, and its bundled Python being extracted at runtime.
+///
+/// Classloader gotcha (verified on hardware): this runs on a Rust-spawned
+/// worker thread attached to the JVM, where the implicit `FindClass` behind a
+/// class-name lookup resolves against the *bootstrap* classloader, which can't
+/// see the app's DEX classes — `FindClass("…/YoutubeDL")` throws
+/// `ClassNotFoundException`, and the next `NewStringUTF` then aborts the whole
+/// process via CheckJNI. The fix is to resolve the classes through the
+/// *application* classloader (`Context.getClassLoader().loadClass(…)`) and call
+/// through the resulting `jclass`. See [`load_class`].
 #[cfg(target_os = "android")]
 mod jni_impl {
     use std::sync::Once;
 
     use jni::JavaVM;
-    use jni::objects::{JObject, JString, JValue};
+    use jni::objects::{JClass, JObject, JString, JValue};
 
     use super::YtDlp;
 
@@ -183,32 +186,82 @@ mod jni_impl {
         }
     }
 
+    /// Resolve a class by its dotted name through the application classloader.
+    ///
+    /// `env.find_class()` (and the class-name forms of `call_static_method` /
+    /// `new_object`) use `FindClass`, which on a native worker thread consults
+    /// the bootstrap classloader and cannot see app/library classes. Going
+    /// through `Context.getClassLoader().loadClass(name)` resolves against the
+    /// app's DEX path instead.
+    fn load_class<'a>(
+        env: &mut jni::JNIEnv<'a>,
+        loader: &JObject,
+        dotted_name: &str,
+    ) -> Result<JClass<'a>, jni::errors::Error> {
+        let jname: JString = env.new_string(dotted_name)?;
+        let cls = env
+            .call_method(
+                loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[JValue::Object(&jname)],
+            )?
+            .l()?;
+        Ok(JClass::from(cls))
+    }
+
     fn run_jni(url: &str, options: &[&str]) -> Result<String, jni::errors::Error> {
         let ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(ctx.vm().cast())? };
         let mut env = vm.attach_current_thread()?;
         let context = unsafe { JObject::from_raw(ctx.context().cast()) };
 
+        // Resolve the youtubedl-android classes via the *application*
+        // classloader (see `load_class`); the implicit `FindClass` would use the
+        // bootstrap loader on this worker thread and abort the process.
+        let loader = env
+            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+            .l()?;
+        let youtube_dl = load_class(
+            &mut env,
+            &loader,
+            "com.yausername.youtubedl_android.YoutubeDL",
+        )?;
+        let request_cls = load_class(
+            &mut env,
+            &loader,
+            "com.yausername.youtubedl_android.YoutubeDLRequest",
+        )?;
+
         // One-time init: extracts the bundled Python/yt-dlp into app storage.
         INIT.call_once(|| {
             let instance = env
                 .call_static_method(
-                    "com/yausername/youtubedl_android/YoutubeDL",
+                    &youtube_dl,
                     "getInstance",
                     "()Lcom/yausername/youtubedl_android/YoutubeDL;",
                     &[],
                 )
                 .and_then(|v| v.l());
-            if let Ok(instance) = instance {
-                let _ = env.call_method(
-                    &instance,
-                    "init",
-                    "(Landroid/content/Context;)V",
-                    &[JValue::Object(&context)],
-                );
-                if env.exception_check().unwrap_or(false) {
+            match instance {
+                Ok(instance) => {
+                    let _ = env.call_method(
+                        &instance,
+                        "init",
+                        "(Landroid/content/Context;)V",
+                        &[JValue::Object(&context)],
+                    );
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                        log::error!("YoutubeDL.init threw");
+                    }
+                }
+                Err(e) => {
+                    // Clear any pending exception so it can't poison the next
+                    // JNI call (a pending exception turns NewStringUTF into a
+                    // hard CheckJNI abort).
                     let _ = env.exception_clear();
-                    log::error!("YoutubeDL.init threw");
+                    log::error!("YoutubeDL.getInstance failed during init: {e}");
                 }
             }
         });
@@ -216,7 +269,7 @@ mod jni_impl {
         // request = new YoutubeDLRequest(url)
         let jurl: JString = env.new_string(url)?;
         let request = env.new_object(
-            "com/yausername/youtubedl_android/YoutubeDLRequest",
+            &request_cls,
             "(Ljava/lang/String;)V",
             &[JValue::Object(&jurl)],
         )?;
@@ -236,7 +289,7 @@ mod jni_impl {
         // response = YoutubeDL.getInstance().execute(request)
         let instance = env
             .call_static_method(
-                "com/yausername/youtubedl_android/YoutubeDL",
+                &youtube_dl,
                 "getInstance",
                 "()Lcom/yausername/youtubedl_android/YoutubeDL;",
                 &[],
