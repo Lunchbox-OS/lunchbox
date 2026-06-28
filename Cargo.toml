@@ -17,6 +17,7 @@ members = [
     "crates/shepherd-e2e",
     "crates/shepherd-media-core",
     "crates/shepherd-media-app",
+    "crates/shepherd-media-android",
     "crates/shepherd-media",
     "crates/shepherd-bridge",
     "crates/shepherd-touch-bridge",

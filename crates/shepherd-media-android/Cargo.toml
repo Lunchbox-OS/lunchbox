@@ -1,0 +1,40 @@
+[package]
+name = "shepherd-media-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android build of shepherd-media: eframe UI over shepherd-media-core and shepherd-media-app"
+
+[lib]
+# `cdylib` is the .so the APK loads via NativeActivity; `rlib` lets the desktop
+# preview example (and unit tests) link the same code on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Core is shared verbatim, with the libmpv-backed player compiled out — the
+# Android player backend is plugged in separately (libmpv via JNI, later).
+shepherd-media-core = { path = "../shepherd-media-core", default-features = false }
+shepherd-media-app = { path = "../shepherd-media-app" }
+
+log = "0.4"
+
+# eframe/egui are cross-platform: the same MediaApp renders on the host (for the
+# desktop preview example) and on Android (via the native-activity backend).
+eframe = { version = "0.34", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+    "android-native-activity",
+] }
+egui = "0.34"
+
+# Android-only glue. Target-gated so the host build (and workspace CI) never
+# pulls the NDK-linked crates.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.21"
+
+[dev-dependencies]
+url = "2.5"

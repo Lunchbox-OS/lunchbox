@@ -1,0 +1,11 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+local.properties
+
+# Generated jniLibs (produced by the cargoNdkBuild task)
+app/src/main/jniLibs/
+
+# The Gradle wrapper (gradlew, gradlew.bat, gradle-wrapper.jar/.properties) IS
+# committed so ./gradlew works out of the box.

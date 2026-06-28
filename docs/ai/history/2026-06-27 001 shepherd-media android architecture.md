@@ -185,10 +185,21 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   `PosterPolicy`, `Quality` mirroring the Linux binary), and atomic TOML
   load/save. 25 unit tests; builds, tests, clippy, and fmt clean. The crate has
   no UI/network/Android dependency so it is testable on the desktop.
-- Steps 2–5 (Android cdylib + eframe shell, libmpv `PlayerHandle`, on-device
-  caching, youtubedl-android) require the Android NDK / `libmpv.so` /
-  youtubedl-android toolchain, which is not present in the current dev
-  environment; they are not yet implemented.
+- **Step 2 — `shepherd-media-android` crate + APK build: done.** A `cdylib`
+  hosting the cross-platform eframe UI (`MediaApp`) over core + app: library
+  switcher, settings page (add/remove/reorder/select-active, per-library cache
+  mode / quality / poster policy / size cap), add-library form, and a
+  placeholder grid; settings persist to the app's private storage. A
+  `StubPlayer` stands in for the playback backend. The same UI runs on the host
+  via the `desktop_preview` example. The crate cross-compiles for
+  `aarch64-linux-android` (exports `android_main` / `ANativeActivity_onCreate`),
+  and the pure-`NativeActivity` Gradle project under `android/` builds an
+  installable APK end-to-end (Rust → cargo-ndk → AGP), verified with NDK
+  27.2.12479018 / cargo-ndk 4.1.2 / Gradle 8.10.2 / AGP 8.7.3.
+- Steps 3–5 (libmpv `PlayerHandle` + embedded playback, on-device cache wiring,
+  source resolution incl. youtubedl-android and the SAF/connectivity JNI
+  bridges) still require a prebuilt Android `libmpv.so` and the
+  youtubedl-android dependency; not yet implemented.
 
 ## Key source references
 
