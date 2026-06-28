@@ -34,6 +34,7 @@ use crate::sidecar::{
     spawn_touch_bridge, terminate_sidecar,
 };
 use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
+use crate::waydroid;
 
 /// How long to wait for the preloaded Steam client to report ready before
 /// un-gating Steam activities anyway (issue #76). A safety net so a missed
@@ -1820,7 +1821,160 @@ impl LinuxHost {
             }
         })
     }
+
+    /// Spawn an Android (Waydroid) session. The app runs inside the Android
+    /// container — there is no host process — so this launches it, waits for its
+    /// Wayland toplevel to appear, and arms a window-watch task that ends the
+    /// session when the toplevel disappears. Requires the Waydroid session to be
+    /// running already (preboot); a stopped session is a spawn error.
+    async fn spawn_android(
+        &self,
+        session_id: SessionId,
+        package_name: &str,
+    ) -> HostResult<HostSessionHandle> {
+        if !waydroid::session_running().await {
+            return Err(HostError::SpawnFailed(
+                "Waydroid session is not running; enable [service.waydroid] preboot \
+                 or start the session before launching Android activities"
+                    .into(),
+            ));
+        }
+
+        waydroid::launch_app(package_name).await?;
+
+        let app_id = waydroid::app_id_for_package(package_name);
+        let handle = HostSessionHandle::new(
+            session_id.clone(),
+            HostHandlePayload::Android {
+                package_name: package_name.to_string(),
+            },
+        );
+
+        // The toplevel appears asynchronously a few seconds after launch.
+        if !wait_for_android_window(&app_id, ANDROID_WINDOW_TIMEOUT).await {
+            waydroid::force_stop(package_name).await;
+            return Err(HostError::SpawnFailed(format!(
+                "Android app {package_name} did not present a window within {}s",
+                ANDROID_WINDOW_TIMEOUT.as_secs()
+            )));
+        }
+
+        // Track the session so the window-watch task can dedup its single
+        // Exited emit (presence acts as the token); the package itself lives in
+        // the handle payload.
+        self.session_info.lock().unwrap().insert(
+            session_id.clone(),
+            SessionInfo {
+                command_name: package_name.to_string(),
+                snap_name: None,
+                flatpak_app_id: None,
+                steam_app_id: None,
+                // None of the process-stop machinery applies: there is no host
+                // pid to signal, no systemd scope to stop, and `stop` returns
+                // on the Android path before any of these are read.
+                firewall_scope: None,
+                graceful_floor: None,
+                polite_close: false,
+            },
+        );
+
+        let _ = self.event_tx.send(HostEvent::WindowReady {
+            handle: handle.clone(),
+        });
+
+        self.spawn_android_window_watch(handle.clone(), app_id, package_name.to_string());
+
+        info!(session_id = %session_id, package = %package_name, "Spawned Android (Waydroid) session");
+        Ok(handle)
+    }
+
+    /// Watch an Android app's Wayland toplevel; when it disappears (the user
+    /// closed it, or `stop` closed it), best-effort reclaim the cached Android
+    /// process and emit [`HostEvent::Exited`]. This is the single exit path for
+    /// Android sessions — `stop` only closes the window and lets this fire.
+    fn spawn_android_window_watch(
+        &self,
+        handle: HostSessionHandle,
+        app_id: String,
+        package_name: String,
+    ) {
+        let event_tx = self.event_tx.clone();
+        let session_info = self.session_info.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ANDROID_WATCH_INTERVAL).await;
+                if wait_for_android_window(&app_id, Duration::ZERO).await {
+                    continue; // still on screen
+                }
+                // Window gone — end the session exactly once.
+                let was_tracked = session_info
+                    .lock()
+                    .unwrap()
+                    .remove(&handle.session_id)
+                    .is_some();
+                if was_tracked {
+                    waydroid::force_stop(&package_name).await;
+                    let _ = event_tx.send(HostEvent::Exited {
+                        handle,
+                        status: ExitStatus::success(),
+                    });
+                }
+                return;
+            }
+        });
+    }
+
+    /// Stop an Android (Waydroid) session: close its Wayland toplevel (the
+    /// user-level, always-available way to end the session) and best-effort
+    /// reclaim the cached process. The window-watch task observes the close and
+    /// emits [`HostEvent::Exited`], so this does not emit it itself.
+    async fn stop_android(&self, package_name: &str) -> HostResult<()> {
+        let app_id = waydroid::app_id_for_package(package_name);
+        if let Some(window_id) = android_window_id(&app_id).await
+            && let Err(e) = crate::sway::act_on_window(window_id, WindowAction::Close).await
+        {
+            warn!(package = %package_name, error = %e, "failed to close Android window via sway");
+        }
+        waydroid::force_stop(package_name).await;
+        Ok(())
+    }
 }
+
+/// Compositor window id of the on-screen Android app with `app_id`, if present.
+async fn android_window_id(app_id: &str) -> Option<u64> {
+    match crate::sway::list_windows().await {
+        Ok(windows) => windows
+            .into_iter()
+            .find(|w| w.app_id.as_deref() == Some(app_id))
+            .map(|w| w.id),
+        Err(e) => {
+            debug!(app_id, error = %e, "failed to list windows while tracking Android app");
+            None
+        }
+    }
+}
+
+/// Poll until the Android `app_id` toplevel exists, or `timeout` elapses.
+/// A `timeout` of [`Duration::ZERO`] makes this a single immediate check.
+async fn wait_for_android_window(app_id: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if android_window_id(app_id).await.is_some() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(ANDROID_WINDOW_POLL_INTERVAL).await;
+    }
+}
+
+/// How long to wait for an Android app's window to appear after launch.
+const ANDROID_WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
+/// Poll cadence while waiting for the window to appear.
+const ANDROID_WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Poll cadence for the window-watch exit task.
+const ANDROID_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Default for LinuxHost {
     fn default() -> Self {
@@ -1840,6 +1994,14 @@ impl HostAdapter for LinuxHost {
         entry_kind: &EntryKind,
         options: SpawnOptions,
     ) -> HostResult<HostSessionHandle> {
+        // Android (Waydroid) has no host process to manage: the app runs inside
+        // the Android container and is tracked via its Wayland toplevel. Handle
+        // it on a dedicated path rather than threading it through the
+        // pid/`ManagedProcess` machinery below.
+        if let EntryKind::Android { package_name, .. } = entry_kind {
+            return self.spawn_android(session_id, package_name).await;
+        }
+
         // Some kinds need a longer grace period on stop than the generic
         // default; `stop` reads this back off the session info.
         let graceful_floor = match entry_kind {
@@ -2025,10 +2187,7 @@ impl HostAdapter for LinuxHost {
                 (launch.argv, merged, None, None, None, None)
             }
             EntryKind::Android { .. } => {
-                // Waydroid launch wiring lands in Phase 2; until then the kind
-                // parses and validates but is not spawnable. `linux_full()`
-                // does not advertise Android, so the core rejects launches
-                // before reaching here — this arm keeps the match exhaustive.
+                // Dispatched above via `spawn_android`; never reached here.
                 return Err(HostError::UnsupportedKind);
             }
             EntryKind::Custom {
@@ -2382,6 +2541,11 @@ impl HostAdapter for LinuxHost {
 
     async fn stop(&self, handle: &HostSessionHandle, mode: StopMode) -> HostResult<()> {
         let session_id = handle.session_id.clone();
+        // Android (Waydroid) sessions have no host pid; stop by closing the
+        // Wayland toplevel. Both stop modes map to the same action.
+        if let HostHandlePayload::Android { package_name } = handle.payload() {
+            return self.stop_android(package_name).await;
+        }
         let (pid, pgid) = match handle.payload() {
             HostHandlePayload::Linux { pid, pgid } => (*pid, *pgid),
             _ => return Err(HostError::SessionNotFound),

@@ -26,6 +26,7 @@ mod steam_interstitial;
 mod sway;
 pub mod sway_ipc;
 mod volume;
+mod waydroid;
 
 pub use adapter::*;
 pub use audio::{AudioOutput, AudioOutputKind, AudioTopology, SinkNode};

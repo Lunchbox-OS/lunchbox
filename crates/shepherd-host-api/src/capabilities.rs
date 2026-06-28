@@ -61,6 +61,7 @@ impl HostCapabilities {
         spawn_kinds.insert(EntryKindTag::Snap);
         spawn_kinds.insert(EntryKindTag::Steam);
         spawn_kinds.insert(EntryKindTag::Flatpak);
+        spawn_kinds.insert(EntryKindTag::Android);
         spawn_kinds.insert(EntryKindTag::Vm);
         spawn_kinds.insert(EntryKindTag::Media);
         spawn_kinds.insert(EntryKindTag::Retroarch);

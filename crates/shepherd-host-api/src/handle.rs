@@ -40,6 +40,11 @@ pub enum HostHandlePayload {
     /// Linux: process group ID
     Linux { pid: u32, pgid: u32 },
 
+    /// Linux/Android (Waydroid): the app runs inside the Android container, so
+    /// there is no host pid — the session is identified by its package name and
+    /// tracked via its Wayland toplevel.
+    Android { package_name: String },
+
     /// Windows: job object handle (serialized as name/id)
     Windows { job_name: String, process_id: u32 },
 
@@ -55,6 +60,7 @@ impl HostHandlePayload {
     pub fn pid(&self) -> Option<u32> {
         match self {
             HostHandlePayload::Linux { pid, .. } => Some(*pid),
+            HostHandlePayload::Android { .. } => None,
             HostHandlePayload::Windows { process_id, .. } => Some(*process_id),
             HostHandlePayload::MacOs { pid, .. } => Some(*pid),
             HostHandlePayload::Mock { .. } => None,
