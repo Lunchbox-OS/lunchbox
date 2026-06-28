@@ -50,16 +50,37 @@ Separately confirmed live: `pkexec /usr/libexec/shepherd-waydroid-helper preboot
 under the `shepherd-waydroid` group runs password-less and starts the container
 — so the polkit grant itself works, not just the helper.
 
+## Preboot coverage (added)
+
+A second `#[ignore]` test, **`waydroid_preboot_enables_multi_window`**, drives
+the real `LinuxHost::preboot_waydroid` and asserts the end state (session
+RUNNING + `persist.waydroid.multi_windows == true`). It passed (~94 s),
+exercising `preboot_container` (→ pkexec → helper), `start_session_and_wait`
+(real boot + ready-log detection), the prop check, and idle-suspend. The
+**set-and-restart branch** also passed in a run with
+`WAYDROID_TEST_FORCE_RESTART=1` (pre-sets the prop to `false`), ~93 s.
+
+### Finding: cold-launch window timeout
+
+Chaining preboot → launch surfaced that a *cold* first app launch right after a
+fresh boot (under software rendering) exceeds the original 20 s
+`ANDROID_WINDOW_TIMEOUT` — a warm launch is ~2 s. Bumped to **45 s** so a slow
+cold start isn't mistaken for a failed launch. (The orchestrator runs the
+launch test against an orchestrator-managed long-lived session, because the
+session preboot starts is held by the short-lived test process and dies with it
+— a test artifact; in production `shepherdd` is long-lived so its session
+persists.)
+
 ## What this does and doesn't cover
 
-- **Covered:** the full adapter runtime against real Waydroid + Sway, and the
-  privileged seam (pkexec/polkit/helper) with the group effective.
+- **Covered:** the full adapter runtime against real Waydroid + Sway, the
+  privileged seam (pkexec/polkit/helper) with the group effective, and
+  `preboot_waydroid` (incl. the multi-window restart branch).
 - **Still not exercised here:** the launcher UI tile → IPC → engine → adapter
   path (this drives the adapter directly, which is the Android-specific surface;
-  the engine/IPC routing is covered by existing tests), and `preboot_waydroid`'s
-  multi-window *restart* branch (multi-window was already enabled on this host,
-  so no restart was needed). Phase 4 items (Lock Task / Device Owner, GAPPS
-  apps) remain.
+  engine/IPC routing has its own tests; a full TestHarness HTTP e2e would need
+  the harness to pass `SWAYSOCK` to shepherdd, which it doesn't today). Phase 4
+  items (Lock Task / Device Owner, GAPPS apps) remain.
 
 ## Verification commands
 

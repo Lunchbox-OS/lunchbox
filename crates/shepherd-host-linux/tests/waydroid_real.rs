@@ -81,6 +81,54 @@ async fn wait_for_event(
     }
 }
 
+/// Exercises `LinuxHost::preboot_waydroid` against real Waydroid: it should
+/// bring up the container, start the session, ensure `multi_windows` is enabled
+/// (setting + restarting the session when it isn't), and leave a ready session.
+/// Verifies the end state: session RUNNING and
+/// `persist.waydroid.multi_windows == true`. Run the orchestrator with
+/// `WAYDROID_TEST_FORCE_RESTART=1` to pre-set the prop to `false` and force the
+/// set-and-restart branch.
+#[tokio::test]
+#[ignore = "requires Waydroid + Sway; run via test-waydroid.sh"]
+async fn waydroid_preboot_enables_multi_window() {
+    if !cmd_ok("waydroid", &["--version"]) {
+        skip("waydroid CLI not available");
+        return;
+    }
+    if std::env::var_os("SWAYSOCK").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        skip("no SWAYSOCK/WAYLAND_DISPLAY (need a running sway)");
+        return;
+    }
+
+    let host = LinuxHost::new();
+    // Short per-attempt boot timeout; preboot does up to two session starts.
+    host.configure_waydroid(true, true, Duration::from_secs(90));
+    host.preboot_waydroid();
+
+    // Poll for the end state: a running session with multi-window enabled.
+    // Generous bound — preboot may start the session twice (set + restart).
+    let mut ok = false;
+    for _ in 0..120 {
+        let running = cmd_stdout("waydroid", &["status"]).contains("RUNNING");
+        let multi = cmd_stdout(
+            "waydroid",
+            &["prop", "get", "persist.waydroid.multi_windows"],
+        )
+        .trim()
+            == "true";
+        if running && multi {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(
+        ok,
+        "preboot should leave a running session with multi_windows=true"
+    );
+    println!("[OK] preboot: session running, multi_windows enabled");
+}
+
 #[tokio::test]
 #[ignore = "requires Waydroid + a booted session + Sway; run via test-waydroid.sh"]
 async fn waydroid_launch_and_stop() {

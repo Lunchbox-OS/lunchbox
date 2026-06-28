@@ -73,23 +73,51 @@ WAYLAND_DISPLAY="$(ls -t "$RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v '\.lock$
 [[ -n "$SWAYSOCK" && -n "$WAYLAND_DISPLAY" ]] || skip "nested sway did not come up"
 info "Nested sway: SWAYSOCK=$SWAYSOCK WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
 
-# Start a Waydroid session attached to the nested sway and wait for ready.
-info "Starting Waydroid session..."
+wait_session_ready() {
+    for _ in $(seq 1 90); do
+        grep -q "Android with user 0 is ready" "$SESSION_LOG" && return 0
+        sleep 2
+    done
+    return 1
+}
+
+# Optionally force multi_windows=false up front so the preboot test exercises
+# its set-and-restart branch (the prop is persistent, so it's otherwise already
+# true on a host that's run this before). This adds an extra Android boot, so
+# it's opt-in via WAYDROID_TEST_FORCE_RESTART=1 — heavy/slow on constrained VMs.
+if [[ "${WAYDROID_TEST_FORCE_RESTART:-0}" == "1" ]]; then
+    info "Forcing multi_windows=false (to exercise the preboot restart branch)..."
+    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" SWAYSOCK="$SWAYSOCK" \
+        waydroid session start >"$SESSION_LOG" 2>&1 &
+    wait_session_ready || skip "Waydroid session did not become ready"
+    waydroid prop set persist.waydroid.multi_windows false
+    waydroid session stop >/dev/null 2>&1 || true
+    sleep 2
+fi
+
+run_test() {
+    local name="$1"
+    info "Running $name..."
+    sudo -u "$USER_NAME" env \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        SWAYSOCK="$SWAYSOCK" \
+        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+        SHEPHERD_WAYDROID_HELPER="$HELPER" \
+        "$TEST_BIN" "$name" --ignored --exact --nocapture --test-threads=1
+}
+
+# 1. preboot test: verifies preboot_waydroid brings the container + session up
+#    and flips multi_windows (set + restart). The session it starts is held by a
+#    child of this short-lived test process, so it dies when the test exits —
+#    fine here (in production shepherdd is long-lived and the session persists).
+run_test waydroid_preboot_enables_multi_window
+waydroid session stop >/dev/null 2>&1 || true
+sleep 2
+
+# 2. launch/stop test against an orchestrator-managed long-lived session
+#    (multi_windows is now persistently true, set by preboot above).
+info "Starting a long-lived session for the launch test..."
 WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" SWAYSOCK="$SWAYSOCK" \
     waydroid session start >"$SESSION_LOG" 2>&1 &
-for _ in $(seq 1 90); do
-    grep -q "Android with user 0 is ready" "$SESSION_LOG" && break
-    sleep 2
-done
-grep -q "Android with user 0 is ready" "$SESSION_LOG" || skip "Waydroid session did not become ready"
-info "Waydroid session ready."
-
-# Run the test binary via `sudo -u` so the shepherd-waydroid group is effective
-# (exercising the force_stop -> pkexec -> helper reclaim path too).
-info "Running waydroid_real..."
-sudo -u "$USER_NAME" env \
-    XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-    SWAYSOCK="$SWAYSOCK" \
-    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-    SHEPHERD_WAYDROID_HELPER="$HELPER" \
-    "$TEST_BIN" --ignored --nocapture --test-threads=1
+wait_session_ready || skip "Waydroid session did not become ready"
+run_test waydroid_launch_and_stop

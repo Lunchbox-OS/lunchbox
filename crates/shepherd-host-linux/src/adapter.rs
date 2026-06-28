@@ -2055,8 +2055,11 @@ async fn wait_for_android_window(app_id: &str, timeout: Duration) -> bool {
     }
 }
 
-/// How long to wait for an Android app's window to appear after launch.
-const ANDROID_WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for an Android app's window to appear after launch. A
+/// *cold* first launch right after the container boots (especially under
+/// software rendering) can take far longer than a warm one, so this is
+/// generous — better a slow launch than killing an app that was about to show.
+const ANDROID_WINDOW_TIMEOUT: Duration = Duration::from_secs(45);
 /// Poll cadence while waiting for the window to appear.
 const ANDROID_WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Poll cadence for the window-watch exit task.
