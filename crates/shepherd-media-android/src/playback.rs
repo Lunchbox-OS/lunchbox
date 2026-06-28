@@ -65,11 +65,20 @@ impl PlaybackView {
             if input.pointer.any_pressed() || input.pointer.any_down() {
                 any_input = true;
             }
-            if input.key_pressed(egui::Key::Space) || input.key_pressed(egui::Key::K) {
+            // Space/K, or the D-pad center (Enter), toggles play/pause.
+            if input.key_pressed(egui::Key::Space)
+                || input.key_pressed(egui::Key::K)
+                || input.key_pressed(egui::Key::Enter)
+            {
                 toggle_pause(player);
                 any_input = true;
             }
-            if input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::Backspace) {
+            // Remote BACK (Android delivers it as BrowserBack), Esc, or Backspace
+            // leaves playback.
+            if input.key_pressed(egui::Key::BrowserBack)
+                || input.key_pressed(egui::Key::Escape)
+                || input.key_pressed(egui::Key::Backspace)
+            {
                 leave = true;
             }
             if input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::J) {

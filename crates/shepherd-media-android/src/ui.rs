@@ -193,7 +193,7 @@ impl MediaApp {
         settings_path: PathBuf,
         cache_dir: PathBuf,
     ) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx.set_visuals(tv_visuals());
         let (settings, status) = match AppSettings::load(&settings_path) {
             Ok(s) => (s, None),
             Err(e) => (
@@ -655,7 +655,12 @@ impl MediaApp {
                                     if let Some(category) = &item.category {
                                         ui.label(format!("Category: {category}"));
                                     }
-                                    if ui.button("▶ Play").clicked() {
+                                    let play = ui.button("▶ Play");
+                                    // Keep the D-pad-focused item scrolled into view.
+                                    if play.gained_focus() {
+                                        play.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    if play.clicked() {
                                         play_request = Some(item.id.clone());
                                     }
                                 });
@@ -872,6 +877,20 @@ impl MediaApp {
     }
 }
 
+/// Dark theme tuned for 10-foot D-pad use (Fire TV / Google TV): a focused
+/// widget renders with `widgets.active`, so make that an unmistakable highlight.
+fn tv_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    let focus = egui::Color32::from_rgb(70, 140, 240);
+    let w = &mut visuals.widgets;
+    w.active.bg_fill = focus;
+    w.active.weak_bg_fill = focus;
+    w.active.bg_stroke = egui::Stroke::new(3.0, egui::Color32::WHITE);
+    w.active.fg_stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+    w.active.expansion = 3.0;
+    visuals
+}
+
 fn item_kind_glyph(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Video => "🎬",
@@ -901,12 +920,35 @@ impl eframe::App for MediaApp {
         } else {
             self.top_bar(ui);
 
-            let next = match self.screen.clone() {
+            // D-pad / remote support (Fire TV, Google TV): egui moves focus with
+            // the arrow keys (Android maps the D-pad to them) but can't bootstrap
+            // focus from nothing, so keep one widget focused at all times. This
+            // also auto-focuses the first control when a screen appears.
+            // DPAD_CENTER arrives as Enter, which activates the focused widget.
+            if ui.ctx().memory(|m| m.focused().is_none()) {
+                ui.ctx()
+                    .memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
+            }
+
+            let mut next = match self.screen.clone() {
                 Screen::Switcher => self.switcher(ui),
                 Screen::Settings => self.settings_screen(ui),
                 Screen::AddLibrary => self.add_library_screen(ui),
                 Screen::Grid(id) => self.grid_screen(ui, &id),
             };
+
+            // Remote BACK navigates up the screen stack. Android delivers it as
+            // BrowserBack; also accept Escape from a keyboard.
+            let back = ui.input(|i| {
+                i.key_pressed(egui::Key::BrowserBack) || i.key_pressed(egui::Key::Escape)
+            });
+            if next.is_none() && back {
+                next = match self.screen {
+                    Screen::Switcher => None,
+                    Screen::Settings | Screen::Grid(_) => Some(Screen::Switcher),
+                    Screen::AddLibrary => Some(Screen::Settings),
+                };
+            }
 
             if let Some(screen) = next {
                 self.screen = screen;

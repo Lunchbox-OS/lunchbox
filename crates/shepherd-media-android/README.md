@@ -18,6 +18,12 @@ the full design and roadmap.
 - Cross-platform egui UI: library switcher, settings (add / remove / reorder /
   select-active, per-library cache mode, quality, poster policy, and size cap),
   add-library form, and a placeholder browse grid.
+- TV remote / D-pad navigation (Fire TV, Google TV): the Android D-pad maps to
+  egui arrow-key focus movement; the app keeps a widget focused at all times
+  (auto-focusing the first control on each screen), draws a prominent focus
+  highlight, activates on the center button (Enter), and treats BACK
+  (`BrowserBack`) as "navigate up". In playback the remote seeks (◄/►), toggles
+  play/pause (center), and leaves (BACK). Verified on hardware.
 - Settings persisted as TOML to the app's private storage.
 - Source resolution (`resolve` module): local/`file://` TOML, HTTP(S) TOML, and
   `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
