@@ -1,0 +1,16 @@
+[package]
+name = "shepherd-waydroid-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged helper for the Android (Waydroid) activity kind: force-stop and container preboot on shepherdd's behalf"
+
+[[bin]]
+name = "shepherd-waydroid-helper"
+path = "src/main.rs"
+
+# Depends only on shepherd-util, for the single shared `is_valid_android_package`
+# validator (the security-critical check). Otherwise std-only, to keep the
+# privileged binary's audit surface small.
+[dependencies]
+shepherd-util = { workspace = true }

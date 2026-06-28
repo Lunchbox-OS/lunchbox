@@ -9,18 +9,41 @@
 //! Privilege split (validated on the bench — see
 //! `docs/ai/history/2026-06-28 002 android-phase0-host-spike.md`):
 //!
-//! * `waydroid app launch` / `waydroid prop` / `waydroid status` run as the
-//!   **session user** (the same user shepherdd runs as).
-//! * `waydroid shell …` (and thus `am force-stop`) needs **root**. shepherdd is
-//!   unprivileged, so [`force_stop`] is best-effort: it only succeeds where a
-//!   privileged path is available. The reliable, user-level way to end a
-//!   session is to close the app's Wayland toplevel via Sway (the adapter does
-//!   this in `stop`), which removes it from screen immediately; Android may keep
-//!   the process cached, which `force_stop` reclaims when it can.
+//! * `waydroid app launch` / `waydroid prop` / `waydroid status` /
+//!   `waydroid session start|stop` run as the **session user** (the same user
+//!   shepherdd runs as).
+//! * `waydroid shell …` (`am force-stop`) and `systemctl start
+//!   waydroid-container` need **root**. shepherdd is unprivileged, so those go
+//!   through the `shepherd-waydroid-helper` via pkexec ([`force_stop`],
+//!   [`preboot_container`]). Both are best-effort: closing the Wayland toplevel
+//!   already ends the visible session; the helper just reclaims the cached
+//!   process and ensures the container is up.
+
+use std::time::Duration;
 
 use shepherd_host_api::{HostError, HostResult};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::{debug, warn};
+use tokio::time::Instant;
+use tracing::{debug, info, warn};
+
+/// The log line `waydroid session start` prints once Android is fully up.
+pub const READY_MARKER: &str = "Android with user 0 is ready";
+
+/// True if `line` is the session-ready marker.
+pub fn is_ready_line(line: &str) -> bool {
+    line.contains(READY_MARKER)
+}
+
+/// Path to the privileged Waydroid helper. Overridable via
+/// `SHEPHERD_WAYDROID_HELPER` for development installs (mirrors
+/// `SHEPHERD_FIREWALL_HELPER`).
+const DEFAULT_WAYDROID_HELPER_PATH: &str = "/usr/libexec/shepherd-waydroid-helper";
+
+fn waydroid_helper_path() -> String {
+    std::env::var("SHEPHERD_WAYDROID_HELPER")
+        .unwrap_or_else(|_| DEFAULT_WAYDROID_HELPER_PATH.to_string())
+}
 
 /// The Wayland `app_id` waydroid's hwcomposer assigns an app in multi-window
 /// mode: the literal `waydroid.` followed by the Android package name
@@ -35,18 +58,6 @@ pub fn launch_argv(package: &str) -> Vec<String> {
         "waydroid".into(),
         "app".into(),
         "launch".into(),
-        package.into(),
-    ]
-}
-
-/// `argv` to force-stop an Android app. Goes through `waydroid shell`, which
-/// requires root — run via a privileged seam, not directly from shepherdd.
-pub fn force_stop_argv(package: &str) -> Vec<String> {
-    vec![
-        "waydroid".into(),
-        "shell".into(),
-        "am".into(),
-        "force-stop".into(),
         package.into(),
     ]
 }
@@ -95,25 +106,129 @@ pub async fn launch_app(package: &str) -> HostResult<()> {
     Ok(())
 }
 
-/// Best-effort force-stop of an Android app. Requires root; shepherdd is
-/// unprivileged, so this logs and returns `Ok(())` on failure rather than
-/// failing the stop — the authoritative session end is closing the Wayland
-/// window. When a privileged seam (pkexec helper) lands, route this through it.
+/// Best-effort force-stop of an Android app via the privileged helper
+/// (`pkexec shepherd-waydroid-helper force-stop --package <pkg>`). Logs and
+/// returns on failure rather than erroring — the authoritative session end is
+/// closing the Wayland window; this just reclaims the cached Android process
+/// where the helper + polkit rule are installed.
 pub async fn force_stop(package: &str) {
-    let argv = force_stop_argv(package);
-    match Command::new(&argv[0]).args(&argv[1..]).status().await {
-        Ok(status) if status.success() => {
-            debug!(package, "force-stopped Android app");
-        }
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .args(["force-stop", "--package", package])
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!(package, "force-stopped Android app"),
+        Ok(status) => debug!(
+            package,
+            %status,
+            "force-stop helper did not succeed (helper not installed or polkit denied?); window close already ended the session"
+        ),
+        Err(e) => warn!(package, error = %e, "failed to invoke force-stop helper"),
+    }
+}
+
+/// Best-effort: ensure the (root) `waydroid-container` service is up, via the
+/// privileged helper (`pkexec shepherd-waydroid-helper preboot`). On a host
+/// where the service is already enabled at boot this is a no-op; it exists so
+/// preboot can self-heal a stopped container.
+pub async fn preboot_container() {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("preboot")
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!("waydroid-container started (preboot)"),
         Ok(status) => {
-            // Expected when running unprivileged ("Action \"shell\" needs root").
-            debug!(
-                package,
-                %status, "waydroid force-stop did not succeed (likely needs root); window close already ended the session"
-            );
+            debug!(%status, "preboot helper did not succeed (helper not installed or polkit denied?)")
         }
+        Err(e) => warn!(error = %e, "failed to invoke preboot helper"),
+    }
+}
+
+/// Read a persistent Waydroid property (session user), trimmed. `None` on any
+/// failure or empty value.
+pub async fn get_prop(key: &str) -> Option<String> {
+    let out = Command::new("waydroid")
+        .args(["prop", "get", key])
+        .output()
+        .await
+        .ok()?;
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Set a persistent Waydroid property (session user).
+pub async fn set_prop(key: &str, value: &str) -> HostResult<()> {
+    let status = Command::new("waydroid")
+        .args(["prop", "set", key, value])
+        .status()
+        .await
+        .map_err(|e| HostError::Internal(format!("failed to invoke waydroid prop set: {e}")))?;
+    if !status.success() {
+        return Err(HostError::Internal(format!(
+            "waydroid prop set {key} {value} exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// Stop the Waydroid session (session user). Best-effort.
+pub async fn session_stop() {
+    if let Err(e) = Command::new("waydroid")
+        .args(["session", "stop"])
+        .status()
+        .await
+    {
+        warn!(error = %e, "failed to stop waydroid session");
+    }
+}
+
+/// Start the Waydroid session (session user) and wait until it reports
+/// [`READY_MARKER`] on stdout, or `timeout` elapses. The session process keeps
+/// running after this returns (we only read its early output). Returns whether
+/// readiness was observed. If the session is already running, returns `true`
+/// immediately.
+pub async fn start_session_and_wait(timeout: Duration) -> bool {
+    if session_running().await {
+        return true;
+    }
+    let mut child = match Command::new("waydroid")
+        .args(["session", "start"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => {
-            warn!(package, error = %e, "failed to invoke waydroid force-stop");
+            warn!(error = %e, "failed to start waydroid session");
+            return false;
+        }
+    };
+
+    let Some(stdout) = child.stdout.take() else {
+        return session_running().await;
+    };
+    // Detach the child: dropping a tokio `Child` does not kill it (no
+    // kill_on_drop), so the session survives for the lifetime of the host.
+    let deadline = Instant::now() + timeout;
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            warn!("waydroid session did not report ready within timeout");
+            return false;
+        }
+        match tokio::time::timeout(remaining, lines.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                if is_ready_line(&line) {
+                    info!("waydroid session ready");
+                    return true;
+                }
+            }
+            // stdout closed, read error, or our timeout fired.
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => return session_running().await,
         }
     }
 }
@@ -139,17 +254,9 @@ mod tests {
     }
 
     #[test]
-    fn force_stop_argv_uses_am() {
-        assert_eq!(
-            force_stop_argv("org.khanacademy.android.kids"),
-            vec![
-                "waydroid",
-                "shell",
-                "am",
-                "force-stop",
-                "org.khanacademy.android.kids"
-            ]
-        );
+    fn ready_line_detection() {
+        assert!(is_ready_line("[09:02:41] Android with user 0 is ready"));
+        assert!(!is_ready_line("[09:02:41] Starting Android container"));
     }
 
     #[test]

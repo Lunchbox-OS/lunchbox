@@ -4880,6 +4880,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-waydroid-helper"
+version = "0.5.1"
+dependencies = [
+ "shepherd-util",
+]
+
+[[package]]
 name = "shepherd-wire-codegen"
 version = "0.5.1"
 dependencies = [

@@ -324,6 +324,14 @@ struct SteamSession {
     seen_game: bool,
 }
 
+/// Validated `[service.waydroid]` settings, applied at preboot.
+#[derive(Clone, Copy, Debug)]
+struct WaydroidSettings {
+    multi_window: bool,
+    suspend_when_idle: bool,
+    boot_ready_timeout: Duration,
+}
+
 /// Linux host adapter
 pub struct LinuxHost {
     capabilities: HostCapabilities,
@@ -382,6 +390,8 @@ pub struct LinuxHost {
     /// the compositor holding an abandoned lock with no client to release it,
     /// which shows as a blank screen until the session restarts.
     lock_process: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+    /// Validated `[service.waydroid]` settings, set by `configure_waydroid`.
+    waydroid_settings: Arc<Mutex<Option<WaydroidSettings>>>,
 }
 
 /// What the reconciliation sweep needs to decide whether a window on screen is
@@ -516,7 +526,83 @@ impl LinuxHost {
             // Capacity is generous only so a slow watcher lags rather than
             // stalls the subscription; a lagged watcher re-checks anyway.
             window_created_tx: broadcast::channel(64).0,
+            waydroid_settings: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Apply `[service.waydroid]` config. Call before [`preboot_waydroid`].
+    /// Takes primitives (not the config struct) to keep host-linux independent
+    /// of shepherd-config, mirroring [`configure_steam`].
+    pub fn configure_waydroid(
+        &self,
+        multi_window: bool,
+        suspend_when_idle: bool,
+        boot_ready_timeout: Duration,
+    ) {
+        *self.waydroid_settings.lock().unwrap() = Some(WaydroidSettings {
+            multi_window,
+            suspend_when_idle,
+            boot_ready_timeout,
+        });
+    }
+
+    /// Pre-boot Android in the background so the first launch is fast: bring up
+    /// the (root) container via the helper, ensure multi-window mode, start the
+    /// session, and enable idle-suspend. Fire-and-forget, like [`preload_steam`]
+    /// — all steps are best-effort and logged.
+    pub fn preboot_waydroid(&self) {
+        let settings = self
+            .waydroid_settings
+            .lock()
+            .unwrap()
+            .unwrap_or(WaydroidSettings {
+                multi_window: true,
+                suspend_when_idle: true,
+                boot_ready_timeout: Duration::from_secs(60),
+            });
+        tokio::spawn(async move {
+            info!("Pre-booting Waydroid (Android) in the background");
+            // 1. Ensure the root container service is up (no-op if already enabled).
+            waydroid::preboot_container().await;
+
+            // 2. Enforce multi-window before relying on the session. The prop is
+            //    read at session start, so if it isn't already enabled we set it
+            //    and (re)start the session once for it to take effect.
+            let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+            if settings.multi_window {
+                let enabled = waydroid::get_prop("persist.waydroid.multi_windows")
+                    .await
+                    .as_deref()
+                    == Some("true");
+                if !enabled {
+                    if let Err(e) =
+                        waydroid::set_prop("persist.waydroid.multi_windows", "true").await
+                    {
+                        warn!(error = %e, "failed to enable waydroid multi-window mode");
+                    } else if started {
+                        // Restart so the new prop takes effect.
+                        waydroid::session_stop().await;
+                        started =
+                            waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+                    }
+                }
+            }
+
+            // 3. Idle-suspend to keep the warm session cheap.
+            if settings.suspend_when_idle
+                && let Err(e) = waydroid::set_prop("persist.waydroid.suspend", "true").await
+            {
+                debug!(error = %e, "failed to set waydroid idle-suspend");
+            }
+
+            if started {
+                info!("Waydroid pre-boot complete; session warm");
+            } else {
+                warn!(
+                    "Waydroid pre-boot did not reach a ready session; Android launches may fail until it does"
+                );
+            }
+        });
     }
 
     /// Give the host somewhere to report administrator-facing conditions.

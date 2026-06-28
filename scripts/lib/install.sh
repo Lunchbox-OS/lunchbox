@@ -64,6 +64,13 @@ FIREWALL_POLICY_NAME="org.shepherd.firewall.policy"
 FIREWALL_RULES_NAME="50-shepherd-firewall.rules"
 FIREWALL_GROUP="shepherd-firewall"
 
+# Waydroid (Android activity kind) helper paths -- same rationale as the
+# firewall helper: a fixed system path referenced by the polkit policy.
+WAYDROID_HELPER_PATH="/usr/libexec/shepherd-waydroid-helper"
+WAYDROID_POLICY_NAME="org.shepherd.waydroid.policy"
+WAYDROID_RULES_NAME="50-shepherd-waydroid.rules"
+WAYDROID_GROUP="shepherd-waydroid"
+
 # State custodian (issue #157). Like the firewall helper, the binary lives at a
 # fixed path regardless of --prefix, because a systemd unit references it
 # absolutely and units are not relocatable. It is not a command an operator
@@ -786,6 +793,79 @@ install_firewall() {
     fi
 
     success "Firewall helper installed"
+}
+
+# Install the Waydroid (Android activity kind) helper and its polkit assets.
+#
+# Args:
+#   $1 -- target user to add to the shepherd-waydroid group (optional;
+#         skipped when DESTDIR is set so packaging doesn't mutate hosts)
+#   $2 -- "true" for release binary, "false" for debug (default: true)
+install_waydroid() {
+    local user="${1:-}"
+    local release="${2:-true}"
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    require_root
+
+    local helper_src
+    helper_src="$(get_target_dir "$release")/shepherd-waydroid-helper"
+    local helper_dst="$destdir$WAYDROID_HELPER_PATH"
+    local policy_src="$repo_root/dist/polkit/$WAYDROID_POLICY_NAME"
+    local policy_dst="$destdir$POLKIT_ACTIONS_DIR/$WAYDROID_POLICY_NAME"
+    local rules_src="$repo_root/dist/polkit/$WAYDROID_RULES_NAME"
+    local rules_dst="$destdir$POLKIT_RULES_DIR/$WAYDROID_RULES_NAME"
+
+    if [[ ! -x "$helper_src" ]]; then
+        if [[ "$release" == "true" ]]; then
+            die "shepherd-waydroid-helper not found at $helper_src; run 'shepherd build --release' first"
+        else
+            die "shepherd-waydroid-helper not found at $helper_src; run 'cargo build --bin shepherd-waydroid-helper' first"
+        fi
+    fi
+    if [[ ! -f "$policy_src" || ! -f "$rules_src" ]]; then
+        die "Polkit assets missing at $repo_root/dist/polkit/"
+    fi
+
+    info "Installing waydroid helper to $helper_dst..."
+    ensure_dir "$(dirname "$helper_dst")" 0755
+    install -m 0755 -o root -g root "$helper_src" "$helper_dst"
+
+    info "Installing polkit policy to $policy_dst..."
+    ensure_dir "$(dirname "$policy_dst")" 0755
+    install -m 0644 -o root -g root "$policy_src" "$policy_dst"
+
+    info "Installing polkit rule to $rules_dst..."
+    ensure_dir "$(dirname "$rules_dst")" 0755
+    install -m 0644 -o root -g root "$rules_src" "$rules_dst"
+
+    # Group + user membership + polkit reload only on a real (non-packaging)
+    # install (see install_firewall for the DESTDIR rationale).
+    if [[ -z "$destdir" ]]; then
+        if ! getent group "$WAYDROID_GROUP" >/dev/null; then
+            info "Creating system group: $WAYDROID_GROUP"
+            groupadd --system "$WAYDROID_GROUP"
+        fi
+        if [[ -n "$user" ]]; then
+            if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "$WAYDROID_GROUP"; then
+                info "$user is already a member of $WAYDROID_GROUP"
+            else
+                info "Adding $user to $WAYDROID_GROUP"
+                usermod -aG "$WAYDROID_GROUP" "$user"
+                warn "$user must log out and back in for the new group membership to take effect."
+            fi
+        fi
+        if systemctl is-active --quiet polkit 2>/dev/null; then
+            info "Reloading polkit so the new rule takes effect"
+            systemctl reload polkit 2>/dev/null \
+                || systemctl restart polkit 2>/dev/null \
+                || warn "Could not reload polkit; restart it manually for the rule to apply"
+        fi
+    fi
+
+    success "Waydroid helper installed"
 }
 
 # Give one user a custodian: the directory, their migrated state, and the socket.
@@ -1907,6 +1987,9 @@ install_main() {
         firewall)
             install_firewall "$user" "$release"
             ;;
+        waydroid)
+            install_waydroid "$user" "$release"
+            ;;
         state)
             install_state "$user" "$release"
             ;;
@@ -1938,6 +2021,8 @@ Usage: shepherd install <command> [OPTIONS]
 Commands:
     bins              Install release binaries
     firewall          Install the privileged firewall helper + polkit rule
+    waydroid          Install the privileged Waydroid helper + polkit rule
+                      (for Android activities; requires Waydroid on the host)
     state             Install the state custodian: its binary, systemd units
                       and system user (issue #157)
     policy            Push a policy to the custodian, making it the one

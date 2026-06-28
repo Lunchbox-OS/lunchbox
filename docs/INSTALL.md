@@ -937,6 +937,33 @@ is **not** required. If the daemon can't read `/dev/input` the gate fails open
 — gated activities stay visible and a warning is logged — so a missing group
 never silently hides content.
 
+## Android activities via Waydroid (optional)
+
+Activities of `type = "android"` (see `config.example.toml`) launch Android apps
+inside [Waydroid](https://waydro.id/). Install and initialize Waydroid on the
+host first (it provides the `waydroid` CLI and the `waydroid-container`
+service), then enable multi-window mode so each app gets its own window:
+
+```sh
+waydroid prop set persist.waydroid.multi_windows true
+```
+
+shepherdd runs unprivileged, so two Waydroid operations (force-stopping an app
+and starting the root container service for preboot) go through a small
+privileged helper invoked via pkexec. Install it and join the
+`shepherd-waydroid` group:
+
+```sh
+sudo ./scripts/shepherd install waydroid --user kiosk
+```
+
+This installs `/usr/libexec/shepherd-waydroid-helper`, its polkit policy and
+rule, and adds the user to the `shepherd-waydroid` group. The group change takes
+effect on the user's next login. Without the helper, Android apps still launch
+and stop (by closing the window); the helper only adds reliable process
+reclamation and container preboot. Tune preboot via `[service.waydroid]` in the
+config.
+
 ## Kiosk hardening
 
 Intended for devices used by children rather than developer machines — but on

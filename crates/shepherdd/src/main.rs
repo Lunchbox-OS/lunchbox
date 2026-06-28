@@ -1052,6 +1052,13 @@ impl Service {
             engine.policy().service.steam.launch_timeout,
         );
 
+        // Apply `[service.waydroid]` config before any preboot.
+        host.configure_waydroid(
+            engine.policy().service.waydroid.multi_window,
+            engine.policy().service.waydroid.suspend_when_idle,
+            engine.policy().service.waydroid.boot_ready_timeout,
+        );
+
         // Initialize internet connectivity monitor (if configured)
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
@@ -1489,6 +1496,26 @@ impl Service {
             // it to ready (see HostEvent::KindReadinessChanged).
             self.engine.set_kind_readiness(EntryKindTag::Steam, false);
             self.host.preload_steam();
+        }
+
+        // Pre-boot Android if configured. Default: preboot iff any Android
+        // entry exists; `[service.waydroid] preboot` overrides either way.
+        let has_android = self
+            .engine
+            .policy()
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Android { .. }));
+        let should_preboot = self
+            .engine
+            .policy()
+            .service
+            .waydroid
+            .preboot
+            .unwrap_or(has_android);
+        if should_preboot {
+            info!("Pre-booting Android (Waydroid) in background");
+            self.host.preboot_waydroid();
         }
 
         // Get channels
