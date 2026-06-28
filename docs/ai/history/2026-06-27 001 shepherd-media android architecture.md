@@ -229,12 +229,19 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   loading goes through a cheap-to-clone `PosterCache` handed to each worker
   thread; local posters are read straight from disk. 15 crate tests; cross-
   compiles and APK builds.
+- **Step 6 — on-disk video cache: done.** A per-library `VideoCache` makes the
+  cache-mode and size-cap settings functional: playback prefers a cached local
+  copy of a `direct-http` source, and with a non-`Off` mode the finished item is
+  downloaded on a worker afterward, with LRU eviction (by mtime) to the cap.
+  Only `direct-http` is cached (`file://` is already local; YouTube needs
+  yt-dlp). 20 crate tests (eviction/LRU/path covered); cross-compiles and APK
+  builds. `QueueAll`'s eager at-launch prefetch is still TODO (both non-`Off`
+  modes currently cache-after-play).
 - Remaining: on-device playback verification (needs hardware — the jdtech AAR
   ships no x86_64 libmpv, so an x86_64 emulator can't load it, and an arm64
-  emulator on an x86 host has no KVM acceleration); on-disk *video* caching with
-  the per-library size cap and cache mode; YouTube resolution via
-  youtubedl-android; per-library quality applied to mpv; and the SAF /
-  connectivity / storage-path JNI bridges.
+  emulator on an x86 host has no KVM acceleration); YouTube resolution via
+  youtubedl-android; per-library quality applied to mpv; `QueueAll` prefetch;
+  and the SAF / connectivity / storage-path JNI bridges.
 
 ## Key source references
 

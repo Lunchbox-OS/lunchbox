@@ -15,6 +15,7 @@ pub mod player;
 pub mod posters;
 pub mod resolve;
 pub mod ui;
+pub mod video_cache;
 
 pub use player::StubPlayer;
 pub use ui::MediaApp;

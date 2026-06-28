@@ -22,6 +22,8 @@ thiserror = { workspace = true }
 # Synchronous HTTP with rustls (no OpenSSL), matching the Linux binary's choice
 # so it cross-compiles cleanly for Android. Used off the UI thread.
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
+# LRU bookkeeping for the video cache via file mtimes (as the Linux binary does).
+filetime = "0.2"
 
 # eframe/egui are cross-platform: the same MediaApp renders on the host (for the
 # desktop preview example) and on Android (via the native-activity backend).

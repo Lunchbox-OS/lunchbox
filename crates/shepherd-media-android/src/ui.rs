@@ -18,15 +18,20 @@ use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
 use shepherd_media_core::{
-    ItemKind, Library, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef, resolve_source,
+    ClassifiedUri, ItemKind, Library, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef, Source,
+    resolve_source,
 };
 
 use crate::playback::PlaybackView;
 use crate::resolve::{ResolveError, resolve};
+use crate::video_cache::VideoCache;
 
-/// The item currently playing (its id and display title for the overlay).
+/// The item currently playing.
 struct PlayingItem {
     title: String,
+    /// For a cacheable (direct-http) source whose library has caching enabled:
+    /// the URL and the cache to download it into after playback finishes.
+    cache: Option<(String, VideoCache)>,
 }
 
 /// Construct the playback backend for this platform: libmpv on Android, a no-op
@@ -662,33 +667,73 @@ impl MediaApp {
         next
     }
 
-    /// Resolve the platform source for `item_id` in the loaded library and hand
-    /// it to the player. Sets the playing item on success.
+    /// Resolve the platform source for `item_id` in the loaded library, prefer a
+    /// cached local copy, and hand it to the player. Sets the playing item on
+    /// success.
     fn start_playback(&mut self, item_id: &str) {
-        let Some(GridView {
-            state: GridState::Loaded(lib),
-            ..
-        }) = self.grid.as_ref()
-        else {
+        // Phase 1: gather what we need under shared borrows of self (grid +
+        // settings), recording any status message to apply afterwards.
+        let mut deferred_status: Option<String> = None;
+        let prepared = (|| {
+            let g = self.grid.as_ref()?;
+            let GridState::Loaded(lib) = &g.state else {
+                return None;
+            };
+            let item = lib.items.iter().find(|it| it.id == item_id)?;
+            let info = PlatformInfo::current();
+            let source = match resolve_source(item, &info) {
+                Some(s) => s.clone(),
+                None => {
+                    deferred_status =
+                        Some(format!("No source for `{}` on this platform.", item.title));
+                    return None;
+                }
+            };
+            let caching = self
+                .settings
+                .get(&g.library_id)
+                .map(|e| e.caching.clone())
+                .unwrap_or_default();
+            Some((g.library_id.clone(), item.title.clone(), source, caching))
+        })();
+        if let Some(s) = deferred_status {
+            self.status = Some(s);
+        }
+        let Some((library_id, title, source, caching)) = prepared else {
             return;
         };
-        let Some(item) = lib.items.iter().find(|it| it.id == item_id) else {
-            return;
-        };
-        let info = PlatformInfo::current();
-        let Some(source) = resolve_source(item, &info) else {
-            self.status = Some(format!("No source for `{}` on this platform.", item.title));
-            return;
-        };
-        let title = item.title.clone();
-        let source = source.clone();
+
+        // Phase 2: consult the video cache and start playback.
+        let mut play_source = source.clone();
+        let mut playing_cache = None;
+        if let ClassifiedUri::DirectHttp(url) = &source.uri {
+            let url = url.to_string();
+            let cache = VideoCache::new(
+                self.cache_dir.join("videos").join(&library_id),
+                caching.max_bytes,
+            );
+            if let Some(path) = cache.cached_path(&url) {
+                play_source = Source {
+                    platforms: source.platforms.clone(),
+                    uri: ClassifiedUri::Local(path),
+                    player_hint: source.player_hint,
+                };
+            }
+            if caching.mode != CacheMode::Off {
+                playing_cache = Some((url, cache));
+            }
+        }
+
         match self.player.as_mut() {
-            Some(p) => match p.play(&source) {
+            Some(p) => match p.play(&play_source) {
                 Ok(()) => {
                     if let Some(pv) = self.playback.as_mut() {
                         pv.note_started();
                     }
-                    self.playing = Some(PlayingItem { title });
+                    self.playing = Some(PlayingItem {
+                        title,
+                        cache: playing_cache,
+                    });
                 }
                 Err(e) => self.status = Some(format!("Playback failed: {e}")),
             },
@@ -716,7 +761,17 @@ impl MediaApp {
             if let Some(p) = self.player.as_mut() {
                 let _ = p.stop();
             }
-            self.playing = None;
+            // Download-after-play: cache the just-finished item so the next play
+            // is local. Runs on a worker (download + LRU eviction are blocking).
+            if let Some(item) = self.playing.take()
+                && let Some((url, cache)) = item.cache
+            {
+                std::thread::spawn(move || {
+                    if let Err(e) = cache.store(&url) {
+                        log::warn!("video cache store failed: {e}");
+                    }
+                });
+            }
             return;
         }
 

@@ -34,13 +34,16 @@ the full design and roadmap.
   + ffmpeg are vendored under [`vendor/libmpv/`](./vendor/libmpv) and packaged
   into the APK. **Caveat:** the build, link, and packaging are verified, but
   on-device video rendering has not been run on hardware yet.
+- Video caching: with a non-`Off` cache mode, a finished direct-HTTP item is
+  downloaded to the per-library cache so the next play is local, with LRU
+  eviction to the per-library size cap. Playback prefers a cached local copy.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
 ## Not yet wired (next steps)
 
-- On-disk *video* caching honoring the per-library size cap and cache mode
-  (poster caching is done; video download/eviction is not).
+- `QueueAll`'s eager prefetch-at-launch (currently both non-`Off` modes cache
+  after play; the size cap and LRU eviction are shared).
 - YouTube resolution via youtubedl-android.
 - JNI bridges for the SAF file picker, connectivity policy, and storage paths.
 - Per-library quality applied to the libmpv `ytdl-format` (currently a single
