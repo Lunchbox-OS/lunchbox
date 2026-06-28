@@ -33,6 +33,12 @@ eframe = { version = "0.34", default-features = false, features = [
     "android-native-activity",
 ] }
 egui = "0.34"
+# Decode poster bytes into egui textures (formats match the Linux binary).
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
 
 # Android-only glue. Target-gated so the host build (and workspace CI) never
 # pulls the NDK-linked crates.

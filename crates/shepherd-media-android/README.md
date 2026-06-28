@@ -23,13 +23,17 @@ the full design and roadmap.
   `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
   and the grid lists the real items. `content://` SAF and YouTube sources report
   a typed "unsupported yet" error.
+- Poster thumbnails in the grid: loaded and decoded (JPEG/PNG/WebP) on worker
+  threads and uploaded as egui textures, honoring `PosterPolicy` (`Never` skips;
+  `WifiOnly` currently behaves like `Always` pending the connectivity bridge).
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
 ## Not yet wired (next steps)
 
 - libmpv-backed `PlayerHandle` and embedded playback (today a `StubPlayer`).
-- Poster images in the grid (fetch + cache, honoring `PosterPolicy`).
+- On-disk poster/video caching honoring the per-library size cap (posters are
+  currently fetched per session, not persisted).
 - YouTube resolution via youtubedl-android.
 - JNI bridges for the SAF file picker, connectivity policy, and storage paths.
 

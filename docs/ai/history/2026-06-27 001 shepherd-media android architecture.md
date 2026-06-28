@@ -203,12 +203,16 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   on a worker thread (Android forbids network on the UI thread), and the grid
   screen polls the result and lists the real items with a loading/error state.
   `content://` SAF and YouTube sources return a typed `Unsupported` error
-  pending their bridges. 9 crate tests; the resolver (incl. rustls/ring)
-  cross-compiles for `aarch64-linux-android` and the APK still builds.
+  pending their bridges. The grid also loads **poster thumbnails** off worker
+  threads (JPEG/PNG/WebP via the `image` crate, uploaded as egui textures,
+  honoring `PosterPolicy`). 13 crate tests; the whole thing (incl. rustls/ring
+  and the image decoders) cross-compiles for `aarch64-linux-android` and the APK
+  still builds.
 - Remaining: libmpv-backed `PlayerHandle` + embedded playback (the long pole —
-  needs a prebuilt Android `libmpv.so` from an mpv/ffmpeg cross-compile); poster
-  image fetching/caching in the grid; YouTube resolution via youtubedl-android;
-  and the SAF / connectivity / storage-path JNI bridges.
+  needs a prebuilt Android `libmpv.so` from an mpv/ffmpeg cross-compile);
+  on-disk poster/video caching honoring the per-library size cap; YouTube
+  resolution via youtubedl-android; and the SAF / connectivity / storage-path
+  JNI bridges.
 
 ## Key source references
 

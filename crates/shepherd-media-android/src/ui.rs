@@ -8,15 +8,26 @@
 //! `shepherd_media_app::AppSettings`; the app diffs the settings each frame and
 //! persists to disk when they change.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
-use shepherd_media_core::{ItemKind, Library};
+use shepherd_media_core::{ItemKind, Library, PosterRef};
 
 use crate::resolve::{ResolveError, resolve};
+
+/// A decoded poster delivered from a worker thread to the UI thread.
+type PosterMsg = (String, Option<egui::ColorImage>);
+
+/// Per-item poster state in the grid.
+enum PosterSlot {
+    Pending,
+    Ready(egui::TextureHandle),
+    Unavailable,
+}
 
 /// Which screen is currently shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +129,11 @@ pub struct MediaApp {
     /// Cached resolution for the browse grid (also acts as a 1-entry cache so
     /// re-opening the same library doesn't re-resolve).
     grid: Option<GridView>,
+    /// Poster textures by item id, plus the channel workers deliver decoded
+    /// posters on.
+    posters: HashMap<String, PosterSlot>,
+    poster_tx: Sender<PosterMsg>,
+    poster_rx: Receiver<PosterMsg>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
 }
@@ -134,12 +150,16 @@ impl MediaApp {
                 Some(format!("Failed to load settings: {e}")),
             ),
         };
+        let (poster_tx, poster_rx) = std::sync::mpsc::channel();
         Self {
             settings_path,
             settings,
             screen: Screen::Switcher,
             form: NewLibraryForm::default(),
             grid: None,
+            posters: HashMap::new(),
+            poster_tx,
+            poster_rx,
             status,
         }
     }
@@ -429,9 +449,69 @@ impl MediaApp {
         }
     }
 
+    /// Upload any posters that workers have finished decoding.
+    fn poll_posters(&mut self, ctx: &egui::Context) {
+        while let Ok((id, image)) = self.poster_rx.try_recv() {
+            let slot = match image {
+                Some(img) => {
+                    let tex = ctx.load_texture(id.as_str(), img, egui::TextureOptions::LINEAR);
+                    PosterSlot::Ready(tex)
+                }
+                None => PosterSlot::Unavailable,
+            };
+            self.posters.insert(id, slot);
+        }
+    }
+
+    /// Kick off poster loads for items in the loaded library that don't have a
+    /// slot yet, honoring the library's poster policy.
+    fn prefetch_posters(&mut self, ui: &egui::Ui, library_id: &str) {
+        let load = self
+            .settings
+            .get(library_id)
+            .map(|e| crate::posters::should_load(e.caching.posters))
+            .unwrap_or(false);
+
+        let pending: Vec<(String, Option<PosterRef>)> = if let Some(GridView {
+            state: GridState::Loaded(lib),
+            ..
+        }) = &self.grid
+        {
+            lib.items
+                .iter()
+                .filter(|it| !self.posters.contains_key(&it.id))
+                .map(|it| (it.id.clone(), it.poster.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        for (id, poster) in pending {
+            match poster {
+                Some(poster) if load => {
+                    self.posters.insert(id.clone(), PosterSlot::Pending);
+                    let tx = self.poster_tx.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let img = crate::posters::load_and_decode(&poster);
+                        let _ = tx.send((id, img));
+                        ctx.request_repaint();
+                    });
+                }
+                // No poster, or policy says don't load: mark resolved so we
+                // fall back to the kind glyph and don't reconsider it.
+                _ => {
+                    self.posters.insert(id, PosterSlot::Unavailable);
+                }
+            }
+        }
+    }
+
     fn grid_screen(&mut self, ui: &mut egui::Ui, library_id: &str) -> Option<Screen> {
         self.ensure_grid_loading(ui, library_id);
         self.poll_grid();
+        self.poll_posters(ui.ctx());
+        self.prefetch_posters(ui, library_id);
 
         let mut next = None;
         ui.horizontal(|ui| {
@@ -464,16 +544,36 @@ impl MediaApp {
             Some(GridState::Loaded(lib)) => {
                 ui.label(format!("{} item(s)", lib.items.len()));
                 ui.add_space(8.0);
+                let posters = &self.posters;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for item in &lib.items {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(item_kind_glyph(item.kind));
-                                ui.strong(&item.title);
+                                match posters.get(&item.id) {
+                                    Some(PosterSlot::Ready(tex)) => {
+                                        let sized = egui::load::SizedTexture::from_handle(tex);
+                                        ui.add(
+                                            egui::Image::new(sized)
+                                                .fit_to_exact_size(egui::vec2(120.0, 68.0)),
+                                        );
+                                    }
+                                    Some(PosterSlot::Pending) => {
+                                        ui.add_sized([120.0, 68.0], egui::Spinner::new());
+                                    }
+                                    _ => {
+                                        ui.add_sized(
+                                            [120.0, 68.0],
+                                            egui::Label::new(item_kind_glyph(item.kind)),
+                                        );
+                                    }
+                                }
+                                ui.vertical(|ui| {
+                                    ui.strong(&item.title);
+                                    if let Some(category) = &item.category {
+                                        ui.label(format!("Category: {category}"));
+                                    }
+                                });
                             });
-                            if let Some(category) = &item.category {
-                                ui.label(format!("Category: {category}"));
-                            }
                         });
                     }
                 });
