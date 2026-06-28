@@ -152,6 +152,28 @@ then re-test — the app side is ready. Also noted: libmpv logs
 via a fallback AO); registering the JVM with libav (`av_jni_set_java_vm`) would
 silence it and is worth doing for the audiotrack AO.
 
+### Version-bump attempt (tried, did not pan out)
+
+Per the follow-up, I tried bumping yt-dlp to get video formats:
+
+1. **No newer AAR exists.** `io.github.junkfood02.youtubedl-android:library` is
+   already at the latest published release (`0.18.1`; Maven Central's newest), so
+   a static dependency bump is a no-op.
+2. **Runtime update fails.** The only lever is updating the bundled yt-dlp at
+   runtime via `YoutubeDL.updateYoutubeDL(context, UpdateChannel._NIGHTLY)`.
+   Wired it over JNI (one-time, on first launch) and ran it on device: it throws
+   `java.lang.ExceptionInInitializerError` from inside youtubedl-android's own
+   updater (a static-initializer failure in the library, independent of our
+   code), so the binary is never replaced.
+
+Conclusion: the version bump can't be done from the app with this AAR. Getting
+YouTube *video* needs an upstream move — a newer/forked youtubedl-android (or a
+self-managed yt-dlp binary + Python) **plus** a PO-token provider. The
+experiment (runtime-update over JNI) was reverted; it doesn't work and would add
+a blocking network download on first launch. The committed app-side plumbing
+(separate A/V streams, H.264 preference, crash-safety) remains the correct
+foundation for when a video format becomes obtainable.
+
 ## Net status of the README "What works / caveats"
 
 - "on-device video rendering has not been run on hardware yet" → **verified
