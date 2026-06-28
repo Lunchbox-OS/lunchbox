@@ -90,16 +90,39 @@ class ShepherdConnection private constructor(
                 // (re)connection, dropping any partial frame from before.
                 peripheral.observe(responseChar) { responseAssembler.reset() }
                     .collect { bytes ->
-                        responseAssembler.push(bytes).forEach(::dispatchResponse)
+                        runCatching { responseAssembler.push(bytes) }
+                            .onSuccess { it.forEach(::dispatchResponse) }
+                            .onFailure(::handleFramingFailure)
                     }
             },
             scope.launch {
                 peripheral.observe(eventsChar) { eventsAssembler.reset() }
                     .collect { bytes ->
-                        eventsAssembler.push(bytes).forEach(::dispatchEvent)
+                        runCatching { eventsAssembler.push(bytes) }
+                            .onSuccess { it.forEach(::dispatchEvent) }
+                            .onFailure(::handleFramingFailure)
                     }
             },
         )
+    }
+
+    /**
+     * A framing-level error means the stream is desynchronised
+     * (corrupt length prefix or a server frame larger than [Protocol.MAX_FRAME_BYTES]).
+     * Disconnect so the [ShepherdViewModel] reconnect loop can rebuild
+     * a clean session — far better than letting the exception propagate
+     * out of the collector and crash the main thread.
+     */
+    private fun handleFramingFailure(error: Throwable) {
+        if (error is FramingException) {
+            // Force a fresh connection; collectors restart on the
+            // next observe(). Any in-flight RPCs time out and the
+            // ViewModel surfaces it through its normal error path.
+            scope.launch { runCatching { peripheral.disconnect() } }
+        } else {
+            // Unexpected — rethrow so it's reported instead of swallowed.
+            throw error
+        }
     }
 
     /** Connect, discover services, negotiate MTU. */

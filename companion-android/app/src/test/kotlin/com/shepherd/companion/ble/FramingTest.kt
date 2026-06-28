@@ -62,9 +62,14 @@ class FramingTest {
 
     @Test
     fun `oversize length prefix is rejected`() {
-        // Declare 0xFFFF bytes but provide none — exceeds the 16 KiB cap.
+        // Declare more bytes than the configured cap. We instantiate a
+        // FrameAssembler with a deliberately tight cap so the test
+        // doesn't have to allocate the full Protocol.MAX_FRAME_BYTES
+        // (64 KiB) just to assert this guard.
         val bogus = byteArrayOf(0xFF.toByte(), 0xFF.toByte())
-        assertThrows(FramingException::class.java) { FrameAssembler().push(bogus) }
+        assertThrows(FramingException::class.java) {
+            FrameAssembler(maxFrameBytes = 1024).push(bogus)
+        }
     }
 
     @Test

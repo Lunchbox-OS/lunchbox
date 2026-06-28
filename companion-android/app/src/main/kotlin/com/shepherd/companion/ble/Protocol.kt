@@ -21,8 +21,20 @@ object Protocol {
     /** Protocol version the app speaks. The device rejects mismatches. */
     const val PROTOCOL_VERSION: Int = 1
 
-    /** Server-side per-frame cap. The app never approaches it. */
-    const val MAX_FRAME_BYTES: Int = 16 * 1024
+    /**
+     * Maximum logical-frame size the app will accept from a notification
+     * stream. Matches the protocol's hard `u16` length-prefix ceiling
+     * (65_535 bytes).
+     *
+     * This is *not* the same as the device's `MAX_FRAME_BYTES` on the
+     * Request characteristic (which is a 16 KiB guard against a buggy /
+     * malicious client claiming a huge incoming write). For Response /
+     * Events the bound is what the *server* can legitimately push — and
+     * a `state_changed` snapshot with a dozen-plus configured entries
+     * comfortably exceeds 16 KiB. The protocol itself cannot exceed
+     * 64 KiB per frame because of the length prefix's width.
+     */
+    const val MAX_FRAME_BYTES: Int = 0xFFFF
 
     /** MTU we request right after service discovery. */
     const val DESIRED_MTU: Int = 517
