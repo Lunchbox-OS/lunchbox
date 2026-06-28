@@ -193,14 +193,20 @@ async fn watch_once(
                     tokio::time::sleep(SUSPEND_COVER_GRACE).await;
                     drop(inhibitor.take());
                 } else {
-                    // Resumed: announce it, ask the service for a fresh state
-                    // snapshot (so clients drop the cover with current content),
-                    // nudge the internet monitor, and re-arm the inhibitor.
+                    // Resumed: announce it, then trigger a fresh StateChanged so
+                    // clients drop their suspend cover/placeholders with current
+                    // content. When an internet monitor is configured, let its
+                    // resume re-check broadcast that StateChanged so connectivity
+                    // is freshly probed (not the stale pre-suspend value the HUD
+                    // would otherwise show). Otherwise ask the main loop to
+                    // broadcast the snapshot directly. Finally re-arm the
+                    // inhibitor for the next sleep.
                     debug!("Resumed from sleep; broadcasting SystemResumed");
                     broadcast(Event::new(EventPayload::SystemResumed));
-                    let _ = resume_tx.send(());
                     if let Some(tx) = recheck_tx {
                         let _ = tx.send(RecheckTrigger::ResumedFromSleep);
+                    } else {
+                        let _ = resume_tx.send(());
                     }
                     if inhibitor.is_none() {
                         inhibitor = acquire_sleep_inhibitor(&logind).await;

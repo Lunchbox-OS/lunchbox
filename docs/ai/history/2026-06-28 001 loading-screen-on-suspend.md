@@ -167,6 +167,46 @@ event handler.
 - HUD: unchanged. Its `EventPayload` match already has a `_ => {}` arm, so the
   new variants are ignored there for now.
 
+## Follow-up: HUD suspend placeholders
+
+The launcher cover hides the home screen, but the HUD bar stays visible during
+a session and would otherwise freeze showing a stale clock, battery %, and
+network status across the suspend/resume gap. So the HUD now shows placeholders
+in the suspend state too, mirroring the launcher's model (placeholder on
+`SystemSuspending`, clear on the fresh `StateChanged`).
+
+- `shepherd-hud/src/state.rs`: added a `suspended` watch flag.
+  `SystemSuspending` sets it; `SystemResumed` is a no-op (placeholders stay up);
+  `StateChanged` clears it. `is_suspended()` exposes it to the render timer.
+- `shepherd-hud/src/app.rs`: the 500 ms render timer, when suspended, draws
+  `--:--` for the clock, `battery-missing-symbolic` + `--%` for battery, and a
+  neutral `content-loading-symbolic` "Checking connectivity…" placeholder for
+  the network indicator (instead of the live values). Volume/brightness are
+  left alone — they don't change while suspended.
+
+### Making the post-resume network status fresh, not just non-stale
+
+Clearing the HUD placeholder on `StateChanged` is only safe if that snapshot's
+connectivity is actually fresh. shepherdd's immediate resume `StateChanged`
+carried the *pre-suspend* internet status (the re-check runs asynchronously),
+and `InternetStatusChanged` only fires on a *change* — so it can't be relied on
+to clear the placeholder. Fixed by:
+
+- `shepherdd/src/internet.rs`: after a re-check triggered by a system event
+  (resume / network change), broadcast a fresh full `StateChanged` snapshot —
+  not just the per-target `InternetStatusChanged` on change.
+- `shepherdd/src/system_events.rs`: on resume, when an internet monitor exists,
+  drive the post-resume `StateChanged` from that re-check (send
+  `RecheckTrigger::ResumedFromSleep`) instead of the immediate stale snapshot;
+  with no monitor, fall back to the immediate `resume_tx` broadcast (no checks
+  configured → nothing to be stale about).
+
+Trade-off: when internet checks are configured, the launcher cover and HUD
+placeholders now persist until the resume re-check completes (bounded by the
+check timeout, default 1.5 s) rather than clearing on an immediate-but-stale
+snapshot. That is intentional — it guarantees the first non-placeholder frame
+shows real connectivity.
+
 ## Verification (done)
 
 - `cargo build --workspace`, `cargo clippy -p shepherd-api -p shepherdd
