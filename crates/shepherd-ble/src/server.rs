@@ -513,25 +513,39 @@ fn response_characteristic(response_tx: broadcast::Sender<Vec<u8>>) -> Character
                     let mut rx = response_tx.subscribe();
                     let chunk_size = negotiated_chunk_size(&notifier);
                     loop {
-                        match rx.recv().await {
-                            Ok(payload) => {
-                                info!(
-                                    payload_len = payload.len(),
-                                    chunk_size, "BLE Response notify sending payload"
-                                );
-                                if !send_chunks(&mut notifier, &payload, chunk_size).await {
+                        // Race rx.recv() against the notifier's stopped
+                        // future so we exit the loop the moment the
+                        // peer drops its subscription (link disconnect,
+                        // CCCD-disable). Without this, the loop keeps
+                        // consuming responses and sending them into a
+                        // dead notifier — every later reconnect from
+                        // the same peer ends up with no working
+                        // Response path.
+                        tokio::select! {
+                            _ = notifier.stopped() => {
+                                info!("BLE Response notify session ended");
+                                return;
+                            }
+                            recv = rx.recv() => match recv {
+                                Ok(payload) => {
+                                    info!(
+                                        payload_len = payload.len(),
+                                        chunk_size, "BLE Response notify sending payload"
+                                    );
+                                    if !send_chunks(&mut notifier, &payload, chunk_size).await {
+                                        return;
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(
+                                        skipped = n,
+                                        "BLE Response subscriber lagged; some responses dropped"
+                                    );
+                                }
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    debug!("Response broadcast closed");
                                     return;
                                 }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(
-                                    skipped = n,
-                                    "BLE Response subscriber lagged; some responses dropped"
-                                );
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                debug!("Response broadcast closed");
-                                return;
                             }
                         }
                     }
@@ -578,21 +592,30 @@ fn events_characteristic(svc: Arc<dyn ManagementService>) -> Characteristic {
                     }
 
                     loop {
-                        match rx.recv().await {
-                            Ok(event) => match serde_json::to_vec(&event) {
-                                Ok(payload) => {
-                                    if !send_chunks(&mut notifier, &payload, chunk_size).await {
-                                        return;
-                                    }
-                                }
-                                Err(e) => warn!(error = %e, "Failed to serialize Event"),
-                            },
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(skipped = n, "BLE Events subscriber lagged");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                debug!("Event broadcast channel closed");
+                        // Same stopped()-race rationale as response_characteristic:
+                        // exit promptly on peer disconnect so we don't pin a
+                        // broadcast subscriber across BLE sessions.
+                        tokio::select! {
+                            _ = notifier.stopped() => {
+                                info!("BLE Events notify session ended");
                                 return;
+                            }
+                            recv = rx.recv() => match recv {
+                                Ok(event) => match serde_json::to_vec(&event) {
+                                    Ok(payload) => {
+                                        if !send_chunks(&mut notifier, &payload, chunk_size).await {
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => warn!(error = %e, "Failed to serialize Event"),
+                                },
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(skipped = n, "BLE Events subscriber lagged");
+                                }
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    debug!("Event broadcast channel closed");
+                                    return;
+                                }
                             }
                         }
                     }
