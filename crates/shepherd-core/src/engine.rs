@@ -1389,6 +1389,7 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
