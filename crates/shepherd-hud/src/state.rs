@@ -93,6 +93,13 @@ pub struct SharedState {
     /// indicator. Order matches the order in `ServiceStateSnapshot`.
     internet_tx: Arc<watch::Sender<Vec<InternetStatusView>>>,
     internet_rx: watch::Receiver<Vec<InternetStatusView>>,
+    /// True while the system is suspending / awaiting fresh state on resume.
+    /// The HUD shows placeholders for time, battery, and network in this
+    /// state so the frame frozen across the suspend/resume gap is never a
+    /// stale status (issue #73). Cleared by the fresh `StateChanged` that
+    /// shepherdd broadcasts after the post-resume connectivity re-check.
+    suspended_tx: Arc<watch::Sender<bool>>,
+    suspended_rx: watch::Receiver<bool>,
 }
 
 impl SharedState {
@@ -102,6 +109,7 @@ impl SharedState {
         let (brightness_tx, brightness_rx) = watch::channel(None);
         let (scale_tx, scale_rx) = watch::channel(1.0_f64);
         let (internet_tx, internet_rx) = watch::channel(Vec::new());
+        let (suspended_tx, suspended_rx) = watch::channel(false);
 
         Self {
             session_tx: Arc::new(session_tx),
@@ -114,7 +122,20 @@ impl SharedState {
             scale_rx,
             internet_tx: Arc::new(internet_tx),
             internet_rx,
+            suspended_tx: Arc::new(suspended_tx),
+            suspended_rx,
         }
+    }
+
+    /// Whether the HUD should currently display suspend placeholders for time,
+    /// battery, and network instead of live (possibly stale) values.
+    pub fn is_suspended(&self) -> bool {
+        *self.suspended_rx.borrow()
+    }
+
+    /// Set the suspend-placeholder flag.
+    fn set_suspended(&self, suspended: bool) {
+        let _ = self.suspended_tx.send(suspended);
     }
 
     /// Current UI scale factor (1.0 = unmodified).
@@ -329,6 +350,10 @@ impl SharedState {
             }
 
             EventPayload::StateChanged(snapshot) => {
+                // Fresh state has arrived (on resume this follows the
+                // post-suspend connectivity re-check), so drop the suspend
+                // placeholders and show live values again.
+                self.set_suspended(false);
                 self.set_internet_status(snapshot.internet_status.clone());
                 if let Some(session) = &snapshot.current_session {
                     let now = shepherd_util::now();
@@ -374,6 +399,17 @@ impl SharedState {
                     1.0
                 };
                 let _ = self.scale_tx.send(clamped);
+            }
+
+            EventPayload::SystemSuspending => {
+                // About to lose the ability to draw; switch time/battery/
+                // network to placeholders so the frozen frame isn't stale.
+                self.set_suspended(true);
+            }
+
+            EventPayload::SystemResumed => {
+                // Keep the placeholders up until the fresh StateChanged (which
+                // follows the post-resume connectivity re-check) clears them.
             }
 
             _ => {}

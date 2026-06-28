@@ -393,6 +393,18 @@ impl LauncherApp {
                         error_label.set_text(&message);
                         stack.set_visible_child_name("error");
                     }
+                    LauncherState::Suspending => {
+                        // Static cover drawn before the screen freezes on
+                        // suspend; replaced by fresh state on resume (issue #73).
+                        // Switch with no transition so the cover appears
+                        // instantly and fully opaque — a crossfade would leave
+                        // the stale content showing through (and possibly be the
+                        // frame that freezes) for the duration of the animation.
+                        if let Some(ref win) = window {
+                            win.set_visible(true);
+                        }
+                        stack.set_visible_child_full("loading", gtk4::StackTransitionType::None);
+                    }
                 }
             }
         });
