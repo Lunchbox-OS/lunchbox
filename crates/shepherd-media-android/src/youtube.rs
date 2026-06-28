@@ -87,6 +87,12 @@ pub fn resolve_stream_url(
         &[
             "-f",
             stream_format(quality),
+            // Use the `android_vr` client: it serves the full DASH format ladder
+            // (incl. H.264 video) without a PO token. The default `android`
+            // client returns audio-only for these videos (PO-token gated), and
+            // `web`/`web_safari` need a PO token or only offer HLS.
+            "--extractor-args",
+            "youtube:player_client=android_vr",
             "-g",
             "--no-playlist",
             "--quiet",
@@ -192,7 +198,10 @@ pub fn provider() -> Option<Box<dyn YtDlp>> {
 /// through the resulting `jclass`. See [`load_class`].
 #[cfg(target_os = "android")]
 mod jni_impl {
+    use std::io::Read;
+    use std::path::Path;
     use std::sync::Once;
+    use std::time::{Duration, SystemTime};
 
     use jni::JavaVM;
     use jni::objects::{JClass, JObject, JString, JValue};
@@ -211,6 +220,87 @@ mod jni_impl {
 
     fn jni_err(e: jni::errors::Error) -> String {
         format!("JNI error: {e}")
+    }
+
+    /// The app's `noBackupFilesDir` (where youtubedl-android stages its runtime),
+    /// via `Context.getNoBackupFilesDir().getAbsolutePath()`.
+    fn no_backup_dir(env: &mut jni::JNIEnv, context: &JObject) -> Option<std::path::PathBuf> {
+        let file = env
+            .call_method(context, "getNoBackupFilesDir", "()Ljava/io/File;", &[])
+            .ok()?
+            .l()
+            .ok()?;
+        let path = env
+            .call_method(&file, "getAbsolutePath", "()Ljava/lang/String;", &[])
+            .ok()?
+            .l()
+            .ok()?;
+        let s: String = env.get_string(&JString::from(path)).ok()?.into();
+        Some(std::path::PathBuf::from(s))
+    }
+
+    /// Refresh the youtubedl-android yt-dlp payload to the latest release.
+    ///
+    /// The yt-dlp bundled in the AAR is too old to extract video formats from
+    /// current YouTube (it returns only audio-only itags), and the library's own
+    /// `updateYoutubeDL` throws `ExceptionInInitializerError` on this AAR. So
+    /// after `init()` lays down the Python runtime + payload dir, we drop the
+    /// latest yt-dlp zipapp from GitHub into the payload path ourselves
+    /// (`<noBackupFilesDir>/youtubedl-android/yt-dlp/yt-dlp`). youtubedl-android
+    /// runs whatever file is there with its bundled Python and won't clobber it
+    /// (it only re-extracts when its own recorded version changes). Best-effort:
+    /// skipped when fresh, and any failure (offline, etc.) leaves the existing
+    /// payload untouched.
+    fn refresh_ytdlp(env: &mut jni::JNIEnv, context: &JObject) {
+        const REFRESH_INTERVAL: Duration = Duration::from_secs(7 * 24 * 3600);
+        let Some(base) = no_backup_dir(env, context) else {
+            log::warn!("yt-dlp refresh: could not resolve noBackupFilesDir");
+            return;
+        };
+        let dir = base.join("youtubedl-android").join("yt-dlp");
+        if !dir.is_dir() {
+            // init() didn't lay down the payload dir; nothing to refresh.
+            return;
+        }
+        let marker = dir.join(".shepherd-ytdlp-refreshed");
+        let fresh = marker
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age < REFRESH_INTERVAL);
+        if fresh {
+            return;
+        }
+        match download_ytdlp(&dir.join("yt-dlp")) {
+            Ok(()) => {
+                let _ = std::fs::write(&marker, b"");
+                log::info!("yt-dlp payload refreshed from GitHub");
+            }
+            Err(e) => log::warn!("yt-dlp refresh failed (keeping existing payload): {e}"),
+        }
+    }
+
+    /// Download the latest yt-dlp zipapp and atomically replace `payload`.
+    fn download_ytdlp(payload: &Path) -> Result<(), String> {
+        const URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+        const MAX_BYTES: u64 = 20 * 1024 * 1024;
+        let resp = ureq::get(URL).call().map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        resp.into_reader()
+            .take(MAX_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        // The zipapp is a multi-MB file beginning with a `#!` shebang. This
+        // guards against a captive-portal HTML page or a truncated download
+        // silently corrupting the payload.
+        if bytes.len() < 1_000_000 || !bytes.starts_with(b"#!") {
+            return Err(format!("unexpected download ({} bytes)", bytes.len()));
+        }
+        let tmp = payload.with_extension("tmp");
+        std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, payload).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// If a Java exception is pending, return its message and **clear** it.
@@ -315,6 +405,9 @@ mod jni_impl {
                         let _ = env.exception_clear();
                         log::error!("YoutubeDL.init threw");
                     }
+                    // Replace the AAR's stale bundled yt-dlp with the latest
+                    // release so current YouTube formats resolve.
+                    refresh_ytdlp(&mut env, &context);
                 }
                 Err(e) => {
                     // Clear any pending exception so it can't poison the next

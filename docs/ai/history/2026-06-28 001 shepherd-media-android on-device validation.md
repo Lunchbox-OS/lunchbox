@@ -181,8 +181,43 @@ foundation for when a video format becomes obtainable.
 - "the JNI execution path is unverified on hardware" → **verified**; two crashes
   found and fixed (classloader, uncaught exception). Playlist + stream resolution
   run over JNI; the app no longer crashes on any yt-dlp failure.
-- YouTube *video* playback is blocked upstream (audio-only formats from the
-  bundled yt-dlp); app-side plumbing is in place — see above.
+- YouTube *video* playback: **now working on device** — see the resolution
+  below. (The earlier "blocked upstream / audio-only" conclusion was for the
+  default `android` client + the AAR's stale yt-dlp; both are addressed.)
+
+## Resolution: YouTube video plays (android_vr + in-app yt-dlp refresh)
+
+Two changes, verified end-to-end on the Pixel 10a:
+
+1. **`android_vr` player client.** `--extractor-args youtube:player_client=android_vr`
+   returns the **full DASH ladder with no PO token** — confirmed via `yt-dlp -F`:
+   itag 18 (360p muxed H.264+AAC), 134/135/136/137 (H.264 video-only), VP9, and
+   audio (140/251). The default `android` client only returns audio-only itag 139
+   (PO-token gated); `web`/`web_safari` need a PO token or only offer HLS. So
+   `android_vr` sidesteps the whole PO-token problem (no BotGuard/DroidGuard
+   generator needed).
+2. **In-app yt-dlp self-refresh.** The AAR's bundled yt-dlp is too old and its
+   `updateYoutubeDL` throws, so after `YoutubeDL.init()` we download the latest
+   yt-dlp zipapp from GitHub and atomically replace the payload at
+   `<noBackupFilesDir>/youtubedl-android/yt-dlp/yt-dlp` (`refresh_ytdlp` /
+   `download_ytdlp`, ureq+rustls HTTPS, ~3 MB, ≤ weekly, best-effort/offline-safe,
+   sanity-checked). youtubedl-android runs whatever file is there with its bundled
+   Python and doesn't clobber it. Verified: wiped the staged runtime, relaunched
+   → init re-extracted the old bundled yt-dlp → refresh downloaded 2026.06.09 over
+   HTTPS → payload replaced.
+
+With both, the resolver gets H.264 480p video (itag 135) + audio (itag 140); the
+existing separate-stream path (`set_external_audio`) hands both to libmpv, which
+**hardware-decodes via MediaCodec and renders** (`Selected decoder: h264`,
+`Using hardware decoding (mediacodec-copy)`, `video=playing`) — confirmed
+visually on the device by the user.
+
+**Screencap caveat (important for future on-device validation):** `adb
+screencap` returned **black** for the composited hardware-video region even while
+video was playing on the physical screen. The egui UI/overlay captured fine, but
+the MediaCodec video overlay did not. Trust libmpv's `video=playing` decode log
+over a screenshot; an earlier "black video" reading here was a screencap artifact,
+not the app.
 
 ## Code changes (this branch)
 

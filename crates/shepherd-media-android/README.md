@@ -32,16 +32,21 @@ the full design and roadmap.
   through core's libmpv `PlayerHandle`, composited into the eframe GL surface
   with a touch/keyboard control overlay (play/pause, ±10s, scrub, back). libmpv
   + ffmpeg are vendored under [`vendor/libmpv/`](./vendor/libmpv) and packaged
-  into the APK. **Caveat:** the build, link, and packaging are verified, but
-  on-device video rendering has not been run on hardware yet.
+  into the APK. Verified on hardware (Pixel 10a): video renders (incl.
+  MediaCodec H.264 hardware decode) with audio, transport controls, and EOF.
 - Video caching: with a non-`Off` cache mode, a finished direct-HTTP item is
   downloaded to the per-library cache so the next play is local, with LRU
   eviction to the per-library size cap. Playback prefers a cached local copy.
 - YouTube: a `youtube-playlist` source resolves into a browseable library
-  (titles, thumbnails) and tapping an item resolves its stream URL for libmpv,
-  both via yt-dlp (bundled as `youtubedl-android`, called over JNI). The yt-dlp
-  JSON parsing is host-tested; **the JNI execution path is unverified on
-  hardware** — see the caveat in `src/youtube.rs`.
+  (titles, thumbnails) and tapping an item plays it through libmpv, both via
+  yt-dlp (bundled as `youtubedl-android`, called over JNI). Verified on hardware:
+  playlist + stream resolution and video playback work. Two requirements are
+  handled in `src/youtube.rs`: the `android_vr` player client (serves video
+  formats without a PO token; the default `android` client returns audio-only),
+  and an in-app refresh of the AAR's stale bundled yt-dlp to the latest release
+  on first launch (`refresh_ytdlp`). Stream + audio are resolved as separate
+  DASH tracks (`StreamUrls`) and muxed at playback via
+  `PlayerHandle::set_external_audio`.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
