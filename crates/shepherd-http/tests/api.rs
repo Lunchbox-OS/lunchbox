@@ -421,6 +421,36 @@ async fn auth_admin_authority_token_passes() {
 }
 
 #[tokio::test]
+async fn auth_admin_authority_unclaimed_stays_open() {
+    use shepherd_management::AdminAuthority;
+
+    // BLE-derived authority is plumbed in but no admin has claimed
+    // yet (the default state on a fresh install). Without a static
+    // token configured this must remain open mode — otherwise a
+    // fresh install with BLE enabled locks itself out of HTTP
+    // before any admin has been set up. Regression test: an earlier
+    // version of `is_open` keyed on `admin.is_none()` alone, which
+    // mis-engaged the auth gate the moment BLE was wired in.
+    struct UnclaimedAdmin;
+    impl AdminAuthority for UnclaimedAdmin {
+        fn current_http_token(&self) -> Option<String> {
+            None
+        }
+    }
+
+    let cfg = temp_config();
+    let admin: Arc<dyn AdminAuthority> = Arc::new(UnclaimedAdmin);
+    let app = make_app_with_admin(None, cfg.path().to_path_buf(), Some(admin));
+
+    // No header — must pass because no token is enforceable yet.
+    let (status, _) = send(&app, req_get("/api/v1/health")).await;
+    assert_eq!(status, StatusCode::OK);
+    // Bogus header also passes; open is open.
+    let (status, _) = send(&app, req_get_auth("/api/v1/health", "anything")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn auth_static_and_admin_tokens_both_accepted() {
     use shepherd_management::AdminAuthority;
     use std::sync::Mutex;

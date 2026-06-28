@@ -218,10 +218,7 @@ impl BleServer {
             "BLE management advertising started",
         );
 
-        let events_task = tokio::spawn(events_forwarder(
-            self.svc.clone(),
-            events_outbox.clone(),
-        ));
+        let events_task = tokio::spawn(events_forwarder(self.svc.clone(), events_outbox.clone()));
 
         let _ = shutdown_rx.wait_for(|v| *v).await;
         info!("BLE management server shutting down");
@@ -290,12 +287,7 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(
-                    svc,
-                    claim,
-                    response_outbox.clone(),
-                    events_outbox.clone(),
-                ),
+                request_characteristic(svc, claim, response_outbox.clone(), events_outbox.clone()),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
                     response_outbox,
@@ -511,15 +503,8 @@ async fn handle_write(
             match r.pop_frame() {
                 Ok(Some(frame)) => {
                     drop(r);
-                    dispatch_frame(
-                        peer,
-                        &frame,
-                        &claim,
-                        &svc,
-                        &response_outbox,
-                        &events_outbox,
-                    )
-                    .await;
+                    dispatch_frame(peer, &frame, &claim, &svc, &response_outbox, &events_outbox)
+                        .await;
                     r = reader.lock().await;
                 }
                 Ok(None) => break,

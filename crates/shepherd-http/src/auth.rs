@@ -6,10 +6,14 @@
 //! - the current admin's HTTP token from the BLE claim flow, surfaced
 //!   through [`AdminAuthority`].
 //!
-//! If neither auth source is configured the middleware passes every
-//! request through unchanged (legacy "open API on the LAN" behaviour).
-//! Once an `AdminAuthority` is plumbed in, requests with no bearer (or
-//! a mismatched bearer) are rejected with 401.
+//! Open mode: if no static token is configured **and** no admin has
+//! claimed via BLE yet, the middleware passes every request through
+//! unchanged. This preserves the documented "omit auth_token to allow
+//! unauthenticated access" behaviour even when BLE is enabled — a
+//! BLE-configured-but-unclaimed device still has no token to enforce
+//! and would otherwise lock itself out of HTTP. As soon as either a
+//! static token is set or an admin claims via BLE, the gate engages
+//! and unauthenticated requests are rejected with 401.
 
 use axum::{
     extract::Request,
@@ -35,8 +39,18 @@ pub struct AuthSources {
 }
 
 impl AuthSources {
+    /// True when there is no token to enforce — neither a static
+    /// config token nor a claimed BLE admin. A BLE authority that's
+    /// plugged in but not yet claimed still counts as open, since
+    /// otherwise a fresh install with BLE enabled would lock itself
+    /// out of HTTP before any admin has been set up.
     fn is_open(&self) -> bool {
-        self.static_token.is_none() && self.admin.is_none()
+        self.static_token.is_none()
+            && self
+                .admin
+                .as_ref()
+                .and_then(|a| a.current_http_token())
+                .is_none()
     }
 
     fn matches(&self, presented: &str) -> bool {
