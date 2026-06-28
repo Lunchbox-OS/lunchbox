@@ -9,7 +9,7 @@ use crate::admin::{AdminRecord, AdminStore, AdminStoreError};
 use shepherd_management::AdminAuthority;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info};
 
 /// Stable peer identity as resolved by BlueZ post-pairing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,17 +156,45 @@ impl ClaimMachine {
 
     /// Gate every non-claim RPC. Called by the dispatcher before
     /// invoking the underlying `ManagementService` method.
+    ///
+    /// **v1 single-admin policy:** if the device is claimed, allow any
+    /// peer that managed to reach us. Justification: every RPC arrives
+    /// over an encrypted-authenticated GATT write (`encrypt_authenticated_write`
+    /// on the Request characteristic), so the link itself is a
+    /// MITM-protected bond — and v1 only ever has one bond, since TOFU
+    /// rejects subsequent claims. Comparing peer addresses on top of
+    /// that buys nothing.
+    ///
+    /// In practice the address comparison was actively harmful: BlueZ
+    /// reports the post-bond *resolved identity address* on a
+    /// reconnect, but at claim time during pairing it presented the
+    /// random private address still in use mid-handshake. Those two
+    /// never match, so the strict check broke every reopen of the
+    /// companion app.
+    ///
+    /// When we add multi-admin later we'll need to identify which
+    /// bond the peer belongs to — at that point the right answer is
+    /// to track the resolved identity in the admin record (or the
+    /// IRK) rather than relying on whichever address BlueZ happened
+    /// to surface on the write request.
     pub fn authorize(&self, peer: &PeerIdentity) -> AuthDecision {
         match &*self.state.read().expect("claim state lock poisoned") {
             ClaimState::Unclaimed => AuthDecision::Deny {
                 reason: "device is not claimed".into(),
             },
-            ClaimState::Claimed(record) if peer.matches(record) => AuthDecision::Allow,
-            ClaimState::Claimed(_) => {
-                warn!(peer = ?peer, "Rejecting RPC from non-admin peer");
-                AuthDecision::Deny {
-                    reason: "peer is not the admin".into(),
+            ClaimState::Claimed(record) => {
+                if !peer.matches(record) {
+                    // Logged so the address drift is still visible in
+                    // the journal even though we now allow the request.
+                    debug!(
+                        peer_address = %peer.address,
+                        record_address = %record.identity_address,
+                        "RPC from peer whose address doesn't match the admin record \
+                         (likely BlueZ identity-resolution drift) — allowing under \
+                         v1 single-admin policy",
+                    );
                 }
+                AuthDecision::Allow
             }
         }
     }
@@ -261,12 +289,17 @@ mod tests {
     }
 
     #[test]
-    fn authorize_claimed_allows_admin_only() {
+    fn authorize_claimed_allows_any_bonded_peer() {
+        // v1 single-admin policy: once claimed, every peer that reaches
+        // us over the encrypted-authenticated GATT link is the admin —
+        // address comparison was found to break on BlueZ
+        // identity-resolution drift, so we relaxed it. See the doc
+        // comment on `authorize`.
         let dir = TempDir::new().unwrap();
         let m = ClaimMachine::load(store(&dir)).unwrap();
         m.claim(peer_a(), "A".into()).unwrap();
         assert_eq!(m.authorize(&peer_a()), AuthDecision::Allow);
-        assert!(matches!(m.authorize(&peer_b()), AuthDecision::Deny { .. }));
+        assert_eq!(m.authorize(&peer_b()), AuthDecision::Allow);
     }
 
     #[test]

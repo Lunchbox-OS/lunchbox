@@ -1,14 +1,18 @@
-//! Length-prefix framing on top of ATT writes and notifies.
+//! Length-prefix framing on top of ATT writes and reads.
 //!
-//! BLE writes/notifies are byte-stream chunks of up to ATT_MTU-3 bytes
-//! each; the management protocol moves whole JSON frames, which may
-//! exceed one chunk. This module wraps that mismatch:
+//! BLE writes are byte-stream chunks of up to ATT_MTU-3 bytes each, and
+//! reads return up to ATT_MTU-1; the management protocol moves whole
+//! JSON frames, which may exceed one chunk. This module wraps that
+//! mismatch:
 //!
-//! - [`FrameReader`] buffers incoming chunks and yields complete
-//!   `Vec<u8>` payloads once a `u16` LE length prefix worth of bytes
-//!   has arrived.
-//! - [`chunk_payload`] takes a logical payload and returns the wire
-//!   bytes (length prefix + body) split into MTU-sized fragments.
+//! - [`FrameReader`] buffers incoming chunks (write fragments or read
+//!   replies) and yields complete `Vec<u8>` payloads once a `u16` LE
+//!   length prefix worth of bytes has arrived.
+//! - [`encode_frame`] prepends the length prefix to a payload. The
+//!   read-poll outbox stores already-encoded frames so the read
+//!   handler can slice across MTU boundaries cheaply.
+//! - [`chunk_payload`] (test-only helper) is a small convenience for
+//!   tests that want both steps in one call.
 
 use thiserror::Error;
 
@@ -59,23 +63,30 @@ impl FrameReader {
     }
 }
 
-/// Encode `payload` as a length-prefixed wire frame, then split it
-/// into fragments no larger than `chunk_size`. `chunk_size` should be
-/// the negotiated ATT MTU minus the 3-byte ATT header.
-pub fn chunk_payload(payload: &[u8], chunk_size: usize) -> Vec<Vec<u8>> {
-    assert!(chunk_size > 0, "chunk_size must be > 0");
+/// Encode `payload` as a length-prefixed wire frame
+/// (`[u16 LE len][payload]`). Used by the read-poll outbox: the outbox
+/// stores already-framed messages so the read handler can slice across
+/// MTU boundaries without re-computing the header.
+pub fn encode_frame(payload: &[u8]) -> Vec<u8> {
     assert!(
         payload.len() <= u16::MAX as usize,
         "payload exceeds u16 length prefix"
     );
-
-    let len_prefix = (payload.len() as u16).to_le_bytes();
-    let total = 2 + payload.len();
-    let mut buf = Vec::with_capacity(total);
-    buf.extend_from_slice(&len_prefix);
+    let mut buf = Vec::with_capacity(2 + payload.len());
+    buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
     buf.extend_from_slice(payload);
+    buf
+}
 
-    buf.chunks(chunk_size).map(|c| c.to_vec()).collect()
+/// Test helper: encode `payload` as a length-prefixed wire frame, then
+/// split it into fragments no larger than `chunk_size`.
+#[cfg(test)]
+fn chunk_payload(payload: &[u8], chunk_size: usize) -> Vec<Vec<u8>> {
+    assert!(chunk_size > 0, "chunk_size must be > 0");
+    encode_frame(payload)
+        .chunks(chunk_size)
+        .map(|c| c.to_vec())
+        .collect()
 }
 
 #[cfg(test)]

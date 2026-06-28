@@ -1,45 +1,50 @@
 //! `BleServer`: lifecycle for the GATT application, advertising, and
 //! the pairing agent.
 //!
-//! Notification channels:
+//! Transport shape:
 //!
-//! - **Response** uses a broadcast channel held centrally;
-//!   `dispatch_frame` writes the response there, and every notify
-//!   subscriber takes its own [`broadcast::Receiver`] via
-//!   `.subscribe()`. This means a reconnecting companion app always
-//!   gets a working channel — the older mpsc-with-take-once design
-//!   silently broke after the first disconnect.
-//! - **Events** subscribes per-callback directly to
-//!   [`ManagementService::subscribe_events`], so there's no central
-//!   pump. Each new subscriber receives a fresh
-//!   [`shepherd_api::Event::StateChanged`] snapshot before entering
-//!   the live stream, so a freshly-reopened companion doesn't have
-//!   to send a separate `service_state` RPC just to populate its UI.
+//! - **Request** is a write characteristic (chunked, length-prefixed
+//!   JSON-RPC; encrypt-authenticated link required).
+//! - **Response** and **Events** are *read-poll* characteristics, not
+//!   notify. Each holds an [`Outbox`] byte queue; the companion app
+//!   drains it with repeated GATT reads. Notify was the original
+//!   design but proved unreliable for bonded reconnects — BlueZ
+//!   caches CCCD state at the bond, Android short-circuits subsequent
+//!   CCCD writes, and the per-subscribe notify task from the *first*
+//!   session ends up the only one the wire ever reaches. Read-poll
+//!   sidesteps all of that.
+//! - **DeviceInfo** is an unencrypted read for the pre-pair "what is
+//!   this device" probe.
+//!
+//! A single long-lived subscriber task forwards every
+//! [`shepherd_api::Event`] from [`ManagementService::subscribe_events`]
+//! into the events outbox throughout the server's lifetime. There's no
+//! per-client subscriber, so events that fire while no companion is
+//! polling simply accumulate (bounded by the outbox capacity); the
+//! companion re-syncs current state by calling `service_state` on
+//! every reconnect.
 //!
 //! v1 still assumes a single bonded admin peer at a time (TOFU
-//! single-admin model from the design doc), but the broadcast-based
-//! channels mean multiple concurrent subscribers would work too if
-//! we ever lift that assumption.
+//! single-admin model from the design doc).
 
 use bluer::adv::{Advertisement, AdvertisementHandle};
 use bluer::agent::AgentHandle;
 use bluer::gatt::local::{
-    Application, ApplicationHandle, Characteristic, CharacteristicNotify,
-    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
-    Service,
+    Application, ApplicationHandle, Characteristic, CharacteristicRead, CharacteristicWrite,
+    CharacteristicWriteMethod, Service,
 };
 use futures_util::FutureExt;
-use shepherd_api::{Event, EventPayload};
 use shepherd_management::ManagementService;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::admin::{AdminStore, check_reset_sentinel};
 use crate::agent::{PairingDisplay, build_agent};
 use crate::claim::{AuthDecision, ClaimMachine, PeerIdentity};
-use crate::framing::{FrameReader, chunk_payload};
+use crate::framing::{FrameReader, encode_frame};
+use crate::outbox::Outbox;
 use crate::protocol::{
     ClaimStateTag, DeviceInfo, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, RpcRequest,
     RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID, SHEPHERD_EVENTS_CHAR_UUID,
@@ -47,11 +52,29 @@ use crate::protocol::{
 };
 use crate::rpc::dispatch_management;
 
-/// Depth of the Response broadcast channel. Small because per-subscriber
-/// queues are independent (each holds its own backlog); a depth this
-/// shallow only matters if the phone is dramatically slower than the
-/// daemon for a sustained burst.
-const NOTIFY_QUEUE_DEPTH: usize = 32;
+/// Cap on the Response outbox. A handful of responses (each a few KiB
+/// at most for `service_state`) fit comfortably; this is a soft ceiling
+/// that exists only so a buggy or AFK companion can't grow the queue
+/// without bound. Backpressure here is unusual in practice — responses
+/// are emitted at the rate the companion sends requests.
+const RESPONSE_OUTBOX_BYTES: usize = 256 * 1024;
+
+/// Cap on the Events outbox. Sized to comfortably hold ~10 full
+/// `StateChanged` snapshots (each up to ~20 KiB once a few entries are
+/// configured) plus the smaller session/policy events that fire around
+/// them. Stale events that overrun this when no companion is polling
+/// are dropped from the front; the companion re-fetches current state
+/// via `service_state` on every reconnect.
+const EVENTS_OUTBOX_BYTES: usize = 256 * 1024;
+
+/// Bluetooth Core spec ceiling on a single GATT attribute value.
+/// Android's stack enforces this strictly: even with an ATT MTU of
+/// 517 (allowing 516-byte read responses on the wire), a single
+/// `BluetoothGatt.readCharacteristic` call delivers at most 512 bytes
+/// to the application, silently truncating the rest. We cap the
+/// outbox read chunk here so each ATT response fits inside what the
+/// client will actually receive.
+const GATT_MAX_ATTR_VALUE: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct BleServerConfig {
@@ -123,7 +146,8 @@ impl BleServer {
     /// 4. Publish the GATT application (Shepherd Management Service +
     ///    DeviceInfo / Request / Response / Events characteristics).
     /// 5. Start LE advertising under the configured device name.
-    /// 6. Wait for shutdown.
+    /// 6. Spawn the events forwarder task.
+    /// 7. Wait for shutdown.
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let session = bluer::Session::new().await.map_err(|e| {
             anyhow::anyhow!(
@@ -165,16 +189,16 @@ impl BleServer {
                     "Failed to register BlueZ pairing agent ({e}); without this, pairing falls back to a PIN entry on the phone and no Numeric Comparison overlay appears on the TV. Likely cause: the daemon user lacks the `bluetooth` group."
                 )
             })?;
-        // Broadcast channel for RPC responses so re-subscribers (the
-        // phone reopening the companion app) always get a fresh
-        // receiver rather than the dead one from the previous session.
-        let (response_tx, _) = broadcast::channel::<Vec<u8>>(NOTIFY_QUEUE_DEPTH);
+
+        let response_outbox = Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES));
+        let events_outbox = Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES));
 
         let application = build_application(
             self.config.clone(),
             self.svc.clone(),
             self.claim.clone(),
-            response_tx.clone(),
+            response_outbox.clone(),
+            events_outbox.clone(),
         );
 
         let _app_handle: ApplicationHandle = adapter.serve_gatt_application(application).await?;
@@ -194,9 +218,44 @@ impl BleServer {
             "BLE management advertising started",
         );
 
+        let events_task = tokio::spawn(events_forwarder(
+            self.svc.clone(),
+            events_outbox.clone(),
+        ));
+
         let _ = shutdown_rx.wait_for(|v| *v).await;
         info!("BLE management server shutting down");
+        events_task.abort();
+        let _ = events_task.await;
         Ok(())
+    }
+}
+
+/// Forward every event from [`ManagementService::subscribe_events`]
+/// into the events outbox for the entire server lifetime. Lagged
+/// events are logged and skipped — the companion re-syncs current
+/// state via `service_state` on reconnect, so a missed event is
+/// recoverable.
+async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) {
+    // The outer `run` aborts this task on shutdown via JoinHandle::abort,
+    // so we don't need an explicit shutdown signal here — keeping the
+    // loop free of `watch::Ref` (which isn't Send) keeps tokio::spawn
+    // happy.
+    let mut rx = svc.subscribe_events();
+    loop {
+        match rx.recv().await {
+            Ok(event) => match serde_json::to_vec(&event) {
+                Ok(payload) => outbox.push(encode_frame(&payload)).await,
+                Err(e) => warn!(error = %e, "Failed to serialize Event"),
+            },
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                warn!(skipped = n, "BLE events forwarder lagged");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                debug!("Event broadcast channel closed");
+                return;
+            }
+        }
     }
 }
 
@@ -222,7 +281,8 @@ fn build_application(
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    response_tx: broadcast::Sender<Vec<u8>>,
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
 ) -> Application {
     Application {
         services: vec![Service {
@@ -230,9 +290,18 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(svc.clone(), claim, response_tx.clone()),
-                response_characteristic(response_tx),
-                events_characteristic(svc),
+                request_characteristic(
+                    svc,
+                    claim,
+                    response_outbox.clone(),
+                    events_outbox.clone(),
+                ),
+                outbox_read_characteristic(
+                    SHEPHERD_RESPONSE_CHAR_UUID,
+                    response_outbox,
+                    "Response",
+                ),
+                outbox_read_characteristic(SHEPHERD_EVENTS_CHAR_UUID, events_outbox, "Events"),
             ],
             ..Default::default()
         }],
@@ -288,7 +357,8 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
 fn request_characteristic(
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    response_tx: broadcast::Sender<Vec<u8>>,
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
 ) -> Characteristic {
     // Per-device frame reassembly buffer. v1 holds a single reader
     // because we only expect one admin connection at a time; if a
@@ -307,7 +377,8 @@ fn request_characteristic(
                 let claim = claim.clone();
                 let reader = reader.clone();
                 let last_peer = last_peer.clone();
-                let response_tx = response_tx.clone();
+                let response_outbox = response_outbox.clone();
+                let events_outbox = events_outbox.clone();
                 async move {
                     let peer = PeerIdentity {
                         address: req.device_address.to_string(),
@@ -318,10 +389,88 @@ fn request_characteristic(
                         // ignores this field on the inbound side.
                         address_type: "public".to_string(),
                     };
-                    handle_write(&peer, chunk, reader, last_peer, claim, svc, response_tx).await
+                    handle_write(
+                        &peer,
+                        chunk,
+                        reader,
+                        last_peer,
+                        claim,
+                        svc,
+                        response_outbox,
+                        events_outbox,
+                    )
+                    .await
                 }
                 .boxed()
             })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// `Response` / `Events`: read-poll characteristic backed by an
+/// [`Outbox`]. Each read returns up to ATT_MTU-1 bytes from the head
+/// of the outbox, in order. Empty result means the queue is drained.
+///
+/// `encrypt_authenticated_read` mirrors the Request characteristic's
+/// write gate: the outbox carries RPC responses (which may include
+/// admin tokens) and live state events, both of which must only flow
+/// over the bonded admin link.
+fn outbox_read_characteristic(
+    uuid: bluer::Uuid,
+    outbox: Arc<Outbox>,
+    label: &'static str,
+) -> Characteristic {
+    Characteristic {
+        uuid,
+        read: Some(CharacteristicRead {
+            read: true,
+            encrypt_authenticated_read: true,
+            fun: Box::new(move |req| {
+                let outbox = outbox.clone();
+                async move {
+                    // Blob reads (offset > 0) shouldn't happen for our
+                    // bounded responses, but if BlueZ ever issues one
+                    // we'd return stale head bytes — answer empty so
+                    // the client treats the read as complete and polls
+                    // again for a fresh drain.
+                    if req.offset != 0 {
+                        debug!(
+                            label,
+                            offset = req.offset,
+                            "BLE outbox read at non-zero offset (long-read continuation); returning empty"
+                        );
+                        return Ok(Vec::new());
+                    }
+                    // Cap at the GATT max-attribute-value of 512
+                    // bytes regardless of negotiated MTU. With MTU 517
+                    // an ATT read response can technically carry 516
+                    // bytes, but Android's stack enforces the spec's
+                    // 512-byte ceiling on a single GATT attribute
+                    // value and silently truncates anything larger.
+                    // Returning 516 here causes the phone to receive
+                    // 512 per chunk, lose 4 bytes per chunk, and end
+                    // up with a corrupt frame stitched together with
+                    // bytes from the *next* response.
+                    let max_chunk = (req.mtu as usize)
+                        .saturating_sub(1)
+                        .min(GATT_MAX_ATTR_VALUE)
+                        .max(20);
+                    let bytes = outbox.read(max_chunk).await;
+                    if !bytes.is_empty() {
+                        debug!(
+                            label,
+                            mtu = req.mtu,
+                            peer = %req.device_address,
+                            len = bytes.len(),
+                            "BLE outbox read"
+                        );
+                    }
+                    Ok(bytes)
+                }
+                .boxed()
+            }),
             ..Default::default()
         }),
         ..Default::default()
@@ -335,7 +484,8 @@ async fn handle_write(
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     claim: Arc<ClaimMachine>,
     svc: Arc<dyn ManagementService>,
-    response_tx: broadcast::Sender<Vec<u8>>,
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
 ) -> bluer::gatt::local::ReqResult<()> {
     debug!(
         peer = %peer.address,
@@ -361,7 +511,15 @@ async fn handle_write(
             match r.pop_frame() {
                 Ok(Some(frame)) => {
                     drop(r);
-                    dispatch_frame(peer, &frame, &claim, &svc, &response_tx).await;
+                    dispatch_frame(
+                        peer,
+                        &frame,
+                        &claim,
+                        &svc,
+                        &response_outbox,
+                        &events_outbox,
+                    )
+                    .await;
                     r = reader.lock().await;
                 }
                 Ok(None) => break,
@@ -381,7 +539,8 @@ async fn dispatch_frame(
     frame: &[u8],
     claim: &Arc<ClaimMachine>,
     svc: &Arc<dyn ManagementService>,
-    response_tx: &broadcast::Sender<Vec<u8>>,
+    response_outbox: &Arc<Outbox>,
+    events_outbox: &Arc<Outbox>,
 ) {
     let request: RpcRequest = match serde_json::from_slice(frame) {
         Ok(r) => r,
@@ -393,12 +552,30 @@ async fn dispatch_frame(
                 "Dropping BLE frame: not valid JSON-RPC"
             );
             let resp = RpcResponse::err(0, ErrorCode::ParseError, e.to_string());
-            push_response(response_tx, &resp).await;
+            push_response(response_outbox, &resp).await;
             return;
         }
     };
 
     let id = request.id;
+
+    // Every `ShepherdConnection` on the companion starts its RPC id
+    // counter at 1, so `id == 1` is a deterministic signal that this
+    // write is the first of a fresh BLE session. Wipe the outboxes
+    // before queueing the response — any bytes still in the queue
+    // are stale (an unread response from the previous session or
+    // events that accumulated while no one was polling) and would
+    // get mixed into the byte stream the client's reassembler is
+    // about to read. The earlier write-gap heuristic was wrong: a
+    // 15-second per-RPC timeout naturally produces inter-write gaps
+    // exceeding any reasonable threshold, so it kept wiping the
+    // queue mid-delivery on a single legitimate session.
+    if id == 1 {
+        info!(peer = %peer.address, "RPC id=1; clearing outboxes for new session");
+        response_outbox.clear().await;
+        events_outbox.clear().await;
+    }
+
     info!(
         peer = %peer.address,
         id, method = %request.method,
@@ -425,7 +602,7 @@ async fn dispatch_frame(
         ok = response.error.is_none(),
         "BLE RPC response queued"
     );
-    push_response(response_tx, &response).await;
+    push_response(response_outbox, &response).await;
 }
 
 async fn handle_claim_rpc(
@@ -478,7 +655,7 @@ async fn handle_factory_reset_rpc(
     }
 }
 
-async fn push_response(tx: &broadcast::Sender<Vec<u8>>, resp: &RpcResponse) {
+async fn push_response(outbox: &Arc<Outbox>, resp: &RpcResponse) {
     let bytes = match serde_json::to_vec(resp) {
         Ok(b) => b,
         Err(e) => {
@@ -486,171 +663,5 @@ async fn push_response(tx: &broadcast::Sender<Vec<u8>>, resp: &RpcResponse) {
             return;
         }
     };
-    // broadcast::send returns Err when there are no active subscribers.
-    // That's an expected condition if a request slipped in before the
-    // companion subscribed to Response — we log and move on rather
-    // than treat it as a fatal channel close.
-    if let Err(e) = tx.send(bytes) {
-        debug!(error = %e, "No Response subscribers; response dropped");
-    }
-}
-
-/// `Response`: server notifies length-prefixed JSON-RPC responses.
-///
-/// Each subscribe takes its own [`broadcast::Receiver`] off the
-/// shared `response_tx`, so a companion that disconnects and
-/// reconnects always lands on a fresh receiver — the prior design's
-/// one-shot mpsc receiver-take is gone.
-fn response_characteristic(response_tx: broadcast::Sender<Vec<u8>>) -> Characteristic {
-    Characteristic {
-        uuid: SHEPHERD_RESPONSE_CHAR_UUID,
-        notify: Some(CharacteristicNotify {
-            notify: true,
-            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
-                let response_tx = response_tx.clone();
-                async move {
-                    info!("BLE Response notify subscribed");
-                    let mut rx = response_tx.subscribe();
-                    let chunk_size = negotiated_chunk_size(&notifier);
-                    loop {
-                        // Race rx.recv() against the notifier's stopped
-                        // future so we exit the loop the moment the
-                        // peer drops its subscription (link disconnect,
-                        // CCCD-disable). Without this, the loop keeps
-                        // consuming responses and sending them into a
-                        // dead notifier — every later reconnect from
-                        // the same peer ends up with no working
-                        // Response path.
-                        tokio::select! {
-                            _ = notifier.stopped() => {
-                                info!("BLE Response notify session ended");
-                                return;
-                            }
-                            recv = rx.recv() => match recv {
-                                Ok(payload) => {
-                                    info!(
-                                        payload_len = payload.len(),
-                                        chunk_size, "BLE Response notify sending payload"
-                                    );
-                                    if !send_chunks(&mut notifier, &payload, chunk_size).await {
-                                        return;
-                                    }
-                                }
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!(
-                                        skipped = n,
-                                        "BLE Response subscriber lagged; some responses dropped"
-                                    );
-                                }
-                                Err(broadcast::error::RecvError::Closed) => {
-                                    debug!("Response broadcast closed");
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-                .boxed()
-            })),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-/// `Events`: server notifies serialized `shepherd_api::Event` JSON.
-///
-/// Each subscribe gets its own [`broadcast::Receiver`] from
-/// [`ManagementService::subscribe_events`] and also receives an
-/// initial `StateChanged` snapshot before entering the live stream.
-/// This makes a freshly-reopened companion's UI populate without
-/// needing a separate `service_state` RPC.
-fn events_characteristic(svc: Arc<dyn ManagementService>) -> Characteristic {
-    Characteristic {
-        uuid: SHEPHERD_EVENTS_CHAR_UUID,
-        notify: Some(CharacteristicNotify {
-            notify: true,
-            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
-                let svc = svc.clone();
-                async move {
-                    info!("BLE Events notify subscribed");
-                    let mut rx = svc.subscribe_events();
-                    let chunk_size = negotiated_chunk_size(&notifier);
-
-                    // Initial-state push: synthesise a StateChanged event
-                    // from the current snapshot so a freshly-connected
-                    // companion can populate its UI immediately.
-                    let snap = svc.service_state().await;
-                    let initial = Event::new(EventPayload::StateChanged(snap));
-                    match serde_json::to_vec(&initial) {
-                        Ok(payload) => {
-                            if !send_chunks(&mut notifier, &payload, chunk_size).await {
-                                return;
-                            }
-                        }
-                        Err(e) => warn!(error = %e, "Failed to serialize initial StateChanged"),
-                    }
-
-                    loop {
-                        // Same stopped()-race rationale as response_characteristic:
-                        // exit promptly on peer disconnect so we don't pin a
-                        // broadcast subscriber across BLE sessions.
-                        tokio::select! {
-                            _ = notifier.stopped() => {
-                                info!("BLE Events notify session ended");
-                                return;
-                            }
-                            recv = rx.recv() => match recv {
-                                Ok(event) => match serde_json::to_vec(&event) {
-                                    Ok(payload) => {
-                                        if !send_chunks(&mut notifier, &payload, chunk_size).await {
-                                            return;
-                                        }
-                                    }
-                                    Err(e) => warn!(error = %e, "Failed to serialize Event"),
-                                },
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!(skipped = n, "BLE Events subscriber lagged");
-                                }
-                                Err(broadcast::error::RecvError::Closed) => {
-                                    debug!("Event broadcast channel closed");
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-                .boxed()
-            })),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-/// Fragment a length-prefixed payload across notifications. Returns
-/// `false` if the notifier rejected a fragment (link dropped) so the
-/// caller can exit its loop.
-async fn send_chunks(
-    notifier: &mut bluer::gatt::local::CharacteristicNotifier,
-    payload: &[u8],
-    chunk_size: usize,
-) -> bool {
-    for fragment in chunk_payload(payload, chunk_size) {
-        if let Err(e) = notifier.notify(fragment).await {
-            debug!(error = %e, "BLE notifier ended");
-            return false;
-        }
-    }
-    true
-}
-
-/// Best-guess fragment size for outbound notifications. bluer's
-/// `CharacteristicNotifier` doesn't expose the negotiated ATT MTU on
-/// the local end; we use a conservative default that matches the BLE
-/// 4.0 23-byte MTU minus the 3-byte ATT header. Real installs
-/// negotiate higher MTUs (often 247 or 517) — the worst case here is
-/// extra fragmentation overhead, not a correctness issue.
-fn negotiated_chunk_size(_notifier: &bluer::gatt::local::CharacteristicNotifier) -> usize {
-    20
+    outbox.push(encode_frame(&bytes)).await;
 }

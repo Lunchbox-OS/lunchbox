@@ -4,6 +4,7 @@ pub mod admin;
 pub mod agent;
 pub mod claim;
 pub mod framing;
+pub mod outbox;
 pub mod protocol;
 pub mod rpc;
 pub mod server;
