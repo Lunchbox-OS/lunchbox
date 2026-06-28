@@ -9,6 +9,9 @@ pub mod protocol;
 pub mod rpc;
 pub mod server;
 
+#[cfg(test)]
+mod testsupport;
+
 pub use admin::{AdminRecord, AdminRole, AdminStore, check_reset_sentinel};
 pub use agent::{NoopPairingDisplay, PairingDisplay, PairingMethod};
 pub use claim::{AuthDecision, ClaimMachine, ClaimState, PeerIdentity};

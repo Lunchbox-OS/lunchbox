@@ -650,3 +650,231 @@ async fn push_response(outbox: &Arc<Outbox>, resp: &RpcResponse) {
     };
     outbox.push(encode_frame(&bytes)).await;
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for the two write-path invariants the read-poll
+    //! transport depends on (see
+    //! `docs/ai/history/2026-06-28 001 ble-read-poll-replaces-notify.md`):
+    //! the `id == 1` session-boundary outbox wipe, and the `FrameReader`
+    //! reset on peer change / framing error. Both took live-hardware
+    //! debugging to land; these guard against regressing them. The GATT/
+    //! advertising/bonding lifecycle still needs a real adapter and is
+    //! exercised by the manual smoke test, not here.
+
+    use super::*;
+    use crate::admin::AdminRecord;
+    use crate::claim::ClaimState;
+    use crate::testsupport::{MockSvc, req};
+
+    fn peer(address: &str) -> PeerIdentity {
+        PeerIdentity {
+            address: address.to_string(),
+            address_type: "public".to_string(),
+        }
+    }
+
+    /// A claimed machine that never touches disk: `authorize` reads only
+    /// in-memory state, and none of these tests drive a claim/reset that
+    /// would persist. Claimed (not Unclaimed) so non-claim RPCs are
+    /// allowed through to the service rather than denied with
+    /// `not_claimed`.
+    fn claimed_machine() -> Arc<ClaimMachine> {
+        let record = AdminRecord::new("AA:BB:CC:DD:EE:FF".into(), "public".into(), "tester".into());
+        let store = AdminStore::new(PathBuf::from("/nonexistent/shepherd-ble-test/admin.toml"));
+        Arc::new(ClaimMachine::new(store, ClaimState::Claimed(record)))
+    }
+
+    fn outbox() -> Arc<Outbox> {
+        Arc::new(Outbox::new("test", RESPONSE_OUTBOX_BYTES))
+    }
+
+    /// Encode a request the way the companion does: JSON body wrapped in
+    /// a length-prefixed wire frame.
+    fn request_frame(id: u32, method: &str) -> Vec<u8> {
+        let body = serde_json::to_vec(&req(id, method, serde_json::Value::Null)).unwrap();
+        encode_frame(&body)
+    }
+
+    /// Drain an outbox the way the companion's poll loop does — repeated
+    /// bounded reads through a `FrameReader` — and decode each frame.
+    async fn drain_responses(outbox: &Outbox) -> Vec<RpcResponse> {
+        let mut reader = FrameReader::new(MAX_FRAME_BYTES);
+        loop {
+            let bytes = outbox.read(GATT_MAX_ATTR_VALUE).await;
+            if bytes.is_empty() {
+                break;
+            }
+            reader.push(&bytes);
+        }
+        let mut out = Vec::new();
+        while let Some(frame) = reader.pop_frame().expect("outbox bytes frame cleanly") {
+            out.push(serde_json::from_slice(&frame).expect("response is valid RpcResponse JSON"));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn id_one_wipes_stale_outboxes_then_queues_fresh_response() {
+        let claim = claimed_machine();
+        let mock = Arc::new(MockSvc::new());
+        let svc: Arc<dyn ManagementService> = mock.clone();
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+
+        // Bytes the previous BLE session left behind, unread.
+        response_outbox.push(encode_frame(b"stale-response")).await;
+        events_outbox.push(encode_frame(b"stale-event")).await;
+
+        // The first RPC of a fresh session always carries id == 1.
+        let body = serde_json::to_vec(&req(1, "health", serde_json::Value::Null)).unwrap();
+        dispatch_frame(
+            &peer("AA:BB:CC:DD:EE:FF"),
+            &body,
+            &claim,
+            &svc,
+            &response_outbox,
+            &events_outbox,
+        )
+        .await;
+
+        // Events outbox is wiped and nothing re-queues onto it.
+        assert_eq!(events_outbox.pending_bytes().await, 0);
+
+        // Response outbox holds exactly the fresh health response — the
+        // stale frame was dropped, not stacked in front of it.
+        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].id, 1);
+        assert!(responses[0].error.is_none());
+        assert_eq!(*mock.health_calls.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn non_first_rpc_leaves_pending_events_intact() {
+        let claim = claimed_machine();
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+
+        events_outbox.push(encode_frame(b"pending-event")).await;
+        let before = events_outbox.pending_bytes().await;
+
+        // id != 1: a mid-session RPC must not disturb events the companion
+        // has not yet polled.
+        let body = serde_json::to_vec(&req(2, "health", serde_json::Value::Null)).unwrap();
+        dispatch_frame(
+            &peer("AA:BB:CC:DD:EE:FF"),
+            &body,
+            &claim,
+            &svc,
+            &response_outbox,
+            &events_outbox,
+        )
+        .await;
+
+        assert_eq!(events_outbox.pending_bytes().await, before);
+        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].id, 2);
+    }
+
+    #[tokio::test]
+    async fn peer_change_resets_partial_frame() {
+        let claim = claimed_machine();
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
+        let last_peer = Arc::new(Mutex::new(None));
+
+        // Peer A writes only the head of a longer frame, then vanishes.
+        let partial = request_frame(7, "health")[..3].to_vec();
+        handle_write(
+            &peer("AA:AA:AA:AA:AA:AA"),
+            partial,
+            reader.clone(),
+            last_peer.clone(),
+            claim.clone(),
+            svc.clone(),
+            response_outbox.clone(),
+            events_outbox.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            drain_responses(&response_outbox).await.is_empty(),
+            "an incomplete frame must not produce a response"
+        );
+
+        // Peer B writes a complete frame. If A's leftover header bytes
+        // weren't dropped on the peer change, they'd be read as B's length
+        // prefix and yield a garbage (id=0 parse-error) frame instead.
+        handle_write(
+            &peer("BB:BB:BB:BB:BB:BB"),
+            request_frame(8, "health"),
+            reader.clone(),
+            last_peer.clone(),
+            claim.clone(),
+            svc.clone(),
+            response_outbox.clone(),
+            events_outbox.clone(),
+        )
+        .await
+        .unwrap();
+
+        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].id, 8);
+        assert!(responses[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn framing_error_drops_state_and_recovers() {
+        let claim = claimed_machine();
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
+        let last_peer = Arc::new(Mutex::new(None));
+        let p = peer("CC:CC:CC:CC:CC:CC");
+
+        // A length prefix past MAX_FRAME_BYTES is an unrecoverable framing
+        // error; the write path must drop the buffered state rather than
+        // wedge on it forever.
+        let bad = ((MAX_FRAME_BYTES + 1) as u16).to_le_bytes().to_vec();
+        handle_write(
+            &p,
+            bad,
+            reader.clone(),
+            last_peer.clone(),
+            claim.clone(),
+            svc.clone(),
+            response_outbox.clone(),
+            events_outbox.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(drain_responses(&response_outbox).await.is_empty());
+
+        // A valid frame from the same peer afterwards still parses — the
+        // reader was reset, not left holding the rejected prefix.
+        handle_write(
+            &p,
+            request_frame(2, "health"),
+            reader.clone(),
+            last_peer.clone(),
+            claim.clone(),
+            svc.clone(),
+            response_outbox.clone(),
+            events_outbox.clone(),
+        )
+        .await
+        .unwrap();
+
+        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].id, 2);
+        assert!(responses[0].error.is_none());
+    }
+}
