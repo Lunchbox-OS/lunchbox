@@ -37,6 +37,11 @@ the full design and roadmap.
 - Video caching: with a non-`Off` cache mode, a finished direct-HTTP item is
   downloaded to the per-library cache so the next play is local, with LRU
   eviction to the per-library size cap. Playback prefers a cached local copy.
+- YouTube: a `youtube-playlist` source resolves into a browseable library
+  (titles, thumbnails) and tapping an item resolves its stream URL for libmpv,
+  both via yt-dlp (bundled as `youtubedl-android`, called over JNI). The yt-dlp
+  JSON parsing is host-tested; **the JNI execution path is unverified on
+  hardware** — see the caveat in `src/youtube.rs`.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
@@ -44,7 +49,6 @@ the full design and roadmap.
 
 - `QueueAll`'s eager prefetch-at-launch (currently both non-`Off` modes cache
   after play; the size cap and LRU eviction are shared).
-- YouTube resolution via youtubedl-android.
 - JNI bridges for the SAF file picker, connectivity policy, and storage paths.
 - Per-library quality applied to the libmpv `ytdl-format` (currently a single
   default is set at startup).

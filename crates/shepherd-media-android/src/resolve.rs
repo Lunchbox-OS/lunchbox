@@ -37,6 +37,9 @@ pub enum ResolveError {
 
     #[error(transparent)]
     Parse(#[from] LibraryError),
+
+    #[error("YouTube: {0}")]
+    YtDlp(String),
 }
 
 /// Resolve a library source into a parsed library. Blocking; call off the UI
@@ -66,9 +69,19 @@ pub fn resolve(source: &LibrarySource) -> Result<Library, ResolveError> {
                 parse_m3u(&body, &path)
             }
         }
-        LibrarySource::YoutubePlaylist { .. } => Err(ResolveError::Unsupported(
-            "YouTube playlist resolution needs youtubedl-android (not yet wired)",
-        )),
+        LibrarySource::YoutubePlaylist { url } => {
+            let provider = crate::youtube::provider().ok_or(ResolveError::Unsupported(
+                "YouTube isn't available on this platform (needs the Android youtubedl bridge)",
+            ))?;
+            let info = crate::youtube::fetch_playlist(provider.as_ref(), url)
+                .map_err(ResolveError::YtDlp)?;
+            Ok(shepherd_media_core::build_library_from_entries(
+                url,
+                info.title,
+                info.playlist_id.as_deref(),
+                &info.entries,
+            ))
+        }
     }
 }
 

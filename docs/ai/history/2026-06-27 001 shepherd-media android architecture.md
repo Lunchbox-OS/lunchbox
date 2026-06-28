@@ -237,11 +237,23 @@ Keep the three-tier design (posters, playlist metadata, videos) but:
   yt-dlp). 20 crate tests (eviction/LRU/path covered); cross-compiles and APK
   builds. `QueueAll`'s eager at-launch prefetch is still TODO (both non-`Off`
   modes currently cache-after-play).
-- Remaining: on-device playback verification (needs hardware — the jdtech AAR
-  ships no x86_64 libmpv, so an x86_64 emulator can't load it, and an arm64
-  emulator on an x86 host has no KVM acceleration); YouTube resolution via
-  youtubedl-android; per-library quality applied to mpv; `QueueAll` prefetch;
-  and the SAF / connectivity / storage-path JNI bridges.
+- **Step 7 — YouTube via youtubedl-android: done at build/package level.**
+  `resolve()` turns a `youtube-playlist` source into a `Library` (yt-dlp
+  `--dump-json --flat-playlist` → `build_library_from_entries`), and tapping a
+  YouTube grid item resolves its stream URL (`-f best[height<=?720] -g`) before
+  handing a `DirectHttp` source to libmpv. yt-dlp runs via the `YtDlp` trait;
+  the JSON parsing (both ops) is pure and host-tested (27 crate tests with a
+  fake provider). On Android the provider bridges to youtubedl-android over JNI
+  (`jni` + `ndk-context`); the AAR (Python runtime + classes) is a Gradle dep,
+  packaged into the APK (verified: `libpython.zip.so` + DEX present, APK builds
+  online). **The JNI execution path is unverified on hardware** — notably the
+  FindClass-from-native-thread classloader gotcha is documented in
+  `src/youtube.rs`. YouTube items aren't video-cached (signed URLs expire).
+- Remaining: on-device verification of playback + the YouTube JNI path (needs
+  hardware — the jdtech AAR ships no x86_64 libmpv, so an x86_64 emulator can't
+  load it, and an arm64 emulator on an x86 host has no KVM acceleration);
+  per-library quality applied to mpv; `QueueAll` eager prefetch; and the SAF /
+  connectivity / storage-path JNI bridges.
 
 ## Key source references
 

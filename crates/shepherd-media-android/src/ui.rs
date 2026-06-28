@@ -13,14 +13,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::time::Duration;
 
 use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
 use shepherd_media_core::{
-    ClassifiedUri, ItemKind, Library, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef, Source,
-    resolve_source,
+    ClassifiedUri, ItemKind, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef,
+    Source, resolve_source,
 };
+use url::Url;
 
 use crate::playback::PlaybackView;
 use crate::resolve::{ResolveError, resolve};
@@ -175,6 +177,9 @@ pub struct MediaApp {
     player: Option<Box<dyn PlayerHandle>>,
     playback: Option<PlaybackView>,
     playing: Option<PlayingItem>,
+    /// A YouTube item whose stream URL is being resolved on a worker thread
+    /// before playback can start: (display title, result receiver).
+    playback_pending: Option<(String, Receiver<Result<String, String>>)>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
 }
@@ -234,6 +239,7 @@ impl MediaApp {
             player,
             playback,
             playing: None,
+            playback_pending: None,
             status,
         }
     }
@@ -662,7 +668,7 @@ impl MediaApp {
         }
 
         if let Some(item_id) = play_request {
-            self.start_playback(&item_id);
+            self.start_playback(ui.ctx(), &item_id);
         }
         next
     }
@@ -670,7 +676,7 @@ impl MediaApp {
     /// Resolve the platform source for `item_id` in the loaded library, prefer a
     /// cached local copy, and hand it to the player. Sets the playing item on
     /// success.
-    fn start_playback(&mut self, item_id: &str) {
+    fn start_playback(&mut self, ctx: &egui::Context, item_id: &str) {
         // Phase 1: gather what we need under shared borrows of self (grid +
         // settings), recording any status message to apply afterwards.
         let mut deferred_status: Option<String> = None;
@@ -702,6 +708,26 @@ impl MediaApp {
         let Some((library_id, title, source, caching)) = prepared else {
             return;
         };
+
+        // YouTube: resolve the stream URL on a worker before playback (network
+        // must not run on the UI thread, and there's no yt-dlp on PATH for
+        // mpv's own ytdl hook to use).
+        if let ClassifiedUri::YouTube(watch) = &source.uri {
+            let watch = watch.to_string();
+            let quality = caching.quality;
+            let ctx = ctx.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = match crate::youtube::provider() {
+                    Some(p) => crate::youtube::resolve_stream_url(p.as_ref(), &watch, quality),
+                    None => Err("YouTube playback isn't available on this platform.".to_string()),
+                };
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+            self.playback_pending = Some((title, rx));
+            return;
+        }
 
         // Phase 2: consult the video cache and start playback.
         let mut play_source = source.clone();
@@ -794,6 +820,51 @@ impl MediaApp {
             self.playing = None;
         }
     }
+
+    /// If a pending YouTube stream resolution has completed, start (or fail)
+    /// playback with the resolved direct URL.
+    fn poll_playback_pending(&mut self) {
+        let Some((_, rx)) = self.playback_pending.as_ref() else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("YouTube resolver thread died.".to_string()),
+        };
+        let (title, _) = self.playback_pending.take().unwrap();
+        let stream_url = match result {
+            Ok(u) => u,
+            Err(e) => {
+                self.status = Some(e);
+                return;
+            }
+        };
+        let url = match Url::parse(&stream_url) {
+            Ok(u) => u,
+            Err(e) => {
+                self.status = Some(format!("Bad stream URL: {e}"));
+                return;
+            }
+        };
+        let src = Source {
+            platforms: vec![Platform::Any],
+            uri: ClassifiedUri::DirectHttp(url),
+            player_hint: None,
+        };
+        match self.player.as_mut() {
+            Some(p) => match p.play(&src) {
+                Ok(()) => {
+                    if let Some(pv) = self.playback.as_mut() {
+                        pv.note_started();
+                    }
+                    self.playing = Some(PlayingItem { title, cache: None });
+                }
+                Err(e) => self.status = Some(format!("Playback failed: {e}")),
+            },
+            None => self.status = Some("No player available on this platform.".to_string()),
+        }
+    }
 }
 
 fn item_kind_glyph(kind: ItemKind) -> &'static str {
@@ -808,9 +879,20 @@ impl eframe::App for MediaApp {
         // Diff settings across the frame so any mutation persists automatically.
         let before = self.settings.clone();
 
+        // Promote a finished YouTube resolution into active playback.
+        self.poll_playback_pending();
+
         // Playback takes over the whole surface while an item is playing.
         if self.playing.is_some() {
             self.run_playback(ui, frame);
+        } else if self.playback_pending.is_some() {
+            self.top_bar(ui);
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.spinner();
+                ui.label("Resolving YouTube stream…");
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
         } else {
             self.top_bar(ui);
 

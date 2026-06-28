@@ -30,6 +30,14 @@ android {
         }
     }
 
+    // youtubedl-android extracts its bundled Python from the APK at runtime, so
+    // the native libs must be page-aligned-uncompressed on disk.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     // No Java/Kotlin sources: the app is a pure NativeActivity that loads the
     // Rust cdylib (libshepherd_media_android.so) built by cargo-ndk below.
     // jniLibs come from two places: our cargo-ndk output, and the vendored
@@ -68,4 +76,11 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
 
 tasks.named("preBuild") {
     dependsOn(cargoNdkBuild)
+}
+
+dependencies {
+    // yt-dlp bundled with a Python runtime, called over JNI from the Rust code
+    // (see src/youtube.rs). Brings its own native libs/assets, packaged into
+    // the APK automatically.
+    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
 }
