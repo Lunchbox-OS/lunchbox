@@ -26,16 +26,29 @@ Multi-touch is intentionally ignored: only the first finger's coordinates
 drive the pointer, additional fingers are dropped. This keeps gestures from
 producing spurious clicks in the target application.
 
+## Grab-only mode (disable the touchscreen)
+
+With `--grab-only` the bridge performs steps 1–2 (auto-detect and `EVIOCGRAB`
+every touchscreen) and then simply **discards** all touch events instead of
+translating them. This disables the touchscreen for the lifetime of the
+bridge — used by `input_compat = "disable_touch"` (issue #68) for activities
+that misbehave on touch input but remain playable with a mouse or gamepad. No
+virtual pointer is created, so this mode does **not** require `/dev/uinput`
+access (only the `input` group, to grab the devices).
+
 ## Permissions
 
 The user running the bridge must be in the `input` group to read
-`/dev/input/event*`.
+`/dev/input/event*`. The default (translate) mode additionally synthesizes
+its pointer through `/dev/uinput`; `--grab-only` does not.
 
 ## CLI
 
 ```
-shepherd-touch-bridge [--device PATH]...
+shepherd-touch-bridge [--device PATH]... [--output-scale SCALE] [--grab-only]
 ```
 
 If no `--device` arguments are given, all touchscreens are auto-detected.
 Pass one or more `--device` flags to grab specific devices instead.
+`--grab-only` grabs the touchscreens and discards their events (no synthetic
+output).
