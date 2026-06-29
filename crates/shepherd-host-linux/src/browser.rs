@@ -208,19 +208,21 @@ pub fn chrome_flags(spec: &BrowserSpec, user_data_dir: Option<&Path>) -> Vec<Str
         args.push(format!("--user-data-dir={}", dir.display()));
     }
     match spec.mode {
-        BrowserMode::Kiosk => {
-            args.push("--kiosk".to_string());
-            if let Some(url) = &spec.start_url {
-                args.push(url.clone());
-            }
-        }
-        BrowserMode::App => {
+        // Both kiosk and app open a *chromeless* window via `--app=<url>`. We
+        // deliberately avoid Chrome's `--kiosk` for kiosk mode: shepherd's sway
+        // compositor force-disables client fullscreen for every non-launcher
+        // window (to keep the time-remaining HUD's exclusive zone visible), so
+        // `--kiosk` only has its fullscreen request denied and then falls back to
+        // a normal window *with* the toolbar — the opposite of the kiosk intent.
+        // `--app` yields a toolbar-less window that sway maximizes into the area
+        // around the HUD, which is the kiosk look we actually want here.
+        BrowserMode::Kiosk | BrowserMode::App => {
             if let Some(url) = &spec.start_url {
                 args.push(format!("--app={url}"));
             } else {
                 tracing::warn!(
                     policy_id = %spec.policy_id,
-                    "browser.mode = app but no start_url; launching a normal window"
+                    "browser.mode is kiosk/app but no start_url; launching a normal window"
                 );
             }
         }
@@ -320,14 +322,21 @@ mod tests {
     }
 
     #[test]
-    fn kiosk_flags() {
+    fn kiosk_flags_use_app_window() {
+        // Kiosk presents as a chromeless `--app` window (not `--kiosk`): the sway
+        // compositor denies real fullscreen, so `--kiosk` would fall back to a
+        // toolbar'd window. See the match in `chrome_flags`.
         assert_eq!(
             chrome_flags(&spec(), None),
-            vec![
-                "--kiosk".to_string(),
-                "https://classroom.google.com".to_string()
-            ]
+            vec!["--app=https://classroom.google.com".to_string()]
         );
+    }
+
+    #[test]
+    fn kiosk_mode_without_url_emits_no_flags() {
+        let mut s = spec();
+        s.start_url = None;
+        assert!(chrome_flags(&s, None).is_empty());
     }
 
     #[test]
@@ -366,8 +375,7 @@ mod tests {
             vec![
                 "--user-data-dir=/home/kid/.var/app/com.google.Chrome/config/google-chrome/school"
                     .to_string(),
-                "--kiosk".to_string(),
-                "https://classroom.google.com".to_string()
+                "--app=https://classroom.google.com".to_string()
             ]
         );
     }

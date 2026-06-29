@@ -459,21 +459,27 @@ app_id = "com.google.Chrome"
 # share cookies/logins; each unique id is isolated. Must be a single safe path
 # segment (letters, digits, '-', '_', '.').
 profile_id = "school"
-# Window mode: "kiosk" (fullscreen, no browser chrome), "app" (single app
-# window), or "windowed" (normal browser window).
+# Window mode: "kiosk" and "app" both open a CHROMELESS window (no tabs or
+# omnibox) that sway maximizes into the area around the time-remaining HUD;
+# "windowed" is a normal browser window with tabs. shepherd's compositor keeps
+# the HUD on top and intentionally denies apps true fullscreen, so neither mode
+# takes over the whole display -- kiosk and app behave the same here.
 mode = "kiosk"
 start_url = "https://classroom.google.com"
 # Hostname allowlisting is enforced by Chrome itself (no extensions needed).
 # A non-empty allowlist is authoritative: everything not matched is blocked.
-# Entries use Chrome's URL-filter format and should be SCHEME-QUALIFIED
-# ("https://host/..."): a bare "host" or "host:port" without a scheme is not
-# reliably matched, so the entry would be blocked by the catch-all. See
+# Entries use Chrome's URL-filter format: "[scheme://]host[/path]". A plain
+# hostname ALREADY matches all its subdomains (so "google.com" covers
+# "classroom.google.com"). Do NOT write a "*." subdomain prefix or a trailing
+# "/*": Chrome does not support a wildcard host and treats the path as a literal
+# prefix, not a glob, so "https://*.google.com/*" matches nothing and the entry
+# is blocked by the catch-all. See
 # https://chromeenterprise.google/policies/url-blocking/ for the full format.
 url_allowlist = [
-    "https://*.google.com/*",
-    "https://*.googleusercontent.com/*",
-    "https://*.gstatic.com/*",
-    "https://accounts.youtube.com/*",
+    "https://google.com",
+    "https://googleusercontent.com",
+    "https://gstatic.com",
+    "https://accounts.youtube.com",
 ]
 # url_blocklist is applied after the allowlist (e.g. carve-outs within an
 # allowed domain). Optional; defaults to empty.

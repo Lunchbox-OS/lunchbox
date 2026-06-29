@@ -189,8 +189,11 @@ pub struct RawBrowserConfig {
     /// Must be a single safe path segment (no separators, not `.`/`..`).
     pub profile_id: String,
 
-    /// Window mode: "kiosk" (fullscreen, no browser chrome), "app" (single
-    /// app window), or "windowed" (normal browser window). Default "kiosk".
+    /// Window mode: "kiosk"/"app" both open a chromeless window (no tabs or
+    /// omnibox) via Chrome's `--app`, or "windowed" (normal browser window).
+    /// Default "kiosk". Note: shepherd's sway compositor denies clients true
+    /// fullscreen to keep the HUD visible, so "kiosk" does not use `--kiosk`
+    /// (which would fall back to a toolbar'd window); it behaves like "app".
     #[serde(default = "default_browser_mode")]
     pub mode: String,
 

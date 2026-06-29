@@ -159,8 +159,10 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
         "com.google.Chrome",
         "-c",
         "bash",
-        "--kiosk",
-        "https://classroom.google.com",
+        // Kiosk mode launches a chromeless `--app` window (sway denies real
+        // fullscreen, so `--kiosk` is intentionally not used). See
+        // shepherd-host-linux `chrome_flags`.
+        "--app=https://classroom.google.com",
     ] {
         assert!(
             lines.contains(&needle),
