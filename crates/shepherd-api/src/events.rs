@@ -87,6 +87,19 @@ pub enum EventPayload {
     /// `InternetStatusView::target` field in `ServiceStateSnapshot`.
     InternetStatusChanged { target: String, available: bool },
 
+    /// The system is about to suspend/sleep. Clients should immediately
+    /// commit a static "cover" frame (e.g. a loading screen) so the image
+    /// frozen on screen across the suspend/resume gap is not stale (old
+    /// clock, battery, or activity list). shepherdd holds a logind delay
+    /// inhibitor for a short grace period after emitting this so clients have
+    /// time to draw before the screen freezes.
+    SystemSuspending,
+
+    /// The system has resumed from suspend/sleep. A fresh `StateChanged`
+    /// follows immediately so clients can replace the cover with up-to-date
+    /// content.
+    SystemResumed,
+
     /// Service is shutting down
     Shutdown,
 
