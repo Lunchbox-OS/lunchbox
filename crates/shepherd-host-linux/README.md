@@ -207,6 +207,50 @@ network filter via systemd's BPF address controls
   early app startup.
 - **Steam**: not yet supported (logged as a warning).
 
+## Browser policy
+
+When `SpawnOptions::browser` is set and the entry is the supported
+`com.google.Chrome` flatpak, the adapter materializes the policy before
+spawning (`browser.rs`). Other entry kinds (and other flatpaks) are not
+supported — a warning is logged and the browser policy ignored.
+
+- **Per-user policy injection (not system-wide).** Google Chrome only reads
+  managed policy from the root-owned, machine-wide `/etc/opt/chrome/policies/`
+  — writing there would hijack Chrome for *every* user on the box. But the
+  flatpak's launch wrapper populates that path *inside its own sandbox* (an
+  ephemeral, per-launch filesystem). So shepherd writes a `<policy_id>.json`
+  (regenerated each spawn) into the app's own per-user tree
+  (`~/.var/app/com.google.Chrome/config/shepherd-policies/`) and rebuilds the
+  launch as:
+
+  ```
+  flatpak run --command=bash --env=SHEPHERD_POLICY=<file> com.google.Chrome \
+    -c 'mkdir -p /etc/opt/chrome/policies/managed;
+        ln -sf "$SHEPHERD_POLICY" /etc/opt/chrome/policies/managed/shepherd.json;
+        exec /app/bin/chrome "$@"' bash <chrome flags>
+  ```
+
+  The shim symlinks our policy into the sandbox's own `/etc` and then execs the
+  flatpak's normal launcher. The policy applies only to that launch, only for
+  this user; the host `/etc` is never touched. (Verified end-to-end against
+  real Chrome by the gated test.)
+
+- **Policy contents**: `URLAllowlist`/`URLBlocklist` plus the lockdown switches
+  (`DeveloperToolsAvailability`, `IncognitoModeAvailability`,
+  `ExtensionInstallBlocklist`). A non-empty allowlist injects a catch-all `"*"`
+  blocklist so the allowlist is authoritative.
+- **Launch flags**: the window mode + start URL become Chrome flags
+  (`--kiosk <url>`, `--app=<url>`, or a bare `<url>`), plus `--user-data-dir`.
+- **Profile**: `profile_id` selects a per-profile user-data-dir under
+  `~/.var/app/com.google.Chrome/config/google-chrome/<profile_id>/`. Entries
+  sharing a `profile_id` share cookies/logins; each unique id is isolated.
+- **`wipe_on_exit`**: when set, the user-data-dir is recorded against the
+  activity's pid and deleted once the activity exits (detected by the process
+  monitor, so the wipe waits for the Chrome instance to be gone). Wiping
+  happens in the host adapter, never inside Chrome.
+
+A failed policy write is logged and Chrome launches without the policy.
+
 ## Future Enhancements
 
 Planned features (hooks are designed in):

@@ -1,7 +1,9 @@
 //! Configuration validation
 
 use crate::internet::InternetCheckTarget;
-use crate::schema::{RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawTimeWindow};
+use crate::schema::{
+    RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawTimeWindow,
+};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -209,6 +211,11 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
         errors.extend(validate_firewall(firewall, &entry.id));
     }
 
+    // Validate browser policy
+    if let Some(browser) = &entry.browser {
+        errors.extend(validate_browser(browser, &entry.id));
+    }
+
     // Validate internet requirements
     if let Some(internet) = &entry.internet {
         if let Some(check) = &internet.check
@@ -346,6 +353,142 @@ pub fn parse_firewall_rule(rule: &str) -> Result<String, String> {
     }
 
     Ok(trimmed.to_string())
+}
+
+fn validate_browser(browser: &RawBrowserConfig, entry_id: &str) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    let mut push = |message: String| {
+        errors.push(ValidationError::EntryError {
+            entry_id: entry_id.to_string(),
+            message,
+        });
+    };
+
+    if let Err(e) = validate_profile_id(&browser.profile_id) {
+        push(format!("browser.profile_id {}", e));
+    }
+
+    let mode = browser.mode.trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "kiosk" | "app" | "windowed") {
+        push(format!(
+            "browser.mode must be \"kiosk\", \"app\", or \"windowed\", got \"{}\"",
+            browser.mode
+        ));
+    }
+
+    if let Some(start_url) = &browser.start_url
+        && let Err(e) = validate_http_url(start_url)
+    {
+        push(format!("browser.start_url \"{}\": {}", start_url, e));
+    }
+
+    for (list_name, patterns) in [
+        ("url_allowlist", &browser.url_allowlist),
+        ("url_blocklist", &browser.url_blocklist),
+    ] {
+        for pattern in patterns {
+            if let Err(e) = validate_url_pattern(pattern) {
+                push(format!(
+                    "browser.{} pattern \"{}\": {}",
+                    list_name, pattern, e
+                ));
+            }
+        }
+    }
+
+    errors
+}
+
+/// Validate a `profile_id` used as a single on-disk path segment. Rejects
+/// anything that could escape the user-data-dir or break path handling.
+fn validate_profile_id(id: &str) -> Result<(), String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err("cannot be empty".into());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("cannot be \".\" or \"..\"".into());
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("may only contain ASCII letters, digits, '-', '_', '.'".into());
+    }
+    Ok(())
+}
+
+/// Validate an http(s) start URL. Light scheme/host check only — Chrome is the
+/// authority on URL semantics; this just catches obvious config mistakes.
+fn validate_http_url(url: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    let (scheme, rest) = trimmed
+        .split_once("://")
+        .ok_or("must be an http:// or https:// URL")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return Err("must be an http:// or https:// URL".into());
+    }
+    if rest.is_empty() || rest.starts_with('/') {
+        return Err("missing host".into());
+    }
+    Ok(())
+}
+
+/// Validate a Chromium URL-filter pattern. Full pattern semantics are left to
+/// Chrome; we only reject empty/whitespace-bearing values that can never match.
+fn validate_url_pattern(pattern: &str) -> Result<(), String> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return Err("is empty".into());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("must not contain whitespace".into());
+    }
+    // The catch-all "*" (match every URL) is the one valid wildcard form.
+    if trimmed == "*" {
+        return Ok(());
+    }
+
+    // Chrome's URL-filter format is `[scheme://][.]host[:port][/path][@query]`
+    // (https://chromeenterprise.google/policies/url-blocking/). The host has no
+    // "*.subdomain" wildcard, and the path is matched as a literal *prefix*, not
+    // a glob. Patterns like "https://*.google.com/*" therefore match nothing and
+    // get silently swallowed by the authoritative catch-all blocklist — the most
+    // common way to misconfigure this list, so reject those forms up front.
+
+    // Drop an optional scheme so the checks below see only host[:port][/path].
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    // Drop an optional leading '.' (the exact-host marker), then isolate the
+    // host: it ends at the first port ':' , path '/', or query '@'.
+    let host_and_rest = after_scheme.strip_prefix('.').unwrap_or(after_scheme);
+    let host_end = host_and_rest
+        .find(['/', ':', '@'])
+        .unwrap_or(host_and_rest.len());
+    let host = &host_and_rest[..host_end];
+
+    // A wildcard is only allowed as the *entire* host; a subdomain wildcard like
+    // "*.example.com" is unsupported (and a plain host already covers subdomains).
+    if host != "*" && host.contains('*') {
+        return Err(format!(
+            "host \"{host}\" uses an unsupported wildcard — Chrome has no \"*.host\" form; \
+             use the plain host (e.g. \"example.com\"), which already matches all its subdomains"
+        ));
+    }
+
+    // The path (from the first '/' up to an optional '@query') is a literal
+    // prefix, so a '*' there — typically a trailing "/*" — matches nothing.
+    if let Some(slash) = host_and_rest[host_end..].find('/') {
+        let rest = &host_and_rest[host_end + slash..];
+        let path = rest.split('@').next().unwrap_or(rest);
+        if path.contains('*') {
+            return Err(format!(
+                "path \"{path}\" contains \"*\", but Chrome matches the path as a literal prefix, \
+                 not a glob; drop it (e.g. use \"example.com/dir\", not \"example.com/dir/*\")"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse HH:MM time format
@@ -494,6 +637,113 @@ mod tests {
         assert_eq!(errors.len(), 1);
     }
 
+    fn browser(profile_id: &str, mode: &str) -> RawBrowserConfig {
+        RawBrowserConfig {
+            profile_id: profile_id.into(),
+            mode: mode.into(),
+            start_url: None,
+            url_allowlist: vec![],
+            url_blocklist: vec![],
+            disable_dev_tools: true,
+            disable_incognito: true,
+            disable_extensions: true,
+            wipe_on_exit: false,
+        }
+    }
+
+    #[test]
+    fn test_validate_browser_accepts_valid() {
+        let mut cfg = browser("school", "kiosk");
+        cfg.start_url = Some("https://classroom.google.com".into());
+        // A plain host already matches all subdomains; "*" is the catch-all.
+        cfg.url_allowlist = vec![
+            "https://google.com".into(),
+            "https://accounts.youtube.com".into(),
+            ".exact.example.com".into(),
+            "https://host.com:8443/path".into(),
+            "*".into(),
+            "https://*".into(),
+        ];
+        assert!(validate_browser(&cfg, "x").is_empty());
+        assert!(validate_browser(&browser("a_b-c.1", "app"), "x").is_empty());
+        assert!(validate_browser(&browser("p", "windowed"), "x").is_empty());
+    }
+
+    #[test]
+    fn test_validate_browser_rejects_bad_profile_id() {
+        for bad in ["", "..", ".", "a/b", "../etc", "has space", "a\\b"] {
+            let errors = validate_browser(&browser(bad, "kiosk"), "x");
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::EntryError { message, .. } if message.contains("profile_id"))),
+                "expected profile_id error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_browser_rejects_bad_mode() {
+        let errors = validate_browser(&browser("school", "fullscreen"), "x");
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::EntryError { message, .. } if message.contains("mode")
+        )));
+    }
+
+    #[test]
+    fn test_validate_browser_rejects_bad_start_url() {
+        for bad in [
+            "ftp://x",
+            "classroom.google.com",
+            "https://",
+            "javascript:alert(1)",
+        ] {
+            let mut cfg = browser("school", "kiosk");
+            cfg.start_url = Some(bad.into());
+            let errors = validate_browser(&cfg, "x");
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::EntryError { message, .. } if message.contains("start_url"))),
+                "expected start_url error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_browser_rejects_bad_url_pattern() {
+        let mut cfg = browser("school", "kiosk");
+        cfg.url_allowlist = vec!["https://ok.com".into(), "bad pattern".into()];
+        cfg.url_blocklist = vec!["".into()];
+        let errors = validate_browser(&cfg, "x");
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_browser_rejects_unsupported_url_wildcards() {
+        // Subdomain-wildcard hosts and path globs are the common Chrome
+        // URL-filter mistakes: they match nothing and get swallowed by the
+        // catch-all blocklist, so validation must reject them at load time.
+        for bad in [
+            "https://*.google.com/*",
+            "https://*.google.com",
+            "*.google.com",
+            "https://example.com/dir/*",
+            "example.com/*",
+        ] {
+            let mut cfg = browser("school", "kiosk");
+            cfg.url_allowlist = vec![bad.into()];
+            let errors = validate_browser(&cfg, "x");
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::EntryError { message, .. } if message.contains("url_allowlist"))),
+                "expected url_allowlist error for {bad:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_duplicate_id_detection() {
         let config = RawConfig {
@@ -519,6 +769,7 @@ mod tests {
                     disabled_reason: None,
                     internet: None,
                     firewall: None,
+                    browser: None,
                     input_compat: vec![],
                     input_compat_options: None,
                     xwayland_native_resolution: false,
@@ -542,6 +793,7 @@ mod tests {
                     disabled_reason: None,
                     internet: None,
                     firewall: None,
+                    browser: None,
                     input_compat: vec![],
                     input_compat_options: None,
                     xwayland_native_resolution: false,

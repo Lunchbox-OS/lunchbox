@@ -6,13 +6,13 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawBrightnessConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat,
-    RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
+    RawBrightnessConfig, RawBrowserConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig,
+    RawInputCompat, RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig,
+    RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
-    EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
+    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
     WarningThreshold,
 };
 use shepherd_util::{
@@ -267,6 +267,9 @@ pub struct Entry {
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
     pub firewall: Option<FirewallPolicy>,
+    /// Supervised-browser policy, materialized into Chromium managed-policy
+    /// JSON + Chrome flags at spawn time.
+    pub browser: Option<BrowserPolicy>,
     /// Input compatibility modes — orthogonal sidecars. Deduplicated and
     /// validated (no conflicting gamepad presets) by `Entry::from_raw`.
     pub input_compat: Vec<InputCompatMode>,
@@ -306,6 +309,7 @@ impl Entry {
         let brightness = raw.brightness.as_ref().map(convert_brightness_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
         let firewall = raw.firewall.as_ref().map(convert_firewall_config);
+        let browser = raw.browser.as_ref().map(convert_browser_config);
         let input_compat =
             convert_input_compat_list(&raw.input_compat, &EntryId::new(raw.id.clone()));
         let input_compat_options = raw
@@ -328,6 +332,7 @@ impl Entry {
             disabled_reason: raw.disabled_reason,
             internet,
             firewall,
+            browser,
             input_compat,
             input_compat_options,
             xwayland_native_resolution: raw.xwayland_native_resolution,
@@ -405,6 +410,56 @@ fn convert_firewall_config(raw: &RawFirewallConfig) -> FirewallPolicy {
         default_deny,
         allow: normalize(&raw.allow),
         deny: normalize(&raw.deny),
+    }
+}
+
+/// Validated supervised-browser policy applied to an entry at spawn time.
+///
+/// Fields are validated at config load time by `validate_browser`:
+/// `profile_id` is a safe path segment, `mode` is a known window mode,
+/// `start_url` is an http(s) URL, and URL patterns are non-empty/whitespace-free.
+#[derive(Debug, Clone)]
+pub struct BrowserPolicy {
+    /// On-disk user-data-dir segment (shared across entries with the same id).
+    pub profile_id: String,
+    /// How Chrome is launched.
+    pub mode: BrowserMode,
+    /// URL opened on launch, if any.
+    pub start_url: Option<String>,
+    /// Chromium `URLAllowlist` patterns.
+    pub url_allowlist: Vec<String>,
+    /// Chromium `URLBlocklist` patterns, applied after the allowlist.
+    pub url_blocklist: Vec<String>,
+    /// Disable DevTools.
+    pub disable_dev_tools: bool,
+    /// Disable incognito mode.
+    pub disable_incognito: bool,
+    /// Block extension installation.
+    pub disable_extensions: bool,
+    /// Wipe the profile directory after the session ends.
+    pub wipe_on_exit: bool,
+}
+
+fn convert_browser_config(raw: &RawBrowserConfig) -> BrowserPolicy {
+    // `mode` was validated by `validate_config`; default to kiosk defensively.
+    let mode = match raw.mode.trim().to_ascii_lowercase().as_str() {
+        "app" => BrowserMode::App,
+        "windowed" => BrowserMode::Windowed,
+        _ => BrowserMode::Kiosk,
+    };
+    let normalize = |patterns: &[String]| -> Vec<String> {
+        patterns.iter().map(|p| p.trim().to_string()).collect()
+    };
+    BrowserPolicy {
+        profile_id: raw.profile_id.trim().to_string(),
+        mode,
+        start_url: raw.start_url.as_ref().map(|s| s.trim().to_string()),
+        url_allowlist: normalize(&raw.url_allowlist),
+        url_blocklist: normalize(&raw.url_blocklist),
+        disable_dev_tools: raw.disable_dev_tools,
+        disable_incognito: raw.disable_incognito,
+        disable_extensions: raw.disable_extensions,
+        wipe_on_exit: raw.wipe_on_exit,
     }
 }
 

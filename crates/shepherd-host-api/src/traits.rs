@@ -1,7 +1,9 @@
 //! Host adapter traits
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode, InputCompatOptions, WindowAction, WindowInfo};
+use shepherd_api::{
+    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, WindowAction, WindowInfo,
+};
 use shepherd_util::SessionId;
 use std::time::Duration;
 use thiserror::Error;
@@ -74,6 +76,11 @@ pub struct SpawnOptions {
     /// Network firewall rules to apply to the session (if supported)
     pub firewall: Option<FirewallSpec>,
 
+    /// Supervised-browser policy to materialize for the session (if supported).
+    /// The host adapter writes a Chromium managed-policy JSON file and appends
+    /// the corresponding Chrome command-line flags before spawning.
+    pub browser: Option<BrowserSpec>,
+
     /// Input compatibility modes to apply (e.g., touch-to-mouse,
     /// gamepad-to-mouse+keyboard). Empty = none. The host adapter is
     /// responsible for any sidecar processes this implies and for spawning
@@ -102,6 +109,41 @@ pub struct FirewallSpec {
     pub allow: Vec<String>,
     /// Deny rules (applied after `allow`)
     pub deny: Vec<String>,
+}
+
+/// Supervised-browser specification for a session.
+///
+/// Hosts that support it materialize this into a Chromium [managed-policy
+/// JSON][policies] file (`<policy_id>.json`) plus a set of Chrome
+/// command-line flags, wrapping the browser through documented controls only.
+/// Mirrors `shepherd-config`'s validated `BrowserPolicy`, kept separate so the
+/// host-api layer does not depend on the config crate (same split as
+/// [`FirewallSpec`]).
+///
+/// [policies]: https://chromeenterprise.google/policies/
+#[derive(Debug, Clone)]
+pub struct BrowserSpec {
+    /// Stem of the managed-policy JSON filename (the entry id). Sanitized to a
+    /// safe filename by the host adapter.
+    pub policy_id: String,
+    /// On-disk user-data-dir segment (shared across entries with the same id).
+    pub profile_id: String,
+    /// How Chrome is launched.
+    pub mode: BrowserMode,
+    /// URL opened on launch, if any.
+    pub start_url: Option<String>,
+    /// Chromium `URLAllowlist` patterns.
+    pub url_allowlist: Vec<String>,
+    /// Chromium `URLBlocklist` patterns, applied after the allowlist.
+    pub url_blocklist: Vec<String>,
+    /// Disable DevTools.
+    pub disable_dev_tools: bool,
+    /// Disable incognito mode.
+    pub disable_incognito: bool,
+    /// Block extension installation.
+    pub disable_extensions: bool,
+    /// Wipe the profile directory after the session ends.
+    pub wipe_on_exit: bool,
 }
 
 /// Events from the host adapter

@@ -434,6 +434,96 @@ max_run_seconds = 0  # Unlimited
 daily_quota_seconds = 0  # Unlimited
 cooldown_seconds = 0  # No cooldown
 
+## === Web browser ===
+# A supervised web browser is a *composition*, not a dedicated entry kind:
+#   1. kind = flatpak  -> the sandboxed com.google.Chrome from Flathub
+#   2. [entries.browser] -> a Chromium managed-policy (URL allowlist + lockdown)
+#                           plus the launch mode and on-disk profile
+#   3. [entries.firewall] -> optional coarse IP-layer defense-in-depth
+# shepherd-launcher only wraps Chrome through documented controls (enterprise
+# policy JSON + command-line flags) -- it does not patch the browser or
+# circumvent any protections.
+#
+# Install: flatpak install flathub com.google.Chrome
+[[entries]]
+id = "chrome-school"
+label = "School"
+# icon is autodetected from the Flatpak app_id (no need to specify)
+
+[entries.kind]
+type = "flatpak"
+app_id = "com.google.Chrome"
+
+[entries.browser]
+# profile_id selects the on-disk user-data-dir. Entries that share a profile_id
+# share cookies/logins; each unique id is isolated. Must be a single safe path
+# segment (letters, digits, '-', '_', '.').
+profile_id = "school"
+# Window mode: "kiosk" and "app" both open a CHROMELESS window (no tabs or
+# omnibox) that sway maximizes into the area around the time-remaining HUD;
+# "windowed" is a normal browser window with tabs. shepherd's compositor keeps
+# the HUD on top and intentionally denies apps true fullscreen, so neither mode
+# takes over the whole display -- kiosk and app behave the same here.
+mode = "kiosk"
+start_url = "https://classroom.google.com"
+# Hostname allowlisting is enforced by Chrome itself (no extensions needed).
+# A non-empty allowlist is authoritative: everything not matched is blocked.
+# Entries use Chrome's URL-filter format: "[scheme://]host[/path]". A plain
+# hostname ALREADY matches all its subdomains (so "google.com" covers
+# "classroom.google.com"). Do NOT write a "*." subdomain prefix or a trailing
+# "/*": Chrome does not support a wildcard host and treats the path as a literal
+# prefix, not a glob, so "https://*.google.com/*" matches nothing and the entry
+# is blocked by the catch-all. See
+# https://chromeenterprise.google/policies/url-blocking/ for the full format.
+url_allowlist = [
+    "https://google.com",
+    "https://googleusercontent.com",
+    "https://gstatic.com",
+    "https://accounts.youtube.com",
+]
+# url_blocklist is applied after the allowlist (e.g. carve-outs within an
+# allowed domain). Optional; defaults to empty.
+url_blocklist = []
+# Lockdown switches (all default to true):
+disable_dev_tools = true
+disable_incognito = true
+disable_extensions = true
+# wipe_on_exit clears the profile directory after the session ends (handled by
+# shepherd, not Chrome). Use a unique profile_id with this; sharing a profile_id
+# AND wiping deletes the shared profile. Defaults to false.
+wipe_on_exit = false
+
+# Optional coarse network firewall (issue #4), enforced via systemd's BPF
+# address filter on the session's cgroup. This is IP-layer only -- hostnames
+# are NOT resolved here, so the browser's url_allowlist above remains the
+# authoritative host control. Left commented because a default-deny list needs
+# the current Google/Workspace IP ranges, which drift over time; populate from
+# https://www.gstatic.com/ipranges/goog.json (and the Microsoft equivalent for
+# Microsoft 365) and uncomment to enable. As written below it would block all
+# web traffic until real ranges are added.
+# [entries.firewall]
+# default = "deny"   # "deny" (default) or "allow"
+# allow = [
+#     "127.0.0.0/8",
+#     "::1/128",
+#     # ... add Google/Workspace CIDRs here ...
+# ]
+# deny = []
+
+[entries.availability]
+[[entries.availability.windows]]
+days = "weekdays"
+start = "15:00"
+end = "18:00"
+
+[entries.internet]
+required = true
+check = "https://www.gstatic.com/generate_204"
+
+[entries.limits]
+max_run_seconds = 3600       # 1 hour
+daily_quota_seconds = 7200   # 2 hours per day
+
 ## === Media ===
 # `shepherd-media` reads a declarative `.toml` library file and either
 # direct-plays a single item or opens a poster-grid browser for a whole

@@ -10,6 +10,7 @@
 
 mod adapter;
 mod brightness;
+mod browser;
 mod process;
 mod sidecar;
 mod steam_interstitial;

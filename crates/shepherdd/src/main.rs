@@ -907,6 +907,20 @@ impl Service {
                                 deny: fw.deny,
                             }
                         });
+                        let browser = entry.and_then(|e| e.browser.clone()).map(|b| {
+                            shepherd_host_api::BrowserSpec {
+                                policy_id: entry_id.as_str().to_string(),
+                                profile_id: b.profile_id,
+                                mode: b.mode,
+                                start_url: b.start_url,
+                                url_allowlist: b.url_allowlist,
+                                url_blocklist: b.url_blocklist,
+                                disable_dev_tools: b.disable_dev_tools,
+                                disable_incognito: b.disable_incognito,
+                                disable_extensions: b.disable_extensions,
+                                wipe_on_exit: b.wipe_on_exit,
+                            }
+                        });
                         let input_compat =
                             entry.map(|e| e.input_compat.clone()).unwrap_or_default();
                         let input_compat_options =
@@ -929,6 +943,7 @@ impl Service {
                                 capture_stderr: true,
                                 log_path: Some(log_path),
                                 firewall,
+                                browser,
                                 input_compat,
                                 input_compat_options,
                                 ..Default::default()
@@ -936,6 +951,7 @@ impl Service {
                         } else {
                             shepherd_host_api::SpawnOptions {
                                 firewall,
+                                browser,
                                 input_compat,
                                 input_compat_options,
                                 ..Default::default()
