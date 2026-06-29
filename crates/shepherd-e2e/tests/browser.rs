@@ -51,7 +51,7 @@ max_run_seconds = 300
 profile_id = "school"
 mode = "kiosk"
 start_url = "https://classroom.google.com"
-url_allowlist = ["https://*.google.com/*"]
+url_allowlist = ["https://google.com"]
 wipe_on_exit = true
 "#;
 
