@@ -9,5 +9,5 @@ pub mod types;
 pub use auth::AdminAuthority;
 pub use dispatch::RpcDispatchError;
 pub use error::{ManagementError, ManagementResult};
-pub use service::{DefaultManagementService, ManagementService, dispatch_json};
+pub use service::{DefaultManagementService, ManagementService, RPC_SCHEMA_JSON, dispatch_json};
 pub use types::LaunchOutcome;

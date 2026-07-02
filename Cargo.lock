@@ -4221,6 +4221,7 @@ dependencies = [
 name = "shepherd-management"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "serde",
@@ -4232,6 +4233,7 @@ dependencies = [
  "shepherd-management-macros",
  "shepherd-store",
  "shepherd-util",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

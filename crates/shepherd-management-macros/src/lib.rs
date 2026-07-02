@@ -41,15 +41,17 @@ pub fn management_rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // as an RPC entry. Non-async items (default methods, sync helpers
     // like `subscribe_events`) are skipped.
     let mut arms: Vec<TokenStream2> = Vec::new();
+    let mut schema_entries: Vec<String> = Vec::new();
     for item in &input.items {
         let TraitItem::Fn(f) = item else { continue };
         if f.sig.asyncness.is_none() {
             continue;
         }
-        // Strip our per-method #[rpc(...)] attribute from the trait
-        // re-emission below; that's what `stripped_input` is for.
         match build_arm(f) {
-            Ok(arm) => arms.push(arm),
+            Ok((arm, schema)) => {
+                arms.push(arm);
+                schema_entries.push(schema);
+            }
             Err(e) => return e.to_compile_error().into(),
         }
     }
@@ -63,6 +65,10 @@ pub fn management_rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
             f.attrs.retain(|a| !a.path().is_ident("rpc"));
         }
     }
+
+    // Assemble the schema JSON at macro time so consumers get a plain
+    // `&'static str` — cheap to embed, no serde dep at the boundary.
+    let schema_json = format!("{{\"methods\":[{}]}}", schema_entries.join(","));
 
     let expanded = quote! {
         #stripped
@@ -85,6 +91,16 @@ pub fn management_rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 ),
             }
         }
+
+        /// Machine-readable schema for the trait's RPCs, meant for
+        /// external codegen (companion-android's Kotlin client,
+        /// shepherd-webui's TypeScript client). The shape is a JSON
+        /// object `{ "methods": [{ "name", "params": [...], "result": {..} }, ...] }`.
+        /// Each param has `{ "name", "type", "required" }`; the result
+        /// carries `{ "type", "wrap_field": <optional> }`. Types are
+        /// verbatim Rust source strings — consumers map them to their
+        /// own type systems.
+        pub const RPC_SCHEMA_JSON: &str = #schema_json;
     };
 
     expanded.into()
@@ -162,7 +178,7 @@ struct Param {
     default_expr: Option<String>,
 }
 
-fn build_arm(f: &TraitItemFn) -> syn::Result<TokenStream2> {
+fn build_arm(f: &TraitItemFn) -> syn::Result<(TokenStream2, String)> {
     let rust_name = f.sig.ident.to_string();
     let meta = parse_rpc_attrs(&f.attrs, &rust_name)?;
     let wire_name = &meta.wire_name;
@@ -197,6 +213,13 @@ fn build_arm(f: &TraitItemFn) -> syn::Result<TokenStream2> {
             default_expr,
         });
     }
+
+    let schema = build_schema_entry(
+        wire_name,
+        &params,
+        &f.sig.output,
+        meta.wrap_result.as_deref(),
+    );
 
     // Build the per-method params struct: `struct Params { field: Ty, ... }`,
     // with `Option<Ty>` for defaulted fields so `serde` treats them as
@@ -266,7 +289,7 @@ fn build_arm(f: &TraitItemFn) -> syn::Result<TokenStream2> {
     // or `ManagementResult<()>` / `()`.
     let call_and_wrap = build_return_handler(&f.sig.output, meta.wrap_result.as_deref())?;
 
-    Ok(quote! {
+    let arm = quote! {
         #wire_name => {
             #params_struct
             #parse_stmt
@@ -274,7 +297,89 @@ fn build_arm(f: &TraitItemFn) -> syn::Result<TokenStream2> {
             let __result = svc.#method_ident(#(#call_args),*).await;
             #call_and_wrap
         }
-    })
+    };
+    Ok((arm, schema))
+}
+
+// ---------------------------------------------------------------------------
+// Schema emission
+// ---------------------------------------------------------------------------
+
+/// Emit a single method's JSON schema entry as a source-level string.
+/// We build the JSON by hand rather than pulling in serde_json because
+/// this runs at proc-macro time — proc-macro crates want to keep their
+/// dependency graph tight.
+fn build_schema_entry(
+    wire_name: &str,
+    params: &[Param],
+    output: &ReturnType,
+    wrap_field: Option<&str>,
+) -> String {
+    let params_json: Vec<String> = params
+        .iter()
+        .map(|p| {
+            format!(
+                "{{\"name\":\"{}\",\"type\":\"{}\",\"required\":{}}}",
+                p.name,
+                json_escape(&type_to_source(&p.ty)),
+                p.default_expr.is_none()
+            )
+        })
+        .collect();
+
+    let (result_type, wrap) = describe_result(output, wrap_field);
+    let mut result_json = format!("{{\"type\":\"{}\"", json_escape(&result_type));
+    if let Some(field) = wrap {
+        result_json.push_str(&format!(",\"wrap_field\":\"{}\"", json_escape(&field)));
+    }
+    result_json.push('}');
+
+    format!(
+        "{{\"name\":\"{}\",\"params\":[{}],\"result\":{}}}",
+        wire_name,
+        params_json.join(","),
+        result_json
+    )
+}
+
+/// Turn a `syn::Type` back into its source-level form so the schema
+/// carries the exact spelling from the trait — e.g. `Vec<EntryView>`,
+/// `Option<DateTime<Local>>`. Consumers map these strings to their
+/// target language's types.
+fn type_to_source(ty: &Type) -> String {
+    quote!(#ty).to_string().replace(' ', "")
+}
+
+fn describe_result(output: &ReturnType, wrap_field: Option<&str>) -> (String, Option<String>) {
+    match output {
+        ReturnType::Default => ("()".into(), None),
+        ReturnType::Type(_, ty) => {
+            // Peel a `ManagementResult<T>` wrapper so the schema
+            // advertises the *successful* payload type; errors are a
+            // separate concern the transport layers already model.
+            let inner = strip_management_result(ty).unwrap_or_else(|| ty.as_ref().clone());
+            (type_to_source(&inner), wrap_field.map(str::to_owned))
+        }
+    }
+}
+
+fn strip_management_result(ty: &Type) -> Option<Type> {
+    let Type::Path(p) = ty else { return None };
+    let last = p.path.segments.last()?;
+    if last.ident != "ManagementResult" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    let GenericArgument::Type(inner) = args.args.first()? else {
+        return None;
+    };
+    Some(inner.clone())
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Emit the tail that turns the method's return value into

@@ -22,3 +22,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"
+
+# Used only by the `rpc-codegen` binary — kept out of the library
+# surface via `[[bin]]` in the parent workspace's build graph.
+anyhow = { workspace = true }
+
+[[bin]]
+name = "rpc-codegen"
+path = "src/bin/rpc_codegen.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
