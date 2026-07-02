@@ -245,6 +245,39 @@
       }
     },
     {
+      "name": "volume_up",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "volume_down",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "toggle_mute",
+      "params": [],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
       "name": "get_brightness",
       "params": [],
       "result": {
@@ -262,6 +295,39 @@
       ],
       "result": {
         "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "brightness_up",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "brightness_down",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "ping",
+      "params": [],
+      "result": {
+        "type": "()"
       }
     },
     {

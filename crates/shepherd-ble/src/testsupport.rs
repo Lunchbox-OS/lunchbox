@@ -121,6 +121,15 @@ impl ManagementService for MockSvc {
     async fn set_mute(&self, _muted: bool) -> ManagementResult<VolumeInfo> {
         Err(ManagementError::Forbidden("no".into()))
     }
+    async fn volume_up(&self, _step: u8) -> ManagementResult<VolumeInfo> {
+        Err(ManagementError::Forbidden("no".into()))
+    }
+    async fn volume_down(&self, _step: u8) -> ManagementResult<VolumeInfo> {
+        Err(ManagementError::Forbidden("no".into()))
+    }
+    async fn toggle_mute(&self) -> ManagementResult<VolumeInfo> {
+        Err(ManagementError::Forbidden("no".into()))
+    }
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Ok(BrightnessInfo {
             percent: 0,
@@ -137,10 +146,17 @@ impl ManagementService for MockSvc {
     async fn set_brightness(&self, _percent: u8) -> ManagementResult<BrightnessInfo> {
         Err(ManagementError::Internal("nope".into()))
     }
+    async fn brightness_up(&self, _step: u8) -> ManagementResult<BrightnessInfo> {
+        Err(ManagementError::Internal("nope".into()))
+    }
+    async fn brightness_down(&self, _step: u8) -> ManagementResult<BrightnessInfo> {
+        Err(ManagementError::Internal("nope".into()))
+    }
     async fn reload_config(&self) -> ManagementResult<usize> {
         Ok(42)
     }
     async fn logout(&self) {}
+    async fn ping(&self) {}
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {
         Ok(vec![])
     }

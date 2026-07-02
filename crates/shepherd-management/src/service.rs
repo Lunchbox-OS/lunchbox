@@ -88,10 +88,20 @@ pub trait ManagementService: Send + Sync {
     async fn get_volume(&self) -> ManagementResult<VolumeInfo>;
     async fn set_volume(&self, percent: u8) -> ManagementResult<VolumeInfo>;
     async fn set_mute(&self, muted: bool) -> ManagementResult<VolumeInfo>;
+    async fn volume_up(&self, step: u8) -> ManagementResult<VolumeInfo>;
+    async fn volume_down(&self, step: u8) -> ManagementResult<VolumeInfo>;
+    async fn toggle_mute(&self) -> ManagementResult<VolumeInfo>;
 
     // Brightness
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo>;
     async fn set_brightness(&self, percent: u8) -> ManagementResult<BrightnessInfo>;
+    async fn brightness_up(&self, step: u8) -> ManagementResult<BrightnessInfo>;
+    async fn brightness_down(&self, step: u8) -> ManagementResult<BrightnessInfo>;
+
+    // Keepalive — pure round-trip used by IPC clients to detect a
+    // wedged connection. The `ping` name aligns with the IPC wire
+    // name; other transports can call it too but rarely need to.
+    async fn ping(&self);
 
     // Config
     #[rpc(wrap_result = "entry_count")]
@@ -567,6 +577,48 @@ impl ManagementService for DefaultManagementService {
         self.broadcast_volume_change().await
     }
 
+    async fn volume_up(&self, step: u8) -> ManagementResult<VolumeInfo> {
+        let restrictions = self.volume_restrictions().await;
+        if !restrictions.allow_change {
+            return Err(ManagementError::Forbidden(
+                "Volume changes are not allowed".into(),
+            ));
+        }
+        self.volume
+            .volume_up(step)
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        self.broadcast_volume_change().await
+    }
+
+    async fn volume_down(&self, step: u8) -> ManagementResult<VolumeInfo> {
+        let restrictions = self.volume_restrictions().await;
+        if !restrictions.allow_change {
+            return Err(ManagementError::Forbidden(
+                "Volume changes are not allowed".into(),
+            ));
+        }
+        self.volume
+            .volume_down(step)
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        self.broadcast_volume_change().await
+    }
+
+    async fn toggle_mute(&self) -> ManagementResult<VolumeInfo> {
+        let restrictions = self.volume_restrictions().await;
+        if !restrictions.allow_mute {
+            return Err(ManagementError::Forbidden(
+                "Mute toggle is not allowed".into(),
+            ));
+        }
+        self.volume
+            .toggle_mute()
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        self.broadcast_volume_change().await
+    }
+
     // ------------------------------------------------------------ brightness
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo> {
         let restrictions = self.brightness_restrictions().await;
@@ -612,6 +664,18 @@ impl ManagementService for DefaultManagementService {
         self.broadcast_brightness_change().await
     }
 
+    async fn brightness_up(&self, step: u8) -> ManagementResult<BrightnessInfo> {
+        let current = self.get_brightness().await?;
+        let target = current.percent.saturating_add(step).min(100);
+        self.set_brightness(target).await
+    }
+
+    async fn brightness_down(&self, step: u8) -> ManagementResult<BrightnessInfo> {
+        let current = self.get_brightness().await?;
+        let target = current.percent.saturating_sub(step);
+        self.set_brightness(target).await
+    }
+
     // ---------------------------------------------------------------- config
     async fn reload_config(&self) -> ManagementResult<usize> {
         match load_config(&self.config_path) {
@@ -637,6 +701,8 @@ impl ManagementService for DefaultManagementService {
     async fn logout(&self) {
         let _ = self.shutdown_tx.send(true);
     }
+
+    async fn ping(&self) {}
 
     // --------------------------------------------------------------- windows
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {
