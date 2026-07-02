@@ -8,7 +8,7 @@ use crate::state::{SessionState, SharedState};
 use crate::time_display::TimeDisplay;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4_layer_shell::{Edge, Layer, LayerShell};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use shepherd_api::Command;
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
@@ -16,6 +16,40 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+
+/// Send a one-shot command to shepherdd on a background thread. The HUD's
+/// GTK main loop must never block on IPC, so each action button spins up a
+/// short-lived Tokio runtime, connects, sends, and exits. Errors are logged
+/// (there is no UI surface to report them to).
+fn spawn_command(socket_path: PathBuf, command: Command) {
+    let desc = format!("{:?}", command);
+    std::thread::spawn(move || {
+        let rt = Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async {
+            match IpcClient::connect(&socket_path).await {
+                Ok(mut client) => {
+                    if let Err(e) = client.send(command).await {
+                        tracing::error!("Failed to send {}: {}", desc, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to connect to shepherdd: {}", e);
+                }
+            }
+        });
+    });
+}
+
+/// Ask shepherdd to end the current session gracefully (the "X" button).
+fn request_stop_current(socket_path: PathBuf) {
+    tracing::info!("Requesting end session");
+    spawn_command(
+        socket_path,
+        Command::StopCurrent {
+            mode: shepherd_api::StopMode::Graceful,
+        },
+    );
+}
 
 /// Pixel size for all symbolic icons in the HUD bar at scale 1.0. The
 /// timer in `build_hud_content` multiplies this by the current HUD scale
@@ -443,47 +477,88 @@ fn build_hud_content(
         .build();
     action_button.add_css_class("close-button");
 
+    // Confirmation popover for the "X" button. Ending an activity forcibly
+    // loses its unsaved state, and the button is easy to hit by accident, so
+    // activities that opt in (the default) get a "really end?" prompt before
+    // the session is stopped (issue #78). The popover is parented to the
+    // button, so on the layer-shell overlay it renders as a child popup above
+    // the running activity. It is built once and re-shown on demand; its
+    // message label is refreshed with the current activity name each time.
+    let confirm_popover = gtk4::Popover::new();
+    confirm_popover.set_parent(&action_button);
+    confirm_popover.add_css_class("confirm-close-popover");
+    // Autohide so the prompt dismisses itself when it loses focus (the user
+    // taps the activity, presses Escape, etc.). Autohide relies on an input
+    // grab that needs the layer surface to accept keyboard focus, so we switch
+    // the HUD to on-demand keyboard interactivity only while the prompt is up
+    // (see the popup/`closed` handlers below) and back to none otherwise, so
+    // the always-present bar never steals keyboard focus from the activity.
+    confirm_popover.set_autohide(true);
+    let confirm_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    let confirm_label = gtk4::Label::new(Some("End this activity?"));
+    confirm_label.add_css_class("confirm-close-message");
+    confirm_label.set_wrap(true);
+    confirm_label.set_max_width_chars(28);
+    confirm_box.append(&confirm_label);
+    let confirm_button_row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .homogeneous(true)
+        .build();
+    let cancel_button = gtk4::Button::with_label("Cancel");
+    let end_button = gtk4::Button::with_label("End activity");
+    end_button.add_css_class("destructive-action");
+    confirm_button_row.append(&cancel_button);
+    confirm_button_row.append(&end_button);
+    confirm_box.append(&confirm_button_row);
+    confirm_popover.set_child(Some(&confirm_box));
+
+    let popover_for_cancel = confirm_popover.clone();
+    cancel_button.connect_clicked(move |_| {
+        popover_for_cancel.popdown();
+    });
+
+    let popover_for_end = confirm_popover.clone();
+    end_button.connect_clicked(move |_| {
+        popover_for_end.popdown();
+        request_stop_current(default_socket_path());
+    });
+
+    // Release the on-demand keyboard grab whenever the prompt goes away, no
+    // matter how it was dismissed (Cancel, End, Escape, focus loss, or a
+    // programmatic popdown when the activity ends by other means), so the HUD
+    // returns to not competing for keyboard focus.
+    let window_for_closed = window.clone();
+    confirm_popover.connect_closed(move |_| {
+        window_for_closed.set_keyboard_mode(KeyboardMode::None);
+    });
+
     let state_for_action = state.clone();
+    let popover_for_action = confirm_popover.clone();
+    let window_for_action = window.clone();
     action_button.connect_clicked(move |_| {
         let session_state = state_for_action.session_state();
         let socket_path = default_socket_path();
-        if let Some(session_id) = session_state.session_id() {
-            tracing::info!("Requesting end session for {}", session_id);
-            std::thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create runtime");
-                rt.block_on(async {
-                    match IpcClient::connect(&socket_path).await {
-                        Ok(mut client) => {
-                            let cmd = Command::StopCurrent {
-                                mode: shepherd_api::StopMode::Graceful,
-                            };
-                            if let Err(e) = client.send(cmd).await {
-                                tracing::error!("Failed to send StopCurrent: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to connect to shepherdd: {}", e);
-                        }
-                    }
-                });
-            });
+        if session_state.session_id().is_some() {
+            if session_state.confirm_on_close() {
+                // Refresh the prompt with the activity's name, then ask. Take
+                // keyboard focus so the autohide grab can dismiss on focus loss.
+                if let Some(name) = session_state.entry_name() {
+                    confirm_label.set_text(&format!("End {name}? Unsaved progress may be lost."));
+                } else {
+                    confirm_label.set_text("End this activity? Unsaved progress may be lost.");
+                }
+                window_for_action.set_keyboard_mode(KeyboardMode::OnDemand);
+                popover_for_action.popup();
+            } else {
+                request_stop_current(socket_path);
+            }
         } else {
             tracing::info!("Requesting logout");
-            std::thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create runtime");
-                rt.block_on(async {
-                    match IpcClient::connect(&socket_path).await {
-                        Ok(mut client) => {
-                            if let Err(e) = client.send(Command::Logout).await {
-                                tracing::error!("Failed to send Logout: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to connect to shepherdd: {}", e);
-                        }
-                    }
-                });
-            });
+            spawn_command(socket_path, Command::Logout);
         }
     });
     right_box.append(&action_button);
@@ -511,6 +586,7 @@ fn build_hud_content(
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
+    let confirm_popover_for_timer = confirm_popover.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
     // All icons we resize when the HUD scale factor changes.
@@ -580,6 +656,16 @@ fn build_hud_content(
         } else {
             action_icon_clone.set_icon_name(Some("system-log-out-symbolic"));
             action_button_clone.set_tooltip_text(Some("Log out"));
+        }
+        // If the activity has ended or started ending by any means other than
+        // the prompt itself (time expiry, API stop, process exit), dismiss a
+        // lingering close-confirmation popover — there is nothing left to
+        // confirm (issue #78). Harmless no-op when it isn't showing.
+        if !matches!(
+            session_state,
+            SessionState::Active { .. } | SessionState::Warning { .. }
+        ) {
+            confirm_popover_for_timer.popdown();
         }
         match &session_state {
             SessionState::NoSession => {
@@ -1046,6 +1132,55 @@ const CSS_TEMPLATE: &str = r#"
             font-weight: bold;
             color: var(--color-warning);
             margin-left: 4px;
+        }
+
+        /* Opaque dark surface with explicit colors (not theme variables) so
+           the prompt keeps strong text contrast regardless of the system GTK
+           theme and never lets the bright activity behind it bleed through.
+           The arrow (the triangle pointing at the "X") is a separate CSS node
+           and must be recolored to match the box. */
+        .confirm-close-popover > contents {
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            padding: 14px;
+        }
+
+        .confirm-close-popover > arrow {
+            background-color: #1e1e1e;
+            border: none;
+        }
+
+        .confirm-close-message {
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: bold;
+        }
+
+        /* Theme buttons paint a gradient via background-image, which a bare
+           background-color won't override, so clear it and set explicit
+           high-contrast fills: a light Cancel with dark text, a red End with
+           white text. */
+        .confirm-close-popover button {
+            min-height: 32px;
+            padding: 6px 14px;
+            border-radius: 4px;
+            border: none;
+            background-image: none;
+            color: #2e3440;
+            background-color: #d8dee9;
+        }
+
+        .confirm-close-popover button:hover {
+            background-color: #e5e9f0;
+        }
+
+        .confirm-close-popover button.destructive-action {
+            color: #ffffff;
+            background-color: #bf616a;
+        }
+
+        .confirm-close-popover button.destructive-action:hover {
+            background-color: #d08770;
         }
     "#;
 

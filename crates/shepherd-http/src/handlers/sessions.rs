@@ -59,6 +59,7 @@ pub async fn launch(
         LaunchDecision::Approved(plan) => {
             let session_id = plan.session_id.clone();
             let plan_label = plan.label.clone();
+            let plan_confirm_on_close = plan.confirm_on_close;
 
             // Register session in engine
             {
@@ -166,6 +167,7 @@ pub async fn launch(
                         entry_id: entry_id.clone(),
                         label: plan_label,
                         deadline,
+                        confirm_on_close: plan_confirm_on_close,
                     }));
 
                     (

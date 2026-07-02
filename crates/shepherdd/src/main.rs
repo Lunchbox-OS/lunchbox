@@ -607,6 +607,7 @@ impl Service {
                 entry_id,
                 label,
                 deadline,
+                confirm_on_close,
             } => {
                 Self::broadcast(
                     ipc,
@@ -616,6 +617,7 @@ impl Service {
                         entry_id: entry_id.clone(),
                         label: label.clone(),
                         deadline: *deadline,
+                        confirm_on_close: *confirm_on_close,
                     }),
                 );
             }
@@ -1005,6 +1007,7 @@ impl Service {
                                         entry_id,
                                         label,
                                         deadline,
+                                        confirm_on_close,
                                     } = event
                                     {
                                         Self::broadcast(
@@ -1015,6 +1018,7 @@ impl Service {
                                                 entry_id,
                                                 label,
                                                 deadline,
+                                                confirm_on_close,
                                             }),
                                         );
 

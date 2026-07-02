@@ -375,6 +375,17 @@ pub struct SessionInfo {
     /// Time remaining. None means unlimited.
     pub time_remaining: Option<Duration>,
     pub warnings_issued: Vec<u64>,
+    /// Whether the HUD should confirm before its "X" button ends this
+    /// session (issue #78). Defaults to `true` when absent so older payloads
+    /// keep the safe behaviour.
+    #[serde(default = "default_confirm_on_close")]
+    pub confirm_on_close: bool,
+}
+
+/// Default for [`SessionInfo::confirm_on_close`] / the `SessionStarted` event:
+/// confirmation is enabled unless a config explicitly opts out.
+pub(crate) fn default_confirm_on_close() -> bool {
+    true
 }
 
 /// Status of a single internet connectivity check target

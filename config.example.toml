@@ -354,6 +354,25 @@ always = true
 # type = "process"
 # command = "/usr/bin/example-game"
 
+# `confirm_on_close` controls whether the HUD asks for confirmation before its
+# "X" (End session) button ends this activity (issue #78). Many activities lose
+# unsaved state when force-closed and the button is easy to hit by accident, so
+# this is `true` by default: the HUD shows a "really end?" prompt and only stops
+# the activity once confirmed. Set it to `false` for activities that are safe to
+# close instantly (e.g. a simple menu or a stateless viewer).
+#
+# This only affects the HUD "X" button. Closing via the API, a time/quota
+# expiration, or the activity's own process exiting is never gated by it.
+#
+# [[entries]]
+# id = "example-safe-to-close"
+# label = "Example (no close confirmation)"
+# confirm_on_close = false
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/example"
+
 ## === Flatpak-based applications ===
 # Flatpak entries use the "flatpak" type for proper process management.
 # Similar to Snap, Flatpak apps run in sandboxed environments and use

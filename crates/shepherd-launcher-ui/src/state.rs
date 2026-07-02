@@ -77,6 +77,7 @@ impl SharedState {
                 entry_id: _,
                 label,
                 deadline,
+                confirm_on_close: _,
             } => {
                 tracing::info!(session_id = %session_id, label = %label, "Session started event");
                 let now = shepherd_util::now();
