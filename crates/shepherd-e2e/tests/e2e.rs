@@ -11,7 +11,6 @@
 use anyhow::{Context, Result};
 use nix::sys::signal::Signal;
 use serde_json::json;
-use shepherd_api::{Command, ResponsePayload, ResponseResult};
 use shepherd_e2e::{HarnessProcess, TestHarness, json_body, proc_inspect};
 use std::time::Duration;
 
@@ -31,12 +30,7 @@ async fn boot_health_and_clean_shutdown() -> Result<()> {
 
     // IPC ping
     let mut ipc = h.connect_ipc().await?;
-    let resp = ipc.send(Command::Ping).await?;
-    assert!(
-        matches!(resp.result, ResponseResult::Ok(ResponsePayload::Pong)),
-        "ping response: {:?}",
-        resp.result
-    );
+    ipc.ping().await.context("IPC ping")?;
 
     // Clean SIGTERM shutdown
     h.signal(HarnessProcess::Shepherdd, Signal::SIGTERM)?;

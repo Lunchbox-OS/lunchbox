@@ -12,11 +12,19 @@ mod tile;
 use crate::client::CommandClient;
 use anyhow::Result;
 use clap::Parser;
-use shepherd_api::{Command, ErrorCode, ResponsePayload, ResponseResult};
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
+
+/// What a media-key CLI flag routes into on the IPC.
+enum MediaCall {
+    VolumeUp(u8),
+    VolumeDown(u8),
+    ToggleMute,
+    BrightnessUp(u8),
+    BrightnessDown(u8),
+}
 
 /// Default step (percent) for the volume up/down CLI flags. Matches the
 /// keyboard step most desktops use for XF86Audio* keys.
@@ -74,29 +82,32 @@ struct Args {
     brightness_down: Option<u8>,
 }
 
-/// Send a single one-shot command to shepherdd. Used by the volume- and
-/// brightness-button CLI flags below: the keypress fires the launcher
-/// binary with `--volume-up` or `--brightness-up`, it connects, sends the
-/// command, and exits. shepherdd handles the policy clamp and broadcasts
-/// the corresponding `*Changed` event so the HUD stays in sync.
+/// Send a single one-shot media call to shepherdd. Used by the volume-
+/// and brightness-button CLI flags: the keypress fires the launcher
+/// binary with `--volume-up` etc., it connects, calls, exits. shepherdd
+/// handles the policy clamp and broadcasts the corresponding `*Changed`
+/// event so the HUD stays in sync.
 ///
 /// `kind` is a short string used only in logs/errors so volume and
 /// brightness failures are distinguishable in the journal.
-async fn send_media_command(socket_path: &Path, kind: &str, command: Command) -> Result<()> {
+async fn send_media_call(socket_path: &Path, kind: &str, call: MediaCall) -> Result<()> {
     let mut client = IpcClient::connect(socket_path).await?;
-    let response = client.send(command).await?;
-    match response.result {
-        ResponseResult::Ok(ResponsePayload::VolumeSet)
-        | ResponseResult::Ok(ResponsePayload::BrightnessSet) => Ok(()),
-        ResponseResult::Ok(ResponsePayload::VolumeDenied { reason })
-        | ResponseResult::Ok(ResponsePayload::BrightnessDenied { reason }) => {
-            tracing::info!("{} change denied: {}", kind, reason);
+    let result = match call {
+        MediaCall::VolumeUp(step) => client.volume_up(step).await.map(|_| ()),
+        MediaCall::VolumeDown(step) => client.volume_down(step).await.map(|_| ()),
+        MediaCall::ToggleMute => client.toggle_mute().await.map(|_| ()),
+        MediaCall::BrightnessUp(step) => client.brightness_up(step).await.map(|_| ()),
+        MediaCall::BrightnessDown(step) => client.brightness_down(step).await.map(|_| ()),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(shepherd_ipc::IpcError::ServerError(msg)) => {
+            // Policy denials look like Forbidden on the wire, which
+            // is expected behaviour and mustn't crash the launcher.
+            tracing::info!("{} change denied: {}", kind, msg);
             Ok(())
         }
-        ResponseResult::Ok(payload) => {
-            anyhow::bail!("Unexpected {} response: {:?}", kind, payload)
-        }
-        ResponseResult::Err(err) => anyhow::bail!("{} request failed: {}", kind, err.message),
+        Err(e) => anyhow::bail!("{} request failed: {}", kind, e),
     }
 }
 
@@ -120,23 +131,22 @@ fn main() -> Result<()> {
         runtime.block_on(async move {
             let client = CommandClient::new(&socket_path);
             match client.stop_current().await {
-                Ok(response) => match response.result {
-                    ResponseResult::Ok(ResponsePayload::Stopped) => {
-                        tracing::info!("StopCurrent succeeded");
-                        Ok(())
-                    }
-                    ResponseResult::Err(err) if err.code == ErrorCode::NoActiveSession => {
+                Ok(()) => {
+                    tracing::info!("stop_current succeeded");
+                    Ok(())
+                }
+                Err(e) => {
+                    // "no active session" comes back from ManagementError::NotFound
+                    // → wire ErrorCode::NotFound → IpcError::ServerError.
+                    // Any other error is fatal for the caller.
+                    let msg = e.to_string();
+                    if msg.to_ascii_lowercase().contains("no active session") {
                         tracing::debug!("No active session to stop");
                         Ok(())
+                    } else {
+                        anyhow::bail!("stop_current failed: {}", msg)
                     }
-                    ResponseResult::Err(err) => {
-                        anyhow::bail!("StopCurrent failed: {}", err.message)
-                    }
-                    ResponseResult::Ok(payload) => {
-                        anyhow::bail!("Unexpected StopCurrent response: {:?}", payload)
-                    }
-                },
-                Err(e) => anyhow::bail!("Failed to send StopCurrent: {}", e),
+                }
             }
         })?;
         return Ok(());
@@ -145,10 +155,10 @@ fn main() -> Result<()> {
     if let Some(step) = args.volume_up {
         let step = if step == 0 { DEFAULT_VOLUME_STEP } else { step };
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_media_command(
+        runtime.block_on(send_media_call(
             &socket_path,
             "Volume",
-            Command::VolumeUp { step },
+            MediaCall::VolumeUp(step),
         ))?;
         return Ok(());
     }
@@ -156,20 +166,20 @@ fn main() -> Result<()> {
     if let Some(step) = args.volume_down {
         let step = if step == 0 { DEFAULT_VOLUME_STEP } else { step };
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_media_command(
+        runtime.block_on(send_media_call(
             &socket_path,
             "Volume",
-            Command::VolumeDown { step },
+            MediaCall::VolumeDown(step),
         ))?;
         return Ok(());
     }
 
     if args.toggle_mute {
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_media_command(
+        runtime.block_on(send_media_call(
             &socket_path,
             "Volume",
-            Command::ToggleMute,
+            MediaCall::ToggleMute,
         ))?;
         return Ok(());
     }
@@ -181,10 +191,10 @@ fn main() -> Result<()> {
             step
         };
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_media_command(
+        runtime.block_on(send_media_call(
             &socket_path,
             "Brightness",
-            Command::BrightnessUp { step },
+            MediaCall::BrightnessUp(step),
         ))?;
         return Ok(());
     }
@@ -196,10 +206,10 @@ fn main() -> Result<()> {
             step
         };
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(send_media_command(
+        runtime.block_on(send_media_call(
             &socket_path,
             "Brightness",
-            Command::BrightnessDown { step },
+            MediaCall::BrightnessDown(step),
         ))?;
         return Ok(());
     }
@@ -209,12 +219,7 @@ fn main() -> Result<()> {
         let session_active = runtime.block_on(async {
             let client = CommandClient::new(&socket_path);
             match client.get_state().await {
-                Ok(response) => match response.result {
-                    ResponseResult::Ok(ResponsePayload::State(state)) => {
-                        state.current_session.is_some()
-                    }
-                    _ => false,
-                },
+                Ok(state) => state.current_session.is_some(),
                 Err(_) => false,
             }
         });

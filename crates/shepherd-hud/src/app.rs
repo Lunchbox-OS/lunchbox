@@ -9,7 +9,6 @@ use crate::time_display::TimeDisplay;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use shepherd_api::Command;
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use std::path::PathBuf;
@@ -17,24 +16,27 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
-/// Send a one-shot command to shepherdd on a background thread. The HUD's
-/// GTK main loop must never block on IPC, so each action button spins up a
-/// short-lived Tokio runtime, connects, sends, and exits. Errors are logged
-/// (there is no UI surface to report them to).
-fn spawn_command(socket_path: PathBuf, command: Command) {
-    let desc = format!("{:?}", command);
+/// Send a one-shot RPC to shepherdd on a background thread. The HUD's
+/// GTK main loop must never block on IPC, so each action button spins
+/// up a short-lived Tokio runtime, connects, calls, exits. Errors are
+/// logged (there is no UI surface to report them to). `action` runs
+/// against a freshly-connected client and returns any error the caller
+/// wants to see in the log.
+fn spawn_action<F, Fut>(socket_path: PathBuf, label: &'static str, action: F)
+where
+    F: FnOnce(IpcClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = shepherd_ipc::IpcResult<()>> + Send,
+{
     std::thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create runtime");
-        rt.block_on(async {
+        rt.block_on(async move {
             match IpcClient::connect(&socket_path).await {
-                Ok(mut client) => {
-                    if let Err(e) = client.send(command).await {
-                        tracing::error!("Failed to send {}: {}", desc, e);
+                Ok(client) => {
+                    if let Err(e) = action(client).await {
+                        tracing::error!("Failed to send {}: {}", label, e);
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to connect to shepherdd: {}", e);
-                }
+                Err(e) => tracing::error!("Failed to connect to shepherdd: {}", e),
             }
         });
     });
@@ -43,12 +45,9 @@ fn spawn_command(socket_path: PathBuf, command: Command) {
 /// Ask shepherdd to end the current session gracefully (the "X" button).
 fn request_stop_current(socket_path: PathBuf) {
     tracing::info!("Requesting end session");
-    spawn_command(
-        socket_path,
-        Command::StopCurrent {
-            mode: shepherd_api::StopMode::Graceful,
-        },
-    );
+    spawn_action(socket_path, "stop_current", |mut client| async move {
+        client.stop_current(shepherd_api::StopMode::Graceful).await
+    });
 }
 
 /// Pixel size for all symbolic icons in the HUD bar at scale 1.0. The
@@ -558,7 +557,9 @@ fn build_hud_content(
             }
         } else {
             tracing::info!("Requesting logout");
-            spawn_command(socket_path, Command::Logout);
+            spawn_action(socket_path, "logout", |mut client| async move {
+                client.logout().await
+            });
         }
     });
     right_box.append(&action_button);
@@ -1195,61 +1196,40 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                 Ok(mut client) => {
                     tracing::info!("Connected to shepherdd");
 
-                    // Get initial volume before subscribing (can't send commands after subscribe)
-                    match client.send(Command::GetVolume).await {
-                        Ok(response) => {
-                            if let shepherd_api::ResponseResult::Ok(
-                                shepherd_api::ResponsePayload::Volume(info),
-                            ) = response.result
-                            {
-                                tracing::debug!("Got initial volume: {}%", info.percent);
-                                state.set_initial_volume(info);
-                            }
+                    // Get initial volume before subscribing (can't send RPCs after subscribe)
+                    match client.get_volume().await {
+                        Ok(info) => {
+                            tracing::debug!("Got initial volume: {}%", info.percent);
+                            state.set_initial_volume(info);
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get initial volume: {}", e);
-                        }
+                        Err(e) => tracing::warn!("Failed to get initial volume: {}", e),
                     }
 
                     // Same for brightness. Returns available=false when the
                     // host has no backlight, which is the signal to the UI
                     // that it should hide the slider entirely.
-                    match client.send(Command::GetBrightness).await {
-                        Ok(response) => {
-                            if let shepherd_api::ResponseResult::Ok(
-                                shepherd_api::ResponsePayload::Brightness(info),
-                            ) = response.result
-                            {
-                                tracing::debug!(
-                                    "Got initial brightness: {}% (available={})",
-                                    info.percent,
-                                    info.available,
-                                );
-                                state.set_initial_brightness(info);
-                            }
+                    match client.get_brightness().await {
+                        Ok(info) => {
+                            tracing::debug!(
+                                "Got initial brightness: {}% (available={})",
+                                info.percent,
+                                info.available,
+                            );
+                            state.set_initial_brightness(info);
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get initial brightness: {}", e);
-                        }
+                        Err(e) => tracing::warn!("Failed to get initial brightness: {}", e),
                     }
 
                     // Pull a fresh service snapshot so the network indicator
                     // (and any other state-derived UI) is populated even when
                     // no event has fired since the HUD connected.
-                    match client.send(Command::GetState).await {
-                        Ok(response) => {
-                            if let shepherd_api::ResponseResult::Ok(
-                                shepherd_api::ResponsePayload::State(snapshot),
-                            ) = response.result
-                            {
-                                state.handle_event(&shepherd_api::Event::new(
-                                    shepherd_api::EventPayload::StateChanged(snapshot),
-                                ));
-                            }
+                    match client.service_state().await {
+                        Ok(snapshot) => {
+                            state.handle_event(&shepherd_api::Event::new(
+                                shepherd_api::EventPayload::StateChanged(snapshot),
+                            ));
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get initial state: {}", e);
-                        }
+                        Err(e) => tracing::warn!("Failed to get initial state: {}", e),
                     }
 
                     let mut stream = match client.subscribe().await {

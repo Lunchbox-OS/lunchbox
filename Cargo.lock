@@ -4186,6 +4186,7 @@ dependencies = [
 name = "shepherd-ipc"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "nix 0.29.0",
  "serde",
  "serde_json",
@@ -4215,6 +4216,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
