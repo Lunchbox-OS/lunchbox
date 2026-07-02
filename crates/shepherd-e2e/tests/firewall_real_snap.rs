@@ -167,13 +167,10 @@ deny = []
     let http = h.http();
 
     let resp = http
-        .post_json(
-            "/api/v1/sessions",
-            &json!({ "entry_id": "snap-firewall-probe" }),
-        )
+        .rpc("launch", json!({ "id": "snap-firewall-probe" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert_eq!(json_body(&resp)?["result"], json!("approved"));
+    assert!(json_body(&resp)?["Approved"].is_object());
 
     // Snap startup is slower than a bare process: a fresh `snap run` has to
     // initialize the runtime + apparmor profile + create the systemd scope
@@ -208,7 +205,7 @@ deny = []
          (BPF) to scope' and that the helper's apply-cgroup didn't fail. Probe log:\n{contents}"
     );
 
-    let resp = http.delete("/api/v1/sessions/current").await?;
+    let resp = http.rpc("stop_current", json!({})).await?;
     assert!(
         resp.status == 204 || resp.status == 200,
         "stop body (status {}): {}",

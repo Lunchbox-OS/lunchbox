@@ -1,11 +1,22 @@
-//! Local-network management HTTP API for shepherdd
+//! Local-network management HTTP API for shepherdd.
 //!
-//! Exposes REST endpoints and SSE event streaming so parents can
-//! control sessions, set daily overrides, and view usage analytics
-//! from a browser or mobile app on the LAN.
+//! Exposes exactly two endpoints on the LAN:
+//!
+//! - `POST /api/v1/rpc` — JSON-RPC pass-through into every
+//!   `ManagementService` method. Wire shape is
+//!   `{ "method": "<name>", "params": <object|null> }` with the trait
+//!   method's return value as the response body; errors come back as
+//!   4xx/5xx with `{ "error": <code>, "message": <string> }`. See
+//!   [`handlers::rpc`] for the code/status mapping.
+//! - `GET /api/v1/events` — Server-Sent Events stream of every
+//!   `shepherd_api::Event`.
+//!
+//! There used to be a full REST surface (`/entries`, `/sessions`,
+//! `/volume`, ...) but every consumer now speaks the RPC endpoint,
+//! and adding a new operation shouldn't require touching four places
+//! for one trait method.
 
 pub mod auth;
-pub mod error;
 pub mod handlers;
 pub mod state;
 pub mod web_assets;

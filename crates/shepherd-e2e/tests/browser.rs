@@ -132,9 +132,7 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
         .await?;
     let http = h.http();
 
-    let resp = http
-        .post_json("/api/v1/sessions", &json!({ "entry_id": "chrome-school" }))
-        .await?;
+    let resp = http.rpc("launch", json!({ "id": "chrome-school" })).await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
     assert_eq!(json_body(&resp)?["result"], json!("approved"));
 

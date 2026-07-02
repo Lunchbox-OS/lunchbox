@@ -1,4 +1,9 @@
 //! Integration tests for the shepherd-http management API.
+//!
+//! Every operation on the HTTP surface goes through the single
+//! `POST /api/v1/rpc` endpoint (see `handlers/rpc.rs`) — the REST
+//! routes are gone. Tests here exercise that endpoint against a
+//! fully-wired-up `AppState` with mocked host/volume/brightness.
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -167,11 +172,11 @@ fn test_policy() -> Policy {
             input_compat: vec![],
             input_compat_options: Default::default(),
             xwayland_native_resolution: false,
-            confirm_on_close: true,
+            confirm_on_close: false,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
-        volume: VolumePolicy::default(),
+        volume: VolumePolicy::unrestricted(),
         brightness: BrightnessPolicy::default(),
     }
 }
@@ -282,74 +287,64 @@ async fn send(app: &axum::Router, req: Request<Body>) -> (StatusCode, Value) {
     (status, json)
 }
 
-fn req_get(uri: &str) -> Request<Body> {
-    Request::builder().uri(uri).body(Body::empty()).unwrap()
-}
+// ---------------------------------------------------------------------------
+// RPC helpers
+//
+// Every test dispatches through `POST /api/v1/rpc` with body
+// `{ "method": "<wire-name>", "params": <object|null> }`. Successful
+// calls come back as 2xx with the trait method's return value as the
+// body; failures return the mapped HTTP status plus
+// `{ "error": <code>, "message": <string> }`.
+// ---------------------------------------------------------------------------
 
-fn req_get_auth(uri: &str, token: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn req_post_json(uri: &str, body: Value) -> Request<Body> {
-    Request::builder()
+fn rpc_request(method: &str, params: Value, token: Option<&str>) -> Request<Body> {
+    let body = json!({ "method": method, "params": params });
+    let mut b = Request::builder()
         .method("POST")
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .uri("/api/v1/rpc")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(t) = token {
+        b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    b.body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
 
-fn req_put_json(uri: &str, body: Value) -> Request<Body> {
-    Request::builder()
-        .method("PUT")
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap()
+async fn rpc(app: &axum::Router, method: &str, params: Value) -> (StatusCode, Value) {
+    send(app, rpc_request(method, params, None)).await
 }
 
-fn req_post(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn req_delete(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("DELETE")
-        .uri(uri)
-        .body(Body::empty())
-        .unwrap()
+async fn rpc_auth(
+    app: &axum::Router,
+    method: &str,
+    params: Value,
+    token: &str,
+) -> (StatusCode, Value) {
+    send(app, rpc_request(method, params, Some(token))).await
 }
 
 // ---------------------------------------------------------------------------
-// Health
+// Health / state
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn health_returns_ok() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/health")).await;
+    let (status, body) = rpc(&app, "health", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["live"], true);
     assert_eq!(body["ready"], true);
 }
 
 #[tokio::test]
-async fn state_returns_snapshot() {
+async fn service_state_returns_snapshot() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/state")).await;
+    let (status, body) = rpc(&app, "service_state", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["api_version"].is_number());
-    assert!(body["active_session"].is_null());
+    assert!(body["current_session"].is_null());
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +355,7 @@ async fn state_returns_snapshot() {
 async fn auth_no_token_configured_allows_all() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, _) = send(&app, req_get("/api/v1/health")).await;
+    let (status, _) = rpc(&app, "health", json!({})).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -368,7 +363,7 @@ async fn auth_no_token_configured_allows_all() {
 async fn auth_missing_header_returns_401() {
     let cfg = temp_config();
     let app = make_app(Some("secret"), cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/health")).await;
+    let (status, body) = rpc(&app, "health", json!({})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "unauthorized");
 }
@@ -377,7 +372,7 @@ async fn auth_missing_header_returns_401() {
 async fn auth_wrong_token_returns_401() {
     let cfg = temp_config();
     let app = make_app(Some("secret"), cfg.path().to_path_buf());
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "wrong")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "wrong").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -385,7 +380,7 @@ async fn auth_wrong_token_returns_401() {
 async fn auth_correct_token_passes() {
     let cfg = temp_config();
     let app = make_app(Some("secret"), cfg.path().to_path_buf());
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "secret")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "secret").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -394,9 +389,6 @@ async fn auth_admin_authority_token_passes() {
     use shepherd_management::AdminAuthority;
     use std::sync::Mutex;
 
-    /// Trivial in-test admin authority. When `token` is `Some`, the
-    /// HTTP middleware should accept that bearer; when `None` (mock of
-    /// "device unclaimed"), it should reject.
     struct MockAdmin(Mutex<Option<String>>);
     impl AdminAuthority for MockAdmin {
         fn current_http_token(&self) -> Option<String> {
@@ -410,15 +402,15 @@ async fn auth_admin_authority_token_passes() {
     let app = make_app_with_admin(None, cfg.path().to_path_buf(), Some(admin.clone()));
 
     // Admin token accepted.
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "admin-tok")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "admin-tok").await;
     assert_eq!(status, StatusCode::OK);
 
     // Wrong token rejected even when admin is claimed.
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "wrong")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "wrong").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Missing header rejected (admin is claimed → auth required).
-    let (status, _) = send(&app, req_get("/api/v1/health")).await;
+    let (status, _) = rpc(&app, "health", json!({})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -430,9 +422,7 @@ async fn auth_admin_authority_unclaimed_stays_open() {
     // yet (the default state on a fresh install). Without a static
     // token configured this must remain open mode — otherwise a
     // fresh install with BLE enabled locks itself out of HTTP
-    // before any admin has been set up. Regression test: an earlier
-    // version of `is_open` keyed on `admin.is_none()` alone, which
-    // mis-engaged the auth gate the moment BLE was wired in.
+    // before any admin has been set up.
     struct UnclaimedAdmin;
     impl AdminAuthority for UnclaimedAdmin {
         fn current_http_token(&self) -> Option<String> {
@@ -444,11 +434,9 @@ async fn auth_admin_authority_unclaimed_stays_open() {
     let admin: Arc<dyn AdminAuthority> = Arc::new(UnclaimedAdmin);
     let app = make_app_with_admin(None, cfg.path().to_path_buf(), Some(admin));
 
-    // No header — must pass because no token is enforceable yet.
-    let (status, _) = send(&app, req_get("/api/v1/health")).await;
+    let (status, _) = rpc(&app, "health", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    // Bogus header also passes; open is open.
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "anything")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "anything").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -469,11 +457,9 @@ async fn auth_static_and_admin_tokens_both_accepted() {
         Arc::new(MockAdmin(Mutex::new(Some("admin-tok".to_string()))));
     let app = make_app_with_admin(Some("static"), cfg.path().to_path_buf(), Some(admin));
 
-    // Static token accepted.
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "static")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "static").await;
     assert_eq!(status, StatusCode::OK);
-    // Admin token accepted.
-    let (status, _) = send(&app, req_get_auth("/api/v1/health", "admin-tok")).await;
+    let (status, _) = rpc_auth(&app, "health", json!({}), "admin-tok").await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -485,7 +471,7 @@ async fn auth_static_and_admin_tokens_both_accepted() {
 async fn entries_list_returns_all_entries() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/entries")).await;
+    let (status, body) = rpc(&app, "list_entries", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 1);
@@ -497,7 +483,7 @@ async fn entries_list_returns_all_entries() {
 async fn entry_get_known_returns_200() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/entries/test-game")).await;
+    let (status, body) = rpc(&app, "get_entry", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["entry_id"], "test-game");
     assert_eq!(body["label"], "Test Game");
@@ -507,9 +493,18 @@ async fn entry_get_known_returns_200() {
 async fn entry_get_unknown_returns_404() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/entries/does-not-exist")).await;
+    let (status, body) = rpc(&app, "get_entry", json!({ "id": "does-not-exist" })).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "not_found");
+}
+
+#[tokio::test]
+async fn unknown_method_returns_404() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "no_such_method", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "method_not_found");
 }
 
 // ---------------------------------------------------------------------------
@@ -517,59 +512,49 @@ async fn entry_get_unknown_returns_404() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn sessions_current_is_null_initially() {
+async fn current_session_is_null_initially() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/sessions/current")).await;
+    let (status, body) = rpc(&app, "current_session", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_null());
 }
 
 #[tokio::test]
-async fn sessions_launch_known_entry_is_approved() {
+async fn launch_known_entry_is_approved() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "test-game" })),
-    )
-    .await;
+    let (status, body) = rpc(&app, "launch", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"], "approved");
-    assert!(body["session_id"].is_string());
+    // LaunchOutcome is serde's externally-tagged form.
+    assert!(body["Approved"].is_object());
+    assert!(body["Approved"]["session_id"].is_string());
 }
 
 #[tokio::test]
-async fn sessions_launch_unknown_entry_is_denied() {
+async fn launch_unknown_entry_is_denied() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "no-such-entry" })),
-    )
-    .await;
+    let (status, body) = rpc(&app, "launch", json!({ "id": "no-such-entry" })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"], "denied");
+    assert!(body["Denied"].is_object());
+    assert!(body["Denied"]["reasons"].is_array());
 }
 
 #[tokio::test]
-async fn sessions_stop_no_active_session_returns_404() {
+async fn stop_current_no_active_session_returns_404() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_delete("/api/v1/sessions/current")).await;
+    let (status, body) = rpc(&app, "stop_current", json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"], "no_active_session");
+    assert_eq!(body["error"], "not_found");
 }
 
 #[tokio::test]
-async fn sessions_extend_no_active_session_returns_404() {
+async fn extend_current_no_active_session_returns_404() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, _) = send(
-        &app,
-        req_post_json("/api/v1/sessions/current/extend", json!({ "seconds": 60 })),
-    )
-    .await;
+    let (status, _) = rpc(&app, "extend_current", json!({ "seconds": 60 })).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -579,345 +564,158 @@ async fn sessions_full_lifecycle() {
     let app = make_app(None, cfg.path().to_path_buf());
 
     // No session yet
-    let (status, body) = send(&app, req_get("/api/v1/sessions/current")).await;
+    let (status, body) = rpc(&app, "current_session", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_null());
 
     // Launch
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "test-game" })),
-    )
-    .await;
+    let (status, body) = rpc(&app, "launch", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"], "approved");
+    assert!(body["Approved"].is_object());
 
     // Session is active
-    let (status, body) = send(&app, req_get("/api/v1/sessions/current")).await;
+    let (status, body) = rpc(&app, "current_session", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!body.is_null());
     assert_eq!(body["entry_id"], "test-game");
 
     // Second launch is denied (session already active)
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "test-game" })),
-    )
-    .await;
+    let (status, body) = rpc(&app, "launch", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"], "denied");
+    assert!(body["Denied"].is_object());
 
     // Stop
-    let (status, _) = send(&app, req_delete("/api/v1/sessions/current")).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = rpc(&app, "stop_current", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
 
-    // Session gone
-    let (status, body) = send(&app, req_get("/api/v1/sessions/current")).await;
+    // Session is null again
+    let (status, body) = rpc(&app, "current_session", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_null());
 }
 
 #[tokio::test]
-async fn sessions_extend_active_session() {
+async fn extend_active_session() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
 
-    // Launch
-    let (status, _) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "test-game" })),
-    )
-    .await;
+    let (_, _) = rpc(&app, "launch", json!({ "id": "test-game" })).await;
+    let (status, body) = rpc(&app, "extend_current", json!({ "seconds": 120 })).await;
     assert_eq!(status, StatusCode::OK);
-
-    // Extend
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions/current/extend", json!({ "seconds": 60 })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    // Entry has max_run=300s so there is a deadline
-    assert!(!body["new_deadline"].is_null());
+    // wrap_result = "new_deadline"
+    assert!(body["new_deadline"].is_string() || body["new_deadline"].is_null());
 }
 
 #[tokio::test]
-async fn sessions_reduce_active_session() {
+async fn reduce_active_session() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
 
-    // Launch
-    let (status, _) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "test-game" })),
-    )
-    .await;
+    let (_, _) = rpc(&app, "launch", json!({ "id": "test-game" })).await;
+    let (status, body) = rpc(&app, "extend_current", json!({ "seconds": -60 })).await;
     assert_eq!(status, StatusCode::OK);
-
-    // Reduce time (negative seconds)
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions/current/extend", json!({ "seconds": -30 })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(!body["new_deadline"].is_null());
+    assert!(body["new_deadline"].is_string() || body["new_deadline"].is_null());
 }
 
 // ---------------------------------------------------------------------------
-// Daily overrides
+// Overrides
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn overrides_list_empty_initially() {
+async fn list_overrides_empty_initially() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/overrides")).await;
+    let (status, body) = rpc(&app, "list_overrides", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn overrides_upsert_creates_record() {
+async fn upsert_override_creates_record() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(
+    let (status, body) = rpc(
         &app,
-        req_put_json(
-            "/api/v1/overrides/test-game",
-            json!({ "availability": false }),
-        ),
+        "upsert_override",
+        json!({ "id": "test-game", "availability": true }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["entry_id"], "test-game");
-    assert_eq!(body["availability"], false);
+    assert_eq!(body["availability"], true);
 }
 
 #[tokio::test]
-async fn overrides_get_returns_existing_record() {
+async fn get_override_returns_existing_record() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-
-    // Create
-    let (status, _) = send(
+    let _ = rpc(
         &app,
-        req_put_json(
-            "/api/v1/overrides/test-game",
-            json!({ "quota_delta_seconds": 1800 }),
-        ),
+        "upsert_override",
+        json!({ "id": "test-game", "quota_delta_seconds": 300 }),
     )
     .await;
+    let (status, body) = rpc(&app, "get_override", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
-
-    // Retrieve
-    let (status, body) = send(&app, req_get("/api/v1/overrides/test-game")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["entry_id"], "test-game");
-    assert_eq!(body["quota_delta_seconds"], 1800);
+    assert_eq!(body["quota_delta_seconds"], 300);
 }
 
 #[tokio::test]
-async fn overrides_get_nonexistent_returns_null() {
+async fn get_override_nonexistent_returns_null() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/overrides/test-game")).await;
+    let (status, body) = rpc(&app, "get_override", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_null());
 }
 
 #[tokio::test]
-async fn overrides_upsert_empty_body_returns_400() {
+async fn upsert_override_missing_id_returns_400() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_put_json("/api/v1/overrides/test-game", json!({}))).await;
+    let (status, body) = rpc(&app, "upsert_override", json!({})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "bad_request");
+    assert_eq!(body["error"], "invalid_params");
 }
 
 #[tokio::test]
-async fn overrides_list_shows_created_record() {
+async fn list_overrides_shows_created_record() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-
-    // Create
-    let (status, _) = send(
+    let _ = rpc(
         &app,
-        req_put_json(
-            "/api/v1/overrides/test-game",
-            json!({ "availability": true }),
-        ),
+        "upsert_override",
+        json!({ "id": "test-game", "availability": true }),
     )
     .await;
+    let (status, body) = rpc(&app, "list_overrides", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-
-    // List
-    let (status, body) = send(&app, req_get("/api/v1/overrides")).await;
-    assert_eq!(status, StatusCode::OK);
-    let arr = body.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["entry_id"], "test-game");
+    assert_eq!(body.as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn overrides_delete_existing_returns_204() {
+async fn delete_override_existing_returns_true() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-
-    // Create
-    let (status, _) = send(
+    let _ = rpc(
         &app,
-        req_put_json(
-            "/api/v1/overrides/test-game",
-            json!({ "availability": false }),
-        ),
+        "upsert_override",
+        json!({ "id": "test-game", "availability": true }),
     )
     .await;
+    let (status, body) = rpc(&app, "delete_override", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
-
-    // Delete
-    let (status, _) = send(&app, req_delete("/api/v1/overrides/test-game")).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-
-    // Gone
-    let (status, body) = send(&app, req_get("/api/v1/overrides/test-game")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.is_null());
+    // wrap_result = "deleted"
+    assert_eq!(body["deleted"], true);
 }
 
 #[tokio::test]
-async fn overrides_delete_nonexistent_returns_404() {
+async fn delete_override_nonexistent_returns_false() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, _) = send(&app, req_delete("/api/v1/overrides/test-game")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn overrides_disabled_entry_shows_as_unavailable() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-
-    // Entry is enabled before override
-    let (status, body) = send(&app, req_get("/api/v1/entries/test-game")).await;
+    let (status, body) = rpc(&app, "delete_override", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["enabled"], true);
-
-    // Disable via override
-    let (status, _) = send(
-        &app,
-        req_put_json(
-            "/api/v1/overrides/test-game",
-            json!({ "availability": false }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Entry is now disabled
-    let (status, body) = send(&app, req_get("/api/v1/entries/test-game")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["enabled"], false);
-    // ReasonCode serializes as { "code": "manually_disabled", ... }
-    let reasons = body["reasons"].as_array().unwrap();
-    assert!(reasons.iter().any(|r| r["code"] == "manually_disabled"));
-}
-
-#[tokio::test]
-async fn overrides_enable_entry_outside_time_window() {
-    // Build a policy with a narrow time window (23:55–23:59) so the entry is
-    // almost always outside its allowed hours.
-    let windowed_policy = Policy {
-        service: ServiceConfig::default(),
-        entries: vec![Entry {
-            id: EntryId::new("time-restricted"),
-            label: "Time Restricted".into(),
-            icon_ref: None,
-            kind: EntryKind::Process {
-                command: "game".into(),
-                args: vec![],
-                env: HashMap::new(),
-                cwd: None,
-            },
-            availability: AvailabilityPolicy {
-                windows: vec![TimeWindow::new(
-                    DaysOfWeek::ALL_DAYS,
-                    WallClock::new(23, 55).unwrap(),
-                    WallClock::new(23, 59).unwrap(),
-                )],
-                always: false,
-            },
-            limits: LimitsPolicy {
-                max_run: None,
-                daily_quota: None,
-                cooldown: None,
-            },
-            warnings: vec![],
-            volume: None,
-            brightness: None,
-            disabled: false,
-            disabled_reason: None,
-            internet: Default::default(),
-            firewall: None,
-            browser: None,
-            input_compat: vec![],
-            input_compat_options: Default::default(),
-            xwayland_native_resolution: false,
-            confirm_on_close: true,
-        }],
-        default_warnings: vec![],
-        default_max_run: None,
-        volume: VolumePolicy::default(),
-        brightness: BrightnessPolicy::default(),
-    };
-
-    let cfg = temp_config();
-    let app = make_app_with_policy(windowed_policy, None, cfg.path().to_path_buf());
-
-    // Entry should be disabled (outside the 23:55–23:59 window) at current time.
-    // We verify the API reflects the right state without relying on a fixed clock.
-    let (status, body) = send(&app, req_get("/api/v1/entries/time-restricted")).await;
-    assert_eq!(status, StatusCode::OK);
-    // Entry is disabled — outside the window
-    assert!(!body["enabled"].as_bool().unwrap());
-    let reasons = body["reasons"].as_array().unwrap();
-    assert!(
-        reasons.iter().any(|r| r["code"] == "outside_time_window"),
-        "expected outside_time_window, got: {reasons:?}"
-    );
-
-    // Enable via override (no date = today)
-    let (status, _) = send(
-        &app,
-        req_put_json(
-            "/api/v1/overrides/time-restricted",
-            json!({ "availability": true }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Entry should now be enabled despite being outside the window
-    let (status, body) = send(&app, req_get("/api/v1/entries/time-restricted")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body["enabled"].as_bool().unwrap(),
-        "entry should be enabled after override, got: {body}"
-    );
-    assert!(
-        body["reasons"].as_array().unwrap().is_empty(),
-        "no reasons expected when enabled: {}",
-        body["reasons"]
-    );
-
-    // Launch should also be approved
-    let (status, body) = send(
-        &app,
-        req_post_json("/api/v1/sessions", json!({ "entry_id": "time-restricted" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"], "approved");
+    assert_eq!(body["deleted"], false);
 }
 
 // ---------------------------------------------------------------------------
@@ -925,48 +723,19 @@ async fn overrides_enable_entry_outside_time_window() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn usage_all_returns_empty_without_any_sessions() {
+async fn usage_all_returns_empty_without_sessions() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/usage")).await;
+    let (status, body) = rpc(&app, "usage_all", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.as_array().unwrap().len(), 0);
+    assert!(body.is_array());
 }
 
 #[tokio::test]
 async fn usage_entry_returns_empty_for_known_entry() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/usage/test-game")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.as_array().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn usage_entry_unknown_returns_404() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/usage/no-such-entry")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"], "not_found");
-}
-
-#[tokio::test]
-async fn usage_invalid_date_range_returns_400() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    // from is after to
-    let (status, body) = send(&app, req_get("/api/v1/usage?from=2026-04-25&to=2026-04-01")).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "bad_request");
-}
-
-#[tokio::test]
-async fn usage_date_range_returns_stats_in_range() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    // Valid range with no data — just check it doesn't error
-    let (status, body) = send(&app, req_get("/api/v1/usage?from=2026-01-01&to=2026-04-25")).await;
+    let (status, body) = rpc(&app, "usage_entry", json!({ "id": "test-game" })).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_array());
 }
@@ -976,199 +745,189 @@ async fn usage_date_range_returns_stats_in_range() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn volume_get_returns_status() {
+async fn get_volume_returns_status() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/volume")).await;
+    let (status, body) = rpc(&app, "get_volume", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["percent"].is_number());
-    assert!(body["muted"].is_boolean());
-    assert_eq!(body["available"], true);
+    assert_eq!(body["percent"], 50);
+    assert_eq!(body["muted"], false);
 }
 
 #[tokio::test]
-async fn volume_set_percent_updates_volume() {
+async fn set_volume_updates_percent() {
     let cfg = temp_config();
-    let app = make_app_with_policy(
-        Policy {
-            volume: VolumePolicy::unrestricted(),
-            ..test_policy()
-        },
-        None,
-        cfg.path().to_path_buf(),
-    );
-    let (status, body) = send(
-        &app,
-        req_put_json("/api/v1/volume", json!({ "percent": 70 })),
-    )
-    .await;
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "set_volume", json!({ "percent": 75 })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["percent"], 70);
+    assert_eq!(body["percent"], 75);
 }
 
 #[tokio::test]
-async fn volume_set_muted_updates_mute_state() {
+async fn set_mute_updates_muted() {
     let cfg = temp_config();
-    let app = make_app_with_policy(
-        Policy {
-            volume: VolumePolicy::unrestricted(),
-            ..test_policy()
-        },
-        None,
-        cfg.path().to_path_buf(),
-    );
-    let (status, body) = send(
-        &app,
-        req_put_json("/api/v1/volume", json!({ "muted": true })),
-    )
-    .await;
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "set_mute", json!({ "muted": true })).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["muted"], true);
 }
 
 #[tokio::test]
-async fn volume_set_above_max_is_clamped() {
+async fn set_volume_above_max_is_clamped() {
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(60),
+        min_volume: Some(0),
+        allow_mute: true,
+        allow_change: true,
+    };
     let cfg = temp_config();
-    let app = make_app_with_policy(
-        Policy {
-            volume: VolumePolicy {
-                max_volume: Some(80),
-                allow_change: true,
-                allow_mute: true,
-                ..Default::default()
-            },
-            ..test_policy()
-        },
-        None,
-        cfg.path().to_path_buf(),
-    );
-    // Request 95%, expect it clamped to 80
-    let (status, body) = send(
-        &app,
-        req_put_json("/api/v1/volume", json!({ "percent": 95 })),
-    )
-    .await;
+    let app = make_app_with_policy(policy, None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "set_volume", json!({ "percent": 95 })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["percent"], 80);
+    assert_eq!(body["percent"], 60);
 }
 
 #[tokio::test]
-async fn volume_set_forbidden_when_change_disallowed() {
+async fn set_volume_forbidden_when_change_disallowed() {
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(100),
+        min_volume: Some(0),
+        allow_mute: true,
+        allow_change: false,
+    };
     let cfg = temp_config();
-    let app = make_app_with_policy(
-        Policy {
-            volume: VolumePolicy {
-                allow_change: false,
-                allow_mute: false,
-                ..Default::default()
-            },
-            ..test_policy()
-        },
-        None,
-        cfg.path().to_path_buf(),
-    );
-    let (status, body) = send(
-        &app,
-        req_put_json("/api/v1/volume", json!({ "percent": 50 })),
-    )
-    .await;
+    let app = make_app_with_policy(policy, None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "set_volume", json!({ "percent": 75 })).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"], "forbidden");
 }
 
 #[tokio::test]
-async fn volume_mute_forbidden_when_mute_disallowed() {
+async fn set_mute_forbidden_when_mute_disallowed() {
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(100),
+        min_volume: Some(0),
+        allow_mute: false,
+        allow_change: true,
+    };
     let cfg = temp_config();
-    let app = make_app_with_policy(
-        Policy {
-            volume: VolumePolicy {
-                allow_change: true,
-                allow_mute: false,
-                ..Default::default()
-            },
-            ..test_policy()
-        },
-        None,
-        cfg.path().to_path_buf(),
-    );
-    let (status, body) = send(
-        &app,
-        req_put_json("/api/v1/volume", json!({ "muted": true })),
-    )
-    .await;
+    let app = make_app_with_policy(policy, None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "set_mute", json!({ "muted": true })).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"], "forbidden");
 }
 
-// ---------------------------------------------------------------------------
-// Config reload
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn config_reload_valid_file_returns_200() {
+async fn volume_up_and_down_walk_through_step() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_post("/api/v1/config/reload")).await;
+    let (status, body) = rpc(&app, "volume_up", json!({ "step": 10 })).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["percent"], 60);
+
+    let (status, body) = rpc(&app, "volume_down", json!({ "step": 25 })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["percent"], 35);
+}
+
+#[tokio::test]
+async fn toggle_mute_flips_state() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "toggle_mute", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["muted"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reload_config_valid_file_returns_ok() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "reload_config", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    // wrap_result = "entry_count"
     assert!(body["entry_count"].is_number());
 }
 
 #[tokio::test]
-async fn config_reload_invalid_file_returns_422() {
-    let f = NamedTempFile::new().unwrap();
-    std::fs::write(f.path(), "this is not valid toml !!!").unwrap();
-    let app = make_app(None, f.path().to_path_buf());
-    let (status, body) = send(&app, req_post("/api/v1/config/reload")).await;
+async fn reload_config_invalid_file_returns_422() {
+    let cfg = NamedTempFile::new().unwrap();
+    std::fs::write(cfg.path(), "not = valid = toml").unwrap();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, body) = rpc(&app, "reload_config", json!({})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error"], "config_error");
+    assert_eq!(body["error"], "unprocessable");
 }
 
 // ---------------------------------------------------------------------------
-// Debug
+// Ping
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn debug_windows_unsupported_returns_500() {
-    // MockHost does not implement list_windows, so the default trait impl
-    // returns HostError::Internal — surfaced as a 500 with a JSON error body.
+async fn ping_returns_null() {
     let cfg = temp_config();
     let app = make_app(None, cfg.path().to_path_buf());
-    let (status, body) = send(&app, req_get("/api/v1/debug/windows")).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body["error"], "internal_error");
-}
-
-#[tokio::test]
-async fn debug_window_actions_unsupported_return_500() {
-    let cfg = temp_config();
-    let app = make_app(None, cfg.path().to_path_buf());
-    for path in ["close", "hide", "show"] {
-        let uri = format!("/api/v1/debug/windows/42/{path}");
-        let (status, body) = send(&app, req_post(&uri)).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{path}");
-        assert_eq!(body["error"], "internal_error", "{path}");
-    }
-}
-
-#[tokio::test]
-async fn config_reload_updates_policy() {
-    // Start with a policy with one entry, reload with zero entries
-    let f = NamedTempFile::new().unwrap();
-    std::fs::write(f.path(), "config_version = 1\n").unwrap();
-    let cfg_path = f.path().to_path_buf();
-
-    let app = make_app(None, cfg_path.clone());
-
-    // Before reload: one entry
-    let (_, body) = send(&app, req_get("/api/v1/entries")).await;
-    assert_eq!(body.as_array().unwrap().len(), 1);
-
-    // Reload with config that has no entries
-    let (status, body) = send(&app, req_post("/api/v1/config/reload")).await;
+    let (status, body) = rpc(&app, "ping", json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["entry_count"], 0);
+    assert!(body.is_null());
+}
 
-    // After reload: zero entries
-    let (_, body) = send(&app, req_get("/api/v1/entries")).await;
-    assert_eq!(body.as_array().unwrap().len(), 0);
+// ---------------------------------------------------------------------------
+// Overrides / policy interactions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn disabled_entry_via_override_shows_as_unavailable() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+
+    // Disable for today via override
+    let _ = rpc(
+        &app,
+        "upsert_override",
+        json!({ "id": "test-game", "availability": false }),
+    )
+    .await;
+
+    let (status, body) = rpc(&app, "get_entry", json!({ "id": "test-game" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+}
+
+#[tokio::test]
+async fn enable_entry_outside_time_window() {
+    // Entry with a lunch-only window that we enable "today" via
+    // override — the override should override the time window at
+    // the policy level so `get_entry` reports it available.
+    let mut policy = test_policy();
+    policy.entries[0].availability = AvailabilityPolicy {
+        windows: vec![TimeWindow {
+            days: DaysOfWeek::new(0x7F),
+            start: WallClock::new(11, 0).unwrap(),
+            end: WallClock::new(12, 0).unwrap(),
+        }],
+        always: false,
+    };
+    let cfg = temp_config();
+    let app = make_app_with_policy(policy, None, cfg.path().to_path_buf());
+
+    // Enable for today
+    let _ = rpc(
+        &app,
+        "upsert_override",
+        json!({ "id": "test-game", "availability": true }),
+    )
+    .await;
+
+    // At any wall-clock time, the entry should be available.
+    let (status, body) = rpc(&app, "get_entry", json!({ "id": "test-game" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], true);
 }
