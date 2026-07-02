@@ -773,6 +773,7 @@ mod tests {
                     input_compat: vec![],
                     input_compat_options: None,
                     xwayland_native_resolution: false,
+                    confirm_on_close: true,
                 },
                 RawEntry {
                     id: "game".into(),
@@ -797,6 +798,7 @@ mod tests {
                     input_compat: vec![],
                     input_compat_options: None,
                     xwayland_native_resolution: false,
+                    confirm_on_close: true,
                 },
             ],
         };

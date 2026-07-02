@@ -142,6 +142,16 @@ pub struct RawEntry {
     /// runs.
     #[serde(default)]
     pub xwayland_native_resolution: bool,
+
+    /// Ask for confirmation before the HUD "X" (End session) button ends this
+    /// activity. Since the button is easy to hit by accident and many
+    /// activities lose unsaved state when force-closed, the HUD shows a
+    /// confirmation prompt first (issue #78). Only affects the "X" button —
+    /// closing via the API, time expiration, or the process exiting is
+    /// unaffected. Enabled by default; set `false` for activities that are
+    /// safe to close instantly.
+    #[serde(default = "default_true")]
+    pub confirm_on_close: bool,
 }
 
 /// Per-entry firewall configuration
@@ -582,6 +592,34 @@ mod tests {
             config.entries[0].input_compat,
             vec![RawInputCompat::DisableTouch]
         );
+    }
+
+    #[test]
+    fn confirm_on_close_defaults_true_and_parses_false() {
+        // Absent -> enabled by default (issue #78).
+        let default_toml = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+        "#;
+        let config: RawConfig = toml::from_str(default_toml).unwrap();
+        assert!(config.entries[0].confirm_on_close);
+
+        // Explicit opt-out.
+        let opt_out_toml = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+            confirm_on_close = false
+        "#;
+        let config: RawConfig = toml::from_str(opt_out_toml).unwrap();
+        assert!(!config.entries[0].confirm_on_close);
     }
 
     #[test]

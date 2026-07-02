@@ -85,6 +85,8 @@ export interface SessionInfo {
   deadline: string | null;
   time_remaining: Duration | null;
   warnings_issued: number[];
+  /** Whether the HUD's "X" button confirms before ending this activity (issue #78). */
+  confirm_on_close: boolean;
 }
 
 export interface EntryView {
