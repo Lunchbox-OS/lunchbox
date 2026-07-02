@@ -32,6 +32,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +47,7 @@ import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.util.Formatting
 import com.armeafamily.shepherd.companion.util.ReasonText
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.LocalDate
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -159,6 +161,7 @@ private fun SessionSection(session: SessionInfo, onExtend: (Long) -> Unit, onSto
 @Composable
 private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
     val today = remember { LocalDate.now().toString() }
+    val scope = rememberCoroutineScope()
     var loaded by remember(entryId) { mutableStateOf<DailyOverride?>(null) }
     var availability by remember(entryId) { mutableStateOf<Boolean?>(null) }
     var quotaDeltaMinutes by remember(entryId) { mutableStateOf(0) }
@@ -193,22 +196,44 @@ private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
                     modifier = Modifier.weight(1f),
                     enabled = availability != null || quotaDeltaMinutes != 0,
                     onClick = {
+                        // Re-read the persisted override after a save so
+                        // the Clear button reflects the freshly-created
+                        // record — otherwise a first-time save leaves
+                        // `loaded == null` and Clear stays disabled.
                         vm.upsertOverride(
                             id = entryId,
                             date = today,
                             availability = availability,
                             quotaDeltaSeconds = if (quotaDeltaMinutes != 0) quotaDeltaMinutes * 60L else null,
-                            onDone = {},
+                            onDone = { scope.launch { reload() } },
                         )
                     },
                 ) { Text("Save") }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = loaded != null,
+                    // Enable Clear whenever there's *something* to
+                    // clear — either the persisted record (`loaded`)
+                    // or unsaved local edits. Users hit this when
+                    // they've dialed in an override and then decide
+                    // to back out without saving; the web version
+                    // handles the same case via a single "Clear
+                    // Override" button that resets both.
+                    enabled = loaded != null
+                        || availability != null
+                        || quotaDeltaMinutes != 0,
                     onClick = {
-                        vm.deleteOverride(entryId, today, onDone = {
-                            loaded = null; availability = null; quotaDeltaMinutes = 0
-                        })
+                        if (loaded != null) {
+                            vm.deleteOverride(entryId, today, onDone = {
+                                loaded = null
+                                availability = null
+                                quotaDeltaMinutes = 0
+                            })
+                        } else {
+                            // Nothing persisted yet — just discard
+                            // the local edits, no server round-trip.
+                            availability = null
+                            quotaDeltaMinutes = 0
+                        }
                     },
                 ) { Text("Clear") }
             }
