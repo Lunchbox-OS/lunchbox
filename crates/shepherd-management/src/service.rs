@@ -26,6 +26,13 @@ use crate::types::LaunchOutcome;
 
 /// Transport-agnostic management operations. `shepherd-http` and
 /// `shepherd-ble` both translate their wire format into calls on this trait.
+///
+/// The `#[management_rpc]` attribute expands to also emit a
+/// `dispatch_json(svc, method, params) -> Result<Value, RpcDispatchError>`
+/// function that BLE (and, in future, other JSON-RPC transports) can
+/// use directly — no hand-written per-method match arms required.
+/// See `shepherd-management-macros` for the attribute's options.
+#[shepherd_management_macros::management_rpc]
 #[async_trait]
 pub trait ManagementService: Send + Sync {
     // Health / state
@@ -33,22 +40,29 @@ pub trait ManagementService: Send + Sync {
     async fn service_state(&self) -> ServiceStateSnapshot;
 
     // Entries
+    #[rpc(default(at = "shepherd_util::now"))]
     async fn list_entries(&self, at: DateTime<Local>) -> Vec<EntryView>;
+    #[rpc(default(at = "shepherd_util::now"))]
     async fn get_entry(&self, id: &EntryId, at: DateTime<Local>) -> ManagementResult<EntryView>;
 
     // Sessions
     async fn current_session(&self) -> Option<SessionInfo>;
     async fn launch(&self, id: EntryId) -> ManagementResult<LaunchOutcome>;
+    #[rpc(default(mode = "default_graceful"))]
     async fn stop_current(&self, mode: StopMode) -> ManagementResult<()>;
+    #[rpc(wrap_result = "new_deadline")]
     async fn extend_current(&self, seconds: i64) -> ManagementResult<Option<DateTime<Local>>>;
 
     // Overrides
+    #[rpc(default(date = "today"))]
     async fn list_overrides(&self, date: NaiveDate) -> ManagementResult<Vec<DailyOverride>>;
+    #[rpc(default(date = "today"))]
     async fn get_override(
         &self,
         id: &EntryId,
         date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>>;
+    #[rpc(default(date = "today"))]
     async fn upsert_override(
         &self,
         id: &EntryId,
@@ -56,10 +70,13 @@ pub trait ManagementService: Send + Sync {
         availability: Option<bool>,
         quota_delta_seconds: Option<i64>,
     ) -> ManagementResult<DailyOverride>;
+    #[rpc(default(date = "today"), wrap_result = "deleted")]
     async fn delete_override(&self, id: &EntryId, date: NaiveDate) -> ManagementResult<bool>;
 
     // Usage
+    #[rpc(default(from = "today", to = "today"))]
     async fn usage_all(&self, from: NaiveDate, to: NaiveDate) -> ManagementResult<Vec<UsageStat>>;
+    #[rpc(default(from = "today", to = "today"))]
     async fn usage_entry(
         &self,
         id: &EntryId,
@@ -77,6 +94,7 @@ pub trait ManagementService: Send + Sync {
     async fn set_brightness(&self, percent: u8) -> ManagementResult<BrightnessInfo>;
 
     // Config
+    #[rpc(wrap_result = "entry_count")]
     async fn reload_config(&self) -> ManagementResult<usize>;
 
     // User
@@ -88,6 +106,14 @@ pub trait ManagementService: Send + Sync {
 
     // Event stream
     fn subscribe_events(&self) -> broadcast::Receiver<Event>;
+}
+
+fn default_graceful() -> StopMode {
+    StopMode::Graceful
+}
+
+fn today() -> NaiveDate {
+    shepherd_util::now().date_naive()
 }
 
 /// Production implementation of [`ManagementService`]. Composes the

@@ -13,6 +13,7 @@ shepherd-host-api = { workspace = true }
 shepherd-config = { workspace = true }
 shepherd-store = { workspace = true }
 shepherd-core = { workspace = true }
+shepherd-management-macros = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

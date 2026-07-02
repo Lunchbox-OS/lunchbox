@@ -4229,11 +4229,21 @@ dependencies = [
  "shepherd-config",
  "shepherd-core",
  "shepherd-host-api",
+ "shepherd-management-macros",
  "shepherd-store",
  "shepherd-util",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "shepherd-management-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
