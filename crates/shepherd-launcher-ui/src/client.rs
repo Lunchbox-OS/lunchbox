@@ -264,6 +264,7 @@ fn reason_to_message(reason: &ReasonCode) -> &'static str {
         ReasonCode::CooldownActive { .. } => "Cooldown period active",
         ReasonCode::SessionActive { .. } => "Another session is active",
         ReasonCode::UnsupportedKind { .. } => "Entry type not supported",
+        ReasonCode::NotReady { .. } => "Still starting up",
         ReasonCode::Disabled { .. } => "Entry disabled",
         ReasonCode::InternetUnavailable { .. } => "Internet connection unavailable",
         ReasonCode::ManuallyDisabled { .. } => "Disabled by parent for today",

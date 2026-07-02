@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use shepherd_api::{
-    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, WindowAction, WindowInfo,
+    BrowserMode, EntryKind, EntryKindTag, InputCompatMode, InputCompatOptions, WindowAction,
+    WindowInfo,
 };
 use shepherd_util::SessionId;
 use std::time::Duration;
@@ -157,6 +158,12 @@ pub enum HostEvent {
 
     /// Window is ready (for UI notification)
     WindowReady { handle: HostSessionHandle },
+
+    /// An activity kind's readiness changed — whether activities of that kind
+    /// can currently be shown or launched. Used to gate a kind while it warms
+    /// up (e.g. Steam finishing its initial load, issue #76). Kinds that never
+    /// emit this are treated as always ready.
+    KindReadinessChanged { kind: EntryKindTag, ready: bool },
 
     /// Spawn failed after handle was created
     SpawnFailed {

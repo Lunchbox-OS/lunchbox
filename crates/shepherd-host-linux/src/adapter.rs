@@ -1,7 +1,9 @@
 //! Linux host adapter implementation
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode, InterstitialKind, WindowAction, WindowInfo};
+use shepherd_api::{
+    EntryKind, EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo,
+};
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
     HostSessionHandle, SpawnOptions, StopMode,
@@ -21,13 +23,18 @@ use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
     build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name,
+    kill_steam_game_processes, make_scope_name, steam_webhelper_running,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
     spawn_touch_bridge, terminate_sidecar,
 };
 use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
+
+/// How long to wait for the preloaded Steam client to report ready before
+/// un-gating Steam activities anyway (issue #76). A safety net so a missed
+/// readiness signal never leaves Steam games permanently hidden.
+const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
 
 /// Best-effort query of the compositor output scale for the touch bridge.
 ///
@@ -246,12 +253,62 @@ impl LinuxHost {
         });
     }
 
+    /// Watch the preloaded Steam client and report when it has finished its
+    /// initial load, so Steam activities can be un-gated (issue #76).
+    ///
+    /// Emits `KindReadinessChanged { Steam, false }` immediately (Steam is not
+    /// ready right after preload) and then `{ Steam, true }` once
+    /// `steamwebhelper` appears — or after a generous fallback deadline, so a
+    /// missed signal (or a failed preload) never hides Steam games forever.
+    fn spawn_steam_readiness_watcher(&self) {
+        let event_tx = self.event_tx.clone();
+
+        // Gate Steam until the watcher confirms readiness. Harmless if the
+        // engine was already seeded not-ready at startup (a no-op there).
+        let _ = event_tx.send(HostEvent::KindReadinessChanged {
+            kind: EntryKindTag::Steam,
+            ready: false,
+        });
+
+        tokio::spawn(async move {
+            let deadline = Instant::now() + STEAM_READY_FALLBACK;
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+
+                let detected = steam_webhelper_running();
+                let timed_out = Instant::now() >= deadline;
+                if detected {
+                    info!("Steam finished initial load (steamwebhelper detected)");
+                } else if timed_out {
+                    warn!(
+                        "Steam readiness not detected within {}s; un-gating Steam anyway",
+                        STEAM_READY_FALLBACK.as_secs()
+                    );
+                } else {
+                    continue;
+                }
+
+                let _ = event_tx.send(HostEvent::KindReadinessChanged {
+                    kind: EntryKindTag::Steam,
+                    ready: true,
+                });
+                return;
+            }
+        });
+    }
+
     /// Spawn Steam in the background so it is ready when a game is launched.
     ///
     /// Steam performs several startup steps (update, auth, cloud sync) before it
     /// can run a game. By starting Steam at daemon startup, these steps complete
     /// in the background and game launches feel nearly instant.
     pub fn preload_steam(&self) {
+        // Watch for Steam finishing its initial load so Steam activities stay
+        // hidden until then (issue #76). Started before the spawn (and
+        // unconditionally, even if the spawn below fails) so the fallback
+        // deadline always un-gates eventually.
+        self.spawn_steam_readiness_watcher();
+
         // Enable the loopback CEF debug endpoint so the launch watchdog can
         // dismiss interstitials. Only do this when at least one interstitial is
         // enabled — the endpoint is a control surface we don't open otherwise.
