@@ -54,9 +54,9 @@ pub async fn launch(
         // Preserve the existing wire shape for these specific launch failures:
         // a LaunchResponse::Denied body with a Disabled reason, but a non-200
         // status. New transports (BLE) can read the ManagementError directly.
-        // The browser-spec wiring that main added inline lives in
-        // `ManagementService::launch` now, so it applies uniformly to every
-        // transport (HTTP, IPC, BLE) instead of only the HTTP path.
+        // The browser-spec + confirm_on_close wiring that main added inline
+        // lives in `ManagementService::launch` now, so it applies uniformly
+        // to every transport (HTTP, IPC, BLE) instead of only the HTTP path.
         Err(ManagementError::NotFound(msg)) => (
             StatusCode::NOT_FOUND,
             Json(LaunchResponse::Denied {

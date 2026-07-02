@@ -315,6 +315,10 @@ pub struct Entry {
     /// XWayland clients get the panel's native pixel grid. See the
     /// corresponding field on [`RawEntry`] for the full rationale.
     pub xwayland_native_resolution: bool,
+    /// Show a confirmation prompt before the HUD "X" button ends this
+    /// activity (issue #78). Enabled by default; only affects the "X" button,
+    /// not API/expiration/process-exit closes.
+    pub confirm_on_close: bool,
 }
 
 impl Entry {
@@ -373,6 +377,7 @@ impl Entry {
             input_compat,
             input_compat_options,
             xwayland_native_resolution: raw.xwayland_native_resolution,
+            confirm_on_close: raw.confirm_on_close,
         }
     }
 }

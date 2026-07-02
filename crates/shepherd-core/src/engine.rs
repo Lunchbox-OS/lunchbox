@@ -365,6 +365,7 @@ impl CoreEngine {
             label: entry.label.clone(),
             max_duration,
             warnings: entry.warnings.clone(),
+            confirm_on_close: entry.confirm_on_close,
         };
 
         if let Some(max_dur) = max_duration {
@@ -397,6 +398,7 @@ impl CoreEngine {
             entry_id: session.plan.entry_id.clone(),
             label: session.plan.label.clone(),
             deadline: session.deadline,
+            confirm_on_close: session.plan.confirm_on_close,
         };
 
         // Log to audit
@@ -804,6 +806,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
@@ -942,6 +945,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             service: Default::default(),
             default_warnings: vec![],
@@ -1034,6 +1038,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             service: Default::default(),
             default_warnings: vec![],
@@ -1134,6 +1139,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             service: Default::default(),
             default_warnings: vec![],
@@ -1210,6 +1216,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
@@ -1303,6 +1310,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
@@ -1379,6 +1387,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
@@ -1466,6 +1475,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,

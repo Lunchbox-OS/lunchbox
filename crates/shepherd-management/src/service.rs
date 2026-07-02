@@ -168,6 +168,7 @@ impl ManagementService for DefaultManagementService {
 
         let session_id = plan.session_id.clone();
         let plan_label = plan.label.clone();
+        let plan_confirm_on_close = plan.confirm_on_close;
 
         {
             let mut eng = self.engine.lock().await;
@@ -262,6 +263,7 @@ impl ManagementService for DefaultManagementService {
                     entry_id: id.clone(),
                     label: plan_label,
                     deadline,
+                    confirm_on_close: plan_confirm_on_close,
                 }));
 
                 Ok(LaunchOutcome::Approved {

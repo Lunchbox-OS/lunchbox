@@ -12,7 +12,7 @@ Always-visible HUD overlay for Shepherd.
 - **Battery level** - Current charge percentage and status
 - **Volume control** - Adjust system volume with enforced limits
 - **Brightness control** - Adjust screen brightness on hosts with a backlight (hidden otherwise)
-- **Session controls** - End session button
+- **Session controls** - End session button (confirms first unless the activity opts out via `confirm_on_close = false`)
 - **Power controls** - Suspend, shutdown, restart
 - **Warning display** - Visual and audio alerts for time warnings
 

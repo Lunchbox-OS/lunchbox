@@ -15,6 +15,9 @@ pub enum CoreEvent {
         label: String,
         /// Deadline for session. None means unlimited.
         deadline: Option<DateTime<Local>>,
+        /// Whether the HUD should confirm before its "X" button ends this
+        /// session (issue #78).
+        confirm_on_close: bool,
     },
 
     /// The set of available entries has changed (e.g., due to time window boundaries)
