@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, Command, EntryKind, ErrorCode, ErrorInfo, Event,
-    EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo,
-    VolumeRestrictions,
+    BrightnessInfo, BrightnessRestrictions, Command, EntryKind, EntryKindTag, ErrorCode, ErrorInfo,
+    Event, EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode,
+    VolumeInfo, VolumeRestrictions,
 };
 use shepherd_ble::{BleServer, BleServerConfig};
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
@@ -176,7 +176,7 @@ impl Service {
         })
     }
 
-    async fn run(self) -> Result<()> {
+    async fn run(mut self) -> Result<()> {
         let config_path = self.config_path.clone();
 
         // Broadcast channel shared by IPC and HTTP SSE
@@ -200,6 +200,11 @@ impl Service {
             .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
         if has_steam {
             info!("Steam entries detected, preloading Steam in background");
+            // Hide Steam activities until the preloaded client finishes its
+            // initial load (issue #76). Seeded here so the very first served
+            // snapshot already gates Steam; the host's readiness watcher flips
+            // it to ready (see HostEvent::KindReadinessChanged).
+            self.engine.set_kind_readiness(EntryKindTag::Steam, false);
             self.host.preload_steam();
         }
 
@@ -821,6 +826,23 @@ impl Service {
                 debug!(session_id = %handle.session_id, "Window ready");
             }
 
+            HostEvent::KindReadinessChanged { kind, ready } => {
+                let changed = {
+                    let mut engine = engine.lock().await;
+                    engine.set_kind_readiness(kind, ready)
+                };
+                if changed {
+                    info!(?kind, ready, "Activity kind readiness changed");
+                    // Re-broadcast state so the launcher shows/hides the now
+                    // (un)gated entries of this kind.
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                }
+            }
+
             HostEvent::SpawnFailed { session_id, error } => {
                 error!(session_id = %session_id, error = %error, "Spawn failed");
             }
@@ -981,6 +1003,20 @@ impl Service {
                                 deny: fw.deny,
                             }
                         });
+                        let browser = entry.and_then(|e| e.browser.clone()).map(|b| {
+                            shepherd_host_api::BrowserSpec {
+                                policy_id: entry_id.as_str().to_string(),
+                                profile_id: b.profile_id,
+                                mode: b.mode,
+                                start_url: b.start_url,
+                                url_allowlist: b.url_allowlist,
+                                url_blocklist: b.url_blocklist,
+                                disable_dev_tools: b.disable_dev_tools,
+                                disable_incognito: b.disable_incognito,
+                                disable_extensions: b.disable_extensions,
+                                wipe_on_exit: b.wipe_on_exit,
+                            }
+                        });
                         let input_compat =
                             entry.map(|e| e.input_compat.clone()).unwrap_or_default();
                         let input_compat_options =
@@ -1003,6 +1039,7 @@ impl Service {
                                 capture_stderr: true,
                                 log_path: Some(log_path),
                                 firewall,
+                                browser,
                                 input_compat,
                                 input_compat_options,
                                 ..Default::default()
@@ -1010,6 +1047,7 @@ impl Service {
                         } else {
                             shepherd_host_api::SpawnOptions {
                                 firewall,
+                                browser,
                                 input_compat,
                                 input_compat_options,
                                 ..Default::default()

@@ -547,6 +547,43 @@ pub fn find_steam_game_pids(app_id: u32) -> Vec<i32> {
     pids
 }
 
+/// Whether Steam has finished its initial load enough to launch games.
+///
+/// Uses the presence of Steam's `steamwebhelper` process (its Chromium-based
+/// UI/service backend) as the readiness signal: it comes up after the
+/// bootstrapper has updated and the client core has initialized, and it must be
+/// running for the modern client to launch a game. This is a best-effort
+/// heuristic — like the interstitial signatures — and works regardless of
+/// whether Steam's CEF remote-debugging endpoint is enabled. Callers pair it
+/// with a fallback timeout so a missed signal never hides games forever
+/// (issue #76).
+pub fn steam_webhelper_running() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        // /proc entries that aren't PIDs (e.g. "self") aren't processes.
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
+            && comm_is_steamwebhelper(&comm)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a `/proc/<pid>/comm` value names Steam's `steamwebhelper` process.
+///
+/// `comm` is the process name with a trailing newline, truncated by the kernel
+/// to 15 characters. "steamwebhelper" is 14, so it fits exactly and an exact
+/// match (after trimming the newline) is correct.
+fn comm_is_steamwebhelper(comm: &str) -> bool {
+    comm.trim() == "steamwebhelper"
+}
+
 /// Kill Steam game processes by Steam App ID
 pub fn kill_steam_game_processes(app_id: u32, signal: Signal) -> bool {
     let pids = find_steam_game_pids(app_id);
@@ -942,6 +979,23 @@ impl Drop for ManagedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comm_matches_only_steamwebhelper() {
+        // The real /proc/<pid>/comm carries a trailing newline.
+        assert!(comm_is_steamwebhelper("steamwebhelper\n"));
+        assert!(comm_is_steamwebhelper("steamwebhelper"));
+        assert!(!comm_is_steamwebhelper("steam\n"));
+        assert!(!comm_is_steamwebhelper("steamwebhelperx\n"));
+        assert!(!comm_is_steamwebhelper(""));
+    }
+
+    #[test]
+    fn steam_webhelper_running_probe_does_not_panic() {
+        // Result depends on whether Steam is running on the test host; we can
+        // only assert the /proc scan completes without panicking.
+        let _ = steam_webhelper_running();
+    }
 
     #[test]
     fn firewall_enforcement_status_does_not_panic() {

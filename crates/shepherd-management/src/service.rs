@@ -174,8 +174,8 @@ impl ManagementService for DefaultManagementService {
             eng.start_session(plan, now, now_mono);
         }
 
-        // Resolve the spawn parameters from policy. Populate firewall from
-        // the entry's policy so per-entry firewall rules are actually
+        // Resolve the spawn parameters from policy. Populate firewall and
+        // browser from the entry's policy so per-entry rules are actually
         // applied -- mirrors the IPC `Launch` path in shepherdd/src/main.rs.
         let (entry_kind, spawn_opts, needs_hidpi) = {
             let eng = self.engine.lock().await;
@@ -188,6 +188,21 @@ impl ManagementService for DefaultManagementService {
                         default_deny: fw.default_deny,
                         allow: fw.allow,
                         deny: fw.deny,
+                    });
+            let browser =
+                entry
+                    .and_then(|e| e.browser.clone())
+                    .map(|b| shepherd_host_api::BrowserSpec {
+                        policy_id: id.as_str().to_string(),
+                        profile_id: b.profile_id,
+                        mode: b.mode,
+                        start_url: b.start_url,
+                        url_allowlist: b.url_allowlist,
+                        url_blocklist: b.url_blocklist,
+                        disable_dev_tools: b.disable_dev_tools,
+                        disable_incognito: b.disable_incognito,
+                        disable_extensions: b.disable_extensions,
+                        wipe_on_exit: b.wipe_on_exit,
                     });
             let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
             let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
@@ -204,6 +219,7 @@ impl ManagementService for DefaultManagementService {
                     capture_stderr: true,
                     log_path: Some(eng.policy().service.child_log_dir.join(filename)),
                     firewall,
+                    browser,
                     input_compat,
                     input_compat_options,
                     ..Default::default()
@@ -211,6 +227,7 @@ impl ManagementService for DefaultManagementService {
             } else {
                 SpawnOptions {
                     firewall,
+                    browser,
                     input_compat,
                     input_compat_options,
                     ..Default::default()
