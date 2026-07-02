@@ -302,6 +302,9 @@ pub enum ReasonCode {
     },
     /// Host doesn't support this entry kind
     UnsupportedKind { kind: EntryKindTag },
+    /// The activity kind has not finished warming up yet (e.g. Steam is still
+    /// performing its initial load). See per-kind readiness (issue #76).
+    NotReady { kind: EntryKindTag },
     /// Entry is explicitly disabled
     Disabled { reason: Option<String> },
     /// Internet connectivity is required but unavailable

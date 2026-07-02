@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, Command, EntryKind, ErrorCode, ErrorInfo, Event,
-    EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo,
-    VolumeRestrictions,
+    BrightnessInfo, BrightnessRestrictions, Command, EntryKind, EntryKindTag, ErrorCode, ErrorInfo,
+    Event, EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode,
+    VolumeInfo, VolumeRestrictions,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
@@ -173,7 +173,7 @@ impl Service {
         })
     }
 
-    async fn run(self) -> Result<()> {
+    async fn run(mut self) -> Result<()> {
         let config_path = self.config_path.clone();
 
         // Broadcast channel shared by IPC and HTTP SSE
@@ -197,6 +197,11 @@ impl Service {
             .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
         if has_steam {
             info!("Steam entries detected, preloading Steam in background");
+            // Hide Steam activities until the preloaded client finishes its
+            // initial load (issue #76). Seeded here so the very first served
+            // snapshot already gates Steam; the host's readiness watcher flips
+            // it to ready (see HostEvent::KindReadinessChanged).
+            self.engine.set_kind_readiness(EntryKindTag::Steam, false);
             self.host.preload_steam();
         }
 
@@ -745,6 +750,23 @@ impl Service {
 
             HostEvent::WindowReady { handle } => {
                 debug!(session_id = %handle.session_id, "Window ready");
+            }
+
+            HostEvent::KindReadinessChanged { kind, ready } => {
+                let changed = {
+                    let mut engine = engine.lock().await;
+                    engine.set_kind_readiness(kind, ready)
+                };
+                if changed {
+                    info!(?kind, ready, "Activity kind readiness changed");
+                    // Re-broadcast state so the launcher shows/hides the now
+                    // (un)gated entries of this kind.
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                }
             }
 
             HostEvent::SpawnFailed { session_id, error } => {
