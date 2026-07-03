@@ -36,17 +36,13 @@ pub async fn dispatch_management(svc: &dyn ManagementService, request: RpcReques
 
 #[cfg(test)]
 mod tests {
+    //! These cover only the BLE-specific glue in `dispatch_management`:
+    //! the `RpcDispatchError` → [`ErrorCode`] mapping. The dispatch
+    //! mechanics and per-method behavior are tested transport-free in
+    //! `shepherd-management/tests/dispatch.rs`; the `ManagementError` →
+    //! `ErrorCode` table has its own direct test in `protocol.rs`.
     use super::*;
     use crate::testsupport::{MockSvc, req};
-
-    #[tokio::test]
-    async fn health_dispatches_to_service() {
-        let svc = MockSvc::new();
-        let resp = dispatch_management(&svc, req(1, "health", serde_json::Value::Null)).await;
-        assert_eq!(resp.id, 1);
-        assert!(resp.error.is_none());
-        assert_eq!(*svc.health_calls.lock().await, 1);
-    }
 
     #[tokio::test]
     async fn unknown_method_returns_method_not_found() {
@@ -75,42 +71,5 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error.unwrap().code, ErrorCode::NotFound);
-    }
-
-    #[tokio::test]
-    async fn logout_returns_null_result() {
-        let svc = MockSvc::new();
-        let resp = dispatch_management(&svc, req(5, "logout", serde_json::Value::Null)).await;
-        assert!(resp.error.is_none());
-        assert_eq!(resp.result, Some(serde_json::Value::Null));
-    }
-
-    #[tokio::test]
-    async fn delete_override_wraps_bool_result() {
-        // Regression check that `#[rpc(wrap_result = "deleted")]` on
-        // the trait actually produces `{"deleted": <bool>}` on the
-        // wire — clients (both the web-ui and the companion) parse
-        // this field explicitly.
-        let svc = MockSvc::new();
-        let resp = dispatch_management(
-            &svc,
-            req(6, "delete_override", serde_json::json!({"id": "steam-goo"})),
-        )
-        .await;
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        assert!(result.get("deleted").is_some());
-    }
-
-    #[tokio::test]
-    async fn zero_arg_method_accepts_object_or_null_params() {
-        let svc = MockSvc::new();
-        // Zero-arg methods should accept both `{}` and `Value::Null`
-        // as a params blob. `health` returns a real value in the mock
-        // (unlike `service_state`, which is `unreachable!`).
-        let a = dispatch_management(&svc, req(7, "health", serde_json::json!({}))).await;
-        let b = dispatch_management(&svc, req(8, "health", serde_json::Value::Null)).await;
-        assert!(a.error.is_none());
-        assert!(b.error.is_none());
     }
 }
