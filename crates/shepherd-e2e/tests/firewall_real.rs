@@ -165,7 +165,7 @@ deny = []
         .rpc("launch", json!({ "id": "firewall-probe" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert_eq!(json_body(&resp)?["result"], json!("approved"));
+    assert!(json_body(&resp)?["Approved"].is_object());
 
     // Wait up to 30s for the probe to finish and atomically publish its log.
     let start = std::time::Instant::now();
