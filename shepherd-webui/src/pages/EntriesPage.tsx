@@ -117,6 +117,41 @@ export function EntriesPage() {
     onSettled: () => setBusyId(null),
   });
 
+  // Instant-commit quota adjustment — matches how availability changes
+  // are already applied. Preserves the current availability override
+  // (if any) so bumping quota doesn't accidentally clear an "Off today"
+  // / "On today ★" state.
+  const adjustQuotaMutation = useMutation({
+    mutationFn: ({
+      entry,
+      newDeltaSeconds,
+      currentAvailability,
+    }: {
+      entry: EntryView;
+      newDeltaSeconds: number;
+      currentAvailability: boolean | null;
+    }) =>
+      upsertOverride(
+        entry.entry_id,
+        currentAvailability,
+        newDeltaSeconds === 0 ? null : newDeltaSeconds,
+        today,
+      ),
+    onMutate: ({ entry }) => setBusyId(entry.entry_id),
+    onSuccess: (_, { entry, newDeltaSeconds }) => {
+      const sign = newDeltaSeconds > 0 ? "+" : newDeltaSeconds < 0 ? "−" : "";
+      const abs = formatDurationHuman(Math.abs(newDeltaSeconds));
+      flash(
+        newDeltaSeconds === 0
+          ? `${entry.label}: quota adjustment cleared`
+          : `${entry.label}: quota ${sign}${abs}`,
+      );
+      invalidateAll();
+    },
+    onError: (e) => flash(String(e), false),
+    onSettled: () => setBusyId(null),
+  });
+
   const loading = entriesLoading && !entries;
   const filtered = (entries ?? []).filter((e) =>
     e.label.toLowerCase().includes(search.toLowerCase()),
@@ -156,18 +191,29 @@ export function EntriesPage() {
       )}
 
       <Stack spacing={1.5}>
-        {filtered.map((entry) => (
-          <EntryCard
-            key={entry.entry_id}
-            entry={entry}
-            override={overrideMap.get(entry.entry_id)}
-            busy={busyId === entry.entry_id}
-            onLaunch={() => launchMutation.mutate(entry.entry_id)}
-            onDisableToday={() => disableMutation.mutate(entry)}
-            onClear={() => clearMutation.mutate(entry)}
-            onEnable={() => enableMutation.mutate(entry)}
-          />
-        ))}
+        {filtered.map((entry) => {
+          const override = overrideMap.get(entry.entry_id);
+          return (
+            <EntryCard
+              key={entry.entry_id}
+              entry={entry}
+              override={override}
+              busy={busyId === entry.entry_id}
+              onLaunch={() => launchMutation.mutate(entry.entry_id)}
+              onDisableToday={() => disableMutation.mutate(entry)}
+              onClear={() => clearMutation.mutate(entry)}
+              onEnable={() => enableMutation.mutate(entry)}
+              onAdjustQuota={(stepSeconds) => {
+                const current = override?.quota_delta_seconds ?? 0;
+                adjustQuotaMutation.mutate({
+                  entry,
+                  newDeltaSeconds: current + stepSeconds,
+                  currentAvailability: override?.availability ?? null,
+                });
+              }}
+            />
+          );
+        })}
         {!loading && filtered.length === 0 && (
           <Typography color="text.secondary" sx={{ textAlign: "center", py: 4 }}>
             No activities found
@@ -178,6 +224,10 @@ export function EntriesPage() {
   );
 }
 
+/** Step (seconds) for the ± quota buttons — matches the Android
+ *  companion's `−5` / `+5` stepper. */
+const QUOTA_STEP_SECS = 5 * 60;
+
 function EntryCard({
   entry,
   override,
@@ -186,6 +236,7 @@ function EntryCard({
   onDisableToday,
   onClear,
   onEnable,
+  onAdjustQuota,
 }: {
   entry: EntryView;
   override: DailyOverride | undefined;
@@ -194,10 +245,12 @@ function EntryCard({
   onDisableToday: () => void;
   onClear: () => void;
   onEnable: () => void;
+  onAdjustQuota: (stepSeconds: number) => void;
 }) {
   const manuallyDisabled = override?.availability === false;
   const manuallyEnabled = override?.availability === true;
   const maxRunSecs = durationToSecs(entry.max_run_if_started_now);
+  const quotaDelta = override?.quota_delta_seconds ?? 0;
 
   return (
     <Card
@@ -235,15 +288,41 @@ function EntryCard({
           </Typography>
         )}
 
-        {override?.quota_delta_seconds != null && override.quota_delta_seconds !== 0 && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-            Quota {override.quota_delta_seconds > 0 ? "+" : ""}
-            {formatDurationHuman(Math.abs(override.quota_delta_seconds))}
+        {/* Quota adjustment: the Android companion has this same
+            ±5 min stepper on the entry detail screen. On the web we
+            place it inline on the card so parents can grant or claw
+            back time from the same view they use for
+            Enable/Disable Today. */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>
+          <Typography variant="caption" color="text.secondary">
+            Quota {quotaDelta === 0
+              ? "unchanged"
+              : `${quotaDelta > 0 ? "+" : "−"}${formatDurationHuman(Math.abs(quotaDelta))}`}
           </Typography>
-        )}
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            onClick={() => onAdjustQuota(-QUOTA_STEP_SECS)}
+            disabled={busy}
+            sx={{ minWidth: 0, px: 1 }}
+          >
+            −5m
+          </Button>
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            onClick={() => onAdjustQuota(QUOTA_STEP_SECS)}
+            disabled={busy}
+            sx={{ minWidth: 0, px: 1 }}
+          >
+            +5m
+          </Button>
+        </Box>
 
         <Box sx={{ display: "flex", gap: 1, mt: 1.5, flexWrap: "wrap" }}>
-          {(manuallyDisabled || manuallyEnabled) ? (
+          {(manuallyDisabled || manuallyEnabled || quotaDelta !== 0) ? (
             <Button size="small" variant="outlined" onClick={onClear} disabled={busy}>
               {busy ? <Spinner size={14} /> : "Clear Override"}
             </Button>
