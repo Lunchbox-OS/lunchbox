@@ -301,11 +301,16 @@ impl PresetState {
         self.emit_mouse_from_stick(mouse_x_axis, mouse_y_axis, dt, &mut out);
         self.emit_scroll_from_stick(scroll_x_axis, scroll_y_axis, dt, &mut out);
 
-        // Triggers + bumpers → mouse buttons.
+        // Mouse buttons: triggers/bumpers plus the A/B face buttons. After
+        // observing usage (issue #84) the face buttons are the primary click
+        // surface — A = left click, B = right click — with the triggers and
+        // bumpers kept as alternates.
         let lmb = self.trigger_pressed(Axis::LeftZ, Button::LeftTrigger2)
-            || self.trigger_pressed(Axis::RightZ, Button::RightTrigger2);
-        let rmb =
-            self.gamepad.button(Button::LeftTrigger) || self.gamepad.button(Button::RightTrigger);
+            || self.trigger_pressed(Axis::RightZ, Button::RightTrigger2)
+            || self.gamepad.button(Button::South);
+        let rmb = self.gamepad.button(Button::LeftTrigger)
+            || self.gamepad.button(Button::RightTrigger)
+            || self.gamepad.button(Button::East);
         self.emit_button(btncode::BTN_LEFT, lmb, &mut out);
         self.emit_button(btncode::BTN_RIGHT, rmb, &mut out);
 
@@ -318,10 +323,11 @@ impl PresetState {
         self.emit_key(keycode::KEY_UP, hat_y < -0.5, &mut out);
         self.emit_key(keycode::KEY_DOWN, hat_y > 0.5, &mut out);
 
-        // Face buttons.
+        // Face buttons: X = Enter (A/B drive the mouse buttons above),
+        // Start = Esc.
         self.emit_key(
             keycode::KEY_ENTER,
-            self.gamepad.button(Button::South),
+            self.gamepad.button(Button::West),
             &mut out,
         );
         self.emit_key(
@@ -667,9 +673,35 @@ mod tests {
     }
 
     #[test]
-    fn productivity_face_south_emits_enter() {
+    fn productivity_face_south_emits_left_click() {
+        // Issue #84: A (South) is a left click, not Enter.
         let mut state = PresetState::new(Preset::Productivity, tunables());
         state.ingest_button(Button::South, true);
+        let out = state.tick(Duration::from_millis(10));
+        assert!(out.iter().any(
+            |e| matches!(e, OutputEvent::PointerButton { button, pressed: true } if *button == btncode::BTN_LEFT)
+        ));
+        assert!(!out.iter().any(
+            |e| matches!(e, OutputEvent::Key { keycode, .. } if *keycode == keycode::KEY_ENTER)
+        ));
+    }
+
+    #[test]
+    fn productivity_face_east_emits_right_click() {
+        // Issue #84: B (East) is a right click.
+        let mut state = PresetState::new(Preset::Productivity, tunables());
+        state.ingest_button(Button::East, true);
+        let out = state.tick(Duration::from_millis(10));
+        assert!(out.iter().any(
+            |e| matches!(e, OutputEvent::PointerButton { button, pressed: true } if *button == btncode::BTN_RIGHT)
+        ));
+    }
+
+    #[test]
+    fn productivity_face_west_emits_enter() {
+        // Issue #84: X (West) is Enter.
+        let mut state = PresetState::new(Preset::Productivity, tunables());
+        state.ingest_button(Button::West, true);
         let out = state.tick(Duration::from_millis(10));
         assert!(out.iter().any(
             |e| matches!(e, OutputEvent::Key { keycode, pressed: true } if *keycode == keycode::KEY_ENTER)
