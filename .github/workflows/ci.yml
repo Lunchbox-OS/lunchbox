@@ -577,15 +577,17 @@ jobs:
           rustup target add aarch64-linux-android
           command -v cargo-ndk >/dev/null || cargo install cargo-ndk
 
-      # Mirrors android/app/build.gradle.kts's cargoNdkBuild task. cargo-ndk
-      # also auto-detects the NDK under $ANDROID_SDK_ROOT/ndk, but we point
-      # ANDROID_NDK_HOME at it explicitly so the build never depends on that
-      # heuristic (and matches how the crate README tells developers to build).
+      # Same cargo-ndk cross-compile as android/app/build.gradle.kts's
+      # cargoNdkBuild task, but debug rather than --release: this is a
+      # compile-and-link gate, and a debug build catches the same breakage in
+      # roughly half the time. cargo-ndk also auto-detects the NDK under
+      # $ANDROID_SDK_ROOT/ndk, but we point ANDROID_NDK_HOME at it explicitly so
+      # the build never depends on that heuristic.
       - name: Build shepherd-media-android cdylib
         run: |
           ANDROID_NDK_HOME="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* | head -n1)"
           export ANDROID_NDK_HOME
-          cargo ndk -t arm64-v8a build -p shepherd-media-android --release
+          cargo ndk -t arm64-v8a build -p shepherd-media-android
 
   shellcheck:
     name: ShellCheck
