@@ -301,3 +301,51 @@ fn initials(title: &str) -> String {
         .collect::<String>()
         .to_uppercase()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initials_takes_first_letter_of_up_to_three_words_uppercased() {
+        assert_eq!(initials("The Matrix Reloaded"), "TMR");
+        assert_eq!(initials("lower case title"), "LCT");
+    }
+
+    #[test]
+    fn initials_caps_at_three_words_and_ignores_extra_whitespace() {
+        assert_eq!(initials("a b c d e"), "ABC");
+        assert_eq!(initials("  spaced   out  "), "SO");
+    }
+
+    #[test]
+    fn initials_is_empty_for_a_blank_title() {
+        assert_eq!(initials(""), "");
+        assert_eq!(initials("   "), "");
+    }
+
+    #[test]
+    fn fit_centered_pillarboxes_a_wide_source_without_squashing() {
+        // Square slot, 16:9 (wide) source: the fit is limited by width, so it
+        // spans the full width and is proportionally shorter — a 16:9 YouTube
+        // thumbnail keeps its aspect instead of being squashed to a square.
+        let slot = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let fit = fit_centered(slot, egui::vec2(16.0, 9.0));
+        assert!((fit.width() - 200.0).abs() < 1e-3);
+        assert!((fit.height() - 112.5).abs() < 1e-3); // 200 * 9/16
+        // Centered in, and fully contained by, the slot.
+        assert!((fit.center().x - slot.center().x).abs() < 1e-3);
+        assert!((fit.center().y - slot.center().y).abs() < 1e-3);
+        assert!(fit.min.y >= slot.min.y - 1e-3 && fit.max.y <= slot.max.y + 1e-3);
+    }
+
+    #[test]
+    fn fit_centered_letterboxes_a_tall_source() {
+        // Wide slot, portrait source: the fit is limited by height.
+        let slot = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let fit = fit_centered(slot, egui::vec2(9.0, 16.0));
+        assert!((fit.height() - 100.0).abs() < 1e-3);
+        assert!((fit.width() - 56.25).abs() < 1e-3); // 100 * 9/16
+        assert!(fit.min.x >= slot.min.x - 1e-3 && fit.max.x <= slot.max.x + 1e-3);
+    }
+}
