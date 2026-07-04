@@ -258,6 +258,16 @@ pub async fn set_output_mode(name: &str, mode: VideoMode) -> HostResult<()> {
     run_command(&format!("output {name} mode {spec}")).await
 }
 
+/// Confine the seat's relative pointer(s) to a single output via
+/// `swaymsg input type:pointer map_to_output <name>`, or pass `"*"` to release
+/// the confinement back to the whole layout. Used in mirror mode to keep the
+/// cursor on the interactive primary so it can't wander onto the uninteractive
+/// wl-mirror surface (issue #87). `map_to_output` is documented to apply to
+/// pointer devices, so it constrains a relative mouse, not just absolute ones.
+pub async fn map_pointer_to_output(output: &str) -> HostResult<()> {
+    run_command(&format!("input type:pointer map_to_output {output}")).await
+}
+
 /// Enable an output via `swaymsg output <name> enable`.
 pub async fn enable_output(name: &str) -> HostResult<()> {
     run_command(&format!("output {name} enable")).await
@@ -330,6 +340,8 @@ pub trait OutputBackend: Send + Sync {
     async fn enable_output(&self, name: &str) -> HostResult<()>;
     async fn disable_output(&self, name: &str) -> HostResult<()>;
     async fn move_to_output_fullscreen(&self, criteria: &str, output: &str) -> HostResult<()>;
+    /// Confine relative pointers to `output`, or release with `"*"`.
+    async fn map_pointer_to_output(&self, output: &str) -> HostResult<()>;
 }
 
 /// Production [`OutputBackend`] that shells out to `swaymsg`.
@@ -354,6 +366,9 @@ impl OutputBackend for SwaymsgBackend {
     }
     async fn move_to_output_fullscreen(&self, criteria: &str, output: &str) -> HostResult<()> {
         move_to_output_fullscreen(criteria, output).await
+    }
+    async fn map_pointer_to_output(&self, output: &str) -> HostResult<()> {
+        map_pointer_to_output(output).await
     }
 }
 

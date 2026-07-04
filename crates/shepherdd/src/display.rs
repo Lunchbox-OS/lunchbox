@@ -34,6 +34,10 @@ use tracing::{info, warn};
 /// it like an activity.
 pub const WL_MIRROR_APP_ID: &str = "at.yrlf.wl_mirror";
 
+/// `map_to_output` value that releases pointer confinement back to the whole
+/// layout.
+const POINTER_ALL_OUTPUTS: &str = "*";
+
 /// Manages the `wl-mirror` child process. Behind a trait so the controller can
 /// be tested without spawning anything.
 #[async_trait]
@@ -266,6 +270,10 @@ impl DisplayManager {
                 if let Err(e) = self.backend.enable_output(primary).await {
                     warn!(error = %e, "Failed to enable primary output");
                 }
+                let _ = self
+                    .backend
+                    .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                    .await;
                 self.audio.restore().await;
             }
             DisplayMode::Mirror => {
@@ -273,12 +281,20 @@ impl DisplayManager {
                     effective = DisplayMode::SingleInternal;
                     self.mirror.stop().await;
                     let _ = self.backend.enable_output(primary).await;
+                    let _ = self
+                        .backend
+                        .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                        .await;
                     self.audio.restore().await;
                     self.commit(primary, None, effective).await;
                     return;
                 };
                 // Enable both panels; drive the primary at the highest mutually
                 // compatible mode so the mirror is clean and the TV upscales.
+                // The external keeps its native mode and its own place in the
+                // layout (overlapping outputs breaks sway's rendering under
+                // screencopy). Instead, the pointer is confined to the primary
+                // below so it can't reach the uninteractive wl-mirror surface.
                 let _ = self.backend.enable_output(primary).await;
                 let _ = self.backend.enable_output(&sec).await;
                 if let (Some(p), Some(s)) = (primary_info, secondary_info)
@@ -300,12 +316,20 @@ impl DisplayManager {
                     {
                         warn!(error = %e, "Failed to pin wl-mirror to external output");
                     }
+                    // Confine the pointer to the primary so it can't wander onto
+                    // the mirror surface, where clicks wouldn't reach the real
+                    // content (issue #87).
+                    let _ = self.backend.map_pointer_to_output(primary).await;
                     self.route_audio_external().await;
                 } else {
                     // wl-mirror unavailable: fall back to external-only, which
                     // still keeps a single active output.
                     warn!("Mirroring unavailable; falling back to external-only");
                     effective = DisplayMode::ExternalOnly;
+                    let _ = self
+                        .backend
+                        .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                        .await;
                     self.apply_external_only(primary, &sec, secondary_info)
                         .await;
                 }
@@ -315,11 +339,21 @@ impl DisplayManager {
                     effective = DisplayMode::SingleInternal;
                     self.mirror.stop().await;
                     let _ = self.backend.enable_output(primary).await;
+                    let _ = self
+                        .backend
+                        .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                        .await;
                     self.audio.restore().await;
                     self.commit(primary, None, effective).await;
                     return;
                 };
                 self.mirror.stop().await;
+                // Only the external output is active now, so release any
+                // pointer confinement from a prior mirror mode.
+                let _ = self
+                    .backend
+                    .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                    .await;
                 self.apply_external_only(primary, &sec, secondary_info)
                     .await;
             }
@@ -439,6 +473,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("mode {name} {}x{}", mode.width, mode.height));
+            Ok(())
+        }
+        async fn map_pointer_to_output(&self, output: &str) -> HostResult<()> {
+            self.ops.lock().unwrap().push(format!("pointer {output}"));
             Ok(())
         }
         async fn set_output_scale(&self, name: &str, scale: f64) -> HostResult<()> {
@@ -570,6 +608,9 @@ mod tests {
         assert!(audio.events.lock().unwrap().iter().any(|e| e == "route"));
         // The primary was driven at the common 1920x1080 mode.
         assert!(backend.ops().iter().any(|o| o == "mode eDP-1 1920x1080"));
+        // The pointer is confined to the primary so it can't wander onto the
+        // mirror surface (issue #87).
+        assert!(backend.ops().iter().any(|o| o == "pointer eDP-1"));
     }
 
     #[tokio::test]
@@ -591,6 +632,9 @@ mod tests {
         let st = mgr.set_mode(DisplayMode::ExternalOnly).await;
         assert_eq!(st.mode, DisplayMode::ExternalOnly);
         assert!(backend.ops().iter().any(|o| o == "disable eDP-1"));
+        // Pointer confinement from mirror mode is released now that the primary
+        // is gone and only the external is active.
+        assert!(backend.ops().iter().any(|o| o == "pointer *"));
     }
 
     #[tokio::test]
