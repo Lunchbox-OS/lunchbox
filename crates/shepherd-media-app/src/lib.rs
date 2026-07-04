@@ -9,6 +9,7 @@
 //! persistent state for its configured libraries and per-library caching
 //! options. That state and the operations on it live here.
 
+pub mod lru;
 pub mod poster_cache;
 pub mod quality;
 pub mod settings;

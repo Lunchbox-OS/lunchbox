@@ -30,6 +30,7 @@ use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
 use filetime::FileTime;
+use shepherd_media_app::lru::{self, LruEntry};
 use shepherd_media_core::resolver::resolve_source;
 use shepherd_media_core::{ClassifiedUri, Library, PlayerError, PlayerEvent, PlayerHandle, Source};
 use tracing::{debug, info, warn};
@@ -347,9 +348,6 @@ fn write_done_sentinel(cache_dir: &Path, item_id: &str) -> Result<(), String> {
 
 struct CacheEntry {
     path: PathBuf,
-    /// The item ID derived from the filename stem, used to delete the paired
-    /// `.done` sentinel on eviction.
-    item_id: String,
     size: u64,
     mtime: SystemTime,
 }
@@ -383,7 +381,6 @@ fn collect_cache_entries(cache_dir: &Path) -> Option<Vec<CacheEntry>> {
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         entries.push(CacheEntry {
             path: de.path(),
-            item_id,
             size: meta.len(),
             mtime,
         });
@@ -398,37 +395,28 @@ fn cache_total(cache_dir: &Path) -> u64 {
 }
 
 /// Evict LRU files from `cache_dir` until the total size is at or below
-/// `target_bytes`.  Errors on individual deletes are logged and skipped.
+/// `target_bytes`, via the shared LRU policy (see `shepherd_media_app::lru`).
+/// On each eviction the paired `.done` sentinel is removed too, so
+/// `find_cached_file` won't return a stale hit for the deleted video.
 fn evict_to(cache_dir: &Path, target_bytes: u64) {
-    let Some(mut entries) = collect_cache_entries(cache_dir) else {
+    let Some(entries) = collect_cache_entries(cache_dir) else {
         return;
     };
+    let entries: Vec<LruEntry<SystemTime>> = entries
+        .into_iter()
+        .map(|e| LruEntry {
+            path: e.path,
+            size: e.size,
+            recency: e.mtime,
+        })
+        .collect();
 
-    let total: u64 = entries.iter().map(|e| e.size).sum();
-    if total <= target_bytes {
-        return;
-    }
-
-    // Oldest mtime first (least recently used).
-    entries.sort_unstable_by_key(|e| e.mtime);
-
-    let mut remaining = total;
-    for entry in entries {
-        if remaining <= target_bytes {
-            break;
+    lru::evict_to_cap(entries, target_bytes, |path| {
+        info!("evicted cached video: {}", path.display());
+        if let Some(item_id) = path.file_stem().and_then(|s| s.to_str()) {
+            let _ = std::fs::remove_file(cache_dir.join(format!("{item_id}.done")));
         }
-        match std::fs::remove_file(&entry.path) {
-            Ok(()) => {
-                info!("evicted cached video: {}", entry.path.display());
-                // Remove the sentinel so find_cached_file won't return a
-                // stale hit for the now-deleted video file.
-                let sentinel = cache_dir.join(format!("{}.done", entry.item_id));
-                let _ = std::fs::remove_file(sentinel);
-                remaining = remaining.saturating_sub(entry.size);
-            }
-            Err(e) => warn!("cache eviction failed for {}: {e}", entry.path.display()),
-        }
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------

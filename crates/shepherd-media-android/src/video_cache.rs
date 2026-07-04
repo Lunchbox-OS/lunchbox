@@ -15,6 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use filetime::FileTime;
+use shepherd_media_app::lru::{self, LruEntry};
 
 /// A per-library video cache rooted at `dir` with a `max_bytes` budget.
 #[derive(Clone)]
@@ -63,26 +64,15 @@ impl VideoCache {
         Ok(path)
     }
 
-    /// Remove least-recently-used files until the total size is within the cap.
+    /// Remove least-recently-used files until the total size is within the cap,
+    /// via the shared LRU policy (see `shepherd_media_app::lru`).
     fn evict_to_cap(&self) {
-        let mut entries = self.entries();
-        let mut total: u64 = entries.iter().map(|e| e.size).sum();
-        if total <= self.max_bytes {
-            return;
-        }
-        // Oldest (smallest mtime) first.
-        entries.sort_by_key(|e| e.mtime);
-        for e in entries {
-            if total <= self.max_bytes {
-                break;
-            }
-            if std::fs::remove_file(&e.path).is_ok() {
-                total = total.saturating_sub(e.size);
-            }
-        }
+        lru::evict_to_cap(self.entries(), self.max_bytes, |_| {});
     }
 
-    fn entries(&self) -> Vec<CacheEntry> {
+    /// All committed cache files (skipping in-flight `.part` downloads) as LRU
+    /// entries keyed on file mtime.
+    fn entries(&self) -> Vec<LruEntry<FileTime>> {
         let Ok(rd) = std::fs::read_dir(&self.dir) else {
             return Vec::new();
         };
@@ -97,20 +87,14 @@ impl VideoCache {
                 if path.extension().and_then(|e| e.to_str()) == Some("part") {
                     return None;
                 }
-                Some(CacheEntry {
+                Some(LruEntry {
                     size: meta.len(),
-                    mtime: FileTime::from_last_modification_time(&meta),
+                    recency: FileTime::from_last_modification_time(&meta),
                     path,
                 })
             })
             .collect()
     }
-}
-
-struct CacheEntry {
-    path: PathBuf,
-    size: u64,
-    mtime: FileTime,
 }
 
 fn download(url: &str, dest: &Path) -> io::Result<()> {
