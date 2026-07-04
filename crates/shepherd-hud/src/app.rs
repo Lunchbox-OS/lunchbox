@@ -857,12 +857,16 @@ fn build_hud_content(
                 && anchored_connector.borrow().as_deref() != Some(name.as_str())
                 && let Some(monitor) = monitor_by_connector(&name)
             {
+                // Force a clean unmap → remap onto the new output. When the
+                // previously-anchored output is disabled (switching to
+                // external-only), the compositor destroys the HUD's layer
+                // surface but GTK still believes the window is visible — so
+                // set_monitor/present alone won't recreate it and the HUD
+                // vanishes. Hiding first resyncs GTK's mapped state, then
+                // set_monitor + show builds a fresh surface on the live output.
+                window_for_monitor.set_visible(false);
                 window_for_monitor.set_monitor(&monitor);
-                // Re-present so the layer surface remaps onto the new output.
-                // When the previously-anchored output was just disabled (e.g.
-                // switching to external-only), its surface is destroyed;
-                // without this the HUD can stay unmapped and vanish.
-                window_for_monitor.present();
+                window_for_monitor.set_visible(true);
                 *anchored_connector.borrow_mut() = Some(name);
             }
         }
