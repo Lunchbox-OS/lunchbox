@@ -25,9 +25,11 @@ source "$LIB_DIR/harden.sh"
 source "$LIB_DIR/config.sh"
 # shellcheck source=lib/bluetooth.sh
 source "$LIB_DIR/bluetooth.sh"
+# shellcheck source=lib/version.sh
+source "$LIB_DIR/version.sh"
 
-# Version
-VERSION="0.1.0"
+# Version: read from the canonical repo-root VERSION file (see lib/version.sh).
+VERSION="$(version_read)"
 
 # Print usage information
 usage() {
@@ -44,6 +46,7 @@ Commands:
     install     Install shepherd to the system
     harden      User hardening for kiosk mode
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
+    version     Show or bump the project version
 
 Development:
     shepherd deps install dev     Install all development dependencies
@@ -73,6 +76,11 @@ Bluetooth:
 Configuration:
     shepherd config validate                  Validate installed config
     shepherd config validate <path>           Validate a specific file
+
+Version:
+    shepherd version                          Show the current version
+    shepherd version set <X.Y.Z>              Bump the version everywhere
+    shepherd version check                    Verify version literals match
 
 Options:
     -h, --help      Show this help message
@@ -129,10 +137,13 @@ EOF
         bluetooth)
             bluetooth_main "$@"
             ;;
+        version)
+            version_main "$@"
+            ;;
         -h|--help|help|"")
             usage
             ;;
-        -V|--version|version)
+        -V|--version)
             echo "shepherd $VERSION"
             ;;
         *)

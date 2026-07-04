@@ -5,6 +5,12 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Single source of truth: the repo-root VERSION file (one directory above this
+// Gradle project). Read it at configure time so `versionName` can never drift
+// from the rest of the monorepo. See scripts/lib/version.sh.
+val shepherdVersion: String =
+    rootProject.projectDir.parentFile.resolve("VERSION").readText().trim()
+
 android {
     namespace = "com.armeafamily.shepherd.companion"
     compileSdk = 35
@@ -14,7 +20,7 @@ android {
         minSdk = 31
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = shepherdVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
