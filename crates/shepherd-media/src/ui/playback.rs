@@ -22,7 +22,7 @@ use eframe::egui;
 use glow::HasContext;
 use shepherd_media_core::{Session, SessionInput};
 
-use crate::ui::theme;
+use shepherd_media_ui::theme;
 
 /// Delta (seconds) applied by the ±10s buttons and the LB/RB / dpad-left/right
 /// gamepad bindings.

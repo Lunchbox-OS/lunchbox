@@ -2,9 +2,8 @@
 //! with a touch- and controller-friendly overlay in `Playing` state.
 
 mod playback;
-mod theme;
 
-use shepherd_media_ui::grid;
+use shepherd_media_ui::{grid, theme};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
