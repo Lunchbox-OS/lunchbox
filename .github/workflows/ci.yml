@@ -326,6 +326,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  versions:
+    name: Version harmony
+    # No custom image needed: the default job container (node:20-bookworm) has
+    # bash + node + grep, which is all `shepherd version check` requires. This
+    # fails if any synced version literal drifts from the canonical VERSION file.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version harmony
+        run: ./scripts/shepherd version check
+
   firewall:
     name: Firewall E2E
     needs: image

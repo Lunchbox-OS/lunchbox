@@ -133,6 +133,28 @@ cargo clippy
 cargo clippy --all-targets -- -D warnings
 ```
 
+### Bumping the version
+
+`shepherd-launcher` is a composition of Rust crates, a web UI, an Android
+companion app, and shell tooling — none of which depend on each other, but all
+of which ship a version string. The canonical version lives in exactly one
+place: the repo-root [`VERSION`](./VERSION) file.
+
+* `scripts/shepherd` and the Android Gradle build **read** it directly, so they
+  can never drift.
+* Cargo and npm can't read a file at manifest-parse time, so their literals are
+  **written** from `VERSION` by the bump command and **verified** by CI.
+
+Bump every version at once:
+
+```sh
+./scripts/shepherd version set 0.2.0
+```
+
+Then commit `VERSION`, `Cargo.toml`, `Cargo.lock`, and
+`shepherd-webui/package*.json` together. CI runs `shepherd version check` to
+fail the build if any literal is edited by hand and drifts out of sync.
+
 
 ## Contribution guidelines
 
