@@ -388,12 +388,13 @@ impl TestHarness {
 
         let http_client = HttpClient::new(http_port, auth_token.clone());
 
-        // Wait for /api/v1/health to return 200.
+        // Wait for the RPC endpoint to answer `health` before
+        // declaring the daemon ready.
         let health_client = http_client.clone();
-        wait_for("shepherdd /api/v1/health", Duration::from_secs(15), || {
+        wait_for("shepherdd rpc health", Duration::from_secs(15), || {
             let health_client = health_client.clone();
             async move {
-                match health_client.get("/api/v1/health").await {
+                match health_client.rpc("health", serde_json::json!({})).await {
                     Ok(r) if r.status == 200 => Some(()),
                     _ => None,
                 }

@@ -15,6 +15,10 @@ pub struct SessionPlan {
     /// Maximum duration for this session. None means unlimited.
     pub max_duration: Option<Duration>,
     pub warnings: Vec<WarningThreshold>,
+    /// Whether the HUD should confirm before its "X" button ends this
+    /// session (issue #78). Carried from the entry's config so the HUD knows
+    /// the activity's preference; only the "X" button consults it.
+    pub confirm_on_close: bool,
 }
 
 impl SessionPlan {
@@ -169,6 +173,7 @@ impl ActiveSession {
             deadline: self.deadline,
             time_remaining: self.time_remaining(now_mono),
             warnings_issued: self.warnings_issued.clone(),
+            confirm_on_close: self.plan.confirm_on_close,
         }
     }
 }
@@ -205,6 +210,7 @@ mod tests {
                     message_template: None,
                 },
             ],
+            confirm_on_close: true,
         }
     }
 
@@ -253,6 +259,7 @@ mod tests {
                 severity: WarningSeverity::Warn,
                 message_template: None,
             }],
+            confirm_on_close: true,
         };
 
         let times = plan.warning_times();

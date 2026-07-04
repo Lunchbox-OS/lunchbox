@@ -41,6 +41,25 @@ allow_change = true  # Whether volume changes are allowed at all
 min_brightness = 10      # Don't let brightness drop below 10%
 allow_change = true      # Whether brightness changes are allowed at all
 
+# Automatic (ambient-light) brightness (optional).
+# When the host exposes an ambient light sensor (an IIO illuminance channel,
+# e.g. /sys/bus/iio/devices/iio:deviceN/in_illuminance_raw), shepherdd can
+# drive the backlight from measured room light. The screen sits at
+# `min_percent` at/below `dim_lux` and at `max_percent` at/above `bright_lux`,
+# interpolated logarithmically in between. The result is still clamped by the
+# `min_brightness`/`max_brightness` restrictions above (and any per-entry
+# override), so a bedtime activity's cap still applies. A manual slider drag
+# temporarily wins and auto resumes once the room light shifts noticeably.
+# `enabled` is only the default; the on/off state is toggleable from the HUD
+# and management API and is persisted across restarts.
+[service.brightness.auto]
+enabled = false             # Start with auto brightness on?
+# dim_lux = 10.0            # Lux at/below which the screen is dimmest
+# bright_lux = 1000.0       # Lux at/above which the screen is brightest
+# min_percent = 15          # Brightness at the dim end (0-100)
+# max_percent = 100         # Brightness at the bright end (0-100)
+# poll_interval_seconds = 3 # How often to sample the sensor
+
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.
 # Supported schemes: https://, http://, tcp://
@@ -85,6 +104,25 @@ bind = "0.0.0.0"             # Bind address ("127.0.0.1" for localhost-only)
                              # assigned (e.g. ZeroTier interface still coming up at login).
                              # 0 = retry forever. Default: 300.
 # auth_token = "changeme"    # Optional Bearer token; omit to allow unauthenticated access
+
+# Bluetooth LE management transport (optional)
+# Primary admin path: works without network configuration, IP autodiscovery,
+# or a known static IP. Pairing uses Numeric Comparison (6-digit code shown
+# on the TV); the first phone to pair becomes the admin (TOFU). Requires a
+# working BlueZ adapter and the `bluez` system package.
+[service.ble_management]
+enabled = true
+# device_name = "shepherd"              # Advertised local name. Pick something
+                                        # the companion app can disambiguate
+                                        # when multiple devices are in range.
+# admin_record_path = "/var/lib/shepherdd/admin.toml"
+                                        # Where the admin record is persisted.
+                                        # Default: <data_dir>/admin.toml.
+# reset_sentinel_path = "/var/lib/shepherdd/.factory-reset-ble"
+                                        # If this file exists at startup, the
+                                        # admin record is wiped and the file
+                                        # removed. Default:
+                                        # <data_dir>/.factory-reset-ble.
 
 # Default warning thresholds
 [[service.default_warnings]]
@@ -354,6 +392,25 @@ always = true
 # type = "process"
 # command = "/usr/bin/example-game"
 
+# `confirm_on_close` controls whether the HUD asks for confirmation before its
+# "X" (End session) button ends this activity (issue #78). Many activities lose
+# unsaved state when force-closed and the button is easy to hit by accident, so
+# this is `true` by default: the HUD shows a "really end?" prompt and only stops
+# the activity once confirmed. Set it to `false` for activities that are safe to
+# close instantly (e.g. a simple menu or a stateless viewer).
+#
+# This only affects the HUD "X" button. Closing via the API, a time/quota
+# expiration, or the activity's own process exiting is never gated by it.
+#
+# [[entries]]
+# id = "example-safe-to-close"
+# label = "Example (no close confirmation)"
+# confirm_on_close = false
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/example"
+
 ## === Flatpak-based applications ===
 # Flatpak entries use the "flatpak" type for proper process management.
 # Similar to Snap, Flatpak apps run in sandboxed environments and use
@@ -433,6 +490,96 @@ always = true
 max_run_seconds = 0  # Unlimited
 daily_quota_seconds = 0  # Unlimited
 cooldown_seconds = 0  # No cooldown
+
+## === Web browser ===
+# A supervised web browser is a *composition*, not a dedicated entry kind:
+#   1. kind = flatpak  -> the sandboxed com.google.Chrome from Flathub
+#   2. [entries.browser] -> a Chromium managed-policy (URL allowlist + lockdown)
+#                           plus the launch mode and on-disk profile
+#   3. [entries.firewall] -> optional coarse IP-layer defense-in-depth
+# shepherd-launcher only wraps Chrome through documented controls (enterprise
+# policy JSON + command-line flags) -- it does not patch the browser or
+# circumvent any protections.
+#
+# Install: flatpak install flathub com.google.Chrome
+[[entries]]
+id = "chrome-school"
+label = "School"
+# icon is autodetected from the Flatpak app_id (no need to specify)
+
+[entries.kind]
+type = "flatpak"
+app_id = "com.google.Chrome"
+
+[entries.browser]
+# profile_id selects the on-disk user-data-dir. Entries that share a profile_id
+# share cookies/logins; each unique id is isolated. Must be a single safe path
+# segment (letters, digits, '-', '_', '.').
+profile_id = "school"
+# Window mode: "kiosk" and "app" both open a CHROMELESS window (no tabs or
+# omnibox) that sway maximizes into the area around the time-remaining HUD;
+# "windowed" is a normal browser window with tabs. shepherd's compositor keeps
+# the HUD on top and intentionally denies apps true fullscreen, so neither mode
+# takes over the whole display -- kiosk and app behave the same here.
+mode = "kiosk"
+start_url = "https://classroom.google.com"
+# Hostname allowlisting is enforced by Chrome itself (no extensions needed).
+# A non-empty allowlist is authoritative: everything not matched is blocked.
+# Entries use Chrome's URL-filter format: "[scheme://]host[/path]". A plain
+# hostname ALREADY matches all its subdomains (so "google.com" covers
+# "classroom.google.com"). Do NOT write a "*." subdomain prefix or a trailing
+# "/*": Chrome does not support a wildcard host and treats the path as a literal
+# prefix, not a glob, so "https://*.google.com/*" matches nothing and the entry
+# is blocked by the catch-all. See
+# https://chromeenterprise.google/policies/url-blocking/ for the full format.
+url_allowlist = [
+    "https://google.com",
+    "https://googleusercontent.com",
+    "https://gstatic.com",
+    "https://accounts.youtube.com",
+]
+# url_blocklist is applied after the allowlist (e.g. carve-outs within an
+# allowed domain). Optional; defaults to empty.
+url_blocklist = []
+# Lockdown switches (all default to true):
+disable_dev_tools = true
+disable_incognito = true
+disable_extensions = true
+# wipe_on_exit clears the profile directory after the session ends (handled by
+# shepherd, not Chrome). Use a unique profile_id with this; sharing a profile_id
+# AND wiping deletes the shared profile. Defaults to false.
+wipe_on_exit = false
+
+# Optional coarse network firewall (issue #4), enforced via systemd's BPF
+# address filter on the session's cgroup. This is IP-layer only -- hostnames
+# are NOT resolved here, so the browser's url_allowlist above remains the
+# authoritative host control. Left commented because a default-deny list needs
+# the current Google/Workspace IP ranges, which drift over time; populate from
+# https://www.gstatic.com/ipranges/goog.json (and the Microsoft equivalent for
+# Microsoft 365) and uncomment to enable. As written below it would block all
+# web traffic until real ranges are added.
+# [entries.firewall]
+# default = "deny"   # "deny" (default) or "allow"
+# allow = [
+#     "127.0.0.0/8",
+#     "::1/128",
+#     # ... add Google/Workspace CIDRs here ...
+# ]
+# deny = []
+
+[entries.availability]
+[[entries.availability.windows]]
+days = "weekdays"
+start = "15:00"
+end = "18:00"
+
+[entries.internet]
+required = true
+check = "https://www.gstatic.com/generate_204"
+
+[entries.limits]
+max_run_seconds = 3600       # 1 hour
+daily_quota_seconds = 7200   # 2 hours per day
 
 ## === Media ===
 # `shepherd-media` reads a declarative `.toml` library file and either

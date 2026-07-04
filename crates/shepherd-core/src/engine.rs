@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Local};
 use shepherd_api::{
-    API_VERSION, EntryView, InternetStatusView, ReasonCode, ServiceStateSnapshot, SessionEndReason,
-    WarningSeverity,
+    API_VERSION, EntryKindTag, EntryView, InternetStatusView, ReasonCode, ServiceStateSnapshot,
+    SessionEndReason, WarningSeverity,
 };
 use shepherd_config::{Entry, InternetCheckTarget, Policy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -40,6 +40,10 @@ pub struct CoreEngine {
     last_availability_set: HashSet<EntryId>,
     /// Latest known internet connectivity status per check target
     internet_status: HashMap<InternetCheckTarget, bool>,
+    /// Per-activity-kind readiness (issue #76). A kind absent from this map is
+    /// treated as ready; a kind mapped to `false` is warming up and its
+    /// entries are neither shown nor launchable until it reports ready.
+    kind_readiness: HashMap<EntryKindTag, bool>,
 }
 
 impl CoreEngine {
@@ -62,6 +66,7 @@ impl CoreEngine {
             current_session: None,
             last_availability_set: HashSet::new(),
             internet_status: HashMap::new(),
+            kind_readiness: HashMap::new(),
         }
     }
 
@@ -94,6 +99,19 @@ impl CoreEngine {
 
     fn internet_available(&self, target: &InternetCheckTarget) -> bool {
         self.internet_status.get(target).copied().unwrap_or(false)
+    }
+
+    /// Update the readiness of an activity kind (issue #76). Kinds default to
+    /// ready; a kind is only gated once it reports `false`. Returns true if the
+    /// stored value changed (so callers can broadcast a fresh state snapshot).
+    pub fn set_kind_readiness(&mut self, kind: EntryKindTag, ready: bool) -> bool {
+        self.kind_readiness.insert(kind, ready) != Some(ready)
+    }
+
+    /// Whether entries of this kind may currently be shown or launched. A kind
+    /// that has never reported readiness is treated as ready.
+    fn kind_ready(&self, kind: EntryKindTag) -> bool {
+        self.kind_readiness.get(&kind).copied().unwrap_or(true)
     }
 
     /// List the configured internet connectivity checks and their latest
@@ -177,6 +195,14 @@ impl CoreEngine {
         if !self.capabilities.supports_kind(kind_tag) {
             enabled = false;
             reasons.push(ReasonCode::UnsupportedKind { kind: kind_tag });
+        }
+
+        // Check per-kind readiness: a kind still warming up (e.g. Steam
+        // finishing its initial load, issue #76) is neither shown nor
+        // launchable until the host reports it ready.
+        if !self.kind_ready(kind_tag) {
+            enabled = false;
+            reasons.push(ReasonCode::NotReady { kind: kind_tag });
         }
 
         // Check availability window (skipped when an enable-today override is set)
@@ -339,6 +365,7 @@ impl CoreEngine {
             label: entry.label.clone(),
             max_duration,
             warnings: entry.warnings.clone(),
+            confirm_on_close: entry.confirm_on_close,
         };
 
         if let Some(max_dur) = max_duration {
@@ -371,6 +398,7 @@ impl CoreEngine {
             entry_id: session.plan.entry_id.clone(),
             label: session.plan.label.clone(),
             deadline: session.deadline,
+            confirm_on_close: session.plan.confirm_on_close,
         };
 
         // Log to audit
@@ -774,14 +802,17 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         }
     }
 
@@ -795,6 +826,53 @@ mod tests {
         let entries = engine.list_entries(shepherd_util::now());
         assert_eq!(entries.len(), 1);
         assert!(entries[0].enabled);
+    }
+
+    #[test]
+    fn test_kind_readiness_gates_show_and_launch() {
+        use shepherd_api::{EntryKindTag, ReasonCode};
+
+        let policy = make_test_policy();
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let mut engine = CoreEngine::new(policy, store, caps);
+
+        let entry_id = EntryId::new("test-game");
+        let now = shepherd_util::now();
+
+        // Kinds default to ready: the entry is enabled and launchable.
+        assert!(engine.list_entries(now)[0].enabled);
+        assert!(matches!(
+            engine.request_launch(&entry_id, now),
+            LaunchDecision::Approved(_)
+        ));
+
+        // Mark the entry's kind not ready: it should be hidden (disabled with a
+        // NotReady reason) and no longer launchable.
+        assert!(engine.set_kind_readiness(EntryKindTag::Process, false));
+        let entries = engine.list_entries(now);
+        assert!(!entries[0].enabled, "should be gated while not ready");
+        assert!(
+            entries[0].reasons.iter().any(|r| matches!(
+                r,
+                ReasonCode::NotReady {
+                    kind: EntryKindTag::Process
+                }
+            )),
+            "expected NotReady reason, got: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, now),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Setting the same value again reports no change; flipping back to
+        // ready un-gates the entry.
+        assert!(!engine.set_kind_readiness(EntryKindTag::Process, false));
+        assert!(engine.set_kind_readiness(EntryKindTag::Process, true));
+        assert!(engine.list_entries(now)[0].enabled);
+        assert!(engine.list_entries(now)[0].reasons.is_empty());
     }
 
     #[test]
@@ -864,15 +942,18 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             service: Default::default(),
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -955,15 +1036,18 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             service: Default::default(),
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1054,15 +1138,18 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             service: Default::default(),
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1129,14 +1216,17 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1221,14 +1311,17 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1296,14 +1389,17 @@ mod tests {
                 disabled_reason: Some("under review".into()),
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1382,14 +1478,17 @@ mod tests {
                 disabled_reason: None,
                 internet: Default::default(),
                 firewall: None,
+                browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 xwayland_native_resolution: false,
+                confirm_on_close: true,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());

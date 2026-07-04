@@ -64,6 +64,11 @@ pub struct RawServiceConfig {
     /// Management HTTP API settings
     #[serde(default)]
     pub management_api: Option<RawManagementApiConfig>,
+
+    /// Bluetooth LE management transport. Designed as the primary admin
+    /// path (works without IP autodiscovery or static IP). See
+    /// `docs/ai/history/2026-06-20 002 ble-management.md`.
+    pub ble_management: Option<RawBleManagementConfig>,
 }
 
 /// Raw entry definition
@@ -116,6 +121,12 @@ pub struct RawEntry {
     #[serde(default)]
     pub firewall: Option<RawFirewallConfig>,
 
+    /// Supervised-browser policy (Chromium enterprise policy + profile).
+    /// Compose with `kind = { type = "flatpak", app_id = "com.google.Chrome" }`
+    /// and an optional `[entries.firewall]` to build the web-browser activity.
+    #[serde(default)]
+    pub browser: Option<RawBrowserConfig>,
+
     /// Input compatibility modes for this entry. Each mode runs an
     /// orthogonal sidecar — touch-to-mouse and gamepad presets can be
     /// stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
@@ -136,6 +147,16 @@ pub struct RawEntry {
     /// runs.
     #[serde(default)]
     pub xwayland_native_resolution: bool,
+
+    /// Ask for confirmation before the HUD "X" (End session) button ends this
+    /// activity. Since the button is easy to hit by accident and many
+    /// activities lose unsaved state when force-closed, the HUD shows a
+    /// confirmation prompt first (issue #78). Only affects the "X" button —
+    /// closing via the API, time expiration, or the process exiting is
+    /// unaffected. Enabled by default; set `false` for activities that are
+    /// safe to close instantly.
+    #[serde(default = "default_true")]
+    pub confirm_on_close: bool,
 }
 
 /// Per-entry firewall configuration
@@ -164,6 +185,66 @@ pub struct RawFirewallConfig {
 
 fn default_firewall_default() -> String {
     "deny".to_string()
+}
+
+/// Per-entry supervised-browser policy.
+///
+/// Materialized at spawn time into a Chromium [managed-policy JSON][policies]
+/// file plus a set of Chrome command-line flags. Hostname allowlisting is
+/// enforced by the browser itself via `URLAllowlist`/`URLBlocklist` (no
+/// extensions); pair with [`RawFirewallConfig`] for coarse IP-layer
+/// defense-in-depth. shepherd-launcher only wraps Chrome through documented
+/// controls — it does not patch the browser or circumvent any protections.
+///
+/// [policies]: https://chromeenterprise.google/policies/
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawBrowserConfig {
+    /// Filesystem segment selecting the on-disk user-data-dir. Entries that
+    /// share a `profile_id` share cookies/logins; each unique id is isolated.
+    /// Must be a single safe path segment (no separators, not `.`/`..`).
+    pub profile_id: String,
+
+    /// Window mode: "kiosk"/"app" both open a chromeless window (no tabs or
+    /// omnibox) via Chrome's `--app`, or "windowed" (normal browser window).
+    /// Default "kiosk". Note: shepherd's sway compositor denies clients true
+    /// fullscreen to keep the HUD visible, so "kiosk" does not use `--kiosk`
+    /// (which would fall back to a toolbar'd window); it behaves like "app".
+    #[serde(default = "default_browser_mode")]
+    pub mode: String,
+
+    /// URL opened on launch. Must be an http(s) URL when set.
+    pub start_url: Option<String>,
+
+    /// Chromium `URLAllowlist` patterns. Empty = no allowlist (all URLs
+    /// permitted, subject to `url_blocklist`).
+    #[serde(default)]
+    pub url_allowlist: Vec<String>,
+
+    /// Chromium `URLBlocklist` patterns, applied after the allowlist.
+    #[serde(default)]
+    pub url_blocklist: Vec<String>,
+
+    /// Disable DevTools (`DeveloperToolsDisabled`). Default true.
+    #[serde(default = "default_true")]
+    pub disable_dev_tools: bool,
+
+    /// Disable incognito mode (`IncognitoModeAvailability`). Default true.
+    #[serde(default = "default_true")]
+    pub disable_incognito: bool,
+
+    /// Block extension installation (`ExtensionInstallBlocklist = ["*"]`).
+    /// Default true.
+    #[serde(default = "default_true")]
+    pub disable_extensions: bool,
+
+    /// Wipe the on-disk profile directory after the session ends (handled by
+    /// the host adapter's post-exit cleanup, not by Chrome). Default false.
+    #[serde(default)]
+    pub wipe_on_exit: bool,
+}
+
+fn default_browser_mode() -> String {
+    "kiosk".to_string()
 }
 
 /// Input compatibility mode
@@ -421,6 +502,29 @@ pub struct RawManagementApiConfig {
     pub auth_token: Option<String>,
 }
 
+/// Bluetooth LE management transport configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawBleManagementConfig {
+    /// Whether the BLE management transport is enabled (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Advertised local name and the device name returned in `DeviceInfo`.
+    /// Defaults to `"shepherd"`. Pick something the companion app can
+    /// disambiguate when multiple shepherd devices are in range.
+    pub device_name: Option<String>,
+
+    /// Where the admin record (`AdminRecord` TOML) is persisted.
+    /// Defaults to `<data_dir>/admin.toml`.
+    pub admin_record_path: Option<PathBuf>,
+
+    /// Sentinel file path. When present at daemon startup, the admin
+    /// record is wiped and the device returns to the unclaimed state
+    /// (and the file is removed). Defaults to
+    /// `<data_dir>/.factory-reset-ble`.
+    pub reset_sentinel_path: Option<PathBuf>,
+}
+
 /// Volume control configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawVolumeConfig {
@@ -453,6 +557,37 @@ pub struct RawBrightnessConfig {
     /// Whether brightness changes are allowed at all (default: true)
     #[serde(default = "default_true")]
     pub allow_change: bool,
+
+    /// Automatic (ambient-light) brightness. Only honored under
+    /// `[service.brightness]`; a copy on a per-entry `[entries.brightness]`
+    /// override is ignored, since auto brightness is a device-global mode.
+    #[serde(default)]
+    pub auto: Option<RawAutoBrightnessConfig>,
+}
+
+/// Automatic screen-brightness configuration (ambient-light driven).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawAutoBrightnessConfig {
+    /// Whether automatic brightness starts enabled. This is only the default;
+    /// the runtime state (toggled from the HUD or management API) is persisted
+    /// and takes precedence once set.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Ambient light (lux) at or below which the screen sits at `min_percent`.
+    pub dim_lux: Option<f32>,
+
+    /// Ambient light (lux) at or above which the screen sits at `max_percent`.
+    pub bright_lux: Option<f32>,
+
+    /// Brightness percent at the dim end of the curve (0-100).
+    pub min_percent: Option<u8>,
+
+    /// Brightness percent at the bright end of the curve (0-100).
+    pub max_percent: Option<u8>,
+
+    /// How often to sample the light sensor, in seconds.
+    pub poll_interval_seconds: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -519,6 +654,34 @@ mod tests {
     }
 
     #[test]
+    fn confirm_on_close_defaults_true_and_parses_false() {
+        // Absent -> enabled by default (issue #78).
+        let default_toml = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+        "#;
+        let config: RawConfig = toml::from_str(default_toml).unwrap();
+        assert!(config.entries[0].confirm_on_close);
+
+        // Explicit opt-out.
+        let opt_out_toml = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+            confirm_on_close = false
+        "#;
+        let config: RawConfig = toml::from_str(opt_out_toml).unwrap();
+        assert!(!config.entries[0].confirm_on_close);
+    }
+
+    #[test]
     fn parse_input_compat_list() {
         let toml_str = r#"
             config_version = 1
@@ -559,6 +722,39 @@ mod tests {
         "#;
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert!(config.entries[0].input_compat.is_empty());
+    }
+
+    #[test]
+    fn parse_browser_entry() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "chrome-school"
+            label = "School"
+            kind = { type = "flatpak", app_id = "com.google.Chrome" }
+
+            [entries.browser]
+            profile_id = "school"
+            mode = "kiosk"
+            start_url = "https://classroom.google.com"
+            url_allowlist = ["https://*.google.com/*"]
+        "#;
+
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        let browser = config.entries[0].browser.as_ref().unwrap();
+        assert_eq!(browser.profile_id, "school");
+        assert_eq!(browser.mode, "kiosk");
+        assert_eq!(
+            browser.start_url.as_deref(),
+            Some("https://classroom.google.com")
+        );
+        assert_eq!(browser.url_allowlist, vec!["https://*.google.com/*"]);
+        // Lockdown defaults are on; wipe defaults off.
+        assert!(browser.disable_dev_tools);
+        assert!(browser.disable_incognito);
+        assert!(browser.disable_extensions);
+        assert!(!browser.wipe_on_exit);
     }
 
     #[test]

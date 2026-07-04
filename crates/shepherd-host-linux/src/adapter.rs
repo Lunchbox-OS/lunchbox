@@ -1,13 +1,16 @@
 //! Linux host adapter implementation
 
 use async_trait::async_trait;
-use shepherd_api::{EntryKind, InputCompatMode, InterstitialKind, WindowAction, WindowInfo};
+use shepherd_api::{
+    EntryKind, EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo,
+};
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
     HostSessionHandle, SpawnOptions, StopMode,
 };
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,13 +23,18 @@ use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
     build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name,
+    kill_steam_game_processes, make_scope_name, steam_webhelper_running,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
     spawn_touch_bridge, terminate_sidecar,
 };
 use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
+
+/// How long to wait for the preloaded Steam client to report ready before
+/// un-gating Steam activities anyway (issue #76). A safety net so a missed
+/// readiness signal never leaves Steam games permanently hidden.
+const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
 
 /// Best-effort query of the compositor output scale for the touch bridge.
 ///
@@ -66,6 +74,16 @@ fn expand_tilde(path: &str) -> String {
 /// Expand tilde in all arguments
 fn expand_args(args: &[String]) -> Vec<String> {
     args.iter().map(|arg| expand_tilde(arg)).collect()
+}
+
+/// Resolve the base directory under which browser policy/profile dirs are
+/// materialized. Honors `SHEPHERD_BROWSER_ROOT` (used by tests to redirect
+/// writes away from the real `~/.var/app/...`), otherwise the user's home.
+fn resolve_browser_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("SHEPHERD_BROWSER_ROOT") {
+        return PathBuf::from(root);
+    }
+    dirs::home_dir().unwrap_or_default()
 }
 
 /// Pop any sidecars registered for `pid` and terminate them on a blocking
@@ -112,6 +130,13 @@ pub struct LinuxHost {
     /// Per-activity sidecar processes (touch-bridge, etc.), keyed by the
     /// activity's pid so the monitor can reap them on natural exit too.
     sidecars: Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+    /// Ephemeral browser profile dirs to delete when their activity exits
+    /// (`wipe_on_exit`), keyed by the activity's pid. The monitor (or `stop`)
+    /// removes the entry and wipes the dir exactly once.
+    profile_wipes: Arc<Mutex<HashMap<u32, PathBuf>>>,
+    /// Base dir for browser policy/profile materialization (the user's home in
+    /// production; redirected in tests). Empty if no home could be resolved.
+    browser_root: PathBuf,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
     /// Steam launch interstitials we're allowed to auto-dismiss via CEF (see
@@ -135,6 +160,8 @@ impl LinuxHost {
             steam_sessions: Arc::new(Mutex::new(HashMap::new())),
             steam_preload_pids: Arc::new(Mutex::new(HashSet::new())),
             sidecars: Arc::new(Mutex::new(HashMap::new())),
+            profile_wipes: Arc::new(Mutex::new(HashMap::new())),
+            browser_root: resolve_browser_root(),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
@@ -226,12 +253,62 @@ impl LinuxHost {
         });
     }
 
+    /// Watch the preloaded Steam client and report when it has finished its
+    /// initial load, so Steam activities can be un-gated (issue #76).
+    ///
+    /// Emits `KindReadinessChanged { Steam, false }` immediately (Steam is not
+    /// ready right after preload) and then `{ Steam, true }` once
+    /// `steamwebhelper` appears — or after a generous fallback deadline, so a
+    /// missed signal (or a failed preload) never hides Steam games forever.
+    fn spawn_steam_readiness_watcher(&self) {
+        let event_tx = self.event_tx.clone();
+
+        // Gate Steam until the watcher confirms readiness. Harmless if the
+        // engine was already seeded not-ready at startup (a no-op there).
+        let _ = event_tx.send(HostEvent::KindReadinessChanged {
+            kind: EntryKindTag::Steam,
+            ready: false,
+        });
+
+        tokio::spawn(async move {
+            let deadline = Instant::now() + STEAM_READY_FALLBACK;
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+
+                let detected = steam_webhelper_running();
+                let timed_out = Instant::now() >= deadline;
+                if detected {
+                    info!("Steam finished initial load (steamwebhelper detected)");
+                } else if timed_out {
+                    warn!(
+                        "Steam readiness not detected within {}s; un-gating Steam anyway",
+                        STEAM_READY_FALLBACK.as_secs()
+                    );
+                } else {
+                    continue;
+                }
+
+                let _ = event_tx.send(HostEvent::KindReadinessChanged {
+                    kind: EntryKindTag::Steam,
+                    ready: true,
+                });
+                return;
+            }
+        });
+    }
+
     /// Spawn Steam in the background so it is ready when a game is launched.
     ///
     /// Steam performs several startup steps (update, auth, cloud sync) before it
     /// can run a game. By starting Steam at daemon startup, these steps complete
     /// in the background and game launches feel nearly instant.
     pub fn preload_steam(&self) {
+        // Watch for Steam finishing its initial load so Steam activities stay
+        // hidden until then (issue #76). Started before the spawn (and
+        // unconditionally, even if the spawn below fails) so the fallback
+        // deadline always un-gates eventually.
+        self.spawn_steam_readiness_watcher();
+
         // Enable the loopback CEF debug endpoint so the launch watchdog can
         // dismiss interstitials. Only do this when at least one interstitial is
         // enabled — the endpoint is a control surface we don't open otherwise.
@@ -288,6 +365,7 @@ impl LinuxHost {
         let steam_sessions = self.steam_sessions.clone();
         let steam_preload_pids = self.steam_preload_pids.clone();
         let sidecars = self.sidecars.clone();
+        let profile_wipes = self.profile_wipes.clone();
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -332,6 +410,12 @@ impl LinuxHost {
                     info!(pid = pid, pgid = pgid, status = ?status, "Process exited - sending HostEvent::Exited");
 
                     reap_sidecars(&sidecars, pid);
+
+                    // Wipe an ephemeral browser profile now that the activity
+                    // (and, for flatpak, its Chrome instance) is fully gone.
+                    if let Some(dir) = profile_wipes.lock().unwrap().remove(&pid) {
+                        crate::browser::wipe_profile_dir(&dir);
+                    }
 
                     // We don't have the session_id here, so we use a placeholder
                     // The service should track the mapping
@@ -516,6 +600,53 @@ impl HostAdapter for LinuxHost {
         // Determine if this is a sandboxed app (snap or flatpak)
         let sandboxed_app_name = snap_name.clone().or_else(|| flatpak_app_id.clone());
 
+        // Materialize browser policy before spawning. Supported only for the
+        // com.google.Chrome flatpak: write the managed-policy JSON to the app's
+        // per-user config tree and rebuild the argv so Chrome is launched
+        // through a shim that injects that policy into the sandbox's own /etc
+        // (per-user, never the machine-wide host /etc). See `crate::browser`.
+        let mut argv = argv;
+        let mut pending_wipe: Option<PathBuf> = None;
+        if let Some(ref browser) = options.browser {
+            match entry_kind {
+                EntryKind::Flatpak { app_id, args, env }
+                    if crate::browser::is_supported_browser_flatpak(app_id) =>
+                {
+                    if self.browser_root.as_os_str().is_empty() {
+                        warn!("Browser policy set but no home directory resolved; ignoring");
+                    } else {
+                        match crate::browser::write_policy_file(&self.browser_root, browser) {
+                            Ok(policy_file) => {
+                                // Per-profile user-data-dir: isolates the profile
+                                // on disk and is what we wipe on exit.
+                                let udd =
+                                    crate::browser::user_data_dir(&self.browser_root, browser);
+                                let mut flags = crate::browser::chrome_flags(browser, Some(&udd));
+                                flags.extend(expand_args(args));
+                                argv = crate::browser::chrome_flatpak_argv(
+                                    app_id,
+                                    &policy_file,
+                                    env,
+                                    &flags,
+                                );
+                                info!(policy = %policy_file.display(), "Materialized Chrome browser policy");
+                                if browser.wipe_on_exit {
+                                    pending_wipe = Some(udd);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to write browser policy; launching Chrome without it")
+                            }
+                        }
+                    }
+                }
+                _ => warn!(
+                    "Browser policy is only supported for the {} flatpak; ignoring",
+                    crate::browser::SUPPORTED_BROWSER_FLATPAK
+                ),
+            }
+        }
+
         // Apply firewall: for Process kind, hand the launch to the privileged
         // helper via pkexec, which runs `systemd-run --scope` against the
         // *system* manager (the one that can attach BPF cgroup programs).
@@ -662,6 +793,11 @@ impl HostAdapter for LinuxHost {
 
         if !session_sidecars.is_empty() {
             self.sidecars.lock().unwrap().insert(pid, session_sidecars);
+        }
+
+        // Register the ephemeral browser profile for wiping when this pid exits.
+        if let Some(dir) = pending_wipe {
+            self.profile_wipes.lock().unwrap().insert(pid, dir);
         }
 
         // Store the session info so we can use it for killing even after process exits

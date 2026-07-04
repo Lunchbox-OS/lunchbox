@@ -85,6 +85,8 @@ export interface SessionInfo {
   deadline: string | null;
   time_remaining: Duration | null;
   warnings_issued: number[];
+  /** Whether the HUD's "X" button confirms before ending this activity (issue #78). */
+  confirm_on_close: boolean;
 }
 
 export interface EntryView {
@@ -97,9 +99,8 @@ export interface EntryView {
   max_run_if_started_now: Duration | null;
 }
 
-export type LaunchResponse =
-  | { result: "approved"; session_id: string; deadline: string | null }
-  | { result: "denied"; reasons: ReasonCode[] };
+// `LaunchResponse` is now exported from `./client` — it's a UI-friendly
+// normalisation of the on-wire `LaunchOutcome` shape.
 
 export interface DailyOverride {
   entry_id: string;
@@ -144,6 +145,8 @@ export interface BrightnessInfo {
   backend: string | null;
   device: string | null;
   restrictions: BrightnessRestrictions;
+  auto_available: boolean;
+  auto_enabled: boolean;
 }
 
 export interface HealthStatus {

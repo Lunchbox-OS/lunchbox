@@ -25,6 +25,9 @@ pub enum SessionState {
         time_limit_secs: Option<u64>,
         #[allow(dead_code)]
         time_remaining_secs: Option<u64>,
+        /// Whether the "X" button should confirm before ending this activity
+        /// (issue #78).
+        confirm_on_close: bool,
     },
 
     /// Warning shown - time running low
@@ -38,6 +41,9 @@ pub enum SessionState {
         message: Option<String>,
         /// Severity level of the warning
         severity: WarningSeverity,
+        /// Whether the "X" button should confirm before ending this activity
+        /// (issue #78).
+        confirm_on_close: bool,
     },
 
     /// Session is ending
@@ -63,6 +69,32 @@ impl SessionState {
             SessionState::Active { session_id, .. } => Some(session_id),
             SessionState::Warning { session_id, .. } => Some(session_id),
             SessionState::Ending { session_id, .. } => Some(session_id),
+        }
+    }
+
+    /// Display name of the current activity, if any. Used to make the
+    /// close-confirmation prompt name the activity being ended (issue #78).
+    pub fn entry_name(&self) -> Option<&str> {
+        match self {
+            SessionState::Active { entry_name, .. } | SessionState::Warning { entry_name, .. } => {
+                Some(entry_name)
+            }
+            SessionState::NoSession | SessionState::Ending { .. } => None,
+        }
+    }
+
+    /// Whether ending the current activity via the HUD "X" button should be
+    /// confirmed first (issue #78). Only meaningful while a session is active;
+    /// returns `false` when there is no session to end.
+    pub fn confirm_on_close(&self) -> bool {
+        match self {
+            SessionState::Active {
+                confirm_on_close, ..
+            }
+            | SessionState::Warning {
+                confirm_on_close, ..
+            } => *confirm_on_close,
+            SessionState::NoSession | SessionState::Ending { .. } => false,
         }
     }
 }
@@ -226,10 +258,11 @@ impl SharedState {
 
     /// Update brightness from BrightnessChanged event (preserves
     /// restrictions/backend/device from the initial fetch).
-    fn update_brightness(&self, percent: u8) {
+    fn update_brightness(&self, percent: u8, auto_enabled: bool) {
         self.brightness_tx.send_modify(|br| {
             if let Some(b) = br {
                 b.percent = percent;
+                b.auto_enabled = auto_enabled;
             } else {
                 *br = Some(BrightnessInfo {
                     percent,
@@ -237,6 +270,8 @@ impl SharedState {
                     backend: None,
                     device: None,
                     restrictions: BrightnessRestrictions::unrestricted(),
+                    auto_available: auto_enabled,
+                    auto_enabled,
                 });
             }
         });
@@ -264,6 +299,7 @@ impl SharedState {
                 entry_id,
                 label,
                 deadline,
+                confirm_on_close,
             } => {
                 let now = shepherd_util::now();
                 // For unlimited sessions (deadline=None), time_remaining is None
@@ -281,6 +317,7 @@ impl SharedState {
                     started_at: std::time::Instant::now(),
                     time_limit_secs: time_remaining,
                     time_remaining_secs: time_remaining,
+                    confirm_on_close: *confirm_on_close,
                 });
             }
 
@@ -303,6 +340,7 @@ impl SharedState {
                         session_id: sid,
                         entry_id,
                         entry_name,
+                        confirm_on_close,
                         ..
                     } = state
                     {
@@ -315,6 +353,7 @@ impl SharedState {
                                 time_remaining_at_warning: time_remaining.as_secs(),
                                 message: message.clone(),
                                 severity: *severity,
+                                confirm_on_close: *confirm_on_close,
                             };
                         }
                     }
@@ -323,6 +362,7 @@ impl SharedState {
                         session_id: sid,
                         entry_id,
                         entry_name,
+                        confirm_on_close,
                         ..
                     } = state
                         && sid == session_id
@@ -335,6 +375,7 @@ impl SharedState {
                             time_remaining_at_warning: time_remaining.as_secs(),
                             message: message.clone(),
                             severity: *severity,
+                            confirm_on_close: *confirm_on_close,
                         };
                     }
                 });
@@ -372,6 +413,7 @@ impl SharedState {
                         started_at: std::time::Instant::now(),
                         time_limit_secs: time_remaining,
                         time_remaining_secs: time_remaining,
+                        confirm_on_close: session.confirm_on_close,
                     });
                 } else {
                     self.set_session_state(SessionState::NoSession);
@@ -382,8 +424,11 @@ impl SharedState {
                 self.update_volume(*percent, *muted);
             }
 
-            EventPayload::BrightnessChanged { percent } => {
-                self.update_brightness(*percent);
+            EventPayload::BrightnessChanged {
+                percent,
+                auto_enabled,
+            } => {
+                self.update_brightness(*percent, *auto_enabled);
             }
 
             EventPayload::InternetStatusChanged { target, available } => {
@@ -420,5 +465,48 @@ impl SharedState {
 impl Default for SharedState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active(confirm_on_close: bool) -> SessionState {
+        SessionState::Active {
+            session_id: SessionId::new(),
+            entry_id: EntryId::new("game"),
+            entry_name: "Some Game".into(),
+            started_at: std::time::Instant::now(),
+            time_limit_secs: None,
+            time_remaining_secs: None,
+            confirm_on_close,
+        }
+    }
+
+    #[test]
+    fn confirm_on_close_reflects_active_session() {
+        assert!(active(true).confirm_on_close());
+        assert!(!active(false).confirm_on_close());
+    }
+
+    #[test]
+    fn confirm_on_close_is_false_without_a_session_to_end() {
+        // Nothing to confirm when idle or already ending, so the "X" button
+        // never prompts in those states (issue #78).
+        assert!(!SessionState::NoSession.confirm_on_close());
+        assert!(
+            !SessionState::Ending {
+                session_id: SessionId::new(),
+                reason: "Time expired".into(),
+            }
+            .confirm_on_close()
+        );
+    }
+
+    #[test]
+    fn entry_name_exposed_for_active_session() {
+        assert_eq!(active(true).entry_name(), Some("Some Game"));
+        assert_eq!(SessionState::NoSession.entry_name(), None);
     }
 }

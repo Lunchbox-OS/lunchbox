@@ -162,10 +162,10 @@ deny = []
     let http = h.http();
 
     let resp = http
-        .post_json("/api/v1/sessions", &json!({ "entry_id": "firewall-probe" }))
+        .rpc("launch", json!({ "id": "firewall-probe" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert_eq!(json_body(&resp)?["result"], json!("approved"));
+    assert!(json_body(&resp)?["Approved"].is_object());
 
     // Wait up to 30s for the probe to finish and atomically publish its log.
     let start = std::time::Instant::now();
@@ -201,7 +201,7 @@ deny = []
     );
 
     // Stop the activity early; the script's trailing sleep is a safety net.
-    let resp = http.delete("/api/v1/sessions/current").await?;
+    let resp = http.rpc("stop_current", json!({})).await?;
     assert!(
         resp.status == 204 || resp.status == 200,
         "stop body (status {}): {}",

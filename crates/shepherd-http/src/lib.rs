@@ -1,21 +1,35 @@
-//! Local-network management HTTP API for shepherdd
+//! Local-network management HTTP API for shepherdd.
 //!
-//! Exposes REST endpoints and SSE event streaming so parents can
-//! control sessions, set daily overrides, and view usage analytics
-//! from a browser or mobile app on the LAN.
+//! Exposes exactly two endpoints on the LAN:
+//!
+//! - `POST /api/v1/rpc` — JSON-RPC pass-through into every
+//!   `ManagementService` method. Wire shape is
+//!   `{ "method": "<name>", "params": <object|null> }` with the trait
+//!   method's return value as the response body; errors come back as
+//!   4xx/5xx with `{ "error": <code>, "message": <string> }`. See
+//!   [`handlers::rpc`] for the code/status mapping.
+//! - `GET /api/v1/events` — Server-Sent Events stream of every
+//!   `shepherd_api::Event`.
+//!
+//! There used to be a full REST surface (`/entries`, `/sessions`,
+//! `/volume`, ...) but every consumer now speaks the RPC endpoint,
+//! and adding a new operation shouldn't require touching four places
+//! for one trait method.
 
 pub mod auth;
-pub mod error;
 pub mod handlers;
 pub mod state;
 pub mod web_assets;
 
+pub use auth::AuthSources;
 pub use state::AppState;
 
 use anyhow::Context;
 use shepherd_config::ManagementApiConfig;
+use shepherd_management::AdminAuthority;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -26,16 +40,34 @@ const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 pub struct HttpServer {
     state: AppState,
     config: ManagementApiConfig,
+    admin: Option<Arc<dyn AdminAuthority>>,
 }
 
 impl HttpServer {
     pub fn new(state: AppState, config: ManagementApiConfig) -> Self {
-        Self { state, config }
+        Self {
+            state,
+            config,
+            admin: None,
+        }
+    }
+
+    /// Plug in a BLE-claim-derived [`AdminAuthority`] so the bearer
+    /// token minted at claim time is accepted on HTTP as well as BLE.
+    /// `None` (the default) preserves the legacy static-token-only
+    /// behaviour.
+    pub fn with_admin_authority(mut self, admin: Option<Arc<dyn AdminAuthority>>) -> Self {
+        self.admin = admin;
+        self
     }
 
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let addr = SocketAddr::new(self.config.bind, self.config.port);
-        let app = handlers::router(self.state, self.config.auth_token);
+        let sources = AuthSources {
+            static_token: self.config.auth_token.clone(),
+            admin: self.admin.clone(),
+        };
+        let app = handlers::router(self.state, sources);
         let listener = bind_with_retry(addr, self.config.bind_retry).await?;
         info!(%addr, "Management HTTP API listening");
         axum::serve(listener, app)

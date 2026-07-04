@@ -57,6 +57,14 @@ impl HttpClient {
         self.request("PUT", path, Some(body)).await
     }
 
+    /// JSON-RPC dispatch through `POST /api/v1/rpc`. The management
+    /// HTTP surface is now RPC-only, so nearly every e2e test call
+    /// goes through this helper.
+    pub async fn rpc(&self, method: &str, params: Value) -> Result<HttpResponse> {
+        let body = serde_json::json!({ "method": method, "params": params });
+        self.request("POST", "/api/v1/rpc", Some(&body)).await
+    }
+
     /// Open an SSE stream against `path`. The returned [`SseStream`] yields
     /// successive JSON-decoded events.
     pub async fn sse(&self, path: &str) -> Result<SseStream> {

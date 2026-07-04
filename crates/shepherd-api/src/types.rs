@@ -209,6 +209,22 @@ impl InputCompatMode {
     }
 }
 
+/// How a supervised browser activity launches its window.
+///
+/// Translated by the host adapter into Chrome command-line flags. Shared by
+/// `shepherd-config`'s validated `BrowserPolicy` and `shepherd-host-api`'s
+/// `BrowserSpec` so there is a single source of truth for the mode vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserMode {
+    /// Fullscreen, no browser chrome (`--kiosk`).
+    Kiosk,
+    /// Single application window (`--app=<url>`).
+    App,
+    /// Normal browser window.
+    Windowed,
+}
+
 /// Per-activity tunables for input compatibility sidecars.
 ///
 /// All fields are optional; sidecars apply their own defaults when a field is
@@ -286,6 +302,9 @@ pub enum ReasonCode {
     },
     /// Host doesn't support this entry kind
     UnsupportedKind { kind: EntryKindTag },
+    /// The activity kind has not finished warming up yet (e.g. Steam is still
+    /// performing its initial load). See per-kind readiness (issue #76).
+    NotReady { kind: EntryKindTag },
     /// Entry is explicitly disabled
     Disabled { reason: Option<String> },
     /// Internet connectivity is required but unavailable
@@ -356,6 +375,17 @@ pub struct SessionInfo {
     /// Time remaining. None means unlimited.
     pub time_remaining: Option<Duration>,
     pub warnings_issued: Vec<u64>,
+    /// Whether the HUD should confirm before its "X" button ends this
+    /// session (issue #78). Defaults to `true` when absent so older payloads
+    /// keep the safe behaviour.
+    #[serde(default = "default_confirm_on_close")]
+    pub confirm_on_close: bool,
+}
+
+/// Default for [`SessionInfo::confirm_on_close`] / the `SessionStarted` event:
+/// confirmation is enabled unless a config explicitly opts out.
+pub(crate) fn default_confirm_on_close() -> bool {
+    true
 }
 
 /// Status of a single internet connectivity check target
@@ -508,6 +538,13 @@ pub struct BrightnessInfo {
     pub device: Option<String>,
     /// Current restrictions on brightness
     pub restrictions: BrightnessRestrictions,
+    /// Whether an ambient light sensor is present, so automatic brightness
+    /// can be offered at all. When false, `auto_enabled` is always false.
+    #[serde(default)]
+    pub auto_available: bool,
+    /// Whether automatic (ambient-light) brightness is currently enabled.
+    #[serde(default)]
+    pub auto_enabled: bool,
 }
 
 /// Brightness restrictions that are currently in effect

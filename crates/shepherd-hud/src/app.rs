@@ -8,14 +8,47 @@ use crate::state::{SessionState, SharedState};
 use crate::time_display::TimeDisplay;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4_layer_shell::{Edge, Layer, LayerShell};
-use shepherd_api::Command;
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+
+/// Send a one-shot RPC to shepherdd on a background thread. The HUD's
+/// GTK main loop must never block on IPC, so each action button spins
+/// up a short-lived Tokio runtime, connects, calls, exits. Errors are
+/// logged (there is no UI surface to report them to). `action` runs
+/// against a freshly-connected client and returns any error the caller
+/// wants to see in the log.
+fn spawn_action<F, Fut>(socket_path: PathBuf, label: &'static str, action: F)
+where
+    F: FnOnce(IpcClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = shepherd_ipc::IpcResult<()>> + Send,
+{
+    std::thread::spawn(move || {
+        let rt = Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async move {
+            match IpcClient::connect(&socket_path).await {
+                Ok(client) => {
+                    if let Err(e) = action(client).await {
+                        tracing::error!("Failed to send {}: {}", label, e);
+                    }
+                }
+                Err(e) => tracing::error!("Failed to connect to shepherdd: {}", e),
+            }
+        });
+    });
+}
+
+/// Ask shepherdd to end the current session gracefully (the "X" button).
+fn request_stop_current(socket_path: PathBuf) {
+    tracing::info!("Requesting end session");
+    spawn_action(socket_path, "stop_current", |mut client| async move {
+        client.stop_current(shepherd_api::StopMode::Graceful).await
+    });
+}
 
 /// Pixel size for all symbolic icons in the HUD bar at scale 1.0. The
 /// timer in `build_hud_content` multiplies this by the current HUD scale
@@ -336,9 +369,36 @@ fn build_hud_content(
         .build();
     brightness_box.add_css_class("brightness-control");
 
+    // The brightness icon doubles as the automatic-brightness toggle: pressing
+    // it hands brightness over to the ambient-light loop (on hosts with a
+    // sensor). It's a `ToggleButton` wrapping the icon `Image` — the same
+    // shape as the volume mute button — so the scale timer can keep resizing
+    // the icon via `set_pixel_size`. Automatic is the expected, default state,
+    // so it renders plain; the icon lights up (in the brightness bar's own
+    // colour) only when the user has taken *manual* control.
     let brightness_icon = gtk4::Image::from_icon_name("display-brightness-symbolic");
     brightness_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    brightness_box.append(&brightness_icon);
+    let brightness_button = gtk4::ToggleButton::builder()
+        .child(&brightness_icon)
+        .has_frame(false)
+        .tooltip_text("Automatic brightness")
+        .build();
+    brightness_button.add_css_class("indicator-button");
+    brightness_button.add_css_class("brightness-toggle");
+
+    // Guards against the programmatic `set_active` in the update loop
+    // re-triggering `toggled` and echoing a redundant RPC back to the daemon.
+    let auto_updating = std::rc::Rc::new(std::cell::Cell::new(false));
+    let auto_updating_clone = auto_updating.clone();
+    brightness_button.connect_toggled(move |btn| {
+        if auto_updating_clone.get() {
+            return;
+        }
+        if let Err(e) = crate::brightness::set_auto_brightness(btn.is_active()) {
+            tracing::error!("Failed to set auto brightness: {}", e);
+        }
+    });
+    brightness_box.append(&brightness_button);
 
     let brightness_slider = gtk4::Scale::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -443,46 +503,89 @@ fn build_hud_content(
         .build();
     action_button.add_css_class("close-button");
 
+    // Confirmation popover for the "X" button. Ending an activity forcibly
+    // loses its unsaved state, and the button is easy to hit by accident, so
+    // activities that opt in (the default) get a "really end?" prompt before
+    // the session is stopped (issue #78). The popover is parented to the
+    // button, so on the layer-shell overlay it renders as a child popup above
+    // the running activity. It is built once and re-shown on demand; its
+    // message label is refreshed with the current activity name each time.
+    let confirm_popover = gtk4::Popover::new();
+    confirm_popover.set_parent(&action_button);
+    confirm_popover.add_css_class("confirm-close-popover");
+    // Autohide so the prompt dismisses itself when it loses focus (the user
+    // taps the activity, presses Escape, etc.). Autohide relies on an input
+    // grab that needs the layer surface to accept keyboard focus, so we switch
+    // the HUD to on-demand keyboard interactivity only while the prompt is up
+    // (see the popup/`closed` handlers below) and back to none otherwise, so
+    // the always-present bar never steals keyboard focus from the activity.
+    confirm_popover.set_autohide(true);
+    let confirm_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    let confirm_label = gtk4::Label::new(Some("End this activity?"));
+    confirm_label.add_css_class("confirm-close-message");
+    confirm_label.set_wrap(true);
+    confirm_label.set_max_width_chars(28);
+    confirm_box.append(&confirm_label);
+    let confirm_button_row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .homogeneous(true)
+        .build();
+    let cancel_button = gtk4::Button::with_label("Cancel");
+    let end_button = gtk4::Button::with_label("End activity");
+    end_button.add_css_class("destructive-action");
+    confirm_button_row.append(&cancel_button);
+    confirm_button_row.append(&end_button);
+    confirm_box.append(&confirm_button_row);
+    confirm_popover.set_child(Some(&confirm_box));
+
+    let popover_for_cancel = confirm_popover.clone();
+    cancel_button.connect_clicked(move |_| {
+        popover_for_cancel.popdown();
+    });
+
+    let popover_for_end = confirm_popover.clone();
+    end_button.connect_clicked(move |_| {
+        popover_for_end.popdown();
+        request_stop_current(default_socket_path());
+    });
+
+    // Release the on-demand keyboard grab whenever the prompt goes away, no
+    // matter how it was dismissed (Cancel, End, Escape, focus loss, or a
+    // programmatic popdown when the activity ends by other means), so the HUD
+    // returns to not competing for keyboard focus.
+    let window_for_closed = window.clone();
+    confirm_popover.connect_closed(move |_| {
+        window_for_closed.set_keyboard_mode(KeyboardMode::None);
+    });
+
     let state_for_action = state.clone();
+    let popover_for_action = confirm_popover.clone();
+    let window_for_action = window.clone();
     action_button.connect_clicked(move |_| {
         let session_state = state_for_action.session_state();
         let socket_path = default_socket_path();
-        if let Some(session_id) = session_state.session_id() {
-            tracing::info!("Requesting end session for {}", session_id);
-            std::thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create runtime");
-                rt.block_on(async {
-                    match IpcClient::connect(&socket_path).await {
-                        Ok(mut client) => {
-                            let cmd = Command::StopCurrent {
-                                mode: shepherd_api::StopMode::Graceful,
-                            };
-                            if let Err(e) = client.send(cmd).await {
-                                tracing::error!("Failed to send StopCurrent: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to connect to shepherdd: {}", e);
-                        }
-                    }
-                });
-            });
+        if session_state.session_id().is_some() {
+            if session_state.confirm_on_close() {
+                // Refresh the prompt with the activity's name, then ask. Take
+                // keyboard focus so the autohide grab can dismiss on focus loss.
+                if let Some(name) = session_state.entry_name() {
+                    confirm_label.set_text(&format!("End {name}? Unsaved progress may be lost."));
+                } else {
+                    confirm_label.set_text("End this activity? Unsaved progress may be lost.");
+                }
+                window_for_action.set_keyboard_mode(KeyboardMode::OnDemand);
+                popover_for_action.popup();
+            } else {
+                request_stop_current(socket_path);
+            }
         } else {
             tracing::info!("Requesting logout");
-            std::thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create runtime");
-                rt.block_on(async {
-                    match IpcClient::connect(&socket_path).await {
-                        Ok(mut client) => {
-                            if let Err(e) = client.send(Command::Logout).await {
-                                tracing::error!("Failed to send Logout: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to connect to shepherdd: {}", e);
-                        }
-                    }
-                });
+            spawn_action(socket_path, "logout", |mut client| async move {
+                client.logout().await
             });
         }
     });
@@ -508,9 +611,12 @@ fn build_hud_content(
     let brightness_slider_clone = brightness_slider.clone();
     let brightness_label_clone = brightness_label.clone();
     let brightness_changing_for_update = brightness_changing.clone();
+    let brightness_button_clone = brightness_button.clone();
+    let auto_updating_for_update = auto_updating.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
+    let confirm_popover_for_timer = confirm_popover.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
     // All icons we resize when the HUD scale factor changes.
@@ -580,6 +686,16 @@ fn build_hud_content(
         } else {
             action_icon_clone.set_icon_name(Some("system-log-out-symbolic"));
             action_button_clone.set_tooltip_text(Some("Log out"));
+        }
+        // If the activity has ended or started ending by any means other than
+        // the prompt itself (time expiry, API stop, process exit), dismiss a
+        // lingering close-confirmation popover — there is nothing left to
+        // confirm (issue #78). Harmless no-op when it isn't showing.
+        if !matches!(
+            session_state,
+            SessionState::Active { .. } | SessionState::Warning { .. }
+        ) {
+            confirm_popover_for_timer.popdown();
         }
         match &session_state {
             SessionState::NoSession => {
@@ -745,6 +861,17 @@ fn build_hud_content(
                 let min = brightness.restrictions.min_brightness.unwrap_or(0) as f64;
                 let max = brightness.restrictions.max_brightness.unwrap_or(100) as f64;
                 brightness_slider_clone.set_range(min, max);
+
+                // The brightness icon toggles auto brightness, but only when a
+                // light sensor exists; otherwise it stays a plain, inert icon.
+                brightness_button_clone.set_sensitive(brightness.auto_available);
+                if brightness.auto_available
+                    && brightness_button_clone.is_active() != brightness.auto_enabled
+                {
+                    auto_updating_for_update.set(true);
+                    brightness_button_clone.set_active(brightness.auto_enabled);
+                    auto_updating_for_update.set(false);
+                }
             } else {
                 brightness_box_clone.set_visible(false);
             }
@@ -922,6 +1049,32 @@ const CSS_TEMPLATE: &str = r#"
             background-color: var(--hover-bg);
         }
 
+        /* The brightness icon is a toggle: automatic is the default, so it
+           stays plain when checked (auto on). It lights up only in the
+           *manual* state (unchecked, and only when a sensor makes auto an
+           option at all), using the brightness bar's own highlight colour so
+           the two read as one control. */
+        .brightness-toggle:not(:checked):not(:disabled) {
+            background-color: var(--color-warning);
+        }
+
+        .brightness-toggle:not(:checked):not(:disabled) image {
+            color: #2e3440;
+        }
+
+        /* The GTK theme shades a *checked* toggle button by default. Automatic
+           brightness (checked) must look completely plain, so clear that
+           shading — keeping only the normal hover feedback. */
+        .brightness-toggle:checked {
+            background-color: transparent;
+            background-image: none;
+            box-shadow: none;
+        }
+
+        .brightness-toggle:checked:hover {
+            background-color: var(--hover-bg);
+        }
+
         .close-button {
             min-width: 32px;
             min-height: 32px;
@@ -1047,6 +1200,55 @@ const CSS_TEMPLATE: &str = r#"
             color: var(--color-warning);
             margin-left: 4px;
         }
+
+        /* Opaque dark surface with explicit colors (not theme variables) so
+           the prompt keeps strong text contrast regardless of the system GTK
+           theme and never lets the bright activity behind it bleed through.
+           The arrow (the triangle pointing at the "X") is a separate CSS node
+           and must be recolored to match the box. */
+        .confirm-close-popover > contents {
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            padding: 14px;
+        }
+
+        .confirm-close-popover > arrow {
+            background-color: #1e1e1e;
+            border: none;
+        }
+
+        .confirm-close-message {
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: bold;
+        }
+
+        /* Theme buttons paint a gradient via background-image, which a bare
+           background-color won't override, so clear it and set explicit
+           high-contrast fills: a light Cancel with dark text, a red End with
+           white text. */
+        .confirm-close-popover button {
+            min-height: 32px;
+            padding: 6px 14px;
+            border-radius: 4px;
+            border: none;
+            background-image: none;
+            color: #2e3440;
+            background-color: #d8dee9;
+        }
+
+        .confirm-close-popover button:hover {
+            background-color: #e5e9f0;
+        }
+
+        .confirm-close-popover button.destructive-action {
+            color: #ffffff;
+            background-color: #bf616a;
+        }
+
+        .confirm-close-popover button.destructive-action:hover {
+            background-color: #d08770;
+        }
     "#;
 
 fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
@@ -1060,61 +1262,40 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                 Ok(mut client) => {
                     tracing::info!("Connected to shepherdd");
 
-                    // Get initial volume before subscribing (can't send commands after subscribe)
-                    match client.send(Command::GetVolume).await {
-                        Ok(response) => {
-                            if let shepherd_api::ResponseResult::Ok(
-                                shepherd_api::ResponsePayload::Volume(info),
-                            ) = response.result
-                            {
-                                tracing::debug!("Got initial volume: {}%", info.percent);
-                                state.set_initial_volume(info);
-                            }
+                    // Get initial volume before subscribing (can't send RPCs after subscribe)
+                    match client.get_volume().await {
+                        Ok(info) => {
+                            tracing::debug!("Got initial volume: {}%", info.percent);
+                            state.set_initial_volume(info);
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get initial volume: {}", e);
-                        }
+                        Err(e) => tracing::warn!("Failed to get initial volume: {}", e),
                     }
 
                     // Same for brightness. Returns available=false when the
                     // host has no backlight, which is the signal to the UI
                     // that it should hide the slider entirely.
-                    match client.send(Command::GetBrightness).await {
-                        Ok(response) => {
-                            if let shepherd_api::ResponseResult::Ok(
-                                shepherd_api::ResponsePayload::Brightness(info),
-                            ) = response.result
-                            {
-                                tracing::debug!(
-                                    "Got initial brightness: {}% (available={})",
-                                    info.percent,
-                                    info.available,
-                                );
-                                state.set_initial_brightness(info);
-                            }
+                    match client.get_brightness().await {
+                        Ok(info) => {
+                            tracing::debug!(
+                                "Got initial brightness: {}% (available={})",
+                                info.percent,
+                                info.available,
+                            );
+                            state.set_initial_brightness(info);
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get initial brightness: {}", e);
-                        }
+                        Err(e) => tracing::warn!("Failed to get initial brightness: {}", e),
                     }
 
                     // Pull a fresh service snapshot so the network indicator
                     // (and any other state-derived UI) is populated even when
                     // no event has fired since the HUD connected.
-                    match client.send(Command::GetState).await {
-                        Ok(response) => {
-                            if let shepherd_api::ResponseResult::Ok(
-                                shepherd_api::ResponsePayload::State(snapshot),
-                            ) = response.result
-                            {
-                                state.handle_event(&shepherd_api::Event::new(
-                                    shepherd_api::EventPayload::StateChanged(snapshot),
-                                ));
-                            }
+                    match client.service_state().await {
+                        Ok(snapshot) => {
+                            state.handle_event(&shepherd_api::Event::new(
+                                shepherd_api::EventPayload::StateChanged(snapshot),
+                            ));
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to get initial state: {}", e);
-                        }
+                        Err(e) => tracing::warn!("Failed to get initial state: {}", e),
                     }
 
                     let mut stream = match client.subscribe().await {

@@ -7,6 +7,8 @@ import CardContent from "@mui/material/CardContent";
 import Slider from "@mui/material/Slider";
 import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
+import Switch from "@mui/material/Switch";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import Typography from "@mui/material/Typography";
 import LogoutIcon from "@mui/icons-material/Logout";
 import VolumeOffIcon from "@mui/icons-material/VolumeOff";
@@ -19,6 +21,7 @@ import {
   getVolume,
   logoutUser,
   reloadConfig,
+  setAutoBrightness,
   setBrightnessPercent,
   setVolumeMuted,
   setVolumePercent,
@@ -66,6 +69,12 @@ export function AdminPage() {
     onError: (e) => flash(String(e), false),
   });
 
+  const setAutoBrightnessMutation = useMutation({
+    mutationFn: setAutoBrightness,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["brightness"] }),
+    onError: (e) => flash(String(e), false),
+  });
+
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: (res) => flash(`Config reloaded (${res.entry_count} entries)`),
@@ -79,7 +88,8 @@ export function AdminPage() {
   });
 
   const busyVol = setPercentMutation.isPending || setMutedMutation.isPending;
-  const busyBright = setBrightnessMutation.isPending;
+  const busyBright =
+    setBrightnessMutation.isPending || setAutoBrightnessMutation.isPending;
 
   const VolumeIcon = !volume || volume.muted
     ? VolumeOffIcon
@@ -168,6 +178,18 @@ export function AdminPage() {
                   {`${brightness.percent}%`}
                 </Typography>
               </Box>
+              {brightness.auto_available && (
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={brightness.auto_enabled}
+                      disabled={busyBright}
+                      onChange={(_, checked) => setAutoBrightnessMutation.mutate(checked)}
+                    />
+                  }
+                  label="Automatic brightness"
+                />
+              )}
               {brightness.backend && (
                 <Typography variant="caption" color="text.disabled">Backend: {brightness.backend}</Typography>
               )}

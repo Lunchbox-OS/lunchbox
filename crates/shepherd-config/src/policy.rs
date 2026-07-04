@@ -6,13 +6,14 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawBrightnessConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat,
-    RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig, RawServiceConfig,
-    RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
+    RawAutoBrightnessConfig, RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig,
+    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
+    RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
+    RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
-    EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
+    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
     WarningThreshold,
 };
 use shepherd_util::{
@@ -21,7 +22,7 @@ use shepherd_util::{
 };
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -45,6 +46,9 @@ pub struct Policy {
 
     /// Global screen-brightness restrictions
     pub brightness: BrightnessPolicy,
+
+    /// Automatic (ambient-light) brightness settings (device-global)
+    pub auto_brightness: AutoBrightnessPolicy,
 }
 
 impl Policy {
@@ -78,6 +82,14 @@ impl Policy {
             .map(convert_brightness_config)
             .unwrap_or_default();
 
+        let auto_brightness = raw
+            .service
+            .brightness
+            .as_ref()
+            .and_then(|b| b.auto.as_ref())
+            .map(convert_auto_brightness_config)
+            .unwrap_or_default();
+
         let entries = raw
             .entries
             .into_iter()
@@ -99,6 +111,7 @@ impl Policy {
             default_max_run,
             volume: global_volume,
             brightness: global_brightness,
+            auto_brightness,
         }
     }
 
@@ -124,6 +137,8 @@ pub struct ServiceConfig {
     pub steam: SteamConfig,
     /// Management HTTP API configuration (None = disabled)
     pub management_api: Option<ManagementApiConfig>,
+    /// Bluetooth LE management transport configuration (None = disabled).
+    pub ble_management: Option<BleManagementConfig>,
 }
 
 impl ServiceConfig {
@@ -139,15 +154,22 @@ impl ServiceConfig {
             .as_ref()
             .filter(|c| c.enabled)
             .map(ManagementApiConfig::from_raw);
+        let data_dir = raw.data_dir.unwrap_or_else(default_data_dir);
+        let ble_management = raw
+            .ble_management
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|c| BleManagementConfig::from_raw(c, &data_dir));
         Self {
             socket_path: raw.socket_path.unwrap_or_else(socket_path_without_env),
             log_dir,
             capture_child_output: raw.capture_child_output,
             child_log_dir,
-            data_dir: raw.data_dir.unwrap_or_else(default_data_dir),
+            data_dir,
             internet,
             steam,
             management_api,
+            ble_management,
         }
     }
 }
@@ -231,6 +253,33 @@ impl ManagementApiConfig {
     }
 }
 
+/// Validated BLE management transport configuration.
+#[derive(Debug, Clone)]
+pub struct BleManagementConfig {
+    pub device_name: String,
+    pub admin_record_path: PathBuf,
+    pub reset_sentinel_path: PathBuf,
+}
+
+impl BleManagementConfig {
+    fn from_raw(raw: &RawBleManagementConfig, data_dir: &Path) -> Self {
+        Self {
+            device_name: raw
+                .device_name
+                .clone()
+                .unwrap_or_else(|| "shepherd".to_string()),
+            admin_record_path: raw
+                .admin_record_path
+                .clone()
+                .unwrap_or_else(|| data_dir.join("admin.toml")),
+            reset_sentinel_path: raw
+                .reset_sentinel_path
+                .clone()
+                .unwrap_or_else(|| data_dir.join(".factory-reset-ble")),
+        }
+    }
+}
+
 impl Default for ServiceConfig {
     fn default() -> Self {
         let log_dir = default_log_dir();
@@ -247,6 +296,7 @@ impl Default for ServiceConfig {
             ),
             steam: SteamConfig::default(),
             management_api: None,
+            ble_management: None,
         }
     }
 }
@@ -267,6 +317,9 @@ pub struct Entry {
     pub disabled_reason: Option<String>,
     pub internet: EntryInternetPolicy,
     pub firewall: Option<FirewallPolicy>,
+    /// Supervised-browser policy, materialized into Chromium managed-policy
+    /// JSON + Chrome flags at spawn time.
+    pub browser: Option<BrowserPolicy>,
     /// Input compatibility modes — orthogonal sidecars. Deduplicated and
     /// validated (no conflicting gamepad presets) by `Entry::from_raw`.
     pub input_compat: Vec<InputCompatMode>,
@@ -275,6 +328,10 @@ pub struct Entry {
     /// XWayland clients get the panel's native pixel grid. See the
     /// corresponding field on [`RawEntry`] for the full rationale.
     pub xwayland_native_resolution: bool,
+    /// Show a confirmation prompt before the HUD "X" button ends this
+    /// activity (issue #78). Enabled by default; only affects the "X" button,
+    /// not API/expiration/process-exit closes.
+    pub confirm_on_close: bool,
 }
 
 impl Entry {
@@ -306,6 +363,7 @@ impl Entry {
         let brightness = raw.brightness.as_ref().map(convert_brightness_config);
         let internet = convert_entry_internet(raw.internet.as_ref());
         let firewall = raw.firewall.as_ref().map(convert_firewall_config);
+        let browser = raw.browser.as_ref().map(convert_browser_config);
         let input_compat =
             convert_input_compat_list(&raw.input_compat, &EntryId::new(raw.id.clone()));
         let input_compat_options = raw
@@ -328,9 +386,11 @@ impl Entry {
             disabled_reason: raw.disabled_reason,
             internet,
             firewall,
+            browser,
             input_compat,
             input_compat_options,
             xwayland_native_resolution: raw.xwayland_native_resolution,
+            confirm_on_close: raw.confirm_on_close,
         }
     }
 }
@@ -408,6 +468,56 @@ fn convert_firewall_config(raw: &RawFirewallConfig) -> FirewallPolicy {
     }
 }
 
+/// Validated supervised-browser policy applied to an entry at spawn time.
+///
+/// Fields are validated at config load time by `validate_browser`:
+/// `profile_id` is a safe path segment, `mode` is a known window mode,
+/// `start_url` is an http(s) URL, and URL patterns are non-empty/whitespace-free.
+#[derive(Debug, Clone)]
+pub struct BrowserPolicy {
+    /// On-disk user-data-dir segment (shared across entries with the same id).
+    pub profile_id: String,
+    /// How Chrome is launched.
+    pub mode: BrowserMode,
+    /// URL opened on launch, if any.
+    pub start_url: Option<String>,
+    /// Chromium `URLAllowlist` patterns.
+    pub url_allowlist: Vec<String>,
+    /// Chromium `URLBlocklist` patterns, applied after the allowlist.
+    pub url_blocklist: Vec<String>,
+    /// Disable DevTools.
+    pub disable_dev_tools: bool,
+    /// Disable incognito mode.
+    pub disable_incognito: bool,
+    /// Block extension installation.
+    pub disable_extensions: bool,
+    /// Wipe the profile directory after the session ends.
+    pub wipe_on_exit: bool,
+}
+
+fn convert_browser_config(raw: &RawBrowserConfig) -> BrowserPolicy {
+    // `mode` was validated by `validate_config`; default to kiosk defensively.
+    let mode = match raw.mode.trim().to_ascii_lowercase().as_str() {
+        "app" => BrowserMode::App,
+        "windowed" => BrowserMode::Windowed,
+        _ => BrowserMode::Kiosk,
+    };
+    let normalize = |patterns: &[String]| -> Vec<String> {
+        patterns.iter().map(|p| p.trim().to_string()).collect()
+    };
+    BrowserPolicy {
+        profile_id: raw.profile_id.trim().to_string(),
+        mode,
+        start_url: raw.start_url.as_ref().map(|s| s.trim().to_string()),
+        url_allowlist: normalize(&raw.url_allowlist),
+        url_blocklist: normalize(&raw.url_blocklist),
+        disable_dev_tools: raw.disable_dev_tools,
+        disable_incognito: raw.disable_incognito,
+        disable_extensions: raw.disable_extensions,
+        wipe_on_exit: raw.wipe_on_exit,
+    }
+}
+
 /// Volume control policy
 #[derive(Debug, Clone, Default)]
 pub struct VolumePolicy {
@@ -466,6 +576,39 @@ impl BrightnessPolicy {
         let min = self.min_brightness.unwrap_or(0);
         let max = self.max_brightness.unwrap_or(100);
         percent.clamp(min, max)
+    }
+}
+
+/// Automatic (ambient-light) brightness policy. Device-global; there is no
+/// per-entry auto override. `min_percent`/`max_percent` bound the auto range;
+/// the per-entry/global [`BrightnessPolicy`] restrictions clamp on top of that
+/// (so a bedtime activity's `max_brightness` still caps auto brightness).
+#[derive(Debug, Clone)]
+pub struct AutoBrightnessPolicy {
+    /// Default enabled state (runtime toggle, once set, overrides this).
+    pub enabled: bool,
+    /// Lux at or below which brightness sits at `min_percent`.
+    pub dim_lux: f32,
+    /// Lux at or above which brightness sits at `max_percent`.
+    pub bright_lux: f32,
+    /// Brightness percent at the dim end of the curve.
+    pub min_percent: u8,
+    /// Brightness percent at the bright end of the curve.
+    pub max_percent: u8,
+    /// How often to sample the ambient light sensor.
+    pub poll_interval: Duration,
+}
+
+impl Default for AutoBrightnessPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dim_lux: 10.0,
+            bright_lux: 1000.0,
+            min_percent: 15,
+            max_percent: 100,
+            poll_interval: Duration::from_secs(3),
+        }
     }
 }
 
@@ -528,6 +671,21 @@ fn convert_brightness_config(raw: &RawBrightnessConfig) -> BrightnessPolicy {
         max_brightness: raw.max_brightness,
         min_brightness: raw.min_brightness,
         allow_change: raw.allow_change,
+    }
+}
+
+fn convert_auto_brightness_config(raw: &RawAutoBrightnessConfig) -> AutoBrightnessPolicy {
+    let defaults = AutoBrightnessPolicy::default();
+    AutoBrightnessPolicy {
+        enabled: raw.enabled,
+        dim_lux: raw.dim_lux.unwrap_or(defaults.dim_lux),
+        bright_lux: raw.bright_lux.unwrap_or(defaults.bright_lux),
+        min_percent: raw.min_percent.unwrap_or(defaults.min_percent),
+        max_percent: raw.max_percent.unwrap_or(defaults.max_percent),
+        poll_interval: raw
+            .poll_interval_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(defaults.poll_interval),
     }
 }
 

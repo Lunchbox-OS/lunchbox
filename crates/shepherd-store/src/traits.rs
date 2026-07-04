@@ -73,6 +73,14 @@ pub trait Store: Send + Sync {
     /// List all daily overrides active on a given date
     fn list_daily_overrides(&self, date: NaiveDate) -> StoreResult<Vec<DailyOverride>>;
 
+    // Settings (small, global, runtime-toggled key/value flags)
+
+    /// Get a persisted setting by key, if present.
+    fn get_setting(&self, key: &str) -> StoreResult<Option<String>>;
+
+    /// Set (upsert) a persisted setting.
+    fn set_setting(&self, key: &str, value: &str) -> StoreResult<()>;
+
     // Usage queries (extended)
 
     /// Get daily usage totals for an entry over a date range (inclusive)

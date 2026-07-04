@@ -1,9 +1,18 @@
+// JSON-RPC client for shepherdd's management HTTP API.
+//
+// Every operation dispatches through a single `POST /api/v1/rpc`
+// endpoint with body `{ method, params }`; the server routes into
+// `ManagementService::dispatch_json` and hands back either the
+// method's return value (2xx) or `{ error, message }` (4xx/5xx).
+// See `crates/shepherd-http/src/handlers/rpc.rs`.
+
 import axios from "axios";
+import type { RpcMethod } from "./rpc-methods.generated";
 import type {
   BrightnessInfo,
   DailyOverride,
   EntryView,
-  LaunchResponse,
+  ReasonCode,
   SessionInfo,
   UsageStat,
   VolumeInfo,
@@ -13,6 +22,7 @@ import type {
 export class ApiError extends Error {
   constructor(
     public status: number,
+    public code: string,
     message: string,
   ) {
     super(message);
@@ -40,52 +50,87 @@ axiosInstance.interceptors.response.use(
   (res) => res,
   (err) => {
     if (axios.isAxiosError(err) && err.response) {
-      const message = err.response.data?.message ?? err.response.statusText;
-      throw new ApiError(err.response.status, message);
+      const body = err.response.data as
+        | { error?: string; message?: string }
+        | undefined;
+      throw new ApiError(
+        err.response.status,
+        body?.error ?? "unknown",
+        body?.message ?? err.response.statusText,
+      );
     }
     throw err;
   },
 );
 
-async function req<T>(url: string, config: import("axios").AxiosRequestConfig = {}): Promise<T> {
-  const res = await axiosInstance.request<T>({ url, ...config });
+/**
+ * Dispatch a single RPC. On success returns the trait method's
+ * return value decoded as `T`; on server-side errors throws
+ * `ApiError` with the status code + machine-readable code.
+ */
+async function call<T>(method: RpcMethod, params: unknown = {}): Promise<T> {
+  const res = await axiosInstance.post<T>("/rpc", { method, params });
   return res.data;
 }
 
+// ---------------------------------------------------------------------------
+// Typed helpers — one per RPC used by the UI.
+// ---------------------------------------------------------------------------
+
 // Health
-export const getHealth = () => req<{ live: boolean; ready: boolean }>("/health");
+export const getHealth = () => call<{ live: boolean; ready: boolean }>("health");
 
 // Entries
 export const listEntries = (at?: Date) =>
-  req<EntryView[]>(at ? `/entries?at=${at.toISOString()}` : "/entries");
+  call<EntryView[]>("list_entries", at ? { at: at.toISOString() } : {});
 
-export const getEntry = (id: string) => req<EntryView>(`/entries/${id}`);
+export const getEntry = (id: string) => call<EntryView>("get_entry", { id });
 
 // Sessions
-export const getCurrentSession = () => req<SessionInfo | null>("/sessions/current");
+export const getCurrentSession = () =>
+  call<SessionInfo | null>("current_session");
 
-export const launchSession = (entry_id: string) =>
-  req<LaunchResponse>("/sessions", {
-    method: "POST",
-    data: { entry_id },
-  });
+/**
+ * `LaunchOutcome` on the wire is serde-externally-tagged:
+ * `{"Approved": {...}}` or `{"Denied": {...}}`. The UI code was
+ * written against a friendlier `{ result: "approved" | "denied", ...}`
+ * shape from the old REST endpoint, so we normalise here.
+ */
+type LaunchWire =
+  | { Approved: { session_id: string; deadline: string | null } }
+  | { Denied: { reasons: ReasonCode[] } };
 
-export const stopSession = () =>
-  req<void>("/sessions/current", { method: "DELETE" });
+export type LaunchResponse =
+  | { result: "approved"; session_id: string; deadline: string | null }
+  | { result: "denied"; reasons: ReasonCode[] };
+
+export const launchSession = async (
+  entry_id: string,
+): Promise<LaunchResponse> => {
+  const wire = await call<LaunchWire>("launch", { id: entry_id });
+  if ("Approved" in wire) {
+    return {
+      result: "approved",
+      session_id: wire.Approved.session_id,
+      deadline: wire.Approved.deadline,
+    };
+  }
+  return { result: "denied", reasons: wire.Denied.reasons };
+};
+
+export const stopSession = () => call<null>("stop_current");
 
 export const extendSession = (seconds: number) =>
-  req<{ new_deadline: string | null }>("/sessions/current/extend", {
-    method: "POST",
-    data: { seconds },
-  });
+  call<{ new_deadline: string | null }>("extend_current", { seconds });
 
 // Daily overrides
 export const listOverrides = (date?: string) =>
-  req<DailyOverride[]>(date ? `/overrides?date=${date}` : "/overrides");
+  call<DailyOverride[]>("list_overrides", date ? { date } : {});
 
 export const getOverride = (entry_id: string, date?: string) =>
-  req<DailyOverride | null>(
-    date ? `/overrides/${entry_id}?date=${date}` : `/overrides/${entry_id}`,
+  call<DailyOverride | null>(
+    "get_override",
+    date ? { id: entry_id, date } : { id: entry_id },
   );
 
 export const upsertOverride = (
@@ -94,73 +139,73 @@ export const upsertOverride = (
   quota_delta_seconds: number | null,
   date?: string,
 ) =>
-  req<DailyOverride>(`/overrides/${entry_id}`, {
-    method: "PUT",
-    data: { date, availability, quota_delta_seconds },
+  call<DailyOverride>("upsert_override", {
+    id: entry_id,
+    date,
+    availability,
+    quota_delta_seconds,
   });
 
-export const deleteOverride = (entry_id: string, date?: string) =>
-  req<void>(
-    date ? `/overrides/${entry_id}?date=${date}` : `/overrides/${entry_id}`,
-    { method: "DELETE" },
+// `delete_override` returns `{deleted: bool}` via `wrap_result`; the
+// UI doesn't care about the boolean today, so match the previous void
+// signature.
+export const deleteOverride = async (
+  entry_id: string,
+  date?: string,
+): Promise<void> => {
+  await call<{ deleted: boolean }>(
+    "delete_override",
+    date ? { id: entry_id, date } : { id: entry_id },
   );
+};
 
 // Usage
 export const getUsage = (from?: string, to?: string) => {
-  const params = new URLSearchParams();
-  if (from) params.set("from", from);
-  if (to) params.set("to", to);
-  const qs = params.toString();
-  return req<UsageStat[]>(qs ? `/usage?${qs}` : "/usage");
+  const params: Record<string, string> = {};
+  if (from) params.from = from;
+  if (to) params.to = to;
+  return call<UsageStat[]>("usage_all", params);
 };
 
 export const getEntryUsage = (entry_id: string, from?: string, to?: string) => {
-  const params = new URLSearchParams();
-  if (from) params.set("from", from);
-  if (to) params.set("to", to);
-  const qs = params.toString();
-  return req<UsageStat[]>(qs ? `/usage/${entry_id}?${qs}` : `/usage/${entry_id}`);
+  const params: Record<string, string> = { id: entry_id };
+  if (from) params.from = from;
+  if (to) params.to = to;
+  return call<UsageStat[]>("usage_entry", params);
 };
 
 // Volume
-export const getVolume = () => req<VolumeInfo>("/volume");
+export const getVolume = () => call<VolumeInfo>("get_volume");
 export const setVolumePercent = (percent: number) =>
-  req<VolumeInfo>("/volume", {
-    method: "PUT",
-    data: { percent },
-  });
+  call<VolumeInfo>("set_volume", { percent });
 export const setVolumeMuted = (muted: boolean) =>
-  req<VolumeInfo>("/volume", {
-    method: "PUT",
-    data: { muted },
-  });
+  call<VolumeInfo>("set_mute", { muted });
 
 // Brightness
-export const getBrightness = () => req<BrightnessInfo>("/brightness");
+export const getBrightness = () => call<BrightnessInfo>("get_brightness");
 export const setBrightnessPercent = (percent: number) =>
-  req<BrightnessInfo>("/brightness", {
-    method: "PUT",
-    data: { percent },
-  });
+  call<BrightnessInfo>("set_brightness", { percent });
+export const setAutoBrightness = (enabled: boolean) =>
+  call<BrightnessInfo>("set_auto_brightness", { enabled });
 
-// Config
+// Config — `reload_config` returns `{entry_count: number}` (wrap_result).
 export const reloadConfig = () =>
-  req<{ entry_count: number }>("/config/reload", { method: "POST" });
+  call<{ entry_count: number }>("reload_config");
 
 // User
-export const logoutUser = () =>
-  req<void>("/user/logout", { method: "POST" });
+export const logoutUser = () => call<null>("logout");
 
 // Debug
-export const listWindows = () => req<WindowsResponse>("/debug/windows");
+export const listWindows = () => call<WindowsResponse>("list_windows");
 export const closeWindow = (id: number) =>
-  req<void>(`/debug/windows/${id}/close`, { method: "POST" });
+  call<null>("act_on_window", { id, action: "close" });
 export const hideWindow = (id: number) =>
-  req<void>(`/debug/windows/${id}/hide`, { method: "POST" });
+  call<null>("act_on_window", { id, action: "hide" });
 export const showWindow = (id: number) =>
-  req<void>(`/debug/windows/${id}/show`, { method: "POST" });
+  call<null>("act_on_window", { id, action: "show" });
 
-// Build SSE URL with auth token header workaround (use query param)
+// Build SSE URL with auth token (query param — EventSource can't set
+// headers). The server-side handler still lives at GET /api/v1/events.
 export function sseUrl(): string {
   const base = getBase();
   const token = getToken();

@@ -12,22 +12,24 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, Command, EntryKind, ErrorCode, ErrorInfo, Event,
-    EventPayload, HealthStatus, Response, ResponsePayload, SessionEndReason, StopMode, VolumeInfo,
-    VolumeRestrictions,
-};
-use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
-use shepherd_core::{CoreEngine, CoreEvent, LaunchDecision, StopDecision};
+use shepherd_api::{EntryKind, EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response};
+use shepherd_ble::{BleServer, BleServerConfig};
+use shepherd_config::load_config;
+use shepherd_core::{CoreEngine, CoreEvent};
 use shepherd_host_api::{
-    BrightnessController, HidpiController, HostAdapter, HostEvent, StopMode as HostStopMode,
-    VolumeController,
+    BrightnessController, HidpiController, HostAdapter, HostEvent, LightSensor,
+    StopMode as HostStopMode, VolumeController,
 };
-use shepherd_host_linux::{LinuxBrightnessController, LinuxHost, LinuxVolumeController};
+use shepherd_host_linux::{
+    LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxVolumeController,
+};
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
+use shepherd_management::{
+    AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementService,
+};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
-use shepherd_util::{ClientId, MonotonicInstant, RateLimiter, default_config_path};
+use shepherd_util::{MonotonicInstant, RateLimiter, default_config_path};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +40,7 @@ use tracing_subscriber::EnvFilter;
 
 mod hidpi;
 mod internet;
+mod pairing_display;
 mod system_events;
 
 use hidpi::XwaylandHidpi;
@@ -71,6 +74,7 @@ struct Service {
     host: Arc<LinuxHost>,
     volume: Arc<LinuxVolumeController>,
     brightness: Arc<LinuxBrightnessController>,
+    light_sensor: Arc<LinuxLightSensor>,
     ipc: Arc<IpcServer>,
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
@@ -138,6 +142,11 @@ impl Service {
             debug!("No backlight detected, brightness control unavailable");
         }
 
+        // Initialize ambient light sensor (for automatic brightness). Absent
+        // on most hardware; the controller logs an info line when one is
+        // found and stays quiet otherwise.
+        let light_sensor = Arc::new(LinuxLightSensor::new());
+
         // Initialize core engine
         let engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
 
@@ -166,6 +175,7 @@ impl Service {
             host,
             volume,
             brightness,
+            light_sensor,
             ipc: Arc::new(ipc),
             store,
             rate_limiter,
@@ -173,7 +183,7 @@ impl Service {
         })
     }
 
-    async fn run(self) -> Result<()> {
+    async fn run(mut self) -> Result<()> {
         let config_path = self.config_path.clone();
 
         // Broadcast channel shared by IPC and HTTP SSE
@@ -197,6 +207,11 @@ impl Service {
             .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
         if has_steam {
             info!("Steam entries detected, preloading Steam in background");
+            // Hide Steam activities until the preloaded client finishes its
+            // initial load (issue #76). Seeded here so the very first served
+            // snapshot already gates Steam; the host's readiness watcher flips
+            // it to ready (see HostEvent::KindReadinessChanged).
+            self.engine.set_kind_readiness(EntryKindTag::Steam, false);
             self.host.preload_steam();
         }
 
@@ -214,6 +229,7 @@ impl Service {
         let host = self.host.clone();
         let volume = self.volume.clone();
         let brightness = self.brightness.clone();
+        let light_sensor = self.light_sensor.clone();
         let store = self.store.clone();
         // The hidpi manager owns both the IPC server handle and the SSE
         // broadcast channel so it can fan `HudScaleChanged` events out to
@@ -222,20 +238,67 @@ impl Service {
         // controller via `Arc<dyn HidpiController>`).
         let hidpi = Arc::new(XwaylandHidpi::new(ipc_ref.clone(), event_tx.clone()));
 
-        // Start HTTP management API if configured
-        let management_api_config = {
+        // Start management transports (HTTP and/or BLE). Both speak the
+        // same shepherd_management::ManagementService, so the service is
+        // constructed once and shared.
+        let (management_api_config, ble_management_config, auto_brightness_policy) = {
             let eng = engine.lock().await;
-            eng.policy().service.management_api.clone()
+            (
+                eng.policy().service.management_api.clone(),
+                eng.policy().service.ble_management.clone(),
+                eng.policy().auto_brightness.clone(),
+            )
         };
-        let http_handle = if let Some(api_cfg) = management_api_config {
+
+        // Automatic brightness. Offered only when the host actually exposes a
+        // light sensor. The runtime on/off state persists in the store; fall
+        // back to the config default the first time (or if the store read
+        // fails). Enabling is meaningless without a sensor, so force it off.
+        let light_sensor_opt: Option<Arc<dyn LightSensor>> =
+            if light_sensor.capabilities().available {
+                Some(light_sensor.clone() as Arc<dyn LightSensor>)
+            } else {
+                None
+            };
+        let initial_auto_enabled = light_sensor_opt.is_some()
+            && match store.get_setting(AUTO_BRIGHTNESS_SETTING_KEY) {
+                Ok(Some(v)) => v == "true",
+                Ok(None) => auto_brightness_policy.enabled,
+                Err(e) => {
+                    warn!(error = %e, "Failed to read auto-brightness setting; using config default");
+                    auto_brightness_policy.enabled
+                }
+            };
+        let auto_brightness_state =
+            Arc::new(Mutex::new(AutoBrightnessState::new(initial_auto_enabled)));
+        if light_sensor_opt.is_some() {
+            info!(
+                enabled = initial_auto_enabled,
+                poll_secs = auto_brightness_policy.poll_interval.as_secs(),
+                "Automatic brightness available",
+            );
+        }
+
+        // Construct the management service unconditionally: IPC is
+        // always on, and now that IPC dispatches through
+        // `dispatch_json` it needs `svc` even when HTTP and BLE are
+        // both disabled. The service is cheap to construct — it only
+        // holds Arcs of already-live objects.
+        // Built as a concrete `Arc<DefaultManagementService>` so the
+        // auto-brightness poll loop can call the inherent
+        // `auto_brightness_tick`, then shared with the transports as
+        // `Arc<dyn ManagementService>`.
+        let svc_concrete = {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();
-            let http_state = HttpAppState {
+            Arc::new(DefaultManagementService {
                 engine: engine.clone(),
                 store: store.clone(),
                 host: host.clone() as Arc<dyn HostAdapter>,
                 volume: volume.clone() as Arc<dyn VolumeController>,
                 brightness: brightness.clone() as Arc<dyn BrightnessController>,
+                light_sensor: light_sensor_opt.clone(),
+                auto_brightness: auto_brightness_state.clone(),
                 event_tx: event_tx.clone(),
                 broadcast_fn: Arc::new(move |event: Event| {
                     ipc_for_broadcast.broadcast_event(event.clone());
@@ -244,16 +307,88 @@ impl Service {
                 config_path: config_path.clone(),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
-            };
-            let http_server = HttpServer::new(http_state, api_cfg);
-            let http_shutdown_rx = shutdown_rx.clone();
-            Some(tokio::spawn(async move {
-                if let Err(e) = http_server.run(http_shutdown_rx).await {
-                    error!(error = %e, "HTTP management API error");
+            })
+        };
+        let svc: Arc<dyn ManagementService> = svc_concrete.clone();
+
+        // Automatic-brightness poll loop: sample the light sensor on a timer
+        // and let the service decide whether to nudge the backlight. Runs only
+        // when a sensor exists; ticks are cheap no-ops while auto is off.
+        if light_sensor_opt.is_some() {
+            let svc_for_auto = svc_concrete.clone();
+            let mut auto_shutdown_rx = shutdown_rx.clone();
+            let poll_interval = auto_brightness_policy.poll_interval;
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(poll_interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => svc_for_auto.auto_brightness_tick().await,
+                        _ = auto_shutdown_rx.changed() => {
+                            if *auto_shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
                 }
-            }))
-        } else {
-            None
+            });
+        }
+
+        // Construct the BLE server first so its ClaimMachine can be
+        // handed to HttpServer as the source of unified admin bearer
+        // tokens. If BLE isn't configured, HTTP falls back to its
+        // static-token-only auth.
+        let (ble_handle, admin_authority): (
+            Option<tokio::task::JoinHandle<()>>,
+            Option<Arc<dyn shepherd_management::AdminAuthority>>,
+        ) = match ble_management_config {
+            Some(ble_cfg) => {
+                let bsc = BleServerConfig {
+                    device_name: ble_cfg.device_name,
+                    firmware_version: env!("CARGO_PKG_VERSION").to_string(),
+                    admin_record_path: ble_cfg.admin_record_path,
+                    reset_sentinel_path: ble_cfg.reset_sentinel_path,
+                };
+                // `shepherd-pairing-display` is spawned per pairing
+                // attempt to render the Numeric Comparison passkey on
+                // the TV. If the binary is missing the pairing path
+                // still completes — the user just won't have an
+                // on-device visual to compare against.
+                let display = Arc::new(pairing_display::SwayPairingDisplay::new());
+                match BleServer::new(bsc, svc.clone(), display) {
+                    Ok(server) => {
+                        let authority =
+                            server.claim_machine() as Arc<dyn shepherd_management::AdminAuthority>;
+                        let rx = shutdown_rx.clone();
+                        let handle = tokio::spawn(async move {
+                            if let Err(e) = server.run(rx).await {
+                                error!(error = %e, "BLE management server error");
+                            }
+                        });
+                        (Some(handle), Some(authority))
+                    }
+                    Err(e) => {
+                        error!(error = %e, "BLE management server failed to initialize");
+                        (None, None)
+                    }
+                }
+            }
+            None => (None, None),
+        };
+
+        let http_handle = match management_api_config {
+            Some(api_cfg) => {
+                let http_state = HttpAppState { svc: svc.clone() };
+                let http_server =
+                    HttpServer::new(http_state, api_cfg).with_admin_authority(admin_authority);
+                let http_shutdown_rx = shutdown_rx.clone();
+                Some(tokio::spawn(async move {
+                    if let Err(e) = http_server.run(http_shutdown_rx).await {
+                        error!(error = %e, "HTTP management API error");
+                    }
+                }))
+            }
+            None => None,
         };
 
         // System event watcher (logind + NetworkManager). Always running so the
@@ -418,7 +553,7 @@ impl Service {
 
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&engine, &host, &volume, &brightness, &ipc_ref, &store, &rate_limiter, &event_tx, &shutdown_tx, &hidpi, &config_path, msg).await;
+                    Self::handle_ipc_message(&svc, &ipc_ref, &store, &rate_limiter, msg).await;
                 }
             }
         }
@@ -471,6 +606,20 @@ impl Service {
                 Ok(Err(e)) => warn!(error = %e, "HTTP server task failed during shutdown"),
                 Err(_) => {
                     warn!("HTTP server did not drain within 3s; aborting");
+                    handle.abort();
+                }
+            }
+        }
+
+        // Same drain treatment for the BLE server. The bluer adapter
+        // release happens in `BleServer::run`'s drop guards on
+        // ApplicationHandle / AdvertisementHandle / AgentHandle.
+        if let Some(mut handle) = ble_handle {
+            match tokio::time::timeout(Duration::from_secs(3), &mut handle).await {
+                Ok(Ok(())) => info!("BLE server drained"),
+                Ok(Err(e)) => warn!(error = %e, "BLE server task failed during shutdown"),
+                Err(_) => {
+                    warn!("BLE server did not drain within 3s; aborting");
                     handle.abort();
                 }
             }
@@ -602,6 +751,7 @@ impl Service {
                 entry_id,
                 label,
                 deadline,
+                confirm_on_close,
             } => {
                 Self::broadcast(
                     ipc,
@@ -611,6 +761,7 @@ impl Service {
                         entry_id: entry_id.clone(),
                         label: label.clone(),
                         deadline: *deadline,
+                        confirm_on_close: *confirm_on_close,
                     }),
                 );
             }
@@ -747,86 +898,92 @@ impl Service {
                 debug!(session_id = %handle.session_id, "Window ready");
             }
 
+            HostEvent::KindReadinessChanged { kind, ready } => {
+                let changed = {
+                    let mut engine = engine.lock().await;
+                    engine.set_kind_readiness(kind, ready)
+                };
+                if changed {
+                    info!(?kind, ready, "Activity kind readiness changed");
+                    // Re-broadcast state so the launcher shows/hides the now
+                    // (un)gated entries of this kind.
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                }
+            }
+
             HostEvent::SpawnFailed { session_id, error } => {
                 error!(session_id = %session_id, error = %error, "Spawn failed");
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
+    /// Handle one incoming message from the IPC socket.
+    ///
+    /// Requests are dispatched through `shepherd_management::dispatch_json`
+    /// — the generated JSON-RPC router keeps this method thin. The two
+    /// wire-method names that don't go through the trait are the
+    /// subscribe / unsubscribe pair: they flip a per-client
+    /// subscription flag on the writer task *after* the response
+    /// frame is on the wire, preventing broadcast events from
+    /// arriving before the subscribe acknowledgement.
     async fn handle_ipc_message(
-        engine: &Arc<Mutex<CoreEngine>>,
-        host: &Arc<LinuxHost>,
-        volume: &Arc<LinuxVolumeController>,
-        brightness: &Arc<LinuxBrightnessController>,
+        svc: &Arc<dyn ManagementService>,
         ipc: &Arc<IpcServer>,
         store: &Arc<dyn Store>,
         rate_limiter: &Arc<Mutex<RateLimiter>>,
-        event_tx: &broadcast::Sender<Event>,
-        shutdown_tx: &tokio::sync::watch::Sender<bool>,
-        hidpi: &Arc<XwaylandHidpi>,
-        config_path: &Path,
         msg: ServerMessage,
     ) {
         match msg {
             ServerMessage::Request { client_id, request } => {
-                // Rate limiting
-                {
-                    let mut limiter = rate_limiter.lock().await;
-                    if !limiter.check(&client_id) {
-                        let response = Response::error(
-                            request.request_id,
-                            ErrorInfo::new(ErrorCode::RateLimited, "Too many requests"),
-                        );
-                        let _ = ipc.send_response(&client_id, response).await;
-                        return;
-                    }
+                if !rate_limiter.lock().await.check(&client_id) {
+                    let resp = Response::error(
+                        request.request_id,
+                        ErrorInfo::new(ErrorCode::RateLimited, "Too many requests"),
+                    );
+                    let _ = ipc.send_response(&client_id, resp).await;
+                    return;
                 }
 
-                // SubscribeEvents / UnsubscribeEvents must go through dedicated
-                // methods so the writer task can flip the subscription flag only
-                // AFTER the response frame is on the wire, preventing events from
-                // arriving before the subscribe acknowledgement.
-                match &request.command {
-                    Command::SubscribeEvents => {
-                        let response = Response::success(
-                            request.request_id,
-                            ResponsePayload::Subscribed {
-                                client_id: client_id.clone(),
-                            },
-                        );
-                        let _ = ipc.send_subscribe_response(&client_id, response).await;
-                        return;
-                    }
-                    Command::UnsubscribeEvents => {
-                        let response =
-                            Response::success(request.request_id, ResponsePayload::Unsubscribed);
-                        let _ = ipc.send_unsubscribe_response(&client_id, response).await;
-                        return;
-                    }
-                    _ => {}
+                if request.api_version != shepherd_api::API_VERSION {
+                    let resp = Response::error(
+                        request.request_id,
+                        ErrorInfo::new(
+                            ErrorCode::InvalidRequest,
+                            format!(
+                                "unsupported api_version {} (server speaks {})",
+                                request.api_version,
+                                shepherd_api::API_VERSION
+                            ),
+                        ),
+                    );
+                    let _ = ipc.send_response(&client_id, resp).await;
+                    return;
                 }
 
-                let response = Self::handle_command(
-                    engine,
-                    host,
-                    volume,
-                    brightness,
-                    ipc,
-                    store,
-                    &client_id,
-                    request.request_id,
-                    request.command,
-                    event_tx,
-                    shutdown_tx,
-                    hidpi,
-                    config_path,
-                )
-                .await;
-
-                let _ = ipc.send_response(&client_id, response).await;
+                match request.method.as_str() {
+                    "subscribe_events" => {
+                        let resp = Response::success(request.request_id, serde_json::Value::Null);
+                        let _ = ipc.send_subscribe_response(&client_id, resp).await;
+                    }
+                    "unsubscribe_events" => {
+                        let resp = Response::success(request.request_id, serde_json::Value::Null);
+                        let _ = ipc.send_unsubscribe_response(&client_id, resp).await;
+                    }
+                    _ => {
+                        let resp = dispatch_ipc(
+                            svc.as_ref(),
+                            &request.method,
+                            request.params,
+                            request.request_id,
+                        )
+                        .await;
+                        let _ = ipc.send_response(&client_id, resp).await;
+                    }
+                }
             }
 
             ServerMessage::ClientConnected { client_id, info } => {
@@ -836,7 +993,6 @@ impl Service {
                     uid = ?info.uid,
                     "Client connected"
                 );
-
                 let _ = store.append_audit(AuditEvent::new(AuditEventType::ClientConnected {
                     client_id: client_id.to_string(),
                     role: format!("{:?}", info.role),
@@ -846,795 +1002,50 @@ impl Service {
 
             ServerMessage::ClientDisconnected { client_id } => {
                 debug!(client_id = %client_id, "Client disconnected");
-
                 let _ = store.append_audit(AuditEvent::new(AuditEventType::ClientDisconnected {
                     client_id: client_id.to_string(),
                 }));
-
-                // Clean up rate limiter
-                let mut limiter = rate_limiter.lock().await;
-                limiter.remove_client(&client_id);
+                rate_limiter.lock().await.remove_client(&client_id);
             }
         }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_command(
-        engine: &Arc<Mutex<CoreEngine>>,
-        host: &Arc<LinuxHost>,
-        volume: &Arc<LinuxVolumeController>,
-        brightness: &Arc<LinuxBrightnessController>,
-        ipc: &Arc<IpcServer>,
-        store: &Arc<dyn Store>,
-        client_id: &ClientId,
-        request_id: u64,
-        command: Command,
-        event_tx: &broadcast::Sender<Event>,
-        shutdown_tx: &tokio::sync::watch::Sender<bool>,
-        hidpi: &Arc<XwaylandHidpi>,
-        config_path: &Path,
-    ) -> Response {
-        let now = shepherd_util::now();
-        let now_mono = MonotonicInstant::now();
-
-        match command {
-            Command::GetState => {
-                let state = engine.lock().await.get_state();
-                Response::success(request_id, ResponsePayload::State(state))
-            }
-
-            Command::ListEntries { at_time } => {
-                let time = at_time.unwrap_or(now);
-                let entries = engine.lock().await.list_entries(time);
-                Response::success(request_id, ResponsePayload::Entries(entries))
-            }
-
-            Command::Launch { entry_id } => {
-                let mut eng = engine.lock().await;
-
-                match eng.request_launch(&entry_id, now) {
-                    LaunchDecision::Approved(plan) => {
-                        // Start the session in the engine
-                        let event = eng.start_session(plan.clone(), now, now_mono);
-
-                        // Get the entry kind and any per-entry spawn metadata
-                        let entry = eng.policy().get_entry(&entry_id);
-                        let entry_kind = entry.map(|e| e.kind.clone());
-                        let firewall = entry.and_then(|e| e.firewall.clone()).map(|fw| {
-                            shepherd_host_api::FirewallSpec {
-                                default_deny: fw.default_deny,
-                                allow: fw.allow,
-                                deny: fw.deny,
-                            }
-                        });
-                        let input_compat =
-                            entry.map(|e| e.input_compat.clone()).unwrap_or_default();
-                        let input_compat_options =
-                            entry.map(|e| e.input_compat_options).unwrap_or_default();
-                        let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
-
-                        // Build spawn options with log path if capture_child_output is enabled
-                        let spawn_options = if eng.policy().service.capture_child_output {
-                            let log_dir = &eng.policy().service.child_log_dir;
-                            // Create log filename: <entry_id>_<session_id>_<timestamp>.log
-                            let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
-                            let log_filename = format!(
-                                "{}_{}.log",
-                                entry_id.as_str().replace(['/', '\\', ' '], "_"),
-                                timestamp
-                            );
-                            let log_path = log_dir.join(log_filename);
-                            shepherd_host_api::SpawnOptions {
-                                capture_stdout: true,
-                                capture_stderr: true,
-                                log_path: Some(log_path),
-                                firewall,
-                                input_compat,
-                                input_compat_options,
-                                ..Default::default()
-                            }
-                        } else {
-                            shepherd_host_api::SpawnOptions {
-                                firewall,
-                                input_compat,
-                                input_compat_options,
-                                ..Default::default()
-                            }
-                        };
-
-                        drop(eng); // Release lock before spawning
-
-                        // Apply the XWayland HiDPI workaround before spawning
-                        // so the client sees the panel's native scale on its
-                        // first map. Restored below if the spawn fails.
-                        if needs_hidpi {
-                            hidpi.apply().await;
-                        }
-
-                        if let Some(kind) = entry_kind {
-                            match host
-                                .spawn(plan.session_id.clone(), &kind, spawn_options)
-                                .await
-                            {
-                                Ok(handle) => {
-                                    // Attach handle to session
-                                    let mut eng = engine.lock().await;
-                                    eng.attach_host_handle(handle);
-
-                                    // Broadcast session started
-                                    if let CoreEvent::SessionStarted {
-                                        session_id,
-                                        entry_id,
-                                        label,
-                                        deadline,
-                                    } = event
-                                    {
-                                        Self::broadcast(
-                                            ipc,
-                                            event_tx,
-                                            Event::new(EventPayload::SessionStarted {
-                                                session_id: session_id.clone(),
-                                                entry_id,
-                                                label,
-                                                deadline,
-                                            }),
-                                        );
-
-                                        Response::success(
-                                            request_id,
-                                            ResponsePayload::LaunchApproved {
-                                                session_id,
-                                                deadline,
-                                            },
-                                        )
-                                    } else {
-                                        Response::error(
-                                            request_id,
-                                            ErrorInfo::new(
-                                                ErrorCode::InternalError,
-                                                "Unexpected event",
-                                            ),
-                                        )
-                                    }
-                                }
-                                Err(e) => {
-                                    // Spawn failed: roll back the scale
-                                    // change so the launcher comes back to a
-                                    // correctly-scaled HUD.
-                                    hidpi.restore().await;
-
-                                    // Notify session ended with error and broadcast to subscribers
-                                    let mut eng = engine.lock().await;
-                                    if let Some(CoreEvent::SessionEnded {
-                                        session_id,
-                                        entry_id,
-                                        reason,
-                                        duration,
-                                    }) = eng.notify_session_exited(Some(-1), now_mono, now)
-                                    {
-                                        Self::broadcast(
-                                            ipc,
-                                            event_tx,
-                                            Event::new(EventPayload::SessionEnded {
-                                                session_id,
-                                                entry_id,
-                                                reason,
-                                                duration,
-                                            }),
-                                        );
-
-                                        // Broadcast state change so clients return to idle
-                                        let state = eng.get_state();
-                                        Self::broadcast(
-                                            ipc,
-                                            event_tx,
-                                            Event::new(EventPayload::StateChanged(state)),
-                                        );
-                                    }
-
-                                    Response::error(
-                                        request_id,
-                                        ErrorInfo::new(
-                                            ErrorCode::HostError,
-                                            format!("Spawn failed: {}", e),
-                                        ),
-                                    )
-                                }
-                            }
-                        } else {
-                            Response::error(
-                                request_id,
-                                ErrorInfo::new(ErrorCode::EntryNotFound, "Entry not found"),
-                            )
-                        }
-                    }
-                    LaunchDecision::Denied { reasons } => {
-                        Response::success(request_id, ResponsePayload::LaunchDenied { reasons })
-                    }
-                }
-            }
-
-            Command::StopCurrent { mode } => {
-                let mut eng = engine.lock().await;
-
-                // Get handle before stopping in engine
-                let handle = eng.current_session().and_then(|s| s.host_handle.clone());
-
-                let reason = match mode {
-                    StopMode::Graceful => SessionEndReason::UserStop,
-                    StopMode::Force => SessionEndReason::AdminStop,
-                };
-
-                match eng.stop_current(reason.clone(), now_mono, now) {
-                    StopDecision::Stopped(result) => {
-                        // Broadcast SessionEnded event so UIs know to transition
-                        info!(
-                            session_id = %result.session_id,
-                            reason = ?result.reason,
-                            "Broadcasting SessionEnded from StopCurrent"
-                        );
-                        Self::broadcast(
-                            ipc,
-                            event_tx,
-                            Event::new(EventPayload::SessionEnded {
-                                session_id: result.session_id,
-                                entry_id: result.entry_id,
-                                reason: result.reason,
-                                duration: result.duration,
-                            }),
-                        );
-
-                        // Also broadcast StateChanged so UIs can update their entry list
-                        let snapshot = eng.get_state();
-                        Self::broadcast(
-                            ipc,
-                            event_tx,
-                            Event::new(EventPayload::StateChanged(snapshot)),
-                        );
-
-                        drop(eng); // Release lock before host operations
-
-                        // Restore output scales / HUD factor before the host
-                        // stops the process so the launcher reappears at its
-                        // normal size. (handle_host_event will see the engine
-                        // already transitioned and not double-restore.)
-                        hidpi.restore().await;
-
-                        // Stop the actual process
-                        if let Some(h) = handle {
-                            let host_mode = match mode {
-                                StopMode::Graceful => HostStopMode::Graceful {
-                                    timeout: Duration::from_secs(5),
-                                },
-                                StopMode::Force => HostStopMode::Force,
-                            };
-                            let _ = host.stop(&h, host_mode).await;
-                        }
-
-                        Response::success(request_id, ResponsePayload::Stopped)
-                    }
-                    StopDecision::NoActiveSession => Response::error(
-                        request_id,
-                        ErrorInfo::new(ErrorCode::NoActiveSession, "No active session"),
-                    ),
-                }
-            }
-
-            Command::ReloadConfig => {
-                // Check permission
-                if let Some(info) = ipc.get_client_info(client_id).await
-                    && !info.role.can_reload_config()
-                {
-                    return Response::error(
-                        request_id,
-                        ErrorInfo::new(ErrorCode::PermissionDenied, "Admin role required"),
-                    );
-                }
-
-                match load_config(config_path) {
-                    Ok(policy) => {
-                        let entry_count = {
-                            let event = engine.lock().await.reload_policy(policy);
-                            if let CoreEvent::PolicyReloaded { entry_count } = event {
-                                entry_count
-                            } else {
-                                0
-                            }
-                        };
-                        Self::broadcast(
-                            ipc,
-                            event_tx,
-                            Event::new(EventPayload::PolicyReloaded { entry_count }),
-                        );
-                        let state = engine.lock().await.get_state();
-                        Self::broadcast(
-                            ipc,
-                            event_tx,
-                            Event::new(EventPayload::StateChanged(state)),
-                        );
-                        Response::success(request_id, ResponsePayload::ConfigReloaded)
-                    }
-                    Err(e) => Response::error(
-                        request_id,
-                        ErrorInfo::new(
-                            ErrorCode::InternalError,
-                            format!("Config reload failed: {e}"),
-                        ),
-                    ),
-                }
-            }
-
-            Command::SubscribeEvents | Command::UnsubscribeEvents => {
-                // Handled before handle_command is called; unreachable in practice.
-                unreachable!("subscribe/unsubscribe handled in handle_ipc_message")
-            }
-
-            Command::GetHealth => {
-                let _eng = engine.lock().await;
-                let health = HealthStatus {
-                    live: true,
-                    ready: true,
-                    policy_loaded: true,
-                    host_adapter_ok: host.is_healthy(),
-                    store_ok: store.is_healthy(),
-                };
-                Response::success(request_id, ResponsePayload::Health(health))
-            }
-
-            Command::ExtendCurrent { by } => {
-                // Check permission
-                if let Some(info) = ipc.get_client_info(client_id).await
-                    && !info.role.can_extend()
-                {
-                    return Response::error(
-                        request_id,
-                        ErrorInfo::new(ErrorCode::PermissionDenied, "Admin role required"),
-                    );
-                }
-
-                let mut eng = engine.lock().await;
-                match eng.extend_current(by, now_mono, now) {
-                    Some(new_deadline) => {
-                        let state = eng.get_state();
-                        drop(eng);
-                        Self::broadcast(
-                            ipc,
-                            event_tx,
-                            Event::new(EventPayload::StateChanged(state)),
-                        );
-                        Response::success(
-                            request_id,
-                            ResponsePayload::Extended {
-                                new_deadline: Some(new_deadline),
-                            },
-                        )
-                    }
-                    None => Response::error(
-                        request_id,
-                        ErrorInfo::new(
-                            ErrorCode::NoActiveSession,
-                            "No active session or session is unlimited",
-                        ),
-                    ),
-                }
-            }
-
-            Command::GetVolume => {
-                let restrictions = Self::get_current_volume_restrictions(engine).await;
-
-                match volume.get_status().await {
-                    Ok(status) => {
-                        let info = VolumeInfo {
-                            percent: status.percent,
-                            muted: status.muted,
-                            available: volume.capabilities().available,
-                            backend: volume.capabilities().backend.clone(),
-                            restrictions,
-                        };
-                        Response::success(request_id, ResponsePayload::Volume(info))
-                    }
-                    Err(e) => {
-                        let info = VolumeInfo {
-                            percent: 0,
-                            muted: false,
-                            available: false,
-                            backend: None,
-                            restrictions,
-                        };
-                        warn!(error = %e, "Failed to get volume status");
-                        Response::success(request_id, ResponsePayload::Volume(info))
-                    }
-                }
-            }
-
-            Command::SetVolume { percent } => {
-                let restrictions = Self::get_current_volume_restrictions(engine).await;
-
-                if !restrictions.allow_change {
-                    return Response::success(
-                        request_id,
-                        ResponsePayload::VolumeDenied {
-                            reason: "Volume changes are not allowed".into(),
-                        },
-                    );
-                }
-
-                let clamped = restrictions.clamp_volume(percent);
-
-                match volume.set_volume(clamped).await {
-                    Ok(()) => {
-                        // Broadcast volume change
-                        if let Ok(status) = volume.get_status().await {
-                            Self::broadcast(
-                                ipc,
-                                event_tx,
-                                Event::new(EventPayload::VolumeChanged {
-                                    percent: status.percent,
-                                    muted: status.muted,
-                                }),
-                            );
-                        }
-                        Response::success(request_id, ResponsePayload::VolumeSet)
-                    }
-                    Err(e) => Response::success(
-                        request_id,
-                        ResponsePayload::VolumeDenied {
-                            reason: e.to_string(),
-                        },
-                    ),
-                }
-            }
-
-            Command::VolumeUp { step } => {
-                Self::handle_relative_volume(engine, volume, ipc, event_tx, request_id, step, true)
-                    .await
-            }
-
-            Command::VolumeDown { step } => {
-                Self::handle_relative_volume(engine, volume, ipc, event_tx, request_id, step, false)
-                    .await
-            }
-
-            Command::ToggleMute => {
-                let restrictions = Self::get_current_volume_restrictions(engine).await;
-
-                if !restrictions.allow_mute {
-                    return Response::success(
-                        request_id,
-                        ResponsePayload::VolumeDenied {
-                            reason: "Mute toggle is not allowed".into(),
-                        },
-                    );
-                }
-
-                match volume.toggle_mute().await {
-                    Ok(()) => {
-                        if let Ok(status) = volume.get_status().await {
-                            Self::broadcast(
-                                ipc,
-                                event_tx,
-                                Event::new(EventPayload::VolumeChanged {
-                                    percent: status.percent,
-                                    muted: status.muted,
-                                }),
-                            );
-                        }
-                        Response::success(request_id, ResponsePayload::VolumeSet)
-                    }
-                    Err(e) => Response::success(
-                        request_id,
-                        ResponsePayload::VolumeDenied {
-                            reason: e.to_string(),
-                        },
-                    ),
-                }
-            }
-
-            Command::SetMute { muted } => {
-                let restrictions = Self::get_current_volume_restrictions(engine).await;
-
-                if !restrictions.allow_mute {
-                    return Response::success(
-                        request_id,
-                        ResponsePayload::VolumeDenied {
-                            reason: "Mute toggle is not allowed".into(),
-                        },
-                    );
-                }
-
-                match volume.set_mute(muted).await {
-                    Ok(()) => {
-                        if let Ok(status) = volume.get_status().await {
-                            Self::broadcast(
-                                ipc,
-                                event_tx,
-                                Event::new(EventPayload::VolumeChanged {
-                                    percent: status.percent,
-                                    muted: status.muted,
-                                }),
-                            );
-                        }
-                        Response::success(request_id, ResponsePayload::VolumeSet)
-                    }
-                    Err(e) => Response::success(
-                        request_id,
-                        ResponsePayload::VolumeDenied {
-                            reason: e.to_string(),
-                        },
-                    ),
-                }
-            }
-
-            Command::GetBrightness => {
-                let restrictions = Self::get_current_brightness_restrictions(engine).await;
-                let caps = brightness.capabilities();
-                let info = match brightness.get_status().await {
-                    Ok(status) => BrightnessInfo {
-                        percent: status.percent,
-                        available: caps.available,
-                        backend: caps.backend.clone(),
-                        device: caps.device.clone(),
-                        restrictions,
-                    },
-                    Err(e) => {
-                        if caps.available {
-                            warn!(error = %e, "Failed to read brightness");
-                        }
-                        BrightnessInfo {
-                            percent: 0,
-                            available: caps.available,
-                            backend: caps.backend.clone(),
-                            device: caps.device.clone(),
-                            restrictions,
-                        }
-                    }
-                };
-                Response::success(request_id, ResponsePayload::Brightness(info))
-            }
-
-            Command::BrightnessUp { step } => {
-                Self::handle_relative_brightness(
-                    engine, brightness, ipc, event_tx, request_id, step, true,
-                )
-                .await
-            }
-
-            Command::BrightnessDown { step } => {
-                Self::handle_relative_brightness(
-                    engine, brightness, ipc, event_tx, request_id, step, false,
-                )
-                .await
-            }
-
-            Command::SetBrightness { percent } => {
-                let restrictions = Self::get_current_brightness_restrictions(engine).await;
-
-                if !restrictions.allow_change {
-                    return Response::success(
-                        request_id,
-                        ResponsePayload::BrightnessDenied {
-                            reason: "Brightness changes are not allowed".into(),
-                        },
-                    );
-                }
-
-                let clamped = restrictions.clamp_brightness(percent);
-
-                match brightness.set_brightness(clamped).await {
-                    Ok(()) => {
-                        if let Ok(status) = brightness.get_status().await {
-                            Self::broadcast(
-                                ipc,
-                                event_tx,
-                                Event::new(EventPayload::BrightnessChanged {
-                                    percent: status.percent,
-                                }),
-                            );
-                        }
-                        Response::success(request_id, ResponsePayload::BrightnessSet)
-                    }
-                    Err(e) => Response::success(
-                        request_id,
-                        ResponsePayload::BrightnessDenied {
-                            reason: e.to_string(),
-                        },
-                    ),
-                }
-            }
-
-            Command::Logout => {
-                info!("Logout requested via IPC");
-                let _ = shutdown_tx.send(true);
-                Response::success(request_id, ResponsePayload::LoggedOut)
-            }
-
-            Command::Ping => Response::success(request_id, ResponsePayload::Pong),
+/// Route an RPC to the trait via `dispatch_json` and translate its
+/// error shape onto the IPC wire's `ErrorCode`. Kept as a free
+/// function (not a `Service` method) so it doesn't drag the full
+/// `Service` fixture into the small set of ManagementError → ErrorCode
+/// mappings.
+async fn dispatch_ipc(
+    svc: &dyn ManagementService,
+    method: &str,
+    params: serde_json::Value,
+    request_id: u64,
+) -> Response {
+    match shepherd_management::dispatch_json(svc, method, params).await {
+        Ok(value) => Response::success(request_id, value),
+        Err(shepherd_management::RpcDispatchError::MethodNotFound(m)) => Response::error(
+            request_id,
+            ErrorInfo::new(ErrorCode::MethodNotFound, format!("unknown method '{m}'")),
+        ),
+        Err(shepherd_management::RpcDispatchError::InvalidParams(msg)) => {
+            Response::error(request_id, ErrorInfo::new(ErrorCode::InvalidParams, msg))
         }
-    }
-
-    /// Apply a relative volume change (up or down) respecting policy
-    /// restrictions. Shared by `VolumeUp` and `VolumeDown` so they take the
-    /// same enforcement and broadcast path as `SetVolume`.
-    async fn handle_relative_volume(
-        engine: &Arc<Mutex<CoreEngine>>,
-        volume: &Arc<LinuxVolumeController>,
-        ipc: &Arc<IpcServer>,
-        event_tx: &broadcast::Sender<Event>,
-        request_id: u64,
-        step: u8,
-        up: bool,
-    ) -> Response {
-        let restrictions = Self::get_current_volume_restrictions(engine).await;
-
-        if !restrictions.allow_change {
-            return Response::success(
-                request_id,
-                ResponsePayload::VolumeDenied {
-                    reason: "Volume changes are not allowed".into(),
-                },
-            );
+        Err(shepherd_management::RpcDispatchError::Serialization(msg)) => {
+            Response::error(request_id, ErrorInfo::new(ErrorCode::Internal, msg))
         }
-
-        // Resolve the target percent based on the current status. Errors here
-        // mean we couldn't talk to the audio backend at all, which is the
-        // same failure mode `SetVolume` surfaces as `VolumeDenied`.
-        let current = match volume.get_status().await {
-            Ok(status) => status,
-            Err(e) => {
-                return Response::success(
-                    request_id,
-                    ResponsePayload::VolumeDenied {
-                        reason: e.to_string(),
-                    },
-                );
-            }
-        };
-
-        let raw = if up {
-            current.percent.saturating_add(step)
-        } else {
-            current.percent.saturating_sub(step)
-        };
-        let target = restrictions.clamp_volume(raw);
-
-        match volume.set_volume(target).await {
-            Ok(()) => {
-                if let Ok(status) = volume.get_status().await {
-                    Self::broadcast(
-                        ipc,
-                        event_tx,
-                        Event::new(EventPayload::VolumeChanged {
-                            percent: status.percent,
-                            muted: status.muted,
-                        }),
-                    );
+        Err(shepherd_management::RpcDispatchError::Management(e)) => {
+            let (code, msg) = match e {
+                shepherd_management::ManagementError::NotFound(m) => (ErrorCode::NotFound, m),
+                shepherd_management::ManagementError::BadRequest(m) => (ErrorCode::BadRequest, m),
+                shepherd_management::ManagementError::Forbidden(m) => (ErrorCode::Forbidden, m),
+                shepherd_management::ManagementError::Conflict(m) => (ErrorCode::Conflict, m),
+                shepherd_management::ManagementError::Unprocessable(m) => {
+                    (ErrorCode::Unprocessable, m)
                 }
-                Response::success(request_id, ResponsePayload::VolumeSet)
-            }
-            Err(e) => Response::success(
-                request_id,
-                ResponsePayload::VolumeDenied {
-                    reason: e.to_string(),
-                },
-            ),
-        }
-    }
-
-    /// Apply a relative brightness change (up or down) respecting policy
-    /// restrictions. Shared by `BrightnessUp` and `BrightnessDown` so they
-    /// take the same enforcement and broadcast path as `SetBrightness`.
-    async fn handle_relative_brightness(
-        engine: &Arc<Mutex<CoreEngine>>,
-        brightness: &Arc<LinuxBrightnessController>,
-        ipc: &Arc<IpcServer>,
-        event_tx: &broadcast::Sender<Event>,
-        request_id: u64,
-        step: u8,
-        up: bool,
-    ) -> Response {
-        let restrictions = Self::get_current_brightness_restrictions(engine).await;
-
-        if !restrictions.allow_change {
-            return Response::success(
-                request_id,
-                ResponsePayload::BrightnessDenied {
-                    reason: "Brightness changes are not allowed".into(),
-                },
-            );
-        }
-
-        // Reading the current level can fail if the backlight disappeared
-        // (USB-DP dock unplugged, etc). Surface that the same way as a
-        // `SetBrightness` backend failure.
-        let current = match brightness.get_status().await {
-            Ok(status) => status,
-            Err(e) => {
-                return Response::success(
-                    request_id,
-                    ResponsePayload::BrightnessDenied {
-                        reason: e.to_string(),
-                    },
-                );
-            }
-        };
-
-        let raw = if up {
-            current.percent.saturating_add(step)
-        } else {
-            current.percent.saturating_sub(step)
-        };
-        let target = restrictions.clamp_brightness(raw);
-
-        match brightness.set_brightness(target).await {
-            Ok(()) => {
-                if let Ok(status) = brightness.get_status().await {
-                    Self::broadcast(
-                        ipc,
-                        event_tx,
-                        Event::new(EventPayload::BrightnessChanged {
-                            percent: status.percent,
-                        }),
-                    );
-                }
-                Response::success(request_id, ResponsePayload::BrightnessSet)
-            }
-            Err(e) => Response::success(
-                request_id,
-                ResponsePayload::BrightnessDenied {
-                    reason: e.to_string(),
-                },
-            ),
-        }
-    }
-
-    /// Get the current volume restrictions based on policy and active session
-    async fn get_current_volume_restrictions(
-        engine: &Arc<Mutex<CoreEngine>>,
-    ) -> VolumeRestrictions {
-        let eng = engine.lock().await;
-
-        // Check if there's an active session with volume restrictions
-        if let Some(session) = eng.current_session()
-            && let Some(entry) = eng.policy().get_entry(&session.plan.entry_id)
-            && let Some(ref vol_policy) = entry.volume
-        {
-            return Self::convert_volume_policy(vol_policy);
-        }
-
-        // Fall back to global policy
-        Self::convert_volume_policy(&eng.policy().volume)
-    }
-
-    fn convert_volume_policy(policy: &VolumePolicy) -> VolumeRestrictions {
-        VolumeRestrictions {
-            max_volume: policy.max_volume,
-            min_volume: policy.min_volume,
-            allow_mute: policy.allow_mute,
-            allow_change: policy.allow_change,
-        }
-    }
-
-    /// Get the current brightness restrictions based on policy and active session
-    async fn get_current_brightness_restrictions(
-        engine: &Arc<Mutex<CoreEngine>>,
-    ) -> BrightnessRestrictions {
-        let eng = engine.lock().await;
-
-        if let Some(session) = eng.current_session()
-            && let Some(entry) = eng.policy().get_entry(&session.plan.entry_id)
-            && let Some(ref br_policy) = entry.brightness
-        {
-            return Self::convert_brightness_policy(br_policy);
-        }
-
-        Self::convert_brightness_policy(&eng.policy().brightness)
-    }
-
-    fn convert_brightness_policy(policy: &BrightnessPolicy) -> BrightnessRestrictions {
-        BrightnessRestrictions {
-            max_brightness: policy.max_brightness,
-            min_brightness: policy.min_brightness,
-            allow_change: policy.allow_change,
+                shepherd_management::ManagementError::Internal(m) => (ErrorCode::Internal, m),
+            };
+            Response::error(request_id, ErrorInfo::new(code, msg))
         }
     }
 }

@@ -17,6 +17,9 @@ Targets non-game / point-and-click activities.
 
 | Input                       | Action                       |
 | --------------------------- | ---------------------------- |
+| A (south)                   | Left mouse button            |
+| B (east)                    | Right mouse button           |
+| X (west)                    | Enter                        |
 | Left trigger / Right trigger| Left mouse button            |
 | Left bumper / Right bumper  | Right mouse button           |
 | Left stick                  | Move mouse (default)         |
@@ -24,7 +27,6 @@ Targets non-game / point-and-click activities.
 | L3 / R3 (stick click)       | Swap which stick moves vs scrolls |
 | D-pad                       | Arrow keys                   |
 | Start                       | Escape                       |
-| A (south)                   | Enter                        |
 
 ### `gpd`
 

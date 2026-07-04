@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use shepherd_util::{EntryId, SessionId};
 use std::time::Duration;
 
+use crate::types::default_confirm_on_close;
 use crate::{API_VERSION, ServiceStateSnapshot, SessionEndReason, WarningSeverity};
 
 /// Event envelope
@@ -39,6 +40,10 @@ pub enum EventPayload {
         label: String,
         /// Deadline for session. None means unlimited.
         deadline: Option<DateTime<Local>>,
+        /// Whether the HUD should confirm before its "X" button ends this
+        /// session (issue #78). Defaults to `true` when absent.
+        #[serde(default = "default_confirm_on_close")]
+        confirm_on_close: bool,
     },
 
     /// Warning issued for current session
@@ -70,8 +75,10 @@ pub enum EventPayload {
     /// Volume status changed
     VolumeChanged { percent: u8, muted: bool },
 
-    /// Screen brightness changed
-    BrightnessChanged { percent: u8 },
+    /// Screen brightness changed. `auto_enabled` reports whether automatic
+    /// (ambient-light) brightness is currently on, so subscribers can keep an
+    /// auto/manual indicator in sync from the same event.
+    BrightnessChanged { percent: u8, auto_enabled: bool },
 
     /// HUD UI scale factor changed. The HUD is expected to multiply its
     /// font/padding/height by `factor` on top of the compositor scale.
@@ -121,6 +128,7 @@ mod tests {
             entry_id: EntryId::new("game-1"),
             label: "Test Game".into(),
             deadline: Some(shepherd_util::now()),
+            confirm_on_close: true,
         });
 
         let json = serde_json::to_string(&event).unwrap();
@@ -141,6 +149,7 @@ mod tests {
             entry_id: EntryId::new("game-1"),
             label: "Unlimited Game".into(),
             deadline: None,
+            confirm_on_close: false,
         });
 
         let json = serde_json::to_string(&event).unwrap();

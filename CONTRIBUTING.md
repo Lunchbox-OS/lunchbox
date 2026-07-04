@@ -99,6 +99,22 @@ The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
 
+### Android companion app
+
+The BLE management companion app lives in [`companion-android/`](companion-android/)
+and is independent of the Rust build. Install its toolchain (JDK + Android SDK
+into `/opt/android-sdk`) with the dedicated deps set, then build:
+
+```sh
+./scripts/shepherd deps install android   # JDK 21 + Android SDK
+cd companion-android
+./gradlew :app:assembleDebug               # debug APK (sideload-friendly)
+./gradlew :app:testDebugUnitTest           # unit tests
+```
+
+See [`companion-android/README.md`](companion-android/README.md) for the
+architecture and the BLE protocol it speaks.
+
 ### Testing and linting
 
 Run the test suite:
@@ -116,6 +132,28 @@ cargo clippy
 # as run in CI:
 cargo clippy --all-targets -- -D warnings
 ```
+
+### Bumping the version
+
+`shepherd-launcher` is a composition of Rust crates, a web UI, an Android
+companion app, and shell tooling — none of which depend on each other, but all
+of which ship a version string. The canonical version lives in exactly one
+place: the repo-root [`VERSION`](./VERSION) file.
+
+* `scripts/shepherd` and the Android Gradle build **read** it directly, so they
+  can never drift.
+* Cargo and npm can't read a file at manifest-parse time, so their literals are
+  **written** from `VERSION` by the bump command and **verified** by CI.
+
+Bump every version at once:
+
+```sh
+./scripts/shepherd version set 0.2.0
+```
+
+Then commit `VERSION`, `Cargo.toml`, `Cargo.lock`, and
+`shepherd-webui/package*.json` together. CI runs `shepherd version check` to
+fail the build if any literal is edited by hand and drifts out of sync.
 
 
 ## Contribution guidelines

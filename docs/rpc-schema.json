@@ -1,0 +1,394 @@
+{
+  "methods": [
+    {
+      "name": "health",
+      "params": [],
+      "result": {
+        "type": "HealthStatus"
+      }
+    },
+    {
+      "name": "service_state",
+      "params": [],
+      "result": {
+        "type": "ServiceStateSnapshot"
+      }
+    },
+    {
+      "name": "list_entries",
+      "params": [
+        {
+          "name": "at",
+          "required": false,
+          "type": "DateTime<Local>"
+        }
+      ],
+      "result": {
+        "type": "Vec<EntryView>"
+      }
+    },
+    {
+      "name": "get_entry",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "EntryId"
+        },
+        {
+          "name": "at",
+          "required": false,
+          "type": "DateTime<Local>"
+        }
+      ],
+      "result": {
+        "type": "EntryView"
+      }
+    },
+    {
+      "name": "current_session",
+      "params": [],
+      "result": {
+        "type": "Option<SessionInfo>"
+      }
+    },
+    {
+      "name": "launch",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "EntryId"
+        }
+      ],
+      "result": {
+        "type": "LaunchOutcome"
+      }
+    },
+    {
+      "name": "stop_current",
+      "params": [
+        {
+          "name": "mode",
+          "required": false,
+          "type": "StopMode"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "extend_current",
+      "params": [
+        {
+          "name": "seconds",
+          "required": true,
+          "type": "i64"
+        }
+      ],
+      "result": {
+        "type": "Option<DateTime<Local>>",
+        "wrap_field": "new_deadline"
+      }
+    },
+    {
+      "name": "list_overrides",
+      "params": [
+        {
+          "name": "date",
+          "required": false,
+          "type": "NaiveDate"
+        }
+      ],
+      "result": {
+        "type": "Vec<DailyOverride>"
+      }
+    },
+    {
+      "name": "get_override",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "EntryId"
+        },
+        {
+          "name": "date",
+          "required": false,
+          "type": "NaiveDate"
+        }
+      ],
+      "result": {
+        "type": "Option<DailyOverride>"
+      }
+    },
+    {
+      "name": "upsert_override",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "EntryId"
+        },
+        {
+          "name": "date",
+          "required": false,
+          "type": "NaiveDate"
+        },
+        {
+          "name": "availability",
+          "required": true,
+          "type": "Option<bool>"
+        },
+        {
+          "name": "quota_delta_seconds",
+          "required": true,
+          "type": "Option<i64>"
+        }
+      ],
+      "result": {
+        "type": "DailyOverride"
+      }
+    },
+    {
+      "name": "delete_override",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "EntryId"
+        },
+        {
+          "name": "date",
+          "required": false,
+          "type": "NaiveDate"
+        }
+      ],
+      "result": {
+        "type": "bool",
+        "wrap_field": "deleted"
+      }
+    },
+    {
+      "name": "usage_all",
+      "params": [
+        {
+          "name": "from",
+          "required": false,
+          "type": "NaiveDate"
+        },
+        {
+          "name": "to",
+          "required": false,
+          "type": "NaiveDate"
+        }
+      ],
+      "result": {
+        "type": "Vec<UsageStat>"
+      }
+    },
+    {
+      "name": "usage_entry",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "EntryId"
+        },
+        {
+          "name": "from",
+          "required": false,
+          "type": "NaiveDate"
+        },
+        {
+          "name": "to",
+          "required": false,
+          "type": "NaiveDate"
+        }
+      ],
+      "result": {
+        "type": "Vec<UsageStat>"
+      }
+    },
+    {
+      "name": "get_volume",
+      "params": [],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "set_volume",
+      "params": [
+        {
+          "name": "percent",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "set_mute",
+      "params": [
+        {
+          "name": "muted",
+          "required": true,
+          "type": "bool"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "volume_up",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "volume_down",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "toggle_mute",
+      "params": [],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
+      "name": "get_brightness",
+      "params": [],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "set_brightness",
+      "params": [
+        {
+          "name": "percent",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "brightness_up",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "brightness_down",
+      "params": [
+        {
+          "name": "step",
+          "required": true,
+          "type": "u8"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "set_auto_brightness",
+      "params": [
+        {
+          "name": "enabled",
+          "required": true,
+          "type": "bool"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "toggle_auto_brightness",
+      "params": [],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "ping",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "reload_config",
+      "params": [],
+      "result": {
+        "type": "usize",
+        "wrap_field": "entry_count"
+      }
+    },
+    {
+      "name": "logout",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "list_windows",
+      "params": [],
+      "result": {
+        "type": "Vec<WindowInfo>"
+      }
+    },
+    {
+      "name": "act_on_window",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "u64"
+        },
+        {
+          "name": "action",
+          "required": true,
+          "type": "WindowAction"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    }
+  ]
+}

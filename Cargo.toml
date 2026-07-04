@@ -10,10 +10,14 @@ members = [
     "crates/shepherd-core",
     "crates/shepherd-host-linux",
     "crates/shepherd-ipc",
+    "crates/shepherd-management",
+    "crates/shepherd-management-macros",
     "crates/shepherd-http",
+    "crates/shepherd-ble",
     "crates/shepherdd",
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
+    "crates/shepherd-pairing-display",
     "crates/shepherd-e2e",
     "crates/shepherd-media-core",
     "crates/shepherd-media-app",
@@ -31,7 +35,10 @@ members = [
 exclude = ["crates/shepherd-firewall-bpf"]
 
 [workspace.package]
-version = "0.1.0"
+# Canonical version lives in the repo-root VERSION file; Cargo can't read it at
+# parse time, so this literal is written by `shepherd version set` and verified
+# by `shepherd version check` (run in CI). Don't hand-edit — bump via the tool.
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0"
 authors = ["Albert Armea"]
@@ -47,7 +54,10 @@ shepherd-store = { path = "crates/shepherd-store" }
 shepherd-core = { path = "crates/shepherd-core" }
 shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
+shepherd-management = { path = "crates/shepherd-management" }
+shepherd-management-macros = { path = "crates/shepherd-management-macros" }
 shepherd-http = { path = "crates/shepherd-http" }
+shepherd-ble = { path = "crates/shepherd-ble" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
 
 # Serialization

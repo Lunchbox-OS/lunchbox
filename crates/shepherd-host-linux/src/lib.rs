@@ -7,9 +7,12 @@
 //! - stdout/stderr capture
 //! - Volume control with auto-detection of sound systems
 //! - Screen brightness control via sysfs / `brightnessctl`
+//! - Ambient-light-sensor reads via IIO sysfs (for automatic brightness)
 
 mod adapter;
 mod brightness;
+mod browser;
+mod light;
 mod process;
 mod sidecar;
 mod steam_interstitial;
@@ -18,6 +21,7 @@ mod volume;
 
 pub use adapter::*;
 pub use brightness::*;
+pub use light::*;
 pub use process::*;
 pub use sway::{OutputScale, get_outputs, set_output_scale};
 pub use volume::*;

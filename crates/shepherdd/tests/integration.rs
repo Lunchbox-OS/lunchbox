@@ -39,9 +39,11 @@ fn make_test_entry(id: &str) -> Entry {
         disabled_reason: None,
         internet: Default::default(),
         firewall: None,
+        browser: None,
         input_compat: vec![],
         input_compat_options: Default::default(),
         xwayland_native_resolution: false,
+        confirm_on_close: true,
     }
 }
 
@@ -85,14 +87,17 @@ fn make_test_policy() -> Policy {
             disabled_reason: None,
             internet: Default::default(),
             firewall: None,
+            browser: None,
             input_compat: vec![],
             input_compat_options: Default::default(),
             xwayland_native_resolution: false,
+            confirm_on_close: true,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     }
 }
 
@@ -375,6 +380,7 @@ fn test_reload_policy_emits_event() {
         default_max_run: None,
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     };
 
     let event = engine.reload_policy(new_policy);
@@ -407,6 +413,7 @@ fn test_reload_policy_updates_entry_list() {
         default_max_run: None,
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     };
     engine.reload_policy(new_policy);
 
@@ -448,6 +455,7 @@ fn test_reload_policy_preserves_active_session() {
         default_max_run: None,
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     };
     engine.reload_policy(new_policy);
 
