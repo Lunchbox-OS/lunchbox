@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 /// Maximum video quality for playback and background downloads.
 ///
 /// Serializes to the same spellings the CLI accepts (`best`, `1080p`, `720p`,
-/// `480p`).
+/// `480p`). With the `clap` feature this is also the Linux binary's
+/// `--quality` value type, so the two front-ends share one definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
     /// No height restriction — download the best available quality.
@@ -24,20 +26,23 @@ pub enum Quality {
     /// Up to 1080p (default).
     #[default]
     #[serde(rename = "1080p")]
+    #[cfg_attr(feature = "clap", value(name = "1080p"))]
     Q1080,
     /// Up to 720p.
     #[serde(rename = "720p")]
+    #[cfg_attr(feature = "clap", value(name = "720p"))]
     Q720,
     /// Up to 480p.
     #[serde(rename = "480p")]
+    #[cfg_attr(feature = "clap", value(name = "480p"))]
     Q480,
 }
 
 impl Quality {
     /// Returns the yt-dlp `--format` / mpv `ytdl-format` string for this preset.
     ///
-    /// Kept byte-for-byte identical to `shepherd-media`'s `Quality::ytdl_format`
-    /// so the two platforms request the same renditions.
+    /// This is the single definition for both front-ends (the Linux binary
+    /// reuses it via the `clap` feature).
     pub fn ytdl_format(self) -> &'static str {
         match self {
             Quality::Best => "bestvideo+bestaudio/best",
@@ -123,8 +128,9 @@ mod tests {
     }
 
     #[test]
-    fn quality_ytdl_format_matches_linux_binary() {
-        // These strings must stay identical to shepherd-media's cli.rs.
+    fn quality_ytdl_format_strings() {
+        // This crate is now the single source of these selectors for both the
+        // Linux binary and the Android app; pin them so a change is deliberate.
         assert_eq!(Quality::Best.ytdl_format(), "bestvideo+bestaudio/best");
         assert_eq!(
             Quality::Q1080.ytdl_format(),

@@ -9,3 +9,12 @@ description = "Platform-agnostic application layer for shepherd-media: persisten
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+# Optional: lets the Linux binary reuse `Quality` directly as a
+# `--quality` clap value. Kept optional so the Android cdylib, which does no
+# CLI parsing, isn't forced to build clap.
+clap = { workspace = true, optional = true }
+
+[features]
+# Derive `clap::ValueEnum` for the CLI-facing enums (Quality). Enabled by the
+# `shepherd-media` Linux binary.
+clap = ["dep:clap"]
