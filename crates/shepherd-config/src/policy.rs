@@ -6,9 +6,9 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawBrightnessConfig, RawBrowserConfig, RawConfig, RawEntry, RawEntryKind, RawFirewallConfig,
-    RawInputCompat, RawInputCompatOptions, RawInternetConfig, RawManagementApiConfig,
-    RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
+    RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig, RawConfig, RawEntry,
+    RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions, RawInternetConfig,
+    RawManagementApiConfig, RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -21,7 +21,7 @@ use shepherd_util::{
 };
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -124,6 +124,8 @@ pub struct ServiceConfig {
     pub steam: SteamConfig,
     /// Management HTTP API configuration (None = disabled)
     pub management_api: Option<ManagementApiConfig>,
+    /// Bluetooth LE management transport configuration (None = disabled).
+    pub ble_management: Option<BleManagementConfig>,
 }
 
 impl ServiceConfig {
@@ -139,15 +141,22 @@ impl ServiceConfig {
             .as_ref()
             .filter(|c| c.enabled)
             .map(ManagementApiConfig::from_raw);
+        let data_dir = raw.data_dir.unwrap_or_else(default_data_dir);
+        let ble_management = raw
+            .ble_management
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|c| BleManagementConfig::from_raw(c, &data_dir));
         Self {
             socket_path: raw.socket_path.unwrap_or_else(socket_path_without_env),
             log_dir,
             capture_child_output: raw.capture_child_output,
             child_log_dir,
-            data_dir: raw.data_dir.unwrap_or_else(default_data_dir),
+            data_dir,
             internet,
             steam,
             management_api,
+            ble_management,
         }
     }
 }
@@ -231,6 +240,33 @@ impl ManagementApiConfig {
     }
 }
 
+/// Validated BLE management transport configuration.
+#[derive(Debug, Clone)]
+pub struct BleManagementConfig {
+    pub device_name: String,
+    pub admin_record_path: PathBuf,
+    pub reset_sentinel_path: PathBuf,
+}
+
+impl BleManagementConfig {
+    fn from_raw(raw: &RawBleManagementConfig, data_dir: &Path) -> Self {
+        Self {
+            device_name: raw
+                .device_name
+                .clone()
+                .unwrap_or_else(|| "shepherd".to_string()),
+            admin_record_path: raw
+                .admin_record_path
+                .clone()
+                .unwrap_or_else(|| data_dir.join("admin.toml")),
+            reset_sentinel_path: raw
+                .reset_sentinel_path
+                .clone()
+                .unwrap_or_else(|| data_dir.join(".factory-reset-ble")),
+        }
+    }
+}
+
 impl Default for ServiceConfig {
     fn default() -> Self {
         let log_dir = default_log_dir();
@@ -247,6 +283,7 @@ impl Default for ServiceConfig {
             ),
             steam: SteamConfig::default(),
             management_api: None,
+            ble_management: None,
         }
     }
 }

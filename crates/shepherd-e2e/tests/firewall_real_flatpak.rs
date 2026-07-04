@@ -179,13 +179,10 @@ deny = []
     let http = h.http();
 
     let resp = http
-        .post_json(
-            "/api/v1/sessions",
-            &json!({ "entry_id": "flatpak-firewall-probe" }),
-        )
+        .rpc("launch", json!({ "id": "flatpak-firewall-probe" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert_eq!(json_body(&resp)?["result"], json!("approved"));
+    assert!(json_body(&resp)?["Approved"].is_object());
 
     // flatpak run startup is similar to snap: dbus activation + sandbox
     // setup before the probe even starts. Up to 60s so the probe has
@@ -218,7 +215,7 @@ deny = []
          (BPF) to scope' and that the helper's apply-cgroup didn't fail. Probe log:\n{contents}"
     );
 
-    let resp = http.delete("/api/v1/sessions/current").await?;
+    let resp = http.rpc("stop_current", json!({})).await?;
     assert!(
         resp.status == 204 || resp.status == 200,
         "stop body (status {}): {}",

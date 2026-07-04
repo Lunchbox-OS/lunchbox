@@ -1,0 +1,35 @@
+# Android CI image for shepherd-launcher.
+#
+# Layers the JDK + Android SDK on top of the base CI image (.ci/Dockerfile)
+# so the companion-android Gradle jobs get a ready SDK without every
+# Rust-only job paying the ~1 GB pull. The base image — including its own
+# year-week + content hash — is passed in via the BASE_IMAGE build arg by
+# the `image-android` workflow job, which rebuilds this layer on a
+# content-hash miss.
+#
+# Tag scheme mirrors the base image: `<isoyear>w<isoweek>-<sha256-12>`,
+# here over .ci/Dockerfile.android, scripts/deps/android.pkgs,
+# scripts/lib/deps.sh, and the base image ref (so a base rebuild forces
+# an Android rebuild too).
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install the JDK + unzip (android.pkgs) and download the Android SDK
+# into /opt/android-sdk via the project's own installer, so the image
+# stays in lockstep with `./scripts/shepherd deps install android` on a
+# host. curl (used to fetch the cmdline-tools) is already present from
+# the base image's build deps. Re-copy scripts so this layer reflects
+# the current checkout rather than whatever the base image baked.
+COPY scripts /opt/shepherd-deps/scripts
+WORKDIR /opt/shepherd-deps
+RUN ./scripts/shepherd deps install android && \
+    rm -rf /var/lib/apt/lists/*
+
+# AGP and the Gradle jobs resolve the SDK from this (local.properties is
+# gitignored and absent in CI). Matches where the installer drops it.
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+
+WORKDIR /

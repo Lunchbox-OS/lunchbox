@@ -86,6 +86,25 @@ bind = "0.0.0.0"             # Bind address ("127.0.0.1" for localhost-only)
                              # 0 = retry forever. Default: 300.
 # auth_token = "changeme"    # Optional Bearer token; omit to allow unauthenticated access
 
+# Bluetooth LE management transport (optional)
+# Primary admin path: works without network configuration, IP autodiscovery,
+# or a known static IP. Pairing uses Numeric Comparison (6-digit code shown
+# on the TV); the first phone to pair becomes the admin (TOFU). Requires a
+# working BlueZ adapter and the `bluez` system package.
+[service.ble_management]
+enabled = true
+# device_name = "shepherd"              # Advertised local name. Pick something
+                                        # the companion app can disambiguate
+                                        # when multiple devices are in range.
+# admin_record_path = "/var/lib/shepherdd/admin.toml"
+                                        # Where the admin record is persisted.
+                                        # Default: <data_dir>/admin.toml.
+# reset_sentinel_path = "/var/lib/shepherdd/.factory-reset-ble"
+                                        # If this file exists at startup, the
+                                        # admin record is wiped and the file
+                                        # removed. Default:
+                                        # <data_dir>/.factory-reset-ble.
+
 # Default warning thresholds
 [[service.default_warnings]]
 seconds_before = 300

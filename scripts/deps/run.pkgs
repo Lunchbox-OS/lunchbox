@@ -31,3 +31,7 @@ python3-venv
 # production. On hosts with no backlight (most desktops) the package is
 # installed but never invoked.
 brightnessctl
+
+# Bluetooth stack — BlueZ provides the bluetoothd D-Bus service the
+# BLE management transport (shepherd-ble) talks to via the bluer crate.
+bluez

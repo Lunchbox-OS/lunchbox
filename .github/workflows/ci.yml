@@ -114,6 +114,93 @@ jobs:
           docker build -t "$ref" -f .ci/Dockerfile .
           docker push "$ref"
 
+  image-android:
+    name: CI image (Android)
+    # Layers the JDK + Android SDK onto the base CI image so the
+    # companion-android Gradle job gets a ready ~1 GB SDK without every
+    # Rust-only job paying the pull. Same build-push-on-hash-miss shape
+    # as the base `image` job above; see .ci/Dockerfile.android.
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
+    steps:
+      - name: Install docker CLI
+        run: |
+          apt-get update
+          apt-get install -y docker.io
+
+      - name: Point DOCKER_HOST at the DinD bridge gateway
+        run: |
+          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
+          if [ -z "$gateway" ]; then
+            echo "::error::could not determine bridge gateway IP"
+            ip route || true
+            exit 1
+          fi
+          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=tcp://${gateway}:2375"
+
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        env:
+          BASE_REF: ${{ needs.image.outputs.ref }}
+        run: |
+          # Hash the Android-layer inputs plus the base image ref. The
+          # base ref already encodes the base Dockerfile + deps hashes,
+          # so folding it in rebuilds this image whenever the base does
+          # or the SDK inputs change. Year+week prefix keeps the weekly
+          # security-update rebuild.
+          hash=$( { cat \
+                .ci/Dockerfile.android \
+                scripts/deps/android.pkgs \
+                scripts/lib/deps.sh; \
+              printf '%s' "$BASE_REF"; \
+            } | sha256sum | cut -c1-12)
+          year_week=$(date -u +%Gw%V)
+          ref="${CI_IMAGE_NAME}-android:${year_week}-${hash}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Image ref: ${ref}"
+
+      - name: Wait for DinD daemon
+        run: |
+          for _ in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready at $DOCKER_HOST"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::docker daemon at $DOCKER_HOST never became ready."
+          exit 1
+
+      - name: Log in to Forgejo container registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" \
+            | docker login git.armeafamily.com \
+                --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and push if tag is missing
+        env:
+          BASE_REF: ${{ needs.image.outputs.ref }}
+        run: |
+          ref="${{ steps.tag.outputs.ref }}"
+          if docker manifest inspect "$ref" >/dev/null 2>&1; then
+            echo "Image already published: $ref"
+            exit 0
+          fi
+          # Pull the base image explicitly so the dind daemon has it
+          # locally for the FROM (it may not be in the daemon's cache).
+          docker pull "$BASE_REF"
+          docker build \
+            --build-arg BASE_IMAGE="$BASE_REF" \
+            -t "$ref" -f .ci/Dockerfile.android .
+          docker push "$ref"
+
   build:
     name: Build
     needs: image
@@ -405,6 +492,39 @@ jobs:
             --target aarch64-linux-android \
             --no-default-features \
             -p shepherd-media-core
+
+  android-companion:
+    name: Android companion (unit tests)
+    # Runs on the Android CI image, which already carries the JDK + SDK at
+    # /opt/android-sdk (with ANDROID_SDK_ROOT set), so there's no per-run
+    # toolchain download. Only the Gradle/Maven dep cache — which churns
+    # with build.gradle edits — rides on actions/cache.
+    needs: image-android
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image-android.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('companion-android/gradle/libs.versions.toml', 'companion-android/gradle/wrapper/gradle-wrapper.properties', 'companion-android/**/build.gradle.kts') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # JVM unit tests only (the hardware-independent framing codec +
+      # wire-decode of every sampled spec payload). No emulator; the live
+      # pair/claim path stays a manual smoke test.
+      - name: Run companion-android unit tests
+        working-directory: companion-android
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
 
   shellcheck:
     name: ShellCheck

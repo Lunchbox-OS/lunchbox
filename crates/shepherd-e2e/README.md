@@ -8,7 +8,7 @@ socket.
 
 The tests cover:
 
-- Boot: shepherdd comes up, `/api/v1/health` reports ready, the IPC socket
+- Boot: shepherdd comes up, `POST /api/v1/rpc { "method": "health" }` reports ready, the IPC socket
   accepts a `Ping`, and `SIGTERM` triggers a clean shutdown.
 - Activity launch and stop via the HTTP API: `POST /sessions`, the spawned
   child appears under `/proc`, then `DELETE /sessions/current` ends the

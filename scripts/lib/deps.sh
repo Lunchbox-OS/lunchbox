@@ -15,6 +15,20 @@ DEPS_DIR="$(get_repo_root)/scripts/deps"
 # Rust installation URL
 RUSTUP_URL="https://sh.rustup.rs"
 
+# Android SDK location and the command-line-tools bundle used to bootstrap
+# sdkmanager. The SDK lives outside any user home so it can be shared and
+# so apt never touches it. Versions track what the companion-android
+# Gradle project (companion-android/) targets; bump together.
+ANDROID_SDK_ROOT="/opt/android-sdk"
+ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+# Components sdkmanager installs. compileSdk / build-tools must match
+# companion-android/build.gradle.kts.
+ANDROID_SDK_PACKAGES=(
+    "platform-tools"
+    "platforms;android-35"
+    "build-tools;35.0.0"
+)
+
 # yt-dlp virtualenv location and the symlink placed on PATH.
 # The venv is owned by root and lives outside /usr so that apt can never
 # silently downgrade or remove yt-dlp.
@@ -120,6 +134,70 @@ install_bpf_toolchain() {
     fi
 }
 
+# Check whether the Android SDK (sdkmanager + a platform) is present.
+is_android_sdk_installed() {
+    [[ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]] \
+        && [[ -d "$ANDROID_SDK_ROOT/platforms/android-35" ]]
+}
+
+# Download the command-line tools and use sdkmanager to install the SDK
+# components the companion-android app builds against. Idempotent: skips
+# the cmdline-tools download when already extracted and re-runs
+# sdkmanager (which no-ops for already-installed packages).
+#
+# The SDK is installed under $ANDROID_SDK_ROOT (owned by the invoking
+# user via sudo chown) so Gradle can write to it without root.
+install_android_sdk() {
+    local cmdline_dir="$ANDROID_SDK_ROOT/cmdline-tools"
+    local sdkmanager="$cmdline_dir/latest/bin/sdkmanager"
+
+    if ! command_exists java; then
+        die "java not found; the 'android' apt packages must install first"
+    fi
+
+    maybe_sudo mkdir -p "$ANDROID_SDK_ROOT"
+    # Hand the tree to the current user so Gradle/sdkmanager need no sudo.
+    maybe_sudo chown -R "$(id -u):$(id -g)" "$ANDROID_SDK_ROOT"
+
+    if [[ ! -x "$sdkmanager" ]]; then
+        info "Downloading Android command-line tools..."
+        local tmp_zip
+        tmp_zip="$(mktemp --suffix=.zip)"
+        curl -fSL "$ANDROID_CMDLINE_TOOLS_URL" -o "$tmp_zip"
+        # The zip extracts to a top-level `cmdline-tools/` dir; sdkmanager
+        # insists on living at `cmdline-tools/latest/`, so stage and move.
+        local tmp_extract
+        tmp_extract="$(mktemp -d)"
+        unzip -q "$tmp_zip" -d "$tmp_extract"
+        mkdir -p "$cmdline_dir"
+        rm -rf "$cmdline_dir/latest"
+        mv "$tmp_extract/cmdline-tools" "$cmdline_dir/latest"
+        rm -rf "$tmp_zip" "$tmp_extract"
+    else
+        info "Android command-line tools already present"
+    fi
+
+    info "Accepting Android SDK licenses..."
+    # `yes` receives SIGPIPE (exit 141) when sdkmanager closes stdin after
+    # reading enough confirmations; under `set -o pipefail` that 141 would
+    # abort the whole script even though sdkmanager succeeded. Disable
+    # pipefail just for this pipeline. A genuine license/SDK failure still
+    # surfaces at the package-install step and the final validation below.
+    set +o pipefail
+    yes | "$sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null
+    set -o pipefail
+
+    info "Installing Android SDK packages: ${ANDROID_SDK_PACKAGES[*]}"
+    "$sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "${ANDROID_SDK_PACKAGES[@]}"
+
+    if is_android_sdk_installed; then
+        success "Android SDK installed at $ANDROID_SDK_ROOT"
+        info "Export ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT (companion-android/local.properties also points here)"
+    else
+        die "Android SDK installation failed — check sdkmanager output above"
+    fi
+}
+
 # Read a package file, stripping comments and empty lines
 read_package_file() {
     local file="$1"
@@ -146,6 +224,9 @@ get_packages() {
         test)
             read_package_file "$DEPS_DIR/test.pkgs"
             ;;
+        android)
+            read_package_file "$DEPS_DIR/android.pkgs"
+            ;;
         dev)
             # Union of all four sets, deduplicated
             {
@@ -156,7 +237,7 @@ get_packages() {
             } | sort -u
             ;;
         *)
-            die "Unknown package set: $set_name (valid: build, run, test, dev)"
+            die "Unknown package set: $set_name (valid: build, run, test, android, dev)"
             ;;
     esac
 }
@@ -213,6 +294,12 @@ deps_install() {
         install_ytdlp
     fi
 
+    # For the android set, fetch the SDK after the JDK + unzip apt
+    # packages are present.
+    if [[ "$set_name" == "android" ]]; then
+        install_android_sdk
+    fi
+
     success "Installed $set_name dependencies"
 }
 
@@ -246,6 +333,14 @@ deps_check() {
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_ytdlp_installed; then
             warn "yt-dlp is not installed (run: shepherd deps install run)"
+            return 1
+        fi
+    fi
+
+    # For the android set, also check the SDK.
+    if [[ "$set_name" == "android" ]]; then
+        if ! is_android_sdk_installed; then
+            warn "Android SDK is not installed (run: shepherd deps install android)"
             return 1
         fi
     fi
@@ -287,13 +382,17 @@ Package sets:
     build    Build-time dependencies (+ Rust via rustup)
     run      Runtime dependencies only
     test     Extra packages needed for the shepherd-e2e harness
+    android  JDK + Android SDK for the companion-android app
     dev      All dependencies (build + run + test + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
+      The 'android' set is standalone (not part of 'dev') because it
+      downloads the Android SDK into /opt/android-sdk.
 
 Examples:
     shepherd deps print build
     shepherd deps install dev
+    shepherd deps install android
     shepherd deps check run
 EOF
             ;;

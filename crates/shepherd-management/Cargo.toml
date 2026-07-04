@@ -1,0 +1,35 @@
+[package]
+name = "shepherd-management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Transport-agnostic management service trait shared by shepherd-http and (planned) shepherd-ble"
+
+[dependencies]
+shepherd-util = { workspace = true }
+shepherd-api = { workspace = true }
+shepherd-host-api = { workspace = true }
+shepherd-config = { workspace = true }
+shepherd-store = { workspace = true }
+shepherd-core = { workspace = true }
+shepherd-management-macros = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+
+# Used only by the `rpc-codegen` binary — kept out of the library
+# surface via `[[bin]]` in the parent workspace's build graph.
+anyhow = { workspace = true }
+
+[[bin]]
+name = "rpc-codegen"
+path = "src/bin/rpc_codegen.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }

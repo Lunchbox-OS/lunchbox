@@ -96,18 +96,17 @@ async fn firewall_unsupported_path_runs_activity() -> Result<()> {
         .await?;
     let http = h.http();
 
-    let resp = http.get("/api/v1/entries/filtered-sleeper").await?;
+    let resp = http
+        .rpc("get_entry", json!({ "id": "filtered-sleeper" }))
+        .await?;
     assert_eq!(resp.status, 200);
     assert_eq!(json_body(&resp)?["enabled"], json!(true));
 
     let resp = http
-        .post_json(
-            "/api/v1/sessions",
-            &json!({ "entry_id": "filtered-sleeper" }),
-        )
+        .rpc("launch", json!({ "id": "filtered-sleeper" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert_eq!(json_body(&resp)?["result"], json!("approved"));
+    assert!(json_body(&resp)?["Approved"].is_object());
 
     let mut found = false;
     for _ in 0..30 {
@@ -122,8 +121,8 @@ async fn firewall_unsupported_path_runs_activity() -> Result<()> {
         "sleep child did not appear — Unsupported branch must still launch the activity"
     );
 
-    let resp = http.delete("/api/v1/sessions/current").await?;
-    assert_eq!(resp.status, 204);
+    let resp = http.rpc("stop_current", json!({})).await?;
+    assert_eq!(resp.status, 200);
     proc_inspect::wait_until_no_process("sleep", Duration::from_secs(5)).await?;
 
     h.shutdown().await?;
@@ -195,13 +194,10 @@ async fn firewall_supported_path_invokes_helper_with_expected_argv() -> Result<(
     let http = h.http();
 
     let resp = http
-        .post_json(
-            "/api/v1/sessions",
-            &json!({ "entry_id": "filtered-sleeper" }),
-        )
+        .rpc("launch", json!({ "id": "filtered-sleeper" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert_eq!(json_body(&resp)?["result"], json!("approved"));
+    assert!(json_body(&resp)?["Approved"].is_object());
 
     wait_for_file(&argv_log, Duration::from_secs(5)).await?;
     let recorded = fs::read_to_string(&argv_log)
@@ -241,8 +237,8 @@ async fn firewall_supported_path_invokes_helper_with_expected_argv() -> Result<(
     }
     assert!(found, "sleep child did not appear after helper stub exec");
 
-    let resp = http.delete("/api/v1/sessions/current").await?;
-    assert_eq!(resp.status, 204);
+    let resp = http.rpc("stop_current", json!({})).await?;
+    assert_eq!(resp.status, 200);
     proc_inspect::wait_until_no_process("sleep", Duration::from_secs(5)).await?;
 
     h.shutdown().await?;

@@ -99,9 +99,8 @@ export interface EntryView {
   max_run_if_started_now: Duration | null;
 }
 
-export type LaunchResponse =
-  | { result: "approved"; session_id: string; deadline: string | null }
-  | { result: "denied"; reasons: ReasonCode[] };
+// `LaunchResponse` is now exported from `./client` — it's a UI-friendly
+// normalisation of the on-wire `LaunchOutcome` shape.
 
 export interface DailyOverride {
   entry_id: string;

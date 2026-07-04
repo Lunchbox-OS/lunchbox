@@ -1,7 +1,21 @@
 //! IPC client implementation
+//!
+//! Speaks the JSON-RPC wire format defined in `shepherd_api::Request`
+//! / `Response`. The typed helpers below are hand-written for the
+//! calls IPC consumers actually make (launcher, HUD, e2e); adding a
+//! new one is a mechanical two-line change. Callers that need
+//! something more exotic can drop down to [`IpcClient::call`] with a
+//! method name and a JSON blob.
 
-use shepherd_api::{Command, Event, Request, Response, ResponseResult};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use shepherd_api::{
+    BrightnessInfo, EntryView, ErrorCode, Event, HealthStatus, ReasonCode, Request, Response,
+    ResponseResult, ServiceStateSnapshot, SessionInfo, StopMode, VolumeInfo,
+};
+use shepherd_util::EntryId;
 use std::path::Path;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -27,44 +41,205 @@ impl IpcClient {
         })
     }
 
-    /// Send a command and wait for response
-    pub async fn send(&mut self, command: Command) -> IpcResult<Response> {
+    /// Low-level call: send a method name + JSON params, get back the
+    /// full `Response`. Prefer the typed helpers below when they
+    /// exist.
+    pub async fn call_raw(&mut self, method: &str, params: Value) -> IpcResult<Response> {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-
-        let request = Request::new(request_id, command);
+        let request = Request::with_params(request_id, method, params);
         let mut json = serde_json::to_string(&request)?;
         json.push('\n');
-
         self.writer.write_all(json.as_bytes()).await?;
 
-        // Read response
         let mut line = String::new();
         let n = self.reader.read_line(&mut line).await?;
         if n == 0 {
             return Err(IpcError::ConnectionClosed);
         }
-
         let response: Response = serde_json::from_str(line.trim())?;
-
         Ok(response)
     }
 
-    /// Subscribe to events and consume this client to return an event stream
-    pub async fn subscribe(mut self) -> IpcResult<EventStream> {
-        let response = self.send(Command::SubscribeEvents).await?;
+    /// Typed call: like `call_raw` but decodes the JSON result into
+    /// `T` on success, and turns any server error into a
+    /// `ServerError` on the client side.
+    pub async fn call<T: DeserializeOwned>(&mut self, method: &str, params: Value) -> IpcResult<T> {
+        let response = self.call_raw(method, params).await?;
+        match response.result {
+            ResponseResult::Ok(value) => serde_json::from_value(value).map_err(IpcError::Json),
+            ResponseResult::Err(e) => Err(IpcError::ServerError(e.message)),
+        }
+    }
 
+    // ---------------------------------------------------------------
+    // Typed helpers — one per RPC that IPC consumers use.
+    // Wire names must match `docs/rpc-schema.json`.
+    // ---------------------------------------------------------------
+
+    pub async fn ping(&mut self) -> IpcResult<()> {
+        self.call::<Value>("ping", Value::Null).await.map(|_| ())
+    }
+
+    pub async fn health(&mut self) -> IpcResult<HealthStatus> {
+        self.call("health", Value::Null).await
+    }
+
+    pub async fn service_state(&mut self) -> IpcResult<ServiceStateSnapshot> {
+        self.call("service_state", Value::Null).await
+    }
+
+    pub async fn list_entries(&mut self) -> IpcResult<Vec<EntryView>> {
+        self.call("list_entries", serde_json::json!({})).await
+    }
+
+    pub async fn current_session(&mut self) -> IpcResult<Option<SessionInfo>> {
+        self.call("current_session", Value::Null).await
+    }
+
+    /// Launch an entry. On approval returns the new session_id; on
+    /// policy denial returns the reason codes wrapped in `Denied`.
+    /// Any lower-layer failure (entry not found, spawn error, etc.)
+    /// bubbles as a normal `IpcError::ServerError`.
+    pub async fn launch(&mut self, entry_id: EntryId) -> IpcResult<LaunchOutcome> {
+        self.call("launch", serde_json::json!({ "id": entry_id }))
+            .await
+    }
+
+    pub async fn stop_current(&mut self, mode: StopMode) -> IpcResult<()> {
+        self.call::<Value>("stop_current", serde_json::json!({ "mode": mode }))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn extend_current(
+        &mut self,
+        by: Duration,
+    ) -> IpcResult<Option<chrono::DateTime<chrono::Local>>> {
+        #[derive(serde::Deserialize)]
+        struct ExtendResult {
+            new_deadline: Option<chrono::DateTime<chrono::Local>>,
+        }
+        let out: ExtendResult = self
+            .call(
+                "extend_current",
+                serde_json::json!({ "seconds": by.as_secs() as i64 }),
+            )
+            .await?;
+        Ok(out.new_deadline)
+    }
+
+    pub async fn reload_config(&mut self) -> IpcResult<usize> {
+        #[derive(serde::Deserialize)]
+        struct ReloadResult {
+            entry_count: usize,
+        }
+        let out: ReloadResult = self.call("reload_config", Value::Null).await?;
+        Ok(out.entry_count)
+    }
+
+    pub async fn logout(&mut self) -> IpcResult<()> {
+        self.call::<Value>("logout", Value::Null).await.map(|_| ())
+    }
+
+    pub async fn get_volume(&mut self) -> IpcResult<VolumeInfo> {
+        self.call("get_volume", Value::Null).await
+    }
+
+    pub async fn set_volume(&mut self, percent: u8) -> IpcResult<VolumeInfo> {
+        self.call("set_volume", serde_json::json!({ "percent": percent }))
+            .await
+    }
+
+    pub async fn set_mute(&mut self, muted: bool) -> IpcResult<VolumeInfo> {
+        self.call("set_mute", serde_json::json!({ "muted": muted }))
+            .await
+    }
+
+    pub async fn volume_up(&mut self, step: u8) -> IpcResult<VolumeInfo> {
+        self.call("volume_up", serde_json::json!({ "step": step }))
+            .await
+    }
+
+    pub async fn volume_down(&mut self, step: u8) -> IpcResult<VolumeInfo> {
+        self.call("volume_down", serde_json::json!({ "step": step }))
+            .await
+    }
+
+    pub async fn toggle_mute(&mut self) -> IpcResult<VolumeInfo> {
+        self.call("toggle_mute", Value::Null).await
+    }
+
+    pub async fn get_brightness(&mut self) -> IpcResult<BrightnessInfo> {
+        self.call("get_brightness", Value::Null).await
+    }
+
+    pub async fn set_brightness(&mut self, percent: u8) -> IpcResult<BrightnessInfo> {
+        self.call("set_brightness", serde_json::json!({ "percent": percent }))
+            .await
+    }
+
+    pub async fn brightness_up(&mut self, step: u8) -> IpcResult<BrightnessInfo> {
+        self.call("brightness_up", serde_json::json!({ "step": step }))
+            .await
+    }
+
+    pub async fn brightness_down(&mut self, step: u8) -> IpcResult<BrightnessInfo> {
+        self.call("brightness_down", serde_json::json!({ "step": step }))
+            .await
+    }
+
+    /// Machine-readable server error code, for callers that need to
+    /// distinguish e.g. `NotFound` from `PermissionDenied` (used by
+    /// the launcher's error routing). Most consumers can rely on the
+    /// `IpcError::ServerError` message.
+    pub async fn call_with_code<T: DeserializeOwned>(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> IpcResult<Result<T, (ErrorCode, String)>> {
+        let response = self.call_raw(method, params).await?;
+        match response.result {
+            ResponseResult::Ok(v) => Ok(Ok(serde_json::from_value(v)?)),
+            ResponseResult::Err(e) => Ok(Err((e.code, e.message))),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Event stream
+    // ---------------------------------------------------------------
+
+    /// Subscribe to events and consume this client to return an event
+    /// stream. Subscribe is an IPC-side special case (the server
+    /// flips a per-client subscription flag *after* the response
+    /// frame is written) — it isn't dispatched through the trait.
+    pub async fn subscribe(mut self) -> IpcResult<EventStream> {
+        let response = self.call_raw("subscribe_events", Value::Null).await?;
         match response.result {
             ResponseResult::Ok(_) => {}
             ResponseResult::Err(e) => {
                 return Err(IpcError::ServerError(e.message));
             }
         }
-
         Ok(EventStream {
             reader: self.reader,
         })
     }
+}
+
+/// Client-side mirror of the server's `LaunchOutcome`. Kept as a
+/// small stable enum so callers can pattern-match without pulling in
+/// `shepherd-management`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub enum LaunchOutcome {
+    Approved {
+        session_id: String,
+        deadline: Option<chrono::DateTime<chrono::Local>>,
+    },
+    Denied {
+        reasons: Vec<ReasonCode>,
+    },
 }
 
 /// Stream of events from shepherdd
@@ -88,6 +263,6 @@ impl EventStream {
 
 #[cfg(test)]
 mod tests {
-    // Client tests would require a running server
-    // See integration tests
+    // Client tests would require a running server; see integration
+    // tests under `crates/shepherd-e2e/`.
 }

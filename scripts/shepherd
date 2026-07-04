@@ -23,6 +23,8 @@ source "$LIB_DIR/install.sh"
 source "$LIB_DIR/harden.sh"
 # shellcheck source=lib/config.sh
 source "$LIB_DIR/config.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$LIB_DIR/bluetooth.sh"
 
 # Version
 VERSION="0.1.0"
@@ -41,6 +43,7 @@ Commands:
     dev         Development commands
     install     Install shepherd to the system
     harden      User hardening for kiosk mode
+    bluetooth   Bluetooth admin operations (clear bonds, etc.)
 
 Development:
     shepherd deps install dev     Install all development dependencies
@@ -62,6 +65,10 @@ Installation:
 Hardening:
     shepherd harden apply --user USER         Apply kiosk restrictions
     shepherd harden revert --user USER        Remove restrictions
+
+Bluetooth:
+    shepherd bluetooth clear --user USER      Unpair + clear admin record
+                                              for a logged-out user
 
 Configuration:
     shepherd config validate                  Validate installed config
@@ -118,6 +125,9 @@ EOF
             ;;
         harden)
             harden_main "$@"
+            ;;
+        bluetooth)
+            bluetooth_main "$@"
             ;;
         -h|--help|help|"")
             usage

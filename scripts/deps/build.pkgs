@@ -39,6 +39,10 @@ libpolly-20-dev
 # libmpv (used by shepherd-media for in-process media playback)
 libmpv-dev
 
+# D-Bus client library (required by bluer, the BLE transport in
+# shepherd-ble; bluer talks to BlueZ over the system bus).
+libdbus-1-dev
+
 # Required for rustup
 curl
 

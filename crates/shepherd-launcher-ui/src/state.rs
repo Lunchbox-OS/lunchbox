@@ -53,6 +53,7 @@ impl SharedState {
         let _ = self.sender.send(state);
     }
 
+    #[allow(dead_code)]
     pub fn get(&self) -> LauncherState {
         self.receiver.borrow().clone()
     }

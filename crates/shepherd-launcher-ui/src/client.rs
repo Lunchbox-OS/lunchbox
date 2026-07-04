@@ -1,8 +1,8 @@
 //! IPC client wrapper for the launcher UI
 
 use anyhow::{Context, Result};
-use shepherd_api::{Command, ReasonCode, Response, ResponsePayload, ResponseResult};
-use shepherd_ipc::IpcClient;
+use shepherd_api::{ReasonCode, ServiceStateSnapshot};
+use shepherd_ipc::{IpcClient, LaunchOutcome};
 use shepherd_util::EntryId;
 use std::path::Path;
 use std::time::Duration;
@@ -77,14 +77,11 @@ impl ServiceClient {
         info!("Connected to shepherdd");
 
         // Get initial state (includes entries)
-        info!("Sending GetState command");
-        let response = client.send(Command::GetState).await?;
-        info!("Got GetState response");
-        self.handle_response(response)?;
+        info!("Fetching initial service_state");
+        let snapshot = client.service_state().await?;
+        self.apply_snapshot(snapshot);
 
-        // Note: ListEntries is not needed since GetState includes entries in the snapshot
-
-        // Now consume client for event stream (this will send SubscribeEvents internally)
+        // Now consume client for event stream (this sends subscribe_events internally)
         info!("Subscribing to events");
         let mut events = client.subscribe().await?;
         info!("Subscribed to events, entering event loop");
@@ -134,81 +131,34 @@ impl ServiceClient {
         }
     }
 
-    fn handle_response(&self, response: Response) -> Result<()> {
-        match response.result {
-            ResponseResult::Ok(payload) => {
-                match payload {
-                    ResponsePayload::State(snapshot) => {
-                        if let Some(session) = snapshot.current_session {
-                            let now = shepherd_util::now();
-                            // For unlimited sessions (deadline=None), time_remaining is None
-                            let time_remaining = session.deadline.and_then(|d| {
-                                if d > now {
-                                    (d - now).to_std().ok()
-                                } else {
-                                    Some(Duration::ZERO)
-                                }
-                            });
-                            self.state.set(LauncherState::SessionActive {
-                                session_id: session.session_id,
-                                entry_label: session.label,
-                                time_remaining,
-                            });
-                        } else {
-                            self.state.set(LauncherState::Idle {
-                                entries: snapshot.entries,
-                            });
-                        }
-                    }
-                    ResponsePayload::Entries(entries) => {
-                        // Only update if we're in idle state
-                        if matches!(
-                            self.state.get(),
-                            LauncherState::Idle { .. } | LauncherState::Connecting
-                        ) {
-                            self.state.set(LauncherState::Idle { entries });
-                        }
-                    }
-                    ResponsePayload::LaunchApproved {
-                        session_id,
-                        deadline,
-                    } => {
-                        let now = shepherd_util::now();
-                        // For unlimited sessions (deadline=None), time_remaining is None
-                        let time_remaining = deadline.and_then(|d| {
-                            if d > now {
-                                (d - now).to_std().ok()
-                            } else {
-                                Some(Duration::ZERO)
-                            }
-                        });
-                        self.state.set(LauncherState::SessionActive {
-                            session_id,
-                            entry_label: "Starting...".into(),
-                            time_remaining,
-                        });
-                    }
-                    ResponsePayload::LaunchDenied { reasons } => {
-                        let message = reasons
-                            .iter()
-                            .map(|r| reason_to_message(r))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.state.set(LauncherState::Error { message });
-                    }
-                    _ => {}
+    /// Translate a `ServiceStateSnapshot` (result of `service_state`)
+    /// into the launcher's higher-level `LauncherState`.
+    fn apply_snapshot(&self, snapshot: ServiceStateSnapshot) {
+        if let Some(session) = snapshot.current_session {
+            let now = shepherd_util::now();
+            let time_remaining = session.deadline.and_then(|d| {
+                if d > now {
+                    (d - now).to_std().ok()
+                } else {
+                    Some(Duration::ZERO)
                 }
-                Ok(())
-            }
-            ResponseResult::Err(e) => {
-                self.state.set(LauncherState::Error { message: e.message });
-                Ok(())
-            }
+            });
+            self.state.set(LauncherState::SessionActive {
+                session_id: session.session_id,
+                entry_label: session.label,
+                time_remaining,
+            });
+        } else {
+            self.state.set(LauncherState::Idle {
+                entries: snapshot.entries,
+            });
         }
     }
 }
 
-/// Separate command client for sending commands (not subscribed)
+/// Separate command client for sending one-shot RPCs (subscribes
+/// consume the connection, so a stateful command channel needs its
+/// own client per call).
 pub struct CommandClient {
     socket_path: std::path::PathBuf,
 }
@@ -220,39 +170,65 @@ impl CommandClient {
         }
     }
 
-    pub async fn launch(&self, entry_id: &EntryId) -> Result<Response> {
+    pub async fn launch(&self, entry_id: &EntryId) -> Result<LaunchOutcomeOwned> {
         let mut client = IpcClient::connect(&self.socket_path).await?;
-        client
-            .send(Command::Launch {
-                entry_id: entry_id.clone(),
-            })
-            .await
-            .map_err(Into::into)
+        let outcome = client.launch(entry_id.clone()).await?;
+        Ok(outcome.into())
     }
 
     #[allow(dead_code)]
-    pub async fn stop_current(&self) -> Result<Response> {
+    pub async fn stop_current(&self) -> Result<()> {
         let mut client = IpcClient::connect(&self.socket_path).await?;
         client
-            .send(Command::StopCurrent {
-                mode: shepherd_api::StopMode::Graceful,
-            })
+            .stop_current(shepherd_api::StopMode::Graceful)
             .await
             .map_err(Into::into)
     }
 
-    pub async fn get_state(&self) -> Result<Response> {
+    pub async fn get_state(&self) -> Result<ServiceStateSnapshot> {
         let mut client = IpcClient::connect(&self.socket_path).await?;
-        client.send(Command::GetState).await.map_err(Into::into)
+        client.service_state().await.map_err(Into::into)
     }
 
     #[allow(dead_code)]
-    pub async fn list_entries(&self) -> Result<Response> {
+    pub async fn list_entries(&self) -> Result<Vec<shepherd_api::EntryView>> {
         let mut client = IpcClient::connect(&self.socket_path).await?;
-        client
-            .send(Command::ListEntries { at_time: None })
-            .await
-            .map_err(Into::into)
+        client.list_entries().await.map_err(Into::into)
+    }
+}
+
+/// Owned + human-friendly launch-outcome shape used by the UI layer.
+/// The IPC helper returns the raw wire form; the launcher's error
+/// path prefers a rendered reason string.
+#[derive(Debug, Clone)]
+pub enum LaunchOutcomeOwned {
+    Approved {
+        session_id: String,
+        deadline: Option<chrono::DateTime<chrono::Local>>,
+    },
+    Denied {
+        message: String,
+    },
+}
+
+impl From<LaunchOutcome> for LaunchOutcomeOwned {
+    fn from(v: LaunchOutcome) -> Self {
+        match v {
+            LaunchOutcome::Approved {
+                session_id,
+                deadline,
+            } => LaunchOutcomeOwned::Approved {
+                session_id,
+                deadline,
+            },
+            LaunchOutcome::Denied { reasons } => LaunchOutcomeOwned::Denied {
+                message: reasons
+                    .iter()
+                    .map(reason_to_message)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            },
+        }
     }
 }
 

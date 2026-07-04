@@ -1,9 +1,9 @@
 //! Volume monitoring and control module
 //!
-//! Provides volume status and control via shepherdd.
-//! The service handles actual volume control and enforces restrictions.
+//! Provides volume status and control via shepherdd. The service
+//! handles actual volume control and enforces restrictions.
 
-use shepherd_api::{Command, ResponsePayload, VolumeInfo};
+use shepherd_api::VolumeInfo;
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use tokio::runtime::Runtime;
@@ -11,7 +11,6 @@ use tokio::runtime::Runtime;
 /// Get current volume status from shepherdd
 pub fn get_volume_status() -> Option<VolumeInfo> {
     let socket_path = default_socket_path();
-
     let rt = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -19,19 +18,10 @@ pub fn get_volume_status() -> Option<VolumeInfo> {
             return None;
         }
     };
-
     rt.block_on(async {
         match IpcClient::connect(&socket_path).await {
-            Ok(mut client) => match client.send(Command::GetVolume).await {
-                Ok(response) => {
-                    if let shepherd_api::ResponseResult::Ok(ResponsePayload::Volume(info)) =
-                        response.result
-                    {
-                        Some(info)
-                    } else {
-                        None
-                    }
-                }
+            Ok(mut client) => match client.get_volume().await {
+                Ok(info) => Some(info),
                 Err(e) => {
                     tracing::error!("Failed to get volume: {}", e);
                     None
@@ -48,42 +38,28 @@ pub fn get_volume_status() -> Option<VolumeInfo> {
 /// Toggle mute state via shepherdd
 pub fn toggle_mute() -> anyhow::Result<()> {
     let socket_path = default_socket_path();
-
     let rt = Runtime::new()?;
-
     rt.block_on(async {
         let mut client = IpcClient::connect(&socket_path).await?;
-        let response = client.send(Command::ToggleMute).await?;
-
-        match response.result {
-            shepherd_api::ResponseResult::Ok(ResponsePayload::VolumeSet) => Ok(()),
-            shepherd_api::ResponseResult::Ok(ResponsePayload::VolumeDenied { reason }) => {
-                Err(anyhow::anyhow!("Volume denied: {}", reason))
-            }
-            shepherd_api::ResponseResult::Err(e) => Err(anyhow::anyhow!("Error: {}", e.message)),
-            _ => Err(anyhow::anyhow!("Unexpected response")),
-        }
+        client
+            .toggle_mute()
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
     })
 }
 
 /// Set volume to a specific percentage via shepherdd
 pub fn set_volume(percent: u8) -> anyhow::Result<()> {
     let socket_path = default_socket_path();
-
     let rt = Runtime::new()?;
-
     rt.block_on(async {
         let mut client = IpcClient::connect(&socket_path).await?;
-        let response = client.send(Command::SetVolume { percent }).await?;
-
-        match response.result {
-            shepherd_api::ResponseResult::Ok(ResponsePayload::VolumeSet) => Ok(()),
-            shepherd_api::ResponseResult::Ok(ResponsePayload::VolumeDenied { reason }) => {
-                Err(anyhow::anyhow!("Volume denied: {}", reason))
-            }
-            shepherd_api::ResponseResult::Err(e) => Err(anyhow::anyhow!("Error: {}", e.message)),
-            _ => Err(anyhow::anyhow!("Unexpected response")),
-        }
+        client
+            .set_volume(percent)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
     })
 }
 

@@ -201,85 +201,58 @@ impl LauncherApp {
             let entry_id = entry_id.clone();
             rt.spawn(async move {
                 match client.launch(&entry_id).await {
-                    Ok(response) => {
-                        debug!(response = ?response, "Launch response");
-                        // Handle error responses from shepherdd
-                        match response.result {
-                            shepherd_api::ResponseResult::Ok(payload) => {
-                                // Check what kind of success response we got
-                                match payload {
-                                    shepherd_api::ResponsePayload::LaunchApproved { session_id, deadline } => {
-                                        info!(session_id = %session_id, "Launch approved, setting SessionActive");
-                                        let now = shepherd_util::now();
-                                        // For unlimited sessions (deadline=None), time_remaining is None
-                                        let time_remaining = deadline.and_then(|d| {
-                                            if d > now {
-                                                (d - now).to_std().ok()
-                                            } else {
-                                                Some(std::time::Duration::ZERO)
-                                            }
-                                        });
-                                        state.set(LauncherState::SessionActive {
-                                            session_id,
-                                            entry_label: entry_id.to_string(),
-                                            time_remaining,
-                                        });
-                                    }
-                                    shepherd_api::ResponsePayload::LaunchDenied { reasons } => {
-                                        let message = reasons
-                                            .iter()
-                                            .map(|r| format!("{:?}", r))
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        error!(message = %message, "Launch denied");
-                                        state.set(LauncherState::Error { message });
-                                    }
-                                    _ => {
-                                        // Other OK responses - events will update state
-                                    }
-                                }
+                    Ok(crate::client::LaunchOutcomeOwned::Approved {
+                        session_id,
+                        deadline,
+                    }) => {
+                        info!(session_id = %session_id, "Launch approved, setting SessionActive");
+                        let now = shepherd_util::now();
+                        let time_remaining = deadline.and_then(|d| {
+                            if d > now {
+                                (d - now).to_std().ok()
+                            } else {
+                                Some(std::time::Duration::ZERO)
                             }
-                            shepherd_api::ResponseResult::Err(err) => {
-                                // Launch failed on server side - refresh state to recover
-                                error!(error = %err.message, "Launch failed on server");
-                                // Request fresh state from shepherdd to get back to correct state
-                                match client.get_state().await {
-                                    Ok(state_resp) => {
-                                        if let shepherd_api::ResponseResult::Ok(
-                                            shepherd_api::ResponsePayload::State(snapshot)
-                                        ) = state_resp.result {
-                                            if snapshot.current_session.is_some() {
-                                                // Session is still active somehow
-                                                debug!("Session still active after spawn failure");
-                                            } else {
-                                                // No session - return to idle with entries
-                                                state.set(LauncherState::Idle {
-                                                    entries: snapshot.entries,
-                                                });
-                                            }
-                                        } else {
-                                            // Unexpected response, show error
-                                            state.set(LauncherState::Error {
-                                                message: format!("Launch failed: {}", err.message),
-                                            });
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Can't get state, show error
-                                        error!(error = %e, "Failed to get state after launch failure");
-                                        state.set(LauncherState::Error {
-                                            message: format!("Launch failed: {}", err.message),
-                                        });
-                                    }
-                                }
-                            }
-                        }
+                        });
+                        // The wire form is a string; the launcher state
+                        // uses a typed SessionId. Parse; if the server
+                        // ever hands us something malformed we synthesise
+                        // a fresh id and drive on rather than crashing
+                        // the UI.
+                        let session_id = uuid::Uuid::parse_str(&session_id)
+                            .map(shepherd_util::SessionId::from_uuid)
+                            .unwrap_or_else(|_| shepherd_util::SessionId::new());
+                        state.set(LauncherState::SessionActive {
+                            session_id,
+                            entry_label: entry_id.to_string(),
+                            time_remaining,
+                        });
+                    }
+                    Ok(crate::client::LaunchOutcomeOwned::Denied { message }) => {
+                        error!(message = %message, "Launch denied");
+                        state.set(LauncherState::Error { message });
                     }
                     Err(e) => {
-                        error!(error = %e, "Launch failed");
-                        state.set(LauncherState::Error {
-                            message: format!("Launch failed: {}", e),
-                        });
+                        // Launch failed on server side (spawn error, entry
+                        // not found, ...) — refresh state to recover.
+                        error!(error = %e, "Launch failed on server");
+                        match client.get_state().await {
+                            Ok(snapshot) => {
+                                if snapshot.current_session.is_some() {
+                                    debug!("Session still active after spawn failure");
+                                } else {
+                                    state.set(LauncherState::Idle {
+                                        entries: snapshot.entries,
+                                    });
+                                }
+                            }
+                            Err(re) => {
+                                error!(error = %re, "Failed to get state after launch failure");
+                                state.set(LauncherState::Error {
+                                    message: format!("Launch failed: {}", e),
+                                });
+                            }
+                        }
                     }
                 }
             });
@@ -532,22 +505,22 @@ impl LauncherApp {
     ) {
         runtime.spawn(async move {
             match command_client.stop_current().await {
-                Ok(response) => match response.result {
-                    shepherd_api::ResponseResult::Ok(shepherd_api::ResponsePayload::Stopped) => {
-                        info!("StopCurrent acknowledged");
-                    }
-                    shepherd_api::ResponseResult::Err(err) => {
-                        debug!(error = %err.message, "StopCurrent request denied");
-                    }
-                    _ => {
-                        debug!("Unexpected StopCurrent response payload");
-                    }
-                },
+                Ok(()) => {
+                    info!("stop_current acknowledged");
+                }
                 Err(e) => {
-                    error!(error = %e, "StopCurrent request failed");
-                    state.set(LauncherState::Error {
-                        message: format!("Failed to stop current activity: {}", e),
-                    });
+                    // "no active session" here is a benign race (the
+                    // session already ended between the button press and
+                    // the RPC hitting the server), not an error to surface.
+                    let msg = e.to_string();
+                    if msg.to_ascii_lowercase().contains("no active session") {
+                        debug!("stop_current: no active session");
+                    } else {
+                        error!(error = %e, "stop_current failed");
+                        state.set(LauncherState::Error {
+                            message: format!("Failed to stop current activity: {}", e),
+                        });
+                    }
                 }
             }
         });

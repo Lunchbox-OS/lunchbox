@@ -1,0 +1,14 @@
+# Android companion-app build dependencies (apt).
+#
+# Installed by `./scripts/shepherd deps install android`, which also
+# downloads the Android command-line tools + SDK platform/build-tools
+# into /opt/android-sdk (see scripts/lib/deps.sh:install_android_sdk).
+#
+# Only the host packages live here; the SDK itself is fetched by
+# sdkmanager because Google does not publish it through apt.
+
+# JDK for the Android Gradle Plugin (AGP 8.x requires JDK 17+).
+openjdk-21-jdk-headless
+
+# sdkmanager ships the cmdline-tools as a zip; unzip extracts it.
+unzip
