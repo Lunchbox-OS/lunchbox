@@ -18,3 +18,6 @@ clap = { workspace = true, optional = true }
 # Derive `clap::ValueEnum` for the CLI-facing enums (Quality). Enabled by the
 # `shepherd-media` Linux binary.
 clap = ["dep:clap"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

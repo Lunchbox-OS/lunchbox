@@ -4367,6 +4367,7 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "serde",
+ "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",
 ]

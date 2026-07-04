@@ -9,9 +9,11 @@
 //! persistent state for its configured libraries and per-library caching
 //! options. That state and the operations on it live here.
 
+pub mod poster_cache;
 pub mod quality;
 pub mod settings;
 
+pub use poster_cache::{RemotePosterCache, Resolution as PosterResolution};
 pub use quality::{CacheMode, PosterPolicy, Quality};
 pub use settings::{
     AppSettings, CachingSettings, LibraryEntry, LibrarySource, SETTINGS_SCHEMA_VERSION,

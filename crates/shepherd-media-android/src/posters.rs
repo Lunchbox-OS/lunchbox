@@ -9,21 +9,16 @@
 //! like `Always`; gating it on a metered/Wi-Fi connection needs the Android
 //! connectivity JNI bridge, which is not wired yet.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::path::PathBuf;
 
 use shepherd_media_app::PosterPolicy;
+use shepherd_media_app::RemotePosterCache;
+use shepherd_media_app::poster_cache::DEFAULT_TTL;
 use shepherd_media_core::PosterRef;
 
 /// Largest poster we'll pull over HTTP, to bound memory on a tiny device.
 const MAX_POSTER_BYTES: u64 = 8 * 1024 * 1024;
-
-/// How long a cached remote poster is considered fresh. A stale entry is still
-/// used as an offline fallback when a refresh fails (mirrors the Linux binary).
-const CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
 
 /// Whether a poster should be loaded at all under the given policy.
 pub fn should_load(policy: PosterPolicy) -> bool {
@@ -34,20 +29,19 @@ pub fn should_load(policy: PosterPolicy) -> bool {
     }
 }
 
-/// On-disk cache for remote posters. Local posters are read straight from their
-/// path and never cached. Cheap to clone (just a dir + TTL) so each worker
-/// thread gets its own handle.
+/// Poster loader for the browse grid. Local posters are read straight from
+/// their path; remote posters go through the shared [`RemotePosterCache`]
+/// (URL-hash keyed, TTL + offline stale-fallback), with the capped download and
+/// image decoding added here. Cheap to clone so each worker gets its own handle.
 #[derive(Clone)]
 pub struct PosterCache {
-    dir: PathBuf,
-    ttl: Duration,
+    remote: RemotePosterCache,
 }
 
 impl PosterCache {
     pub fn new(dir: PathBuf) -> Self {
         Self {
-            dir,
-            ttl: CACHE_TTL,
+            remote: RemotePosterCache::new(dir, DEFAULT_TTL),
         }
     }
 
@@ -56,7 +50,10 @@ impl PosterCache {
     pub fn load(&self, poster: &PosterRef) -> Option<Vec<u8>> {
         match poster {
             PosterRef::Local(path) => std::fs::read(path).ok(),
-            PosterRef::Remote(url) => self.load_remote(url.as_str()),
+            PosterRef::Remote(url) => {
+                let url = url.as_str();
+                self.remote.load(url, || http_get_bytes(url))
+            }
         }
     }
 
@@ -64,49 +61,6 @@ impl PosterCache {
     pub fn load_and_decode(&self, poster: &PosterRef) -> Option<egui::ColorImage> {
         decode(&self.load(poster)?)
     }
-
-    fn load_remote(&self, url: &str) -> Option<Vec<u8>> {
-        let path = self.path_for(url);
-        let cached = read_with_age(&path);
-
-        // Fresh cache hit: use it without touching the network.
-        if let Some((bytes, age)) = &cached
-            && *age < self.ttl
-        {
-            return Some(bytes.clone());
-        }
-
-        // Stale or missing: try a fresh fetch, falling back to the stale copy.
-        match http_get_bytes(url) {
-            Some(bytes) => {
-                self.write(&path, &bytes);
-                Some(bytes)
-            }
-            None => cached.map(|(bytes, _)| bytes),
-        }
-    }
-
-    fn path_for(&self, url: &str) -> PathBuf {
-        let mut h = DefaultHasher::new();
-        url.hash(&mut h);
-        self.dir.join(format!("{:016x}.bin", h.finish()))
-    }
-
-    fn write(&self, path: &Path, bytes: &[u8]) {
-        let _ = std::fs::create_dir_all(&self.dir);
-        let _ = std::fs::write(path, bytes);
-    }
-}
-
-/// Read a cached file with its age, or `None` if it doesn't exist.
-fn read_with_age(path: &Path) -> Option<(Vec<u8>, Duration)> {
-    let bytes = std::fs::read(path).ok()?;
-    let age = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| SystemTime::now().duration_since(t).ok())
-        .unwrap_or(Duration::ZERO);
-    Some((bytes, age))
 }
 
 fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
@@ -181,25 +135,6 @@ mod tests {
         assert_eq!(img.size, [4, 4]);
     }
 
-    #[test]
-    fn fresh_cache_entry_is_a_hit() {
-        let dir = unique_dir("hit");
-        let cache = PosterCache::new(dir.clone());
-        // Pre-seed the cache file for a URL; a fresh entry must be returned
-        // without any network access (this URL is never reachable in tests).
-        let url = "https://unreachable.invalid/poster.png";
-        let path = cache.path_for(url);
-        let bytes = red_png(5, 5);
-        cache.write(&path, &bytes);
-
-        let loaded = cache
-            .load(&PosterRef::Remote(url.parse().unwrap()))
-            .expect("fresh cache hit");
-        assert_eq!(loaded, bytes);
-    }
-
-    #[test]
-    fn read_with_age_reports_missing() {
-        assert!(read_with_age(Path::new("/nonexistent/poster.bin")).is_none());
-    }
+    // The remote disk-cache behavior (fresh hit, stale offline fallback, TTL)
+    // now lives in and is tested by shepherd-media-app's RemotePosterCache.
 }
