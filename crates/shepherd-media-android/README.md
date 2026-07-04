@@ -89,12 +89,14 @@ Settings persist under `<tmp>/shepherd-media-preview/settings.toml`.
 
 ## Build the Android library
 
-Requires the Rust Android target, `cargo-ndk`, and an installed NDK:
+Requires the Rust Android target, `cargo-ndk`, and an installed NDK. The NDK is
+provisioned into `/opt/android-sdk` by `./scripts/shepherd deps install android`
+(the same deps set the companion app uses); point `ANDROID_NDK_HOME` at it:
 
 ```sh
 rustup target add aarch64-linux-android
 cargo install cargo-ndk
-export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>
+export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>   # e.g. .../ndk/27.2.12479018
 
 cargo ndk -t arm64-v8a build -p shepherd-media-android --release
 ```
