@@ -69,6 +69,10 @@ pub struct RawServiceConfig {
     /// path (works without IP autodiscovery or static IP). See
     /// `docs/ai/history/2026-06-20 002 ble-management.md`.
     pub ble_management: Option<RawBleManagementConfig>,
+
+    /// External monitor / docking behaviour (issue #87).
+    #[serde(default)]
+    pub display: Option<RawDisplayConfig>,
 }
 
 /// Raw entry definition
@@ -588,6 +592,20 @@ pub struct RawAutoBrightnessConfig {
 
     /// How often to sample the light sensor, in seconds.
     pub poll_interval_seconds: Option<u64>,
+}
+
+/// External monitor / docking settings (issue #87).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawDisplayConfig {
+    /// Master switch for docking support. When false, shepherdd leaves display
+    /// configuration entirely to sway (default: true).
+    #[serde(default = "default_true")]
+    pub docking_enabled: bool,
+
+    /// Route audio to the external video device while a secondary display is in
+    /// use, in both mirror and external-only modes (default: true).
+    #[serde(default = "default_true")]
+    pub mirror_audio: bool,
 }
 
 fn default_true() -> bool {

@@ -10,6 +10,7 @@
 //! - Ambient-light-sensor reads via IIO sysfs (for automatic brightness)
 
 mod adapter;
+mod audio_route;
 mod brightness;
 mod browser;
 mod light;
@@ -20,8 +21,13 @@ mod sway;
 mod volume;
 
 pub use adapter::*;
+pub use audio_route::{AudioRouter, NoOpAudioRouter, PipeWireAudioRouter};
 pub use brightness::*;
 pub use light::*;
 pub use process::*;
-pub use sway::{OutputScale, get_outputs, set_output_scale};
+pub use sway::{
+    DisplayInfo, OutputBackend, OutputScale, SwaymsgBackend, disable_output, enable_output,
+    get_displays, get_outputs, move_to_output_fullscreen, pick_mirror_mode, select_primary,
+    set_output_mode, set_output_scale,
+};
 pub use volume::*;

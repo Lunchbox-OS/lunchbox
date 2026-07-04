@@ -17,11 +17,12 @@ use shepherd_ble::{BleServer, BleServerConfig};
 use shepherd_config::load_config;
 use shepherd_core::{CoreEngine, CoreEvent};
 use shepherd_host_api::{
-    BrightnessController, HidpiController, HostAdapter, HostEvent, LightSensor,
-    StopMode as HostStopMode, VolumeController,
+    BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent, LightSensor,
+    NoOpDisplayController, StopMode as HostStopMode, VolumeController,
 };
 use shepherd_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxVolumeController,
+    PipeWireAudioRouter, SwaymsgBackend,
 };
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
@@ -38,11 +39,14 @@ use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod display;
+mod display_watch;
 mod hidpi;
 mod internet;
 mod pairing_display;
 mod system_events;
 
+use display::{DisplayManager, WlMirrorLauncher};
 use hidpi::XwaylandHidpi;
 
 /// shepherdd - Policy enforcement service for child-focused computing
@@ -238,6 +242,28 @@ impl Service {
         // controller via `Arc<dyn HidpiController>`).
         let hidpi = Arc::new(XwaylandHidpi::new(ipc_ref.clone(), event_tx.clone()));
 
+        // External monitor / docking controller (issue #87). When docking is
+        // disabled in config, a no-op controller is used so the management RPCs
+        // still resolve. When enabled, the real `DisplayManager` is also handed
+        // to a hotplug watcher and initialized below.
+        let display_cfg = { engine.lock().await.policy().service.display.clone() };
+        let (display_svc, display_manager): (
+            Arc<dyn DisplayController>,
+            Option<Arc<DisplayManager>>,
+        ) = if display_cfg.docking_enabled {
+            let mgr = Arc::new(DisplayManager::new(
+                Arc::new(SwaymsgBackend),
+                Arc::new(WlMirrorLauncher::new()),
+                Arc::new(PipeWireAudioRouter::new()),
+                display_cfg.mirror_audio,
+                ipc_ref.clone(),
+                event_tx.clone(),
+            ));
+            (mgr.clone() as Arc<dyn DisplayController>, Some(mgr))
+        } else {
+            (Arc::new(NoOpDisplayController), None)
+        };
+
         // Start management transports (HTTP and/or BLE). Both speak the
         // same shepherd_management::ManagementService, so the service is
         // constructed once and shared.
@@ -307,6 +333,7 @@ impl Service {
                 config_path: config_path.clone(),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
+                display: display_svc.clone(),
             })
         };
         let svc: Arc<dyn ManagementService> = svc_concrete.clone();
@@ -434,6 +461,14 @@ impl Service {
                 error!(error = %e, "IPC server error");
             }
         });
+
+        // Initialize the display arrangement (detect primary, mirror any already
+        // connected external) and watch for hotplug events (issue #87).
+        if let Some(mgr) = display_manager {
+            let init_mgr = mgr.clone();
+            tokio::spawn(async move { init_mgr.initialize().await });
+            display_watch::spawn(mgr, shutdown_rx.clone());
+        }
 
         // Set up config file watcher
         let (config_change_tx, mut config_change_rx) = tokio::sync::mpsc::unbounded_channel::<()>();

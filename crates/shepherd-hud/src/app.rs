@@ -459,6 +459,31 @@ fn build_hud_content(
 
     right_box.append(&brightness_box);
 
+    // Display mode toggle (issue #87): mirror ⇄ external-only. Hidden unless an
+    // external display is connected. Uses an explicit child Image so its pixel
+    // size follows the HUD scale factor, like the other indicator buttons.
+    let display_icon = gtk4::Image::from_icon_name("preferences-desktop-display-symbolic");
+    display_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let display_button = gtk4::Button::builder()
+        .child(&display_icon)
+        .has_frame(false)
+        .tooltip_text("Toggle external display mode")
+        .visible(false)
+        .build();
+    display_button.add_css_class("indicator-button");
+    let state_for_display = state.clone();
+    display_button.connect_clicked(move |_| {
+        if let Some(ds) = state_for_display.display_state() {
+            let target = ds.mode.toggled();
+            spawn_action(
+                default_socket_path(),
+                "set_display_mode",
+                move |mut client| async move { client.set_display_mode(target).await.map(|_| ()) },
+            );
+        }
+    });
+    right_box.append(&display_button);
+
     // Network connectivity indicator. Shown only when at least one
     // connectivity check is configured. Icon reflects the worst status across
     // all configured checks; the tooltip lists every check and its result so
@@ -619,14 +644,20 @@ fn build_hud_content(
     let confirm_popover_for_timer = confirm_popover.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
+    let display_button_clone = display_button.clone();
+    // Tracks the connector the HUD is currently anchored to, so we only
+    // re-anchor the layer-shell surface when the active output actually changes.
+    let anchored_connector = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+    let window_for_monitor = window.clone();
     // All icons we resize when the HUD scale factor changes.
-    let scaled_icons: [gtk4::Image; 6] = [
+    let scaled_icons: [gtk4::Image; 7] = [
         warning_icon.clone(),
         battery_icon.clone(),
         volume_icon.clone(),
         brightness_icon.clone(),
         action_icon.clone(),
         network_icon.clone(),
+        display_icon.clone(),
     ];
     // Track the most-recently-applied scale factor so we only rebuild the
     // stylesheet when shepherdd sends a new HudScaleChanged value.
@@ -799,6 +830,38 @@ fn build_hud_content(
             network_box_clone.set_tooltip_text(Some(&tooltip));
         }
 
+        // Update the display-mode toggle and follow the active output (#87).
+        // The button only appears while an external display is connected; its
+        // tooltip names the action the toggle performs from the current mode.
+        if let Some(ds) = state.display_state() {
+            use shepherd_api::DisplayMode;
+            match (ds.has_secondary(), ds.mode) {
+                (true, DisplayMode::Mirror) => {
+                    display_button_clone.set_visible(true);
+                    display_button_clone.set_tooltip_text(Some("Use external display only"));
+                }
+                (true, DisplayMode::ExternalOnly) => {
+                    display_button_clone.set_visible(true);
+                    display_button_clone.set_tooltip_text(Some("Mirror to external display"));
+                }
+                _ => display_button_clone.set_visible(false),
+            }
+            // The active output is the external in external-only mode, else the
+            // primary. Re-anchor the layer-shell surface there so the HUD is
+            // always visible on the screen the user is looking at.
+            let active = match ds.mode {
+                DisplayMode::ExternalOnly => ds.secondary.clone(),
+                _ => ds.primary.clone(),
+            };
+            if let Some(name) = active
+                && anchored_connector.borrow().as_deref() != Some(name.as_str())
+                && let Some(monitor) = monitor_by_connector(&name)
+            {
+                window_for_monitor.set_monitor(&monitor);
+                *anchored_connector.borrow_mut() = Some(name);
+            }
+        }
+
         // Update battery
         if suspended {
             // Placeholder so a stale charge level isn't frozen on screen.
@@ -883,6 +946,19 @@ fn build_hud_content(
     });
 
     container
+}
+
+/// Find the GDK monitor whose connector name matches `connector` (e.g.
+/// "eDP-1", "HDMI-A-1"), so the HUD can anchor its layer-shell surface to a
+/// specific output (issue #87). Returns `None` if no monitor reports that
+/// connector (e.g. it was just disabled).
+fn monitor_by_connector(connector: &str) -> Option<gtk4::gdk::Monitor> {
+    use gtk4::gio::prelude::ListModelExt;
+    let monitors = gtk4::gdk::Display::default()?.monitors();
+    (0..monitors.n_items())
+        .filter_map(|i| monitors.item(i))
+        .filter_map(|obj| obj.downcast::<gtk4::gdk::Monitor>().ok())
+        .find(|m| m.connector().as_deref() == Some(connector))
 }
 
 /// Install an empty `CssProvider` at application priority and return it so
@@ -1284,6 +1360,14 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                             state.set_initial_brightness(info);
                         }
                         Err(e) => tracing::warn!("Failed to get initial brightness: {}", e),
+                    }
+
+                    // Seed the display arrangement so the mirror/external toggle
+                    // and active-output anchor are correct before any hotplug
+                    // event fires (issue #87).
+                    match client.get_display_state().await {
+                        Ok(ds) => state.set_display_state(ds),
+                        Err(e) => tracing::warn!("Failed to get initial display state: {}", e),
                     }
 
                     // Pull a fresh service snapshot so the network indicator

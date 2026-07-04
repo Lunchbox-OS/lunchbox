@@ -588,6 +588,76 @@ impl BrightnessInfo {
     }
 }
 
+/// A compositor output video mode: pixel resolution and refresh rate.
+///
+/// `refresh_mhz` is millihertz, matching sway's `get_outputs` JSON (60 Hz is
+/// `60000`). Refresh participates in equality, but [`VideoMode::area`] ignores
+/// it so "highest resolution" comparisons are purely by pixel count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoMode {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub refresh_mhz: u32,
+}
+
+impl VideoMode {
+    /// Pixel area, used to rank modes by resolution.
+    pub fn area(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+}
+
+/// How the kiosk drives displays when an external monitor is docked (issue #87).
+///
+/// Exactly one logical output is ever active in every variant, so the
+/// one-activity-at-a-time invariant always holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayMode {
+    /// Only the internal/primary panel is active — the state when no external
+    /// display is connected.
+    SingleInternal,
+    /// The external display mirrors the primary. Default whenever an external
+    /// display connects.
+    Mirror,
+    /// The primary panel is disabled and the external display drives the
+    /// session at its native resolution.
+    ExternalOnly,
+}
+
+impl DisplayMode {
+    /// The mode the HUD toggle flips to from the current one. `Mirror` and
+    /// `ExternalOnly` toggle between each other; `SingleInternal` has no
+    /// external display to toggle, so it maps to itself.
+    pub fn toggled(self) -> Self {
+        match self {
+            DisplayMode::Mirror => DisplayMode::ExternalOnly,
+            DisplayMode::ExternalOnly => DisplayMode::Mirror,
+            DisplayMode::SingleInternal => DisplayMode::SingleInternal,
+        }
+    }
+}
+
+/// Snapshot of the compositor's display arrangement, broadcast to shells so the
+/// HUD can show/hide and label its mirror/external toggle (issue #87).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayState {
+    pub mode: DisplayMode,
+    /// Connector name of the primary (internal, first-enumerated) output.
+    pub primary: Option<String>,
+    /// Connector name of the external/secondary output, if one is connected.
+    pub secondary: Option<String>,
+}
+
+impl DisplayState {
+    /// True when an external display is connected — the condition under which
+    /// the HUD reveals its mode toggle.
+    pub fn has_secondary(&self) -> bool {
+        self.secondary.is_some()
+    }
+}
+
 /// A parent-set daily override for a single entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyOverride {

@@ -246,6 +246,7 @@ fn make_app_with_admin_and_policy(
         config_path,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
+        display: Arc::new(shepherd_host_api::NoOpDisplayController),
     });
     let state = AppState { svc };
     handlers::router(
