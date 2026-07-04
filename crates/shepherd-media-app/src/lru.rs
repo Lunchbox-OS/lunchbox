@@ -73,9 +73,21 @@ mod tests {
         let mut evicted = Vec::new();
         evict_to_cap(
             vec![
-                LruEntry { path: old.clone(), size: 100, recency: 1u64 },
-                LruEntry { path: mid.clone(), size: 100, recency: 2 },
-                LruEntry { path: new.clone(), size: 100, recency: 3 },
+                LruEntry {
+                    path: old.clone(),
+                    size: 100,
+                    recency: 1u64,
+                },
+                LruEntry {
+                    path: mid.clone(),
+                    size: 100,
+                    recency: 2,
+                },
+                LruEntry {
+                    path: new.clone(),
+                    size: 100,
+                    recency: 3,
+                },
             ],
             250,
             |p| evicted.push(p.to_path_buf()),
@@ -92,7 +104,11 @@ mod tests {
         let a = seed(tmp.path(), "a", 100);
         let mut hook_ran = false;
         evict_to_cap(
-            vec![LruEntry { path: a.clone(), size: 100, recency: 1u64 }],
+            vec![LruEntry {
+                path: a.clone(),
+                size: 100,
+                recency: 1u64,
+            }],
             1_000,
             |_| hook_ran = true,
         );
