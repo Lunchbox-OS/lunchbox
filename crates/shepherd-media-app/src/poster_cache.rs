@@ -17,24 +17,15 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::cache::{self, Freshness};
+
 /// Default freshness window for a cached poster. Matches the playlist metadata
 /// cache so the two evict — and fall back offline — on the same cadence.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(6 * 3600);
 
-/// Outcome of resolving a URL against the cache (and, when needed, a live
-/// fetch). The caller decides how to log each case; the cache has already
-/// written back on [`Resolution::Fetched`].
-pub enum Resolution {
-    /// Fresh cache hit — these bytes came from disk, no fetch was attempted.
-    Fresh(Vec<u8>),
-    /// A live fetch succeeded; the bytes have been written back to the cache.
-    Fetched(Vec<u8>),
-    /// The fetch failed but a stale cache entry existed; serving the stale
-    /// bytes as an offline fallback. Carries the fetch error for logging.
-    Stale(Vec<u8>, String),
-    /// No bytes available: a cache miss plus a failed fetch. Carries the error.
-    Miss(String),
-}
+/// Outcome of resolving a poster URL against the cache and, when needed, a live
+/// fetch — the shared [`cache::Resolution`] specialized to poster bytes.
+pub type Resolution = cache::Resolution<Vec<u8>>;
 
 /// A URL-keyed on-disk cache of remote poster bytes.
 ///
@@ -73,25 +64,21 @@ impl RemotePosterCache {
         fetch: impl FnOnce() -> Result<Vec<u8>, String>,
     ) -> Resolution {
         let path = self.path_for(url);
-        let cached = read_with_age(&path);
+        let cached = read_with_age(&path).map(|(bytes, age)| {
+            let freshness = if age < self.ttl {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            };
+            (bytes, freshness)
+        });
 
-        if let Some((bytes, age)) = &cached
-            && *age < self.ttl
-        {
-            return Resolution::Fresh(bytes.clone());
+        let resolution = cache::resolve(cached, fetch);
+        // Persist a freshly fetched poster so the next launch is a cache hit.
+        if let cache::Resolution::Fetched(bytes) = &resolution {
+            self.write(&path, bytes);
         }
-
-        let stale = cached.map(|(bytes, _)| bytes);
-        match fetch() {
-            Ok(bytes) => {
-                self.write(&path, &bytes);
-                Resolution::Fetched(bytes)
-            }
-            Err(e) => match stale {
-                Some(bytes) => Resolution::Stale(bytes, e),
-                None => Resolution::Miss(e),
-            },
-        }
+        resolution
     }
 
     /// Convenience over [`resolve`](Self::resolve) for callers that don't need

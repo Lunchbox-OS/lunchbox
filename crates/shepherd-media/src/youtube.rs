@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use shepherd_media_app::cache::{self, Freshness};
 use shepherd_media_core::{PlaylistInfo, YoutubePlaylistEntry, parse_flat_playlist};
 use tracing::{debug, warn};
 use url::Url;
@@ -111,24 +112,14 @@ fn playlist_cache_path(url: &str) -> Option<PathBuf> {
     )
 }
 
-/// Freshness of an on-disk cache hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheFreshness {
-    /// Cached entry is within [`CACHE_TTL_SECS`] of now.
-    Fresh,
-    /// Cached entry is older than [`CACHE_TTL_SECS`]; usable as an offline
-    /// fallback when a live fetch fails.
-    Stale,
-}
-
 /// Try to load playlist metadata from the on-disk cache.
 ///
 /// Returns `None` if the cache file is absent, unreadable, or unparseable.
 /// All errors are logged at `warn` level and treated as cache misses so the
-/// caller can fall back to a live fetch. The returned [`CacheFreshness`]
-/// lets the caller decide whether to trust the entry directly or only use
-/// it as an offline fallback.
-fn load_from_cache(url: &str) -> Option<(PlaylistInfo, CacheFreshness)> {
+/// caller can fall back to a live fetch. The returned [`Freshness`] lets the
+/// caller decide whether to trust the entry directly or only use it as an
+/// offline fallback.
+fn load_from_cache(url: &str) -> Option<(PlaylistInfo, Freshness)> {
     let path = playlist_cache_path(url)?;
     let bytes = std::fs::read(&path).ok()?;
     let cached: CachedPlaylist = match serde_json::from_slice(&bytes) {
@@ -145,10 +136,10 @@ fn load_from_cache(url: &str) -> Option<(PlaylistInfo, CacheFreshness)> {
         .as_secs();
     let freshness = if now.saturating_sub(cached.fetched_at) >= CACHE_TTL_SECS {
         debug!("playlist cache stale for {url}");
-        CacheFreshness::Stale
+        Freshness::Stale
     } else {
         debug!("playlist cache hit for {url} ({})", path.display());
-        CacheFreshness::Fresh
+        Freshness::Fresh
     };
 
     let info = PlaylistInfo {
@@ -218,24 +209,17 @@ fn save_to_cache(url: &str, info: &PlaylistInfo) {
 /// The caller is responsible for having `yt-dlp` installed; see
 /// `docs/shepherd-media.md` for setup instructions.
 pub fn fetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
-    let cached = load_from_cache(url);
-    if let Some((info, CacheFreshness::Fresh)) = cached {
-        return Ok(info);
-    }
-    let stale = cached.map(|(info, _)| info);
-
-    match fetch_playlist_live(url) {
-        Ok(info) => {
+    match cache::resolve(load_from_cache(url), || fetch_playlist_live(url)) {
+        cache::Resolution::Fresh(info) => Ok(info),
+        cache::Resolution::Fetched(info) => {
             save_to_cache(url, &info);
             Ok(info)
         }
-        Err(e) => match stale {
-            Some(info) => {
-                warn!("live playlist fetch failed for {url}: {e}; using stale cache");
-                Ok(info)
-            }
-            None => Err(e),
-        },
+        cache::Resolution::Stale(info, e) => {
+            warn!("live playlist fetch failed for {url}: {e}; using stale cache");
+            Ok(info)
+        }
+        cache::Resolution::Miss(e) => Err(e),
     }
 }
 
