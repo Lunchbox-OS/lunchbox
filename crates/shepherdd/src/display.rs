@@ -109,6 +109,9 @@ impl MirrorLauncher for WlMirrorLauncher {
 struct Inner {
     /// Connector name of the primary output, fixed at first enumeration.
     primary: Option<String>,
+    /// The primary's mode at startup, captured before any mirror-driven change
+    /// so it can be restored when the external display is disconnected.
+    primary_native_mode: Option<VideoMode>,
     /// Connector name of the currently connected external output, if any.
     secondary: Option<String>,
     mode: DisplayMode,
@@ -134,6 +137,11 @@ pub struct DisplayManager {
     ipc: Arc<IpcServer>,
     event_tx: broadcast::Sender<Event>,
     inner: Mutex<Inner>,
+    /// Serializes whole reconcile/apply sequences so a burst of HUD toggles (or
+    /// a toggle racing a hotplug) can't interleave enable/disable/mode-set and
+    /// wl-mirror start/stop and leave outputs — or the HUD's layer surface — in
+    /// a broken state.
+    apply_lock: Mutex<()>,
 }
 
 impl DisplayManager {
@@ -154,9 +162,11 @@ impl DisplayManager {
             event_tx,
             inner: Mutex::new(Inner {
                 primary: None,
+                primary_native_mode: None,
                 secondary: None,
                 mode: DisplayMode::SingleInternal,
             }),
+            apply_lock: Mutex::new(()),
         }
     }
 
@@ -176,13 +186,16 @@ impl DisplayManager {
                 return;
             }
         };
-        let primary = select_primary(&displays).map(|d| d.name.clone());
+        let primary_disp = select_primary(&displays);
+        let primary = primary_disp.map(|d| d.name.clone());
+        let primary_native_mode = primary_disp.and_then(|d| d.current_mode);
         {
             let mut inner = self.inner.lock().await;
             inner.primary = primary.clone();
+            inner.primary_native_mode = primary_native_mode;
         }
         if let Some(p) = &primary {
-            info!(primary = %p, "Captured primary display");
+            info!(primary = %p, mode = ?primary_native_mode, "Captured primary display");
         }
         self.reconcile(&displays, true).await;
     }
@@ -204,6 +217,7 @@ impl DisplayManager {
     /// Core reconciliation. `initial` forces a broadcast even when nothing
     /// changes, so shells learn the starting state.
     async fn reconcile(&self, displays: &[DisplayInfo], initial: bool) {
+        let _serial = self.apply_lock.lock().await;
         let (primary_name, prev_secondary, prev_mode) = {
             let inner = self.inner.lock().await;
             (inner.primary.clone(), inner.secondary.clone(), inner.mode)
@@ -270,6 +284,7 @@ impl DisplayManager {
                 if let Err(e) = self.backend.enable_output(primary).await {
                     warn!(error = %e, "Failed to enable primary output");
                 }
+                self.restore_primary_native(primary).await;
                 let _ = self
                     .backend
                     .map_pointer_to_output(POINTER_ALL_OUTPUTS)
@@ -281,6 +296,7 @@ impl DisplayManager {
                     effective = DisplayMode::SingleInternal;
                     self.mirror.stop().await;
                     let _ = self.backend.enable_output(primary).await;
+                    self.restore_primary_native(primary).await;
                     let _ = self
                         .backend
                         .map_pointer_to_output(POINTER_ALL_OUTPUTS)
@@ -339,6 +355,7 @@ impl DisplayManager {
                     effective = DisplayMode::SingleInternal;
                     self.mirror.stop().await;
                     let _ = self.backend.enable_output(primary).await;
+                    self.restore_primary_native(primary).await;
                     let _ = self
                         .backend
                         .map_pointer_to_output(POINTER_ALL_OUTPUTS)
@@ -387,6 +404,18 @@ impl DisplayManager {
         }
     }
 
+    /// Restore the primary to the mode captured at startup, undoing any
+    /// mirror-driven mode change (issue #87). Called when the external display
+    /// is disconnected and the primary becomes the sole output again.
+    async fn restore_primary_native(&self, primary: &str) {
+        let native = self.inner.lock().await.primary_native_mode;
+        if let Some(mode) = native
+            && let Err(e) = self.backend.set_output_mode(primary, mode).await
+        {
+            warn!(error = %e, "Failed to restore primary native mode");
+        }
+    }
+
     /// Persist the new state and broadcast it.
     async fn commit(&self, primary: &str, secondary: Option<String>, mode: DisplayMode) {
         let state = {
@@ -417,6 +446,9 @@ impl DisplayController for DisplayManager {
     }
 
     async fn set_mode(&self, mode: DisplayMode) -> DisplayState {
+        // Serialize against concurrent toggles/hotplugs so a burst of clicks
+        // can't interleave and corrupt the arrangement.
+        let _serial = self.apply_lock.lock().await;
         let displays = match self.backend.get_displays().await {
             Ok(d) => d,
             Err(e) => {
@@ -635,6 +667,32 @@ mod tests {
         // Pointer confinement from mirror mode is released now that the primary
         // is gone and only the external is active.
         assert!(backend.ops().iter().any(|o| o == "pointer *"));
+    }
+
+    #[tokio::test]
+    async fn disconnect_restores_primary_native_mode() {
+        // Primary native mode is 1280x800; mirroring drives it to the common
+        // 1280x720. Unplugging the external must put it back to 1280x800.
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(vec![
+            disp("eDP-1", true, &[(1280, 800), (1280, 720)]),
+            disp("HDMI-A-1", true, &[(1280, 720)]),
+        ]);
+        let mirror = Arc::new(MockMirror {
+            available: true,
+            ..Default::default()
+        });
+        let audio = Arc::new(MockAudio::default());
+        let mgr = manager(backend.clone(), mirror.clone(), audio.clone());
+        mgr.initialize().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::Mirror);
+        assert!(backend.ops().iter().any(|o| o == "mode eDP-1 1280x720"));
+        // Unplug the external.
+        backend.set_displays(vec![disp("eDP-1", true, &[(1280, 800), (1280, 720)])]);
+        mgr.on_output_changed().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::SingleInternal);
+        // The primary was restored to its captured native mode.
+        assert!(backend.ops().iter().any(|o| o == "mode eDP-1 1280x800"));
     }
 
     #[tokio::test]

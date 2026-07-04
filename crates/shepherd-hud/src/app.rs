@@ -858,6 +858,11 @@ fn build_hud_content(
                 && let Some(monitor) = monitor_by_connector(&name)
             {
                 window_for_monitor.set_monitor(&monitor);
+                // Re-present so the layer surface remaps onto the new output.
+                // When the previously-anchored output was just disabled (e.g.
+                // switching to external-only), its surface is destroyed;
+                // without this the HUD can stay unmapped and vanish.
+                window_for_monitor.present();
                 *anchored_connector.borrow_mut() = Some(name);
             }
         }
