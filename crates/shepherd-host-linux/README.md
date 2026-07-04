@@ -16,6 +16,10 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
   `brightnessctl` for writes (required runtime dep — its udev rules grant
   the `video` group write access, which is the only supported path for an
   unprivileged shepherdd). Skipped on hosts without a backlight.
+- **Ambient light sensor reads** via the IIO sysfs `in_illuminance_raw`
+  channel (`LinuxLightSensor`), used by the automatic-brightness feature.
+  Read-only and world-readable, so no helper or privilege is needed. Absent
+  on hosts without an ALS.
 
 ## Capabilities
 

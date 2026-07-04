@@ -75,8 +75,10 @@ pub enum EventPayload {
     /// Volume status changed
     VolumeChanged { percent: u8, muted: bool },
 
-    /// Screen brightness changed
-    BrightnessChanged { percent: u8 },
+    /// Screen brightness changed. `auto_enabled` reports whether automatic
+    /// (ambient-light) brightness is currently on, so subscribers can keep an
+    /// auto/manual indicator in sync from the same event.
+    BrightnessChanged { percent: u8, auto_enabled: bool },
 
     /// HUD UI scale factor changed. The HUD is expected to multiply its
     /// font/padding/height by `factor` on top of the compositor scale.

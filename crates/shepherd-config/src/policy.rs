@@ -6,9 +6,10 @@ use crate::internet::{
     InternetCheckTarget, InternetConfig,
 };
 use crate::schema::{
-    RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig, RawConfig, RawEntry,
-    RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions, RawInternetConfig,
-    RawManagementApiConfig, RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
+    RawAutoBrightnessConfig, RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig,
+    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
+    RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
+    RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -45,6 +46,9 @@ pub struct Policy {
 
     /// Global screen-brightness restrictions
     pub brightness: BrightnessPolicy,
+
+    /// Automatic (ambient-light) brightness settings (device-global)
+    pub auto_brightness: AutoBrightnessPolicy,
 }
 
 impl Policy {
@@ -78,6 +82,14 @@ impl Policy {
             .map(convert_brightness_config)
             .unwrap_or_default();
 
+        let auto_brightness = raw
+            .service
+            .brightness
+            .as_ref()
+            .and_then(|b| b.auto.as_ref())
+            .map(convert_auto_brightness_config)
+            .unwrap_or_default();
+
         let entries = raw
             .entries
             .into_iter()
@@ -99,6 +111,7 @@ impl Policy {
             default_max_run,
             volume: global_volume,
             brightness: global_brightness,
+            auto_brightness,
         }
     }
 
@@ -566,6 +579,39 @@ impl BrightnessPolicy {
     }
 }
 
+/// Automatic (ambient-light) brightness policy. Device-global; there is no
+/// per-entry auto override. `min_percent`/`max_percent` bound the auto range;
+/// the per-entry/global [`BrightnessPolicy`] restrictions clamp on top of that
+/// (so a bedtime activity's `max_brightness` still caps auto brightness).
+#[derive(Debug, Clone)]
+pub struct AutoBrightnessPolicy {
+    /// Default enabled state (runtime toggle, once set, overrides this).
+    pub enabled: bool,
+    /// Lux at or below which brightness sits at `min_percent`.
+    pub dim_lux: f32,
+    /// Lux at or above which brightness sits at `max_percent`.
+    pub bright_lux: f32,
+    /// Brightness percent at the dim end of the curve.
+    pub min_percent: u8,
+    /// Brightness percent at the bright end of the curve.
+    pub max_percent: u8,
+    /// How often to sample the ambient light sensor.
+    pub poll_interval: Duration,
+}
+
+impl Default for AutoBrightnessPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dim_lux: 10.0,
+            bright_lux: 1000.0,
+            min_percent: 15,
+            max_percent: 100,
+            poll_interval: Duration::from_secs(3),
+        }
+    }
+}
+
 // Conversion helpers
 
 fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
@@ -625,6 +671,21 @@ fn convert_brightness_config(raw: &RawBrightnessConfig) -> BrightnessPolicy {
         max_brightness: raw.max_brightness,
         min_brightness: raw.min_brightness,
         allow_change: raw.allow_change,
+    }
+}
+
+fn convert_auto_brightness_config(raw: &RawAutoBrightnessConfig) -> AutoBrightnessPolicy {
+    let defaults = AutoBrightnessPolicy::default();
+    AutoBrightnessPolicy {
+        enabled: raw.enabled,
+        dim_lux: raw.dim_lux.unwrap_or(defaults.dim_lux),
+        bright_lux: raw.bright_lux.unwrap_or(defaults.bright_lux),
+        min_percent: raw.min_percent.unwrap_or(defaults.min_percent),
+        max_percent: raw.max_percent.unwrap_or(defaults.max_percent),
+        poll_interval: raw
+            .poll_interval_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(defaults.poll_interval),
     }
 }
 

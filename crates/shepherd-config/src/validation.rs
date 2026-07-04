@@ -67,6 +67,52 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
+    // Validate automatic-brightness settings (if set).
+    if let Some(brightness) = &config.service.brightness
+        && let Some(auto) = &brightness.auto
+    {
+        for (name, pct) in [
+            ("min_percent", auto.min_percent),
+            ("max_percent", auto.max_percent),
+        ] {
+            if let Some(pct) = pct
+                && pct > 100
+            {
+                errors.push(ValidationError::GlobalError(format!(
+                    "brightness.auto.{name} must be 0-100, got {pct}"
+                )));
+            }
+        }
+        if let (Some(min), Some(max)) = (auto.min_percent, auto.max_percent)
+            && min > max
+        {
+            errors.push(ValidationError::GlobalError(format!(
+                "brightness.auto.min_percent ({min}) must not exceed max_percent ({max})"
+            )));
+        }
+        for (name, lux) in [("dim_lux", auto.dim_lux), ("bright_lux", auto.bright_lux)] {
+            if let Some(lux) = lux
+                && (!lux.is_finite() || lux < 0.0)
+            {
+                errors.push(ValidationError::GlobalError(format!(
+                    "brightness.auto.{name} must be a non-negative number, got {lux}"
+                )));
+            }
+        }
+        if let (Some(dim), Some(bright)) = (auto.dim_lux, auto.bright_lux)
+            && dim >= bright
+        {
+            errors.push(ValidationError::GlobalError(format!(
+                "brightness.auto.dim_lux ({dim}) must be less than bright_lux ({bright})"
+            )));
+        }
+        if auto.poll_interval_seconds == Some(0) {
+            errors.push(ValidationError::GlobalError(
+                "brightness.auto.poll_interval_seconds must be > 0".into(),
+            ));
+        }
+    }
+
     // Validate Steam interstitial auto-dismiss slugs.
     if let Some(steam) = &config.service.steam
         && let Some(list) = &steam.auto_dismiss_interstitials

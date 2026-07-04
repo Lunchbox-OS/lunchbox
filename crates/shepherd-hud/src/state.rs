@@ -258,10 +258,11 @@ impl SharedState {
 
     /// Update brightness from BrightnessChanged event (preserves
     /// restrictions/backend/device from the initial fetch).
-    fn update_brightness(&self, percent: u8) {
+    fn update_brightness(&self, percent: u8, auto_enabled: bool) {
         self.brightness_tx.send_modify(|br| {
             if let Some(b) = br {
                 b.percent = percent;
+                b.auto_enabled = auto_enabled;
             } else {
                 *br = Some(BrightnessInfo {
                     percent,
@@ -269,6 +270,8 @@ impl SharedState {
                     backend: None,
                     device: None,
                     restrictions: BrightnessRestrictions::unrestricted(),
+                    auto_available: auto_enabled,
+                    auto_enabled,
                 });
             }
         });
@@ -421,8 +424,11 @@ impl SharedState {
                 self.update_volume(*percent, *muted);
             }
 
-            EventPayload::BrightnessChanged { percent } => {
-                self.update_brightness(*percent);
+            EventPayload::BrightnessChanged {
+                percent,
+                auto_enabled,
+            } => {
+                self.update_brightness(*percent, *auto_enabled);
             }
 
             EventPayload::InternetStatusChanged { target, available } => {

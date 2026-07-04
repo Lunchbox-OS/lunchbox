@@ -141,6 +141,8 @@ impl ManagementService for MockSvc {
                 min_brightness: Some(0),
                 allow_change: true,
             },
+            auto_available: false,
+            auto_enabled: false,
         })
     }
     async fn set_brightness(&self, _percent: u8) -> ManagementResult<BrightnessInfo> {
@@ -150,6 +152,12 @@ impl ManagementService for MockSvc {
         Err(ManagementError::Internal("nope".into()))
     }
     async fn brightness_down(&self, _step: u8) -> ManagementResult<BrightnessInfo> {
+        Err(ManagementError::Internal("nope".into()))
+    }
+    async fn set_auto_brightness(&self, _enabled: bool) -> ManagementResult<BrightnessInfo> {
+        Err(ManagementError::Internal("nope".into()))
+    }
+    async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Err(ManagementError::Internal("nope".into()))
     }
     async fn reload_config(&self) -> ManagementResult<usize> {

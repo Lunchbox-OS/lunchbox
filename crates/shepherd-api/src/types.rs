@@ -538,6 +538,13 @@ pub struct BrightnessInfo {
     pub device: Option<String>,
     /// Current restrictions on brightness
     pub restrictions: BrightnessRestrictions,
+    /// Whether an ambient light sensor is present, so automatic brightness
+    /// can be offered at all. When false, `auto_enabled` is always false.
+    #[serde(default)]
+    pub auto_available: bool,
+    /// Whether automatic (ambient-light) brightness is currently enabled.
+    #[serde(default)]
+    pub auto_enabled: bool,
 }
 
 /// Brightness restrictions that are currently in effect

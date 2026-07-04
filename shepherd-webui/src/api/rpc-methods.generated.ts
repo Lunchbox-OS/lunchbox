@@ -35,6 +35,8 @@ export type RpcMethod =
   | "set_brightness"
   | "brightness_up"
   | "brightness_down"
+  | "set_auto_brightness"
+  | "toggle_auto_brightness"
   | "ping"
   | "reload_config"
   | "logout"

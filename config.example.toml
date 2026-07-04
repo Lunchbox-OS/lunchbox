@@ -41,6 +41,25 @@ allow_change = true  # Whether volume changes are allowed at all
 min_brightness = 10      # Don't let brightness drop below 10%
 allow_change = true      # Whether brightness changes are allowed at all
 
+# Automatic (ambient-light) brightness (optional).
+# When the host exposes an ambient light sensor (an IIO illuminance channel,
+# e.g. /sys/bus/iio/devices/iio:deviceN/in_illuminance_raw), shepherdd can
+# drive the backlight from measured room light. The screen sits at
+# `min_percent` at/below `dim_lux` and at `max_percent` at/above `bright_lux`,
+# interpolated logarithmically in between. The result is still clamped by the
+# `min_brightness`/`max_brightness` restrictions above (and any per-entry
+# override), so a bedtime activity's cap still applies. A manual slider drag
+# temporarily wins and auto resumes once the room light shifts noticeably.
+# `enabled` is only the default; the on/off state is toggleable from the HUD
+# and management API and is persisted across restarts.
+[service.brightness.auto]
+enabled = false             # Start with auto brightness on?
+# dim_lux = 10.0            # Lux at/below which the screen is dimmest
+# bright_lux = 1000.0       # Lux at/above which the screen is brightest
+# min_percent = 15          # Brightness at the dim end (0-100)
+# max_percent = 100         # Brightness at the bright end (0-100)
+# poll_interval_seconds = 3 # How often to sample the sensor
+
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.
 # Supported schemes: https://, http://, tcp://

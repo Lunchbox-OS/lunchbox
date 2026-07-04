@@ -185,6 +185,8 @@ export const setVolumeMuted = (muted: boolean) =>
 export const getBrightness = () => call<BrightnessInfo>("get_brightness");
 export const setBrightnessPercent = (percent: number) =>
   call<BrightnessInfo>("set_brightness", { percent });
+export const setAutoBrightness = (enabled: boolean) =>
+  call<BrightnessInfo>("set_auto_brightness", { enabled });
 
 // Config — `reload_config` returns `{entry_count: number}` (wrap_result).
 export const reloadConfig = () =>

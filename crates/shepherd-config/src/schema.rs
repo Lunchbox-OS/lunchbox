@@ -557,6 +557,37 @@ pub struct RawBrightnessConfig {
     /// Whether brightness changes are allowed at all (default: true)
     #[serde(default = "default_true")]
     pub allow_change: bool,
+
+    /// Automatic (ambient-light) brightness. Only honored under
+    /// `[service.brightness]`; a copy on a per-entry `[entries.brightness]`
+    /// override is ignored, since auto brightness is a device-global mode.
+    #[serde(default)]
+    pub auto: Option<RawAutoBrightnessConfig>,
+}
+
+/// Automatic screen-brightness configuration (ambient-light driven).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawAutoBrightnessConfig {
+    /// Whether automatic brightness starts enabled. This is only the default;
+    /// the runtime state (toggled from the HUD or management API) is persisted
+    /// and takes precedence once set.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Ambient light (lux) at or below which the screen sits at `min_percent`.
+    pub dim_lux: Option<f32>,
+
+    /// Ambient light (lux) at or above which the screen sits at `max_percent`.
+    pub bright_lux: Option<f32>,
+
+    /// Brightness percent at the dim end of the curve (0-100).
+    pub min_percent: Option<u8>,
+
+    /// Brightness percent at the bright end of the curve (0-100).
+    pub max_percent: Option<u8>,
+
+    /// How often to sample the light sensor, in seconds.
+    pub poll_interval_seconds: Option<u64>,
 }
 
 fn default_true() -> bool {
