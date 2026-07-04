@@ -305,37 +305,16 @@ impl DisplayManager {
                     self.commit(primary, None, effective).await;
                     return;
                 };
-                // Enable both panels; drive the primary at the highest mutually
-                // compatible mode so the mirror is clean and the TV upscales.
-                // The external keeps its native mode and its own place in the
-                // layout (overlapping outputs breaks sway's rendering under
-                // screencopy). Instead, the pointer is confined to the primary
-                // below so it can't reach the uninteractive wl-mirror surface.
+                // Enable both panels and (re)establish the mirror. The external
+                // keeps its native mode and its own place in the layout
+                // (overlapping outputs breaks sway's rendering under screencopy);
+                // the pointer is confined to the primary instead.
                 let _ = self.backend.enable_output(primary).await;
                 let _ = self.backend.enable_output(&sec).await;
-                if let (Some(p), Some(s)) = (primary_info, secondary_info)
-                    && let Some(mode) = pick_mirror_mode(p, s)
-                    && let Err(e) = self.backend.set_output_mode(primary, mode).await
+                if self
+                    .establish_mirror(primary, &sec, primary_info, secondary_info)
+                    .await
                 {
-                    warn!(error = %e, "Failed to set primary mirror mode");
-                }
-                if self.mirror.start(primary).await {
-                    // Pin the mirror window fullscreen onto the external output.
-                    let criteria = format!("app_id=\"{WL_MIRROR_APP_ID}\"");
-                    // wl-mirror maps its window shortly after spawn; give it a
-                    // moment before we address it.
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Err(e) = self
-                        .backend
-                        .move_to_output_fullscreen(&criteria, &sec)
-                        .await
-                    {
-                        warn!(error = %e, "Failed to pin wl-mirror to external output");
-                    }
-                    // Confine the pointer to the primary so it can't wander onto
-                    // the mirror surface, where clicks wouldn't reach the real
-                    // content (issue #87).
-                    let _ = self.backend.map_pointer_to_output(primary).await;
                     self.route_audio_external().await;
                 } else {
                     // wl-mirror unavailable: fall back to external-only, which
@@ -377,6 +356,49 @@ impl DisplayManager {
         }
 
         self.commit(primary, secondary, effective).await;
+    }
+
+    /// (Re)establish mirroring: set the primary to the mirror mode, (re)start
+    /// wl-mirror, pin its window fullscreen to the external, and confine the
+    /// pointer to the primary. Returns whether wl-mirror started.
+    ///
+    /// This always *restarts* wl-mirror rather than reusing a running one: the
+    /// process is sensitive to the source output being reconfigured (a scale or
+    /// mode change — e.g. the XWayland HiDPI workaround around an activity — can
+    /// make it show a black frame or exit), so a fresh capture is the reliable
+    /// way to recover (issue #87).
+    async fn establish_mirror(
+        &self,
+        primary: &str,
+        secondary: &str,
+        primary_info: Option<&DisplayInfo>,
+        secondary_info: Option<&DisplayInfo>,
+    ) -> bool {
+        // Drive the primary at the highest mutually-compatible mode so the
+        // mirror is clean and the external's hardware upscales.
+        if let (Some(p), Some(s)) = (primary_info, secondary_info)
+            && let Some(mode) = pick_mirror_mode(p, s)
+            && let Err(e) = self.backend.set_output_mode(primary, mode).await
+        {
+            warn!(error = %e, "Failed to set primary mirror mode");
+        }
+        if !self.mirror.start(primary).await {
+            return false;
+        }
+        // wl-mirror maps its window shortly after spawn; give it a moment.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let criteria = format!("app_id=\"{WL_MIRROR_APP_ID}\"");
+        if let Err(e) = self
+            .backend
+            .move_to_output_fullscreen(&criteria, secondary)
+            .await
+        {
+            warn!(error = %e, "Failed to pin wl-mirror to external output");
+        }
+        // Confine the pointer to the primary so it can't wander onto the mirror
+        // surface, where clicks wouldn't reach the real content (issue #87).
+        let _ = self.backend.map_pointer_to_output(primary).await;
+        true
     }
 
     /// Enable the external at its native mode, disable the primary, route audio.
@@ -444,24 +466,19 @@ impl DisplayManager {
                 let Some(sec) = secondary else {
                     return;
                 };
-                // An activity (or the HiDPI workaround) may have changed the
-                // primary's mode; put it back to the mirror mode.
-                if let (Some(p), Some(s)) = (
-                    displays.iter().find(|d| d.name == primary),
-                    displays.iter().find(|d| d.name == sec),
-                ) && let Some(m) = pick_mirror_mode(p, s)
-                    && let Err(e) = self.backend.set_output_mode(&primary, m).await
+                let primary_info = displays.iter().find(|d| d.name == primary);
+                let secondary_info = displays.iter().find(|d| d.name == sec);
+                let _ = self.backend.enable_output(&primary).await;
+                let _ = self.backend.enable_output(&sec).await;
+                // Restart the mirror: an activity (or the HiDPI workaround)
+                // reconfigured the source output, which can leave wl-mirror black
+                // or dead, so a re-pin isn't enough — re-establish from scratch.
+                if !self
+                    .establish_mirror(&primary, &sec, primary_info, secondary_info)
+                    .await
                 {
-                    warn!(error = %e, "reassert: failed to set primary mirror mode");
+                    warn!("reassert: failed to re-establish mirror");
                 }
-                // Re-pin the (still-running) mirror window and re-confine the
-                // pointer, both of which a fullscreen activity can disturb.
-                let criteria = format!("app_id=\"{WL_MIRROR_APP_ID}\"");
-                let _ = self
-                    .backend
-                    .move_to_output_fullscreen(&criteria, &sec)
-                    .await;
-                let _ = self.backend.map_pointer_to_output(&primary).await;
             }
             DisplayMode::ExternalOnly => {
                 let Some(sec) = secondary else {
@@ -741,7 +758,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reassert_reestablishes_mirror_without_restarting_it() {
+    async fn reassert_restarts_the_mirror() {
+        // A native-resolution activity reconfigures the source output, which can
+        // leave wl-mirror black or dead; reassert must *restart* it (not just
+        // re-pin) so the mirror recovers (issue #87).
         let backend = Arc::new(MockBackend::default());
         backend.set_displays(vec![
             disp("eDP-1", true, &[(1920, 1080)]),
@@ -764,16 +784,14 @@ mod tests {
             .count();
 
         backend.clear_ops();
-        // Simulate the HiDPI workaround having reconfigured outputs around an
-        // activity, then re-assert.
         mgr.reassert().await;
 
         let ops = backend.ops();
-        // Mode, mirror pin, and pointer confinement were all re-applied...
+        // Mode, mirror pin, and pointer confinement were all re-applied.
         assert!(ops.iter().any(|o| o == "mode eDP-1 1920x1080"));
         assert!(ops.iter().any(|o| o == "move HDMI-A-1"));
         assert!(ops.iter().any(|o| o == "pointer eDP-1"));
-        // ...but the running mirror was NOT torn down and respawned.
+        // And wl-mirror was restarted, not left as-is.
         let starts_after = mirror
             .events
             .lock()
@@ -781,8 +799,7 @@ mod tests {
             .iter()
             .filter(|e| e.starts_with("start"))
             .count();
-        assert_eq!(starts_before, starts_after);
-        assert!(!mirror.events.lock().unwrap().iter().any(|e| e == "stop"));
+        assert_eq!(starts_after, starts_before + 1);
     }
 
     #[tokio::test]

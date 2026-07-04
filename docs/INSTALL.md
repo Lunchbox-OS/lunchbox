@@ -42,6 +42,23 @@ EOF
 
 See `man 5 sway-output` for the full set of `output` directives.
 
+### External monitor / docking (issue #87)
+
+If you use external-monitor mirroring, the Sway session must be started with
+`WLR_SCENE_DISABLE_DIRECT_SCANOUT=1` in its environment. Without it, a
+fullscreen activity direct-scans-out and starves `wl-mirror`'s screen capture,
+blacking the mirrored display. This is a compositor-startup environment variable
+(read by wlroots, not settable from `sway.conf`), so set it wherever the kiosk
+session is launched — e.g. in the "Shepherd Kiosk" desktop entry's `Exec`, or a
+drop-in `environment.d`/PAM env file for the kiosk user:
+
+```sh
+echo 'WLR_SCENE_DISABLE_DIRECT_SCANOUT=1' | sudo tee -a /etc/environment
+```
+
+Mirroring also requires the `wl-mirror` package (installed by
+`shepherd deps install run`).
+
 For custom installation paths:
 ```sh
 # Install to /usr instead of /usr/local
