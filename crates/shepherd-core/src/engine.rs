@@ -812,6 +812,7 @@ mod tests {
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         }
     }
 
@@ -952,6 +953,7 @@ mod tests {
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1045,6 +1047,7 @@ mod tests {
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1146,6 +1149,7 @@ mod tests {
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1222,6 +1226,7 @@ mod tests {
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1316,6 +1321,7 @@ mod tests {
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1393,6 +1399,7 @@ mod tests {
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1481,6 +1488,7 @@ mod tests {
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
+            auto_brightness: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());

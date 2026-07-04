@@ -189,6 +189,18 @@ impl IpcClient {
             .await
     }
 
+    pub async fn set_auto_brightness(&mut self, enabled: bool) -> IpcResult<BrightnessInfo> {
+        self.call(
+            "set_auto_brightness",
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+    }
+
+    pub async fn toggle_auto_brightness(&mut self) -> IpcResult<BrightnessInfo> {
+        self.call("toggle_auto_brightness", Value::Null).await
+    }
+
     /// Machine-readable server error code, for callers that need to
     /// distinguish e.g. `NotFound` from `PermissionDenied` (used by
     /// the launcher's error routing). Most consumers can rely on the

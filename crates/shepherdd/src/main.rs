@@ -17,13 +17,17 @@ use shepherd_ble::{BleServer, BleServerConfig};
 use shepherd_config::load_config;
 use shepherd_core::{CoreEngine, CoreEvent};
 use shepherd_host_api::{
-    BrightnessController, HidpiController, HostAdapter, HostEvent, StopMode as HostStopMode,
-    VolumeController,
+    BrightnessController, HidpiController, HostAdapter, HostEvent, LightSensor,
+    StopMode as HostStopMode, VolumeController,
 };
-use shepherd_host_linux::{LinuxBrightnessController, LinuxHost, LinuxVolumeController};
+use shepherd_host_linux::{
+    LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxVolumeController,
+};
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
-use shepherd_management::{DefaultManagementService, ManagementService};
+use shepherd_management::{
+    AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementService,
+};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{MonotonicInstant, RateLimiter, default_config_path};
 use std::path::{Path, PathBuf};
@@ -70,6 +74,7 @@ struct Service {
     host: Arc<LinuxHost>,
     volume: Arc<LinuxVolumeController>,
     brightness: Arc<LinuxBrightnessController>,
+    light_sensor: Arc<LinuxLightSensor>,
     ipc: Arc<IpcServer>,
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
@@ -137,6 +142,11 @@ impl Service {
             debug!("No backlight detected, brightness control unavailable");
         }
 
+        // Initialize ambient light sensor (for automatic brightness). Absent
+        // on most hardware; the controller logs an info line when one is
+        // found and stays quiet otherwise.
+        let light_sensor = Arc::new(LinuxLightSensor::new());
+
         // Initialize core engine
         let engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
 
@@ -165,6 +175,7 @@ impl Service {
             host,
             volume,
             brightness,
+            light_sensor,
             ipc: Arc::new(ipc),
             store,
             rate_limiter,
@@ -218,6 +229,7 @@ impl Service {
         let host = self.host.clone();
         let volume = self.volume.clone();
         let brightness = self.brightness.clone();
+        let light_sensor = self.light_sensor.clone();
         let store = self.store.clone();
         // The hidpi manager owns both the IPC server handle and the SSE
         // broadcast channel so it can fan `HudScaleChanged` events out to
@@ -229,20 +241,54 @@ impl Service {
         // Start management transports (HTTP and/or BLE). Both speak the
         // same shepherd_management::ManagementService, so the service is
         // constructed once and shared.
-        let (management_api_config, ble_management_config) = {
+        let (management_api_config, ble_management_config, auto_brightness_policy) = {
             let eng = engine.lock().await;
             (
                 eng.policy().service.management_api.clone(),
                 eng.policy().service.ble_management.clone(),
+                eng.policy().auto_brightness.clone(),
             )
         };
+
+        // Automatic brightness. Offered only when the host actually exposes a
+        // light sensor. The runtime on/off state persists in the store; fall
+        // back to the config default the first time (or if the store read
+        // fails). Enabling is meaningless without a sensor, so force it off.
+        let light_sensor_opt: Option<Arc<dyn LightSensor>> =
+            if light_sensor.capabilities().available {
+                Some(light_sensor.clone() as Arc<dyn LightSensor>)
+            } else {
+                None
+            };
+        let initial_auto_enabled = light_sensor_opt.is_some()
+            && match store.get_setting(AUTO_BRIGHTNESS_SETTING_KEY) {
+                Ok(Some(v)) => v == "true",
+                Ok(None) => auto_brightness_policy.enabled,
+                Err(e) => {
+                    warn!(error = %e, "Failed to read auto-brightness setting; using config default");
+                    auto_brightness_policy.enabled
+                }
+            };
+        let auto_brightness_state =
+            Arc::new(Mutex::new(AutoBrightnessState::new(initial_auto_enabled)));
+        if light_sensor_opt.is_some() {
+            info!(
+                enabled = initial_auto_enabled,
+                poll_secs = auto_brightness_policy.poll_interval.as_secs(),
+                "Automatic brightness available",
+            );
+        }
 
         // Construct the management service unconditionally: IPC is
         // always on, and now that IPC dispatches through
         // `dispatch_json` it needs `svc` even when HTTP and BLE are
         // both disabled. The service is cheap to construct — it only
         // holds Arcs of already-live objects.
-        let svc: Arc<dyn ManagementService> = {
+        // Built as a concrete `Arc<DefaultManagementService>` so the
+        // auto-brightness poll loop can call the inherent
+        // `auto_brightness_tick`, then shared with the transports as
+        // `Arc<dyn ManagementService>`.
+        let svc_concrete = {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();
             Arc::new(DefaultManagementService {
@@ -251,6 +297,8 @@ impl Service {
                 host: host.clone() as Arc<dyn HostAdapter>,
                 volume: volume.clone() as Arc<dyn VolumeController>,
                 brightness: brightness.clone() as Arc<dyn BrightnessController>,
+                light_sensor: light_sensor_opt.clone(),
+                auto_brightness: auto_brightness_state.clone(),
                 event_tx: event_tx.clone(),
                 broadcast_fn: Arc::new(move |event: Event| {
                     ipc_for_broadcast.broadcast_event(event.clone());
@@ -261,6 +309,30 @@ impl Service {
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
             })
         };
+        let svc: Arc<dyn ManagementService> = svc_concrete.clone();
+
+        // Automatic-brightness poll loop: sample the light sensor on a timer
+        // and let the service decide whether to nudge the backlight. Runs only
+        // when a sensor exists; ticks are cheap no-ops while auto is off.
+        if light_sensor_opt.is_some() {
+            let svc_for_auto = svc_concrete.clone();
+            let mut auto_shutdown_rx = shutdown_rx.clone();
+            let poll_interval = auto_brightness_policy.poll_interval;
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(poll_interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => svc_for_auto.auto_brightness_tick().await,
+                        _ = auto_shutdown_rx.changed() => {
+                            if *auto_shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Construct the BLE server first so its ClaimMachine can be
         // handed to HttpServer as the source of unified admin bearer

@@ -50,6 +50,20 @@ pub fn set_brightness(percent: u8) -> anyhow::Result<()> {
     })
 }
 
+/// Enable or disable automatic (ambient-light) brightness via shepherdd.
+pub fn set_auto_brightness(enabled: bool) -> anyhow::Result<()> {
+    let socket_path = default_socket_path();
+    let rt = Runtime::new()?;
+    rt.block_on(async {
+        let mut client = IpcClient::connect(&socket_path).await?;
+        client
+            .set_auto_brightness(enabled)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use shepherd_api::BrightnessRestrictions;
@@ -65,6 +79,8 @@ mod tests {
                 backend: Some("test".into()),
                 device: Some("test0".into()),
                 restrictions: BrightnessRestrictions::unrestricted(),
+                auto_available: false,
+                auto_enabled: false,
             };
             assert_eq!(info.icon_name(), "display-brightness-symbolic");
         }

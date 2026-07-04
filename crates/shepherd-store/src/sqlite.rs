@@ -80,6 +80,12 @@ impl SqliteStore {
                 PRIMARY KEY (entry_id, date)
             );
 
+            -- Small global key/value settings (runtime-toggled flags)
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_usage_day ON usage(day);
@@ -254,6 +260,30 @@ impl Store for SqliteStore {
         )?;
 
         debug!("Snapshot saved");
+        Ok(())
+    }
+
+    fn get_setting(&self, key: &str) -> StoreResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row("SELECT value FROM settings WHERE key = ?", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(value)
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> StoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO settings (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET value = excluded.value
+            "#,
+            [key, value],
+        )?;
         Ok(())
     }
 
@@ -461,6 +491,27 @@ mod tests {
     fn test_in_memory_store() {
         let store = SqliteStore::in_memory().unwrap();
         assert!(store.is_healthy());
+    }
+
+    #[test]
+    fn test_settings_roundtrip() {
+        let store = SqliteStore::in_memory().unwrap();
+        assert_eq!(store.get_setting("auto_brightness_enabled").unwrap(), None);
+        store
+            .set_setting("auto_brightness_enabled", "true")
+            .unwrap();
+        assert_eq!(
+            store.get_setting("auto_brightness_enabled").unwrap(),
+            Some("true".to_string())
+        );
+        // Upsert overwrites.
+        store
+            .set_setting("auto_brightness_enabled", "false")
+            .unwrap();
+        assert_eq!(
+            store.get_setting("auto_brightness_enabled").unwrap(),
+            Some("false".to_string())
+        );
     }
 
     #[test]

@@ -324,6 +324,26 @@
       }
     },
     {
+      "name": "set_auto_brightness",
+      "params": [
+        {
+          "name": "enabled",
+          "required": true,
+          "type": "bool"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "toggle_auto_brightness",
+      "params": [],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
       "name": "ping",
       "params": [],
       "result": {

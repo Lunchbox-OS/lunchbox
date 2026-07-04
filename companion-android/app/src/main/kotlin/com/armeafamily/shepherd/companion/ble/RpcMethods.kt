@@ -37,6 +37,8 @@ object RpcMethods {
     const val SET_BRIGHTNESS: String = "set_brightness"
     const val BRIGHTNESS_UP: String = "brightness_up"
     const val BRIGHTNESS_DOWN: String = "brightness_down"
+    const val SET_AUTO_BRIGHTNESS: String = "set_auto_brightness"
+    const val TOGGLE_AUTO_BRIGHTNESS: String = "toggle_auto_brightness"
     const val PING: String = "ping"
     const val RELOAD_CONFIG: String = "reload_config"
     const val LOGOUT: String = "logout"

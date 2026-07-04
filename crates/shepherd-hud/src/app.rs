@@ -369,9 +369,36 @@ fn build_hud_content(
         .build();
     brightness_box.add_css_class("brightness-control");
 
+    // The brightness icon doubles as the automatic-brightness toggle: pressing
+    // it hands brightness over to the ambient-light loop (on hosts with a
+    // sensor). It's a `ToggleButton` wrapping the icon `Image` — the same
+    // shape as the volume mute button — so the scale timer can keep resizing
+    // the icon via `set_pixel_size`. Automatic is the expected, default state,
+    // so it renders plain; the icon lights up (in the brightness bar's own
+    // colour) only when the user has taken *manual* control.
     let brightness_icon = gtk4::Image::from_icon_name("display-brightness-symbolic");
     brightness_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    brightness_box.append(&brightness_icon);
+    let brightness_button = gtk4::ToggleButton::builder()
+        .child(&brightness_icon)
+        .has_frame(false)
+        .tooltip_text("Automatic brightness")
+        .build();
+    brightness_button.add_css_class("indicator-button");
+    brightness_button.add_css_class("brightness-toggle");
+
+    // Guards against the programmatic `set_active` in the update loop
+    // re-triggering `toggled` and echoing a redundant RPC back to the daemon.
+    let auto_updating = std::rc::Rc::new(std::cell::Cell::new(false));
+    let auto_updating_clone = auto_updating.clone();
+    brightness_button.connect_toggled(move |btn| {
+        if auto_updating_clone.get() {
+            return;
+        }
+        if let Err(e) = crate::brightness::set_auto_brightness(btn.is_active()) {
+            tracing::error!("Failed to set auto brightness: {}", e);
+        }
+    });
+    brightness_box.append(&brightness_button);
 
     let brightness_slider = gtk4::Scale::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -584,6 +611,8 @@ fn build_hud_content(
     let brightness_slider_clone = brightness_slider.clone();
     let brightness_label_clone = brightness_label.clone();
     let brightness_changing_for_update = brightness_changing.clone();
+    let brightness_button_clone = brightness_button.clone();
+    let auto_updating_for_update = auto_updating.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
@@ -832,6 +861,17 @@ fn build_hud_content(
                 let min = brightness.restrictions.min_brightness.unwrap_or(0) as f64;
                 let max = brightness.restrictions.max_brightness.unwrap_or(100) as f64;
                 brightness_slider_clone.set_range(min, max);
+
+                // The brightness icon toggles auto brightness, but only when a
+                // light sensor exists; otherwise it stays a plain, inert icon.
+                brightness_button_clone.set_sensitive(brightness.auto_available);
+                if brightness.auto_available
+                    && brightness_button_clone.is_active() != brightness.auto_enabled
+                {
+                    auto_updating_for_update.set(true);
+                    brightness_button_clone.set_active(brightness.auto_enabled);
+                    auto_updating_for_update.set(false);
+                }
             } else {
                 brightness_box_clone.set_visible(false);
             }
@@ -1006,6 +1046,32 @@ const CSS_TEMPLATE: &str = r#"
 
         .indicator-button:hover,
         .control-button:hover {
+            background-color: var(--hover-bg);
+        }
+
+        /* The brightness icon is a toggle: automatic is the default, so it
+           stays plain when checked (auto on). It lights up only in the
+           *manual* state (unchecked, and only when a sensor makes auto an
+           option at all), using the brightness bar's own highlight colour so
+           the two read as one control. */
+        .brightness-toggle:not(:checked):not(:disabled) {
+            background-color: var(--color-warning);
+        }
+
+        .brightness-toggle:not(:checked):not(:disabled) image {
+            color: #2e3440;
+        }
+
+        /* The GTK theme shades a *checked* toggle button by default. Automatic
+           brightness (checked) must look completely plain, so clear that
+           shading — keeping only the normal hover feedback. */
+        .brightness-toggle:checked {
+            background-color: transparent;
+            background-image: none;
+            box-shadow: none;
+        }
+
+        .brightness-toggle:checked:hover {
             background-color: var(--hover-bg);
         }
 
