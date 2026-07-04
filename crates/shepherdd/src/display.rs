@@ -416,6 +416,74 @@ impl DisplayManager {
         }
     }
 
+    /// Re-apply the current arrangement in place, *without* tearing down a
+    /// running wl-mirror. Called after the XWayland HiDPI workaround (issue #45)
+    /// reconfigures sway outputs around a native-resolution activity, so a
+    /// fullscreen activity can't leave the mirror mode, the mirror window's pin,
+    /// or the pointer confinement misconfigured (issue #87). Serialized against
+    /// reconcile/set_mode via `apply_lock`; does not broadcast, since the mode
+    /// (and thus the HUD's view) is unchanged.
+    pub async fn reassert(&self) {
+        let _serial = self.apply_lock.lock().await;
+        let (primary, secondary, mode) = {
+            let inner = self.inner.lock().await;
+            (inner.primary.clone(), inner.secondary.clone(), inner.mode)
+        };
+        let Some(primary) = primary else {
+            return;
+        };
+        let displays = match self.backend.get_displays().await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(error = %e, "reassert: failed to query displays");
+                return;
+            }
+        };
+        match mode {
+            DisplayMode::Mirror => {
+                let Some(sec) = secondary else {
+                    return;
+                };
+                // An activity (or the HiDPI workaround) may have changed the
+                // primary's mode; put it back to the mirror mode.
+                if let (Some(p), Some(s)) = (
+                    displays.iter().find(|d| d.name == primary),
+                    displays.iter().find(|d| d.name == sec),
+                ) && let Some(m) = pick_mirror_mode(p, s)
+                    && let Err(e) = self.backend.set_output_mode(&primary, m).await
+                {
+                    warn!(error = %e, "reassert: failed to set primary mirror mode");
+                }
+                // Re-pin the (still-running) mirror window and re-confine the
+                // pointer, both of which a fullscreen activity can disturb.
+                let criteria = format!("app_id=\"{WL_MIRROR_APP_ID}\"");
+                let _ = self
+                    .backend
+                    .move_to_output_fullscreen(&criteria, &sec)
+                    .await;
+                let _ = self.backend.map_pointer_to_output(&primary).await;
+            }
+            DisplayMode::ExternalOnly => {
+                let Some(sec) = secondary else {
+                    return;
+                };
+                let sec_info = displays.iter().find(|d| d.name == sec);
+                let _ = self
+                    .backend
+                    .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                    .await;
+                self.apply_external_only(&primary, &sec, sec_info).await;
+            }
+            DisplayMode::SingleInternal => {
+                self.restore_primary_native(&primary).await;
+                let _ = self
+                    .backend
+                    .map_pointer_to_output(POINTER_ALL_OUTPUTS)
+                    .await;
+            }
+        }
+    }
+
     /// Persist the new state and broadcast it.
     async fn commit(&self, primary: &str, secondary: Option<String>, mode: DisplayMode) {
         let state = {
@@ -492,6 +560,9 @@ mod tests {
         }
         fn ops(&self) -> Vec<String> {
             self.ops.lock().unwrap().clone()
+        }
+        fn clear_ops(&self) {
+            self.ops.lock().unwrap().clear();
         }
     }
 
@@ -667,6 +738,51 @@ mod tests {
         // Pointer confinement from mirror mode is released now that the primary
         // is gone and only the external is active.
         assert!(backend.ops().iter().any(|o| o == "pointer *"));
+    }
+
+    #[tokio::test]
+    async fn reassert_reestablishes_mirror_without_restarting_it() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(vec![
+            disp("eDP-1", true, &[(1920, 1080)]),
+            disp("HDMI-A-1", true, &[(1920, 1080)]),
+        ]);
+        let mirror = Arc::new(MockMirror {
+            available: true,
+            ..Default::default()
+        });
+        let audio = Arc::new(MockAudio::default());
+        let mgr = manager(backend.clone(), mirror.clone(), audio.clone());
+        mgr.initialize().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::Mirror);
+        let starts_before = mirror
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.starts_with("start"))
+            .count();
+
+        backend.clear_ops();
+        // Simulate the HiDPI workaround having reconfigured outputs around an
+        // activity, then re-assert.
+        mgr.reassert().await;
+
+        let ops = backend.ops();
+        // Mode, mirror pin, and pointer confinement were all re-applied...
+        assert!(ops.iter().any(|o| o == "mode eDP-1 1920x1080"));
+        assert!(ops.iter().any(|o| o == "move HDMI-A-1"));
+        assert!(ops.iter().any(|o| o == "pointer eDP-1"));
+        // ...but the running mirror was NOT torn down and respawned.
+        let starts_after = mirror
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.starts_with("start"))
+            .count();
+        assert_eq!(starts_before, starts_after);
+        assert!(!mirror.events.lock().unwrap().iter().any(|e| e == "stop"));
     }
 
     #[tokio::test]

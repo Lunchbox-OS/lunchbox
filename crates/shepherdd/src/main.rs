@@ -235,17 +235,12 @@ impl Service {
         let brightness = self.brightness.clone();
         let light_sensor = self.light_sensor.clone();
         let store = self.store.clone();
-        // The hidpi manager owns both the IPC server handle and the SSE
-        // broadcast channel so it can fan `HudScaleChanged` events out to
-        // both subscriber populations without being passed them at each
-        // call site (the IPC and HTTP handlers can share the same
-        // controller via `Arc<dyn HidpiController>`).
-        let hidpi = Arc::new(XwaylandHidpi::new(ipc_ref.clone(), event_tx.clone()));
-
         // External monitor / docking controller (issue #87). When docking is
         // disabled in config, a no-op controller is used so the management RPCs
         // still resolve. When enabled, the real `DisplayManager` is also handed
-        // to a hotplug watcher and initialized below.
+        // to a hotplug watcher and initialized below, and to the HiDPI workaround
+        // so the two output-mutating controllers coordinate (the HiDPI apply /
+        // restore re-asserts the mirror).
         let display_cfg = { engine.lock().await.policy().service.display.clone() };
         let (display_svc, display_manager): (
             Arc<dyn DisplayController>,
@@ -263,6 +258,18 @@ impl Service {
         } else {
             (Arc::new(NoOpDisplayController), None)
         };
+
+        // The hidpi manager owns both the IPC server handle and the SSE
+        // broadcast channel so it can fan `HudScaleChanged` events out to
+        // both subscriber populations without being passed them at each
+        // call site (the IPC and HTTP handlers can share the same
+        // controller via `Arc<dyn HidpiController>`). It also holds the docking
+        // controller so it can re-assert the mirror after changing scales.
+        let hidpi = Arc::new(XwaylandHidpi::new(
+            ipc_ref.clone(),
+            event_tx.clone(),
+            display_manager.clone(),
+        ));
 
         // Start management transports (HTTP and/or BLE). Both speak the
         // same shepherd_management::ManagementService, so the service is
