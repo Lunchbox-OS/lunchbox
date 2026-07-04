@@ -27,6 +27,13 @@ RUN apt-get update && \
 # Install apt build/run/test deps + rustup (stable) + nightly+rust-src
 # + bpf-linker via the project's own deps script, so the image stays in
 # lockstep with what `./scripts/shepherd deps install` does on a host.
+#
+# `scripts/shepherd` reads the canonical repo-root VERSION file at startup
+# (for any subcommand), resolving it relative to the script location as
+# `scripts/../VERSION` — i.e. /opt/shepherd-deps/VERSION here. Copy it in so
+# the deps subcommand doesn't die with "Version file not found". Its value is
+# irrelevant to what gets installed; only its presence matters.
+COPY VERSION /opt/shepherd-deps/VERSION
 COPY scripts /opt/shepherd-deps/scripts
 WORKDIR /opt/shepherd-deps
 RUN ./scripts/shepherd deps install build && \

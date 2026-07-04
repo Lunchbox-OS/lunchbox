@@ -139,6 +139,38 @@ pub struct ServiceConfig {
     pub management_api: Option<ManagementApiConfig>,
     /// Bluetooth LE management transport configuration (None = disabled).
     pub ble_management: Option<BleManagementConfig>,
+    /// External monitor / docking behaviour (issue #87).
+    pub display: DisplayConfig,
+}
+
+/// Validated external monitor / docking configuration (issue #87).
+#[derive(Debug, Clone)]
+pub struct DisplayConfig {
+    /// Master switch for docking support.
+    pub docking_enabled: bool,
+    /// Route audio to the external video device while docked.
+    pub mirror_audio: bool,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            docking_enabled: true,
+            mirror_audio: true,
+        }
+    }
+}
+
+impl DisplayConfig {
+    fn from_raw(raw: Option<&crate::schema::RawDisplayConfig>) -> Self {
+        match raw {
+            Some(r) => Self {
+                docking_enabled: r.docking_enabled,
+                mirror_audio: r.mirror_audio,
+            },
+            None => Self::default(),
+        }
+    }
 }
 
 impl ServiceConfig {
@@ -160,6 +192,7 @@ impl ServiceConfig {
             .as_ref()
             .filter(|c| c.enabled)
             .map(|c| BleManagementConfig::from_raw(c, &data_dir));
+        let display = DisplayConfig::from_raw(raw.display.as_ref());
         Self {
             socket_path: raw.socket_path.unwrap_or_else(socket_path_without_env),
             log_dir,
@@ -170,6 +203,7 @@ impl ServiceConfig {
             steam,
             management_api,
             ble_management,
+            display,
         }
     }
 }
@@ -297,6 +331,7 @@ impl Default for ServiceConfig {
             steam: SteamConfig::default(),
             management_api: None,
             ble_management: None,
+            display: DisplayConfig::default(),
         }
     }
 }

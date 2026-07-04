@@ -60,6 +60,16 @@ enabled = false             # Start with auto brightness on?
 # max_percent = 100         # Brightness at the bright end (0-100)
 # poll_interval_seconds = 3 # How often to sample the sensor
 
+# External monitor / docking (optional, issue #87)
+# When a handheld or laptop is docked to an external monitor or TV, shepherdd
+# mirrors the primary panel onto it by default (via `wl-mirror`) and offers a
+# HUD toggle to switch to "external only" at the TV's native resolution. Exactly
+# one logical output is ever active, so the one-activity-at-a-time rule holds.
+# Requires the `wl-mirror` runtime dependency for mirroring.
+[service.display]
+docking_enabled = true   # Master switch for external-monitor support
+mirror_audio = true      # Route audio to the external video device while docked
+
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.
 # Supported schemes: https://, http://, tcp://

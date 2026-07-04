@@ -182,8 +182,13 @@ sway_start_nested() {
     trap sway_cleanup EXIT
     trap sway_handle_signal TERM INT HUP
 
-    # Start sway with wayland backend (nested in current session)
-    WLR_BACKENDS=wayland WLR_LIBINPUT_NO_DEVICES=1 sway -c "$sway_config" --unsupported-gpu &
+    # Start sway with wayland backend (nested in current session).
+    # WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 forces the compositor to always
+    # composite, even for fullscreen surfaces. A fullscreen activity would
+    # otherwise direct-scan-out and starve wl-mirror's screencopy of frames,
+    # blacking the mirrored external display (issue #87).
+    WLR_BACKENDS=wayland WLR_LIBINPUT_NO_DEVICES=1 WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 \
+        sway -c "$sway_config" --unsupported-gpu &
     SWAY_PID=$!
 
     info "Sway started with PID $SWAY_PID"

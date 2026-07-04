@@ -94,6 +94,12 @@ pub enum EventPayload {
     /// `InternetStatusView::target` field in `ServiceStateSnapshot`.
     InternetStatusChanged { target: String, available: bool },
 
+    /// The external-display arrangement changed (issue #87). Shells use this to
+    /// show/hide their mirror/external toggle and to re-anchor their layer-shell
+    /// surface to the currently active output. Emitted on boot, on hotplug, and
+    /// on every mode toggle.
+    DisplayModeChanged { state: crate::DisplayState },
+
     /// The system is about to suspend/sleep. Clients should immediately
     /// commit a static "cover" frame (e.g. a loading screen) so the image
     /// frozen on screen across the suspend/resume gap is not stale (old

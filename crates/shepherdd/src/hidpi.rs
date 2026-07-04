@@ -13,6 +13,7 @@
 //! shepherdd broadcasts the captured pre-launch scale as a `HudScaleChanged`
 //! event so the HUD can apply a counter-scale and stay readable.
 
+use crate::display::DisplayManager;
 use async_trait::async_trait;
 use shepherd_api::{Event, EventPayload};
 use shepherd_host_api::HidpiController;
@@ -37,14 +38,33 @@ pub struct XwaylandHidpi {
     /// Daemon-wide event broadcast channel, used to fan the same event
     /// out to HTTP SSE subscribers.
     event_tx: broadcast::Sender<Event>,
+    /// External-display controller (issue #87), if docking is enabled. After
+    /// this workaround changes output scales for a native-resolution activity,
+    /// it asks the controller to re-assert the mirror arrangement so a
+    /// fullscreen activity can't leave the mirror mode / pin / pointer
+    /// confinement broken. `None` when docking is disabled.
+    display: Option<Arc<DisplayManager>>,
 }
 
 impl XwaylandHidpi {
-    pub fn new(ipc: Arc<IpcServer>, event_tx: broadcast::Sender<Event>) -> Self {
+    pub fn new(
+        ipc: Arc<IpcServer>,
+        event_tx: broadcast::Sender<Event>,
+        display: Option<Arc<DisplayManager>>,
+    ) -> Self {
         Self {
             saved: Mutex::new(None),
             ipc,
             event_tx,
+            display,
+        }
+    }
+
+    /// Re-assert the docking arrangement, if a controller is present. Called
+    /// after scale changes so the mirror survives the activity.
+    async fn reassert_display(&self) {
+        if let Some(dm) = &self.display {
+            dm.reassert().await;
         }
     }
 
@@ -88,6 +108,10 @@ impl HidpiController for XwaylandHidpi {
         *guard = Some(outputs);
         info!(factor, "Applied XWayland HiDPI workaround");
         self.broadcast_factor(factor);
+        drop(guard);
+        // Re-assert the mirror after changing scales so the activity launches
+        // into a correctly-configured docked layout (issue #87).
+        self.reassert_display().await;
     }
 
     /// Restore the captured scales and broadcast factor=1.0. No-op if not
@@ -107,5 +131,8 @@ impl HidpiController for XwaylandHidpi {
             }
         }
         info!("Restored sway output scales");
+        // Re-assert the mirror now that the activity has exited and scales are
+        // back, so the mirror mode / pin / pointer are correct again (issue #87).
+        self.reassert_display().await;
     }
 }

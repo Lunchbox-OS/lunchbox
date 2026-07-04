@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, EntryView, Event, HealthStatus,
-    ServiceStateSnapshot, SessionInfo, StopMode, UsageStat, VolumeInfo, VolumeRestrictions,
-    WindowAction, WindowInfo,
+    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
+    Event, HealthStatus, ServiceStateSnapshot, SessionInfo, StopMode, UsageStat, VolumeInfo,
+    VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_management::{LaunchOutcome, ManagementError, ManagementResult, ManagementService};
 use shepherd_util::EntryId;
@@ -159,6 +159,16 @@ impl ManagementService for MockSvc {
     }
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Err(ManagementError::Internal("nope".into()))
+    }
+    async fn get_display_state(&self) -> DisplayState {
+        DisplayState {
+            mode: DisplayMode::SingleInternal,
+            primary: None,
+            secondary: None,
+        }
+    }
+    async fn set_display_mode(&self, _mode: DisplayMode) -> DisplayState {
+        self.get_display_state().await
     }
     async fn reload_config(&self) -> ManagementResult<usize> {
         Ok(42)
