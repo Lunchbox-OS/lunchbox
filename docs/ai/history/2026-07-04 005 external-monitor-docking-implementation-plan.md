@@ -190,3 +190,92 @@ Each PR builds/tests/lints green and `cargo fmt --all` clean.
   transitions idempotent.
 - **`wl-mirror` availability** — add to `docs/INSTALL.md` and the CI image;
   degrade gracefully (log + stay SingleInternal-with-extend-disabled) if absent.
+
+---
+
+## Post-implementation: real-hardware testing & fixes
+
+The feature was implemented and merged onto `main` (rebased over the
+auto-brightness PR #88; history docs renumbered 003→004/005 to avoid colliding
+with `2026-07-04 003 automatic-screen-brightness.md`). Testing on a real
+handheld + external TV then surfaced a series of issues that several of the
+plan's "watch-items" anticipated. Each was root-caused and fixed; commit hashes
+are on the `u/albert/87/external-monitor-docking` branch.
+
+### CI: deps image build failed (`a2492df`)
+Adding `wl-mirror` to `scripts/deps/run.pkgs` invalidated the previously-cached
+`RUN ./scripts/shepherd deps install` layer in `.ci/Dockerfile`, exposing a
+latent breakage from the version-harmonization work (#83): `scripts/shepherd`
+now reads the repo-root `VERSION` file at startup, but the Dockerfile only
+`COPY`s `scripts/`. Fix: `COPY VERSION` into the image before the `RUN`. Its
+value is irrelevant to what gets installed — only its presence matters.
+
+### 1. Cursor could click the dead mirror surface (`240f5f6`)
+In mirror mode the external output sat beside the primary in the layout, so the
+pointer could travel onto it and land on the (uninteractive) `wl-mirror`
+surface, where clicks went nowhere.
+
+- **First attempt (reverted): overlap the outputs at the same origin.** This is
+  the canonical sway mirroring layout and *did* trap the cursor, but it
+  destabilized sway's rendering under `wl-mirror`'s screencopy — the primary went
+  black with cursor trails (the classic "no full repaint, software cursor
+  overdraw" signature). Dropped.
+- **Fix: confine the pointer, not the outputs.** sway's `map_to_output` applies
+  to pointer devices, so `input type:pointer map_to_output <primary>` keeps a
+  relative mouse on the primary; released with `map_to_output *` in
+  single-internal / external-only. Outputs stay in their normal side-by-side
+  layout (which rendered fine), and `wl-mirror` still shows the cursor on the TV
+  because it mirrors the primary.
+
+### 2. HUD vanished after a few toggles; resolution not restored on undock (`7fa0f58`)
+Two bugs:
+- **HUD vanished** — `set_mode` and `reconcile` weren't serialized, so rapid HUD
+  toggles ran `apply()` concurrently, interleaving enable/disable, mode-set,
+  `wl-mirror` start/stop (incl. its 500 ms settle) and pointer mapping, corrupting
+  the arrangement and the HUD's layer surface. Fix: an `apply_lock` held across
+  every reconcile/apply so they run one at a time.
+- **Resolution not restored** — mirror mode drives the primary to
+  `pick_mirror_mode` (may differ from native). Fix: capture the primary's native
+  mode at startup and restore it whenever the external disconnects and the
+  primary becomes the sole output.
+
+### 3. Fullscreen activities broke mirroring + resolution
+Enumerated the solution space (force composition; re-assert on lifecycle;
+coordinate with the HiDPI controller; constrain fullscreen; per-activity
+arrangement). Tried them in order:
+
+- **HiDPI coordination first (`bf44579`).** The XWayland HiDPI workaround (#45)
+  and the docking controller both mutate sway outputs independently. Gave
+  `DisplayManager` a `reassert()` and had `XwaylandHidpi` call it after changing
+  scales on apply/restore (i.e. around an activity launch/exit), serialized on
+  the same `apply_lock`. Insufficient on its own.
+- **Root cause + real fix (`58a98c3`).** The HiDPI hack reconfigures the
+  primary's *scale* right as the activity opens, which leaves `wl-mirror` showing
+  a black frame or exited — and `reassert` was only *re-pinning* the dead
+  process. Factored the bring-up into `establish_mirror` and made it always
+  **restart** `wl-mirror` (fresh capture) from both apply and reassert, so it
+  recovers after any source-output reconfiguration. Plus
+  `WLR_SCENE_DISABLE_DIRECT_SCANOUT=1` in the sway env (dev launcher +
+  documented for prod): a fullscreen surface would otherwise direct-scan-out and
+  starve `wl-mirror`'s screencopy of frames, blacking the TV even while
+  `wl-mirror` is alive. Confirmed working on hardware (incl. Human Resource
+  Machine with the native-resolution hack).
+
+### 4. HUD vanished when switching to external-only (`02cc925`)
+Distinct from #2's concurrency. Disabling the primary destroys the HUD's
+layer surface anchored there, but GTK still believed the window was visible, so
+`set_monitor` + `present()` had nothing to remap and the anchor cache stuck.
+Fix: re-anchor with an explicit `set_visible(false)` → `set_monitor` →
+`set_visible(true)` cycle — GTK4 unmaps/maps synchronously, tearing down the dead
+surface and building a fresh one on the live output.
+
+### Lessons
+- **Overlapping outputs + screencopy is a trap** — confine the pointer instead.
+- **`wl-mirror` is fragile across source-output reconfiguration** — restart it
+  (fresh capture) rather than re-pinning; force composition so fullscreen
+  activities don't starve its capture.
+- **Two independent output-mutating controllers must be serialized** and made to
+  re-assert around each other (the `apply_lock` + `reassert()` pattern).
+- **gtk4-layer-shell surfaces don't survive their output being disabled** — a
+  synchronous hide→set_monitor→show is the reliable way to follow the active
+  output.
