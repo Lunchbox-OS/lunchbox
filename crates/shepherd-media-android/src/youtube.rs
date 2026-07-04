@@ -17,23 +17,14 @@
 //!   hand to libmpv (mpv's own ytdl hook can't run — there's no yt-dlp on the
 //!   Android PATH).
 
-use serde::Deserialize;
 use shepherd_media_app::Quality;
-use shepherd_media_core::YoutubePlaylistEntry;
-use url::Url;
+use shepherd_media_core::{PlaylistInfo, parse_flat_playlist};
 
 /// Runs yt-dlp for a single URL with the given options (yt-dlp CLI flags, minus
 /// the URL). Returns yt-dlp's stdout on success, or a human-readable error.
 /// Blocking; callers run it off the UI thread.
 pub trait YtDlp: Send + Sync {
     fn run(&self, url: &str, options: &[&str]) -> Result<String, String>;
-}
-
-/// A resolved playlist: optional title/id and the videos in order.
-pub struct PlaylistInfo {
-    pub title: Option<String>,
-    pub playlist_id: Option<String>,
-    pub entries: Vec<YoutubePlaylistEntry>,
 }
 
 /// yt-dlp's `--format` selector for a quality preset.
@@ -100,63 +91,6 @@ pub fn resolve_stream_url(
         ],
     )?;
     parse_stream_urls(&stdout, watch_url)
-}
-
-/// One video object from `yt-dlp --dump-json --flat-playlist`. Only the fields
-/// we use are declared; serde ignores the rest.
-#[derive(Debug, Deserialize)]
-struct YtDlpEntry {
-    id: String,
-    title: String,
-    #[serde(default)]
-    duration: Option<f64>,
-    #[serde(default)]
-    thumbnail: Option<String>,
-    #[serde(default)]
-    playlist_title: Option<String>,
-    #[serde(default)]
-    playlist_id: Option<String>,
-}
-
-/// Parse `--dump-json --flat-playlist` NDJSON (one JSON object per line).
-pub fn parse_flat_playlist(stdout: &str, url: &str) -> Result<PlaylistInfo, String> {
-    let mut entries = Vec::new();
-    let mut playlist_title = None;
-    let mut playlist_id = None;
-
-    for (line_no, line) in stdout.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: YtDlpEntry = serde_json::from_str(line)
-            .map_err(|e| format!("failed to parse yt-dlp output (line {line_no}): {e}"))?;
-
-        if playlist_title.is_none() {
-            playlist_title = entry.playlist_title;
-        }
-        if playlist_id.is_none() {
-            playlist_id = entry.playlist_id;
-        }
-        let thumbnail_url = entry.thumbnail.as_deref().and_then(|t| Url::parse(t).ok());
-        entries.push(YoutubePlaylistEntry {
-            video_id: entry.id,
-            title: entry.title,
-            duration_seconds: entry.duration.map(|d| d as u64),
-            thumbnail_url,
-        });
-    }
-
-    if entries.is_empty() {
-        return Err(format!(
-            "no videos found in playlist — check the URL and that it is public: {url}"
-        ));
-    }
-    Ok(PlaylistInfo {
-        title: playlist_title,
-        playlist_id,
-        entries,
-    })
 }
 
 /// Parse `yt-dlp -g` output. With a `bv*+ba` selection it prints two URLs (video
@@ -505,29 +439,9 @@ mod tests {
         "\n",
     );
 
-    #[test]
-    fn parses_flat_playlist() {
-        let info =
-            parse_flat_playlist(FLAT_JSON, "https://youtube.com/playlist?list=PL999").unwrap();
-        assert_eq!(info.title.as_deref(), Some("My List"));
-        assert_eq!(info.playlist_id.as_deref(), Some("PL999"));
-        assert_eq!(info.entries.len(), 2);
-        assert_eq!(info.entries[0].video_id, "abc123");
-        assert_eq!(info.entries[0].duration_seconds, Some(61));
-        assert!(info.entries[0].thumbnail_url.is_some());
-        assert_eq!(info.entries[1].title, "Second");
-    }
-
-    #[test]
-    fn empty_playlist_is_an_error() {
-        assert!(parse_flat_playlist("\n  \n", "u").is_err());
-    }
-
-    #[test]
-    fn malformed_line_is_an_error() {
-        assert!(parse_flat_playlist("not json", "u").is_err());
-    }
-
+    // The pure NDJSON parser (parse_flat_playlist) now lives in and is tested
+    // by shepherd-media-core; this test covers the Android provider wiring
+    // (YtDlp trait → core parser) that the core tests can't reach.
     #[test]
     fn fetch_playlist_uses_the_provider() {
         let fake = FakeYtDlp(FLAT_JSON);

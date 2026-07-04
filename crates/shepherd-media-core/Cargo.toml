@@ -7,6 +7,7 @@ description = "Platform-agnostic core for shepherd-media: library parsing, sourc
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

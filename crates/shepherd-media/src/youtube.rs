@@ -17,41 +17,16 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use shepherd_media_core::YoutubePlaylistEntry;
+use shepherd_media_core::{PlaylistInfo, YoutubePlaylistEntry, parse_flat_playlist};
 use tracing::{debug, warn};
 use url::Url;
 
 /// Cached playlist metadata is considered fresh for this many seconds.
 const CACHE_TTL_SECS: u64 = 6 * 3600;
 
-/// The result of successfully fetching a YouTube playlist.
-pub struct PlaylistInfo {
-    /// Playlist display title from yt-dlp, if present.
-    pub title: Option<String>,
-    /// The `list=…` parameter value (YouTube's playlist ID).
-    pub playlist_id: Option<String>,
-    /// Videos in playlist order.
-    pub entries: Vec<YoutubePlaylistEntry>,
-}
-
-// --- yt-dlp JSON deserialization ---
-
-// Only the fields shepherd-media actually uses are declared; serde ignores
-// the rest. `playlist_title` and `playlist_id` repeat on every entry but we
-// only keep the first non-None value we see.
-#[derive(Debug, Deserialize)]
-struct YtDlpEntry {
-    id: String,
-    title: String,
-    #[serde(default)]
-    duration: Option<f64>,
-    #[serde(default)]
-    thumbnail: Option<String>,
-    #[serde(default)]
-    playlist_title: Option<String>,
-    #[serde(default)]
-    playlist_id: Option<String>,
-}
+// The yt-dlp NDJSON parser and its `PlaylistInfo` result live in
+// `shepherd-media-core` (`parse_flat_playlist`), shared with the Android app.
+// Only the yt-dlp *invocation* and the on-disk cache below are Linux-specific.
 
 // --- On-disk playlist metadata cache ---
 
@@ -291,7 +266,7 @@ fn fetch_playlist_live(url: &str) -> Result<PlaylistInfo, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ytdlp_output(&stdout, url)
+    parse_flat_playlist(&stdout, url)
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {
@@ -307,47 +282,4 @@ fn ensure_ytdlp_available() -> Result<(), String> {
                 .to_string()
         })?;
     Ok(())
-}
-
-fn parse_ytdlp_output(stdout: &str, url: &str) -> Result<PlaylistInfo, String> {
-    let mut entries: Vec<YoutubePlaylistEntry> = Vec::new();
-    let mut playlist_title: Option<String> = None;
-    let mut playlist_id: Option<String> = None;
-
-    for (line_no, line) in stdout.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: YtDlpEntry = serde_json::from_str(line)
-            .map_err(|e| format!("failed to parse yt-dlp output (line {line_no}): {e}"))?;
-
-        if playlist_title.is_none() {
-            playlist_title = entry.playlist_title;
-        }
-        if playlist_id.is_none() {
-            playlist_id = entry.playlist_id;
-        }
-
-        let thumbnail_url = entry.thumbnail.as_deref().and_then(|t| Url::parse(t).ok());
-
-        entries.push(YoutubePlaylistEntry {
-            video_id: entry.id,
-            title: entry.title,
-            duration_seconds: entry.duration.map(|d| d as u64),
-            thumbnail_url,
-        });
-    }
-
-    if entries.is_empty() {
-        return Err(format!(
-            "no videos found in playlist — check the URL and that the playlist is public: {url}"
-        ));
-    }
-
-    Ok(PlaylistInfo {
-        title: playlist_title,
-        playlist_id,
-        entries,
-    })
 }

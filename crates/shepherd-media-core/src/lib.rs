@@ -24,7 +24,8 @@ pub use resolver::{PlatformInfo, resolve_source};
 pub use session::{Session, SessionInput, SessionState};
 pub use uri::DrmRejection;
 pub use youtube_playlist::{
-    YoutubePlaylistEntry, build_library_from_entries, is_youtube_playlist_url,
+    PlaylistInfo, YoutubePlaylistEntry, build_library_from_entries, is_youtube_playlist_url,
+    parse_flat_playlist,
 };
 
 #[cfg(feature = "libmpv")]

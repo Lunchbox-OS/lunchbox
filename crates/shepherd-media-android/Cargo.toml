@@ -20,8 +20,6 @@ shepherd-media-ui = { path = "../shepherd-media-ui" }
 
 log = "0.4"
 thiserror = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 # Synchronous HTTP with rustls (no OpenSSL), matching the Linux binary's choice
 # so it cross-compiles cleanly for Android. Used off the UI thread.
