@@ -10,6 +10,7 @@
 //! `NativeActivity` glue. On the host, the same [`MediaApp`] runs via the
 //! `desktop_preview` example for fast UI iteration.
 
+pub mod insets;
 pub mod playback;
 pub mod player;
 pub mod posters;
@@ -28,6 +29,11 @@ fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+
+    // Record the activity handle so the safe-area inset query can reach
+    // getWindow()/getRootWindowInsets() (ndk_context's context is the
+    // Application, which has no window).
+    insets::set_activity(app.activity_as_ptr());
 
     // Persist settings and caches in the app's private storage.
     let data_dir = app

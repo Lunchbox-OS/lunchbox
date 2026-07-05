@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fullscreen, and allow the window to extend into the display cutout on
+         the short edges (where a landscape camera cutout sits). The app insets
+         its own content to the safe area (see src/insets.rs), so the background
+         fills the whole non-rectangular display while nothing important lands
+         under the camera or the rounded corners. The cutout-mode attribute is
+         ignored on API < 28. -->
+    <style name="Theme.ShepherdMedia" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

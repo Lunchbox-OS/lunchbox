@@ -192,6 +192,11 @@ pub struct MediaApp {
     playback_pending: Option<(String, Receiver<Result<crate::youtube::StreamUrls, String>>)>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
+    /// Cached display safe-area insets (physical px: camera cutout + rounded
+    /// corners) and the ctx time we last queried them. Refreshed about once a
+    /// second so a rotation that moves the cutout to the other edge is picked up.
+    safe_insets: crate::insets::SafeInsets,
+    insets_checked_at: f64,
 }
 
 impl MediaApp {
@@ -254,6 +259,9 @@ impl MediaApp {
             playing: None,
             playback_pending: None,
             status,
+            safe_insets: crate::insets::SafeInsets::default(),
+            // Force a query on the first frame.
+            insets_checked_at: f64::NEG_INFINITY,
         }
     }
 
@@ -954,10 +962,45 @@ impl eframe::App for MediaApp {
         // Promote a finished YouTube resolution into active playback.
         self.poll_playback_pending();
 
-        // Playback takes over the whole surface while an item is playing.
+        // Playback takes over the whole surface while an item is playing and
+        // fills it edge-to-edge (the video is composited full-screen), so it is
+        // deliberately NOT inset. Only the browse/settings screens below are
+        // inset, so navigation clears the camera cutout and rounded corners
+        // while video still uses the entire display as it did before.
         if self.playing.is_some() {
             self.run_playback(ui, frame);
-        } else if self.playback_pending.is_some() {
+            if self.settings != before {
+                self.persist();
+            }
+            return;
+        }
+
+        // Non-playback screens: inset content into the display's safe rectangle.
+        // eframe's background clear already fills the whole non-rectangular
+        // display, so the background stays edge-to-edge while content stays
+        // clear of the cutout and rounded corners. Insets refresh ~once a second.
+        let now = ui.ctx().input(|i| i.time);
+        if now - self.insets_checked_at > 1.0 {
+            self.safe_insets = crate::insets::query();
+            self.insets_checked_at = now;
+        }
+        let ppp = ui.ctx().pixels_per_point().max(0.01);
+        let ins = self.safe_insets;
+        let full = ui.max_rect();
+        let safe = egui::Rect::from_min_max(
+            full.min + egui::vec2(ins.left / ppp, ins.top / ppp),
+            full.max - egui::vec2(ins.right / ppp, ins.bottom / ppp),
+        );
+        // Guard against pathological insets swallowing the whole window.
+        let safe = if safe.width() > 1.0 && safe.height() > 1.0 {
+            safe
+        } else {
+            full
+        };
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(safe).layout(*ui.layout()));
+        let ui = &mut content;
+
+        if self.playback_pending.is_some() {
             self.top_bar(ui);
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
