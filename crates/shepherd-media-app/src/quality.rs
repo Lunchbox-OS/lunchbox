@@ -39,6 +39,17 @@ pub enum Quality {
 }
 
 impl Quality {
+    /// Human-readable label for a settings UI (e.g. the Android quality picker).
+    /// Distinct from the serde spelling only for `Best` ("Best" vs "best").
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::Best => "Best",
+            Quality::Q1080 => "1080p",
+            Quality::Q720 => "720p",
+            Quality::Q480 => "480p",
+        }
+    }
+
     /// Returns the yt-dlp `--format` / mpv `ytdl-format` string for this preset.
     ///
     /// This is the single definition for both front-ends (the Linux binary

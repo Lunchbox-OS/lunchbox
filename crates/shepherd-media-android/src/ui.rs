@@ -1086,7 +1086,7 @@ fn caching_editors(ui: &mut egui::Ui, id: &str, caching: &mut CachingSettings) {
 
         ui.label("Quality");
         egui::ComboBox::from_id_salt((id, "quality"))
-            .selected_text(quality_label(caching.quality))
+            .selected_text(caching.quality.label())
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut caching.quality, Quality::Best, "Best");
                 ui.selectable_value(&mut caching.quality, Quality::Q1080, "1080p");
@@ -1128,14 +1128,6 @@ fn cache_mode_label(mode: CacheMode) -> &'static str {
     }
 }
 
-fn quality_label(q: Quality) -> &'static str {
-    match q {
-        Quality::Best => "Best",
-        Quality::Q1080 => "1080p",
-        Quality::Q720 => "720p",
-        Quality::Q480 => "480p",
-    }
-}
 
 fn poster_label(p: PosterPolicy) -> &'static str {
     match p {
