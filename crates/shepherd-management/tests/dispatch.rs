@@ -20,7 +20,8 @@ use shepherd_core::CoreEngine;
 use shepherd_host_api::{
     BrightnessCapabilities, BrightnessController, BrightnessResult, BrightnessStatus,
     HostCapabilities, LightSensor, LightSensorCapabilities, LightSensorResult, MockHost,
-    NoOpHidpiController, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
+    NoOpDisplayController, NoOpHidpiController, VolumeCapabilities, VolumeController, VolumeResult,
+    VolumeStatus,
 };
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
@@ -259,6 +260,7 @@ fn make_svc_opts(
         config_path,
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
+        display: Arc::new(NoOpDisplayController),
     }
 }
 

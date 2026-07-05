@@ -10,8 +10,9 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use shepherd_api::{
-    BrightnessInfo, EntryView, ErrorCode, Event, HealthStatus, ReasonCode, Request, Response,
-    ResponseResult, ServiceStateSnapshot, SessionInfo, StopMode, VolumeInfo,
+    BrightnessInfo, DisplayMode, DisplayState, EntryView, ErrorCode, Event, HealthStatus,
+    ReasonCode, Request, Response, ResponseResult, ServiceStateSnapshot, SessionInfo, StopMode,
+    VolumeInfo,
 };
 use shepherd_util::EntryId;
 use std::path::Path;
@@ -172,6 +173,15 @@ impl IpcClient {
 
     pub async fn get_brightness(&mut self) -> IpcResult<BrightnessInfo> {
         self.call("get_brightness", Value::Null).await
+    }
+
+    pub async fn get_display_state(&mut self) -> IpcResult<DisplayState> {
+        self.call("get_display_state", Value::Null).await
+    }
+
+    pub async fn set_display_mode(&mut self, mode: DisplayMode) -> IpcResult<DisplayState> {
+        self.call("set_display_mode", serde_json::json!({ "mode": mode }))
+            .await
     }
 
     pub async fn set_brightness(&mut self, percent: u8) -> IpcResult<BrightnessInfo> {

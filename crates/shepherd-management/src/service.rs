@@ -4,14 +4,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, EntryView, Event, EventPayload,
-    HealthStatus, ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, UsageStat,
-    VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
+    Event, EventPayload, HealthStatus, ServiceStateSnapshot, SessionEndReason, SessionInfo,
+    StopMode, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, LaunchDecision, StopDecision};
 use shepherd_host_api::{
-    BrightnessController, HidpiController, HostAdapter, LightSensor, SpawnOptions, VolumeController,
+    BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
+    SpawnOptions, VolumeController,
 };
 use shepherd_store::Store;
 use shepherd_util::{EntryId, MonotonicInstant};
@@ -106,6 +107,10 @@ pub trait ManagementService: Send + Sync {
     async fn set_auto_brightness(&self, enabled: bool) -> ManagementResult<BrightnessInfo>;
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo>;
 
+    // Display / docking (issue #87)
+    async fn get_display_state(&self) -> DisplayState;
+    async fn set_display_mode(&self, mode: DisplayMode) -> DisplayState;
+
     // Keepalive — pure round-trip used by IPC clients to detect a
     // wedged connection. The `ping` name aligns with the IPC wire
     // name; other transports can call it too but rarely need to.
@@ -158,6 +163,7 @@ pub struct DefaultManagementService {
     /// operation flips this to `true`.
     pub shutdown_tx: watch::Sender<bool>,
     pub hidpi: Arc<dyn HidpiController>,
+    pub display: Arc<dyn DisplayController>,
 }
 
 #[async_trait]
@@ -706,6 +712,15 @@ impl ManagementService for DefaultManagementService {
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
         let current = self.auto_brightness.lock().await.enabled();
         self.apply_auto_enabled(!current).await
+    }
+
+    // --------------------------------------------------------------- display
+    async fn get_display_state(&self) -> DisplayState {
+        self.display.state().await
+    }
+
+    async fn set_display_mode(&self, mode: DisplayMode) -> DisplayState {
+        self.display.set_mode(mode).await
     }
 
     // ---------------------------------------------------------------- config

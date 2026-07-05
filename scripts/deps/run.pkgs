@@ -9,6 +9,13 @@ sway
 swayidle
 xdg-desktop-portal-wlr
 
+# Output mirroring for external monitor / docking support (issue #87). sway
+# cannot mirror outputs from config, so shepherdd drives `wl-mirror` (a
+# screencopy client) to clone the primary panel onto a docked display. Audio
+# routing while docked uses `pw-dump`/`wpctl` from PipeWire/WirePlumber, which
+# the volume control already depends on.
+wl-mirror
+
 # Runtime libraries (may be pulled in automatically, but explicit is safer)
 libgtk-4-1
 libadwaita-1-0
