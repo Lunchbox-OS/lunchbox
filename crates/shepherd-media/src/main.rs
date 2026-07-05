@@ -3,7 +3,6 @@
 mod cli;
 mod connectivity;
 mod ordering;
-mod platform;
 mod posters;
 mod ui;
 mod video_cache;
@@ -127,7 +126,7 @@ fn run_play(
         }
     };
 
-    let info = platform::current();
+    let info = shepherd_media_core::PlatformInfo::current();
     let item = match library.items.iter().find(|i| i.id == item_id) {
         Some(i) => i,
         None => {

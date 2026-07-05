@@ -15,7 +15,6 @@ use shepherd_media_core::{
 };
 use shepherd_util::gamepad_nav::{NavDir, StickNav};
 
-use crate::platform;
 use crate::posters::{self, PosterCache};
 use crate::video_cache::VideoCache;
 
@@ -156,7 +155,7 @@ struct App {
 impl App {
     /// Build the list of items to display for the current frame.
     fn visible_items(&self) -> Vec<Item> {
-        let info = platform::current();
+        let info = shepherd_media_core::PlatformInfo::current();
         let online = self.online.load(Ordering::Relaxed);
         self.session
             .library()
@@ -365,7 +364,7 @@ impl App {
         let Some(item) = visible.get(self.focused) else {
             return;
         };
-        let info = platform::current();
+        let info = shepherd_media_core::PlatformInfo::current();
         if resolve_source(item, &info).is_none() {
             return;
         }

@@ -35,7 +35,6 @@ use shepherd_media_core::resolver::resolve_source;
 use shepherd_media_core::{ClassifiedUri, Library, PlayerError, PlayerEvent, PlayerHandle, Source};
 use tracing::{debug, info, warn};
 
-use crate::platform;
 
 // ---------------------------------------------------------------------------
 // Cache size cap
@@ -131,7 +130,7 @@ impl VideoCache {
     /// Queue background prefetch downloads for every remote item in `library`
     /// (Option A).
     pub fn queue_all(&self, library: &Library) {
-        let platform_info = platform::current();
+        let platform_info = shepherd_media_core::PlatformInfo::current();
         for item in &library.items {
             if let Some(source) = resolve_source(item, &platform_info) {
                 self.queue_prefetch(&item.id, source);
@@ -177,7 +176,7 @@ pub struct CachingPlayer {
 
 impl CachingPlayer {
     pub fn new(inner: Box<dyn PlayerHandle>, cache: Arc<VideoCache>, library: &Library) -> Self {
-        let platform_info = platform::current();
+        let platform_info = shepherd_media_core::PlatformInfo::current();
         let mut url_to_id = HashMap::new();
         for item in &library.items {
             if let Some(source) = resolve_source(item, &platform_info)
