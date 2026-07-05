@@ -1,4 +1,4 @@
-package com.shepherd.dpc;
+package com.armeafamily.shepherd.dpc;
 
 import android.app.admin.DevicePolicyManager;
 import android.content.BroadcastReceiver;
@@ -10,7 +10,7 @@ import android.util.Log;
 /**
  * Clears the Lock Task allowlist so a pinned session can be ended:
  *
- *   am broadcast -n com.shepherd.dpc/.ControlReceiver --es action unlock
+ *   am broadcast -n com.armeafamily.shepherd.dpc/.ControlReceiver --es action unlock
  *
  * Removing the foreground app's package from the allowlist makes the framework
  * exit Lock Task for it, after which shepherd can close the window / force-stop

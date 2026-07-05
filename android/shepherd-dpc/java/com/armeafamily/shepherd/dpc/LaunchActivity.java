@@ -1,4 +1,4 @@
-package com.shepherd.dpc;
+package com.armeafamily.shepherd.dpc;
 
 import android.app.Activity;
 import android.app.ActivityOptions;
@@ -13,7 +13,7 @@ import android.util.Log;
  * No-UI entry point shepherd invokes to launch a kiosk app pinned in Lock Task
  * Mode:
  *
- *   am start -n com.shepherd.dpc/.LaunchActivity --es pkg com.android.calculator2
+ *   am start -n com.armeafamily.shepherd.dpc/.LaunchActivity --es pkg com.android.calculator2
  *
  * As device owner it allowlists the target package for Lock Task, then launches
  * it with {@link ActivityOptions#setLockTaskEnabled(boolean)} so the target is

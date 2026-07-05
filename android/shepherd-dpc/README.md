@@ -41,13 +41,13 @@ key. Build artifacts and the APK are gitignored.
 # install the DPC
 waydroid app install shepherd-dpc.apk
 # set it as device owner (fresh Waydroid, no accounts) — needs root
-sudo waydroid shell -- dpm set-device-owner com.shepherd.dpc/.AdminReceiver
+sudo waydroid shell -- dpm set-device-owner com.armeafamily.shepherd.dpc/.AdminReceiver
 # launch a kiosk app pinned in Lock Task Mode (note the `--` so waydroid forwards
 # the dashed args to am)
-sudo waydroid shell -- am start -n com.shepherd.dpc/.LaunchActivity \
+sudo waydroid shell -- am start -n com.armeafamily.shepherd.dpc/.LaunchActivity \
     --es pkg com.android.calculator2
 # end the locked session
-sudo waydroid shell -- am broadcast -n com.shepherd.dpc/.ControlReceiver \
+sudo waydroid shell -- am broadcast -n com.armeafamily.shepherd.dpc/.ControlReceiver \
     --es action unlock
 ```
 

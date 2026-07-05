@@ -32,7 +32,7 @@ platform-tools, NDK) + system Java 21. No Gradle, so the app builds with a plain
 ## Verified on real Waydroid
 
 - APK builds, signs (stable keystore), installs.
-- `dpm set-device-owner com.shepherd.dpc/.AdminReceiver` → **Success** (works on
+- `dpm set-device-owner com.armeafamily.shepherd.dpc/.AdminReceiver` → **Success** (works on
   a fresh, account-free Waydroid).
 - DPC-launched app → **`mLockTaskModeState=LOCKED`**.
 - Injected `KEYCODE_HOME` **no longer escaped** — foreground stayed on the app

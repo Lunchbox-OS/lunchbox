@@ -3,7 +3,7 @@
   Shepherd DPC: a minimal Device Policy Controller for Waydroid kiosk lock-in.
 
   Provisioned as Device Owner (no Google account needed on a fresh Waydroid):
-    adb shell dpm set-device-owner com.shepherd.dpc/.AdminReceiver
+    adb shell dpm set-device-owner com.armeafamily.shepherd.dpc/.AdminReceiver
 
   Once it is device owner, shepherd launches a kiosk app *pinned* (Lock Task
   Mode) by starting LaunchActivity with the target package, which allowlists it
@@ -11,7 +11,7 @@
   apps that don't call startLockTask themselves (Calculator, M365, …).
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.shepherd.dpc">
+    package="com.armeafamily.shepherd.dpc">
 
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="33" />
 
