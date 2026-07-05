@@ -15,7 +15,6 @@
 //! Android app. Only the HTTP fetch and the XDG cache-dir choice are here.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use shepherd_media_app::poster_cache::{DEFAULT_TTL, RemotePosterCache, Resolution};
@@ -56,7 +55,8 @@ pub fn prefetch(library: &Library) -> PosterCache {
     // The shared disk cache. `None` only when no cache home can be determined
     // (no `$XDG_CACHE_HOME` and no `$HOME`), in which case posters are fetched
     // every launch without caching.
-    let disk = poster_cache_dir().map(|d| RemotePosterCache::new(d, DEFAULT_TTL));
+    let disk =
+        crate::paths::media_cache_dir("posters").map(|d| RemotePosterCache::new(d, DEFAULT_TTL));
 
     for item in &library.items {
         let Some(poster) = &item.poster else { continue };
@@ -120,10 +120,3 @@ fn fetch_remote(agent: &ureq::Agent, url: &str) -> Result<PosterBytes, String> {
     Ok(buf)
 }
 
-/// The on-disk poster cache directory, or `None` if no cache home is known.
-fn poster_cache_dir() -> Option<PathBuf> {
-    let cache_home = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(cache_home.join("shepherd").join("media").join("posters"))
-}

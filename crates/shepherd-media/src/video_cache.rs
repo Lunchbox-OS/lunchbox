@@ -83,7 +83,7 @@ impl VideoCache {
     /// background worker thread.  Returns `None` if the cache directory cannot
     /// be determined or created; in that case the caller should skip caching.
     pub fn new(ytdl_format: &str) -> Option<Arc<Self>> {
-        let cache_dir = video_cache_dir()?;
+        let cache_dir = crate::paths::media_cache_dir("videos")?;
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             warn!(
                 "could not create video cache dir {}: {e}",
@@ -291,13 +291,6 @@ impl PlayerHandle for CachingPlayer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn video_cache_dir() -> Option<PathBuf> {
-    let cache_home = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(cache_home.join("shepherd").join("media").join("videos"))
-}
 
 /// Extract a URL string from a remote `Source`, returning `None` for local
 /// paths that do not need downloading.

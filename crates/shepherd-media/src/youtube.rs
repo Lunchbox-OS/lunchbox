@@ -99,17 +99,7 @@ fn playlist_cache_path(url: &str) -> Option<PathBuf> {
         .take(128)
         .collect();
 
-    let cache_home = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-
-    Some(
-        cache_home
-            .join("shepherd")
-            .join("media")
-            .join("playlists")
-            .join(format!("{safe}.json")),
-    )
+    Some(crate::paths::media_cache_dir("playlists")?.join(format!("{safe}.json")))
 }
 
 /// Try to load playlist metadata from the on-disk cache.

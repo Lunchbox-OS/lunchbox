@@ -3,6 +3,7 @@
 mod cli;
 mod connectivity;
 mod ordering;
+mod paths;
 mod posters;
 mod ui;
 mod video_cache;
