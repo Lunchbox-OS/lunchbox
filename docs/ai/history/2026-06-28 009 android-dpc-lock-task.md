@@ -15,11 +15,11 @@ kiosk lock-in deferred in Phase 4a.
 
 Found the SDK at `/opt/android-sdk` (build-tools 35.0.0, platform android-35,
 platform-tools, NDK) + system Java 21. No Gradle, so the app builds with a plain
-`aapt2 → javac → d8 → zipalign → apksigner` pipeline (`android/shepherd-dpc/build.sh`).
+`aapt2 → javac → d8 → zipalign → apksigner` pipeline (`dpc-waydroid/build.sh`).
 
 ## What was built
 
-`android/shepherd-dpc/` — a ~13 KB DPC APK:
+`dpc-waydroid/` — a ~13 KB DPC APK:
 - `AdminReceiver` (DeviceAdminReceiver), `device_admin.xml` policies.
 - `LaunchActivity` — allowlists a target package for Lock Task and launches it
   with `ActivityOptions.setLockTaskEnabled(true)`, pinning even apps that don't
