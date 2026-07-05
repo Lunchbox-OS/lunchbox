@@ -14,3 +14,7 @@ shepherd-media-core = { path = "../shepherd-media-core", default-features = fals
 # (egui_extras::install_image_loaders) is installed by each binary that uses
 # this crate, so it isn't a dependency here.
 egui = "0.34"
+# glow backs the shared video compositor (an off-screen FBO/texture the player
+# renders into). The eframe texture *registration* is passed in as a closure, so
+# this crate needs glow but not eframe.
+glow = "0.17"

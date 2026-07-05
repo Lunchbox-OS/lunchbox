@@ -4392,6 +4392,7 @@ name = "shepherd-media-ui"
 version = "0.2.0"
 dependencies = [
  "egui",
+ "glow",
  "shepherd-media-core",
 ]
 

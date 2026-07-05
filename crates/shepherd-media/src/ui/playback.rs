@@ -19,10 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use glow::HasContext;
 use shepherd_media_core::{Session, SessionInput};
 
 use shepherd_media_ui::theme;
+use shepherd_media_ui::video::{self, VideoCompositor};
 
 /// Delta (seconds) applied by the ±10s buttons and the LB/RB / dpad-left/right
 /// gamepad bindings.
@@ -37,17 +37,9 @@ const CONTROL_BAR_HEIGHT: f32 = 160.0;
 /// Minimum hit-box size for a touch-friendly button.
 const TOUCH_TARGET: f32 = 72.0;
 
-/// Resources owned per-frame for compositing mpv into egui.
-struct GlSurface {
-    fbo: glow::Framebuffer,
-    texture: glow::Texture,
-    size: [u32; 2],
-    texture_id: Option<egui::TextureId>,
-}
-
 pub struct PlaybackView {
-    gl: Arc<glow::Context>,
-    surface: Option<GlSurface>,
+    /// Off-screen GL target mpv renders into, shared with the Android app.
+    compositor: VideoCompositor,
     last_input_at: Instant,
     /// Title of the item that's currently playing — captured when entering
     /// Playing state so the overlay header keeps showing the right name even
@@ -61,8 +53,7 @@ pub struct PlaybackView {
 impl PlaybackView {
     pub fn new(gl: Arc<glow::Context>, needs_render: Arc<std::sync::atomic::AtomicBool>) -> Self {
         Self {
-            gl,
-            surface: None,
+            compositor: VideoCompositor::new(gl),
             last_input_at: Instant::now(),
             item_title: String::new(),
             needs_render,
@@ -145,9 +136,6 @@ impl PlaybackView {
             screen_pixels.y.max(1.0) as u32,
         ];
 
-        // Allocate or resize the offscreen FBO if needed.
-        self.ensure_surface(target_size, frame);
-
         // Pull a frame from mpv if it has one, regardless of which thread
         // signaled. We always render at least the previous frame so the
         // scene stays painted on resize.
@@ -155,39 +143,23 @@ impl PlaybackView {
             .needs_render
             .swap(false, std::sync::atomic::Ordering::Relaxed);
 
-        if let Some(surface) = &self.surface {
-            // Bind our FBO so mpv draws into the texture, not the
-            // backbuffer that egui is about to paint into.
-            unsafe {
-                self.gl
-                    .bind_framebuffer(glow::FRAMEBUFFER, Some(surface.fbo));
-            }
-            if let Err(e) = session.render(
-                framebuffer_to_gl(surface.fbo),
-                surface.size[0] as i32,
-                surface.size[1] as i32,
-            ) {
-                tracing::warn!("mpv render failed: {e}");
-            }
-            unsafe {
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
-        }
-
-        let texture_id = self.surface.as_ref().and_then(|s| s.texture_id);
+        // The shared compositor sizes the off-screen target and has mpv render
+        // this frame into it; we get back the egui texture to paint.
+        let texture_id = self.compositor.composite(
+            target_size,
+            |texture| frame.register_native_glow_texture(texture),
+            |fbo, w, h| {
+                if let Err(e) = session.render(fbo, w, h) {
+                    tracing::warn!("mpv render failed: {e}");
+                }
+            },
+        );
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show_inside(ui, |ui| {
                 let rect = ui.max_rect();
-                if let Some(tex_id) = texture_id {
-                    ui.painter().image(
-                        tex_id,
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                }
+                video::paint_frame(ui.painter(), rect, texture_id);
 
                 // Auto-hide the overlay after CONTROLS_VISIBLE_FOR of idle.
                 let controls_visible =
@@ -205,88 +177,6 @@ impl PlaybackView {
             Duration::from_millis(250)
         };
         ctx.request_repaint_after(next);
-    }
-
-    fn ensure_surface(&mut self, target_size: [u32; 2], frame: &mut eframe::Frame) {
-        let needs_alloc = match &self.surface {
-            Some(s) => s.size != target_size,
-            None => true,
-        };
-        if !needs_alloc {
-            return;
-        }
-
-        // Free the old surface if any.
-        if let Some(old) = self.surface.take() {
-            unsafe {
-                self.gl.delete_framebuffer(old.fbo);
-                self.gl.delete_texture(old.texture);
-            }
-        }
-
-        let (fbo, texture) = unsafe {
-            let texture = self
-                .gl
-                .create_texture()
-                .expect("failed to create GL texture");
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            self.gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA as i32,
-                target_size[0] as i32,
-                target_size[1] as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-
-            let fbo = self
-                .gl
-                .create_framebuffer()
-                .expect("failed to create GL framebuffer");
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            self.gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(texture),
-                0,
-            );
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-            (fbo, texture)
-        };
-
-        let texture_id = frame.register_native_glow_texture(texture);
-
-        self.surface = Some(GlSurface {
-            fbo,
-            texture,
-            size: target_size,
-            texture_id: Some(texture_id),
-        });
     }
 
     fn draw_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect, session: &mut Session) {
@@ -333,23 +223,25 @@ impl PlaybackView {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         scrubber_ui.label(
-            egui::RichText::new(format_time(position))
+            egui::RichText::new(video::format_time(position))
                 .monospace()
                 .size(20.0),
         );
         scrubber_ui.add_space(12.0);
         let slider_width = scrubber_rect.width() - 160.0;
-        if let Some(new_pos) = touch_slider(
+        if let Some(new_pos) = video::touch_slider(
             &mut scrubber_ui,
             egui::vec2(slider_width, 40.0),
             position,
             (0.0, duration),
+            theme::FOCUS_BORDER,
+            theme::FOCUS_BORDER,
         ) {
             let _ = session.seek_absolute(new_pos);
         }
         scrubber_ui.add_space(12.0);
         scrubber_ui.label(
-            egui::RichText::new(format_time(duration))
+            egui::RichText::new(video::format_time(duration))
                 .monospace()
                 .size(20.0),
         );
@@ -405,83 +297,4 @@ fn button(ui: &mut egui::Ui, label: &str, height: f32) -> egui::Response {
             .fill(theme::TILE_FOCUSED)
             .corner_radius(12.0),
     )
-}
-
-/// Touch-friendly horizontal slider used for both scrubber and volume.
-///
-/// Returns `Some(new_value)` if the user is actively dragging this frame;
-/// the caller is expected to push the value to the source of truth (mpv)
-/// immediately. The widget reads the pointer position directly rather
-/// than relying on egui::Slider's drag-delta logic, which is unreliable
-/// on touchscreens. While interacting, the visual knob tracks the finger
-/// straight away rather than waiting for mpv to apply the previous
-/// frame's update — without this, the slider visibly snaps back to the
-/// stale source-of-truth value between frames.
-fn touch_slider(
-    ui: &mut egui::Ui,
-    size: egui::Vec2,
-    current: f64,
-    range: (f64, f64),
-) -> Option<f64> {
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-
-    let interacting = response.is_pointer_button_down_on() || response.dragged();
-    let new_value = if interacting && range.1 > range.0 {
-        let pos = response
-            .interact_pointer_pos()
-            .or_else(|| ui.input(|i| i.pointer.latest_pos()));
-        pos.map(|p| {
-            let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
-            range.0 + frac * (range.1 - range.0)
-        })
-    } else {
-        None
-    };
-
-    let display = new_value.unwrap_or(current);
-    let frac = if range.1 > range.0 {
-        ((display - range.0) / (range.1 - range.0)).clamp(0.0, 1.0) as f32
-    } else {
-        0.0
-    };
-
-    let painter = ui.painter_at(rect);
-    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 12.0));
-    painter.rect_filled(track, 6.0, egui::Color32::from_white_alpha(40));
-
-    if range.1 > range.0 {
-        let filled =
-            egui::Rect::from_min_size(track.min, egui::vec2(track.width() * frac, track.height()));
-        painter.rect_filled(filled, 6.0, theme::FOCUS_BORDER);
-
-        let knob_x = track.min.x + track.width() * frac;
-        painter.circle_filled(
-            egui::pos2(knob_x, track.center().y),
-            14.0,
-            theme::FOCUS_BORDER,
-        );
-    }
-
-    new_value
-}
-
-fn format_time(seconds: f64) -> String {
-    if !seconds.is_finite() || seconds < 0.0 {
-        return "--:--".to_string();
-    }
-    let total = seconds as u64;
-    let h = total / 3600;
-    let m = (total / 60) % 60;
-    let s = total % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
-/// glow exposes `Framebuffer` as an opaque newtype; mpv wants a raw GL
-/// integer name. Cast through the public API.
-fn framebuffer_to_gl(fb: glow::Framebuffer) -> i32 {
-    fb.0.get() as i32
 }
