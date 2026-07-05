@@ -6,12 +6,10 @@
 //! - `PlaybackView::new` is called once, inside `eframe::App::new`'s
 //!   creation closure, after `session.bind_gl` has been wired up.
 //! - On every `update()` while the session is in `Playing` or
-//!   `Stopping`, the host calls `draw`, which:
-//!   1. (Re)allocates the offscreen FBO + texture if the viewport
-//!      changed size, registering the texture with egui_glow on the
-//!      first draw.
-//!   2. Asks mpv to render the current frame into that FBO.
-//!   3. Paints the texture full-screen and overlays the controls.
+//!   `Stopping`, the host calls `draw`, which uses the shared
+//!   `shepherd-media-ui::video` compositor to render mpv's current frame
+//!   into an off-screen texture, paints it full-screen, and draws the
+//!   shared transport overlay (in this binary's theme) on top.
 //! - Input (touch/click, keyboard, gamepad) is fed into `handle_input`
 //!   before `draw` each frame.
 

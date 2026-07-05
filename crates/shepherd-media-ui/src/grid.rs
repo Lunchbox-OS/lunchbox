@@ -1,10 +1,9 @@
-//! Poster grid rendering — the shared "view a library's contents" UI.
-//!
-//! Adapted from the Linux binary's original grid so the Android app renders an
-//! identical poster grid. It is platform-agnostic: the caller supplies the
-//! items, the focused index (moved by its own keyboard / D-pad / gamepad input),
-//! and a poster-bytes accessor; `draw` returns the id of an item the user chose
-//! to play, leaving playback to the caller.
+//! Poster grid rendering — the shared "view a library's contents" UI used by
+//! both the Linux binary and the Android app, so they render an identical
+//! poster grid. It is platform-agnostic: the caller supplies the items, the
+//! focused index (moved by its own keyboard / D-pad / gamepad input), and a
+//! poster-bytes accessor; `draw` returns the id of an item the user chose to
+//! play, leaving playback to the caller.
 
 use shepherd_media_core::{Item, PlatformInfo, resolve_source};
 

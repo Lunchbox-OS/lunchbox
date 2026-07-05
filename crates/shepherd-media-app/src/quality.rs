@@ -1,10 +1,7 @@
-//! Caching and quality policy types.
+//! Caching and quality policy types for the Android settings model.
 //!
-//! These mirror options that already exist in the Linux binary so the Android
-//! settings model expresses the same knobs:
-//!
-//! - [`Quality`] mirrors `shepherd-media`'s `--quality` presets (and the
-//!   `ytdl_format` selector they map to).
+//! - [`Quality`] is the shared `--quality` preset enum — the Linux binary reuses
+//!   it via this crate's `clap` feature — plus the `ytdl_format` selector.
 //! - [`CacheMode`] mirrors the two `VideoCache` strategies (`queue_all` /
 //!   `queue_after_play`) plus an explicit `off`.
 //! - [`PosterPolicy`] gates poster fetching on metered/Wi-Fi connectivity, a

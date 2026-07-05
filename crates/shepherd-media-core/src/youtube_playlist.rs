@@ -2,9 +2,9 @@
 //! video metadata.
 //!
 //! Network I/O is deliberately absent from this module. The platform binary
-//! (e.g. `shepherd-media` on Linux) fetches the playlist via `yt-dlp` and
-//! passes the extracted entries to [`build_library_from_entries`], which
-//! performs only pure in-memory construction. [android-portability]
+//! (e.g. `shepherd-media` on Linux) runs `yt-dlp`; [`parse_flat_playlist`] turns
+//! its `--dump-json` output into entries, and [`build_library_from_entries`]
+//! assembles them into a `Library` — both pure, in-memory. [android-portability]
 
 use std::path::PathBuf;
 
@@ -39,8 +39,8 @@ pub fn is_youtube_playlist_url(s: &str) -> bool {
 
 /// Metadata for a single video entry extracted from a YouTube playlist fetch.
 ///
-/// This struct is produced by the platform binary (e.g. by parsing
-/// `yt-dlp --dump-json` output) and passed to [`build_library_from_entries`].
+/// Produced by [`parse_flat_playlist`] (from `yt-dlp --dump-json` output) and
+/// passed to [`build_library_from_entries`].
 #[derive(Debug, Clone)]
 pub struct YoutubePlaylistEntry {
     /// The stable YouTube video ID (e.g. `YE7VzlLtp-4`).

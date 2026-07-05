@@ -1,11 +1,12 @@
 //! Playback view: composites the player's GL output into the eframe surface and
-//! draws a touch-friendly control overlay.
+//! draws the transport overlay.
 //!
-//! This is adapted from the Linux binary's `ui/playback.rs`, trimmed to touch +
-//! keyboard (no gamepad) and using egui's default theme. It is cross-platform:
-//! it drives any `PlayerHandle`, so it composites real video from the libmpv
-//! backend on Android and simply paints black behind the overlay with the
-//! `StubPlayer` on the host (whose `render` is a no-op).
+//! The GL compositor and the overlay are the shared `shepherd-media-ui::video`
+//! code (also used by the Linux binary); this file is just the touch/D-pad
+//! input handling and the Android theme colors on top. It drives any
+//! `PlayerHandle`, so it composites real video from the libmpv backend on
+//! Android and paints black behind the overlay with the `StubPlayer` on the
+//! host (whose `render` is a no-op).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
