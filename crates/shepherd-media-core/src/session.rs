@@ -8,7 +8,7 @@
 use std::ffi::{CStr, c_void};
 
 use crate::library::{Item, Library, Source};
-use crate::player::{PlayerError, PlayerEvent, PlayerHandle};
+use crate::player::{PlayerError, PlayerEvent, PlayerHandle, Transport};
 use crate::protocol::{ExitReason, ProtocolEmitter, ProtocolEvent, ReturnReason, UriClass};
 use crate::resolver::{PlatformInfo, resolve_source};
 
@@ -302,5 +302,28 @@ impl Session {
             // Idle player events while browsing or exiting are ignored.
             (_, _) => {}
         }
+    }
+}
+
+/// Drive the session's transport from a shared UI overlay. Delegates to the
+/// inherent methods above (which forward to the underlying player).
+impl Transport for Session {
+    fn is_paused(&self) -> bool {
+        Session::is_paused(self)
+    }
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+        Session::set_paused(self, paused)
+    }
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+        Session::seek_relative(self, delta_seconds)
+    }
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+        Session::seek_absolute(self, seconds)
+    }
+    fn position(&self) -> Option<f64> {
+        Session::position(self)
+    }
+    fn duration(&self) -> Option<f64> {
+        Session::duration(self)
     }
 }

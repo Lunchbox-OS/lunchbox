@@ -107,6 +107,42 @@ pub trait PlayerHandle: Send {
     fn set_redraw_callback(&mut self, _cb: Box<dyn Fn() + Send + Sync + 'static>) {}
 }
 
+/// The playback-transport controls a UI overlay needs — the common subset of
+/// [`PlayerHandle`] and [`Session`](crate::Session), which expose these methods
+/// with identical signatures. Lets a shared overlay drive either one: the
+/// Android app passes its `dyn PlayerHandle`, the Linux binary its `Session`.
+pub trait Transport {
+    fn is_paused(&self) -> bool;
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError>;
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError>;
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError>;
+    fn position(&self) -> Option<f64>;
+    fn duration(&self) -> Option<f64>;
+}
+
+/// Every player is transport-controllable (`?Sized` so `dyn PlayerHandle`
+/// qualifies). `Session` gets its own impl in `session.rs`.
+impl<T: PlayerHandle + ?Sized> Transport for T {
+    fn is_paused(&self) -> bool {
+        PlayerHandle::is_paused(self)
+    }
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+        PlayerHandle::set_paused(self, paused)
+    }
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+        PlayerHandle::seek_relative(self, delta_seconds)
+    }
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+        PlayerHandle::seek_absolute(self, seconds)
+    }
+    fn position(&self) -> Option<f64> {
+        PlayerHandle::position(self)
+    }
+    fn duration(&self) -> Option<f64> {
+        PlayerHandle::duration(self)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     Started,

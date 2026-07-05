@@ -1128,7 +1128,6 @@ fn cache_mode_label(mode: CacheMode) -> &'static str {
     }
 }
 
-
 fn poster_label(p: PosterPolicy) -> &'static str {
     match p {
         PosterPolicy::Always => "Always",

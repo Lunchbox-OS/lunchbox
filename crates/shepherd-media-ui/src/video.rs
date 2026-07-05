@@ -8,9 +8,20 @@
 //! `PlayerHandle`-driven playback on top.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use egui::{Color32, TextureId};
 use glow::HasContext;
+use shepherd_media_core::Transport;
+
+/// Seconds applied by the ±10s buttons and the seek keys/gamepad bindings.
+pub const SEEK_DELTA_SECONDS: f64 = 10.0;
+/// How long the control overlay stays visible after the last input event.
+pub const CONTROLS_VISIBLE_FOR: Duration = Duration::from_secs(3);
+/// Height (logical px) of the bottom control bar, sized for thumb taps.
+const CONTROL_BAR_HEIGHT: f32 = 160.0;
+/// Minimum hit-box size for a touch-friendly button.
+const TOUCH_TARGET: f32 = 72.0;
 
 /// An off-screen GL render target for video: the player renders into an
 /// FBO-backed texture, which is then painted into the egui scene. The FBO +
@@ -235,4 +246,195 @@ pub fn touch_slider(
 /// name.
 fn framebuffer_to_gl(fb: glow::Framebuffer) -> i32 {
     fb.0.get() as i32
+}
+
+/// Colors the transport overlay draws with — each front-end supplies its theme.
+pub struct OverlayTheme {
+    /// Title text.
+    pub text: Color32,
+    /// Filled portion of the scrubber track.
+    pub slider_fill: Color32,
+    /// Scrubber knob.
+    pub slider_knob: Color32,
+    /// Button fill; `None` uses egui's default button styling.
+    pub button_fill: Option<Color32>,
+}
+
+/// What the user asked for via the overlay this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayAction {
+    /// No exit requested.
+    None,
+    /// The back button was tapped — the caller should leave/stop playback.
+    Leave,
+}
+
+/// Draw the transport overlay (title + back, scrubber, ±10s / play-pause) over
+/// `rect`, driving `transport`, and return whether the user asked to leave.
+/// Shared by both front-ends; only the colors (`theme`) and the leave-handling
+/// differ between them.
+pub fn transport_overlay<T: Transport + ?Sized>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    transport: &mut T,
+    title: &str,
+    theme: &OverlayTheme,
+) -> OverlayAction {
+    let mut action = OverlayAction::None;
+
+    // Header strip — title + back affordance.
+    let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 96.0));
+    ui.painter()
+        .rect_filled(header_rect, 0.0, Color32::from_black_alpha(180));
+    ui.painter().text(
+        header_rect.left_center() + egui::vec2(32.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(28.0),
+        theme.text,
+    );
+
+    let mut header_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(header_rect.shrink(16.0))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    if button(&mut header_ui, "‹ Back", theme.button_fill).clicked() {
+        action = OverlayAction::Leave;
+    }
+
+    // Bottom control bar.
+    let bar_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x, rect.max.y - CONTROL_BAR_HEIGHT),
+        egui::vec2(rect.width(), CONTROL_BAR_HEIGHT),
+    );
+    ui.painter()
+        .rect_filled(bar_rect, 0.0, Color32::from_black_alpha(180));
+
+    let position = transport.position().unwrap_or(0.0);
+    let duration = transport.duration().unwrap_or(0.0);
+
+    // Scrubber row: elapsed / slider / total.
+    let scrubber_rect = egui::Rect::from_min_size(
+        bar_rect.min + egui::vec2(32.0, 16.0),
+        egui::vec2(bar_rect.width() - 64.0, 40.0),
+    );
+    let mut scrubber_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(scrubber_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    scrubber_ui.label(
+        egui::RichText::new(format_time(position))
+            .monospace()
+            .size(20.0),
+    );
+    scrubber_ui.add_space(12.0);
+    let slider_width = scrubber_rect.width() - 160.0;
+    if let Some(new_pos) = touch_slider(
+        &mut scrubber_ui,
+        egui::vec2(slider_width, 40.0),
+        position,
+        (0.0, duration),
+        theme.slider_fill,
+        theme.slider_knob,
+    ) {
+        let _ = transport.seek_absolute(new_pos);
+    }
+    scrubber_ui.add_space(12.0);
+    scrubber_ui.label(
+        egui::RichText::new(format_time(duration))
+            .monospace()
+            .size(20.0),
+    );
+
+    // Button row: -10s / play-pause / +10s, centered. Volume is intentionally
+    // absent — the global HUD owns volume, so duplicating it here would confuse.
+    let buttons_rect = egui::Rect::from_min_size(
+        bar_rect.min + egui::vec2(32.0, 72.0),
+        egui::vec2(bar_rect.width() - 64.0, TOUCH_TARGET),
+    );
+    let mut buttons_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(buttons_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    // Spacer that centers the button cluster within the row.
+    let cluster_width = TOUCH_TARGET * 2.0 * 3.0 + 16.0 * 2.0;
+    let lead = ((buttons_rect.width() - cluster_width) / 2.0).max(0.0);
+    buttons_ui.add_space(lead);
+    if button(&mut buttons_ui, "« 10s", theme.button_fill).clicked() {
+        let _ = transport.seek_relative(-SEEK_DELTA_SECONDS);
+    }
+    buttons_ui.add_space(16.0);
+    // Glyphs deliberately drawn from the Geometric Shapes block — bundled
+    // NotoEmoji covers them, unlike the Dingbat-block "❚❚".
+    let play_label = if transport.is_paused() {
+        "▶  Play"
+    } else {
+        "▮▮  Pause"
+    };
+    if button(&mut buttons_ui, play_label, theme.button_fill).clicked() {
+        toggle_pause(transport);
+    }
+    buttons_ui.add_space(16.0);
+    if button(&mut buttons_ui, "10s »", theme.button_fill).clicked() {
+        let _ = transport.seek_relative(SEEK_DELTA_SECONDS);
+    }
+
+    action
+}
+
+/// Toggle play/pause on any transport.
+pub fn toggle_pause<T: Transport + ?Sized>(transport: &mut T) {
+    let paused = transport.is_paused();
+    let _ = transport.set_paused(!paused);
+}
+
+fn button(ui: &mut egui::Ui, label: &str, fill: Option<Color32>) -> egui::Response {
+    let text = egui::RichText::new(label).size(22.0).strong();
+    let mut button = egui::Button::new(text).corner_radius(12.0);
+    if let Some(fill) = fill {
+        button = button.fill(fill);
+    }
+    ui.add_sized(egui::vec2(TOUCH_TARGET * 2.0, TOUCH_TARGET), button)
+}
+
+/// A transport action derived from a key press.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransportIntent {
+    TogglePause,
+    /// Seek by the carried delta (seconds; negative to rewind).
+    Seek(f64),
+    /// Leave playback (back / stop).
+    Leave,
+}
+
+/// The keys the transport responds to, so a caller can poll each with
+/// `Input::key_pressed` and dispatch via [`key_intent`].
+pub const TRANSPORT_KEYS: &[egui::Key] = &[
+    egui::Key::Space,
+    egui::Key::K,
+    egui::Key::Enter,
+    egui::Key::ArrowLeft,
+    egui::Key::J,
+    egui::Key::ArrowRight,
+    egui::Key::L,
+    egui::Key::Escape,
+    egui::Key::Backspace,
+    egui::Key::BrowserBack,
+];
+
+/// Map a transport key to its intent. `seek_delta` is the ±seconds step.
+/// `Enter` (D-pad center) toggles pause and `BrowserBack` (the Android remote
+/// BACK) leaves; both are harmless on desktop, where they simply weren't bound.
+pub fn key_intent(key: egui::Key, seek_delta: f64) -> Option<TransportIntent> {
+    use egui::Key;
+    match key {
+        Key::Space | Key::K | Key::Enter => Some(TransportIntent::TogglePause),
+        Key::ArrowLeft | Key::J => Some(TransportIntent::Seek(-seek_delta)),
+        Key::ArrowRight | Key::L => Some(TransportIntent::Seek(seek_delta)),
+        Key::Escape | Key::Backspace | Key::BrowserBack => Some(TransportIntent::Leave),
+        _ => None,
+    }
 }

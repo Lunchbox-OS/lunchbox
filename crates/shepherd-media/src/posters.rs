@@ -119,4 +119,3 @@ fn fetch_remote(agent: &ureq::Agent, url: &str) -> Result<PosterBytes, String> {
     std::io::copy(&mut resp.into_reader(), &mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
 }
-

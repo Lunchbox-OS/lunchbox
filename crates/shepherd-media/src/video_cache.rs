@@ -35,7 +35,6 @@ use shepherd_media_core::resolver::resolve_source;
 use shepherd_media_core::{ClassifiedUri, Library, PlayerError, PlayerEvent, PlayerHandle, Source};
 use tracing::{debug, info, warn};
 
-
 // ---------------------------------------------------------------------------
 // Cache size cap
 // ---------------------------------------------------------------------------
