@@ -11,6 +11,14 @@ plugins {
 val shepherdVersion: String =
     rootProject.projectDir.parentFile.resolve("VERSION").readText().trim()
 
+// Derive a monotonic versionCode from the canonical semver so in-place upgrades
+// work without a second source of truth. Strip any -prerelease/+build suffix,
+// then pack major.minor.patch as MMMMMNNPP (minor/patch < 100). e.g. 0.2.0 -> 200.
+val shepherdVersionCode: Int =
+    shepherdVersion.substringBefore('-').substringBefore('+').split('.').let {
+        it[0].toInt() * 10000 + it[1].toInt() * 100 + it[2].toInt()
+    }
+
 android {
     namespace = "com.armeafamily.shepherd.companion"
     compileSdk = 35
@@ -19,10 +27,26 @@ android {
         applicationId = "com.armeafamily.shepherd.companion"
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
+        versionCode = shepherdVersionCode
         versionName = shepherdVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Release signing is configured only when the CI keystore env vars are
+    // present (see .github/workflows/release.yml). Local `assembleRelease`
+    // without them falls back to the debug signing config below, so developers
+    // can still produce an installable APK without the release key.
+    val releaseKeystore: String? = System.getenv("SHEPHERD_KEYSTORE_FILE")
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("SHEPHERD_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SHEPHERD_KEY_ALIAS")
+                keyPassword = System.getenv("SHEPHERD_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -35,6 +59,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
 

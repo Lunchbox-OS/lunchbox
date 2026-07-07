@@ -3,10 +3,47 @@
 `shepherd-launcher` can be installed on Linux with a modern Wayland compositor.
 It is currently developed and tested on Ubuntu 25.10.
 
-`shepherd-launcher` currently must be built from source. `./scripts/shepherd`
-can help set up your build environment and manage your installation.
+`shepherd-launcher` can be installed either from a prebuilt `.deb` (the quick
+path) or from source (for development). `./scripts/shepherd` can help set up
+your build environment and manage a source installation.
+
+## Installing from a `.deb`
+
+Prebuilt amd64 packages are attached to each
+[release](https://git.armeafamily.com/albert/shepherd-launcher/releases).
+Download the `.deb` for the version you want and install it with `apt`, which
+also pulls in the runtime dependencies (Sway, mpv, BlueZ, …):
+
+```sh
+sudo apt install ./shepherd-launcher_0.2.0_amd64.deb
+```
+
+The package installs the binaries, the privileged firewall helper and its
+polkit assets, the `/dev/uinput` udev rule, the Sway kiosk session, and the
+display-manager session entry. Its post-install step creates the
+`shepherd-firewall` system group and reloads udev/polkit.
+
+A distro package can't know which account is your kiosk user, so two per-user
+steps are **not** done automatically — run them once after installing:
+
+```sh
+# Deploy the example config + media library to the user (edit them afterward).
+sudo shepherd install config --user kiosk
+
+# Add the user to the required groups (input/video/bluetooth/shepherd-firewall).
+sudo shepherd install groups --user kiosk
+```
+
+Then have `kiosk` log out and back in (so the new group memberships take
+effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is
+still optional — see [below](#kiosk-hardening-optional).
+
+> The companion `.apk` is attached to the same release; sideload it with
+> `adb install shepherd-companion_0.2.0.apk`.
 
 ## Basic setup
+
+The following builds and installs a fully functional local kiosk from source.
 
 ```sh
 # 0. Install build dependencies

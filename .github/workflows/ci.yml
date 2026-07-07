@@ -8,205 +8,35 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
 
-# All Rust jobs share a pre-baked CI image (.ci/Dockerfile) hosted in
-# Forgejo's container registry, so they no longer race to apt-install
-# the same ~1 GB of build deps in parallel containers (which used to
-# OOM-kill the runner). The `image` job builds + pushes the image on
-# cache miss and emits its ref as an output for the rest of the chain.
+# All Rust jobs share a pre-baked CI image (.ci/Dockerfile) hosted in Forgejo's
+# container registry, so they don't race to apt-install the same ~1 GB of build
+# deps in parallel containers (which used to OOM-kill the runner). Building and
+# publishing those images (on content-hash miss) lives in the reusable
+# `images.yml` workflow; the `images` job below calls it and re-exposes the refs
+# for the rest of the chain.
 #
-# Requires a repo secret named `REGISTRY_TOKEN` containing a Forgejo
-# personal access token with package read+write scope; the workflow
-# `permissions: packages: write` block alone does not elevate
-# `secrets.GITHUB_TOKEN` enough to push to the registry on this
-# Forgejo instance (it authenticates fine for read but 401s on push).
+# Requires a repo secret named `REGISTRY_TOKEN` containing a Forgejo personal
+# access token with package read+write scope; the `permissions: packages: write`
+# block alone does not elevate `secrets.GITHUB_TOKEN` enough to push to the
+# registry on this Forgejo instance (it authenticates fine for read but 401s on
+# push). `secrets: inherit` passes REGISTRY_TOKEN through to the reusable
+# workflow.
 
 jobs:
-  image:
-    name: CI image
-    runs-on: ubuntu-latest
+  images:
+    name: CI images
+    uses: ./.github/workflows/images.yml
     permissions:
       packages: write
-    outputs:
-      ref: ${{ steps.tag.outputs.ref }}
-    steps:
-      - name: Install docker CLI
-        # The default `runs-on: ubuntu-latest` job container
-        # (node:20-bookworm) has git but no docker CLI. Install
-        # docker.io so we can talk to the DinD daemon.
-        run: |
-          apt-get update
-          apt-get install -y docker.io
-
-      - name: Point DOCKER_HOST at the DinD bridge gateway
-        # The runner is configured with
-        # `container.docker_host: tcp://docker:2375`, which auto-
-        # provisions a docker:dind sidecar. The hostname `docker`
-        # only resolves on the docker-compose network the runner
-        # lives on — but job containers are children of the dind
-        # service and live on dind's own bridge network, where
-        # `docker` doesn't resolve. The dind daemon is reachable
-        # from a job container at the bridge gateway IP (which is
-        # the dind container itself, listening on 0.0.0.0:2375
-        # because the compose env sets DOCKER_TLS_CERTDIR="").
-        # `iproute2` was just pulled in as a transitive dep of the
-        # docker.io install above, so `ip route` is on PATH.
-        run: |
-          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
-          if [ -z "$gateway" ]; then
-            echo "::error::could not determine bridge gateway IP"
-            ip route || true
-            exit 1
-          fi
-          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=tcp://${gateway}:2375"
-
-      - uses: actions/checkout@v4
-
-      - name: Compute image tag
-        id: tag
-        run: |
-          # Strict hash over the inputs that determine image content.
-          # Year+week prefix forces a weekly rebuild so distro security
-          # updates roll in even when no input file has changed.
-          hash=$(cat \
-              .ci/Dockerfile \
-              scripts/deps/build.pkgs \
-              scripts/deps/run.pkgs \
-              scripts/deps/test.pkgs \
-              scripts/lib/deps.sh \
-            | sha256sum | cut -c1-12)
-          year_week=$(date -u +%Gw%V)
-          ref="${CI_IMAGE_NAME}:${year_week}-${hash}"
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "Image ref: ${ref}"
-
-      - name: Wait for DinD daemon
-        # Even after the sidecar is up, the daemon can take a few
-        # seconds before it answers requests. Poll until ready.
-        run: |
-          for _ in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "docker daemon ready at $DOCKER_HOST"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::docker daemon at $DOCKER_HOST never became ready."
-          echo "::error::Confirm the runner has container.docker_host: tcp://docker:2375 set"
-          echo "::error::and a docker:dind sidecar reachable from job containers."
-          exit 1
-
-      - name: Log in to Forgejo container registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login git.armeafamily.com \
-                --username "${{ github.actor }}" --password-stdin
-
-      - name: Build and push if tag is missing
-        run: |
-          ref="${{ steps.tag.outputs.ref }}"
-          if docker manifest inspect "$ref" >/dev/null 2>&1; then
-            echo "Image already published: $ref"
-            exit 0
-          fi
-          docker build -t "$ref" -f .ci/Dockerfile .
-          docker push "$ref"
-
-  image-android:
-    name: CI image (Android)
-    # Layers the JDK + Android SDK onto the base CI image so the
-    # companion-android Gradle job gets a ready ~1 GB SDK without every
-    # Rust-only job paying the pull. Same build-push-on-hash-miss shape
-    # as the base `image` job above; see .ci/Dockerfile.android.
-    needs: image
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-    outputs:
-      ref: ${{ steps.tag.outputs.ref }}
-    steps:
-      - name: Install docker CLI
-        run: |
-          apt-get update
-          apt-get install -y docker.io
-
-      - name: Point DOCKER_HOST at the DinD bridge gateway
-        run: |
-          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
-          if [ -z "$gateway" ]; then
-            echo "::error::could not determine bridge gateway IP"
-            ip route || true
-            exit 1
-          fi
-          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=tcp://${gateway}:2375"
-
-      - uses: actions/checkout@v4
-
-      - name: Compute image tag
-        id: tag
-        env:
-          BASE_REF: ${{ needs.image.outputs.ref }}
-        run: |
-          # Hash the Android-layer inputs plus the base image ref. The
-          # base ref already encodes the base Dockerfile + deps hashes,
-          # so folding it in rebuilds this image whenever the base does
-          # or the SDK inputs change. Year+week prefix keeps the weekly
-          # security-update rebuild.
-          hash=$( { cat \
-                .ci/Dockerfile.android \
-                scripts/deps/android.pkgs \
-                scripts/lib/deps.sh; \
-              printf '%s' "$BASE_REF"; \
-            } | sha256sum | cut -c1-12)
-          year_week=$(date -u +%Gw%V)
-          ref="${CI_IMAGE_NAME}-android:${year_week}-${hash}"
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "Image ref: ${ref}"
-
-      - name: Wait for DinD daemon
-        run: |
-          for _ in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "docker daemon ready at $DOCKER_HOST"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::docker daemon at $DOCKER_HOST never became ready."
-          exit 1
-
-      - name: Log in to Forgejo container registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login git.armeafamily.com \
-                --username "${{ github.actor }}" --password-stdin
-
-      - name: Build and push if tag is missing
-        env:
-          BASE_REF: ${{ needs.image.outputs.ref }}
-        run: |
-          ref="${{ steps.tag.outputs.ref }}"
-          if docker manifest inspect "$ref" >/dev/null 2>&1; then
-            echo "Image already published: $ref"
-            exit 0
-          fi
-          # Pull the base image explicitly so the dind daemon has it
-          # locally for the FROM (it may not be in the daemon's cache).
-          docker pull "$BASE_REF"
-          docker build \
-            --build-arg BASE_IMAGE="$BASE_REF" \
-            -t "$ref" -f .ci/Dockerfile.android .
-          docker push "$ref"
+    secrets: inherit
 
   build:
     name: Build
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image.outputs.ref }}
+      image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -232,10 +62,10 @@ jobs:
 
   test:
     name: Test
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image.outputs.ref }}
+      image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -258,10 +88,10 @@ jobs:
 
   e2e:
     name: E2E
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image.outputs.ref }}
+      image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -287,10 +117,10 @@ jobs:
 
   lint:
     name: Clippy
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image.outputs.ref }}
+      image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -313,10 +143,10 @@ jobs:
 
   fmt:
     name: Rustfmt
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image.outputs.ref }}
+      image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -325,6 +155,39 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  package:
+    name: Package (.deb smoke build)
+    # Builds the amd64 .deb on every push/PR to catch packaging breakage before
+    # a release tag ever runs release.yml. Nothing is published — this only
+    # proves `shepherd package deb` (release build → DESTDIR stage → dpkg-deb)
+    # still works. Runs as root in the container, so no fakeroot is needed.
+    needs: images
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.images.outputs.base-ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-v2-
+
+      - name: Build .deb
+        run: ./scripts/shepherd package deb --out dist/pkg
+
+      - name: Inspect package metadata
+        run: dpkg-deb -I dist/pkg/*.deb
 
   versions:
     name: Version harmony
@@ -340,7 +203,7 @@ jobs:
 
   firewall:
     name: Firewall E2E
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     # The test (crates/shepherd-e2e/tests/firewall_real.rs) needs systemd
     # as PID1 + polkit + dbus + a writable cgroup hierarchy + the BPF
@@ -391,7 +254,7 @@ jobs:
 
       - name: Run firewall_real in a privileged systemd sidecar
         env:
-          IMAGE_REF: ${{ needs.image.outputs.ref }}
+          IMAGE_REF: ${{ needs.images.outputs.base-ref }}
         run: |
           set -euo pipefail
 
@@ -470,10 +333,10 @@ jobs:
 
   android-portability:
     name: Android portability (shepherd-media-core)
-    needs: image
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image.outputs.ref }}
+      image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -511,10 +374,10 @@ jobs:
     # /opt/android-sdk (with ANDROID_SDK_ROOT set), so there's no per-run
     # toolchain download. Only the Gradle/Maven dep cache — which churns
     # with build.gradle edits — rides on actions/cache.
-    needs: image-android
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image-android.outputs.ref }}
+      image: ${{ needs.images.outputs.android-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
