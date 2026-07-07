@@ -94,12 +94,25 @@ the full design and roadmap.
 
 ## Vendored libmpv
 
-`vendor/libmpv/arm64-v8a/` holds the prebuilt `libmpv.so` plus its ffmpeg
-dependencies, extracted from the `dev.jdtech.mpv:libmpv` AAR (Maven Central).
-`build.rs` adds that directory to the link search path so the `-lmpv` from
-`libmpv2-sys` resolves, and the Gradle project packages the same `.so` into the
-APK's `jniLibs`. To add another ABI, extract its libraries into a sibling dir
-(e.g. `x86_64/`) and add the ABI to `rustAbis` in `android/app/build.gradle.kts`.
+`vendor/libmpv/<abi>/` holds the prebuilt `libmpv.so` plus its ffmpeg
+dependencies, extracted from the `dev.jdtech.mpv:libmpv` AAR (Maven Central,
+version `1.0.0` — mpv v0.41.0). `build.rs` adds the ABI's directory to the link
+search path so the `-lmpv` from `libmpv2-sys` resolves, and the Gradle project
+packages the same `.so`s into the APK's `jniLibs`. Two ABIs are vendored today:
+
+- `arm64-v8a/` — modern phones and 64-bit TVs.
+- `armeabi-v7a/` — 32-bit-only Fire TV sticks (e.g. AFTHA004 "hazel", which
+  reports no `arm64-v8a`). The 32-bit target needs `libmpv2-sys`'s bindgen path
+  rather than its pregenerated (64-bit-layout) bindings; that's forced on for
+  Android in `Cargo.toml` (`libmpv2-sys` with `use-bindgen`), which needs
+  `libclang` on the build host. `cargo-ndk` sets `BINDGEN_EXTRA_CLANG_ARGS_<triple>`
+  so bindgen picks the right per-ABI data model.
+
+To add another ABI (e.g. `x86_64/` for the emulator): unzip that ABI's `jni/`
+libs from the AAR into a sibling dir — copy the same file set as an existing ABI
+(drop the AAR's `libplayer.so`, which this app doesn't use) — add the ABI to
+`rustAbis` in `android/app/build.gradle.kts`, and map its Rust `target_arch` to
+the dir name in `build.rs`.
 
 ## Develop on the host
 

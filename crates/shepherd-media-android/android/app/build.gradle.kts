@@ -4,9 +4,10 @@ plugins {
     id("com.android.application")
 }
 
-// Single ABI for now; add "x86_64" here to also target the emulator. Drives
-// both the packaged ABIs and the cargo-ndk cross-compile below.
-val rustAbis = listOf("arm64-v8a")
+// Add "x86_64" here to also target the emulator. Drives both the packaged ABIs
+// and the cargo-ndk cross-compile below. armeabi-v7a covers 32-bit-only Fire TV
+// sticks (e.g. AFTHA004); arm64-v8a covers modern phones and 64-bit TVs.
+val rustAbis = listOf("arm64-v8a", "armeabi-v7a")
 
 android {
     namespace = "com.armeafamily.shepherd.media"

@@ -67,4 +67,10 @@ ndk-context = "0.1"
 # the vendored libmpv under vendor/libmpv/ (see build.rs); the runtime .so are
 # packaged from there into the APK's jniLibs (see android/app/build.gradle.kts).
 shepherd-media-core = { path = "../shepherd-media-core", features = ["libmpv"] }
+# Force libmpv2-sys (pulled transitively via libmpv2) to regenerate its bindings
+# with bindgen instead of copying its pregenerated ones, which bake in a 64-bit
+# struct layout and fail to compile for the 32-bit armeabi-v7a target (Fire TV).
+# cargo-ndk sets BINDGEN_EXTRA_CLANG_ARGS_<triple> so bindgen picks the right
+# per-ABI data model. Android-only; the host build keeps the pregenerated path.
+libmpv2-sys = { version = "4", features = ["use-bindgen"] }
 

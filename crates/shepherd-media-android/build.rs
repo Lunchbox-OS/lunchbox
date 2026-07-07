@@ -18,6 +18,7 @@ fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let abi = match target_arch.as_str() {
         "aarch64" => "arm64-v8a",
+        "arm" => "armeabi-v7a",
         other => panic!("no vendored libmpv for Android target arch `{other}`"),
     };
 
