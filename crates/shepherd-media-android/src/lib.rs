@@ -17,7 +17,6 @@ pub mod playback;
 pub mod player;
 pub mod posters;
 pub mod resolve;
-pub mod screen;
 pub mod storage;
 pub mod ui;
 pub mod video_cache;
@@ -41,8 +40,17 @@ fn android_main(app: android_activity::AndroidApp) {
     storage::set_activity(app.activity_as_ptr());
     // So BACK from the top-level screen can finish the activity and exit.
     exit::set_activity(app.activity_as_ptr());
-    // So playback can hold the screen on (KEEP_SCREEN_ON window flag).
-    screen::set_app(app.clone());
+
+    // Keep the TV awake while the app is foreground. With `vo=libmpv` there is no
+    // player window to inhibit the screensaver, so it would blank mid-video. Set
+    // the flag once here, before the eframe loop starts: `set_window_flags` takes
+    // android-activity's activity lock, which the render loop also holds while
+    // dispatching input/redraw — calling it from inside `App::update` deadlocks
+    // (ANR). Nothing holds that lock yet at startup, so this is safe.
+    app.set_window_flags(
+        android_activity::WindowManagerFlags::KEEP_SCREEN_ON,
+        android_activity::WindowManagerFlags::empty(),
+    );
 
     // Persist settings and caches in the app's private storage.
     let data_dir = app

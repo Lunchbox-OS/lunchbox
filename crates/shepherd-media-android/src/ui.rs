@@ -212,9 +212,6 @@ pub struct MediaApp {
     /// Whether a text field held focus this frame (the add-library form). Lets
     /// the remote's BACK leave the field before it leaves the screen.
     text_field_focused: bool,
-    /// Whether the `KEEP_SCREEN_ON` window flag is currently set (only toggled on
-    /// change, while a video is on screen).
-    keep_awake: bool,
 }
 
 impl MediaApp {
@@ -283,7 +280,6 @@ impl MediaApp {
             // Force a query on the first frame.
             insets_checked_at: f64::NEG_INFINITY,
             text_field_focused: false,
-            keep_awake: false,
         }
     }
 
@@ -1263,14 +1259,6 @@ impl eframe::App for MediaApp {
 
         // Promote a finished YouTube resolution into active playback.
         self.poll_playback_pending();
-
-        // Hold the screen on while a video is on screen or being resolved, so the
-        // TV's screensaver doesn't blank mid-playback. Toggle only on change.
-        let want_awake = self.playing.is_some() || self.playback_pending.is_some();
-        if want_awake != self.keep_awake {
-            crate::screen::keep_awake(want_awake);
-            self.keep_awake = want_awake;
-        }
 
         // Playback takes over the whole surface while an item is playing and
         // fills it edge-to-edge (the video is composited full-screen), so it is

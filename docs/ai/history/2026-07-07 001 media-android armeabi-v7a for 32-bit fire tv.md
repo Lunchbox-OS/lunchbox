@@ -266,11 +266,22 @@ Three independent issues:
   1080p→720p→480p and Enter closes it.
 
 - **Screensaver blanks mid-video.** With `vo=libmpv` there's no player window, so
-  nothing inhibits the Fire TV screensaver. New `screen` module toggles the
-  `KEEP_SCREEN_ON` window flag via `AndroidApp::set_window_flags` (which marshals
-  to the UI thread) whenever a video is on screen or resolving
-  (`playing.is_some() || playback_pending.is_some()`), cleared otherwise. The
-  `AndroidApp` is stashed thread-locally from `android_main` (the render thread).
+  nothing inhibits the Fire TV screensaver. Set the `KEEP_SCREEN_ON` window flag
+  via `AndroidApp::set_window_flags`.
+
+  *First attempt (broken, reverted):* a per-frame toggle from `App::update`
+  (on while `playing`/`playback_pending`). This **deadlocked** — `set_window_flags`
+  takes android-activity's activity lock (`native_activity.mutex`), which winit
+  already holds on the same thread while dispatching input/redraw to the eframe
+  loop, so re-locking it from inside `update` is a re-entrant deadlock → ANR →
+  crash, exactly on play (when the flag first flips on). Confirmed via logcat
+  (`ANR … the focused window has not finished processing … input events`).
+
+  *Fix:* set the flag **once, from `android_main` before `eframe::run_native`** —
+  nothing holds that lock at startup. The screen stays on for the app's whole
+  foreground lifetime (fine for a TV media player) and never touches the render
+  loop. Verified: `dumpsys window` shows `fl=KEEP_SCREEN_ON …` at launch, and
+  playback no longer hangs.
 
 - **Slow YouTube resolve (~15 s).** Profiled: CPU-bound in the bundled
   Python/yt-dlp (extraction + the nsig JS challenge under quickjs), not network.
