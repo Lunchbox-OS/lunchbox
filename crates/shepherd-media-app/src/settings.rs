@@ -85,6 +85,113 @@ impl LibrarySource {
             LibrarySource::HttpToml { url } | LibrarySource::YoutubePlaylist { url } => url,
         }
     }
+
+    /// A suggested library id derived from the locator, used when the user
+    /// leaves the id field blank (typing on a TV remote is painful). Always a
+    /// valid, non-empty id; falls back to a per-kind default when the locator
+    /// yields nothing usable. Not guaranteed unique — callers dedupe via
+    /// [`AppSettings::unique_id`].
+    pub fn suggested_id(&self) -> String {
+        let raw = match self {
+            LibrarySource::YoutubePlaylist { url } => {
+                youtube_list_id(url).map(slugify_id).unwrap_or_default()
+            }
+            _ => slugify_id(file_stem(self.locator())),
+        };
+        if raw.is_empty() {
+            self.kind_default_id().to_string()
+        } else {
+            raw
+        }
+    }
+
+    /// A suggested human label derived from the locator, used when the user
+    /// leaves the label field blank. Falls back to a per-kind default. This is
+    /// only a placeholder from the locator text; the resolved library's real
+    /// title is not known until the source is fetched.
+    pub fn suggested_label(&self) -> String {
+        let stem = match self {
+            // A YouTube URL's file stem is meaningless; only the title (fetched
+            // later) is human-friendly, so use the kind default for now.
+            LibrarySource::YoutubePlaylist { .. } => "",
+            _ => file_stem(self.locator()).trim(),
+        };
+        let label: String = stem.chars().take(128).collect();
+        let label = label.trim();
+        if label.is_empty() {
+            self.kind_default_label().to_string()
+        } else {
+            label.to_string()
+        }
+    }
+
+    fn kind_default_id(&self) -> &'static str {
+        match self {
+            LibrarySource::SafToml { .. } | LibrarySource::HttpToml { .. } => "library",
+            LibrarySource::M3u { .. } => "playlist",
+            LibrarySource::YoutubePlaylist { .. } => "youtube-playlist",
+        }
+    }
+
+    fn kind_default_label(&self) -> &'static str {
+        match self {
+            LibrarySource::SafToml { .. } | LibrarySource::HttpToml { .. } => "Library",
+            LibrarySource::M3u { .. } => "Playlist",
+            LibrarySource::YoutubePlaylist { .. } => "YouTube playlist",
+        }
+    }
+}
+
+/// Slugify an arbitrary string into a library id fragment: ASCII letters are
+/// lowercased, digits kept, every other character folded to `-`, runs of `-`
+/// collapsed, leading/trailing `-` trimmed, and the result capped at 64 chars.
+/// May return an empty string — the caller supplies a fallback.
+fn slugify_id(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(64));
+    let mut last_dash = true; // treat the start as after a dash to suppress leading dashes
+    for ch in input.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            out.push(ch);
+            last_dash = false;
+        } else if ch.is_ascii_uppercase() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_end_matches('-');
+    if trimmed.len() > 64 {
+        trimmed[..64].trim_end_matches('-').to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The last path segment of a URI/URL/path, with any `?query` and `#fragment`
+/// stripped. Empty when the locator ends in a separator or has no path.
+fn last_path_segment(locator: &str) -> &str {
+    let no_frag = locator.split('#').next().unwrap_or(locator);
+    let no_query = no_frag.split('?').next().unwrap_or(no_frag);
+    no_query.rsplit('/').next().unwrap_or(no_query)
+}
+
+/// The file stem of a locator: its last path segment minus a trailing
+/// extension (e.g. `.../kids.toml` → `kids`). A segment with no extension is
+/// returned whole.
+fn file_stem(locator: &str) -> &str {
+    let seg = last_path_segment(locator);
+    match seg.rsplit_once('.') {
+        Some((stem, _ext)) if !stem.is_empty() => stem,
+        _ => seg,
+    }
+}
+
+/// The `list=` query value of a YouTube playlist URL, if present.
+fn youtube_list_id(url: &str) -> Option<&str> {
+    let query = url.split('?').nth(1)?;
+    query.split('&').find_map(|kv| kv.strip_prefix("list="))
 }
 
 /// Per-library caching and quality knobs.
@@ -244,6 +351,30 @@ impl AppSettings {
         }
         self.libraries.push(entry);
         Ok(())
+    }
+
+    /// Return `base` if it is free, otherwise `base-2`, `base-3`, … until an
+    /// unused id is found. The base is trimmed to leave room for the suffix
+    /// within the 64-char id budget, so the result stays a valid id. Used to
+    /// dedupe an auto-derived id (an explicitly typed duplicate is still an
+    /// error, so the user learns about the collision).
+    pub fn unique_id(&self, base: &str) -> String {
+        if self.get(base).is_none() {
+            return base.to_string();
+        }
+        for n in 2u32.. {
+            let suffix = format!("-{n}");
+            let room = 64usize.saturating_sub(suffix.len());
+            let trimmed = base
+                .get(..base.len().min(room))
+                .unwrap_or(base)
+                .trim_end_matches('-');
+            let candidate = format!("{trimmed}{suffix}");
+            if self.get(&candidate).is_none() {
+                return candidate;
+            }
+        }
+        unreachable!("32-bit suffix space is never exhausted")
     }
 
     /// Remove a library by id, returning the removed entry. If the removed
@@ -659,5 +790,142 @@ mod tests {
         let back = AppSettings::load(&path).unwrap();
         assert_eq!(s, back);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slugify_folds_and_collapses() {
+        assert_eq!(slugify_id("Big Buck Bunny"), "big-buck-bunny");
+        assert_eq!(slugify_id("kids_movies.2024"), "kids-movies-2024");
+        assert_eq!(slugify_id("  --Weird__/name--  "), "weird-name");
+        assert_eq!(slugify_id("***"), "");
+        assert_eq!(slugify_id(""), "");
+        // Cap at 64 chars, no trailing dash.
+        let long = "a".repeat(80);
+        assert_eq!(slugify_id(&long).len(), 64);
+    }
+
+    #[test]
+    fn suggested_id_derives_from_locator() {
+        let toml = LibrarySource::HttpToml {
+            url: "https://host/media/Kids Movies.toml".to_string(),
+        };
+        assert_eq!(toml.suggested_id(), "kids-movies");
+
+        let saf = LibrarySource::SafToml {
+            uri: "content://authority/document/msf%3A42".to_string(),
+        };
+        assert_eq!(saf.suggested_id(), "msf-3a42");
+
+        let m3u = LibrarySource::M3u {
+            uri: "/sdcard/My Playlist.m3u8".to_string(),
+        };
+        assert_eq!(m3u.suggested_id(), "my-playlist");
+
+        let yt = LibrarySource::YoutubePlaylist {
+            url: "https://www.youtube.com/playlist?list=PL6D326BFD2E6696FC".to_string(),
+        };
+        assert_eq!(yt.suggested_id(), "pl6d326bfd2e6696fc");
+    }
+
+    #[test]
+    fn suggested_id_falls_back_to_kind_default() {
+        // Trailing slash → empty stem → kind default.
+        let toml = LibrarySource::HttpToml {
+            url: "https://host/media/".to_string(),
+        };
+        assert_eq!(toml.suggested_id(), "library");
+
+        let m3u = LibrarySource::M3u { uri: String::new() };
+        assert_eq!(m3u.suggested_id(), "playlist");
+
+        // YouTube URL with no list= param.
+        let yt = LibrarySource::YoutubePlaylist {
+            url: "https://www.youtube.com/watch?v=abc".to_string(),
+        };
+        assert_eq!(yt.suggested_id(), "youtube-playlist");
+    }
+
+    #[test]
+    fn suggested_id_is_always_valid() {
+        for src in [
+            LibrarySource::SafToml {
+                uri: "content://a/b/c".to_string(),
+            },
+            LibrarySource::HttpToml {
+                url: "https://h/x.toml".to_string(),
+            },
+            LibrarySource::M3u {
+                uri: "///".to_string(),
+            },
+            LibrarySource::YoutubePlaylist {
+                url: "not a url".to_string(),
+            },
+        ] {
+            assert!(
+                validate_id(&src.suggested_id()).is_ok(),
+                "invalid id from {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn suggested_label_uses_stem_or_kind_default() {
+        let toml = LibrarySource::HttpToml {
+            url: "https://host/Family Films.toml".to_string(),
+        };
+        assert_eq!(toml.suggested_label(), "Family Films");
+
+        let yt = LibrarySource::YoutubePlaylist {
+            url: "https://youtube.com/playlist?list=PL1".to_string(),
+        };
+        assert_eq!(yt.suggested_label(), "YouTube playlist");
+
+        let bare = LibrarySource::SafToml {
+            uri: "content://a/b/".to_string(),
+        };
+        assert_eq!(bare.suggested_label(), "Library");
+    }
+
+    #[test]
+    fn unique_id_appends_suffix_on_collision() {
+        let mut s = AppSettings::new();
+        assert_eq!(s.unique_id("movies"), "movies");
+        s.add_library(entry("movies")).unwrap();
+        assert_eq!(s.unique_id("movies"), "movies-2");
+        s.add_library(entry("movies-2")).unwrap();
+        assert_eq!(s.unique_id("movies"), "movies-3");
+    }
+
+    #[test]
+    fn unique_id_keeps_result_within_budget() {
+        let mut s = AppSettings::new();
+        let base = "a".repeat(64);
+        s.add_library(entry(&base)).unwrap();
+        let deduped = s.unique_id(&base);
+        assert!(deduped.len() <= 64);
+        assert!(validate_id(&deduped).is_ok());
+        assert!(deduped.ends_with("-2"));
+    }
+
+    #[test]
+    fn blank_id_and_label_derive_from_source() {
+        // Mirrors the add-library form's behavior for a remote-only user who
+        // leaves Id and Label blank.
+        let mut s = AppSettings::new();
+        let source = LibrarySource::HttpToml {
+            url: "https://host/Weekend Movies.toml".to_string(),
+        };
+        let id = s.unique_id(&source.suggested_id());
+        let label = source.suggested_label();
+        s.add_library(LibraryEntry {
+            id: id.clone(),
+            label: label.clone(),
+            source,
+            caching: CachingSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(id, "weekend-movies");
+        assert_eq!(label, "Weekend Movies");
+        assert_eq!(s.active_library.as_deref(), Some("weekend-movies"));
     }
 }

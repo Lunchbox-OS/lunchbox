@@ -486,11 +486,17 @@ impl MediaApp {
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 ui.label("Id");
-                ui.text_edit_singleline(&mut self.form.id);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.form.id)
+                        .hint_text("optional — from source"),
+                );
                 ui.end_row();
 
                 ui.label("Label");
-                ui.text_edit_singleline(&mut self.form.label);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.form.label)
+                        .hint_text("optional — from source"),
+                );
                 ui.end_row();
 
                 ui.label("Source");
@@ -513,13 +519,30 @@ impl MediaApp {
 
         ui.add_space(8.0);
         if ui.button("Add").clicked() {
+            let source = self
+                .form
+                .kind
+                .into_source(self.form.locator.trim().to_string());
+            // Id and Label are optional: derive them from the source when left
+            // blank so a remote-only user need not type them. A derived id is
+            // de-duplicated against existing libraries; an explicitly typed
+            // duplicate still surfaces an error.
+            let typed_id = self.form.id.trim();
+            let id = if typed_id.is_empty() {
+                self.settings.unique_id(&source.suggested_id())
+            } else {
+                typed_id.to_string()
+            };
+            let typed_label = self.form.label.trim();
+            let label = if typed_label.is_empty() {
+                source.suggested_label()
+            } else {
+                typed_label.to_string()
+            };
             let entry = LibraryEntry {
-                id: self.form.id.trim().to_string(),
-                label: self.form.label.trim().to_string(),
-                source: self
-                    .form
-                    .kind
-                    .into_source(self.form.locator.trim().to_string()),
+                id,
+                label,
+                source,
                 caching: CachingSettings::default(),
             };
             match self.settings.add_library(entry) {
