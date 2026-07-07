@@ -103,3 +103,37 @@ Both surfaced while testing on the AFTHA004 (D-pad only, no pointer).
    our `NativeActivity` to the Fire TV launcher. Note `finish()` ends the app's
    UI (returns to home) but leaves the process cached — expected Android
    behavior, not a leak, and cleaner than `Close` hard-killing the process.
+
+## Follow-up: text fields trap D-pad focus (same session)
+
+> if the focus ends up in a text box, it is impossible to leave the text box —
+> the arrows don't exit it, and the back button goes to the previous screen
+> entirely
+
+A focused egui `TextEdit` sets a focus lock filter with
+`horizontal_arrows: true, vertical_arrows: true` (arrows move the text cursor,
+not focus). On a remote — which has no other way to move focus — that traps the
+add-library form's Id / Label / Location fields. The user's only escape was BACK,
+which the screen-level handler treated as "navigate up a screen".
+
+Fixes (`src/ui.rs`, add-library form is the only screen with text fields):
+
+- **Free the vertical arrows.** After each `TextEdit`, override its lock filter
+  (`tv_free_field_focus`) to `vertical_arrows: false` so Up/Down move focus
+  between the stacked fields and off to the buttons; keep `horizontal_arrows:
+  true` so Left/Right still move the cursor (useful in the desktop preview,
+  harmless on a remote where text is entered via the phone hand-off / file
+  browser, not typed). Overriding *after* the widget runs wins for that frame's
+  end-of-frame focus move.
+- **BACK leaves the field, not the screen.** Track whether a field held focus
+  this frame (`text_field_focused`); if so, BACK calls `Memory::stop_text_input()`
+  (clears focus) instead of navigating up. Focus falls back to the screen's first
+  control on the next frame; a second BACK then leaves the screen as before.
+
+Verified on the AFTHA004: from a focused Id field, Down moves to Label (no longer
+trapped); BACK releases the field and stays on the Add-library screen.
+
+Aside (not changed): reaching the fields from the left-column buttons
+(Back / Browse / Add) needs a Right press — egui's spatial focus walks the
+vertically-aligned left column and skips the offset field column. Separate from
+the trap; left as-is.

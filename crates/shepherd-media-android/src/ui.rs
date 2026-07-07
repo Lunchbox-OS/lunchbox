@@ -206,6 +206,9 @@ pub struct MediaApp {
     /// second so a rotation that moves the cutout to the other edge is picked up.
     safe_insets: crate::insets::SafeInsets,
     insets_checked_at: f64,
+    /// Whether a text field held focus this frame (the add-library form). Lets
+    /// the remote's BACK leave the field before it leaves the screen.
+    text_field_focused: bool,
 }
 
 impl MediaApp {
@@ -273,6 +276,7 @@ impl MediaApp {
             safe_insets: crate::insets::SafeInsets::default(),
             // Force a query on the first frame.
             insets_checked_at: f64::NEG_INFINITY,
+            text_field_focused: false,
         }
     }
 
@@ -500,22 +504,25 @@ impl MediaApp {
         });
         ui.separator();
 
+        let mut field_focused = false;
         egui::Grid::new("add_library_form")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 ui.label("Id");
-                ui.add(
+                let r = ui.add(
                     egui::TextEdit::singleline(&mut self.form.id)
                         .hint_text("optional — from source"),
                 );
+                field_focused |= tv_free_field_focus(ui, &r);
                 ui.end_row();
 
                 ui.label("Label");
-                ui.add(
+                let r = ui.add(
                     egui::TextEdit::singleline(&mut self.form.label)
                         .hint_text("optional — from source"),
                 );
+                field_focused |= tv_free_field_focus(ui, &r);
                 ui.end_row();
 
                 ui.label("Source");
@@ -529,12 +536,14 @@ impl MediaApp {
                 ui.end_row();
 
                 ui.label("Location");
-                ui.add(
+                let r = ui.add(
                     egui::TextEdit::singleline(&mut self.form.locator)
                         .hint_text(self.form.kind.locator_hint()),
                 );
+                field_focused |= tv_free_field_focus(ui, &r);
                 ui.end_row();
             });
+        self.text_field_focused = field_focused;
 
         // For an on-device source, offer a keyboard-free file browser instead of
         // typing the path. Needs "All files access" (API 30+); if it isn't
@@ -1263,6 +1272,9 @@ impl eframe::App for MediaApp {
                     .memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
             }
 
+            // Only the add-library form has text fields; clear the flag so it
+            // never lingers true on a screen that can't have a focused field.
+            self.text_field_focused = false;
             let mut next = match self.screen.clone() {
                 Screen::Switcher => self.switcher(ui),
                 Screen::Settings => self.settings_screen(ui),
@@ -1277,7 +1289,12 @@ impl eframe::App for MediaApp {
             let back = ui.input(|i| {
                 i.key_pressed(egui::Key::BrowserBack) || i.key_pressed(egui::Key::Escape)
             });
-            if next.is_none() && back {
+            if next.is_none() && back && self.text_field_focused {
+                // BACK from inside a text field leaves the field, not the screen;
+                // a second BACK then navigates up as usual. Focus falls back to
+                // the screen's first control on the next frame's bootstrap.
+                ui.ctx().memory_mut(|m| m.stop_text_input());
+            } else if next.is_none() && back {
                 match self.screen {
                     // Top of the stack: BACK exits the app, matching the TV
                     // expectation that BACK from the home screen leaves rather
@@ -1300,6 +1317,34 @@ impl eframe::App for MediaApp {
             self.persist();
         }
     }
+}
+
+/// Let the D-pad step off a focused single-line text field.
+///
+/// A focused `TextEdit` locks the arrow keys for cursor movement, so on a remote
+/// (which has no other way to move focus) the field becomes a trap. Text here is
+/// entered via the phone hand-off or the file browser, not the remote, so free
+/// the *vertical* arrows to move focus between the stacked fields and off to the
+/// buttons; horizontal arrows stay with the cursor (harmless on a remote, still
+/// useful when editing in the desktop preview). Overriding the lock filter after
+/// the widget runs wins for this frame's end-of-frame focus move. Returns whether
+/// the field is focused, so the caller can make BACK leave the field, not the
+/// screen.
+fn tv_free_field_focus(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    if resp.has_focus() {
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                resp.id,
+                egui::EventFilter {
+                    tab: false,
+                    horizontal_arrows: true,
+                    vertical_arrows: false,
+                    escape: false,
+                },
+            );
+        });
+    }
+    resp.has_focus()
 }
 
 /// Whether `url` points at a YouTube host (so a phone-submitted URL becomes a
