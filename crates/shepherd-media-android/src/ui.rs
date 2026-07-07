@@ -318,8 +318,16 @@ impl MediaApp {
 
         if self.settings.libraries.is_empty() {
             ui.label("No libraries configured yet.");
-            if ui.button("➕ Add a library").clicked() {
+            let resp = ui.button("➕ Add a library");
+            if resp.clicked() {
                 next = Some(Screen::AddLibrary);
+            }
+            // No library list to focus, so the switcher's usual "focus the first
+            // library" bootstrap doesn't fire here. Focus the Add button instead,
+            // or the remote's center button has nothing to activate and the first
+            // library can never be added on a TV.
+            if ui.ctx().memory(|m| m.focused().is_none()) {
+                resp.request_focus();
             }
             return next;
         }
@@ -1270,12 +1278,17 @@ impl eframe::App for MediaApp {
                 i.key_pressed(egui::Key::BrowserBack) || i.key_pressed(egui::Key::Escape)
             });
             if next.is_none() && back {
-                next = match self.screen {
-                    Screen::Switcher => None,
-                    Screen::Settings | Screen::Grid(_) => Some(Screen::Switcher),
-                    Screen::AddLibrary => Some(Screen::Settings),
-                    Screen::FilePicker | Screen::PhoneHandoff => Some(Screen::AddLibrary),
-                };
+                match self.screen {
+                    // Top of the stack: BACK exits the app, matching the TV
+                    // expectation that BACK from the home screen leaves rather
+                    // than doing nothing. Finishing the activity over JNI is
+                    // deterministic; winit's ViewportCommand::Close doesn't
+                    // reliably end a NativeActivity.
+                    Screen::Switcher => crate::exit::finish(),
+                    Screen::Settings | Screen::Grid(_) => next = Some(Screen::Switcher),
+                    Screen::AddLibrary => next = Some(Screen::Settings),
+                    Screen::FilePicker | Screen::PhoneHandoff => next = Some(Screen::AddLibrary),
+                }
             }
 
             if let Some(screen) = next {

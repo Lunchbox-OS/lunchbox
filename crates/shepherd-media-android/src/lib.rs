@@ -10,6 +10,7 @@
 //! `NativeActivity` glue. On the host, the same [`MediaApp`] runs via the
 //! `desktop_preview` example for fast UI iteration.
 
+pub mod exit;
 pub mod handoff;
 pub mod insets;
 pub mod playback;
@@ -37,6 +38,8 @@ fn android_main(app: android_activity::AndroidApp) {
     // Context (ndk_context's context is the Application, which has no window).
     insets::set_activity(app.activity_as_ptr());
     storage::set_activity(app.activity_as_ptr());
+    // So BACK from the top-level screen can finish the activity and exit.
+    exit::set_activity(app.activity_as_ptr());
 
     // Persist settings and caches in the app's private storage.
     let data_dir = app
