@@ -133,7 +133,38 @@ Fixes (`src/ui.rs`, add-library form is the only screen with text fields):
 Verified on the AFTHA004: from a focused Id field, Down moves to Label (no longer
 trapped); BACK releases the field and stays on the Add-library screen.
 
-Aside (not changed): reaching the fields from the left-column buttons
-(Back / Browse / Add) needs a Right press — egui's spatial focus walks the
-vertically-aligned left column and skips the offset field column. Separate from
-the trap; left as-is.
+## Follow-up: add-library form D-pad navigation (same session)
+
+> yes, fix the field navigation too
+
+The aside above became the ask. egui's spatial focus walks the vertically-aligned
+left-column buttons (Back / Browse / Add) and skips the offset field column, so a
+remote's Down never reaches the fields — you had to press Right. Fixed by driving
+focus explicitly in `add_library_screen` (`src/ui.rs`):
+
+- **Tab-order Up/Down.** Capture every control's `Response` (Back, Id, Label,
+  Source, Location, the one Browse/Phone action button, Add) into an ordered
+  list; on Up/Down, find the focused one and `request_focus()` the previous/next
+  (wrapping), then `move_focus(None)` to cancel egui's spatial move. Down now
+  steps Back → Id → Label → Source → Location → Browse → Add. Verified on device.
+
+Testing that surfaced two more remote gaps in the **Source `ComboBox`** — egui
+only closes a combo popup on a *pointer click* or *Escape* (see
+`popup.rs`: `close_click = … pointer.any_click()`), and Android sends BACK as
+`BrowserBack`, not Escape:
+
+- **Enter didn't close the popup.** A D-pad Enter fires the `selectable_value`
+  (the kind changes) but leaves the popup open. Detect the change (`prev_kind`)
+  and `Popup::close_all`, then re-focus the combo so focus doesn't drop to the
+  first widget.
+- **BACK skipped past the open popup and left the screen.** Snapshot
+  `Popup::is_any_open` *before* the screen renders (egui may close it on Escape
+  mid-render), and in the BACK handler dismiss an open popup first — ahead of the
+  text-field and screen-navigation cases — so BACK closes the dropdown instead of
+  navigating. While the popup is open, the form's Up/Down stepping is skipped so
+  egui drives the options.
+
+All verified on the AFTHA004: Down reaches every field; the Source dropdown opens,
+navigates, selects (closing the popup, focus kept on Source), and BACK dismisses
+it without leaving the screen. Back-handler order is now popup → text field →
+screen; regression-checked that field-BACK and plain-BACK still behave.

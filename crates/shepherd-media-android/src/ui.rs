@@ -496,15 +496,24 @@ impl MediaApp {
 
     fn add_library_screen(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
         let mut next = None;
+        let mut back_resp = None;
         ui.horizontal(|ui| {
-            if ui.button("⬅ Back").clicked() {
+            let b = ui.button("⬅ Back");
+            if b.clicked() {
                 next = Some(Screen::Settings);
             }
+            back_resp = Some(b);
             ui.heading("Add library");
         });
         ui.separator();
 
         let mut field_focused = false;
+        let (mut id_resp, mut label_resp, mut combo_resp, mut location_resp) =
+            (None, None, None, None);
+        // egui only closes a ComboBox popup on a pointer click or Escape, so a
+        // D-pad Enter selects the option but leaves the popup open. Detect the
+        // resulting change and close it ourselves.
+        let prev_kind = self.form.kind;
         egui::Grid::new("add_library_form")
             .num_columns(2)
             .spacing([12.0, 8.0])
@@ -515,6 +524,7 @@ impl MediaApp {
                         .hint_text("optional — from source"),
                 );
                 field_focused |= tv_free_field_focus(ui, &r);
+                id_resp = Some(r);
                 ui.end_row();
 
                 ui.label("Label");
@@ -523,16 +533,18 @@ impl MediaApp {
                         .hint_text("optional — from source"),
                 );
                 field_focused |= tv_free_field_focus(ui, &r);
+                label_resp = Some(r);
                 ui.end_row();
 
                 ui.label("Source");
-                egui::ComboBox::from_id_salt("add_kind")
+                let combo = egui::ComboBox::from_id_salt("add_kind")
                     .selected_text(self.form.kind.label())
                     .show_ui(ui, |ui| {
                         for kind in FormKind::ALL {
                             ui.selectable_value(&mut self.form.kind, kind, kind.label());
                         }
                     });
+                combo_resp = Some(combo.response);
                 ui.end_row();
 
                 ui.label("Location");
@@ -541,16 +553,30 @@ impl MediaApp {
                         .hint_text(self.form.kind.locator_hint()),
                 );
                 field_focused |= tv_free_field_focus(ui, &r);
+                location_resp = Some(r);
                 ui.end_row();
             });
         self.text_field_focused = field_focused;
+        if self.form.kind != prev_kind {
+            egui::Popup::close_all(ui.ctx());
+            // Keep focus on the Source control rather than letting the closed
+            // popup drop focus and the bootstrap jump it to the first widget.
+            if let Some(r) = &combo_resp {
+                r.request_focus();
+            }
+        }
+
+        // The one source-specific action button (browse / hand-off), tracked for
+        // D-pad focus stepping below.
+        let mut action_resp = None;
 
         // For an on-device source, offer a keyboard-free file browser instead of
         // typing the path. Needs "All files access" (API 30+); if it isn't
         // granted, send the user to settings and let them retry.
         if matches!(self.form.kind, FormKind::SafToml | FormKind::M3u) {
             ui.add_space(4.0);
-            if ui.button("📁 Browse device…").clicked() {
+            let b = ui.button("📁 Browse device…");
+            if b.clicked() {
                 if crate::storage::has_all_files_access() {
                     self.picker_dir = crate::storage::browse_root();
                     next = Some(Screen::FilePicker);
@@ -561,22 +587,63 @@ impl MediaApp {
                     );
                 }
             }
+            action_resp = Some(b);
         }
 
         // For a URL source, let a phone (which has a keyboard) hand the URL over
         // instead of typing it on the TV.
         if matches!(self.form.kind, FormKind::HttpToml | FormKind::Youtube) {
             ui.add_space(4.0);
-            if ui.button("📱 Add from phone…").clicked() {
+            let b = ui.button("📱 Add from phone…");
+            if b.clicked() {
                 match self.ensure_handoff() {
                     Ok(()) => next = Some(Screen::PhoneHandoff),
                     Err(e) => self.status = Some(format!("Couldn't start hand-off: {e}")),
                 }
             }
+            action_resp = Some(b);
         }
 
         ui.add_space(8.0);
-        if ui.button("Add").clicked() {
+        let add_resp = ui.button("Add");
+
+        // D-pad Up/Down step through the controls in tab order. egui's spatial
+        // focus walks the vertically-aligned left column (Back / Browse / Add)
+        // and skips the offset field column, so a remote can't reach the fields
+        // by pressing Down; drive focus explicitly instead. (Left/Right still do
+        // spatial moves / text-cursor edits.) Skipped while the Source dropdown
+        // is open — then focus is inside the popup, not any control here.
+        let order: Vec<&egui::Response> = [
+            back_resp.as_ref(),
+            id_resp.as_ref(),
+            label_resp.as_ref(),
+            combo_resp.as_ref(),
+            location_resp.as_ref(),
+            action_resp.as_ref(),
+            Some(&add_resp),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let step = ui.input(|i| {
+            i.key_pressed(egui::Key::ArrowDown) as i32 - i.key_pressed(egui::Key::ArrowUp) as i32
+        });
+        // While the Source dropdown is open, leave Up/Down to egui so they move
+        // through the popup's options rather than the form behind it.
+        let popup_open = egui::Popup::is_any_open(ui.ctx());
+        if step != 0
+            && !popup_open
+            && let Some(cur) = order.iter().position(|r| r.has_focus())
+        {
+            let n = order.len() as i32;
+            let target = order[(((cur as i32 + step) % n + n) % n) as usize];
+            target.request_focus();
+            // Cancel egui's own pending spatial move so it doesn't step further.
+            ui.ctx()
+                .memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
+
+        if add_resp.clicked() {
             let source = self
                 .form
                 .kind
@@ -1272,6 +1339,13 @@ impl eframe::App for MediaApp {
                     .memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
             }
 
+            // Snapshot popup state before the screen renders: egui closes popups
+            // on Escape during rendering, so checking afterward would miss a
+            // just-closed one and let BACK also navigate. Android sends BACK as
+            // BrowserBack (not Escape), so egui leaves the popup open and we
+            // dismiss it ourselves below.
+            let popup_was_open = egui::Popup::is_any_open(ui.ctx());
+
             // Only the add-library form has text fields; clear the flag so it
             // never lingers true on a screen that can't have a focused field.
             self.text_field_focused = false;
@@ -1289,7 +1363,11 @@ impl eframe::App for MediaApp {
             let back = ui.input(|i| {
                 i.key_pressed(egui::Key::BrowserBack) || i.key_pressed(egui::Key::Escape)
             });
-            if next.is_none() && back && self.text_field_focused {
+            if next.is_none() && back && popup_was_open {
+                // BACK first dismisses an open popup (the Source dropdown) rather
+                // than leaving the screen behind it.
+                egui::Popup::close_all(ui.ctx());
+            } else if next.is_none() && back && self.text_field_focused {
                 // BACK from inside a text field leaves the field, not the screen;
                 // a second BACK then navigates up as usual. Focus falls back to
                 // the screen's first control on the next frame's bootstrap.
@@ -1319,17 +1397,17 @@ impl eframe::App for MediaApp {
     }
 }
 
-/// Let the D-pad step off a focused single-line text field.
+/// Stop a focused single-line text field from swallowing the vertical D-pad.
 ///
 /// A focused `TextEdit` locks the arrow keys for cursor movement, so on a remote
 /// (which has no other way to move focus) the field becomes a trap. Text here is
 /// entered via the phone hand-off or the file browser, not the remote, so free
-/// the *vertical* arrows to move focus between the stacked fields and off to the
-/// buttons; horizontal arrows stay with the cursor (harmless on a remote, still
-/// useful when editing in the desktop preview). Overriding the lock filter after
-/// the widget runs wins for this frame's end-of-frame focus move. Returns whether
-/// the field is focused, so the caller can make BACK leave the field, not the
-/// screen.
+/// the *vertical* arrows: the field no longer consumes Up/Down, leaving them for
+/// the form's explicit tab-order stepping (see `add_library_screen`). Horizontal
+/// arrows stay with the cursor (harmless on a remote, still useful when editing
+/// in the desktop preview). Overriding the lock filter after the widget runs wins
+/// for this frame's end-of-frame focus handling. Returns whether the field is
+/// focused, so the caller can make BACK leave the field, not the screen.
 fn tv_free_field_focus(ui: &egui::Ui, resp: &egui::Response) -> bool {
     if resp.has_focus() {
         ui.memory_mut(|m| {
