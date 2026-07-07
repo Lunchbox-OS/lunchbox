@@ -190,13 +190,17 @@ Typing a URL is the genuinely painful case (YouTube/HTTP libraries), and it's
 where the file browser can't help. So the TV hosts a tiny LAN web page a phone
 (with a real keyboard) submits the URL to.
 
-- `crates/shepherd-media-android/src/handoff.rs` (new) — a dependency-light,
-  hand-rolled HTTP/1.1 server (`std::net`, no server crate): binds an ephemeral
-  port on all interfaces, finds the LAN IP (UDP-connect trick), serves a form
-  page at `GET /` and accepts `POST /submit`, and delivers the submitted URL
-  over an `mpsc` channel. Includes `qr_matrix()` (via the new `qrcode` dep,
-  core-only) for the on-screen QR. Cross-platform, so the desktop preview drives
-  it too. Unit tests cover form/percent decoding, `Content-Length` parsing, QR.
+- `crates/shepherd-media-android/src/handoff.rs` (new) — an `axum` server (the
+  same `axum`/`tokio` the management API `shepherd-http` uses), run on a
+  background thread off the egui loop. It binds an ephemeral port synchronously
+  (so the port is known before the runtime starts), finds the LAN IP (UDP-connect
+  trick), serves a form page at `GET /`, and accepts `POST /submit` via axum's
+  `Form` extractor (which handles form/percent decoding), delivering the URL over
+  an `mpsc` channel. Includes `qr_matrix()` (via the new `qrcode` dep, core-only)
+  for the on-screen QR. Unit tests spin up the real server and round-trip a
+  `GET`/`POST` over HTTP; a QR test covers the matrix. (First drafted as a
+  hand-rolled `std::net` HTTP/1.1 handler; switched to axum to reuse the project's
+  established server stack.)
 - `ui.rs` — a `Screen::PhoneHandoff` showing the `http://<lan-ip>:<port>/`
   address and a painted QR, reached via a **📱 Add from phone…** button on the
   add form for the URL source kinds. It polls the channel; on receipt it detects

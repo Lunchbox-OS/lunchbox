@@ -30,7 +30,8 @@ the full design and roadmap.
     the system settings screen; it reaches internal storage and SD cards, not
     USB-OTG (SAF-only).
   - **📱 Add from phone…** (for URL sources) starts a tiny LAN web server
-    (`handoff` module + the `PhoneHandoff` screen) and shows its address + a QR.
+    (`handoff` module + the `PhoneHandoff` screen — `axum`, the same server stack
+    as the `shepherd-http` management API) and shows its address + a QR.
     A phone on the same Wi-Fi opens the page, submits a TOML/M3U/YouTube URL, and
     the TV fills the form automatically (detecting the source kind). LAN-only and
     unauthenticated.

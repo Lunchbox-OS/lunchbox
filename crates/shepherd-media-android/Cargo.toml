@@ -27,6 +27,12 @@ ureq = { version = "2.10", default-features = false, features = ["tls"] }
 # LRU bookkeeping for the video cache via file mtimes (as the Linux binary does).
 filetime = "0.2"
 
+# Phone hand-off server (src/handoff.rs): the same axum/tokio the management API
+# (shepherd-http) uses, run on a background thread off the egui loop.
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
 # eframe/egui are cross-platform: the same MediaApp renders on the host (for the
 # desktop preview example) and on Android (via the native-activity backend).
 eframe = { version = "0.34", default-features = false, features = [

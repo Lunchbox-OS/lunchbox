@@ -4350,6 +4350,7 @@ version = "0.2.0"
 dependencies = [
  "android-activity",
  "android_logger",
+ "axum",
  "eframe",
  "egui",
  "egui_extras",
@@ -4360,10 +4361,12 @@ dependencies = [
  "log",
  "ndk-context",
  "qrcode",
+ "serde",
  "shepherd-media-app",
  "shepherd-media-core",
  "shepherd-media-ui",
  "thiserror 1.0.69",
+ "tokio",
  "ureq",
  "url",
 ]
