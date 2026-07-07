@@ -55,6 +55,10 @@ pub struct LibraryEntry {
     pub source: LibrarySource,
     #[serde(default)]
     pub caching: CachingSettings,
+    /// Show the library's items in reverse order (mirrors the Linux binary's
+    /// `--reverse` flag). Applied after the source is resolved.
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 /// Where a library's content comes from. The variants mirror the dispatch the
@@ -524,6 +528,7 @@ mod tests {
                 url: "https://example.com/lib.toml".to_string(),
             },
             caching: CachingSettings::default(),
+            reverse: false,
         }
     }
 
@@ -664,6 +669,7 @@ mod tests {
                 url: "https://www.youtube.com/playlist?list=UUtest".to_string(),
             },
             caching: CachingSettings::default(),
+            reverse: false,
         })
         .unwrap();
 
@@ -922,6 +928,7 @@ mod tests {
             label: label.clone(),
             source,
             caching: CachingSettings::default(),
+            reverse: false,
         })
         .unwrap();
         assert_eq!(id, "weekend-movies");

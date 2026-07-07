@@ -16,7 +16,8 @@ the full design and roadmap.
 ## What works today
 
 - Cross-platform egui UI: library switcher, settings (add / remove / reorder /
-  select-active, per-library cache mode, quality, poster policy, and size cap),
+  select-active, per-library cache mode, quality, poster policy, size cap, and a
+  reverse-order toggle mirroring the Linux binary's `--reverse`),
   add-library form, and a browse grid.
 - Keyboard-free library adding for TVs. The add-library form's `Id`/`Label` are
   optional and auto-derived from the source (see `shepherd-media-app`'s

@@ -435,6 +435,9 @@ impl MediaApp {
             MoveDown(String),
         }
         let mut pending: Option<Pending> = None;
+        // A library whose "Reverse" toggle flipped this frame, applied to its
+        // already-loaded grid below (so it takes effect without re-resolving).
+        let mut reverse_toggled: Option<String> = None;
         let active = self.settings.active_library.clone();
         let count = ids.len();
 
@@ -464,6 +467,12 @@ impl MediaApp {
                     // Caching editors operate on a fresh mutable borrow.
                     if let Some(entry) = self.settings.get_mut(id) {
                         controls.extend(caching_editors(ui, id, &mut entry.caching));
+                        // Reverse the item order (mirrors the Linux `--reverse`).
+                        let rev = ui.checkbox(&mut entry.reverse, "Reverse order");
+                        if rev.changed() {
+                            reverse_toggled = Some(id.clone());
+                        }
+                        controls.push(rev);
                     }
 
                     ui.horizontal(|ui| {
@@ -491,6 +500,18 @@ impl MediaApp {
                 });
             }
         });
+
+        // A "Reverse" toggle takes effect immediately: flip the already-loaded
+        // grid in place rather than re-resolving (a YouTube re-fetch is slow).
+        // Fresh loads apply the flag in `poll_grid`, so the two stay consistent.
+        if let Some(id) = reverse_toggled
+            && let Some(g) = self.grid.as_mut()
+            && g.library_id == id
+            && let GridState::Loaded(lib) = &mut g.state
+        {
+            lib.items.reverse();
+            g.focused = 0;
+        }
 
         // Drive D-pad Up/Down through every control (the Limit drag value is left
         // out — it's reachable via Left/Right from Posters, and owns its own
@@ -658,6 +679,7 @@ impl MediaApp {
                 label,
                 source,
                 caching: CachingSettings::default(),
+                reverse: false,
             };
             match self.settings.add_library(entry) {
                 Ok(()) => {
@@ -872,7 +894,19 @@ impl MediaApp {
         }) = self.grid.as_ref()
         {
             match rx.try_recv() {
-                Ok(Ok(lib)) => self.set_grid_state(GridState::Loaded(lib)),
+                Ok(Ok(mut lib)) => {
+                    // Mirror the Linux binary's `--reverse`: flip the item order
+                    // if this library is configured for it.
+                    let reverse = self
+                        .grid
+                        .as_ref()
+                        .and_then(|g| self.settings.get(&g.library_id))
+                        .is_some_and(|e| e.reverse);
+                    if reverse {
+                        lib.items.reverse();
+                    }
+                    self.set_grid_state(GridState::Loaded(lib));
+                }
                 Ok(Err(e)) => self.set_grid_state(GridState::Failed(e.to_string())),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
