@@ -181,6 +181,46 @@ so the bridge was reverted (kept out of the committed tree). Real fixes:
    above; a future phone hand-off for URLs) plus hardware keyboards. Most
    consistent with the app as it stands.
 
+Chosen: option 3 — build the phone hand-off (below) for the typed-URL case and
+keep the app pure `NativeActivity`.
+
+## Phone hand-off for URLs
+
+Typing a URL is the genuinely painful case (YouTube/HTTP libraries), and it's
+where the file browser can't help. So the TV hosts a tiny LAN web page a phone
+(with a real keyboard) submits the URL to.
+
+- `crates/shepherd-media-android/src/handoff.rs` (new) — a dependency-light,
+  hand-rolled HTTP/1.1 server (`std::net`, no server crate): binds an ephemeral
+  port on all interfaces, finds the LAN IP (UDP-connect trick), serves a form
+  page at `GET /` and accepts `POST /submit`, and delivers the submitted URL
+  over an `mpsc` channel. Includes `qr_matrix()` (via the new `qrcode` dep,
+  core-only) for the on-screen QR. Cross-platform, so the desktop preview drives
+  it too. Unit tests cover form/percent decoding, `Content-Length` parsing, QR.
+- `ui.rs` — a `Screen::PhoneHandoff` showing the `http://<lan-ip>:<port>/`
+  address and a painted QR, reached via a **📱 Add from phone…** button on the
+  add form for the URL source kinds. It polls the channel; on receipt it detects
+  the kind (YouTube host → `Youtube`, else `HttpToml`), fills the locator, and
+  returns to the add form (which then auto-derives id/label). The server starts
+  on first use and is kept alive so the URL/port stay stable for the session.
+- `qrcode = { version = "0.14.1", default-features = false }` added.
+
+Trust model: LAN-only and unauthenticated, the same as a home TV + phone on one
+Wi-Fi. Not exposed beyond the local network.
+
+### Verification (phone hand-off)
+
+- `cargo test` (27 + 44), host + `aarch64-linux-android` clippy — all clean.
+- On-device (Pixel 10a): the screen renders the address + QR. Simulating the
+  phone via `adb forward` + `curl`: `GET /` returns the form; `POST /submit` with
+  a URL returns "Sent ✓" and the TV — **with no input on the TV** — navigates to
+  the add form with the URL filled and the source kind detected. Verified both a
+  TOML URL (`https://example.com/Weekend Movies.toml`, percent-decoded → space,
+  kind `HttpToml`) and a YouTube playlist URL (kind `Youtube`). One bug found and
+  fixed during verification: the receiving frame returned early without a repaint
+  request, so the add form didn't paint until the next input — fixed with an
+  explicit `request_repaint()`.
+
 ### Verification (#2)
 
 - `cargo clippy -p shepherd-media-android` on host **and** `cargo ndk -t

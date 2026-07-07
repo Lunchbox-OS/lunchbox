@@ -18,16 +18,26 @@ the full design and roadmap.
 - Cross-platform egui UI: library switcher, settings (add / remove / reorder /
   select-active, per-library cache mode, quality, poster policy, and size cap),
   add-library form, and a browse grid.
-- Keyboard-free library adding for TVs: the add-library form's `Id`/`Label` are
+- Keyboard-free library adding for TVs. The add-library form's `Id`/`Label` are
   optional and auto-derived from the source (see `shepherd-media-app`'s
-  `LibrarySource::suggested_id`/`suggested_label`), and a **📁 Browse device…**
-  button opens an in-app, D-pad-navigable file browser (`storage` module + the
-  `FilePicker` screen) for on-device `.toml`/`.m3u` sources. The browser hands
-  the resolver a real filesystem path, so an offline library's relative media
-  resolves against its own directory. Reading shared storage needs "All files
-  access" (`MANAGE_EXTERNAL_STORAGE`), requested via the system settings screen;
-  it reaches internal storage and SD cards, not USB-OTG (SAF-only). Verified on
-  hardware.
+  `LibrarySource::suggested_id`/`suggested_label`). Two no-type paths cover the
+  two kinds of source:
+  - **📁 Browse device…** opens an in-app, D-pad-navigable file browser
+    (`storage` module + the `FilePicker` screen) for on-device `.toml`/`.m3u`
+    sources. The browser hands the resolver a real filesystem path, so an offline
+    library's relative media resolves against its own directory. Reading shared
+    storage needs "All files access" (`MANAGE_EXTERNAL_STORAGE`), requested via
+    the system settings screen; it reaches internal storage and SD cards, not
+    USB-OTG (SAF-only).
+  - **📱 Add from phone…** (for URL sources) starts a tiny LAN web server
+    (`handoff` module + the `PhoneHandoff` screen) and shows its address + a QR.
+    A phone on the same Wi-Fi opens the page, submits a TOML/M3U/YouTube URL, and
+    the TV fills the form automatically (detecting the source kind). LAN-only and
+    unauthenticated.
+
+  Both verified on hardware. (Typing directly on the TV's on-screen keyboard is
+  intentionally avoided — a `NativeActivity` can't capture soft-keyboard text
+  for a D-pad-focused field; see the history doc.)
 - The browse grid is the **shared `shepherd-media-ui` poster grid** — the same
   responsive poster-tile view the Linux binary uses, so the two front-ends stay
   in sync. The Android app supplies the items, poster bytes, and focus input;

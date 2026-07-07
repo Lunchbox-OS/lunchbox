@@ -79,6 +79,8 @@ enum Screen {
     AddLibrary,
     /// Browse on-device storage to pick a `.toml`/`.m3u` for the add form.
     FilePicker,
+    /// Show a QR/URL so a phone can hand a library URL to the add form.
+    PhoneHandoff,
     /// Browse a library's contents as a poster grid.
     Grid(String),
 }
@@ -178,6 +180,9 @@ pub struct MediaApp {
     form: NewLibraryForm,
     /// Current directory shown by the file browser (`Screen::FilePicker`).
     picker_dir: PathBuf,
+    /// The phone hand-off server (`Screen::PhoneHandoff`), started on first use
+    /// and kept running so the URL/port stay stable for the session.
+    handoff: Option<crate::handoff::Handoff>,
     /// Cached resolution for the browse grid (also acts as a 1-entry cache so
     /// re-opening the same library doesn't re-resolve).
     grid: Option<GridView>,
@@ -255,6 +260,7 @@ impl MediaApp {
             screen: Screen::Switcher,
             form: NewLibraryForm::default(),
             picker_dir: crate::storage::browse_root(),
+            handoff: None,
             grid: None,
             posters: HashMap::new(),
             poster_tx,
@@ -540,6 +546,18 @@ impl MediaApp {
             }
         }
 
+        // For a URL source, let a phone (which has a keyboard) hand the URL over
+        // instead of typing it on the TV.
+        if matches!(self.form.kind, FormKind::HttpToml | FormKind::Youtube) {
+            ui.add_space(4.0);
+            if ui.button("📱 Add from phone…").clicked() {
+                match self.ensure_handoff() {
+                    Ok(()) => next = Some(Screen::PhoneHandoff),
+                    Err(e) => self.status = Some(format!("Couldn't start hand-off: {e}")),
+                }
+            }
+        }
+
         ui.add_space(8.0);
         if ui.button("Add").clicked() {
             let source = self
@@ -669,6 +687,66 @@ impl MediaApp {
                 ui.label("No folders or .toml/.m3u files here.");
             }
         });
+        next
+    }
+
+    /// Start the phone hand-off server if it isn't already running (kept alive
+    /// so the URL/port stay stable across visits to the screen).
+    fn ensure_handoff(&mut self) -> std::io::Result<()> {
+        if self.handoff.is_none() {
+            self.handoff = Some(crate::handoff::start()?);
+        }
+        Ok(())
+    }
+
+    /// Show the hand-off URL + QR and poll for a URL submitted from the phone.
+    /// When one arrives, fill the add form (source kind detected from the URL)
+    /// and return to it.
+    fn phone_handoff_screen(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
+        let mut next = None;
+        ui.horizontal(|ui| {
+            if ui.button("⬅ Back").clicked() {
+                next = Some(Screen::AddLibrary);
+            }
+            ui.heading("Add from phone");
+        });
+        ui.separator();
+
+        let Some(handoff) = self.handoff.as_ref() else {
+            ui.label("Hand-off server isn't running.");
+            return next;
+        };
+
+        // A URL arrived from the phone: fill the form and go back to it.
+        if let Ok(url) = handoff.rx.try_recv() {
+            let url = url.trim().to_string();
+            self.form.kind = if is_youtube(&url) {
+                FormKind::Youtube
+            } else {
+                FormKind::HttpToml
+            };
+            self.form.locator = url;
+            self.status = Some("Received from phone.".to_string());
+            // The submission arrives with no user input on the TV, so nothing
+            // else would schedule the frame that paints the add form — request
+            // it explicitly.
+            ui.ctx().request_repaint();
+            return Some(Screen::AddLibrary);
+        }
+
+        ui.add_space(8.0);
+        ui.label("On a phone on the same Wi-Fi, open this address:");
+        ui.heading(&handoff.url);
+        ui.add_space(12.0);
+        ui.label("or scan:");
+        if let Some((w, dark)) = crate::handoff::qr_matrix(&handoff.url) {
+            draw_qr(ui, w, &dark);
+        }
+        ui.add_space(12.0);
+        ui.label("Paste a URL there and tap Send — it appears here automatically.");
+
+        // Poll for the submission while this screen is visible.
+        ui.ctx().request_repaint_after(Duration::from_millis(200));
         next
     }
 
@@ -1173,6 +1251,7 @@ impl eframe::App for MediaApp {
                 Screen::Settings => self.settings_screen(ui),
                 Screen::AddLibrary => self.add_library_screen(ui),
                 Screen::FilePicker => self.file_picker_screen(ui),
+                Screen::PhoneHandoff => self.phone_handoff_screen(ui),
                 Screen::Grid(id) => self.grid_screen(ui, &id),
             };
 
@@ -1186,7 +1265,7 @@ impl eframe::App for MediaApp {
                     Screen::Switcher => None,
                     Screen::Settings | Screen::Grid(_) => Some(Screen::Switcher),
                     Screen::AddLibrary => Some(Screen::Settings),
-                    Screen::FilePicker => Some(Screen::AddLibrary),
+                    Screen::FilePicker | Screen::PhoneHandoff => Some(Screen::AddLibrary),
                 };
             }
 
@@ -1197,6 +1276,43 @@ impl eframe::App for MediaApp {
 
         if self.settings != before {
             self.persist();
+        }
+    }
+}
+
+/// Whether `url` points at a YouTube host (so a phone-submitted URL becomes a
+/// YouTube playlist source rather than a plain HTTP TOML).
+fn is_youtube(url: &str) -> bool {
+    let u = url.to_lowercase();
+    ["youtube.com", "youtu.be", "youtube-nocookie.com"]
+        .iter()
+        .any(|host| u.contains(host))
+}
+
+/// Paint a QR code (`width` × `width` modules, row-major `dark` flags) as black
+/// squares on white, with a 4-module quiet zone.
+fn draw_qr(ui: &mut egui::Ui, width: usize, dark: &[bool]) {
+    let quiet = 4usize;
+    let modules = width + quiet * 2;
+    let module_px = (320.0 / modules as f32).floor().max(2.0);
+    let side = module_px * modules as f32;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+    for y in 0..width {
+        for x in 0..width {
+            if dark[y * width + x] {
+                let min = rect.min
+                    + egui::vec2(
+                        (x + quiet) as f32 * module_px,
+                        (y + quiet) as f32 * module_px,
+                    );
+                painter.rect_filled(
+                    egui::Rect::from_min_size(min, egui::vec2(module_px, module_px)),
+                    0.0,
+                    egui::Color32::BLACK,
+                );
+            }
         }
     }
 }

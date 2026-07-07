@@ -47,6 +47,7 @@ image = { version = "0.25", default-features = false, features = [
     "png",
     "webp",
 ] }
+qrcode = { version = "0.14.1", default-features = false }
 
 # Android-only glue. Target-gated so the host build (and workspace CI) never
 # pulls the NDK-linked crates.

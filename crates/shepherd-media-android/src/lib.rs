@@ -10,6 +10,7 @@
 //! `NativeActivity` glue. On the host, the same [`MediaApp`] runs via the
 //! `desktop_preview` example for fast UI iteration.
 
+pub mod handoff;
 pub mod insets;
 pub mod playback;
 pub mod player;
