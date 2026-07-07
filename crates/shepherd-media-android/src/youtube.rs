@@ -390,12 +390,25 @@ mod jni_impl {
         // execute() throws YoutubeDLException on any yt-dlp failure. Catch it
         // and clear the pending exception (see take_pending_exception) so the
         // worker thread doesn't crash the process when it detaches.
+        //
+        // Use the (request, processId, useCache) overload with useCache=true: the
+        // default execute passes `--no-cache-dir`, which makes yt-dlp re-download
+        // and re-parse YouTube's player JS (the expensive nsig extraction) on
+        // every call. With caching on it writes to the app cache dir, so repeat
+        // resolves — and the next launch — reuse the extracted player. The URL is
+        // the process id (unique per call, so a future concurrent resolve can't
+        // collide in the library's process map).
+        let pid: JString = env.new_string(url).map_err(jni_err)?;
         let response = match env.call_method(
             &instance,
             "execute",
-            "(Lcom/yausername/youtubedl_android/YoutubeDLRequest;)\
+            "(Lcom/yausername/youtubedl_android/YoutubeDLRequest;Ljava/lang/String;Z)\
              Lcom/yausername/youtubedl_android/YoutubeDLResponse;",
-            &[JValue::Object(&request)],
+            &[
+                JValue::Object(&request),
+                JValue::Object(&pid),
+                JValue::Bool(1),
+            ],
         ) {
             Ok(v) => v.l().map_err(jni_err)?,
             Err(_) => {
