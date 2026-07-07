@@ -19,9 +19,6 @@ on:
         description: Android CI image ref (JDK + Android SDK layered on base)
         value: ${{ jobs.image-android.outputs.ref }}
 
-env:
-  CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
-
 jobs:
   image:
     name: CI image
@@ -30,6 +27,11 @@ jobs:
       packages: write
     outputs:
       ref: ${{ steps.tag.outputs.ref }}
+    # Job-level, not workflow-level: Forgejo's runner does not propagate a
+    # reusable workflow's top-level `env:` into its jobs, which silently blanked
+    # CI_IMAGE_NAME and produced an invalid `:tag`-only image ref.
+    env:
+      CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
     steps:
       - name: Install docker CLI
         # The default `runs-on: ubuntu-latest` job container
@@ -126,6 +128,10 @@ jobs:
       packages: write
     outputs:
       ref: ${{ steps.tag.outputs.ref }}
+    # See the note on the base image job: job-level env so CI_IMAGE_NAME
+    # survives inside the reusable workflow.
+    env:
+      CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
     steps:
       - name: Install docker CLI
         run: |
