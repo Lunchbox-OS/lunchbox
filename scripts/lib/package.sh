@@ -27,6 +27,10 @@ source "$PACKAGE_LIB_DIR/version.sh"
 PACKAGE_PREFIX="/usr"
 PACKAGE_NAME="shepherd-launcher"
 PACKAGE_MAINTAINER="Albert Armea <shepherd-launcher-patch@albertarmea.com>"
+# Where the package drops the example config + media library. A from-source
+# install copies these into the user's config dir from the repo (install_config);
+# a .deb user has no repo, so they live here for the admin to copy.
+PACKAGE_EXAMPLE_DIR="$PACKAGE_PREFIX/share/shepherd"
 
 # Build the amd64 .deb.
 package_deb() {
@@ -98,15 +102,24 @@ package_deb() {
     umask 022
 
     info "Staging install tree into $stage..."
-    # DESTDIR makes every install step below relocate under $stage and skip
-    # host mutation. Exported so the sourced functions pick it up.
+    # DESTDIR makes the install steps relocate under $stage and skip host
+    # mutation. install_system (defined in install.sh) is the shared list of
+    # system-wide components; the package intentionally omits the per-user
+    # config/groups steps that install_all adds. Empty firewall user: no
+    # per-user group work happens under DESTDIR anyway.
     export DESTDIR="$stage"
-    install_bins "$PACKAGE_PREFIX"
-    install_firewall "" "true"          # helper + polkit assets; no user/group work under DESTDIR
-    install_sway_config "$PACKAGE_PREFIX"
-    install_desktop_entry "$PACKAGE_PREFIX"
-    install_udev
+    install_system "$PACKAGE_PREFIX" ""
     unset DESTDIR
+
+    # Ship the example config + media library system-wide so a .deb user (who
+    # has no repo checkout) has something to copy into the kiosk user's config
+    # dir. The postinst prints the exact copy/usermod commands; see also
+    # docs/INSTALL.md.
+    local ex_stage="$stage$PACKAGE_EXAMPLE_DIR"
+    ensure_dir "$ex_stage" 0755
+    install -m 0644 "$repo_root/config.example.toml" "$ex_stage/config.example.toml"
+    install -m 0644 "$repo_root/movies-library.example.toml" \
+        "$ex_stage/movies-library.example.toml"
 
     _package_write_control "$stage" "$version" "$repo_root"
 
@@ -171,12 +184,25 @@ $UDEV_RULES_DIR/$UINPUT_RULES_NAME
 $POLKIT_RULES_DIR/$FIREWALL_RULES_NAME
 EOF
 
-    # postinst: exactly the host-mutating steps install.sh guards out under
-    # DESTDIR. All best-effort so a headless/container install still succeeds.
-    # The group name is injected from install.sh's FIREWALL_GROUP so it stays in
-    # lockstep; the rest of the body is a literal heredoc (keeps $1 unexpanded).
+    # The full set of groups a kiosk user needs, single-sourced from install.sh
+    # (SHEPHERD_REQUIRED_GROUPS + FIREWALL_GROUP) so the printed guidance can't
+    # drift from what install_user_groups / install_firewall actually add.
+    local all_groups
+    all_groups="$(IFS=','; printf '%s' "${SHEPHERD_REQUIRED_GROUPS[*]}")"
+    all_groups="$all_groups,$FIREWALL_GROUP"
+
+    # postinst: the host-mutating steps install.sh's install_firewall /
+    # install_udev run on a real install (guarded out under DESTDIR), re-
+    # expressed as POSIX sh because the maintainer script runs on the target
+    # without the repo. Keep in sync with those functions. Values that must not
+    # drift are injected from install.sh: the firewall group, the full required-
+    # group set, and the examples dir. The per-user config/groups steps can't be
+    # done at package time (unknown user), so they're printed for the admin.
     {
-        printf '#!/bin/sh\nset -e\ngroup=%s\n' "$FIREWALL_GROUP"
+        printf '#!/bin/sh\nset -e\n'
+        printf 'group=%s\n' "$FIREWALL_GROUP"
+        printf 'groups=%s\n' "$all_groups"
+        printf 'examples=%s\n' "$PACKAGE_EXAMPLE_DIR"
         cat <<'EOF'
 if [ "$1" = "configure" ]; then
     if ! getent group "$group" >/dev/null 2>&1; then
@@ -191,6 +217,15 @@ if [ "$1" = "configure" ]; then
             || systemctl restart polkit 2>/dev/null \
             || true
     fi
+    cat <<EOM
+shepherd-launcher installed. To set up a kiosk user (replace USER):
+
+  install -Dm644 -o USER -g USER $examples/config.example.toml ~USER/.config/shepherd/config.toml
+  usermod -aG $groups USER
+
+Then have USER log out and back in and pick the "Shepherd Kiosk" session.
+A media-library example is at $examples/movies-library.example.toml.
+EOM
 fi
 exit 0
 EOF

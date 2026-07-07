@@ -325,6 +325,10 @@ install_udev() {
 
     # Reload + apply only on a real (non-packaging) install. Under DESTDIR
     # these would touch the build host, which is wrong for packaging.
+    #
+    # NOTE: the .deb runs these same steps from its generated postinst instead
+    # (scripts/lib/package.sh, _package_write_control). If you change the
+    # udev reload/trigger here, mirror it there.
     if [[ -z "$destdir" ]]; then
         if command -v udevadm >/dev/null 2>&1; then
             info "Reloading udev rules so the new rule takes effect"
@@ -389,6 +393,10 @@ install_firewall() {
     # Group + user membership + polkit reload only on a real (non-packaging)
     # install. Under DESTDIR these would mutate the build host and the
     # resulting package, which is wrong.
+    #
+    # NOTE: the .deb runs the group-create + polkit-reload from its generated
+    # postinst instead (scripts/lib/package.sh, _package_write_control), and
+    # emits the per-user usermod as printed guidance. Keep them in sync.
     if [[ -z "$destdir" ]]; then
         if ! getent group "$FIREWALL_GROUP" >/dev/null; then
             info "Creating system group: $FIREWALL_GROUP"
@@ -414,6 +422,27 @@ install_firewall() {
     success "Firewall helper installed"
 }
 
+# Install the system-wide components: everything that is host-global and
+# DESTDIR-safe. This is the single source of truth for "what a system install
+# places" — `install_all` (from-source) and `package_deb` (.deb staging, in
+# scripts/lib/package.sh) both call it, so a new system component is added in
+# exactly one place. The per-user steps (config, groups) are deliberately NOT
+# here: install_all appends them, and the package leaves them to the admin.
+#
+# Args:
+#   $1 -- install prefix (default: $DEFAULT_PREFIX)
+#   $2 -- user to add to the shepherd-firewall group (empty under DESTDIR)
+install_system() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+    local firewall_user="${2:-}"
+
+    install_bins "$prefix"
+    install_firewall "$firewall_user" "true"
+    install_sway_config "$prefix"
+    install_desktop_entry "$prefix"
+    install_udev
+}
+
 # Install everything
 install_all() {
     local user="${1:-}"
@@ -429,13 +458,9 @@ install_all() {
 
     info "Installing shepherd-launcher (prefix: $prefix)..."
 
-    install_bins "$prefix"
-    install_firewall "$user" "true"
-    install_sway_config "$prefix"
-    install_desktop_entry "$prefix"
+    install_system "$prefix" "$user"
     install_config "$user" "" "$force"
     install_user_groups "$user"
-    install_udev
 
     success "Installation complete!"
     info ""

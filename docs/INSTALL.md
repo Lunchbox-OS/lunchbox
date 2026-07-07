@@ -23,16 +23,21 @@ polkit assets, the `/dev/uinput` udev rule, the Sway kiosk session, and the
 display-manager session entry. Its post-install step creates the
 `shepherd-firewall` system group and reloads udev/polkit.
 
-A distro package can't know which account is your kiosk user, so two per-user
-steps are **not** done automatically — run them once after installing:
+A distro package can't know which account is your kiosk user, so the per-user
+setup is **not** done automatically. The package prints the exact commands when
+it installs; they deploy the example config and add the user to the groups
+shepherd needs (substitute your user for `kiosk`):
 
 ```sh
-# Deploy the example config + media library to the user (edit them afterward).
-sudo shepherd install config --user kiosk
-
-# Add the user to the required groups (input/video/bluetooth/shepherd-firewall).
-sudo shepherd install groups --user kiosk
+sudo install -Dm644 -o kiosk -g kiosk \
+  /usr/share/shepherd/config.example.toml ~kiosk/.config/shepherd/config.toml
+sudo usermod -aG input,video,bluetooth,shepherd-firewall kiosk
 ```
+
+The group list above is illustrative — the installer prints the authoritative
+set for your version. A media-library example ships alongside at
+`/usr/share/shepherd/movies-library.example.toml`; copy it to
+`~kiosk/.config/shepherd/movies.toml` if you use the bundled media entries.
 
 Then have `kiosk` log out and back in (so the new group memberships take
 effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is
