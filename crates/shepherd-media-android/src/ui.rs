@@ -735,15 +735,24 @@ impl MediaApp {
         }
 
         ui.add_space(8.0);
-        ui.label("On a phone on the same Wi-Fi, open this address:");
-        ui.heading(&handoff.url);
-        ui.add_space(12.0);
-        ui.label("or scan:");
-        if let Some((w, dark)) = crate::handoff::qr_matrix(&handoff.url) {
-            draw_qr(ui, w, &dark);
-        }
-        ui.add_space(12.0);
-        ui.label("Paste a URL there and tap Send — it appears here automatically.");
+        // Landscape: instructions on the left, QR on the right sized to the
+        // space that's actually left so it never runs off the bottom.
+        ui.columns(2, |cols| {
+            cols[0].label("On a phone on the same Wi-Fi, open this address:");
+            cols[0].heading(&handoff.url);
+            cols[0].add_space(12.0);
+            cols[0].label("Paste a URL there and tap Send — it appears here automatically.");
+
+            let ui = &mut cols[1];
+            ui.label("or scan:");
+            if let Some((w, dark)) = crate::handoff::qr_matrix(&handoff.url) {
+                // Fit the QR within the column, both dimensions, with a margin.
+                let max_side = (ui.available_height() - 8.0)
+                    .min(ui.available_width())
+                    .max(96.0);
+                draw_qr(ui, max_side, w, &dark);
+            }
+        });
 
         // Poll for the submission while this screen is visible.
         ui.ctx().request_repaint_after(Duration::from_millis(200));
@@ -1290,11 +1299,12 @@ fn is_youtube(url: &str) -> bool {
 }
 
 /// Paint a QR code (`width` × `width` modules, row-major `dark` flags) as black
-/// squares on white, with a 4-module quiet zone.
-fn draw_qr(ui: &mut egui::Ui, width: usize, dark: &[bool]) {
+/// squares on white, with a 4-module quiet zone, fitting within `max_side`
+/// points (whole-pixel modules, so it stays crisp).
+fn draw_qr(ui: &mut egui::Ui, max_side: f32, width: usize, dark: &[bool]) {
     let quiet = 4usize;
     let modules = width + quiet * 2;
-    let module_px = (320.0 / modules as f32).floor().max(2.0);
+    let module_px = (max_side / modules as f32).floor().max(1.0);
     let side = module_px * modules as f32;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
     let painter = ui.painter_at(rect);
