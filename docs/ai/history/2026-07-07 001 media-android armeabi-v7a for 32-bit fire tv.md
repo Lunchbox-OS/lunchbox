@@ -299,3 +299,23 @@ and the yt-dlp call were verified on device (the grid *loads its playlist* throu
 the changed `execute`, proving the new signature); the screensaver flag couldn't
 be observed under sustained scripted playback and is left for confirmation on a
 real remote. Shipped in a signed release APK.
+
+## Follow-up: DRM-protected playlist videos wouldn't load (same session)
+
+> when I was testing there was at least one video in that playlist that wouldn't
+> load — find it and figure out what's wrong
+
+Reproduced the app's exact resolve (same format selector + `player_client=
+android_vr`) against every video in the test playlist with host yt-dlp. Three
+failed, all licensed "full episode" uploads (PBS / Disney–Muppets):
+`1gbjxQ3evP4`, `B7UmUX68KtE`, `PcoAZGb4h5g`. `android_vr` reports them "not
+available"; the `tv` client reveals the real reason — **DRM protected**. Their
+adaptive/DASH formats are Widevine-encrypted (unplayable by mpv), but YouTube
+still serves the legacy progressive **itag 18** (360p H.264+AAC, non-DRM) — and
+only the `android` client exposes it, which `android_vr` doesn't.
+
+Fix: query both clients (`player_client=android_vr,android`). yt-dlp merges their
+formats; the selector still picks 720p DASH for normal videos (verified
+unchanged) and falls back to the muxed 360p (itag 18) for the DRM ones, so they
+now play (at 360p). Verified all three resolve to itag 18 with the two-client arg
+while normal videos keep 720p. Shipped in a signed release APK.

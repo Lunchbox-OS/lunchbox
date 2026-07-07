@@ -78,12 +78,17 @@ pub fn resolve_stream_url(
         &[
             "-f",
             stream_format(quality),
-            // Use the `android_vr` client: it serves the full DASH format ladder
-            // (incl. H.264 video) without a PO token. The default `android`
-            // client returns audio-only for these videos (PO-token gated), and
-            // `web`/`web_safari` need a PO token or only offer HLS.
+            // `android_vr` serves the full DASH format ladder (incl. H.264 video)
+            // without a PO token; the default `android` client returns audio-only
+            // for normal videos (PO-token gated) and `web`/`web_safari` need a PO
+            // token or only offer HLS. But `android_vr` reports some licensed,
+            // DRM-protected videos (e.g. PBS/Muppets "full episode" uploads) as
+            // "not available", even though a non-DRM legacy progressive stream
+            // (itag 18, 360p H.264) is still served to the `android` client. List
+            // both so yt-dlp merges their formats: the selector keeps 720p DASH
+            // for normal videos and falls back to the muxed 360p for DRM ones.
             "--extractor-args",
-            "youtube:player_client=android_vr",
+            "youtube:player_client=android_vr,android",
             "-g",
             "--no-playlist",
             "--quiet",
