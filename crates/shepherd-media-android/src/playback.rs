@@ -120,12 +120,22 @@ impl PlaybackView {
             self.last_input_at = Instant::now();
         }
 
-        let next = if self.last_input_at.elapsed() < video::CONTROLS_VISIBLE_FOR {
-            Duration::from_millis(33)
+        // mpv's render API is driven by the host: it re-presents the current
+        // frame and advances when a new one is ready. While playing, repaint
+        // every frame so video is composited at the display's refresh rate rather
+        // than at mpv's update-callback cadence — the latter left the Fire TV
+        // presenting ~15 fps (visibly choppy) even though decode kept up. When
+        // paused, idle at a slow tick (still frequent enough to fade the overlay).
+        if player.is_paused() {
+            let next = if self.last_input_at.elapsed() < video::CONTROLS_VISIBLE_FOR {
+                Duration::from_millis(33)
+            } else {
+                Duration::from_millis(250)
+            };
+            ctx.request_repaint_after(next);
         } else {
-            Duration::from_millis(250)
-        };
-        ctx.request_repaint_after(next);
+            ctx.request_repaint();
+        }
 
         leave
     }

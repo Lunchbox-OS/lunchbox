@@ -201,3 +201,46 @@ Verified on the AFTHA004: in the editor, Down now steps Back → Add → active 
 Cache → Quality → Posters → Remove (reaching every combo), and each combo opens,
 navigates, and selects (popup closes, focus kept). Add-form regression re-checked
 after the refactor.
+
+## Follow-up: choppy playback (same session)
+
+> playback is still choppy … See what's going on here
+
+Diagnosed on the AFTHA004 with a YouTube-playlist library, measuring rather than
+guessing:
+
+- `top`: during playback the app used ~35 % CPU and the system was >50 % idle —
+  **not** compute-bound, so not software decode.
+- logcat: `OMX.amlogic.avc.decoder.awesome` at 1280×720 — **hardware** H.264
+  decode was already working (the `stream_format` selector prefers avc1 ≤720p).
+- `dumpsys SurfaceFlinger --latency` on the NativeActivity layer: the display
+  runs at 60 Hz but the app presented a new frame only every ~4th vsync —
+  **median 66.7 ms ≈ 15 fps**, very regularly. So the bottleneck was the
+  **GL render/present**, not decode.
+
+Root cause: mpv's default GL video renderer (high-quality scaler + dither +
+debanding) can't upscale 720p → the 1080p output surface within a frame on the
+Fire TV's Amlogic Mali GPU, so it presents at a fraction of the refresh rate.
+
+Fix — two parts, in order of impact:
+
+- **`profile=fast`** on the libmpv init (bilinear scaling, no dither/deband).
+  This alone took the measured present rate from ~15 fps → ~60 fps. `LibmpvPlayer::new`
+  gained a `fast_render: bool`; the Android app passes `true`, the desktop binary
+  `false` (desktop GPUs render the full-quality path fine). Best-effort set so a
+  libmpv without the profile still runs.
+- **Render at display rate while playing** (`playback.rs`): the mpv render API is
+  host-driven, so during playback we now `request_repaint()` every frame instead
+  of leaning on mpv's update-callback cadence (which, even after the GPU was
+  unblocked, is the correct way to keep presentation at the refresh rate). Paused
+  playback still idles at the slow tick.
+
+Verified end-to-end on a signed **release** APK: hardware decode, present rate
+59.9 fps (median 16.7 ms) at ~44 % CPU, video smooth on screen.
+
+Note on measurement flakiness: YouTube resolution via yt-dlp is slow (~15 s,
+CPU-bound under the bundled Python/quickjs) and the browse grid loads
+asynchronously, so scripted "open grid → play" often raced the load; each
+present-rate number here was taken only after confirming a decoded frame
+(`HW.video.avc Got First Frame Ready`) and video on screen. The slow yt-dlp
+resolve is startup latency, separate from the playback-smoothness fix.

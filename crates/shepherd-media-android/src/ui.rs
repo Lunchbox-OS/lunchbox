@@ -42,7 +42,10 @@ struct PlayingItem {
 fn make_player() -> Option<Box<dyn PlayerHandle>> {
     #[cfg(target_os = "android")]
     {
-        match shepherd_media_core::LibmpvPlayer::new(Quality::default().ytdl_format()) {
+        // `fast_render`: this app targets TVs with weak GPUs (e.g. Fire TV
+        // sticks), where mpv's default GL render path can't keep up with the
+        // display; the `fast` profile restores full-rate playback.
+        match shepherd_media_core::LibmpvPlayer::new(Quality::default().ytdl_format(), true) {
             Ok(p) => Some(Box::new(p)),
             Err(e) => {
                 log::error!("libmpv init failed: {e}");

@@ -214,12 +214,21 @@ mod libmpv_backend {
     }
 
     impl LibmpvPlayer {
-        pub fn new(ytdl_format: &str) -> Result<Self, PlayerError> {
+        /// `fast_render` applies mpv's `fast` profile (bilinear scaling, no
+        /// dither/deband). Weak GPUs — e.g. the Amlogic Mali in a Fire TV Stick —
+        /// otherwise can't upscale to a 1080p output surface within a frame and
+        /// present at a fraction of the display rate; the desktop binary leaves it
+        /// off for full quality.
+        pub fn new(ytdl_format: &str, fast_render: bool) -> Result<Self, PlayerError> {
             let mpv = Mpv::with_initializer(|init| {
                 // `vo=libmpv` disables mpv's own windowing — the host UI
                 // owns the surface and composites mpv's output via
                 // RenderContext.
                 init.set_property("vo", "libmpv")?;
+                if fast_render {
+                    // Best-effort: keep default quality if the profile is missing.
+                    let _ = init.set_property("profile", "fast");
+                }
                 init.set_property("osc", "no")?;
                 init.set_property("input-default-bindings", "no")?;
                 init.set_property("input-vo-keyboard", "no")?;
