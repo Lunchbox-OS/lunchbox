@@ -145,6 +145,42 @@ Implementation:
 Reaches internal shared storage and SD cards; **not** USB-OTG (SAF-only) — the
 one case that would still want a tree picker.
 
+## Suggestion #6: the D-pad → soft-keyboard gap — investigated, blocked
+
+Attempted to make the on-screen keyboard usable when a text field is reached
+with the remote. A JNI `keyboard` bridge toggling `InputMethodManager` from
+egui's `egui_wants_keyboard_input()` **did** make the keyboard appear on D-pad
+focus (verified on the Pixel 10a: `mInputShown=true` after `DPAD_DOWN` onto a
+field, where before it stayed `false`).
+
+But typing on that keyboard doesn't work for the D-pad case:
+
+- Touch-focus a field → tap an on-screen key → the character lands (`"hello"`
+  → `"helloa"`). Verified.
+- D-pad-focus a field (keyboard shown by the bridge) → tap the same on-screen
+  key → **nothing lands** in any field. Reproduced repeatedly.
+
+So a **pointer-focused** field captures soft-keyboard text, but a
+**keyboard-focused** one does not. The touch path establishes the Android IME
+input binding; keyboard focus does not, and merely forcing the keyboard visible
+doesn't create that binding. Consistent with the stack: winit 0.30's Android
+backend implements no IME (`set_ime_allowed`/`Ime` events absent — only keycode
+mapping), and android-activity 0.6's README states on-screen keyboard text input
+is a **GameActivity + GameTextInput** feature; a `NativeActivity` would need a
+custom `InputConnection`. Hardware/Bluetooth-keyboard keys (and `adb input text`)
+arrive as `KeyEvent`s via `AInputQueue` and work regardless.
+
+Showing a keyboard that a D-pad user can't type into is a **false affordance**,
+so the bridge was reverted (kept out of the committed tree). Real fixes:
+
+1. **Migrate `NativeActivity` → `GameActivity`** (android-activity supports both;
+   `GameTextInput` handles on-screen keyboard text for both focus paths). The
+   robust fix, but a non-trivial change touching the eframe/GL + libmpv setup.
+2. A custom `InputConnection` via a Java/Kotlin shim (the thing the app avoids).
+3. Accept no on-screen typing: rely on the no-type paths (the file browser
+   above; a future phone hand-off for URLs) plus hardware keyboards. Most
+   consistent with the app as it stands.
+
 ### Verification (#2)
 
 - `cargo clippy -p shepherd-media-android` on host **and** `cargo ndk -t
