@@ -105,3 +105,56 @@ suggestions #2–#6.
   both fields; entering only `/sdcard/Kids Movies.toml` with Id/Label blank adds
   a library shown as "Kids Movies (kids-movies)" — label humanized from the file
   stem, id slugified. Confirmed working.
+
+## Suggestion #2: keyboard-free file picking — SAF vs. in-app browser
+
+We evaluated the standard SAF document picker (`ACTION_OPEN_DOCUMENT`) and
+rejected it for this app:
+
+- **It can't resolve offline libraries.** SAF returns an opaque `content://`
+  for the single picked file with a persistable grant for *that document only*.
+  A `.toml`/`.m3u` that references media in the same folder or a subfolder can't
+  reach them: `content://` isn't a path (nothing to resolve relatives against)
+  and there's no permission for the siblings. Only `ACTION_OPEN_DOCUMENT_TREE`
+  could, at the cost of teaching media-core to walk `DocumentsContract`.
+- **It needs Java.** The pure `NativeActivity` (android-activity `native-activity`
+  glue) never receives `onActivityResult`, so a SAF result can only come back
+  through a Kotlin/Java shim Activity — breaking the app's no-Java property.
+
+So we built an **in-app egui file browser** instead. It hands the resolver a
+real filesystem path, so `resolve()`'s existing local-path branch parses the
+file and media-core resolves relative media/posters against its directory —
+**zero changes to `resolve.rs` or media-core**, and offline libraries work.
+
+Implementation:
+
+- `crates/shepherd-media-android/src/storage.rs` (new) — JNI, android-gated with
+  host fallbacks: `browse_root()` (`Environment.getExternalStorageDirectory`),
+  `has_all_files_access()` (`Environment.isExternalStorageManager`, true < API
+  30), `request_all_files_access()` (opens the system "All files access" settings
+  screen via `startActivity`; re-checked on return). No Java/Kotlin — the app
+  stays a pure `NativeActivity`.
+- `ui.rs` — a `Screen::FilePicker` browser (D-pad-navigable button column, dirs
+  first then `.toml`/`.m3u`/`.m3u8`, `⬆ ..` bounded at `/storage`), reached via a
+  **📁 Browse device…** button on the add form for the on-device source kinds.
+  Picking a file fills the locator, sets the source kind from the extension, and
+  the form auto-derives id/label (suggestion #1).
+- `AndroidManifest.xml` — `MANAGE_EXTERNAL_STORAGE` (+ legacy
+  `READ_EXTERNAL_STORAGE` maxSdk 32).
+
+Reaches internal shared storage and SD cards; **not** USB-OTG (SAF-only) — the
+one case that would still want a tree picker.
+
+### Verification (#2)
+
+- `cargo clippy -p shepherd-media-android` on host **and** `cargo ndk -t
+  arm64-v8a clippy` (aarch64-linux-android, compiles the JNI) — both clean.
+- `cargo test -p shepherd-media-android -p shepherd-media-app` — 23 + 44 pass.
+- On-device (Pixel 10a): tapping **Browse device…** with no permission opens the
+  system All-files-access screen; after granting, Browse opens the browser at
+  `/storage/emulated/0`; navigating into a staged `ShepherdMedia/` folder and
+  picking `offline.m3u` (relative entries `beach-clip.mp4`, `sub/forest-clip.mp4`)
+  set the source to M3U and filled the path; Add derived id/label `offline`; and
+  opening the library rendered **both items** — confirming relative media
+  resolved against the picked file's real directory. End-to-end offline flow
+  works with no keyboard.

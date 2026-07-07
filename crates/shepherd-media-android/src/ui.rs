@@ -77,6 +77,8 @@ enum Screen {
     Settings,
     /// Form for adding a new library.
     AddLibrary,
+    /// Browse on-device storage to pick a `.toml`/`.m3u` for the add form.
+    FilePicker,
     /// Browse a library's contents as a poster grid.
     Grid(String),
 }
@@ -174,6 +176,8 @@ pub struct MediaApp {
     settings: AppSettings,
     screen: Screen,
     form: NewLibraryForm,
+    /// Current directory shown by the file browser (`Screen::FilePicker`).
+    picker_dir: PathBuf,
     /// Cached resolution for the browse grid (also acts as a 1-entry cache so
     /// re-opening the same library doesn't re-resolve).
     grid: Option<GridView>,
@@ -250,6 +254,7 @@ impl MediaApp {
             settings,
             screen: Screen::Switcher,
             form: NewLibraryForm::default(),
+            picker_dir: crate::storage::browse_root(),
             grid: None,
             posters: HashMap::new(),
             poster_tx,
@@ -517,6 +522,24 @@ impl MediaApp {
                 ui.end_row();
             });
 
+        // For an on-device source, offer a keyboard-free file browser instead of
+        // typing the path. Needs "All files access" (API 30+); if it isn't
+        // granted, send the user to settings and let them retry.
+        if matches!(self.form.kind, FormKind::SafToml | FormKind::M3u) {
+            ui.add_space(4.0);
+            if ui.button("📁 Browse device…").clicked() {
+                if crate::storage::has_all_files_access() {
+                    self.picker_dir = crate::storage::browse_root();
+                    next = Some(Screen::FilePicker);
+                } else {
+                    crate::storage::request_all_files_access();
+                    self.status = Some(
+                        "Grant \u{201c}All files access\u{201d}, then tap Browse again.".into(),
+                    );
+                }
+            }
+        }
+
         ui.add_space(8.0);
         if ui.button("Add").clicked() {
             let source = self
@@ -554,6 +577,98 @@ impl MediaApp {
                 Err(e) => self.status = Some(e.to_string()),
             }
         }
+        next
+    }
+
+    /// Keyboard-free file browser: pick an on-device `.toml`/`.m3u` for the add
+    /// form. A vertical column of buttons, so the D-pad steps through it and the
+    /// first entry auto-focuses like the other screens. Picking a file drops its
+    /// real path into the form (relative media then resolves against it).
+    fn file_picker_screen(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
+        let mut next = None;
+        ui.horizontal(|ui| {
+            if ui.button("⬅ Back").clicked() {
+                next = Some(Screen::AddLibrary);
+            }
+            ui.heading("Pick a file");
+        });
+        ui.label(self.picker_dir.display().to_string());
+        ui.separator();
+
+        // Snapshot the directory once (dirs first, then matching files, both
+        // case-insensitive), so the button loop can mutate `picker_dir` freely.
+        let mut dirs: Vec<(String, PathBuf)> = Vec::new();
+        let mut files: Vec<(String, PathBuf)> = Vec::new();
+        let mut read_err = None;
+        match std::fs::read_dir(&self.picker_dir) {
+            Ok(rd) => {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    if is_dir {
+                        dirs.push((name, entry.path()));
+                    } else if is_library_file(&name) {
+                        files.push((name, entry.path()));
+                    }
+                }
+                dirs.sort_by_key(|a| a.0.to_lowercase());
+                files.sort_by_key(|a| a.0.to_lowercase());
+            }
+            Err(e) => read_err = Some(e.to_string()),
+        }
+
+        if let Some(e) = read_err {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Cannot read this folder: {e}"),
+            );
+            if ui.button("Grant “All files access”").clicked() {
+                crate::storage::request_all_files_access();
+            }
+        }
+
+        let floor = std::path::Path::new(crate::storage::FLOOR);
+        let size = egui::vec2(360.0, 34.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Up one level, as long as we stay at or below the floor.
+            if self.picker_dir.as_path() != floor
+                && let Some(parent) = self.picker_dir.parent()
+                && parent.starts_with(floor)
+                && ui.add(egui::Button::new("⬆ ..").min_size(size)).clicked()
+            {
+                self.picker_dir = parent.to_path_buf();
+            }
+            for (name, path) in &dirs {
+                if ui
+                    .add(egui::Button::new(format!("📁 {name}")).min_size(size))
+                    .clicked()
+                {
+                    self.picker_dir = path.clone();
+                }
+            }
+            for (name, path) in &files {
+                if ui
+                    .add(egui::Button::new(format!("🎬 {name}")).min_size(size))
+                    .clicked()
+                {
+                    // Match the source kind to the extension so a playlist becomes
+                    // an M3u source; the add form auto-derives id/label from it.
+                    self.form.kind = if is_m3u(name) {
+                        FormKind::M3u
+                    } else {
+                        FormKind::SafToml
+                    };
+                    self.form.locator = path.to_string_lossy().into_owned();
+                    next = Some(Screen::AddLibrary);
+                }
+            }
+            if dirs.is_empty() && files.is_empty() {
+                ui.label("No folders or .toml/.m3u files here.");
+            }
+        });
         next
     }
 
@@ -1057,6 +1172,7 @@ impl eframe::App for MediaApp {
                 Screen::Switcher => self.switcher(ui),
                 Screen::Settings => self.settings_screen(ui),
                 Screen::AddLibrary => self.add_library_screen(ui),
+                Screen::FilePicker => self.file_picker_screen(ui),
                 Screen::Grid(id) => self.grid_screen(ui, &id),
             };
 
@@ -1070,6 +1186,7 @@ impl eframe::App for MediaApp {
                     Screen::Switcher => None,
                     Screen::Settings | Screen::Grid(_) => Some(Screen::Switcher),
                     Screen::AddLibrary => Some(Screen::Settings),
+                    Screen::FilePicker => Some(Screen::AddLibrary),
                 };
             }
 
@@ -1082,6 +1199,18 @@ impl eframe::App for MediaApp {
             self.persist();
         }
     }
+}
+
+/// Whether `name` is an M3U/M3U8 playlist file (by extension).
+fn is_m3u(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".m3u") || lower.ends_with(".m3u8")
+}
+
+/// Whether `name` is a library file the browser should offer (`.toml` or an
+/// M3U/M3U8 playlist).
+fn is_library_file(name: &str) -> bool {
+    name.to_lowercase().ends_with(".toml") || is_m3u(name)
 }
 
 /// One-line human description of where a library comes from.

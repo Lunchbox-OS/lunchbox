@@ -18,6 +18,16 @@ the full design and roadmap.
 - Cross-platform egui UI: library switcher, settings (add / remove / reorder /
   select-active, per-library cache mode, quality, poster policy, and size cap),
   add-library form, and a browse grid.
+- Keyboard-free library adding for TVs: the add-library form's `Id`/`Label` are
+  optional and auto-derived from the source (see `shepherd-media-app`'s
+  `LibrarySource::suggested_id`/`suggested_label`), and a **📁 Browse device…**
+  button opens an in-app, D-pad-navigable file browser (`storage` module + the
+  `FilePicker` screen) for on-device `.toml`/`.m3u` sources. The browser hands
+  the resolver a real filesystem path, so an offline library's relative media
+  resolves against its own directory. Reading shared storage needs "All files
+  access" (`MANAGE_EXTERNAL_STORAGE`), requested via the system settings screen;
+  it reaches internal storage and SD cards, not USB-OTG (SAF-only). Verified on
+  hardware.
 - The browse grid is the **shared `shepherd-media-ui` poster grid** — the same
   responsive poster-tile view the Linux binary uses, so the two front-ends stay
   in sync. The Android app supplies the items, poster bytes, and focus input;
@@ -64,7 +74,10 @@ the full design and roadmap.
 
 - `QueueAll`'s eager prefetch-at-launch (currently both non-`Off` modes cache
   after play; the size cap and LRU eviction are shared).
-- JNI bridges for the SAF file picker, connectivity policy, and storage paths.
+- JNI bridge for the connectivity policy (the `WifiOnly` poster gate). The
+  storage-path bridge is wired (see the `storage` module); a SAF **tree** picker
+  for USB-OTG / cloud sources is still open — the single-document SAF picker was
+  rejected because it can't resolve an offline library's sibling media.
 - Per-library quality applied to the libmpv `ytdl-format` (currently a single
   default is set at startup).
 

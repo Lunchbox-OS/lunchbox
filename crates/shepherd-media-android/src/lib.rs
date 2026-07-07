@@ -15,6 +15,7 @@ pub mod playback;
 pub mod player;
 pub mod posters;
 pub mod resolve;
+pub mod storage;
 pub mod ui;
 pub mod video_cache;
 pub mod youtube;
@@ -31,9 +32,10 @@ fn android_main(app: android_activity::AndroidApp) {
     );
 
     // Record the activity handle so the safe-area inset query can reach
-    // getWindow()/getRootWindowInsets() (ndk_context's context is the
-    // Application, which has no window).
+    // getWindow()/getRootWindowInsets() and the file browser can reach a
+    // Context (ndk_context's context is the Application, which has no window).
     insets::set_activity(app.activity_as_ptr());
+    storage::set_activity(app.activity_as_ptr());
 
     // Persist settings and caches in the app's private storage.
     let data_dir = app

@@ -6,6 +6,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Browse to an on-device .toml/.m3u library in the Add-library form. Reading
+         arbitrary shared-storage files needs "All files access" on API 30+; older
+         devices use the legacy read permission. Requested at runtime (the user
+         toggles it in system settings); see src/storage.rs. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <!-- OpenGL ES 3.0 for the eframe/glow renderer. -->
     <uses-feature
         android:glEsVersion="0x00030000"
