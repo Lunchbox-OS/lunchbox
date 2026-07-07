@@ -119,6 +119,9 @@ class ManagementClient(private val connection: ShepherdConnection) {
     suspend fun setBrightness(percent: Int): BrightnessInfo =
         decode(call("set_brightness", buildJsonObject { put("percent", JsonPrimitive(percent)) }))
 
+    suspend fun setAutoBrightness(enabled: Boolean): BrightnessInfo =
+        decode(call("set_auto_brightness", buildJsonObject { put("enabled", JsonPrimitive(enabled)) }))
+
     // --- misc ----------------------------------------------------------
 
     suspend fun reloadConfig(): ReloadResult = decode(call("reload_config", empty()))

@@ -16,6 +16,16 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
   `brightnessctl` for writes (required runtime dep — its udev rules grant
   the `video` group write access, which is the only supported path for an
   unprivileged shepherdd). Skipped on hosts without a backlight.
+- **Ambient light sensor reads** via the IIO sysfs `in_illuminance_raw`
+  channel (`LinuxLightSensor`), used by the automatic-brightness feature.
+  Read-only and world-readable, so no helper or privilege is needed. Absent
+  on hosts without an ALS.
+- **Compositor output primitives** (`sway.rs`) — query/enable/disable outputs,
+  set modes and scales, and pick a mirror mode; behind the `OutputBackend`
+  trait so the docking state machine in `shepherdd` is unit-testable. Used for
+  external monitor / docking support (issue #87).
+- **Audio routing** (`audio_route.rs`) — switch the PipeWire default sink to an
+  HDMI/DisplayPort output while docked, via `pw-dump` + `wpctl set-default`.
 
 ## Capabilities
 

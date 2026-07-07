@@ -122,6 +122,12 @@ private fun BrightnessCard(brightness: BrightnessInfo, vm: ShepherdViewModel) {
                 valueRange = min..max,
                 enabled = enabled,
             )
+            if (brightness.autoAvailable) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Automatic")
+                    Switch(checked = brightness.autoEnabled, onCheckedChange = { vm.setAutoBrightness(it) })
+                }
+            }
         }
     }
 }

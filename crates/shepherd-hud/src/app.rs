@@ -369,9 +369,36 @@ fn build_hud_content(
         .build();
     brightness_box.add_css_class("brightness-control");
 
+    // The brightness icon doubles as the automatic-brightness toggle: pressing
+    // it hands brightness over to the ambient-light loop (on hosts with a
+    // sensor). It's a `ToggleButton` wrapping the icon `Image` — the same
+    // shape as the volume mute button — so the scale timer can keep resizing
+    // the icon via `set_pixel_size`. Automatic is the expected, default state,
+    // so it renders plain; the icon lights up (in the brightness bar's own
+    // colour) only when the user has taken *manual* control.
     let brightness_icon = gtk4::Image::from_icon_name("display-brightness-symbolic");
     brightness_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    brightness_box.append(&brightness_icon);
+    let brightness_button = gtk4::ToggleButton::builder()
+        .child(&brightness_icon)
+        .has_frame(false)
+        .tooltip_text("Automatic brightness")
+        .build();
+    brightness_button.add_css_class("indicator-button");
+    brightness_button.add_css_class("brightness-toggle");
+
+    // Guards against the programmatic `set_active` in the update loop
+    // re-triggering `toggled` and echoing a redundant RPC back to the daemon.
+    let auto_updating = std::rc::Rc::new(std::cell::Cell::new(false));
+    let auto_updating_clone = auto_updating.clone();
+    brightness_button.connect_toggled(move |btn| {
+        if auto_updating_clone.get() {
+            return;
+        }
+        if let Err(e) = crate::brightness::set_auto_brightness(btn.is_active()) {
+            tracing::error!("Failed to set auto brightness: {}", e);
+        }
+    });
+    brightness_box.append(&brightness_button);
 
     let brightness_slider = gtk4::Scale::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -431,6 +458,31 @@ fn build_hud_content(
     brightness_box.append(&brightness_label);
 
     right_box.append(&brightness_box);
+
+    // Display mode toggle (issue #87): mirror ⇄ external-only. Hidden unless an
+    // external display is connected. Uses an explicit child Image so its pixel
+    // size follows the HUD scale factor, like the other indicator buttons.
+    let display_icon = gtk4::Image::from_icon_name("preferences-desktop-display-symbolic");
+    display_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let display_button = gtk4::Button::builder()
+        .child(&display_icon)
+        .has_frame(false)
+        .tooltip_text("Toggle external display mode")
+        .visible(false)
+        .build();
+    display_button.add_css_class("indicator-button");
+    let state_for_display = state.clone();
+    display_button.connect_clicked(move |_| {
+        if let Some(ds) = state_for_display.display_state() {
+            let target = ds.mode.toggled();
+            spawn_action(
+                default_socket_path(),
+                "set_display_mode",
+                move |mut client| async move { client.set_display_mode(target).await.map(|_| ()) },
+            );
+        }
+    });
+    right_box.append(&display_button);
 
     // Network connectivity indicator. Shown only when at least one
     // connectivity check is configured. Icon reflects the worst status across
@@ -584,20 +636,28 @@ fn build_hud_content(
     let brightness_slider_clone = brightness_slider.clone();
     let brightness_label_clone = brightness_label.clone();
     let brightness_changing_for_update = brightness_changing.clone();
+    let brightness_button_clone = brightness_button.clone();
+    let auto_updating_for_update = auto_updating.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
     let confirm_popover_for_timer = confirm_popover.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
+    let display_button_clone = display_button.clone();
+    // Tracks the connector the HUD is currently anchored to, so we only
+    // re-anchor the layer-shell surface when the active output actually changes.
+    let anchored_connector = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+    let window_for_monitor = window.clone();
     // All icons we resize when the HUD scale factor changes.
-    let scaled_icons: [gtk4::Image; 6] = [
+    let scaled_icons: [gtk4::Image; 7] = [
         warning_icon.clone(),
         battery_icon.clone(),
         volume_icon.clone(),
         brightness_icon.clone(),
         action_icon.clone(),
         network_icon.clone(),
+        display_icon.clone(),
     ];
     // Track the most-recently-applied scale factor so we only rebuild the
     // stylesheet when shepherdd sends a new HudScaleChanged value.
@@ -770,6 +830,47 @@ fn build_hud_content(
             network_box_clone.set_tooltip_text(Some(&tooltip));
         }
 
+        // Update the display-mode toggle and follow the active output (#87).
+        // The button only appears while an external display is connected; its
+        // tooltip names the action the toggle performs from the current mode.
+        if let Some(ds) = state.display_state() {
+            use shepherd_api::DisplayMode;
+            match (ds.has_secondary(), ds.mode) {
+                (true, DisplayMode::Mirror) => {
+                    display_button_clone.set_visible(true);
+                    display_button_clone.set_tooltip_text(Some("Use external display only"));
+                }
+                (true, DisplayMode::ExternalOnly) => {
+                    display_button_clone.set_visible(true);
+                    display_button_clone.set_tooltip_text(Some("Mirror to external display"));
+                }
+                _ => display_button_clone.set_visible(false),
+            }
+            // The active output is the external in external-only mode, else the
+            // primary. Re-anchor the layer-shell surface there so the HUD is
+            // always visible on the screen the user is looking at.
+            let active = match ds.mode {
+                DisplayMode::ExternalOnly => ds.secondary.clone(),
+                _ => ds.primary.clone(),
+            };
+            if let Some(name) = active
+                && anchored_connector.borrow().as_deref() != Some(name.as_str())
+                && let Some(monitor) = monitor_by_connector(&name)
+            {
+                // Force a clean unmap → remap onto the new output. When the
+                // previously-anchored output is disabled (switching to
+                // external-only), the compositor destroys the HUD's layer
+                // surface but GTK still believes the window is visible — so
+                // set_monitor/present alone won't recreate it and the HUD
+                // vanishes. Hiding first resyncs GTK's mapped state, then
+                // set_monitor + show builds a fresh surface on the live output.
+                window_for_monitor.set_visible(false);
+                window_for_monitor.set_monitor(&monitor);
+                window_for_monitor.set_visible(true);
+                *anchored_connector.borrow_mut() = Some(name);
+            }
+        }
+
         // Update battery
         if suspended {
             // Placeholder so a stale charge level isn't frozen on screen.
@@ -832,6 +933,17 @@ fn build_hud_content(
                 let min = brightness.restrictions.min_brightness.unwrap_or(0) as f64;
                 let max = brightness.restrictions.max_brightness.unwrap_or(100) as f64;
                 brightness_slider_clone.set_range(min, max);
+
+                // The brightness icon toggles auto brightness, but only when a
+                // light sensor exists; otherwise it stays a plain, inert icon.
+                brightness_button_clone.set_sensitive(brightness.auto_available);
+                if brightness.auto_available
+                    && brightness_button_clone.is_active() != brightness.auto_enabled
+                {
+                    auto_updating_for_update.set(true);
+                    brightness_button_clone.set_active(brightness.auto_enabled);
+                    auto_updating_for_update.set(false);
+                }
             } else {
                 brightness_box_clone.set_visible(false);
             }
@@ -843,6 +955,19 @@ fn build_hud_content(
     });
 
     container
+}
+
+/// Find the GDK monitor whose connector name matches `connector` (e.g.
+/// "eDP-1", "HDMI-A-1"), so the HUD can anchor its layer-shell surface to a
+/// specific output (issue #87). Returns `None` if no monitor reports that
+/// connector (e.g. it was just disabled).
+fn monitor_by_connector(connector: &str) -> Option<gtk4::gdk::Monitor> {
+    use gtk4::gio::prelude::ListModelExt;
+    let monitors = gtk4::gdk::Display::default()?.monitors();
+    (0..monitors.n_items())
+        .filter_map(|i| monitors.item(i))
+        .filter_map(|obj| obj.downcast::<gtk4::gdk::Monitor>().ok())
+        .find(|m| m.connector().as_deref() == Some(connector))
 }
 
 /// Install an empty `CssProvider` at application priority and return it so
@@ -1006,6 +1131,32 @@ const CSS_TEMPLATE: &str = r#"
 
         .indicator-button:hover,
         .control-button:hover {
+            background-color: var(--hover-bg);
+        }
+
+        /* The brightness icon is a toggle: automatic is the default, so it
+           stays plain when checked (auto on). It lights up only in the
+           *manual* state (unchecked, and only when a sensor makes auto an
+           option at all), using the brightness bar's own highlight colour so
+           the two read as one control. */
+        .brightness-toggle:not(:checked):not(:disabled) {
+            background-color: var(--color-warning);
+        }
+
+        .brightness-toggle:not(:checked):not(:disabled) image {
+            color: #2e3440;
+        }
+
+        /* The GTK theme shades a *checked* toggle button by default. Automatic
+           brightness (checked) must look completely plain, so clear that
+           shading — keeping only the normal hover feedback. */
+        .brightness-toggle:checked {
+            background-color: transparent;
+            background-image: none;
+            box-shadow: none;
+        }
+
+        .brightness-toggle:checked:hover {
             background-color: var(--hover-bg);
         }
 
@@ -1218,6 +1369,14 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                             state.set_initial_brightness(info);
                         }
                         Err(e) => tracing::warn!("Failed to get initial brightness: {}", e),
+                    }
+
+                    // Seed the display arrangement so the mirror/external toggle
+                    // and active-output anchor are correct before any hotplug
+                    // event fires (issue #87).
+                    match client.get_display_state().await {
+                        Ok(ds) => state.set_display_state(ds),
+                        Err(e) => tracing::warn!("Failed to get initial display state: {}", e),
                     }
 
                     // Pull a fresh service snapshot so the network indicator

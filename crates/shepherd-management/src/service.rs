@@ -4,14 +4,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, EntryView, Event, EventPayload,
-    HealthStatus, ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, UsageStat,
-    VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
+    Event, EventPayload, HealthStatus, ServiceStateSnapshot, SessionEndReason, SessionInfo,
+    StopMode, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, LaunchDecision, StopDecision};
 use shepherd_host_api::{
-    BrightnessController, HidpiController, HostAdapter, SpawnOptions, VolumeController,
+    BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
+    SpawnOptions, VolumeController,
 };
 use shepherd_store::Store;
 use shepherd_util::{EntryId, MonotonicInstant};
@@ -19,10 +20,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, watch};
-use tracing::warn;
+use tracing::{debug, warn};
 
+use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 use crate::error::{ManagementError, ManagementResult};
 use crate::types::LaunchOutcome;
+
+/// Store key under which the runtime auto-brightness on/off state persists.
+pub const AUTO_BRIGHTNESS_SETTING_KEY: &str = "auto_brightness_enabled";
 
 /// Transport-agnostic management operations. `shepherd-http` and
 /// `shepherd-ble` both translate their wire format into calls on this trait.
@@ -98,6 +103,14 @@ pub trait ManagementService: Send + Sync {
     async fn brightness_up(&self, step: u8) -> ManagementResult<BrightnessInfo>;
     async fn brightness_down(&self, step: u8) -> ManagementResult<BrightnessInfo>;
 
+    // Automatic (ambient-light) brightness
+    async fn set_auto_brightness(&self, enabled: bool) -> ManagementResult<BrightnessInfo>;
+    async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo>;
+
+    // Display / docking (issue #87)
+    async fn get_display_state(&self) -> DisplayState;
+    async fn set_display_mode(&self, mode: DisplayMode) -> DisplayState;
+
     // Keepalive — pure round-trip used by IPC clients to detect a
     // wedged connection. The `ping` name aligns with the IPC wire
     // name; other transports can call it too but rarely need to.
@@ -135,6 +148,12 @@ pub struct DefaultManagementService {
     pub host: Arc<dyn HostAdapter>,
     pub volume: Arc<dyn VolumeController>,
     pub brightness: Arc<dyn BrightnessController>,
+    /// Ambient light sensor, present only when the host exposes one. `None`
+    /// disables automatic brightness entirely (the toggle rejects enabling).
+    pub light_sensor: Option<Arc<dyn LightSensor>>,
+    /// Runtime automatic-brightness state (on/off + manual override). Shared
+    /// with the daemon's poll loop, which calls [`Self::auto_brightness_tick`].
+    pub auto_brightness: Arc<Mutex<AutoBrightnessState>>,
     pub event_tx: broadcast::Sender<Event>,
     /// Broadcasts an event to all subscribers (IPC clients and SSE clients
     /// alike). Set by the daemon's main loop.
@@ -144,6 +163,7 @@ pub struct DefaultManagementService {
     /// operation flips this to `true`.
     pub shutdown_tx: watch::Sender<bool>,
     pub hidpi: Arc<dyn HidpiController>,
+    pub display: Arc<dyn DisplayController>,
 }
 
 #[async_trait]
@@ -622,6 +642,7 @@ impl ManagementService for DefaultManagementService {
     // ------------------------------------------------------------ brightness
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo> {
         let restrictions = self.brightness_restrictions().await;
+        let (auto_available, auto_enabled) = self.auto_status().await;
         match self.brightness.get_status().await {
             Ok(s) => Ok(BrightnessInfo {
                 percent: s.percent,
@@ -629,6 +650,8 @@ impl ManagementService for DefaultManagementService {
                 backend: self.brightness.capabilities().backend.clone(),
                 device: self.brightness.capabilities().device.clone(),
                 restrictions,
+                auto_available,
+                auto_enabled,
             }),
             Err(e) => {
                 // No backlight detected (or read failed) → return an
@@ -641,6 +664,8 @@ impl ManagementService for DefaultManagementService {
                         backend: self.brightness.capabilities().backend.clone(),
                         device: self.brightness.capabilities().device.clone(),
                         restrictions,
+                        auto_available,
+                        auto_enabled,
                     })
                 } else {
                     Err(ManagementError::Internal(e.to_string()))
@@ -661,6 +686,10 @@ impl ManagementService for DefaultManagementService {
             .set_brightness(clamped)
             .await
             .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        // A manual set temporarily wins over auto brightness: record the
+        // ambient light at this moment so the poll loop holds off until the
+        // room's lighting shifts noticeably (phone-style).
+        self.register_manual_override().await;
         self.broadcast_brightness_change().await
     }
 
@@ -674,6 +703,24 @@ impl ManagementService for DefaultManagementService {
         let current = self.get_brightness().await?;
         let target = current.percent.saturating_sub(step);
         self.set_brightness(target).await
+    }
+
+    async fn set_auto_brightness(&self, enabled: bool) -> ManagementResult<BrightnessInfo> {
+        self.apply_auto_enabled(enabled).await
+    }
+
+    async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
+        let current = self.auto_brightness.lock().await.enabled();
+        self.apply_auto_enabled(!current).await
+    }
+
+    // --------------------------------------------------------------- display
+    async fn get_display_state(&self) -> DisplayState {
+        self.display.state().await
+    }
+
+    async fn set_display_mode(&self, mode: DisplayMode) -> DisplayState {
+        self.display.set_mode(mode).await
     }
 
     // ---------------------------------------------------------------- config
@@ -741,15 +788,108 @@ impl DefaultManagementService {
 
     async fn brightness_restrictions(&self) -> BrightnessRestrictions {
         let eng = self.engine.lock().await;
-        let policy = if let Some(session) = eng.current_session()
-            && let Some(entry) = eng.policy().get_entry(&session.plan.entry_id)
-            && let Some(ref br) = entry.brightness
-        {
-            br.clone()
-        } else {
-            eng.policy().brightness.clone()
+        resolve_brightness_restrictions(&eng)
+    }
+
+    /// `(auto_available, auto_enabled)` — whether a light sensor is present
+    /// and whether auto brightness is currently on.
+    async fn auto_status(&self) -> (bool, bool) {
+        let available = self.light_sensor.is_some();
+        let enabled = available && self.auto_brightness.lock().await.enabled();
+        (available, enabled)
+    }
+
+    /// Record that the user just set brightness by hand, so the auto poll loop
+    /// backs off until the ambient light changes. No-op without a sensor or
+    /// when auto is off.
+    async fn register_manual_override(&self) {
+        let Some(sensor) = self.light_sensor.as_ref() else {
+            return;
         };
-        convert_brightness_policy(&policy)
+        let mut st = self.auto_brightness.lock().await;
+        if !st.enabled() {
+            return;
+        }
+        match sensor.read_lux() {
+            Ok(lux) => st.begin_manual_override(lux),
+            Err(e) => debug!(error = %e, "auto-brightness: manual-override lux read failed"),
+        }
+    }
+
+    /// Turn auto brightness on/off, persist the choice, and (when enabling)
+    /// apply an initial adjustment immediately rather than waiting a poll.
+    async fn apply_auto_enabled(&self, enabled: bool) -> ManagementResult<BrightnessInfo> {
+        if enabled && self.light_sensor.is_none() {
+            return Err(ManagementError::Unprocessable(
+                "No ambient light sensor available on this host".into(),
+            ));
+        }
+        self.auto_brightness.lock().await.set_enabled(enabled);
+        if let Err(e) = self.store.set_setting(
+            AUTO_BRIGHTNESS_SETTING_KEY,
+            if enabled { "true" } else { "false" },
+        ) {
+            warn!(error = %e, "Failed to persist auto-brightness setting");
+        }
+        if enabled {
+            // Snap to the ambient light now; this also emits BrightnessChanged.
+            self.auto_brightness_tick().await;
+        }
+        // Return fresh info regardless (the tick may have held if already
+        // at target, but the auto_enabled flag still changed).
+        self.broadcast_brightness_change().await
+    }
+
+    /// One iteration of the automatic-brightness control loop: sample the
+    /// light sensor, map to a target through the configured curve and policy
+    /// clamp, and write it — unless a manual override is holding. Called on a
+    /// timer by the daemon and once on enable. Cheap no-op when auto is off.
+    pub async fn auto_brightness_tick(&self) {
+        let Some(sensor) = self.light_sensor.as_ref() else {
+            return;
+        };
+        if !self.auto_brightness.lock().await.enabled() {
+            return;
+        }
+        let lux = match sensor.read_lux() {
+            Ok(lux) => lux,
+            Err(e) => {
+                debug!(error = %e, "auto-brightness: light sensor read failed");
+                return;
+            }
+        };
+        // Resolve the curve and policy clamp together under one engine lock so
+        // a concurrent config reload can't split them.
+        let (curve, restrictions) = {
+            let eng = self.engine.lock().await;
+            let ab = &eng.policy().auto_brightness;
+            let curve = AutoBrightnessCurve {
+                dim_lux: ab.dim_lux,
+                bright_lux: ab.bright_lux,
+                min_percent: ab.min_percent,
+                max_percent: ab.max_percent,
+            };
+            (curve, resolve_brightness_restrictions(&eng))
+        };
+        let current = match self.brightness.get_status().await {
+            Ok(s) => s.percent,
+            Err(e) => {
+                debug!(error = %e, "auto-brightness: backlight read failed");
+                return;
+            }
+        };
+        let action = {
+            let mut st = self.auto_brightness.lock().await;
+            st.tick(&curve, lux, current, |p| restrictions.clamp_brightness(p))
+        };
+        if let AutoAction::Apply(target) = action {
+            match self.brightness.set_brightness(target).await {
+                Ok(()) => {
+                    let _ = self.broadcast_brightness_change().await;
+                }
+                Err(e) => warn!(error = %e, "auto-brightness: failed to set backlight"),
+            }
+        }
     }
 
     async fn broadcast_volume_change(&self) -> ManagementResult<VolumeInfo> {
@@ -777,8 +917,10 @@ impl DefaultManagementService {
             .get_status()
             .await
             .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        let (auto_available, auto_enabled) = self.auto_status().await;
         (self.broadcast_fn)(Event::new(EventPayload::BrightnessChanged {
             percent: status.percent,
+            auto_enabled,
         }));
         Ok(BrightnessInfo {
             percent: status.percent,
@@ -786,8 +928,25 @@ impl DefaultManagementService {
             backend: self.brightness.capabilities().backend.clone(),
             device: self.brightness.capabilities().device.clone(),
             restrictions: self.brightness_restrictions().await,
+            auto_available,
+            auto_enabled,
         })
     }
+}
+
+/// Resolve the effective brightness restrictions for the active session: the
+/// current entry's override if it has one, else the global default. Shared by
+/// the RPC path and the auto-brightness poll loop.
+fn resolve_brightness_restrictions(eng: &CoreEngine) -> BrightnessRestrictions {
+    let policy = if let Some(session) = eng.current_session()
+        && let Some(entry) = eng.policy().get_entry(&session.plan.entry_id)
+        && let Some(ref br) = entry.brightness
+    {
+        br.clone()
+    } else {
+        eng.policy().brightness.clone()
+    };
+    convert_brightness_policy(&policy)
 }
 
 fn convert_volume_policy(p: &VolumePolicy) -> VolumeRestrictions {

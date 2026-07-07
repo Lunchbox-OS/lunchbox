@@ -153,6 +153,10 @@ impl SharedState {
                 // EntryAvailabilityChanged / StateChanged; the raw check
                 // status is HUD-only.
             }
+            EventPayload::DisplayModeChanged { .. } => {
+                // External-display arrangement is handled by shepherdd and the
+                // HUD; the launcher doesn't render it (issue #87).
+            }
         }
     }
 

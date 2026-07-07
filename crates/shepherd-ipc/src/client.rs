@@ -10,8 +10,9 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use shepherd_api::{
-    BrightnessInfo, EntryView, ErrorCode, Event, HealthStatus, ReasonCode, Request, Response,
-    ResponseResult, ServiceStateSnapshot, SessionInfo, StopMode, VolumeInfo,
+    BrightnessInfo, DisplayMode, DisplayState, EntryView, ErrorCode, Event, HealthStatus,
+    ReasonCode, Request, Response, ResponseResult, ServiceStateSnapshot, SessionInfo, StopMode,
+    VolumeInfo,
 };
 use shepherd_util::EntryId;
 use std::path::Path;
@@ -174,6 +175,15 @@ impl IpcClient {
         self.call("get_brightness", Value::Null).await
     }
 
+    pub async fn get_display_state(&mut self) -> IpcResult<DisplayState> {
+        self.call("get_display_state", Value::Null).await
+    }
+
+    pub async fn set_display_mode(&mut self, mode: DisplayMode) -> IpcResult<DisplayState> {
+        self.call("set_display_mode", serde_json::json!({ "mode": mode }))
+            .await
+    }
+
     pub async fn set_brightness(&mut self, percent: u8) -> IpcResult<BrightnessInfo> {
         self.call("set_brightness", serde_json::json!({ "percent": percent }))
             .await
@@ -187,6 +197,18 @@ impl IpcClient {
     pub async fn brightness_down(&mut self, step: u8) -> IpcResult<BrightnessInfo> {
         self.call("brightness_down", serde_json::json!({ "step": step }))
             .await
+    }
+
+    pub async fn set_auto_brightness(&mut self, enabled: bool) -> IpcResult<BrightnessInfo> {
+        self.call(
+            "set_auto_brightness",
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+    }
+
+    pub async fn toggle_auto_brightness(&mut self) -> IpcResult<BrightnessInfo> {
+        self.call("toggle_auto_brightness", Value::Null).await
     }
 
     /// Machine-readable server error code, for callers that need to

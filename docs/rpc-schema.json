@@ -324,6 +324,46 @@
       }
     },
     {
+      "name": "set_auto_brightness",
+      "params": [
+        {
+          "name": "enabled",
+          "required": true,
+          "type": "bool"
+        }
+      ],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "toggle_auto_brightness",
+      "params": [],
+      "result": {
+        "type": "BrightnessInfo"
+      }
+    },
+    {
+      "name": "get_display_state",
+      "params": [],
+      "result": {
+        "type": "DisplayState"
+      }
+    },
+    {
+      "name": "set_display_mode",
+      "params": [
+        {
+          "name": "mode",
+          "required": true,
+          "type": "DisplayMode"
+        }
+      ],
+      "result": {
+        "type": "DisplayState"
+      }
+    },
+    {
       "name": "ping",
       "params": [],
       "result": {

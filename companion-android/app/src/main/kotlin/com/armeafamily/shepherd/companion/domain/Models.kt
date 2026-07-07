@@ -248,6 +248,8 @@ data class BrightnessInfo(
     val backend: String? = null,
     val device: String? = null,
     val restrictions: BrightnessRestrictions = BrightnessRestrictions(),
+    val autoAvailable: Boolean = false,
+    val autoEnabled: Boolean = false,
 )
 
 // --- health / state ---------------------------------------------------
@@ -441,7 +443,7 @@ sealed interface EventPayload {
 
     @Serializable
     @SerialName("brightness_changed")
-    data class BrightnessChanged(val percent: Int) : EventPayload
+    data class BrightnessChanged(val percent: Int, val autoEnabled: Boolean = false) : EventPayload
 
     @Serializable
     @SerialName("hud_scale_changed")

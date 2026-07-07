@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use shepherd_api::{
-    BrowserMode, EntryKind, EntryKindTag, InputCompatMode, InputCompatOptions, WindowAction,
-    WindowInfo,
+    BrowserMode, DisplayMode, DisplayState, EntryKind, EntryKindTag, InputCompatMode,
+    InputCompatOptions, WindowAction, WindowInfo,
 };
 use shepherd_util::SessionId;
 use std::time::Duration;
@@ -261,6 +261,49 @@ pub struct NoOpHidpiController;
 impl HidpiController for NoOpHidpiController {
     async fn apply(&self) {}
     async fn restore(&self) {}
+}
+
+/// External-display / docking controller (issue #87).
+///
+/// Owns the compositor's display arrangement: on boot it records the primary
+/// (first-enumerated) output, mirrors it onto any connected external display by
+/// default, and toggles to "external only" on request. Threaded into the
+/// management service so admins can drive it over HTTP/BLE, exactly like
+/// [`HidpiController`].
+///
+/// Two implementations ship in the workspace:
+/// - `DisplayManager` in `shepherdd` — the production sway-backed implementation
+///   that also manages the `wl-mirror` process, routes audio, and broadcasts
+///   `DisplayModeChanged` events.
+/// - [`NoOpDisplayController`] — for tests and HTTP-only contexts that don't
+///   have a compositor.
+#[async_trait]
+pub trait DisplayController: Send + Sync {
+    /// The current arrangement, for `get_display_state` and for shells that
+    /// connect after the last broadcast.
+    async fn state(&self) -> DisplayState;
+    /// Switch to `mode` and return the resulting state. A no-op (returns the
+    /// unchanged state) when the mode does not apply — e.g. requesting
+    /// `ExternalOnly` with no external display connected.
+    async fn set_mode(&self, mode: DisplayMode) -> DisplayState;
+}
+
+/// No-op [`DisplayController`] for tests and hosts without docking support.
+/// Always reports a single internal display with no external monitor.
+pub struct NoOpDisplayController;
+
+#[async_trait]
+impl DisplayController for NoOpDisplayController {
+    async fn state(&self) -> DisplayState {
+        DisplayState {
+            mode: DisplayMode::SingleInternal,
+            primary: None,
+            secondary: None,
+        }
+    }
+    async fn set_mode(&self, _mode: DisplayMode) -> DisplayState {
+        self.state().await
+    }
 }
 
 #[cfg(test)]

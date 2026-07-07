@@ -6,6 +6,7 @@
 mod brightness;
 mod capabilities;
 mod handle;
+mod light;
 mod mock;
 mod traits;
 mod volume;
@@ -13,6 +14,7 @@ mod volume;
 pub use brightness::*;
 pub use capabilities::*;
 pub use handle::*;
+pub use light::*;
 pub use mock::*;
 pub use traits::*;
 pub use volume::*;

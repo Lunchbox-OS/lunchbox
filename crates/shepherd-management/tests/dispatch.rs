@@ -13,16 +13,19 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use shepherd_api::{EntryKind, Event};
 use shepherd_config::{
-    AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy,
+    AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
+    ServiceConfig, VolumePolicy,
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
     BrightnessCapabilities, BrightnessController, BrightnessResult, BrightnessStatus,
-    HostCapabilities, MockHost, NoOpHidpiController, VolumeCapabilities, VolumeController,
-    VolumeResult, VolumeStatus,
+    HostCapabilities, LightSensor, LightSensorCapabilities, LightSensorResult, MockHost,
+    NoOpDisplayController, NoOpHidpiController, VolumeCapabilities, VolumeController, VolumeResult,
+    VolumeStatus,
 };
 use shepherd_management::{
-    DefaultManagementService, ManagementError, RpcDispatchError, dispatch_json,
+    AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
+    RpcDispatchError, dispatch_json,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::{DaysOfWeek, EntryId, TimeWindow, WallClock};
@@ -137,6 +140,36 @@ impl BrightnessController for MockBrightness {
 }
 
 // ---------------------------------------------------------------------------
+// MockLightSensor
+// ---------------------------------------------------------------------------
+
+struct MockLightSensor {
+    capabilities: LightSensorCapabilities,
+    lux: std::sync::Mutex<f32>,
+}
+
+impl MockLightSensor {
+    fn new(lux: f32) -> Self {
+        Self {
+            capabilities: LightSensorCapabilities {
+                available: true,
+                device: Some("mock-als".into()),
+            },
+            lux: std::sync::Mutex::new(lux),
+        }
+    }
+}
+
+impl LightSensor for MockLightSensor {
+    fn capabilities(&self) -> &LightSensorCapabilities {
+        &self.capabilities
+    }
+    fn read_lux(&self) -> LightSensorResult<f32> {
+        Ok(*self.lux.lock().unwrap())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -179,17 +212,31 @@ fn test_policy() -> Policy {
         default_max_run: Some(Duration::from_secs(3600)),
         volume: VolumePolicy::unrestricted(),
         brightness: BrightnessPolicy::default(),
+        auto_brightness: AutoBrightnessPolicy::default(),
     }
 }
 
 /// Build a real `DefaultManagementService` over an in-memory store and
 /// mock host/volume/brightness — the same wiring the daemon uses, minus
-/// the OS-facing bits.
+/// the OS-facing bits. Includes a mock ambient light sensor (bright room).
 fn make_svc(policy: Policy, config_path: PathBuf) -> DefaultManagementService {
+    make_svc_opts(policy, config_path, Some(1000.0))
+}
+
+/// Like [`make_svc`], but `sensor_lux` controls the ambient light sensor:
+/// `Some(lux)` installs a mock sensor reading that value, `None` models a host
+/// with no light sensor (auto brightness unavailable).
+fn make_svc_opts(
+    policy: Policy,
+    config_path: PathBuf,
+    sensor_lux: Option<f32>,
+) -> DefaultManagementService {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
     let volume = Arc::new(MockVolume::new());
     let brightness = Arc::new(MockBrightness::new());
+    let light_sensor: Option<Arc<dyn LightSensor>> =
+        sensor_lux.map(|lux| Arc::new(MockLightSensor::new(lux)) as Arc<dyn LightSensor>);
     let engine = Arc::new(Mutex::new(CoreEngine::new(
         policy,
         store.clone(),
@@ -204,6 +251,8 @@ fn make_svc(policy: Policy, config_path: PathBuf) -> DefaultManagementService {
         host,
         volume,
         brightness,
+        light_sensor,
+        auto_brightness: Arc::new(Mutex::new(AutoBrightnessState::new(false))),
         event_tx: tx,
         broadcast_fn: Arc::new(move |event: Event| {
             let _ = tx_for_fn.send(event);
@@ -211,6 +260,7 @@ fn make_svc(policy: Policy, config_path: PathBuf) -> DefaultManagementService {
         config_path,
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
+        display: Arc::new(NoOpDisplayController),
     }
 }
 
@@ -604,6 +654,58 @@ async fn set_mute_updates_muted() {
     let svc = make_svc(test_policy(), cfg.path().to_path_buf());
     let body = ok(&svc, "set_mute", json!({ "muted": true })).await;
     assert_eq!(body["muted"], true);
+}
+
+#[tokio::test]
+async fn set_auto_brightness_enables_persists_and_applies() {
+    let cfg = temp_config();
+    // Bright room (1000 lux) → default curve drives brightness to max.
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    let body = ok(&svc, "set_auto_brightness", json!({ "enabled": true })).await;
+    assert_eq!(body["auto_available"], true);
+    assert_eq!(body["auto_enabled"], true);
+    // Enabling applies immediately: the mock backlight (started at 50%) is
+    // driven to the bright end of the curve.
+    assert_eq!(body["percent"], 100);
+    // The choice is persisted so it survives a restart.
+    assert_eq!(
+        svc.store.get_setting(AUTO_BRIGHTNESS_SETTING_KEY).unwrap(),
+        Some("true".to_string())
+    );
+}
+
+#[tokio::test]
+async fn toggle_auto_brightness_flips_state() {
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    let on = ok(&svc, "toggle_auto_brightness", Value::Null).await;
+    assert_eq!(on["auto_enabled"], true);
+    let off = ok(&svc, "toggle_auto_brightness", Value::Null).await;
+    assert_eq!(off["auto_enabled"], false);
+    assert_eq!(
+        svc.store.get_setting(AUTO_BRIGHTNESS_SETTING_KEY).unwrap(),
+        Some("false".to_string())
+    );
+}
+
+#[tokio::test]
+async fn set_auto_brightness_without_sensor_is_rejected() {
+    let cfg = temp_config();
+    let svc = make_svc_opts(test_policy(), cfg.path().to_path_buf(), None);
+    // No sensor → get_brightness reports auto unavailable.
+    let info = ok(&svc, "get_brightness", Value::Null).await;
+    assert_eq!(info["auto_available"], false);
+    // …and enabling is refused.
+    let err = rpc(&svc, "set_auto_brightness", json!({ "enabled": true }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::Unprocessable(_))
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

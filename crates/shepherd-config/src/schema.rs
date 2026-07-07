@@ -69,6 +69,10 @@ pub struct RawServiceConfig {
     /// path (works without IP autodiscovery or static IP). See
     /// `docs/ai/history/2026-06-20 002 ble-management.md`.
     pub ble_management: Option<RawBleManagementConfig>,
+
+    /// External monitor / docking behaviour (issue #87).
+    #[serde(default)]
+    pub display: Option<RawDisplayConfig>,
 }
 
 /// Raw entry definition
@@ -557,6 +561,51 @@ pub struct RawBrightnessConfig {
     /// Whether brightness changes are allowed at all (default: true)
     #[serde(default = "default_true")]
     pub allow_change: bool,
+
+    /// Automatic (ambient-light) brightness. Only honored under
+    /// `[service.brightness]`; a copy on a per-entry `[entries.brightness]`
+    /// override is ignored, since auto brightness is a device-global mode.
+    #[serde(default)]
+    pub auto: Option<RawAutoBrightnessConfig>,
+}
+
+/// Automatic screen-brightness configuration (ambient-light driven).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawAutoBrightnessConfig {
+    /// Whether automatic brightness starts enabled. This is only the default;
+    /// the runtime state (toggled from the HUD or management API) is persisted
+    /// and takes precedence once set.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Ambient light (lux) at or below which the screen sits at `min_percent`.
+    pub dim_lux: Option<f32>,
+
+    /// Ambient light (lux) at or above which the screen sits at `max_percent`.
+    pub bright_lux: Option<f32>,
+
+    /// Brightness percent at the dim end of the curve (0-100).
+    pub min_percent: Option<u8>,
+
+    /// Brightness percent at the bright end of the curve (0-100).
+    pub max_percent: Option<u8>,
+
+    /// How often to sample the light sensor, in seconds.
+    pub poll_interval_seconds: Option<u64>,
+}
+
+/// External monitor / docking settings (issue #87).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawDisplayConfig {
+    /// Master switch for docking support. When false, shepherdd leaves display
+    /// configuration entirely to sway (default: true).
+    #[serde(default = "default_true")]
+    pub docking_enabled: bool,
+
+    /// Route audio to the external video device while a secondary display is in
+    /// use, in both mirror and external-only modes (default: true).
+    #[serde(default = "default_true")]
+    pub mirror_audio: bool,
 }
 
 fn default_true() -> bool {

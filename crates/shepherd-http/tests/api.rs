@@ -23,7 +23,8 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use shepherd_api::{EntryKind, Event};
 use shepherd_config::{
-    AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy, ServiceConfig, VolumePolicy,
+    AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
+    ServiceConfig, VolumePolicy,
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
@@ -31,7 +32,7 @@ use shepherd_host_api::{
     HostCapabilities, MockHost, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
 };
 use shepherd_http::{AppState, handlers};
-use shepherd_management::DefaultManagementService;
+use shepherd_management::{AutoBrightnessState, DefaultManagementService};
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
 use std::collections::HashMap;
@@ -188,6 +189,7 @@ fn test_policy() -> Policy {
         default_max_run: Some(Duration::from_secs(3600)),
         volume: VolumePolicy::unrestricted(),
         brightness: BrightnessPolicy::default(),
+        auto_brightness: AutoBrightnessPolicy::default(),
     }
 }
 
@@ -235,6 +237,8 @@ fn make_app_with_admin_and_policy(
         host,
         volume,
         brightness,
+        light_sensor: None,
+        auto_brightness: Arc::new(Mutex::new(AutoBrightnessState::new(false))),
         event_tx: tx,
         broadcast_fn: Arc::new(move |event: Event| {
             let _ = tx_for_fn.send(event);
@@ -242,6 +246,7 @@ fn make_app_with_admin_and_policy(
         config_path,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
+        display: Arc::new(shepherd_host_api::NoOpDisplayController),
     });
     let state = AppState { svc };
     handlers::router(

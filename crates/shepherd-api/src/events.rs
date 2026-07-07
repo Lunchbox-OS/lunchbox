@@ -75,8 +75,10 @@ pub enum EventPayload {
     /// Volume status changed
     VolumeChanged { percent: u8, muted: bool },
 
-    /// Screen brightness changed
-    BrightnessChanged { percent: u8 },
+    /// Screen brightness changed. `auto_enabled` reports whether automatic
+    /// (ambient-light) brightness is currently on, so subscribers can keep an
+    /// auto/manual indicator in sync from the same event.
+    BrightnessChanged { percent: u8, auto_enabled: bool },
 
     /// HUD UI scale factor changed. The HUD is expected to multiply its
     /// font/padding/height by `factor` on top of the compositor scale.
@@ -91,6 +93,12 @@ pub enum EventPayload {
     /// Internet connectivity check changed. `target` matches the
     /// `InternetStatusView::target` field in `ServiceStateSnapshot`.
     InternetStatusChanged { target: String, available: bool },
+
+    /// The external-display arrangement changed (issue #87). Shells use this to
+    /// show/hide their mirror/external toggle and to re-anchor their layer-shell
+    /// surface to the currently active output. Emitted on boot, on hotplug, and
+    /// on every mode toggle.
+    DisplayModeChanged { state: crate::DisplayState },
 
     /// The system is about to suspend/sleep. Clients should immediately
     /// commit a static "cover" frame (e.g. a loading screen) so the image

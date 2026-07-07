@@ -281,6 +281,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setBrightness(percent: Int) = action { c -> _state.update { it.copy(brightness = c.setBrightness(percent)) } }
 
+    fun setAutoBrightness(enabled: Boolean) =
+        action { c -> _state.update { it.copy(brightness = c.setAutoBrightness(enabled)) } }
+
     fun reloadConfig() = action { c ->
         val result = c.reloadConfig()
         _message.value = "Config reloaded — ${result.entryCount} entries."

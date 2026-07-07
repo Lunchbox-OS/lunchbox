@@ -97,6 +97,7 @@ fn make_test_policy() -> Policy {
         default_max_run: Some(Duration::from_secs(3600)),
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     }
 }
 
@@ -379,6 +380,7 @@ fn test_reload_policy_emits_event() {
         default_max_run: None,
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     };
 
     let event = engine.reload_policy(new_policy);
@@ -411,6 +413,7 @@ fn test_reload_policy_updates_entry_list() {
         default_max_run: None,
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     };
     engine.reload_policy(new_policy);
 
@@ -452,6 +455,7 @@ fn test_reload_policy_preserves_active_session() {
         default_max_run: None,
         volume: Default::default(),
         brightness: Default::default(),
+        auto_brightness: Default::default(),
     };
     engine.reload_policy(new_policy);
 

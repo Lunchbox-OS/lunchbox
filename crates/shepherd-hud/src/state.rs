@@ -3,8 +3,8 @@
 //! The HUD subscribes to events from shepherdd and tracks session state.
 
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, Event, EventPayload, InternetStatusView, VolumeInfo,
-    VolumeRestrictions, WarningSeverity,
+    BrightnessInfo, BrightnessRestrictions, DisplayState, Event, EventPayload, InternetStatusView,
+    VolumeInfo, VolumeRestrictions, WarningSeverity,
 };
 use shepherd_util::{EntryId, SessionId};
 use std::sync::Arc;
@@ -132,6 +132,11 @@ pub struct SharedState {
     /// shepherdd broadcasts after the post-resume connectivity re-check.
     suspended_tx: Arc<watch::Sender<bool>>,
     suspended_rx: watch::Receiver<bool>,
+    /// Latest external-display arrangement (issue #87). `None` until the first
+    /// `DisplayModeChanged` (or initial `get_display_state`) arrives. Drives the
+    /// HUD's mirror/external toggle visibility and the active-output anchor.
+    display_tx: Arc<watch::Sender<Option<DisplayState>>>,
+    display_rx: watch::Receiver<Option<DisplayState>>,
 }
 
 impl SharedState {
@@ -142,6 +147,7 @@ impl SharedState {
         let (scale_tx, scale_rx) = watch::channel(1.0_f64);
         let (internet_tx, internet_rx) = watch::channel(Vec::new());
         let (suspended_tx, suspended_rx) = watch::channel(false);
+        let (display_tx, display_rx) = watch::channel(None);
 
         Self {
             session_tx: Arc::new(session_tx),
@@ -156,7 +162,20 @@ impl SharedState {
             internet_rx,
             suspended_tx: Arc::new(suspended_tx),
             suspended_rx,
+            display_tx: Arc::new(display_tx),
+            display_rx,
         }
+    }
+
+    /// Current external-display arrangement, if known.
+    pub fn display_state(&self) -> Option<DisplayState> {
+        self.display_rx.borrow().clone()
+    }
+
+    /// Replace the cached display arrangement (from `DisplayModeChanged` or the
+    /// initial `get_display_state` fetch).
+    pub fn set_display_state(&self, state: DisplayState) {
+        let _ = self.display_tx.send(Some(state));
     }
 
     /// Whether the HUD should currently display suspend placeholders for time,
@@ -258,10 +277,11 @@ impl SharedState {
 
     /// Update brightness from BrightnessChanged event (preserves
     /// restrictions/backend/device from the initial fetch).
-    fn update_brightness(&self, percent: u8) {
+    fn update_brightness(&self, percent: u8, auto_enabled: bool) {
         self.brightness_tx.send_modify(|br| {
             if let Some(b) = br {
                 b.percent = percent;
+                b.auto_enabled = auto_enabled;
             } else {
                 *br = Some(BrightnessInfo {
                     percent,
@@ -269,6 +289,8 @@ impl SharedState {
                     backend: None,
                     device: None,
                     restrictions: BrightnessRestrictions::unrestricted(),
+                    auto_available: auto_enabled,
+                    auto_enabled,
                 });
             }
         });
@@ -421,12 +443,19 @@ impl SharedState {
                 self.update_volume(*percent, *muted);
             }
 
-            EventPayload::BrightnessChanged { percent } => {
-                self.update_brightness(*percent);
+            EventPayload::BrightnessChanged {
+                percent,
+                auto_enabled,
+            } => {
+                self.update_brightness(*percent, *auto_enabled);
             }
 
             EventPayload::InternetStatusChanged { target, available } => {
                 self.update_internet_target(target, *available);
+            }
+
+            EventPayload::DisplayModeChanged { state } => {
+                self.set_display_state(state.clone());
             }
 
             EventPayload::HudScaleChanged { factor } => {

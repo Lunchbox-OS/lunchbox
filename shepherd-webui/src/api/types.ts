@@ -145,6 +145,8 @@ export interface BrightnessInfo {
   backend: string | null;
   device: string | null;
   restrictions: BrightnessRestrictions;
+  auto_available: boolean;
+  auto_enabled: boolean;
 }
 
 export interface HealthStatus {
