@@ -395,14 +395,21 @@ impl MediaApp {
 
     fn settings_screen(&mut self, ui: &mut egui::Ui) -> Option<Screen> {
         let mut next = None;
+        // Every focusable control, in visual order, for the D-pad focus stepping
+        // at the end (egui's spatial focus skips the offset combo/field columns).
+        let mut controls: Vec<egui::Response> = Vec::new();
         ui.horizontal(|ui| {
-            if ui.button("⬅ Back").clicked() {
+            let back = ui.button("⬅ Back");
+            if back.clicked() {
                 next = Some(Screen::Switcher);
             }
+            controls.push(back);
             ui.heading("Settings");
-            if ui.button("➕ Add library").clicked() {
+            let add = ui.button("➕ Add library");
+            if add.clicked() {
                 next = Some(Screen::AddLibrary);
             }
+            controls.push(add);
         });
         ui.separator();
 
@@ -433,9 +440,11 @@ impl MediaApp {
                 let is_active = active.as_deref() == Some(id.as_str());
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(is_active, "active").clicked() {
+                        let act = ui.selectable_label(is_active, "active");
+                        if act.clicked() {
                             pending = Some(Pending::SetActive(id.clone()));
                         }
+                        controls.push(act);
                         let label = self
                             .settings
                             .get(id)
@@ -451,26 +460,40 @@ impl MediaApp {
 
                     // Caching editors operate on a fresh mutable borrow.
                     if let Some(entry) = self.settings.get_mut(id) {
-                        caching_editors(ui, id, &mut entry.caching);
+                        controls.extend(caching_editors(ui, id, &mut entry.caching));
                     }
 
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(idx > 0, egui::Button::new("⬆")).clicked() {
+                        let up = ui.add_enabled(idx > 0, egui::Button::new("⬆"));
+                        if up.clicked() {
                             pending = Some(Pending::MoveUp(id.clone()));
                         }
-                        if ui
-                            .add_enabled(idx + 1 < count, egui::Button::new("⬇"))
-                            .clicked()
-                        {
+                        // Disabled at the ends; don't leave a dead slot in the order.
+                        if idx > 0 {
+                            controls.push(up);
+                        }
+                        let down = ui.add_enabled(idx + 1 < count, egui::Button::new("⬇"));
+                        if down.clicked() {
                             pending = Some(Pending::MoveDown(id.clone()));
                         }
-                        if ui.button("🗑 Remove").clicked() {
+                        if idx + 1 < count {
+                            controls.push(down);
+                        }
+                        let remove = ui.button("🗑 Remove");
+                        if remove.clicked() {
                             pending = Some(Pending::Remove(id.clone()));
                         }
+                        controls.push(remove);
                     });
                 });
             }
         });
+
+        // Drive D-pad Up/Down through every control (the Limit drag value is left
+        // out — it's reachable via Left/Right from Posters, and owns its own
+        // arrow handling).
+        let order: Vec<&egui::Response> = controls.iter().collect();
+        tv_focus_step(ui, &order);
 
         match pending {
             Some(Pending::SetActive(id)) => {
@@ -510,10 +533,8 @@ impl MediaApp {
         let mut field_focused = false;
         let (mut id_resp, mut label_resp, mut combo_resp, mut location_resp) =
             (None, None, None, None);
-        // egui only closes a ComboBox popup on a pointer click or Escape, so a
-        // D-pad Enter selects the option but leaves the popup open. Detect the
-        // resulting change and close it ourselves.
-        let prev_kind = self.form.kind;
+        let kind_opts: Vec<(FormKind, &str)> =
+            FormKind::ALL.iter().map(|&k| (k, k.label())).collect();
         egui::Grid::new("add_library_form")
             .num_columns(2)
             .spacing([12.0, 8.0])
@@ -537,14 +558,7 @@ impl MediaApp {
                 ui.end_row();
 
                 ui.label("Source");
-                let combo = egui::ComboBox::from_id_salt("add_kind")
-                    .selected_text(self.form.kind.label())
-                    .show_ui(ui, |ui| {
-                        for kind in FormKind::ALL {
-                            ui.selectable_value(&mut self.form.kind, kind, kind.label());
-                        }
-                    });
-                combo_resp = Some(combo.response);
+                combo_resp = Some(tv_combo(ui, "add_kind", &mut self.form.kind, &kind_opts));
                 ui.end_row();
 
                 ui.label("Location");
@@ -557,14 +571,6 @@ impl MediaApp {
                 ui.end_row();
             });
         self.text_field_focused = field_focused;
-        if self.form.kind != prev_kind {
-            egui::Popup::close_all(ui.ctx());
-            // Keep focus on the Source control rather than letting the closed
-            // popup drop focus and the bootstrap jump it to the first widget.
-            if let Some(r) = &combo_resp {
-                r.request_focus();
-            }
-        }
 
         // The one source-specific action button (browse / hand-off), tracked for
         // D-pad focus stepping below.
@@ -607,12 +613,8 @@ impl MediaApp {
         ui.add_space(8.0);
         let add_resp = ui.button("Add");
 
-        // D-pad Up/Down step through the controls in tab order. egui's spatial
-        // focus walks the vertically-aligned left column (Back / Browse / Add)
-        // and skips the offset field column, so a remote can't reach the fields
-        // by pressing Down; drive focus explicitly instead. (Left/Right still do
-        // spatial moves / text-cursor edits.) Skipped while the Source dropdown
-        // is open — then focus is inside the popup, not any control here.
+        // Let the D-pad step through every control in tab order (Left/Right still
+        // do spatial moves / text-cursor edits).
         let order: Vec<&egui::Response> = [
             back_resp.as_ref(),
             id_resp.as_ref(),
@@ -625,23 +627,7 @@ impl MediaApp {
         .into_iter()
         .flatten()
         .collect();
-        let step = ui.input(|i| {
-            i.key_pressed(egui::Key::ArrowDown) as i32 - i.key_pressed(egui::Key::ArrowUp) as i32
-        });
-        // While the Source dropdown is open, leave Up/Down to egui so they move
-        // through the popup's options rather than the form behind it.
-        let popup_open = egui::Popup::is_any_open(ui.ctx());
-        if step != 0
-            && !popup_open
-            && let Some(cur) = order.iter().position(|r| r.has_focus())
-        {
-            let n = order.len() as i32;
-            let target = order[(((cur as i32 + step) % n + n) % n) as usize];
-            target.request_focus();
-            // Cancel egui's own pending spatial move so it doesn't step further.
-            ui.ctx()
-                .memory_mut(|m| m.move_focus(egui::FocusDirection::None));
-        }
+        tv_focus_step(ui, &order);
 
         if add_resp.clicked() {
             let source = self
@@ -1425,6 +1411,71 @@ fn tv_free_field_focus(ui: &egui::Ui, resp: &egui::Response) -> bool {
     resp.has_focus()
 }
 
+/// A D-pad-friendly [`egui::ComboBox`] over a `(value, label)` list.
+///
+/// egui only closes a combo popup on a pointer click or Escape, so a remote's
+/// Enter picks an option but leaves the popup open, and Android's BACK (delivered
+/// as `BrowserBack`, not Escape) can't dismiss it. This wrapper detects the pick,
+/// closes the popup, and keeps focus on the combo instead of letting it drop to
+/// the first widget. BACK-dismisses-while-open is handled once, globally, in the
+/// update loop's back handler. Returns the combo button response (for focus
+/// stepping). `current` is updated in place.
+fn tv_combo<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    current: &mut T,
+    options: &[(T, &str)],
+) -> egui::Response {
+    let selected_text = options
+        .iter()
+        .find(|(v, _)| *v == *current)
+        .map(|(_, label)| *label)
+        .unwrap_or_default();
+    let before = *current;
+    let resp = egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(selected_text)
+        .show_ui(ui, |ui| {
+            for (value, label) in options {
+                ui.selectable_value(current, *value, *label);
+            }
+        })
+        .response;
+    if *current != before {
+        egui::Popup::close_all(ui.ctx());
+        resp.request_focus();
+    }
+    resp
+}
+
+/// Move focus through `order` (in tab order) on a D-pad Up/Down press, wrapping
+/// at the ends.
+///
+/// egui's spatial focus navigation picks the geometrically nearest widget, which
+/// on these forms skips controls in an offset column (e.g. the add-library fields
+/// next to the left-column buttons), leaving them unreachable by remote. Driving
+/// focus explicitly guarantees every control is reachable. No-op while a popup is
+/// open, so Up/Down then move through the popup's own options instead. Caller
+/// builds `order` from the frame's control responses (necessarily imperative,
+/// given egui).
+fn tv_focus_step(ui: &egui::Ui, order: &[&egui::Response]) {
+    if egui::Popup::is_any_open(ui.ctx()) {
+        return;
+    }
+    let step = ui.input(|i| {
+        i.key_pressed(egui::Key::ArrowDown) as i32 - i.key_pressed(egui::Key::ArrowUp) as i32
+    });
+    if step != 0
+        && let Some(cur) = order.iter().position(|r| r.has_focus())
+    {
+        let n = order.len() as i32;
+        let target = order[(((cur as i32 + step) % n + n) % n) as usize];
+        target.request_focus();
+        // Cancel egui's own pending spatial move so it doesn't step further.
+        ui.ctx()
+            .memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    }
+}
+
 /// Whether `url` points at a YouTube host (so a phone-submitted URL becomes a
 /// YouTube playlist source rather than a plain HTTP TOML).
 fn is_youtube(url: &str) -> bool {
@@ -1487,65 +1538,72 @@ fn source_summary(source: &LibrarySource) -> String {
 }
 
 /// Caching/quality combo boxes and the cache-size control for one library.
-fn caching_editors(ui: &mut egui::Ui, id: &str, caching: &mut CachingSettings) {
-    ui.horizontal(|ui| {
-        ui.label("Cache");
-        egui::ComboBox::from_id_salt((id, "mode"))
-            .selected_text(cache_mode_label(caching.mode))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut caching.mode, CacheMode::Off, "Off");
-                ui.selectable_value(&mut caching.mode, CacheMode::QueueAfterPlay, "After play");
-                ui.selectable_value(&mut caching.mode, CacheMode::QueueAll, "All");
-            });
+/// Returns the combo responses (Cache, Quality, Posters) so the caller can wire
+/// them into the screen's D-pad focus order.
+fn caching_editors(
+    ui: &mut egui::Ui,
+    id: &str,
+    caching: &mut CachingSettings,
+) -> [egui::Response; 3] {
+    let (cache_resp, quality_resp) = ui
+        .horizontal(|ui| {
+            ui.label("Cache");
+            let cache = tv_combo(
+                ui,
+                (id, "mode"),
+                &mut caching.mode,
+                &[
+                    (CacheMode::Off, "Off"),
+                    (CacheMode::QueueAfterPlay, "After play"),
+                    (CacheMode::QueueAll, "All"),
+                ],
+            );
 
-        ui.label("Quality");
-        egui::ComboBox::from_id_salt((id, "quality"))
-            .selected_text(caching.quality.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut caching.quality, Quality::Best, "Best");
-                ui.selectable_value(&mut caching.quality, Quality::Q1080, "1080p");
-                ui.selectable_value(&mut caching.quality, Quality::Q720, "720p");
-                ui.selectable_value(&mut caching.quality, Quality::Q480, "480p");
-            });
-    });
+            ui.label("Quality");
+            let quality = tv_combo(
+                ui,
+                (id, "quality"),
+                &mut caching.quality,
+                &[
+                    (Quality::Best, "Best"),
+                    (Quality::Q1080, "1080p"),
+                    (Quality::Q720, "720p"),
+                    (Quality::Q480, "480p"),
+                ],
+            );
+            (cache, quality)
+        })
+        .inner;
 
-    ui.horizontal(|ui| {
-        ui.label("Posters");
-        egui::ComboBox::from_id_salt((id, "posters"))
-            .selected_text(poster_label(caching.posters))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut caching.posters, PosterPolicy::Always, "Always");
-                ui.selectable_value(&mut caching.posters, PosterPolicy::WifiOnly, "Wi-Fi only");
-                ui.selectable_value(&mut caching.posters, PosterPolicy::Never, "Never");
-            });
+    let posters_resp = ui
+        .horizontal(|ui| {
+            ui.label("Posters");
+            let posters = tv_combo(
+                ui,
+                (id, "posters"),
+                &mut caching.posters,
+                &[
+                    (PosterPolicy::Always, "Always"),
+                    (PosterPolicy::WifiOnly, "Wi-Fi only"),
+                    (PosterPolicy::Never, "Never"),
+                ],
+            );
 
-        ui.label("Limit");
-        let mut mib = caching.max_bytes / (1024 * 1024);
-        if ui
-            .add(
-                egui::DragValue::new(&mut mib)
-                    .range(0..=1_048_576)
-                    .suffix(" MiB"),
-            )
-            .changed()
-        {
-            caching.max_bytes = mib * 1024 * 1024;
-        }
-    });
-}
+            ui.label("Limit");
+            let mut mib = caching.max_bytes / (1024 * 1024);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut mib)
+                        .range(0..=1_048_576)
+                        .suffix(" MiB"),
+                )
+                .changed()
+            {
+                caching.max_bytes = mib * 1024 * 1024;
+            }
+            posters
+        })
+        .inner;
 
-fn cache_mode_label(mode: CacheMode) -> &'static str {
-    match mode {
-        CacheMode::Off => "Off",
-        CacheMode::QueueAfterPlay => "After play",
-        CacheMode::QueueAll => "All",
-    }
-}
-
-fn poster_label(p: PosterPolicy) -> &'static str {
-    match p {
-        PosterPolicy::Always => "Always",
-        PosterPolicy::WifiOnly => "Wi-Fi only",
-        PosterPolicy::Never => "Never",
-    }
+    [cache_resp, quality_resp, posters_resp]
 }

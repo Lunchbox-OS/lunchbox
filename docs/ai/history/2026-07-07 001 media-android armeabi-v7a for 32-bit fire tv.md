@@ -168,3 +168,36 @@ All verified on the AFTHA004: Down reaches every field; the Source dropdown open
 navigates, selects (closing the popup, focus kept on Source), and BACK dismisses
 it without leaving the screen. Back-handler order is now popup → text field →
 screen; regression-checked that field-BACK and plain-BACK still behave.
+
+## Follow-up: same fixes in the library editor, via shared helpers (same session)
+
+> I need these fixes in the library *editor* too, not just the add library page.
+> Ideally these should be pulled out into their own helpers rather than being
+> copy/pasted.
+
+The editor is the Settings screen's per-library `caching_editors` (three
+`ComboBox`es — Cache / Quality / Posters — plus a Limit drag value). On device it
+had the same faults: Down jumped `active` → `Remove`, skipping the combos, and the
+combos didn't close on a D-pad Enter. Pulled the add-form logic into shared
+helpers (`src/ui.rs`) and applied them to both screens:
+
+- `tv_combo(ui, id_salt, &mut current, &[(value, label)])` — a D-pad-friendly
+  `ComboBox`: shows the options, and on a pick closes the popup (`Popup::close_all`)
+  and re-focuses the combo. Replaces all four inline combos (source kind + the
+  three caching combos); the `cache_mode_label`/`poster_label` helpers became dead
+  and were removed.
+- `tv_focus_step(ui, &[&Response])` — the explicit Up/Down tab-order stepping,
+  extracted verbatim. The caller builds the ordered response list (unavoidably
+  imperative in egui); the helper does the wrap-around focus move and the
+  popup-open skip. `caching_editors` now returns its three combo responses so
+  `settings_screen` can thread them, the `active` toggle, and the move/remove
+  buttons into one order. The Limit drag value is intentionally left out — it owns
+  arrow-key handling and is reachable via Left/Right from Posters.
+- `tv_free_field_focus` was already a helper (add-form text fields; the editor has
+  no text fields). BACK-dismisses-open-popup stays where it was — once, globally,
+  in the update loop — so it already covered the editor.
+
+Verified on the AFTHA004: in the editor, Down now steps Back → Add → active →
+Cache → Quality → Posters → Remove (reaching every combo), and each combo opens,
+navigates, and selects (popup closes, focus kept). Add-form regression re-checked
+after the refactor.
