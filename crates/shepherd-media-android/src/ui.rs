@@ -212,6 +212,9 @@ pub struct MediaApp {
     /// Whether a text field held focus this frame (the add-library form). Lets
     /// the remote's BACK leave the field before it leaves the screen.
     text_field_focused: bool,
+    /// Whether the `KEEP_SCREEN_ON` window flag is currently set (only toggled on
+    /// change, while a video is on screen).
+    keep_awake: bool,
 }
 
 impl MediaApp {
@@ -280,6 +283,7 @@ impl MediaApp {
             // Force a query on the first frame.
             insets_checked_at: f64::NEG_INFINITY,
             text_field_focused: false,
+            keep_awake: false,
         }
     }
 
@@ -1260,6 +1264,14 @@ impl eframe::App for MediaApp {
         // Promote a finished YouTube resolution into active playback.
         self.poll_playback_pending();
 
+        // Hold the screen on while a video is on screen or being resolved, so the
+        // TV's screensaver doesn't blank mid-playback. Toggle only on change.
+        let want_awake = self.playing.is_some() || self.playback_pending.is_some();
+        if want_awake != self.keep_awake {
+            crate::screen::keep_awake(want_awake);
+            self.keep_awake = want_awake;
+        }
+
         // Playback takes over the whole surface while an item is playing and
         // fills it edge-to-edge (the video is composited full-screen), so it is
         // deliberately NOT inset. Only the browse/settings screens below are
@@ -1416,19 +1428,47 @@ fn tv_free_field_focus(ui: &egui::Ui, resp: &egui::Response) -> bool {
 
 /// A D-pad-friendly [`egui::ComboBox`] over a `(value, label)` list.
 ///
-/// egui only closes a combo popup on a pointer click or Escape, so a remote's
-/// Enter picks an option but leaves the popup open, and Android's BACK (delivered
-/// as `BrowserBack`, not Escape) can't dismiss it. This wrapper detects the pick,
-/// closes the popup, and keeps focus on the combo instead of letting it drop to
-/// the first widget. BACK-dismisses-while-open is handled once, globally, in the
-/// update loop's back handler. Returns the combo button response (for focus
-/// stepping). `current` is updated in place.
+/// egui's combo popup doesn't reliably take keyboard focus when opened, so a
+/// remote's Up/Down either does nothing or spatially escapes to a neighbouring
+/// widget instead of moving through the options. So while the popup is open we
+/// consume Up/Down ourselves and cycle `current` in place (the popup's selected
+/// highlight follows it); the list stays open so the choice is visible. Enter
+/// toggles the popup shut (egui's own button behaviour), and BACK dismisses it
+/// via the update loop's global handler. A pointer click on an option still
+/// commits and closes. Returns the combo button response (for focus stepping).
 fn tv_combo<T: PartialEq + Copy>(
     ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
+    id_salt: impl std::hash::Hash + Copy,
     current: &mut T,
     options: &[(T, &str)],
 ) -> egui::Response {
+    // The popup's open state is keyed by the combo's own id; recompute it the
+    // same way `ComboBox::from_id_salt` does (`make_persistent_id(Id::new(salt))`)
+    // so we can query it before rendering.
+    let combo_id = ui.make_persistent_id(egui::Id::new(id_salt));
+    if egui::ComboBox::is_open(ui.ctx(), combo_id) {
+        // Own the D-pad while open: Up/Down cycle the value, Enter commits and
+        // closes (egui closes the popup only on a *pointer* click, not Enter, and
+        // its popup focus is too unreliable to steer with a remote). Consume the
+        // keys so egui doesn't also act on them (spatial focus escape / re-toggle).
+        let (step, commit) = ui.input_mut(|i| {
+            let down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+            let up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+            let enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+            (down as i32 - up as i32, enter)
+        });
+        if step != 0
+            && let Some(idx) = options.iter().position(|(v, _)| *v == *current)
+        {
+            let n = options.len() as i32;
+            *current = options[(idx as i32 + step).rem_euclid(n) as usize].0;
+        }
+        if commit {
+            egui::Popup::close_all(ui.ctx());
+            ui.ctx().memory_mut(|m| m.request_focus(combo_id));
+        }
+    }
+
     let selected_text = options
         .iter()
         .find(|(v, _)| *v == *current)
@@ -1443,6 +1483,8 @@ fn tv_combo<T: PartialEq + Copy>(
             }
         })
         .response;
+    // A pointer click on an option changes the value without going through the
+    // cycling above; commit it (close + keep focus on the combo).
     if *current != before {
         egui::Popup::close_all(ui.ctx());
         resp.request_focus();

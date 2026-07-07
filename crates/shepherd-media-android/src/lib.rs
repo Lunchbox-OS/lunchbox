@@ -17,6 +17,7 @@ pub mod playback;
 pub mod player;
 pub mod posters;
 pub mod resolve;
+pub mod screen;
 pub mod storage;
 pub mod ui;
 pub mod video_cache;
@@ -40,6 +41,8 @@ fn android_main(app: android_activity::AndroidApp) {
     storage::set_activity(app.activity_as_ptr());
     // So BACK from the top-level screen can finish the activity and exit.
     exit::set_activity(app.activity_as_ptr());
+    // So playback can hold the screen on (KEEP_SCREEN_ON window flag).
+    screen::set_app(app.clone());
 
     // Persist settings and caches in the app's private storage.
     let data_dir = app

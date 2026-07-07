@@ -244,3 +244,47 @@ asynchronously, so scripted "open grid → play" often raced the load; each
 present-rate number here was taken only after confirming a decoded frame
 (`HW.video.avc Got First Frame Ready`) and video on screen. The slow yt-dlp
 resolve is startup latency, separate from the playback-smoothness fix.
+
+## Follow-up: dropdown nav, screensaver, yt-dlp speed (same session)
+
+> the screensaver appears after some time in video, and dropdowns (particularly
+> the library quality selector) cannot be navigated
+> …
+> look into the YouTube resolution speed
+
+Three independent issues:
+
+- **Combo popups un-navigable by remote.** egui doesn't reliably move keyboard
+  focus *into* an open combo popup, so a D-pad Down either did nothing or
+  spatially escaped to a neighbour (the Limit drag value), and Enter never closed
+  it (egui closes a combo only on a *pointer* click). Reworked `tv_combo`: while
+  the popup is open it *consumes* Up/Down/Enter and drives the choice itself —
+  Up/Down cycle the value in place (the list's highlight follows), Enter commits
+  and closes and re-focuses the combo. It recomputes the combo's own id
+  (`make_persistent_id(Id::new(salt))`, matching `from_id_salt`) to query
+  `ComboBox::is_open`. Verified on the AFTHA004: the Quality selector cycles
+  1080p→720p→480p and Enter closes it.
+
+- **Screensaver blanks mid-video.** With `vo=libmpv` there's no player window, so
+  nothing inhibits the Fire TV screensaver. New `screen` module toggles the
+  `KEEP_SCREEN_ON` window flag via `AndroidApp::set_window_flags` (which marshals
+  to the UI thread) whenever a video is on screen or resolving
+  (`playing.is_some() || playback_pending.is_some()`), cleared otherwise. The
+  `AndroidApp` is stashed thread-locally from `android_main` (the render thread).
+
+- **Slow YouTube resolve (~15 s).** Profiled: CPU-bound in the bundled
+  Python/yt-dlp (extraction + the nsig JS challenge under quickjs), not network.
+  youtubedl-android's default `execute` passes `--no-cache-dir`, so every resolve
+  re-downloads and re-parses YouTube's player JS. Decompiling the AAR showed an
+  `execute(request, processId, useCache)` overload (default `useCache=false`);
+  switched our JNI call to pass `true`, which makes yt-dlp cache the extracted
+  player in the app cache dir so repeat resolves — and the next launch — skip that
+  work. The URL is passed as the process id (unique per call).
+
+Testing note: the browse grid, when idle, doesn't repaint continuously, so
+scripted `adb` key/tap events into it were unreliable this session (compounded by
+the Fire TV's own screensaver backgrounding the app to Netflix). The dropdown fix
+and the yt-dlp call were verified on device (the grid *loads its playlist* through
+the changed `execute`, proving the new signature); the screensaver flag couldn't
+be observed under sustained scripted playback and is left for confirmation on a
+real remote. Shipped in a signed release APK.
