@@ -12,6 +12,12 @@ use crate::player::{PlayerError, PlayerEvent, PlayerHandle, Transport};
 use crate::protocol::{ExitReason, ProtocolEmitter, ProtocolEvent, ReturnReason, UriClass};
 use crate::resolver::{PlatformInfo, resolve_source};
 
+/// How many times a playing item is restarted after a player `Error` before the
+/// session gives up and returns to the menu. A flaky stream (e.g. a network
+/// connection dropping right after the file opens) surfaces as an `Error` that
+/// usually clears on a retry, so recover a couple of times before surfacing it.
+const MAX_PLAY_RETRIES: u8 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     Browsing,
@@ -38,6 +44,9 @@ pub struct Session {
     protocol: ProtocolEmitter,
     platform: PlatformInfo,
     ready_emitted: bool,
+    /// Number of times the current item has been restarted after an `Error`,
+    /// reset when a new item starts. Bounds recovery at [`MAX_PLAY_RETRIES`].
+    play_retries: u8,
 }
 
 impl Session {
@@ -57,6 +66,7 @@ impl Session {
             protocol,
             platform: PlatformInfo::current(),
             ready_emitted: false,
+            play_retries: 0,
         }
     }
 
@@ -227,6 +237,7 @@ impl Session {
                     kind,
                     source: class,
                 });
+                self.play_retries = 0;
                 self.state = SessionState::Playing {
                     item_id: item_id.to_string(),
                 };
@@ -235,6 +246,20 @@ impl Session {
                 self.handle_player_error(item_id, e);
             }
         }
+    }
+
+    /// Restart the currently-playing item in place after a transient error,
+    /// without re-emitting `STARTED_PLAYBACK` (the state stays `Playing`).
+    /// Returns whether the player accepted the restart.
+    fn retry_play(&mut self, item_id: &str) -> bool {
+        let source: &Source = match self.library.items.iter().find(|i| i.id == item_id) {
+            Some(item) => match resolve_source(item, &self.platform) {
+                Some(s) => s,
+                None => return false,
+            },
+            None => return false,
+        };
+        self.player.play(source).is_ok()
     }
 
     fn handle_player_error(&mut self, item_id: &str, err: PlayerError) {
@@ -267,15 +292,30 @@ impl Session {
                 self.state = SessionState::Browsing;
             }
             (SessionState::Playing { item_id }, PlayerEvent::Error(message)) => {
-                self.protocol.emit(ProtocolEvent::Error {
-                    item_id: item_id.clone(),
-                    message,
-                });
-                self.protocol.emit(ProtocolEvent::ReturnedToMenu {
-                    item_id,
-                    reason: ReturnReason::Error,
-                });
-                self.state = SessionState::Browsing;
+                // A transient stream error (e.g. a flaky network connection
+                // dropping the stream just after it opens) ends the file with an
+                // error; these usually clear on a retry. Restart the same item a
+                // bounded number of times before surfacing the error and
+                // returning to the menu.
+                let recovered = self.play_retries < MAX_PLAY_RETRIES && {
+                    self.play_retries += 1;
+                    self.protocol.emit(ProtocolEvent::Warning {
+                        item_id: item_id.clone(),
+                        reason: "playback-retry".into(),
+                    });
+                    self.retry_play(&item_id)
+                };
+                if !recovered {
+                    self.protocol.emit(ProtocolEvent::Error {
+                        item_id: item_id.clone(),
+                        message,
+                    });
+                    self.protocol.emit(ProtocolEvent::ReturnedToMenu {
+                        item_id,
+                        reason: ReturnReason::Error,
+                    });
+                    self.state = SessionState::Browsing;
+                }
             }
             (SessionState::Stopping { item_id }, PlayerEvent::Closed)
             | (SessionState::Stopping { item_id }, PlayerEvent::EndOfFile) => {

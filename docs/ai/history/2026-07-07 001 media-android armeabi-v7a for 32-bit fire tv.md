@@ -400,3 +400,18 @@ no resolve wait. A normal (un-prefetched) play also banks its resolution so a
 replay is instant. Verified on-device: prefetched 4-hour video went from
 selection → `play()` in **5 ms** (was ~3.2 s), first frame ~1.7 s later — total
 ~1.7 s vs ~4.8 s before. Shipped to the phone.
+
+## Follow-up: port the transient-error retry into the shared session (Linux too)
+
+The Android retry lives in the Android event loop, which bypasses `Session`. The
+Linux binary drives playback through the shared `Session::tick` →
+`apply_player_event`, where a `PlayerEvent::Error` went straight to `ERROR` +
+`RETURNED_TO_MENU` — the same flaky-stream failure mode with no recovery. Added
+the bounded retry there (`crates/shepherd-media-core/src/session.rs`): a `Playing`
++ `Error` now restarts the same item in place (emitting `WARNING
+reason=playback-retry`, staying `Playing`) up to `MAX_PLAY_RETRIES` (2) before
+surfacing the error and returning to the menu; the counter resets when a new item
+starts. Two integration tests in `tests/protocol.rs` cover recover-on-transient
+and give-up-after-exhaustion. So the Linux front-end now gets the same recovery
+the Android app does. (Kept on this branch at the user's request rather than a
+separate one.)
