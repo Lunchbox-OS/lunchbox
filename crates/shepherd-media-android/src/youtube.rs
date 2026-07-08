@@ -61,7 +61,7 @@ pub fn fetch_playlist(ytdlp: &dyn YtDlp, url: &str) -> Result<PlaylistInfo, Stri
 
 /// A resolved playable stream: a video URL and, when the format is DASH
 /// (separate tracks), the matching audio URL to attach as an external track.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamUrls {
     pub video: String,
     pub audio: Option<String>,

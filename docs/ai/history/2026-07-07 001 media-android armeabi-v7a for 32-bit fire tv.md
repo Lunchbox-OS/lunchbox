@@ -366,3 +366,37 @@ status message instead of a silent bounce. Reproducing the transient error
 on demand proved impractical (rare, and the idle browse grid makes scripted
 `adb` taps unreliable), but the retry is bounded, fires only on `Error`, logs a
 `warn`, and healthy playback was verified unaffected. Shipped to the phone.
+
+## Follow-up: initial-load timing, particularly on longer videos
+
+> see about improving initial load timing, particularly on longer videos
+
+Measured the two phases on the Pixel (temporary `TIMING`/codec logs):
+
+| phase | short video (~20 min) | 4-hour video |
+| --- | --- | --- |
+| yt-dlp resolve (tap → resolved) | 3.4 s | 3.2 s |
+| open (play → codec alloc) | 0.33 s | 1.55 s |
+
+So the **yt-dlp resolve (~3 s) dominates every play and is length-independent**;
+the length-dependent part is the demux (index read), which adds ~1.2 s for a
+very long stream. Two dead ends confirmed by measurement, not assumption:
+
+- mpv demuxer probe tuning (`demuxer-lavf-probesize`/`analyzeduration`) does
+  nothing here — an apparent "22× speed-up" was mpv *erroring out* on an
+  out-of-range `analyzeduration` value (it wants seconds, not µs); with valid
+  units there's no change.
+- `demuxer-lavf-o=fflags=+ignidx` (skip the fragmented-MP4 segment index) was
+  built and measured on-device: the 4-hour open was 1.70 s with it vs 1.55 s
+  without — no gain, so it was dropped rather than ship the seek-precision cost
+  for nothing. The 1.55 s open is not dominated by the `sidx` read.
+
+**Fix that landed: prefetch the resolve.** As focus settles on a grid item
+(`PREFETCH_DWELL`, 400 ms), its stream is resolved on a worker and cached by
+watch URL (`stream_cache`, `STREAM_CACHE_TTL` = 4 h, under googlevideo's URL
+expiry); one prefetch runs at a time. Tapping play then reuses the cached
+resolution via a pre-filled channel — the same `poll_playback_pending` path,
+no resolve wait. A normal (un-prefetched) play also banks its resolution so a
+replay is instant. Verified on-device: prefetched 4-hour video went from
+selection → `play()` in **5 ms** (was ~3.2 s), first frame ~1.7 s later — total
+~1.7 s vs ~4.8 s before. Shipped to the phone.

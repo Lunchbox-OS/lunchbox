@@ -78,7 +78,9 @@ the full design and roadmap.
   and an in-app refresh of the AAR's stale bundled yt-dlp to the latest release
   on first launch (`refresh_ytdlp`). Stream + audio are resolved as separate
   DASH tracks (`StreamUrls`) and muxed at playback via
-  `PlayerHandle::set_external_audio`.
+  `PlayerHandle::set_external_audio`. The ~3s stream resolution is prefetched in
+  the background once focus settles on a grid item (cached by watch URL), so
+  tapping play starts almost immediately instead of waiting for yt-dlp.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 

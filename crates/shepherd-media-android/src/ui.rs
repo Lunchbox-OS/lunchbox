@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
@@ -48,6 +48,14 @@ struct PlayingItem {
 /// since these usually succeed on a second try.
 const MAX_PLAYBACK_RETRIES: u8 = 2;
 
+/// How long a focused grid item must stay focused before its stream is
+/// prefetched, so quickly scrolling past items doesn't kick off resolves.
+const PREFETCH_DWELL: Duration = Duration::from_millis(400);
+
+/// How long a resolved YouTube stream stays usable from the cache. googlevideo
+/// URLs embed a multi-hour expiry; keep this comfortably under it.
+const STREAM_CACHE_TTL: Duration = Duration::from_secs(4 * 3600);
+
 /// Construct the playback backend for this platform: libmpv on Android, a no-op
 /// stub elsewhere (so the playback path still compiles and runs on the host).
 fn make_player() -> Option<Box<dyn PlayerHandle>> {
@@ -74,6 +82,10 @@ fn make_player() -> Option<Box<dyn PlayerHandle>> {
 /// shared grid renders them via egui's image loader (egui_extras), so we pass
 /// the raw bytes through rather than decoding to a texture ourselves.
 type PosterMsg = (String, Option<Vec<u8>>);
+
+/// The outcome of a YouTube stream resolution delivered from a worker thread:
+/// the resolved stream URLs, or an error message to show.
+type StreamResult = Result<crate::youtube::StreamUrls, String>;
 
 /// Per-item poster state in the grid.
 enum PosterSlot {
@@ -211,8 +223,19 @@ pub struct MediaApp {
     playback: Option<PlaybackView>,
     playing: Option<PlayingItem>,
     /// A YouTube item whose stream URLs are being resolved on a worker thread
-    /// before playback can start: (display title, result receiver).
-    playback_pending: Option<(String, Receiver<Result<crate::youtube::StreamUrls, String>>)>,
+    /// before playback can start: (display title, watch URL, result receiver).
+    playback_pending: Option<(String, String, Receiver<StreamResult>)>,
+    /// Resolved YouTube streams cached by watch URL, so a play that was
+    /// prefetched (or recently played) skips the ~3s yt-dlp resolve. Entries
+    /// carry the time they were resolved and expire via `STREAM_CACHE_TTL`
+    /// (googlevideo URLs are only valid for a few hours).
+    stream_cache: HashMap<String, (Instant, crate::youtube::StreamUrls)>,
+    /// An in-flight background prefetch of the focused grid item's streams:
+    /// (watch URL, result receiver). At most one runs at a time.
+    prefetch: Option<(String, Receiver<StreamResult>)>,
+    /// The focused grid index and when it became focused, used to debounce
+    /// prefetch so only an item the user pauses on gets resolved.
+    prefetch_focus: Option<(usize, Instant)>,
     /// Transient one-line status (errors, confirmations) shown in the top bar.
     status: Option<String>,
     /// Cached display safe-area insets (physical px: camera cutout + rounded
@@ -286,6 +309,9 @@ impl MediaApp {
             playback,
             playing: None,
             playback_pending: None,
+            stream_cache: HashMap::new(),
+            prefetch: None,
+            prefetch_focus: None,
             status,
             safe_insets: crate::insets::SafeInsets::default(),
             // Force a query on the first frame.
@@ -1080,6 +1106,8 @@ impl MediaApp {
         }
         if let Some(id) = selected {
             self.start_playback(ui.ctx(), &id);
+        } else {
+            self.maybe_prefetch_focused(ui.ctx());
         }
         None
     }
@@ -1126,17 +1154,18 @@ impl MediaApp {
         if let ClassifiedUri::YouTube(watch) = &source.uri {
             let watch = watch.to_string();
             let quality = caching.quality;
-            let ctx = ctx.clone();
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let result = match crate::youtube::provider() {
-                    Some(p) => crate::youtube::resolve_stream_url(p.as_ref(), &watch, quality),
-                    None => Err("YouTube playback isn't available on this platform.".to_string()),
-                };
-                let _ = tx.send(result);
-                ctx.request_repaint();
-            });
-            self.playback_pending = Some((title, rx));
+            // A prefetch (or a recent play) may have already resolved this
+            // stream; if so, hand the cached URLs straight to the play path via
+            // a pre-filled channel so playback starts without the ~3s resolve.
+            let rx = match self.stream_cache.get(&watch) {
+                Some((t, streams)) if t.elapsed() < STREAM_CACHE_TTL => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let _ = tx.send(Ok(streams.clone()));
+                    rx
+                }
+                _ => Self::spawn_resolve(ctx, watch.clone(), quality),
+            };
+            self.playback_pending = Some((title, watch, rx));
             return;
         }
 
@@ -1270,10 +1299,107 @@ impl MediaApp {
         }
     }
 
+    /// Resolve a YouTube `watch` URL to its stream URLs on a worker thread
+    /// (network must not run on the UI thread), delivering the result on the
+    /// returned receiver and repainting when it lands.
+    fn spawn_resolve(
+        ctx: &egui::Context,
+        watch: String,
+        quality: Quality,
+    ) -> Receiver<StreamResult> {
+        let ctx = ctx.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match crate::youtube::provider() {
+                Some(p) => crate::youtube::resolve_stream_url(p.as_ref(), &watch, quality),
+                None => Err("YouTube playback isn't available on this platform.".to_string()),
+            };
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        rx
+    }
+
+    /// Prefetch the focused grid item's stream in the background once focus has
+    /// settled on it, so tapping play starts near-instantly. Resolves at most
+    /// one item at a time and caches the result by watch URL.
+    fn maybe_prefetch_focused(&mut self, ctx: &egui::Context) {
+        // Don't compete with an in-flight play resolution, an active playback,
+        // or an already-running prefetch.
+        if self.playback_pending.is_some() || self.playing.is_some() || self.prefetch.is_some() {
+            return;
+        }
+        // Identify the focused item and, if it's a YouTube source, its watch URL
+        // and quality.
+        let target = (|| {
+            let g = self.grid.as_ref()?;
+            let GridState::Loaded(lib) = &g.state else {
+                return None;
+            };
+            let item = lib.items.get(g.focused)?;
+            let source = resolve_source(item, &PlatformInfo::current())?;
+            let ClassifiedUri::YouTube(watch) = &source.uri else {
+                return None;
+            };
+            let quality = self
+                .settings
+                .get(&g.library_id)
+                .map(|e| e.caching.quality)
+                .unwrap_or_default();
+            Some((g.focused, watch.to_string(), quality))
+        })();
+        let Some((idx, watch, quality)) = target else {
+            self.prefetch_focus = None;
+            return;
+        };
+        // Restart the dwell timer whenever the focus moves to a new item; only
+        // prefetch once it has rested here for `PREFETCH_DWELL`.
+        match self.prefetch_focus {
+            Some((i, since)) if i == idx => {
+                if since.elapsed() < PREFETCH_DWELL {
+                    ctx.request_repaint_after(PREFETCH_DWELL);
+                    return;
+                }
+            }
+            _ => {
+                self.prefetch_focus = Some((idx, Instant::now()));
+                ctx.request_repaint_after(PREFETCH_DWELL);
+                return;
+            }
+        }
+        // Already resolved and still fresh — nothing to do.
+        if self
+            .stream_cache
+            .get(&watch)
+            .is_some_and(|(t, _)| t.elapsed() < STREAM_CACHE_TTL)
+        {
+            return;
+        }
+        let rx = Self::spawn_resolve(ctx, watch.clone(), quality);
+        self.prefetch = Some((watch, rx));
+    }
+
+    /// Store a completed background prefetch in the stream cache.
+    fn poll_prefetch(&mut self) {
+        let Some((_, rx)) = self.prefetch.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(streams)) => {
+                let (watch, _) = self.prefetch.take().unwrap();
+                self.stream_cache.insert(watch, (Instant::now(), streams));
+            }
+            // A prefetch failing is not worth surfacing — the real play will
+            // resolve again and report any error then.
+            Ok(Err(_)) | Err(TryRecvError::Disconnected) => self.prefetch = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
     /// If a pending YouTube stream resolution has completed, start (or fail)
     /// playback with the resolved direct URL.
     fn poll_playback_pending(&mut self) {
-        let Some((_, rx)) = self.playback_pending.as_ref() else {
+        let Some((_, _, rx)) = self.playback_pending.as_ref() else {
             return;
         };
         let result = match rx.try_recv() {
@@ -1281,7 +1407,7 @@ impl MediaApp {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err("YouTube resolver thread died.".to_string()),
         };
-        let (title, _) = self.playback_pending.take().unwrap();
+        let (title, watch, _) = self.playback_pending.take().unwrap();
         let streams = match result {
             Ok(u) => u,
             Err(e) => {
@@ -1289,6 +1415,10 @@ impl MediaApp {
                 return;
             }
         };
+        // Cache the resolution so replaying this item is instant (harmless if it
+        // came from the cache already).
+        self.stream_cache
+            .insert(watch, (Instant::now(), streams.clone()));
         let url = match Url::parse(&streams.video) {
             Ok(u) => u,
             Err(e) => {
@@ -1347,8 +1477,10 @@ impl eframe::App for MediaApp {
         // Diff settings across the frame so any mutation persists automatically.
         let before = self.settings.clone();
 
-        // Promote a finished YouTube resolution into active playback.
+        // Promote a finished YouTube resolution into active playback, and bank
+        // any completed background prefetch.
         self.poll_playback_pending();
+        self.poll_prefetch();
 
         // Playback takes over the whole surface while an item is playing and
         // fills it edge-to-edge (the video is composited full-screen), so it is
