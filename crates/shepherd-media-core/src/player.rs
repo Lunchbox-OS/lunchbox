@@ -288,6 +288,15 @@ mod libmpv_backend {
     impl PlayerHandle for LibmpvPlayer {
         fn play(&mut self, source: &Source) -> Result<(), PlayerError> {
             let uri = Self::uri_for_source(source)?;
+            // Discard events left over from a previous session before starting a
+            // new one. `stop` makes mpv emit an `EndFile`, and the UI stops
+            // draining events once it leaves the playback screen, so that event
+            // (and the `idle-active` that follows) sit in the queue. Without this
+            // the next `play` reads the stale `EndFile` as *this* file ending and
+            // tears playback down immediately — and each teardown re-issues
+            // `stop`, so playback stays stuck. (Reliably triggered by seeking and
+            // then closing right away.)
+            while self.mpv.wait_event(0.0).is_some() {}
             // An external audio track (separate video/audio streams) is attached
             // via the loadfile per-file options. The value is length-prefix
             // quoted (`%<len>%<str>`) so commas/colons in the URL don't get

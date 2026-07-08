@@ -319,3 +319,27 @@ formats; the selector still picks 720p DASH for normal videos (verified
 unchanged) and falls back to the muxed 360p (itag 18) for the DRM ones, so they
 now play (at 360p). Verified all three resolve to itag 18 with the two-client arg
 while normal videos keep 720p. Shipped in a signed release APK.
+
+## Follow-up: playback wedged after seek-then-close (same session, on the phone)
+
+> The app can get into a state, usually after seeking and then immediately
+> closing the video, where no more videos will play.
+
+Reproduced on the Pixel with temporary event logging: after a video plays, a
+seek + immediate BACK, then playing another shows `play() → EndOfFile → stop()` —
+the new video is torn down the instant it starts, and stays that way.
+
+Cause: mpv emits an `MPV_EVENT_END_FILE` whenever the UI issues `stop` (on
+leaving playback). But the app only drains player events inside `run_playback`,
+which stops running once it leaves the playback screen (`self.playing = None`),
+so that `EndFile` (and the `idle-active` after it) sits in mpv's queue. The next
+`play` → `loadfile` starts, `run_playback` drains the **stale** `EndFile` first,
+reads it as *this* file ending, and stops — and that stop queues another
+`EndFile`, so every subsequent play dies the same way. Seeking just makes the
+timing line up reliably.
+
+Fix (`LibmpvPlayer::play`, shepherd-media-core): drain the event queue
+(`while self.mpv.wait_event(0.0).is_some() {}`) before `loadfile`, so a new
+session never inherits a previous one's events. Verified on the phone: the
+seek→close→play sequence that used to wedge now plays every time (two cycles).
+Shipped to the phone in a signed release APK.
