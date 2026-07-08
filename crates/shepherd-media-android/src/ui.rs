@@ -35,7 +35,18 @@ struct PlayingItem {
     /// For a cacheable (direct-http) source whose library has caching enabled:
     /// the URL and the cache to download it into after playback finishes.
     cache: Option<(String, VideoCache)>,
+    /// The resolved source and its external audio (YouTube DASH), kept so a
+    /// transient playback error can be retried without re-resolving.
+    source: Source,
+    external_audio: Option<String>,
+    /// How many times playback of this item has been retried after an error.
+    error_retries: u8,
 }
+
+/// A flaky stream (e.g. a googlevideo connection dropping right after it opens)
+/// ends the file with an error; retry it a couple of times before giving up,
+/// since these usually succeed on a second try.
+const MAX_PLAYBACK_RETRIES: u8 = 2;
 
 /// Construct the playback backend for this platform: libmpv on Android, a no-op
 /// stub elsewhere (so the playback path still compiles and runs on the host).
@@ -1149,7 +1160,6 @@ impl MediaApp {
                 playing_cache = Some((url, cache));
             }
         }
-
         match self.player.as_mut() {
             Some(p) => match p.play(&play_source) {
                 Ok(()) => {
@@ -1159,6 +1169,9 @@ impl MediaApp {
                     self.playing = Some(PlayingItem {
                         title,
                         cache: playing_cache,
+                        source: play_source,
+                        external_audio: None,
+                        error_retries: 0,
                     });
                 }
                 Err(e) => self.status = Some(format!("Playback failed: {e}")),
@@ -1171,18 +1184,54 @@ impl MediaApp {
     /// EOF/close/error) and composite the video + overlay. Returns to the grid
     /// when playback ends or the user leaves.
     fn run_playback(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Drain events without holding a borrow across the mutation.
+        // Drain events without holding a borrow across the mutation. A clean
+        // end (EOF/close) leaves; an error is transient — retry it below.
         let mut ended = false;
+        let mut errored: Option<String> = None;
         if let Some(p) = self.player.as_mut() {
             while let Some(ev) = p.poll_event() {
                 match ev {
-                    PlayerEvent::EndOfFile | PlayerEvent::Closed | PlayerEvent::Error(_) => {
-                        ended = true;
-                    }
+                    PlayerEvent::EndOfFile | PlayerEvent::Closed => ended = true,
+                    PlayerEvent::Error(e) => errored = Some(e),
                     PlayerEvent::Started => {}
                 }
             }
         }
+
+        // A flaky stream ends the file with an error (e.g. a googlevideo
+        // connection dropping just after it opens). Retry the same source a few
+        // times before giving up — these usually recover on a second try; only
+        // surface the error and return to the grid once retries are exhausted.
+        if let Some(err) = errored
+            && !ended
+        {
+            let retry = self
+                .playing
+                .as_ref()
+                .is_some_and(|it| it.error_retries < MAX_PLAYBACK_RETRIES);
+            if retry {
+                let (src, audio) = {
+                    let it = self.playing.as_mut().expect("checked above");
+                    it.error_retries += 1;
+                    log::warn!(
+                        "playback error, retry {}/{MAX_PLAYBACK_RETRIES}: {err}",
+                        it.error_retries
+                    );
+                    (it.source.clone(), it.external_audio.clone())
+                };
+                if let Some(p) = self.player.as_mut() {
+                    p.set_external_audio(audio);
+                    if let Err(e) = p.play(&src) {
+                        self.status = Some(format!("Playback failed: {e}"));
+                        ended = true;
+                    }
+                }
+            } else {
+                self.status = Some(format!("Playback failed: {err}"));
+                ended = true;
+            }
+        }
+
         if ended {
             if let Some(p) = self.player.as_mut() {
                 let _ = p.stop();
@@ -1256,13 +1305,20 @@ impl MediaApp {
             Some(p) => {
                 // YouTube DASH gives separate tracks: attach the audio URL as an
                 // external track so the video-only stream plays with sound.
-                p.set_external_audio(streams.audio);
+                let audio = streams.audio;
+                p.set_external_audio(audio.clone());
                 match p.play(&src) {
                     Ok(()) => {
                         if let Some(pv) = self.playback.as_mut() {
                             pv.note_started();
                         }
-                        self.playing = Some(PlayingItem { title, cache: None });
+                        self.playing = Some(PlayingItem {
+                            title,
+                            cache: None,
+                            source: src,
+                            external_audio: audio,
+                            error_retries: 0,
+                        });
                     }
                     Err(e) => self.status = Some(format!("Playback failed: {e}")),
                 }

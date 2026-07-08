@@ -343,3 +343,26 @@ Fix (`LibmpvPlayer::play`, shepherd-media-core): drain the event queue
 session never inherits a previous one's events. Verified on the phone: the
 seek→close→play sequence that used to wedge now plays every time (two cycles).
 Shipped to the phone in a signed release APK.
+
+## Follow-up: intermittent first-play error (same session, on the phone)
+
+> investigate that intermittent first-play error too
+
+While debugging the wedge above, a play occasionally showed
+`play() → Started → Error → stop()` a few hundred ms in, bouncing back to the
+grid; replaying usually worked. Traced it: libmpv2 surfaces an `END_FILE` whose
+`error` field is set as `wait_event() -> Err(e)`, which `poll_event` maps to
+`PlayerEvent::Error`. So the "error" is the file ending because the stream
+failed to open/continue (a flaky googlevideo connection right after start), not
+a stray log line (log messages aren't even requested). `run_playback` treated
+that identically to a clean end — silently stop and return to the grid, no
+feedback, no recovery.
+
+Fix (`run_playback`): distinguish a clean end (EOF/close → leave) from an error.
+On an error, retry the same resolved source up to `MAX_PLAYBACK_RETRIES` (2)
+before giving up — `PlayingItem` now carries the resolved `source` + external
+audio so a retry needs no re-resolve — and only then surface the error as a
+status message instead of a silent bounce. Reproducing the transient error
+on demand proved impractical (rare, and the idle browse grid makes scripted
+`adb` taps unreliable), but the retry is bounded, fires only on `Error`, logs a
+`warn`, and healthy playback was verified unaffected. Shipped to the phone.
