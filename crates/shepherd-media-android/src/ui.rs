@@ -8,7 +8,7 @@
 //! `shepherd_media_app::AppSettings`; the app diffs the settings each frame and
 //! persists to disk when they change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +50,24 @@ const PREFETCH_DWELL: Duration = Duration::from_millis(400);
 /// How long a resolved YouTube stream stays usable from the cache. googlevideo
 /// URLs embed a multi-hour expiry; keep this comfortably under it.
 const STREAM_CACHE_TTL: Duration = Duration::from_secs(4 * 3600);
+
+/// After every playlist is resolved, warm the stream URLs of this many leading
+/// items in each so the first videos a user is likely to pick start instantly.
+const PREFETCH_FIRST_N: usize = 5;
+
+/// The single in-flight background resolve driven by `drive_prefetch`.
+enum Prefetch {
+    /// Resolving a library's contents (playlist → items).
+    Library {
+        id: String,
+        rx: Receiver<Result<Library, ResolveError>>,
+    },
+    /// Resolving a YouTube item's stream URLs.
+    Video {
+        watch: String,
+        rx: Receiver<StreamResult>,
+    },
+}
 
 /// Construct the playback backend for this platform: libmpv on Android, a no-op
 /// stub elsewhere (so the playback path still compiles and runs on the host).
@@ -225,9 +243,18 @@ pub struct MediaApp {
     /// carry the time they were resolved and expire via `STREAM_CACHE_TTL`
     /// (googlevideo URLs are only valid for a few hours).
     stream_cache: HashMap<String, (Instant, crate::youtube::StreamUrls)>,
-    /// An in-flight background prefetch of the focused grid item's streams:
-    /// (watch URL, result receiver). At most one runs at a time.
-    prefetch: Option<(String, Receiver<StreamResult>)>,
+    /// Resolved library contents (playlists) by library id, warmed in the
+    /// background so opening a library is instant. Stored in display order
+    /// (the per-library `reverse` is already applied).
+    library_cache: HashMap<String, Library>,
+    /// The single in-flight background resolve (at most one at a time, to avoid
+    /// piling yt-dlp work on a weak TV). Started by `drive_prefetch` by priority:
+    /// the focused item, then unresolved playlists, then their first-N videos.
+    prefetch: Option<Prefetch>,
+    /// Library ids and video watch URLs the background warm-up has already tried,
+    /// so a resolve that fails (e.g. a DRM video) isn't retried forever. The
+    /// focused-item prefetch and an actual play ignore this and resolve anew.
+    prefetch_attempted: HashSet<String>,
     /// The focused grid index and when it became focused, used to debounce
     /// prefetch so only an item the user pauses on gets resolved.
     prefetch_focus: Option<(usize, Instant)>,
@@ -305,7 +332,9 @@ impl MediaApp {
             playing: None,
             playback_pending: None,
             stream_cache: HashMap::new(),
+            library_cache: HashMap::new(),
             prefetch: None,
+            prefetch_attempted: HashSet::new(),
             prefetch_focus: None,
             status,
             safe_insets: crate::insets::SafeInsets::default(),
@@ -896,18 +925,16 @@ impl MediaApp {
         if already {
             return;
         }
-        let state = match self.settings.get(library_id) {
-            Some(entry) => {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let source = entry.source.clone();
-                let ctx = ui.ctx().clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(resolve(&source));
-                    ctx.request_repaint(); // wake the UI when the result lands
-                });
-                GridState::Loading(rx)
+        let state = if let Some(lib) = self.library_cache.get(library_id) {
+            // Warmed by the background prefetch — show it immediately.
+            GridState::Loaded(lib.clone())
+        } else {
+            match self.settings.get(library_id) {
+                Some(entry) => {
+                    GridState::Loading(Self::spawn_library_resolve(ui.ctx(), entry.source.clone()))
+                }
+                None => GridState::Failed("This library no longer exists.".to_string()),
             }
-            None => GridState::Failed("This library no longer exists.".to_string()),
         };
         self.grid = Some(GridView {
             library_id: library_id.to_string(),
@@ -926,18 +953,17 @@ impl MediaApp {
         }) = self.grid.as_ref()
         {
             match rx.try_recv() {
-                Ok(Ok(mut lib)) => {
-                    // Mirror the Linux binary's `--reverse`: flip the item order
-                    // if this library is configured for it.
-                    let reverse = self
-                        .grid
-                        .as_ref()
-                        .and_then(|g| self.settings.get(&g.library_id))
-                        .is_some_and(|e| e.reverse);
-                    if reverse {
-                        lib.items.reverse();
+                Ok(Ok(lib)) => {
+                    // Cache it (applying the per-library `reverse`, mirroring the
+                    // Linux binary's `--reverse`) so the grid — and any re-open —
+                    // shows it in display order.
+                    let id = self.grid.as_ref().map(|g| g.library_id.clone());
+                    if let Some(id) = id {
+                        self.cache_library(id.clone(), lib);
+                        if let Some(cached) = self.library_cache.get(&id) {
+                            self.set_grid_state(GridState::Loaded(cached.clone()));
+                        }
                     }
-                    self.set_grid_state(GridState::Loaded(lib));
                 }
                 Ok(Err(e)) => self.set_grid_state(GridState::Failed(e.to_string())),
                 Err(TryRecvError::Empty) => {}
@@ -1163,7 +1189,7 @@ impl MediaApp {
                 // resolve for the same URL (which would run concurrently and
                 // waste work on a weak device).
                 _ => match self.prefetch.take() {
-                    Some((w, rx)) if w == watch => rx,
+                    Some(Prefetch::Video { watch: w, rx }) if w == watch => rx,
                     other => {
                         self.prefetch = other;
                         Self::spawn_resolve(ctx, watch.clone(), quality)
@@ -1377,24 +1403,115 @@ impl MediaApp {
             return;
         }
         let rx = Self::spawn_resolve(ctx, watch.clone(), quality);
-        self.prefetch = Some((watch, rx));
+        self.prefetch = Some(Prefetch::Video { watch, rx });
     }
 
-    /// Store a completed background prefetch in the stream cache.
-    fn poll_prefetch(&mut self) {
-        let Some((_, rx)) = self.prefetch.as_ref() else {
-            return;
-        };
-        match rx.try_recv() {
-            Ok(Ok(streams)) => {
-                let (watch, _) = self.prefetch.take().unwrap();
-                self.stream_cache.insert(watch, (Instant::now(), streams));
-            }
-            // A prefetch failing is not worth surfacing — the real play will
-            // resolve again and report any error then.
-            Ok(Err(_)) | Err(TryRecvError::Disconnected) => self.prefetch = None,
-            Err(TryRecvError::Empty) => {}
+    /// Resolve a library's contents (playlist → items) on a worker thread,
+    /// delivering the result on the returned receiver and repainting when done.
+    fn spawn_library_resolve(
+        ctx: &egui::Context,
+        source: LibrarySource,
+    ) -> Receiver<Result<Library, ResolveError>> {
+        let ctx = ctx.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve(&source));
+            ctx.request_repaint();
+        });
+        rx
+    }
+
+    /// Store a resolved library in the warm cache, applying the per-library
+    /// `reverse` so it matches display order (as the grid shows it).
+    fn cache_library(&mut self, id: String, mut lib: Library) {
+        if self.settings.get(&id).is_some_and(|e| e.reverse) {
+            lib.items.reverse();
         }
+        self.library_cache.insert(id, lib);
+    }
+
+    /// Bank a completed background resolve into its cache. Failures are dropped
+    /// silently — a real open/play will resolve again and report any error.
+    fn poll_prefetch(&mut self) {
+        match self.prefetch.take() {
+            Some(Prefetch::Video { watch, rx }) => match rx.try_recv() {
+                Ok(Ok(streams)) => {
+                    self.stream_cache.insert(watch, (Instant::now(), streams));
+                }
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Empty) => self.prefetch = Some(Prefetch::Video { watch, rx }),
+            },
+            Some(Prefetch::Library { id, rx }) => match rx.try_recv() {
+                Ok(Ok(lib)) => self.cache_library(id, lib),
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Empty) => self.prefetch = Some(Prefetch::Library { id, rx }),
+            },
+            None => {}
+        }
+    }
+
+    /// Warm caches in the background while the app is idle: resolve every
+    /// playlist first, then the leading videos of each. Runs one resolve at a
+    /// time and yields the slot to the higher-priority focused-item prefetch.
+    fn drive_background_prefetch(&mut self, ctx: &egui::Context) {
+        if self.playing.is_some() || self.playback_pending.is_some() || self.prefetch.is_some() {
+            return;
+        }
+        // Every playlist before any video, per the warm-up order.
+        if let Some((id, source)) = self.next_unresolved_library() {
+            self.prefetch_attempted.insert(id.clone());
+            let rx = Self::spawn_library_resolve(ctx, source);
+            self.prefetch = Some(Prefetch::Library { id, rx });
+            return;
+        }
+        if let Some((watch, quality)) = self.next_firstn_video() {
+            self.prefetch_attempted.insert(watch.clone());
+            let rx = Self::spawn_resolve(ctx, watch.clone(), quality);
+            self.prefetch = Some(Prefetch::Video { watch, rx });
+        }
+    }
+
+    /// The first configured library not yet resolved (skipping one the grid is
+    /// already loading, and any the warm-up already tried).
+    fn next_unresolved_library(&self) -> Option<(String, LibrarySource)> {
+        let loading = self.grid.as_ref().and_then(|g| match g.state {
+            GridState::Loading(_) => Some(g.library_id.as_str()),
+            _ => None,
+        });
+        self.settings.libraries.iter().find_map(|e| {
+            (!self.library_cache.contains_key(&e.id)
+                && !self.prefetch_attempted.contains(&e.id)
+                && Some(e.id.as_str()) != loading)
+                .then(|| (e.id.clone(), e.source.clone()))
+        })
+    }
+
+    /// The first not-yet-cached YouTube stream among the leading
+    /// `PREFETCH_FIRST_N` items of each resolved library.
+    fn next_firstn_video(&self) -> Option<(String, Quality)> {
+        let info = PlatformInfo::current();
+        for entry in &self.settings.libraries {
+            let Some(lib) = self.library_cache.get(&entry.id) else {
+                continue;
+            };
+            for item in lib.items.iter().take(PREFETCH_FIRST_N) {
+                let Some(source) = resolve_source(item, &info) else {
+                    continue;
+                };
+                let ClassifiedUri::YouTube(watch) = &source.uri else {
+                    continue;
+                };
+                let watch = watch.to_string();
+                let fresh = self
+                    .stream_cache
+                    .get(&watch)
+                    .is_some_and(|(t, _)| t.elapsed() < STREAM_CACHE_TTL);
+                if !fresh && !self.prefetch_attempted.contains(&watch) {
+                    return Some((watch, entry.caching.quality));
+                }
+            }
+        }
+        None
     }
 
     /// If a pending YouTube stream resolution has completed, start (or fail)
@@ -1569,6 +1686,10 @@ impl eframe::App for MediaApp {
                 Screen::PhoneHandoff => self.phone_handoff_screen(ui),
                 Screen::Grid(id) => self.grid_screen(ui, &id),
             };
+
+            // Warm playlists and their leading videos in the background whenever
+            // the slot isn't taken by the focused-item prefetch above.
+            self.drive_background_prefetch(ui.ctx());
 
             // Remote BACK navigates up the screen stack. Android delivers it as
             // BrowserBack; also accept Escape from a keyboard.

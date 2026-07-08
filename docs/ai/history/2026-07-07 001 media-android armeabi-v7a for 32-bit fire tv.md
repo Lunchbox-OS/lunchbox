@@ -442,3 +442,25 @@ rationale. `Session` holds one (reset on a new item) and the Android
 `PlayingItem` holds one; each still performs the restart and reports it its own
 way. Unit tests cover the budget; the existing session integration tests are
 unchanged (behaviour preserved).
+
+## Follow-up: warm playlists (then their first-N videos) in the background at launch
+
+Extended the prefetch into a background warm-up so cold-start latency is hidden.
+A single-slot driver (`drive_background_prefetch`, one resolve at a time to spare
+a weak TV) runs whenever the app is idle, with priority: the focused grid item
+(unchanged) → any unresolved playlist → the first `PREFETCH_FIRST_N` (5) videos
+of each resolved playlist. That ordering makes "all playlists first, then their
+first-N videos" fall out naturally. The in-flight slot became an enum
+(`Prefetch::Library | Video`); libraries land in a new `library_cache` (display
+order, `reverse` applied) so opening one is instant, and first-N videos feed the
+existing `stream_cache`. `ensure_grid_loading` serves from `library_cache`;
+`poll_grid` banks into it too. A `prefetch_attempted` set stops a failing resolve
+(e.g. a DRM video) from looping forever in the background; the focused prefetch
+and a real play ignore it.
+
+Verified on the cold Fire TV: sitting on the switcher, the playlist resolved
+(~16s), then the leading videos resolved one at a time (the position-2 DRM video
+took ~68s via the two-client path but didn't block — it completed and the chain
+continued). Opening the library was then instant (`grid opened from cache`) and
+playing a warmed item was a `play cache HIT` → first frame the same second.
+Shipped to the Fire TV and the phone.
