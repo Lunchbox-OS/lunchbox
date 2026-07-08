@@ -53,7 +53,7 @@ const STREAM_CACHE_TTL: Duration = Duration::from_secs(4 * 3600);
 
 /// After every playlist is resolved, warm the stream URLs of this many leading
 /// items in each so the first videos a user is likely to pick start instantly.
-const PREFETCH_FIRST_N: usize = 5;
+const PREFETCH_FIRST_N: usize = 10;
 
 /// The single in-flight background resolve driven by `drive_prefetch`.
 enum Prefetch {
@@ -1347,63 +1347,84 @@ impl MediaApp {
         rx
     }
 
-    /// Prefetch the focused grid item's stream in the background once focus has
-    /// settled on it, so tapping play starts near-instantly. Resolves at most
-    /// one item at a time and caches the result by watch URL.
+    /// Prefetch the focused grid item and the two around it once focus has
+    /// settled, so tapping play — or moving to a neighbour and playing — starts
+    /// near-instantly. Resolves one at a time (focused first).
     fn maybe_prefetch_focused(&mut self, ctx: &egui::Context) {
         // Don't compete with an in-flight play resolution, an active playback,
         // or an already-running prefetch.
         if self.playback_pending.is_some() || self.playing.is_some() || self.prefetch.is_some() {
             return;
         }
-        // Identify the focused item and, if it's a YouTube source, its watch URL
-        // and quality.
-        let target = (|| {
-            let g = self.grid.as_ref()?;
-            let GridState::Loaded(lib) = &g.state else {
-                return None;
-            };
-            let item = lib.items.get(g.focused)?;
-            let source = resolve_source(item, &PlatformInfo::current())?;
-            let ClassifiedUri::YouTube(watch) = &source.uri else {
-                return None;
-            };
-            let quality = self
-                .settings
-                .get(&g.library_id)
-                .map(|e| e.caching.quality)
-                .unwrap_or_default();
-            Some((g.focused, watch.to_string(), quality))
-        })();
-        let Some((idx, watch, quality)) = target else {
-            self.prefetch_focus = None;
-            return;
+        // The focused index and item count (grid must be loaded and non-empty).
+        let (focused, n) = match self.grid.as_ref().map(|g| &g.state) {
+            Some(GridState::Loaded(lib)) if !lib.items.is_empty() => {
+                (self.grid.as_ref().unwrap().focused, lib.items.len())
+            }
+            _ => {
+                self.prefetch_focus = None;
+                return;
+            }
         };
-        // Restart the dwell timer whenever the focus moves to a new item; only
-        // prefetch once it has rested here for `PREFETCH_DWELL`.
+        // Restart the dwell timer whenever the focus moves; only prefetch once it
+        // has rested on this item for `PREFETCH_DWELL`.
         match self.prefetch_focus {
-            Some((i, since)) if i == idx => {
+            Some((i, since)) if i == focused => {
                 if since.elapsed() < PREFETCH_DWELL {
                     ctx.request_repaint_after(PREFETCH_DWELL);
                     return;
                 }
             }
             _ => {
-                self.prefetch_focus = Some((idx, Instant::now()));
+                self.prefetch_focus = Some((focused, Instant::now()));
                 ctx.request_repaint_after(PREFETCH_DWELL);
                 return;
             }
         }
-        // Already resolved and still fresh — nothing to do.
-        if self
-            .stream_cache
-            .get(&watch)
-            .is_some_and(|(t, _)| t.elapsed() < STREAM_CACHE_TTL)
-        {
+        // The focused item plus its two neighbours, focused first. Resolve the
+        // first that isn't already cached or attempted; the slot chains through
+        // the rest across frames as each completes.
+        let window = [
+            Some(focused),
+            focused.checked_sub(1),
+            (focused + 1 < n).then_some(focused + 1),
+        ];
+        for idx in window.into_iter().flatten() {
+            let Some((watch, quality)) = self.item_watch(idx) else {
+                continue;
+            };
+            let fresh = self
+                .stream_cache
+                .get(&watch)
+                .is_some_and(|(t, _)| t.elapsed() < STREAM_CACHE_TTL);
+            if fresh || self.prefetch_attempted.contains(&watch) {
+                continue;
+            }
+            self.prefetch_attempted.insert(watch.clone());
+            let rx = Self::spawn_resolve(ctx, watch.clone(), quality);
+            self.prefetch = Some(Prefetch::Video { watch, rx });
             return;
         }
-        let rx = Self::spawn_resolve(ctx, watch.clone(), quality);
-        self.prefetch = Some(Prefetch::Video { watch, rx });
+    }
+
+    /// The YouTube watch URL and quality for the grid item at `idx`, if it is a
+    /// YouTube source in the currently loaded library.
+    fn item_watch(&self, idx: usize) -> Option<(String, Quality)> {
+        let g = self.grid.as_ref()?;
+        let GridState::Loaded(lib) = &g.state else {
+            return None;
+        };
+        let item = lib.items.get(idx)?;
+        let ClassifiedUri::YouTube(watch) = &resolve_source(item, &PlatformInfo::current())?.uri
+        else {
+            return None;
+        };
+        let quality = self
+            .settings
+            .get(&g.library_id)
+            .map(|e| e.caching.quality)
+            .unwrap_or_default();
+        Some((watch.to_string(), quality))
     }
 
     /// Resolve a library's contents (playlist → items) on a worker thread,

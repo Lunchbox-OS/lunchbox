@@ -464,3 +464,7 @@ took ~68s via the two-client path but didn't block — it completed and the chai
 continued). Opening the library was then instant (`grid opened from cache`) and
 playing a warmed item was a `play cache HIT` → first frame the same second.
 Shipped to the Fire TV and the phone.
+
+Later tuned: `PREFETCH_FIRST_N` raised to 10, and the focused-item prefetch
+now warms the focused grid item plus its two neighbours (focused first, one at a
+time) so moving to an adjacent tile and playing is also instant.
