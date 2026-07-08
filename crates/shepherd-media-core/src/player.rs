@@ -216,7 +216,10 @@ mod retry_budget_tests {
     fn allows_default_max_retries_then_gives_up() {
         let mut budget = RetryBudget::new();
         for _ in 0..RetryBudget::DEFAULT_MAX {
-            assert!(budget.try_retry(), "restarts within the budget should retry");
+            assert!(
+                budget.try_retry(),
+                "restarts within the budget should retry"
+            );
         }
         assert!(
             !budget.try_retry(),
@@ -230,7 +233,10 @@ mod retry_budget_tests {
         while budget.try_retry() {}
         assert!(!budget.try_retry());
         budget.reset();
-        assert!(budget.try_retry(), "reset should make retries available again");
+        assert!(
+            budget.try_retry(),
+            "reset should make retries available again"
+        );
     }
 }
 
