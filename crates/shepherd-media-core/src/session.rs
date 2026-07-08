@@ -8,15 +8,9 @@
 use std::ffi::{CStr, c_void};
 
 use crate::library::{Item, Library, Source};
-use crate::player::{PlayerError, PlayerEvent, PlayerHandle, Transport};
+use crate::player::{PlayerError, PlayerEvent, PlayerHandle, RetryBudget, Transport};
 use crate::protocol::{ExitReason, ProtocolEmitter, ProtocolEvent, ReturnReason, UriClass};
 use crate::resolver::{PlatformInfo, resolve_source};
-
-/// How many times a playing item is restarted after a player `Error` before the
-/// session gives up and returns to the menu. A flaky stream (e.g. a network
-/// connection dropping right after the file opens) surfaces as an `Error` that
-/// usually clears on a retry, so recover a couple of times before surfacing it.
-const MAX_PLAY_RETRIES: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -44,9 +38,9 @@ pub struct Session {
     protocol: ProtocolEmitter,
     platform: PlatformInfo,
     ready_emitted: bool,
-    /// Number of times the current item has been restarted after an `Error`,
-    /// reset when a new item starts. Bounds recovery at [`MAX_PLAY_RETRIES`].
-    play_retries: u8,
+    /// Bounded restart budget for the current item after a transient player
+    /// `Error`, refilled when a new item starts.
+    retries: RetryBudget,
 }
 
 impl Session {
@@ -66,7 +60,7 @@ impl Session {
             protocol,
             platform: PlatformInfo::current(),
             ready_emitted: false,
-            play_retries: 0,
+            retries: RetryBudget::new(),
         }
     }
 
@@ -237,7 +231,7 @@ impl Session {
                     kind,
                     source: class,
                 });
-                self.play_retries = 0;
+                self.retries.reset();
                 self.state = SessionState::Playing {
                     item_id: item_id.to_string(),
                 };
@@ -297,8 +291,7 @@ impl Session {
                 // error; these usually clear on a retry. Restart the same item a
                 // bounded number of times before surfacing the error and
                 // returning to the menu.
-                let recovered = self.play_retries < MAX_PLAY_RETRIES && {
-                    self.play_retries += 1;
+                let recovered = self.retries.try_retry() && {
                     self.protocol.emit(ProtocolEvent::Warning {
                         item_id: item_id.clone(),
                         reason: "playback-retry".into(),

@@ -428,3 +428,17 @@ now uses a unique per-call id (`shepherd-resolve-<seq>`), and `start_playback`
 adopts an in-flight prefetch's receiver for the same item instead of starting a
 second resolve. Re-verified on the 32-bit Fire TV: hardware H.264 decode + audio,
 no collision.
+
+## Follow-up: share the retry policy between the two front-ends
+
+The retry existed in two places — the Android event loop and `Session` — with
+two `MAX_*_RETRIES = 2` constants that could drift. The *mechanics* genuinely
+differ (Android drives its own loop and resolves YouTube async; the Linux binary
+goes through `Session` with a protocol emitter), so a full merge would mean
+migrating Android onto `Session` — a large refactor for little gain. Instead the
+*policy* is now shared: a small `RetryBudget` in `shepherd-media-core::player`
+(`try_retry()` / `reset()`, `DEFAULT_MAX = 2`) owns the count + threshold and its
+rationale. `Session` holds one (reset on a new item) and the Android
+`PlayingItem` holds one; each still performs the restart and reports it its own
+way. Unit tests cover the budget; the existing session integration tests are
+unchanged (behaviour preserved).

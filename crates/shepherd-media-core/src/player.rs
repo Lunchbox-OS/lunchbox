@@ -160,6 +160,80 @@ pub enum PlayerError {
     InvalidSource(String),
 }
 
+/// Bounded retry policy for restarting playback after a transient
+/// [`PlayerEvent::Error`]. A flaky stream (e.g. a network connection dropping
+/// right after the file opens) usually ends the file with an error that clears
+/// on a restart, so both front-ends recover a couple of times before giving up.
+/// This holds only the *policy* (how many restarts remain); each front-end still
+/// performs the restart and reports it in its own way — the Android app drives
+/// its own event loop while the Linux binary goes through [`Session`](crate::Session).
+#[derive(Debug, Clone)]
+pub struct RetryBudget {
+    used: u8,
+    max: u8,
+}
+
+impl RetryBudget {
+    /// Default number of restarts allowed before surfacing the error.
+    pub const DEFAULT_MAX: u8 = 2;
+
+    /// A fresh budget with [`RetryBudget::DEFAULT_MAX`] restarts available.
+    pub fn new() -> Self {
+        Self {
+            used: 0,
+            max: Self::DEFAULT_MAX,
+        }
+    }
+
+    /// Refill the budget — call when a new item starts playing.
+    pub fn reset(&mut self) {
+        self.used = 0;
+    }
+
+    /// Consume one restart if any remain, returning whether the caller should
+    /// retry (`true`) or give up and surface the error (`false`).
+    pub fn try_retry(&mut self) -> bool {
+        if self.used < self.max {
+            self.used += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for RetryBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use super::RetryBudget;
+
+    #[test]
+    fn allows_default_max_retries_then_gives_up() {
+        let mut budget = RetryBudget::new();
+        for _ in 0..RetryBudget::DEFAULT_MAX {
+            assert!(budget.try_retry(), "restarts within the budget should retry");
+        }
+        assert!(
+            !budget.try_retry(),
+            "once the budget is spent the caller should give up"
+        );
+    }
+
+    #[test]
+    fn reset_refills_the_budget() {
+        let mut budget = RetryBudget::new();
+        while budget.try_retry() {}
+        assert!(!budget.try_retry());
+        budget.reset();
+        assert!(budget.try_retry(), "reset should make retries available again");
+    }
+}
+
 #[cfg(feature = "libmpv")]
 pub use libmpv_backend::LibmpvPlayer;
 

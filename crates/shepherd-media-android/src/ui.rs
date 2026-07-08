@@ -19,8 +19,8 @@ use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
 };
 use shepherd_media_core::{
-    ClassifiedUri, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef, Source,
-    resolve_source,
+    ClassifiedUri, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef,
+    RetryBudget, Source, resolve_source,
 };
 use shepherd_media_ui::grid;
 use url::Url;
@@ -39,14 +39,9 @@ struct PlayingItem {
     /// transient playback error can be retried without re-resolving.
     source: Source,
     external_audio: Option<String>,
-    /// How many times playback of this item has been retried after an error.
-    error_retries: u8,
+    /// Bounded restart budget for this item after a transient playback error.
+    retries: RetryBudget,
 }
-
-/// A flaky stream (e.g. a googlevideo connection dropping right after it opens)
-/// ends the file with an error; retry it a couple of times before giving up,
-/// since these usually succeed on a second try.
-const MAX_PLAYBACK_RETRIES: u8 = 2;
 
 /// How long a focused grid item must stay focused before its stream is
 /// prefetched, so quickly scrolling past items doesn't kick off resolves.
@@ -1210,7 +1205,7 @@ impl MediaApp {
                         cache: playing_cache,
                         source: play_source,
                         external_audio: None,
-                        error_retries: 0,
+                        retries: RetryBudget::new(),
                     });
                 }
                 Err(e) => self.status = Some(format!("Playback failed: {e}")),
@@ -1246,16 +1241,12 @@ impl MediaApp {
         {
             let retry = self
                 .playing
-                .as_ref()
-                .is_some_and(|it| it.error_retries < MAX_PLAYBACK_RETRIES);
+                .as_mut()
+                .is_some_and(|it| it.retries.try_retry());
             if retry {
                 let (src, audio) = {
-                    let it = self.playing.as_mut().expect("checked above");
-                    it.error_retries += 1;
-                    log::warn!(
-                        "playback error, retry {}/{MAX_PLAYBACK_RETRIES}: {err}",
-                        it.error_retries
-                    );
+                    let it = self.playing.as_ref().expect("checked above");
+                    log::warn!("playback error, restarting playback: {err}");
                     (it.source.clone(), it.external_audio.clone())
                 };
                 if let Some(p) = self.player.as_mut() {
@@ -1457,7 +1448,7 @@ impl MediaApp {
                             cache: None,
                             source: src,
                             external_audio: audio,
-                            error_retries: 0,
+                            retries: RetryBudget::new(),
                         });
                     }
                     Err(e) => self.status = Some(format!("Playback failed: {e}")),
