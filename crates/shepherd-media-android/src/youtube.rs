@@ -400,10 +400,16 @@ mod jni_impl {
         // default execute passes `--no-cache-dir`, which makes yt-dlp re-download
         // and re-parse YouTube's player JS (the expensive nsig extraction) on
         // every call. With caching on it writes to the app cache dir, so repeat
-        // resolves — and the next launch — reuse the extracted player. The URL is
-        // the process id (unique per call, so a future concurrent resolve can't
-        // collide in the library's process map).
-        let pid: JString = env.new_string(url).map_err(jni_err)?;
+        // resolves — and the next launch — reuse the extracted player. The
+        // process id must be unique per call: the library rejects a second
+        // `execute` with a live id ("Process ID already exists"), and the same
+        // item can resolve twice at once (a background prefetch racing the play).
+        static RESOLVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pid_value = format!(
+            "shepherd-resolve-{}",
+            RESOLVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let pid: JString = env.new_string(&pid_value).map_err(jni_err)?;
         let response = match env.call_method(
             &instance,
             "execute",

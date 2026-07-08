@@ -1163,7 +1163,17 @@ impl MediaApp {
                     let _ = tx.send(Ok(streams.clone()));
                     rx
                 }
-                _ => Self::spawn_resolve(ctx, watch.clone(), quality),
+                // A background prefetch for this exact item may already be
+                // resolving; adopt its receiver rather than starting a second
+                // resolve for the same URL (which would run concurrently and
+                // waste work on a weak device).
+                _ => match self.prefetch.take() {
+                    Some((w, rx)) if w == watch => rx,
+                    other => {
+                        self.prefetch = other;
+                        Self::spawn_resolve(ctx, watch.clone(), quality)
+                    }
+                },
             };
             self.playback_pending = Some((title, watch, rx));
             return;

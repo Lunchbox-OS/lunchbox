@@ -415,3 +415,16 @@ starts. Two integration tests in `tests/protocol.rs` cover recover-on-transient
 and give-up-after-exhaustion. So the Linux front-end now gets the same recovery
 the Android app does. (Kept on this branch at the user's request rather than a
 separate one.)
+
+## Follow-up: prefetch/play process-id collision (found deploying to the Fire TV)
+
+Deploying the prefetch build to the Fire TV surfaced `youtubedl-android: Process
+ID already exists` and a failed play. The youtubedl-android `execute` overload
+takes a process id and rejects a second call with a live id; the resolver had
+been passing the **watch URL** as that id, which was fine when only a play ever
+resolved an item — but prefetch means the same URL can resolve twice at once (a
+background prefetch racing the play), so they collided. Two fixes: the resolver
+now uses a unique per-call id (`shepherd-resolve-<seq>`), and `start_playback`
+adopts an in-flight prefetch's receiver for the same item instead of starting a
+second resolve. Re-verified on the 32-bit Fire TV: hardware H.264 decode + audio,
+no collision.
