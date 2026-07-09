@@ -122,11 +122,14 @@ jobs:
             dir: companion-android
             gradle_module: app
             artifact: shepherd-companion
-          # Fan-out point for #72 and future apps:
-          # - name: media
-          #   dir: shepherd-media-android
-          #   gradle_module: app
-          #   artifact: shepherd-media
+          # media is a NativeActivity app whose Gradle build cross-compiles a
+          # Rust cdylib via cargo-ndk (rust: true gates the extra toolchain
+          # setup below). Its Gradle project sits inside the crate.
+          - name: media
+            dir: crates/shepherd-media-android/android
+            gradle_module: app
+            artifact: shepherd-media
+            rust: true
     steps:
       - uses: actions/checkout@v4
 
@@ -139,6 +142,35 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles(format('{0}/gradle/libs.versions.toml', matrix.module.dir), format('{0}/**/build.gradle.kts', matrix.module.dir)) }}
           restore-keys: |
             ${{ runner.os }}-gradle-
+
+      # Rust-native modules only: the Gradle `assembleRelease` invokes cargo-ndk
+      # to cross-compile the cdylib for every ABI in the app's `rustAbis`, so it
+      # needs the Android Rust targets, cargo-ndk, and the NDK on PATH. Cache key
+      # matches the android-media job in ci.yml so they share the built deps.
+      - name: Cache cargo (Rust-native APKs)
+        if: matrix.module.rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            target
+          key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-media-android-
+
+      - name: Set up cargo-ndk (Rust-native APKs)
+        if: matrix.module.rust
+        run: |
+          # Both ABIs the media app packages (arm64-v8a + armeabi-v7a); the
+          # 32-bit target's bindgen path needs libclang, already in the image.
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          command -v cargo-ndk >/dev/null || cargo install cargo-ndk
+          # cargo-ndk auto-detects the NDK, but pin ANDROID_NDK_HOME explicitly
+          # (baked into the android image by `deps install android`).
+          ndk="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* | head -n1)"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
 
       - name: Decode signing keystore
         env:

@@ -413,10 +413,10 @@ jobs:
     # target are the only per-run additions, cached so they install at most once
     # per Cargo.lock; unlike android-portability's `cargo check` of the core,
     # this fully builds and links the cdylib against the vendored libmpv.
-    needs: image-android
+    needs: images
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.image-android.outputs.ref }}
+      image: ${{ needs.images.outputs.android-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}

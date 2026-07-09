@@ -9,6 +9,19 @@ plugins {
 // sticks (e.g. AFTHA004); arm64-v8a covers modern phones and 64-bit TVs.
 val rustAbis = listOf("arm64-v8a", "armeabi-v7a")
 
+// Single source of truth: the repo-root VERSION file, three directories up from
+// this Gradle project (android/ -> shepherd-media-android/ -> crates/ -> root).
+// Mirrors companion-android and scripts/lib/version.sh so versionName can't drift.
+val shepherdVersion: String =
+    rootProject.projectDir.parentFile.parentFile.parentFile.resolve("VERSION")
+        .readText().trim()
+
+// Monotonic versionCode packed from semver (minor/patch < 100). e.g. 0.2.0 -> 200.
+val shepherdVersionCode: Int =
+    shepherdVersion.substringBefore('-').substringBefore('+').split('.').let {
+        it[0].toInt() * 10000 + it[1].toInt() * 100 + it[2].toInt()
+    }
+
 android {
     namespace = "com.armeafamily.shepherd.media"
     compileSdk = 35
@@ -17,17 +30,35 @@ android {
         applicationId = "com.armeafamily.shepherd.media"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = shepherdVersionCode
+        versionName = shepherdVersion
         ndk {
             //noinspection ChromeOsAbiSupport
             abiFilters += rustAbis
         }
     }
 
+    // Release signing is configured only when the CI keystore env vars are
+    // present (see .github/workflows/release.yml). Local `assembleRelease`
+    // without them falls back to debug signing, so developers can still produce
+    // an installable APK without the release key.
+    val releaseKeystore: String? = System.getenv("SHEPHERD_KEYSTORE_FILE")
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("SHEPHERD_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SHEPHERD_KEY_ALIAS")
+                keyPassword = System.getenv("SHEPHERD_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
 

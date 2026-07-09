@@ -201,7 +201,6 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
 
 - **arm64 `.deb`** (#82 follow-up).
 - **GPG-signed `.deb` + APT repo.**
-- **`shepherd-media-android`** (#72) — add a matrix row to the `apk` job.
 
 ## Done in follow-up passes
 
@@ -216,6 +215,13 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
   breakage is caught before a release tag.
 - **`INSTALL.md` section** documenting install-from-`.deb` and the required
   post-install `shepherd install config --user` / `groups --user` steps.
+- **`shepherd-media-android` (#72)** — added as a second `apk` matrix row. Its
+  Gradle `assembleRelease` cross-compiles a Rust cdylib via cargo-ndk for both
+  packaged ABIs (arm64-v8a + armeabi-v7a), so the row carries a `rust: true`
+  flag that gates cargo-ndk/target/NDK setup that the pure-Kotlin companion row
+  skips. Its `build.gradle.kts` was also given the VERSION-derived
+  `versionCode`/`versionName` and the guarded release signing config, matching
+  companion.
 
 ## Files
 
