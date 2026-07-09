@@ -12,19 +12,22 @@ pub mod resolver;
 pub mod schema;
 pub mod session;
 pub mod uri;
+pub mod youtube;
 pub mod youtube_playlist;
 
 pub use library::{
     ClassifiedUri, Item, ItemKind, Library, LibraryError, Platform, PlayerHint, PosterRef, Source,
     load_library,
 };
-pub use player::{GetProcAddress, PlayerError, PlayerEvent, PlayerHandle};
+pub use player::{GetProcAddress, PlayerError, PlayerEvent, PlayerHandle, RetryBudget, Transport};
 pub use protocol::{ProtocolEmitter, ProtocolEvent, UriClass};
 pub use resolver::{PlatformInfo, resolve_source};
 pub use session::{Session, SessionInput, SessionState};
 pub use uri::DrmRejection;
+pub use youtube::YOUTUBE_EXTRACTOR_ARGS;
 pub use youtube_playlist::{
-    YoutubePlaylistEntry, build_library_from_entries, is_youtube_playlist_url,
+    PlaylistInfo, YoutubePlaylistEntry, build_library_from_entries, is_youtube_playlist_url,
+    parse_flat_playlist,
 };
 
 #[cfg(feature = "libmpv")]

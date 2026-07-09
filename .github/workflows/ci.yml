@@ -401,6 +401,57 @@ jobs:
         working-directory: companion-android
         run: ./gradlew --no-daemon :app:testDebugUnitTest
 
+  android-media:
+    name: Android media (cargo-ndk build)
+    # Cross-compiles the shepherd-media-android Rust cdylib for
+    # aarch64-linux-android exactly as the app's Gradle build does (the
+    # `cargoNdkBuild` task in android/app/build.gradle.kts), so a break in the
+    # device build fails CI without paying for the full AGP/APK assembly.
+    #
+    # Runs on the Android CI image for its prebuilt NDK (baked in at
+    # $ANDROID_SDK_ROOT/ndk by `deps install android`). cargo-ndk and the Rust
+    # target are the only per-run additions, cached so they install at most once
+    # per Cargo.lock; unlike android-portability's `cargo check` of the core,
+    # this fully builds and links the cdylib against the vendored libmpv.
+    needs: image-android
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image-android.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry, cargo-ndk, and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            target
+          key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-media-android-
+
+      - name: Install cargo-ndk and the aarch64-linux-android target
+        run: |
+          rustup target add aarch64-linux-android
+          command -v cargo-ndk >/dev/null || cargo install cargo-ndk
+
+      # Same cargo-ndk cross-compile as android/app/build.gradle.kts's
+      # cargoNdkBuild task, but debug rather than --release: this is a
+      # compile-and-link gate, and a debug build catches the same breakage in
+      # roughly half the time. cargo-ndk also auto-detects the NDK under
+      # $ANDROID_SDK_ROOT/ndk, but we point ANDROID_NDK_HOME at it explicitly so
+      # the build never depends on that heuristic.
+      - name: Build shepherd-media-android cdylib
+        run: |
+          ANDROID_NDK_HOME="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* | head -n1)"
+          export ANDROID_NDK_HOME
+          cargo ndk -t arm64-v8a build -p shepherd-media-android
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest

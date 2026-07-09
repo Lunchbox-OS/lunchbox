@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The same guardian shield as the management companion app, but with a play
+     triangle instead of the check: "watched content, ready to play". White on
+     the green adaptive-icon background, drawn inside the inner safe zone of the
+     108x108 adaptive-icon viewport. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30 L74,38 L74,54 C74,66 66,74 54,79 C42,74 34,66 34,54 L34,38 Z M54,36 L40,42 L40,54 C40,62 45,68 54,72 C63,68 68,62 68,54 L68,42 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,45 L48,63 L65,54 Z" />
+</vector>

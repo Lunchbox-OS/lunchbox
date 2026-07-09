@@ -1,7 +1,7 @@
 # Android companion-app build dependencies (apt).
 #
 # Installed by `./scripts/shepherd deps install android`, which also
-# downloads the Android command-line tools + SDK platform/build-tools
+# downloads the Android command-line tools + SDK platform/build-tools + NDK
 # into /opt/android-sdk (see scripts/lib/deps.sh:install_android_sdk).
 #
 # Only the host packages live here; the SDK itself is fetched by

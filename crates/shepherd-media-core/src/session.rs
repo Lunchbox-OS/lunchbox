@@ -8,7 +8,7 @@
 use std::ffi::{CStr, c_void};
 
 use crate::library::{Item, Library, Source};
-use crate::player::{PlayerError, PlayerEvent, PlayerHandle};
+use crate::player::{PlayerError, PlayerEvent, PlayerHandle, RetryBudget, Transport};
 use crate::protocol::{ExitReason, ProtocolEmitter, ProtocolEvent, ReturnReason, UriClass};
 use crate::resolver::{PlatformInfo, resolve_source};
 
@@ -38,6 +38,9 @@ pub struct Session {
     protocol: ProtocolEmitter,
     platform: PlatformInfo,
     ready_emitted: bool,
+    /// Bounded restart budget for the current item after a transient player
+    /// `Error`, refilled when a new item starts.
+    retries: RetryBudget,
 }
 
 impl Session {
@@ -57,6 +60,7 @@ impl Session {
             protocol,
             platform: PlatformInfo::current(),
             ready_emitted: false,
+            retries: RetryBudget::new(),
         }
     }
 
@@ -227,6 +231,7 @@ impl Session {
                     kind,
                     source: class,
                 });
+                self.retries.reset();
                 self.state = SessionState::Playing {
                     item_id: item_id.to_string(),
                 };
@@ -235,6 +240,20 @@ impl Session {
                 self.handle_player_error(item_id, e);
             }
         }
+    }
+
+    /// Restart the currently-playing item in place after a transient error,
+    /// without re-emitting `STARTED_PLAYBACK` (the state stays `Playing`).
+    /// Returns whether the player accepted the restart.
+    fn retry_play(&mut self, item_id: &str) -> bool {
+        let source: &Source = match self.library.items.iter().find(|i| i.id == item_id) {
+            Some(item) => match resolve_source(item, &self.platform) {
+                Some(s) => s,
+                None => return false,
+            },
+            None => return false,
+        };
+        self.player.play(source).is_ok()
     }
 
     fn handle_player_error(&mut self, item_id: &str, err: PlayerError) {
@@ -267,15 +286,29 @@ impl Session {
                 self.state = SessionState::Browsing;
             }
             (SessionState::Playing { item_id }, PlayerEvent::Error(message)) => {
-                self.protocol.emit(ProtocolEvent::Error {
-                    item_id: item_id.clone(),
-                    message,
-                });
-                self.protocol.emit(ProtocolEvent::ReturnedToMenu {
-                    item_id,
-                    reason: ReturnReason::Error,
-                });
-                self.state = SessionState::Browsing;
+                // A transient stream error (e.g. a flaky network connection
+                // dropping the stream just after it opens) ends the file with an
+                // error; these usually clear on a retry. Restart the same item a
+                // bounded number of times before surfacing the error and
+                // returning to the menu.
+                let recovered = self.retries.try_retry() && {
+                    self.protocol.emit(ProtocolEvent::Warning {
+                        item_id: item_id.clone(),
+                        reason: "playback-retry".into(),
+                    });
+                    self.retry_play(&item_id)
+                };
+                if !recovered {
+                    self.protocol.emit(ProtocolEvent::Error {
+                        item_id: item_id.clone(),
+                        message,
+                    });
+                    self.protocol.emit(ProtocolEvent::ReturnedToMenu {
+                        item_id,
+                        reason: ReturnReason::Error,
+                    });
+                    self.state = SessionState::Browsing;
+                }
             }
             (SessionState::Stopping { item_id }, PlayerEvent::Closed)
             | (SessionState::Stopping { item_id }, PlayerEvent::EndOfFile) => {
@@ -302,5 +335,28 @@ impl Session {
             // Idle player events while browsing or exiting are ignored.
             (_, _) => {}
         }
+    }
+}
+
+/// Drive the session's transport from a shared UI overlay. Delegates to the
+/// inherent methods above (which forward to the underlying player).
+impl Transport for Session {
+    fn is_paused(&self) -> bool {
+        Session::is_paused(self)
+    }
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+        Session::set_paused(self, paused)
+    }
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+        Session::seek_relative(self, delta_seconds)
+    }
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+        Session::seek_absolute(self, seconds)
+    }
+    fn position(&self) -> Option<f64> {
+        Session::position(self)
+    }
+    fn duration(&self) -> Option<f64> {
+        Session::duration(self)
     }
 }

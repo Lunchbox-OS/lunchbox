@@ -3,7 +3,7 @@
 mod cli;
 mod connectivity;
 mod ordering;
-mod platform;
+mod paths;
 mod posters;
 mod ui;
 mod video_cache;
@@ -127,7 +127,7 @@ fn run_play(
         }
     };
 
-    let info = platform::current();
+    let info = shepherd_media_core::PlatformInfo::current();
     let item = match library.items.iter().find(|i| i.id == item_id) {
         Some(i) => i,
         None => {
@@ -221,13 +221,16 @@ fn build_session(
     ytdl_format: &str,
     cache: Option<Arc<VideoCache>>,
 ) -> Result<Session, u8> {
-    let inner: Box<dyn shepherd_media_core::PlayerHandle> = match LibmpvPlayer::new(ytdl_format) {
-        Ok(p) => Box::new(p),
-        Err(e) => {
-            error!("failed to construct libmpv player: {e}");
-            return Err(EXIT_PLAYER);
-        }
-    };
+    // Desktop GPUs render mpv's default (full-quality) path fine; only the
+    // Android TV build needs the `fast` profile.
+    let inner: Box<dyn shepherd_media_core::PlayerHandle> =
+        match LibmpvPlayer::new(ytdl_format, false) {
+            Ok(p) => Box::new(p),
+            Err(e) => {
+                error!("failed to construct libmpv player: {e}");
+                return Err(EXIT_PLAYER);
+            }
+        };
     let player: Box<dyn shepherd_media_core::PlayerHandle> = match cache {
         Some(c) => Box::new(CachingPlayer::new(inner, c, &library)),
         None => inner,

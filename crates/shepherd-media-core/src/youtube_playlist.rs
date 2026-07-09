@@ -2,12 +2,13 @@
 //! video metadata.
 //!
 //! Network I/O is deliberately absent from this module. The platform binary
-//! (e.g. `shepherd-media` on Linux) fetches the playlist via `yt-dlp` and
-//! passes the extracted entries to [`build_library_from_entries`], which
-//! performs only pure in-memory construction. [android-portability]
+//! (e.g. `shepherd-media` on Linux) runs `yt-dlp`; [`parse_flat_playlist`] turns
+//! its `--dump-json` output into entries, and [`build_library_from_entries`]
+//! assembles them into a `Library` — both pure, in-memory. [android-portability]
 
 use std::path::PathBuf;
 
+use serde::Deserialize;
 use url::Url;
 
 use crate::library::{ClassifiedUri, Item, ItemKind, Library, Platform, PosterRef, Source};
@@ -38,8 +39,8 @@ pub fn is_youtube_playlist_url(s: &str) -> bool {
 
 /// Metadata for a single video entry extracted from a YouTube playlist fetch.
 ///
-/// This struct is produced by the platform binary (e.g. by parsing
-/// `yt-dlp --dump-json` output) and passed to [`build_library_from_entries`].
+/// Produced by [`parse_flat_playlist`] (from `yt-dlp --dump-json` output) and
+/// passed to [`build_library_from_entries`].
 #[derive(Debug, Clone)]
 pub struct YoutubePlaylistEntry {
     /// The stable YouTube video ID (e.g. `YE7VzlLtp-4`).
@@ -50,6 +51,83 @@ pub struct YoutubePlaylistEntry {
     pub duration_seconds: Option<u64>,
     /// Thumbnail URL for use as the item poster, if available.
     pub thumbnail_url: Option<Url>,
+}
+
+/// A parsed YouTube playlist: optional title/id and the videos in order.
+///
+/// Produced by [`parse_flat_playlist`] and consumed by
+/// [`build_library_from_entries`]. Both platform binaries run yt-dlp
+/// themselves (Linux via a subprocess, Android via a JNI binding) and hand the
+/// resulting stdout to the shared parser here.
+pub struct PlaylistInfo {
+    /// Playlist display title from yt-dlp, if present.
+    pub title: Option<String>,
+    /// The `list=…` parameter value (YouTube's playlist ID), if present.
+    pub playlist_id: Option<String>,
+    /// Videos in playlist order.
+    pub entries: Vec<YoutubePlaylistEntry>,
+}
+
+/// One video object from `yt-dlp --dump-json --flat-playlist`. Only the fields
+/// we use are declared; serde ignores the rest. `playlist_title`/`playlist_id`
+/// repeat on every entry, so only the first non-`None` value is kept.
+#[derive(Debug, Deserialize)]
+struct YtDlpEntry {
+    id: String,
+    title: String,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    playlist_title: Option<String>,
+    #[serde(default)]
+    playlist_id: Option<String>,
+}
+
+/// Parse `yt-dlp --dump-json --flat-playlist` output (one JSON object per line)
+/// into a [`PlaylistInfo`]. Pure: no network or subprocess. `url` is only used
+/// in the "empty playlist" error message. Returns an error string suitable for
+/// printing directly to the user.
+pub fn parse_flat_playlist(stdout: &str, url: &str) -> Result<PlaylistInfo, String> {
+    let mut entries: Vec<YoutubePlaylistEntry> = Vec::new();
+    let mut playlist_title: Option<String> = None;
+    let mut playlist_id: Option<String> = None;
+
+    for (line_no, line) in stdout.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: YtDlpEntry = serde_json::from_str(line)
+            .map_err(|e| format!("failed to parse yt-dlp output (line {line_no}): {e}"))?;
+
+        if playlist_title.is_none() {
+            playlist_title = entry.playlist_title;
+        }
+        if playlist_id.is_none() {
+            playlist_id = entry.playlist_id;
+        }
+        let thumbnail_url = entry.thumbnail.as_deref().and_then(|t| Url::parse(t).ok());
+        entries.push(YoutubePlaylistEntry {
+            video_id: entry.id,
+            title: entry.title,
+            duration_seconds: entry.duration.map(|d| d as u64),
+            thumbnail_url,
+        });
+    }
+
+    if entries.is_empty() {
+        return Err(format!(
+            "no videos found in playlist — check the URL and that the playlist is public: {url}"
+        ));
+    }
+
+    Ok(PlaylistInfo {
+        title: playlist_title,
+        playlist_id,
+        entries,
+    })
 }
 
 /// Construct a [`Library`] from pre-fetched YouTube playlist data.
@@ -175,6 +253,40 @@ fn sanitize_to_id(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- parse_flat_playlist ---
+
+    const FLAT_JSON: &str = concat!(
+        r#"{"id":"abc123","title":"First","duration":61.0,"thumbnail":"https://i.ytimg.com/vi/abc123/hq.jpg","playlist_title":"My List","playlist_id":"PL999"}"#,
+        "\n",
+        r#"{"id":"def456","title":"Second","duration":120.0}"#,
+        "\n",
+    );
+
+    #[test]
+    fn parses_flat_playlist() {
+        let info =
+            parse_flat_playlist(FLAT_JSON, "https://youtube.com/playlist?list=PL999").unwrap();
+        assert_eq!(info.title.as_deref(), Some("My List"));
+        assert_eq!(info.playlist_id.as_deref(), Some("PL999"));
+        assert_eq!(info.entries.len(), 2);
+        assert_eq!(info.entries[0].video_id, "abc123");
+        assert_eq!(info.entries[0].duration_seconds, Some(61));
+        assert!(info.entries[0].thumbnail_url.is_some());
+        assert_eq!(info.entries[1].title, "Second");
+        // playlist_title/id only appear on the first entry; still captured.
+        assert!(info.entries[1].thumbnail_url.is_none());
+    }
+
+    #[test]
+    fn empty_playlist_is_an_error() {
+        assert!(parse_flat_playlist("\n  \n", "u").is_err());
+    }
+
+    #[test]
+    fn malformed_line_is_an_error() {
+        assert!(parse_flat_playlist("not json", "u").is_err());
+    }
 
     // --- is_youtube_playlist_url ---
 

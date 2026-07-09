@@ -17,41 +17,17 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use shepherd_media_core::YoutubePlaylistEntry;
+use shepherd_media_app::cache::{self, Freshness};
+use shepherd_media_core::{PlaylistInfo, YoutubePlaylistEntry, parse_flat_playlist};
 use tracing::{debug, warn};
 use url::Url;
 
 /// Cached playlist metadata is considered fresh for this many seconds.
 const CACHE_TTL_SECS: u64 = 6 * 3600;
 
-/// The result of successfully fetching a YouTube playlist.
-pub struct PlaylistInfo {
-    /// Playlist display title from yt-dlp, if present.
-    pub title: Option<String>,
-    /// The `list=…` parameter value (YouTube's playlist ID).
-    pub playlist_id: Option<String>,
-    /// Videos in playlist order.
-    pub entries: Vec<YoutubePlaylistEntry>,
-}
-
-// --- yt-dlp JSON deserialization ---
-
-// Only the fields shepherd-media actually uses are declared; serde ignores
-// the rest. `playlist_title` and `playlist_id` repeat on every entry but we
-// only keep the first non-None value we see.
-#[derive(Debug, Deserialize)]
-struct YtDlpEntry {
-    id: String,
-    title: String,
-    #[serde(default)]
-    duration: Option<f64>,
-    #[serde(default)]
-    thumbnail: Option<String>,
-    #[serde(default)]
-    playlist_title: Option<String>,
-    #[serde(default)]
-    playlist_id: Option<String>,
-}
+// The yt-dlp NDJSON parser and its `PlaylistInfo` result live in
+// `shepherd-media-core` (`parse_flat_playlist`), shared with the Android app.
+// Only the yt-dlp *invocation* and the on-disk cache below are Linux-specific.
 
 // --- On-disk playlist metadata cache ---
 
@@ -123,37 +99,17 @@ fn playlist_cache_path(url: &str) -> Option<PathBuf> {
         .take(128)
         .collect();
 
-    let cache_home = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-
-    Some(
-        cache_home
-            .join("shepherd")
-            .join("media")
-            .join("playlists")
-            .join(format!("{safe}.json")),
-    )
-}
-
-/// Freshness of an on-disk cache hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheFreshness {
-    /// Cached entry is within [`CACHE_TTL_SECS`] of now.
-    Fresh,
-    /// Cached entry is older than [`CACHE_TTL_SECS`]; usable as an offline
-    /// fallback when a live fetch fails.
-    Stale,
+    Some(crate::paths::media_cache_dir("playlists")?.join(format!("{safe}.json")))
 }
 
 /// Try to load playlist metadata from the on-disk cache.
 ///
 /// Returns `None` if the cache file is absent, unreadable, or unparseable.
 /// All errors are logged at `warn` level and treated as cache misses so the
-/// caller can fall back to a live fetch. The returned [`CacheFreshness`]
-/// lets the caller decide whether to trust the entry directly or only use
-/// it as an offline fallback.
-fn load_from_cache(url: &str) -> Option<(PlaylistInfo, CacheFreshness)> {
+/// caller can fall back to a live fetch. The returned [`Freshness`] lets the
+/// caller decide whether to trust the entry directly or only use it as an
+/// offline fallback.
+fn load_from_cache(url: &str) -> Option<(PlaylistInfo, Freshness)> {
     let path = playlist_cache_path(url)?;
     let bytes = std::fs::read(&path).ok()?;
     let cached: CachedPlaylist = match serde_json::from_slice(&bytes) {
@@ -170,10 +126,10 @@ fn load_from_cache(url: &str) -> Option<(PlaylistInfo, CacheFreshness)> {
         .as_secs();
     let freshness = if now.saturating_sub(cached.fetched_at) >= CACHE_TTL_SECS {
         debug!("playlist cache stale for {url}");
-        CacheFreshness::Stale
+        Freshness::Stale
     } else {
         debug!("playlist cache hit for {url} ({})", path.display());
-        CacheFreshness::Fresh
+        Freshness::Fresh
     };
 
     let info = PlaylistInfo {
@@ -243,24 +199,17 @@ fn save_to_cache(url: &str, info: &PlaylistInfo) {
 /// The caller is responsible for having `yt-dlp` installed; see
 /// `docs/shepherd-media.md` for setup instructions.
 pub fn fetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
-    let cached = load_from_cache(url);
-    if let Some((info, CacheFreshness::Fresh)) = cached {
-        return Ok(info);
-    }
-    let stale = cached.map(|(info, _)| info);
-
-    match fetch_playlist_live(url) {
-        Ok(info) => {
+    match cache::resolve(load_from_cache(url), || fetch_playlist_live(url)) {
+        cache::Resolution::Fresh(info) => Ok(info),
+        cache::Resolution::Fetched(info) => {
             save_to_cache(url, &info);
             Ok(info)
         }
-        Err(e) => match stale {
-            Some(info) => {
-                warn!("live playlist fetch failed for {url}: {e}; using stale cache");
-                Ok(info)
-            }
-            None => Err(e),
-        },
+        cache::Resolution::Stale(info, e) => {
+            warn!("live playlist fetch failed for {url}: {e}; using stale cache");
+            Ok(info)
+        }
+        cache::Resolution::Miss(e) => Err(e),
     }
 }
 
@@ -291,7 +240,7 @@ fn fetch_playlist_live(url: &str) -> Result<PlaylistInfo, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ytdlp_output(&stdout, url)
+    parse_flat_playlist(&stdout, url)
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {
@@ -307,47 +256,4 @@ fn ensure_ytdlp_available() -> Result<(), String> {
                 .to_string()
         })?;
     Ok(())
-}
-
-fn parse_ytdlp_output(stdout: &str, url: &str) -> Result<PlaylistInfo, String> {
-    let mut entries: Vec<YoutubePlaylistEntry> = Vec::new();
-    let mut playlist_title: Option<String> = None;
-    let mut playlist_id: Option<String> = None;
-
-    for (line_no, line) in stdout.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: YtDlpEntry = serde_json::from_str(line)
-            .map_err(|e| format!("failed to parse yt-dlp output (line {line_no}): {e}"))?;
-
-        if playlist_title.is_none() {
-            playlist_title = entry.playlist_title;
-        }
-        if playlist_id.is_none() {
-            playlist_id = entry.playlist_id;
-        }
-
-        let thumbnail_url = entry.thumbnail.as_deref().and_then(|t| Url::parse(t).ok());
-
-        entries.push(YoutubePlaylistEntry {
-            video_id: entry.id,
-            title: entry.title,
-            duration_seconds: entry.duration.map(|d| d as u64),
-            thumbnail_url,
-        });
-    }
-
-    if entries.is_empty() {
-        return Err(format!(
-            "no videos found in playlist — check the URL and that the playlist is public: {url}"
-        ));
-    }
-
-    Ok(PlaylistInfo {
-        title: playlist_title,
-        playlist_id,
-        entries,
-    })
 }
