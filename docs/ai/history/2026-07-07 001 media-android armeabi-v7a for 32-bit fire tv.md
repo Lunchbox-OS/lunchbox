@@ -468,3 +468,24 @@ Shipped to the Fire TV and the phone.
 Later tuned: `PREFETCH_FIRST_N` raised to 10, and the focused-item prefetch
 now warms the focused grid item plus its two neighbours (focused first, one at a
 time) so moving to an adjacent tile and playing is also instant.
+
+## Follow-up: port the DRM progressive fallback to the Linux build
+
+The same DRM-protected "full episode" videos that needed the `android` client on
+Android also failed on Linux ("This video is not available"). The Linux binary
+resolves through mpv's own `ytdl_hook` (yt-dlp on PATH) with the default player
+clients, which don't serve those; and its `ytdl-format` already has a muxed
+fallback (`/best`), so the only missing piece was the client. Added
+`ytdl-raw-options=extractor-args=youtube:player_client=android_vr,android` to
+`LibmpvPlayer::new` (shared core; a no-op on Android, which pre-resolves and
+never invokes ytdl_hook). The value is length-prefix quoted (`%<len>%<value>`,
+length computed) because mpv's key/value list parser otherwise splits it on the
+comma between the two client names — plain-comma and default both fail; the
+length-prefixed form works.
+
+Verified through the real `LibmpvPlayer` headless (`vo=libmpv`, no GL, watching
+for Started vs Error): the Bill Nye "full episode" that resolved to `CLOSED`
+(unavailable) without the change now `STARTED` (yt-dlp picks itag 18, 360p H.264
+non-DRM); a normal video still resolves to 720p DASH. host `yt-dlp` confirms the
+DRM video returns itag 18 with the two clients and the default-client resolve
+errors.

@@ -315,6 +315,19 @@ mod libmpv_backend {
                 init.set_property("keep-open", "no")?;
                 init.set_property("ytdl", "yes")?;
                 init.set_property("ytdl-format", ytdl_format)?;
+                // mpv's ytdl_hook (the Linux path — Android pre-resolves its
+                // streams) invokes yt-dlp with the default player clients, which
+                // report some DRM-protected "full episode" uploads as "not
+                // available". Route it through android_vr + android like the
+                // Android resolver: android_vr serves DASH video without a PO
+                // token, and android additionally exposes the legacy progressive
+                // itag 18 that the `ytdl-format` muxed fallback (`/best`) then
+                // selects for those videos (360p H.264, non-DRM). The value is
+                // length-prefix quoted (`%<len>%<value>`) so mpv's key/value list
+                // parser doesn't split it on the comma between the two clients.
+                const YTDL_CLIENTS: &str = "youtube:player_client=android_vr,android";
+                let raw_options = format!("extractor-args=%{}%{YTDL_CLIENTS}", YTDL_CLIENTS.len());
+                init.set_property("ytdl-raw-options", raw_options.as_str())?;
                 // Hardware-accelerated decode where available; fall back
                 // to software automatically.
                 init.set_property("hwdec", "auto-safe")?;
