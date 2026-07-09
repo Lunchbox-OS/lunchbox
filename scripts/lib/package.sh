@@ -21,10 +21,6 @@ source "$PACKAGE_LIB_DIR/build.sh"
 source "$PACKAGE_LIB_DIR/install.sh"
 # shellcheck source=version.sh
 source "$PACKAGE_LIB_DIR/version.sh"
-# shellcheck source=deps.sh
-# Sourced for YTDLP_VENV / YTDLP_LINK, injected into the postinst guidance so the
-# yt-dlp setup path can't drift from `shepherd deps install run` (install_ytdlp).
-source "$PACKAGE_LIB_DIR/deps.sh"
 
 # System package conventions: a distro package installs under /usr, not the
 # /usr/local default used by a manual `shepherd install`.
@@ -124,6 +120,10 @@ package_deb() {
     install -m 0644 "$repo_root/config.example.toml" "$ex_stage/config.example.toml"
     install -m 0644 "$repo_root/movies-library.example.toml" \
         "$ex_stage/movies-library.example.toml"
+    # VERSION so `shepherd-admin --version` works off get_data_dir when packaged.
+    install -m 0644 "$repo_root/VERSION" "$ex_stage/VERSION"
+
+    _package_stage_admin_cli "$stage" "$repo_root"
 
     _package_write_control "$stage" "$version" "$repo_root"
 
@@ -135,6 +135,25 @@ package_deb() {
 
     success "Built $deb"
     echo "$deb"
+}
+
+# Stage the shepherd-admin CLI + its shared libs so an installed system has the
+# post-install admin tasks (setup-user, yt-dlp, apps, harden, bluetooth) without
+# a source tree. Libs go under /usr/lib/shepherd/lib; the entrypoint is
+# symlinked onto PATH. shepherd-admin resolves its libs from a sibling lib/ dir
+# and, finding no repo Cargo.toml above it, uses /usr/share/shepherd for data.
+_package_stage_admin_cli() {
+    local stage="$1" repo_root="$2"
+    local libdir="$stage/usr/lib/shepherd"
+
+    ensure_dir "$libdir/lib" 0755
+    # Ship the whole lib dir so a future admin-lib dependency can't be left out;
+    # the build/package/dev-only libs are inert without a source tree.
+    install -m 0644 "$repo_root"/scripts/lib/*.sh "$libdir/lib/"
+    install -m 0755 "$repo_root/scripts/shepherd-admin" "$libdir/shepherd-admin"
+
+    ensure_dir "$stage/usr/bin" 0755
+    ln -sf /usr/lib/shepherd/shepherd-admin "$stage/usr/bin/shepherd-admin"
 }
 
 # Write the DEBIAN control directory (control, conffiles, maintainer scripts)
@@ -188,27 +207,16 @@ $UDEV_RULES_DIR/$UINPUT_RULES_NAME
 $POLKIT_RULES_DIR/$FIREWALL_RULES_NAME
 EOF
 
-    # The full set of groups a kiosk user needs, single-sourced from install.sh
-    # (SHEPHERD_REQUIRED_GROUPS + FIREWALL_GROUP) so the printed guidance can't
-    # drift from what install_user_groups / install_firewall actually add.
-    local all_groups
-    all_groups="$(IFS=','; printf '%s' "${SHEPHERD_REQUIRED_GROUPS[*]}")"
-    all_groups="$all_groups,$FIREWALL_GROUP"
-
     # postinst: the host-mutating steps install.sh's install_firewall /
     # install_udev run on a real install (guarded out under DESTDIR), re-
     # expressed as POSIX sh because the maintainer script runs on the target
-    # without the repo. Keep in sync with those functions. Values that must not
-    # drift are injected from install.sh: the firewall group, the full required-
-    # group set, and the examples dir. The per-user config/groups steps can't be
-    # done at package time (unknown user), so they're printed for the admin.
+    # without the repo. Keep in sync with those functions. The firewall group
+    # name is injected from install.sh's FIREWALL_GROUP. Per-user setup can't be
+    # done at package time (unknown user), so it points at the packaged
+    # shepherd-admin CLI, which shares its implementation with `shepherd`.
     {
         printf '#!/bin/sh\nset -e\n'
         printf 'group=%s\n' "$FIREWALL_GROUP"
-        printf 'groups=%s\n' "$all_groups"
-        printf 'examples=%s\n' "$PACKAGE_EXAMPLE_DIR"
-        printf 'ytdlp_venv=%s\n' "$YTDLP_VENV"
-        printf 'ytdlp_link=%s\n' "$YTDLP_LINK"
         cat <<'EOF'
 if [ "$1" = "configure" ]; then
     if ! getent group "$group" >/dev/null 2>&1; then
@@ -223,21 +231,14 @@ if [ "$1" = "configure" ]; then
             || systemctl restart polkit 2>/dev/null \
             || true
     fi
-    cat <<EOM
-shepherd-launcher installed. To set up a kiosk user (replace USER):
+    cat <<'EOM'
+shepherd-launcher installed. Finish setting up a kiosk user (replace USER):
 
-  install -Dm644 -o USER -g USER $examples/config.example.toml ~USER/.config/shepherd/config.toml
-  usermod -aG $groups USER
-
-For YouTube media libraries, install yt-dlp into its own venv (kept current
-independently of apt, whose build YouTube quickly breaks) and link it on PATH:
-
-  python3 -m venv $ytdlp_venv
-  $ytdlp_venv/bin/pip install -U yt-dlp
-  ln -sf $ytdlp_venv/bin/yt-dlp $ytdlp_link
+  shepherd-admin setup-user USER     # deploy config + add group memberships
+  shepherd-admin yt-dlp install      # only for YouTube media libraries
 
 Then have USER log out and back in and pick the "Shepherd Kiosk" session.
-A media-library example is at $examples/movies-library.example.toml.
+Other admin tasks: shepherd-admin apps install steam|chrome, harden, bluetooth.
 EOM
 fi
 exit 0

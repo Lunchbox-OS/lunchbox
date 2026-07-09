@@ -466,6 +466,6 @@ jobs:
       - name: Run ShellCheck
         run: |
           # SC1091: Not following sourced files (info only, safe to ignore)
-          shellcheck -e SC1091 scripts/shepherd scripts/dev scripts/admin
+          shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
           shellcheck -e SC1091 scripts/lib/*.sh
           shellcheck -e SC1091 run-dev

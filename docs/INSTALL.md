@@ -23,35 +23,32 @@ polkit assets, the `/dev/uinput` udev rule, the Sway kiosk session, and the
 display-manager session entry. Its post-install step creates the
 `shepherd-firewall` system group and reloads udev/polkit.
 
-A distro package can't know which account is your kiosk user, so the per-user
-setup is **not** done automatically. The package prints the exact commands when
-it installs; they deploy the example config and add the user to the groups
-shepherd needs (substitute your user for `kiosk`):
+A distro package can't know which account is your kiosk user, so per-user setup
+is **not** done automatically. The package ships a `shepherd-admin` CLI for the
+post-install admin tasks (the same code the from-source `./scripts/shepherd`
+runs). Deploy the example config and add the user to shepherd's groups with one
+command (substitute your user for `kiosk`):
 
 ```sh
-sudo install -Dm644 -o kiosk -g kiosk \
-  /usr/share/shepherd/config.example.toml ~kiosk/.config/shepherd/config.toml
-sudo usermod -aG input,video,bluetooth,shepherd-firewall kiosk
+sudo shepherd-admin setup-user kiosk
 ```
 
-The group list above is illustrative — the installer prints the authoritative
-set for your version. A media-library example ships alongside at
-`/usr/share/shepherd/movies-library.example.toml`; copy it to
-`~kiosk/.config/shepherd/movies.toml` if you use the bundled media entries.
-
-If you use YouTube media libraries, also install `yt-dlp` into its own
-virtualenv and link it onto `PATH`. shepherd deliberately does not use the apt
-`yt-dlp` — YouTube changes formats often and the archived build goes stale — so
-the package depends on `python3-venv` but leaves the venv to you:
+If you use YouTube media libraries, also install `yt-dlp`. shepherd deliberately
+does not use the apt `yt-dlp` — YouTube changes formats often and the archived
+build goes stale — so it lives in a venv you can refresh independently:
 
 ```sh
-sudo python3 -m venv /opt/shepherd/ytdlp-venv
-sudo /opt/shepherd/ytdlp-venv/bin/pip install -U yt-dlp
-sudo ln -sf /opt/shepherd/ytdlp-venv/bin/yt-dlp /usr/local/bin/yt-dlp
+sudo shepherd-admin yt-dlp install   # re-run periodically to update
 ```
 
-Re-run the last two commands periodically to keep `yt-dlp` current. (The
-from-source path does this via `shepherd deps install run`.)
+To install an activity backend from Flathub:
+
+```sh
+sudo shepherd-admin apps install steam    # or: chrome
+```
+
+`shepherd-admin` also exposes `harden` (kiosk lockdown) and `bluetooth clear`
+(reset a user to unclaimed); run `shepherd-admin --help` for the full list.
 
 Then have `kiosk` log out and back in (so the new group memberships take
 effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is

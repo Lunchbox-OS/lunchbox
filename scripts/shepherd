@@ -11,6 +11,8 @@ LIB_DIR="$SCRIPT_DIR/lib"
 # Source shared libraries
 # shellcheck source=lib/common.sh
 source "$LIB_DIR/common.sh"
+# shellcheck source=lib/admin.sh
+source "$LIB_DIR/admin.sh"
 # shellcheck source=lib/deps.sh
 source "$LIB_DIR/deps.sh"
 # shellcheck source=lib/build.sh
@@ -50,6 +52,12 @@ Commands:
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
     version     Show or bump the project version
     package     Build distributable packages (.deb)
+    apps        Install activity backends from Flathub (steam, chrome)
+    setup-user  Deploy config + add a user to shepherd's groups
+
+Note: the post-install admin tasks (setup-user, apps, harden, bluetooth,
+yt-dlp) are also available on an installed system as 'shepherd-admin', which
+the .deb ships without needing this source tree.
 
 Development:
     shepherd deps install dev     Install all development dependencies
@@ -146,6 +154,12 @@ EOF
             ;;
         package)
             package_main "$@"
+            ;;
+        apps)
+            apps_main "$@"
+            ;;
+        setup-user)
+            setup_user "$@"
             ;;
         -h|--help|help|"")
             usage

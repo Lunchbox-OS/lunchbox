@@ -215,13 +215,29 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
   breakage is caught before a release tag.
 - **`INSTALL.md` section** documenting install-from-`.deb` and the required
   post-install `shepherd install config --user` / `groups --user` steps.
-- **yt-dlp guidance.** `yt-dlp` isn't apt-installed; the from-source path builds
-  it into a venv at `/opt/shepherd/ytdlp-venv` via `deps install run`
-  (`install_ytdlp`), which a `.deb` user never runs. The `.deb` only Depends on
-  `python3-venv`. The postinst now prints the venv+pip+symlink commands (paths
-  injected from `deps.sh`'s `YTDLP_VENV`/`YTDLP_LINK` so they can't drift), and
-  `INSTALL.md` documents it. Only YouTube libraries need it; local mpv playback
-  doesn't.
+- **yt-dlp guidance** (superseded by the shared admin CLI below). `yt-dlp` isn't
+  apt-installed; the from-source path builds it into a venv at
+  `/opt/shepherd/ytdlp-venv` via `deps install run` (`install_ytdlp`), which a
+  `.deb` user never runs. Rather than keep printing raw commands, this was folded
+  into a shared admin CLI.
+- **Shared admin CLI (`shepherd-admin`).** Refactored the repo-bound admin tasks
+  so they run from both the source tree and a `.deb` install:
+  - New `scripts/lib/admin.sh` holds the repo-independent tasks: yt-dlp
+    (moved out of `deps.sh`), Flathub `apps install steam|chrome`, and
+    `setup-user` (config + all group memberships, reusing `install_config` /
+    a new shared `add_user_to_groups`). `harden.sh` / `bluetooth.sh` were
+    already repo-independent.
+  - New `scripts/shepherd-admin` entrypoint resolves its libs from a sibling
+    `lib/` dir and detects source-vs-packaged layout, exporting
+    `SHEPHERD_DATA_DIR` (`get_data_dir` in `common.sh`) so example configs
+    resolve to the repo root or `/usr/share/shepherd` accordingly. It omits the
+    build/package/dev machinery that needs a source tree.
+  - `scripts/shepherd` sources `admin.sh` and gained `apps` / `setup-user` for
+    parity; the tasks share one implementation.
+  - The `.deb` ships `scripts/lib/*.sh` + `shepherd-admin` under
+    `/usr/lib/shepherd/`, symlinked to `/usr/bin/shepherd-admin`, plus `VERSION`
+    in the data dir. The postinst guidance collapsed to `shepherd-admin
+    setup-user USER` / `yt-dlp install`, and `INSTALL.md` follows suit.
 - **`shepherd-media-android` (#72)** — added as a second `apk` matrix row. Its
   Gradle `assembleRelease` cross-compiles a Rust cdylib via cargo-ndk for both
   packaged ABIs (arm64-v8a + armeabi-v7a), so the row carries a `rust: true`

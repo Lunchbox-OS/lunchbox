@@ -29,23 +29,42 @@ This directory contains the unified script system for shepherd-launcher.
 # Hardening
 ./shepherd harden apply --user USER
 ./shepherd harden revert --user USER
+
+# Packaging
+./shepherd package deb
+
+# Post-install admin tasks (shared with the .deb, where they run as the
+# installed `shepherd-admin` CLI without a source tree)
+./shepherd setup-user USER          # deploy config + add group memberships
+./shepherd apps install steam|chrome
+./shepherd deps install run         # (includes yt-dlp)  ==  shepherd-admin yt-dlp install
 ```
+
+These admin tasks live in `lib/admin.sh` and are exposed by **both**
+`./scripts/shepherd` (from source) and `scripts/shepherd-admin` (a slim
+entrypoint the `.deb` installs as `/usr/bin/shepherd-admin`). See
+[docs/INSTALL.md](../docs/INSTALL.md).
 
 ## Structure
 
 ```
 scripts/
-├── shepherd           # Main CLI dispatcher
+├── shepherd           # Main CLI dispatcher (build/dev/install/package + admin)
+├── shepherd-admin     # Slim admin CLI shipped in the .deb (no source tree)
 ├── dev                # Wrapper → shepherd dev run
 ├── admin              # Wrapper → shepherd install/harden
 ├── lib/               # Shared libraries
-│   ├── common.sh      # Logging, error handling, sudo helpers
+│   ├── common.sh      # Logging, error handling, sudo, get_data_dir
 │   ├── deps.sh        # Dependency management
+│   ├── admin.sh       # Shared post-install admin tasks (yt-dlp, apps, setup-user)
 │   ├── build.sh       # Cargo build logic
 │   ├── config.sh      # Configuration validation
 │   ├── sway.sh        # Nested sway execution
 │   ├── install.sh     # Installation logic
-│   └── harden.sh      # User hardening/unhardening
+│   ├── harden.sh      # User hardening/unhardening
+│   ├── bluetooth.sh   # BLE admin (clear/unpair)
+│   ├── version.sh     # Canonical VERSION sync
+│   └── package.sh     # .deb packaging (stages install.sh + shepherd-admin)
 └── deps/              # Package lists
     ├── build.pkgs     # Build-time dependencies
     ├── run.pkgs       # Runtime dependencies

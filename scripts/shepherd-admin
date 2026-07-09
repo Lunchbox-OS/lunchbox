@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# shepherd-admin - post-install admin tasks for shepherd-launcher.
+#
+# A slim, repo-independent companion to `scripts/shepherd`. It exposes the admin
+# operations that are useful on an installed system — per-user setup, yt-dlp,
+# activity-backend installs, Bluetooth reset, kiosk hardening — and works both
+# from a source checkout (scripts/shepherd-admin) and from the .deb, which ships
+# it as /usr/bin/shepherd-admin with its libs under /usr/lib/shepherd/lib.
+#
+# Everything here shares implementations with `scripts/shepherd` via scripts/lib
+# (see admin.sh); this tool just omits the build/package/dev machinery that
+# needs a source tree.
+
+set -euo pipefail
+
+# Resolve our real location (following the /usr/bin symlink) so we can find our
+# libs whether we live at scripts/ or /usr/lib/shepherd/. In both layouts the
+# libs sit in a sibling `lib/` directory.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+LIB_DIR="$SELF_DIR/lib"
+
+# Data files (example configs) live at the repo root in a source checkout and
+# under /usr/share/shepherd when packaged. Detect via the repo Cargo.toml one
+# level up from scripts/; export SHEPHERD_DATA_DIR so get_data_dir resolves the
+# right place without relying on get_repo_root (which is meaningless under /usr).
+# An explicit SHEPHERD_DATA_DIR in the environment wins (testing / odd layouts).
+if [[ -z "${SHEPHERD_DATA_DIR:-}" ]]; then
+    if [[ -f "$SELF_DIR/../Cargo.toml" ]]; then
+        SHEPHERD_DATA_DIR="$(cd "$SELF_DIR/.." && pwd)"
+    else
+        SHEPHERD_DATA_DIR="/usr/share/shepherd"
+    fi
+fi
+export SHEPHERD_DATA_DIR
+
+# shellcheck source=lib/common.sh
+source "$LIB_DIR/common.sh"
+# install.sh provides install_config / install_user_groups / add_user_to_groups
+# / FIREWALL_GROUP that admin.sh's setup_user calls. (It sources build.sh, whose
+# functions are unused here but harmless.)
+# shellcheck source=lib/install.sh
+source "$LIB_DIR/install.sh"
+# shellcheck source=lib/harden.sh
+source "$LIB_DIR/harden.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$LIB_DIR/bluetooth.sh"
+# shellcheck source=lib/admin.sh
+source "$LIB_DIR/admin.sh"
+
+VERSION="unknown"
+if [[ -f "$(get_data_dir)/VERSION" ]]; then
+    VERSION="$(head -n1 "$(get_data_dir)/VERSION" | tr -d '[:space:]')"
+fi
+
+usage() {
+    cat <<EOF
+shepherd-admin - post-install admin tasks for shepherd-launcher
+
+Usage: shepherd-admin <command> [options]
+
+Commands:
+    setup-user USER   Deploy the example config and add USER to the groups
+                      shepherd needs (input/video/bluetooth/shepherd-firewall)
+    yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
+    apps install APP  Install an activity backend from Flathub (steam | chrome)
+    harden <cmd>      Apply/revert/status kiosk hardening for a user
+    bluetooth clear   Force-unpair a user's BLE admin and reset to unclaimed
+
+Options:
+    -h, --help        Show this help
+    -V, --version     Show version
+
+Run 'shepherd-admin <command> help' for detailed command information.
+
+Examples:
+    sudo shepherd-admin setup-user kiosk
+    sudo shepherd-admin yt-dlp install
+    sudo shepherd-admin apps install steam
+    sudo shepherd-admin harden apply --user kiosk
+    sudo shepherd-admin bluetooth clear --user kiosk
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        setup-user)
+            setup_user "$@"
+            ;;
+        yt-dlp|ytdlp)
+            ytdlp_main "$@"
+            ;;
+        apps)
+            apps_main "$@"
+            ;;
+        harden)
+            harden_main "$@"
+            ;;
+        bluetooth)
+            bluetooth_main "$@"
+            ;;
+        -h|--help|help|"")
+            usage
+            ;;
+        -V|--version)
+            echo "shepherd-admin $VERSION"
+            ;;
+        *)
+            error "Unknown command: $cmd"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

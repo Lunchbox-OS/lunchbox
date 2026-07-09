@@ -8,6 +8,10 @@ DEPS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source common utilities
 # shellcheck source=common.sh
 source "$DEPS_LIB_DIR/common.sh"
+# yt-dlp install/upgrade lives in the shared admin lib so `deps install run` and
+# `shepherd-admin yt-dlp install` share one implementation.
+# shellcheck source=admin.sh
+source "$DEPS_LIB_DIR/admin.sh"
 
 # Directory containing package lists
 DEPS_DIR="$(get_repo_root)/scripts/deps"
@@ -36,51 +40,9 @@ ANDROID_SDK_PACKAGES=(
     "ndk;${ANDROID_NDK_VERSION}"
 )
 
-# yt-dlp virtualenv location and the symlink placed on PATH.
-# The venv is owned by root and lives outside /usr so that apt can never
-# silently downgrade or remove yt-dlp.
-YTDLP_VENV="/opt/shepherd/ytdlp-venv"
-YTDLP_LINK="/usr/local/bin/yt-dlp"
-
-# Check whether yt-dlp is available on PATH (covers both the venv symlink and
-# any pre-existing system installation).
-is_ytdlp_installed() {
-    command_exists yt-dlp
-}
-
-# Install or upgrade yt-dlp into a dedicated virtualenv.
-#
-# Using a venv rather than apt keeps yt-dlp at the latest release, which
-# matters because YouTube frequently changes the formats yt-dlp has to handle.
-# Re-running this function is idempotent and upgrades an existing installation.
-install_ytdlp() {
-    if is_ytdlp_installed; then
-        info "yt-dlp already available ($(yt-dlp --version 2>/dev/null || echo 'unknown version')); upgrading..."
-    else
-        info "Installing yt-dlp into virtualenv at $YTDLP_VENV..."
-    fi
-
-    # Ensure the venv parent directory exists.
-    maybe_sudo mkdir -p "$(dirname "$YTDLP_VENV")"
-
-    # Create the venv if it does not already exist.
-    if [[ ! -d "$YTDLP_VENV" ]]; then
-        maybe_sudo python3 -m venv "$YTDLP_VENV"
-    fi
-
-    # Install or upgrade yt-dlp inside the venv.
-    maybe_sudo "$YTDLP_VENV/bin/pip" install --quiet --upgrade yt-dlp
-
-    # Symlink the venv binary onto PATH so shepherd-media (and anything else)
-    # can find it as plain `yt-dlp`.
-    maybe_sudo ln -sf "$YTDLP_VENV/bin/yt-dlp" "$YTDLP_LINK"
-
-    if is_ytdlp_installed; then
-        success "yt-dlp installed ($(yt-dlp --version))"
-    else
-        die "yt-dlp installation failed — check pip output above"
-    fi
-}
+# yt-dlp install/upgrade + its venv constants (YTDLP_VENV/YTDLP_LINK,
+# is_ytdlp_installed, install_ytdlp) now live in scripts/lib/admin.sh, sourced
+# above. deps_install/deps_check below call them for the run/dev sets.
 
 # Check if Rust is installed
 is_rust_installed() {

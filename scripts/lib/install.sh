@@ -156,10 +156,13 @@ install_config() {
     fi
     
     validate_user "$user"
-    
+
+    # Example configs live at the repo root in a source checkout and under
+    # /usr/share/shepherd on a packaged install; get_data_dir picks the right
+    # one so `shepherd-admin setup-user` works without a source tree.
     local repo_root
-    repo_root="$(get_repo_root)"
-    
+    repo_root="$(get_data_dir)"
+
     # Default source is the example config
     if [[ -z "$source_config" ]]; then
         source_config="$repo_root/config.example.toml"
@@ -254,25 +257,23 @@ SHEPHERD_REQUIRED_GROUPS=(
     "bluetooth"
 )
 
-# Add the target user to all groups required by shepherd-launcher.
-# Idempotent: skips any group the user is already in.
-install_user_groups() {
-    local user="${1:-}"
-
-    if [[ -z "$user" ]]; then
-        die "Usage: shepherd install groups --user USER"
-    fi
-
-    require_root
-    validate_user "$user"
+# Add $user to each named group, skipping groups that don't exist on this
+# system or that the user already belongs to. Shared by install_user_groups
+# (from-source `install all`) and setup_user (shepherd-admin, .deb path) so the
+# membership logic lives in one place.
+add_user_to_groups() {
+    local user="$1"
+    shift
 
     local current_groups
     current_groups="$(id -nG "$user")"
 
     local changed=false
-    for group in "${SHEPHERD_REQUIRED_GROUPS[@]}"; do
+    local group
+    for group in "$@"; do
         # Skip groups that don't exist on this system. We don't create
-        # them — they're expected to come from the distro.
+        # them — they're expected to come from the distro (or, for
+        # shepherd-firewall, from install/packaging).
         if ! getent group "$group" >/dev/null 2>&1; then
             warn "Group '$group' does not exist on this system; skipping"
             continue
@@ -291,11 +292,24 @@ install_user_groups() {
     done
 
     if [[ "$changed" == "true" ]]; then
-        success "Updated group memberships for $user"
         info "Group changes take effect on the user's next login."
-    else
-        success "User '$user' already has all required group memberships"
     fi
+}
+
+# Add the target user to all groups required by shepherd-launcher.
+# Idempotent: skips any group the user is already in.
+install_user_groups() {
+    local user="${1:-}"
+
+    if [[ -z "$user" ]]; then
+        die "Usage: shepherd install groups --user USER"
+    fi
+
+    require_root
+    validate_user "$user"
+
+    add_user_to_groups "$user" "${SHEPHERD_REQUIRED_GROUPS[@]}"
+    success "Updated group memberships for $user"
 }
 
 # Install the udev rules shepherd-launcher needs.
