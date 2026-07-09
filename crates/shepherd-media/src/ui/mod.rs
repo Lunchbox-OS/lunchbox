@@ -1,9 +1,9 @@
 //! egui-based UI: poster grid in `Browsing` state, embedded mpv player
 //! with a touch- and controller-friendly overlay in `Playing` state.
 
-mod grid;
 mod playback;
-mod theme;
+
+use shepherd_media_ui::{grid, theme};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,6 @@ use shepherd_media_core::{
 };
 use shepherd_util::gamepad_nav::{NavDir, StickNav};
 
-use crate::platform;
 use crate::posters::{self, PosterCache};
 use crate::video_cache::VideoCache;
 
@@ -156,7 +155,7 @@ struct App {
 impl App {
     /// Build the list of items to display for the current frame.
     fn visible_items(&self) -> Vec<Item> {
-        let info = platform::current();
+        let info = shepherd_media_core::PlatformInfo::current();
         let online = self.online.load(Ordering::Relaxed);
         self.session
             .library()
@@ -253,15 +252,20 @@ impl eframe::App for App {
         }
 
         self.handle_browse_input(ctx, &visible, &gamepad_events);
-        grid::draw(
+        let title = self.session.library().title.clone();
+        let posters = &self.posters;
+        let selected = grid::draw(
             ui,
             &mut self.grid_scroll,
-            &mut self.session,
+            &title,
             &visible,
             &mut self.focused,
             &mut self.columns,
-            &self.posters,
+            &|id| posters.get(id).cloned(),
         );
+        if let Some(id) = selected {
+            self.session.handle_input(SessionInput::SelectItem(id));
+        }
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }
@@ -360,7 +364,7 @@ impl App {
         let Some(item) = visible.get(self.focused) else {
             return;
         };
-        let info = platform::current();
+        let info = shepherd_media_core::PlatformInfo::current();
         if resolve_source(item, &info).is_none() {
             return;
         }

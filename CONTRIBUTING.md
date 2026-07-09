@@ -102,11 +102,11 @@ daemon just returns 404 for all non-API routes.
 ### Android companion app
 
 The BLE management companion app lives in [`companion-android/`](companion-android/)
-and is independent of the Rust build. Install its toolchain (JDK + Android SDK
-into `/opt/android-sdk`) with the dedicated deps set, then build:
+and is independent of the Rust build. Install its toolchain (JDK + Android SDK +
+NDK into `/opt/android-sdk`) with the dedicated deps set, then build:
 
 ```sh
-./scripts/shepherd deps install android   # JDK 21 + Android SDK
+./scripts/shepherd deps install android   # JDK 21 + Android SDK + NDK
 cd companion-android
 ./gradlew :app:assembleDebug               # debug APK (sideload-friendly)
 ./gradlew :app:testDebugUnitTest           # unit tests
@@ -114,6 +114,10 @@ cd companion-android
 
 See [`companion-android/README.md`](companion-android/README.md) for the
 architecture and the BLE protocol it speaks.
+
+The same deps set also provisions the NDK that
+[`crates/shepherd-media-android`](crates/shepherd-media-android/) cross-compiles
+its Rust cdylib against (via `cargo-ndk`); see that crate's README for its build.
 
 ### Testing and linting
 

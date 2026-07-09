@@ -21,12 +21,19 @@ RUSTUP_URL="https://sh.rustup.rs"
 # Gradle project (companion-android/) targets; bump together.
 ANDROID_SDK_ROOT="/opt/android-sdk"
 ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+# The NDK is required for the shepherd-media-android cdylib, which cargo-ndk
+# cross-compiles for aarch64-linux-android. Keep this in sync with the version
+# the crate is validated against (see crates/shepherd-media-android/README.md);
+# sdkmanager installs it under $ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION, which
+# is what cargo-ndk finds via ANDROID_NDK_HOME.
+ANDROID_NDK_VERSION="27.2.12479018"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
 ANDROID_SDK_PACKAGES=(
     "platform-tools"
     "platforms;android-35"
     "build-tools;35.0.0"
+    "ndk;${ANDROID_NDK_VERSION}"
 )
 
 # yt-dlp virtualenv location and the symlink placed on PATH.
@@ -134,14 +141,16 @@ install_bpf_toolchain() {
     fi
 }
 
-# Check whether the Android SDK (sdkmanager + a platform) is present.
+# Check whether the Android SDK (sdkmanager + a platform + the NDK) is present.
 is_android_sdk_installed() {
     [[ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]] \
-        && [[ -d "$ANDROID_SDK_ROOT/platforms/android-35" ]]
+        && [[ -d "$ANDROID_SDK_ROOT/platforms/android-35" ]] \
+        && [[ -d "$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" ]]
 }
 
 # Download the command-line tools and use sdkmanager to install the SDK
-# components the companion-android app builds against. Idempotent: skips
+# components the companion-android app builds against, plus the NDK the
+# shepherd-media-android cdylib cross-compiles with. Idempotent: skips
 # the cmdline-tools download when already extracted and re-runs
 # sdkmanager (which no-ops for already-installed packages).
 #
@@ -193,6 +202,7 @@ install_android_sdk() {
     if is_android_sdk_installed; then
         success "Android SDK installed at $ANDROID_SDK_ROOT"
         info "Export ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT (companion-android/local.properties also points here)"
+        info "Export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION for the cargo-ndk cross-compile"
     else
         die "Android SDK installation failed — check sdkmanager output above"
     fi
@@ -382,12 +392,13 @@ Package sets:
     build    Build-time dependencies (+ Rust via rustup)
     run      Runtime dependencies only
     test     Extra packages needed for the shepherd-e2e harness
-    android  JDK + Android SDK for the companion-android app
+    android  JDK + Android SDK + NDK for the companion-android and
+             shepherd-media-android apps
     dev      All dependencies (build + run + test + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
       The 'android' set is standalone (not part of 'dev') because it
-      downloads the Android SDK into /opt/android-sdk.
+      downloads the Android SDK + NDK into /opt/android-sdk.
 
 Examples:
     shepherd deps print build

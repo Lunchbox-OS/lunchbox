@@ -70,6 +70,13 @@ pub trait PlayerHandle: Send {
         None
     }
 
+    /// Attach an external audio track to the *next* [`play`](Self::play) call,
+    /// or clear it with `None`. Needed for sources whose video and audio are
+    /// separate streams (e.g. a YouTube DASH video-only URL paired with an
+    /// audio-only URL), where the platform resolves both and the player must
+    /// mux them at playback. Applies once and is consumed by the next `play`.
+    fn set_external_audio(&mut self, _url: Option<String>) {}
+
     // -----------------------------------------------------------------
     // Embedded rendering hooks. The host calls `bind_gl` once after its
     // OpenGL context is current, registers a redraw callback so it
@@ -100,6 +107,42 @@ pub trait PlayerHandle: Send {
     fn set_redraw_callback(&mut self, _cb: Box<dyn Fn() + Send + Sync + 'static>) {}
 }
 
+/// The playback-transport controls a UI overlay needs — the common subset of
+/// [`PlayerHandle`] and [`Session`](crate::Session), which expose these methods
+/// with identical signatures. Lets a shared overlay drive either one: the
+/// Android app passes its `dyn PlayerHandle`, the Linux binary its `Session`.
+pub trait Transport {
+    fn is_paused(&self) -> bool;
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError>;
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError>;
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError>;
+    fn position(&self) -> Option<f64>;
+    fn duration(&self) -> Option<f64>;
+}
+
+/// Every player is transport-controllable (`?Sized` so `dyn PlayerHandle`
+/// qualifies). `Session` gets its own impl in `session.rs`.
+impl<T: PlayerHandle + ?Sized> Transport for T {
+    fn is_paused(&self) -> bool {
+        PlayerHandle::is_paused(self)
+    }
+    fn set_paused(&mut self, paused: bool) -> Result<(), PlayerError> {
+        PlayerHandle::set_paused(self, paused)
+    }
+    fn seek_relative(&mut self, delta_seconds: f64) -> Result<(), PlayerError> {
+        PlayerHandle::seek_relative(self, delta_seconds)
+    }
+    fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
+        PlayerHandle::seek_absolute(self, seconds)
+    }
+    fn position(&self) -> Option<f64> {
+        PlayerHandle::position(self)
+    }
+    fn duration(&self) -> Option<f64> {
+        PlayerHandle::duration(self)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     Started,
@@ -115,6 +158,86 @@ pub enum PlayerError {
 
     #[error("invalid source for backend: {0}")]
     InvalidSource(String),
+}
+
+/// Bounded retry policy for restarting playback after a transient
+/// [`PlayerEvent::Error`]. A flaky stream (e.g. a network connection dropping
+/// right after the file opens) usually ends the file with an error that clears
+/// on a restart, so both front-ends recover a couple of times before giving up.
+/// This holds only the *policy* (how many restarts remain); each front-end still
+/// performs the restart and reports it in its own way — the Android app drives
+/// its own event loop while the Linux binary goes through [`Session`](crate::Session).
+#[derive(Debug, Clone)]
+pub struct RetryBudget {
+    used: u8,
+    max: u8,
+}
+
+impl RetryBudget {
+    /// Default number of restarts allowed before surfacing the error.
+    pub const DEFAULT_MAX: u8 = 2;
+
+    /// A fresh budget with [`RetryBudget::DEFAULT_MAX`] restarts available.
+    pub fn new() -> Self {
+        Self {
+            used: 0,
+            max: Self::DEFAULT_MAX,
+        }
+    }
+
+    /// Refill the budget — call when a new item starts playing.
+    pub fn reset(&mut self) {
+        self.used = 0;
+    }
+
+    /// Consume one restart if any remain, returning whether the caller should
+    /// retry (`true`) or give up and surface the error (`false`).
+    pub fn try_retry(&mut self) -> bool {
+        if self.used < self.max {
+            self.used += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for RetryBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use super::RetryBudget;
+
+    #[test]
+    fn allows_default_max_retries_then_gives_up() {
+        let mut budget = RetryBudget::new();
+        for _ in 0..RetryBudget::DEFAULT_MAX {
+            assert!(
+                budget.try_retry(),
+                "restarts within the budget should retry"
+            );
+        }
+        assert!(
+            !budget.try_retry(),
+            "once the budget is spent the caller should give up"
+        );
+    }
+
+    #[test]
+    fn reset_refills_the_budget() {
+        let mut budget = RetryBudget::new();
+        while budget.try_retry() {}
+        assert!(!budget.try_retry());
+        budget.reset();
+        assert!(
+            budget.try_retry(),
+            "reset should make retries available again"
+        );
+    }
 }
 
 #[cfg(feature = "libmpv")]
@@ -165,24 +288,50 @@ mod libmpv_backend {
         // Created lazily by `bind_gl` and consulted by every later
         // `render` / `set_redraw_callback` call.
         render_ctx: Mutex<RenderCtxHolder>,
+        // An external audio URL to attach to the next `play`, consumed there.
+        // Used for separate video/audio streams (e.g. YouTube DASH).
+        external_audio: Option<String>,
     }
 
     impl LibmpvPlayer {
-        pub fn new(ytdl_format: &str) -> Result<Self, PlayerError> {
+        /// `fast_render` applies mpv's `fast` profile (bilinear scaling, no
+        /// dither/deband). Weak GPUs — e.g. the Amlogic Mali in a Fire TV Stick —
+        /// otherwise can't upscale to a 1080p output surface within a frame and
+        /// present at a fraction of the display rate; the desktop binary leaves it
+        /// off for full quality.
+        pub fn new(ytdl_format: &str, fast_render: bool) -> Result<Self, PlayerError> {
             let mpv = Mpv::with_initializer(|init| {
                 // `vo=libmpv` disables mpv's own windowing — the host UI
                 // owns the surface and composites mpv's output via
                 // RenderContext.
                 init.set_property("vo", "libmpv")?;
+                if fast_render {
+                    // Best-effort: keep default quality if the profile is missing.
+                    let _ = init.set_property("profile", "fast");
+                }
                 init.set_property("osc", "no")?;
                 init.set_property("input-default-bindings", "no")?;
                 init.set_property("input-vo-keyboard", "no")?;
                 init.set_property("keep-open", "no")?;
                 init.set_property("ytdl", "yes")?;
                 init.set_property("ytdl-format", ytdl_format)?;
+                // Route mpv's ytdl_hook (the Linux path — Android pre-resolves
+                // its streams) through the shared android_vr + android player
+                // clients so DRM-protected uploads fall back to the progressive
+                // itag 18 instead of failing as "not available". The value is
+                // length-prefix quoted (`%<len>%<value>`) so mpv's key/value list
+                // parser doesn't split it on the comma between the two clients.
+                let clients = crate::youtube::YOUTUBE_EXTRACTOR_ARGS;
+                let raw_options = format!("extractor-args=%{}%{clients}", clients.len());
+                init.set_property("ytdl-raw-options", raw_options.as_str())?;
                 // Hardware-accelerated decode where available; fall back
                 // to software automatically.
                 init.set_property("hwdec", "auto-safe")?;
+                // Optional verbose mpv log to a file, for on-device debugging.
+                if let Ok(path) = std::env::var("SHEPHERD_MPV_LOG") {
+                    let _ = init.set_property("msg-level", "all=v");
+                    let _ = init.set_property("log-file", path.as_str());
+                }
                 Ok(())
             })
             .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
@@ -196,6 +345,7 @@ mod libmpv_backend {
                 mpv,
                 playing: AtomicBool::new(false),
                 render_ctx: Mutex::new(RenderCtxHolder(None)),
+                external_audio: None,
             })
         }
 
@@ -227,9 +377,32 @@ mod libmpv_backend {
     impl PlayerHandle for LibmpvPlayer {
         fn play(&mut self, source: &Source) -> Result<(), PlayerError> {
             let uri = Self::uri_for_source(source)?;
-            self.mpv
-                .command("loadfile", &[&uri, "replace"])
-                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+            // Discard events left over from a previous session before starting a
+            // new one. `stop` makes mpv emit an `EndFile`, and the UI stops
+            // draining events once it leaves the playback screen, so that event
+            // (and the `idle-active` that follows) sit in the queue. Without this
+            // the next `play` reads the stale `EndFile` as *this* file ending and
+            // tears playback down immediately — and each teardown re-issues
+            // `stop`, so playback stays stuck. (Reliably triggered by seeking and
+            // then closing right away.)
+            while self.mpv.wait_event(0.0).is_some() {}
+            // An external audio track (separate video/audio streams) is attached
+            // via the loadfile per-file options. The value is length-prefix
+            // quoted (`%<len>%<str>`) so commas/colons in the URL don't get
+            // parsed as option separators.
+            match self.external_audio.take() {
+                Some(audio) => {
+                    let opts = format!("audio-file=%{}%{}", audio.len(), audio);
+                    self.mpv
+                        .command("loadfile", &[&uri, "replace", "0", &opts])
+                        .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+                }
+                None => {
+                    self.mpv
+                        .command("loadfile", &[&uri, "replace"])
+                        .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+                }
+            }
             // Reset pause state on every new playback.
             let _ = self.mpv.set_property("pause", false);
             self.playing.store(true, Ordering::SeqCst);
@@ -286,6 +459,10 @@ mod libmpv_backend {
 
         fn volume(&self) -> Option<f64> {
             self.mpv.get_property::<f64>("volume").ok()
+        }
+
+        fn set_external_audio(&mut self, url: Option<String>) {
+            self.external_audio = url;
         }
 
         fn bind_gl(

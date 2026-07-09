@@ -1,17 +1,19 @@
-//! Poster grid rendering.
+//! Poster grid rendering — the shared "view a library's contents" UI used by
+//! both the Linux binary and the Android app, so they render an identical
+//! poster grid. It is platform-agnostic: the caller supplies the items, the
+//! focused index (moved by its own keyboard / D-pad / gamepad input), and a
+//! poster-bytes accessor; `draw` returns the id of an item the user chose to
+//! play, leaving playback to the caller.
 
-use eframe::egui;
-use shepherd_media_core::{Item, Session, resolve_source};
+use shepherd_media_core::{Item, PlatformInfo, resolve_source};
 
-use crate::platform;
-use crate::posters::PosterCache;
-use crate::ui::theme;
+use crate::theme;
 
 /// Persistent state for the grid's custom drag-to-scroll. egui's built-in
 /// `drag_to_scroll` is delta-based and resets to the top on the first press
 /// after the user releases a stationary finger (because the press-frame's
 /// `pointer.delta()` carries the jump from the previous touch's release
-/// position to the new touch's start). The `touch_slider` in `playback.rs`
+/// position to the new touch's start). The `touch_slider` in the playback view
 /// hits the same delta bug and works around it by reading absolute pointer
 /// positions; we do the same here.
 #[derive(Default)]
@@ -42,18 +44,21 @@ struct DragStart {
 }
 
 /// Draw the poster grid for `items` (already filtered to the currently visible
-/// subset).  `focused` is an index into `items`.
+/// subset). `focused` is an index into `items`; the caller moves it in response
+/// to input. `get_poster` returns the (already-fetched) encoded poster bytes
+/// for an item id, if available. Returns the id of an item the user activated
+/// (clicked, and which is playable on this platform).
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &mut egui::Ui,
     scroll: &mut ScrollState,
-    session: &mut Session,
+    title: &str,
     items: &[Item],
     focused: &mut usize,
     columns: &mut usize,
-    posters: &PosterCache,
-) {
+    get_poster: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Option<String> {
     let mut to_select: Option<String> = None;
-    let library_title = session.library().title.clone();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(theme::BG).inner_margin(48.0))
@@ -62,10 +67,10 @@ pub fn draw(
             let target_tile_width = 220.0;
             *columns = ((available / (target_tile_width + 16.0)).floor() as usize).max(1);
 
-            ui.heading(library_title);
+            ui.heading(title);
             ui.add_space(16.0);
 
-            let info = platform::current();
+            let info = PlatformInfo::current();
 
             // Drag-to-scroll covers the remaining vertical space. `Sense::drag`
             // (not click_and_drag) coexists with the tiles' `Sense::click`:
@@ -100,7 +105,7 @@ pub fn draw(
                         for (idx, item) in items.iter().enumerate() {
                             let playable = resolve_source(item, &info).is_some();
                             let is_focused = idx == *focused;
-                            let bytes = posters.get(&item.id).cloned();
+                            let bytes = get_poster(&item.id);
                             let response = draw_tile(
                                 ui,
                                 &item.id,
@@ -129,9 +134,7 @@ pub fn draw(
             scroll.offset = output.state.offset.y;
         });
 
-    if let Some(id) = to_select {
-        session.handle_input(shepherd_media_core::SessionInput::SelectItem(id));
-    }
+    to_select
 }
 
 /// Update `scroll` from this frame's drag input and return the offset to
@@ -296,4 +299,52 @@ fn initials(title: &str) -> String {
         .take(3)
         .collect::<String>()
         .to_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initials_takes_first_letter_of_up_to_three_words_uppercased() {
+        assert_eq!(initials("The Matrix Reloaded"), "TMR");
+        assert_eq!(initials("lower case title"), "LCT");
+    }
+
+    #[test]
+    fn initials_caps_at_three_words_and_ignores_extra_whitespace() {
+        assert_eq!(initials("a b c d e"), "ABC");
+        assert_eq!(initials("  spaced   out  "), "SO");
+    }
+
+    #[test]
+    fn initials_is_empty_for_a_blank_title() {
+        assert_eq!(initials(""), "");
+        assert_eq!(initials("   "), "");
+    }
+
+    #[test]
+    fn fit_centered_pillarboxes_a_wide_source_without_squashing() {
+        // Square slot, 16:9 (wide) source: the fit is limited by width, so it
+        // spans the full width and is proportionally shorter — a 16:9 YouTube
+        // thumbnail keeps its aspect instead of being squashed to a square.
+        let slot = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let fit = fit_centered(slot, egui::vec2(16.0, 9.0));
+        assert!((fit.width() - 200.0).abs() < 1e-3);
+        assert!((fit.height() - 112.5).abs() < 1e-3); // 200 * 9/16
+        // Centered in, and fully contained by, the slot.
+        assert!((fit.center().x - slot.center().x).abs() < 1e-3);
+        assert!((fit.center().y - slot.center().y).abs() < 1e-3);
+        assert!(fit.min.y >= slot.min.y - 1e-3 && fit.max.y <= slot.max.y + 1e-3);
+    }
+
+    #[test]
+    fn fit_centered_letterboxes_a_tall_source() {
+        // Wide slot, portrait source: the fit is limited by height.
+        let slot = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let fit = fit_centered(slot, egui::vec2(9.0, 16.0));
+        assert!((fit.height() - 100.0).abs() < 1e-3);
+        assert!((fit.width() - 56.25).abs() < 1e-3); // 100 * 9/16
+        assert!(fit.min.x >= slot.min.x - 1e-3 && fit.max.x <= slot.max.x + 1e-3);
+    }
 }

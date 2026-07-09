@@ -134,9 +134,37 @@ EXIT reason=user
 }
 
 #[test]
-fn player_error_during_playback_returns_to_menu_with_error() {
+fn transient_player_error_retries_and_recovers() {
+    // A single error during playback is treated as transient: the item is
+    // restarted (WARNING playback-retry) and playback continues, so a later EOF
+    // returns to the menu normally rather than as an error.
     let captured = capture(|session, player| {
         session.handle_input(SessionInput::SelectItem("direct-http".into()));
+        player.queue(PlayerEvent::Error("flaky connection".into()));
+        session.tick();
+        player.queue(PlayerEvent::EndOfFile);
+        session.tick();
+        session.handle_input(SessionInput::ExitSession);
+    });
+
+    let golden = "\
+READY library_id=valid-mixed item_count=5
+STARTED_PLAYBACK item=direct-http kind=video source=direct-http
+WARNING item=direct-http reason=playback-retry
+RETURNED_TO_MENU item=direct-http reason=eof
+EXIT reason=user
+";
+    assert_eq!(captured, golden);
+}
+
+#[test]
+fn player_error_returns_to_menu_after_retries_exhausted() {
+    // Errors that keep recurring exhaust the retry budget (MAX_PLAY_RETRIES = 2,
+    // so two WARNING retries) and then surface as an ERROR + return to menu.
+    let captured = capture(|session, player| {
+        session.handle_input(SessionInput::SelectItem("direct-http".into()));
+        player.queue(PlayerEvent::Error("backend exploded".into()));
+        player.queue(PlayerEvent::Error("backend exploded".into()));
         player.queue(PlayerEvent::Error("backend exploded".into()));
         session.tick();
         session.handle_input(SessionInput::ExitSession);
@@ -145,6 +173,8 @@ fn player_error_during_playback_returns_to_menu_with_error() {
     let golden = "\
 READY library_id=valid-mixed item_count=5
 STARTED_PLAYBACK item=direct-http kind=video source=direct-http
+WARNING item=direct-http reason=playback-retry
+WARNING item=direct-http reason=playback-retry
 ERROR item=direct-http message=backend%20exploded
 RETURNED_TO_MENU item=direct-http reason=error
 EXIT reason=user
