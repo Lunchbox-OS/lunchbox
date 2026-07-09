@@ -223,7 +223,9 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
 - **Shared admin CLI (`shepherd-admin`).** Refactored the repo-bound admin tasks
   so they run from both the source tree and a `.deb` install:
   - New `scripts/lib/admin.sh` holds the repo-independent tasks: yt-dlp
-    (moved out of `deps.sh`), Flathub `apps install steam|chrome`, and
+    (moved out of `deps.sh`), `apps install steam|chrome` (Steam via
+    Canonical's snap — what `type="steam"` drives — Chrome via the Flathub
+    flatpak), and
     `setup-user` (config + all group memberships, reusing `install_config` /
     a new shared `add_user_to_groups`). `harden.sh` / `bluetooth.sh` were
     already repo-independent.

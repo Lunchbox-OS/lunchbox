@@ -63,7 +63,7 @@ Commands:
     setup-user USER   Deploy the example config and add USER to the groups
                       shepherd needs (input/video/bluetooth/shepherd-firewall)
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
-    apps install APP  Install an activity backend from Flathub (steam | chrome)
+    apps install APP  Install an activity backend (steam via snap, chrome via Flathub)
     harden <cmd>      Apply/revert/status kiosk hardening for a user
     bluetooth clear   Force-unpair a user's BLE admin and reset to unclaimed
 

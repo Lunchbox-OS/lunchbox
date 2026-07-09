@@ -110,15 +110,30 @@ ensure_flathub() {
     flatpak remote-add --if-not-exists flathub "$FLATHUB_REMOTE_URL"
 }
 
-# Install one of the supported Flathub apps, system-wide, so the kiosk user can
-# launch it. Only the apps shepherd's example config references are supported;
-# add rows here as needed.
+# Install a supported activity backend, using whichever packaging shepherd's
+# integration actually expects for it. These are NOT both flatpaks: the
+# type="steam" adapter drives Canonical's Steam *snap* (config.example.toml
+# documents `snap install steam`), while Chrome is wrapped as the Flathub
+# flatpak `com.google.Chrome`. Add rows here as new backends are supported.
 apps_install() {
     local app="${1:-}"
-    local id
     case "$app" in
-        steam)  id="com.valvesoftware.Steam" ;;
-        chrome) id="com.google.Chrome" ;;
+        steam)
+            require_root
+            require_command snap
+            info "Installing the Steam snap (snap install steam)..."
+            snap install steam
+            success "Installed the Steam snap"
+            info "Launch Steam once and log in before using type=\"steam\" entries."
+            ;;
+        chrome)
+            require_root
+            ensure_flathub
+            info "Installing com.google.Chrome from Flathub..."
+            flatpak install -y flathub com.google.Chrome
+            success "Installed com.google.Chrome"
+            info "Reference it with kind = \"flatpak\", app_id = \"com.google.Chrome\"."
+            ;;
         ""|help|-h|--help)
             apps_usage
             return 0
@@ -127,25 +142,18 @@ apps_install() {
             die "Unknown app '$app' (supported: steam, chrome)"
             ;;
     esac
-
-    require_root
-    ensure_flathub
-    info "Installing $id from Flathub (system-wide)..."
-    flatpak install -y flathub "$id"
-    success "Installed $id"
-    info "Reference it from an entry with kind = flatpak, app_id = \"$id\"."
 }
 
 apps_usage() {
     cat <<EOF
 Usage: shepherd-admin apps install <steam|chrome>
 
-Installs a supported activity backend from Flathub, system-wide (adds the
-Flathub remote first if missing). Then reference it from a config entry:
+Installs a supported activity backend with the packaging shepherd's integration
+expects (they differ):
 
-    [entries.kind]
-    type = "flatpak"
-    app_id = "com.valvesoftware.Steam"   # or com.google.Chrome
+    steam    Canonical's Steam snap (drives type = "steam" entries). Launch it
+             and log in once before those entries will work.
+    chrome   com.google.Chrome from Flathub (for kind = "flatpak" entries).
 EOF
 }
 

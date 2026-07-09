@@ -52,7 +52,7 @@ Commands:
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
     version     Show or bump the project version
     package     Build distributable packages (.deb)
-    apps        Install activity backends from Flathub (steam, chrome)
+    apps        Install activity backends (steam via snap, chrome via Flathub)
     setup-user  Deploy config + add a user to shepherd's groups
 
 Note: the post-install admin tasks (setup-user, apps, harden, bluetooth,

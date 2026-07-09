@@ -41,7 +41,8 @@ build goes stale — so it lives in a venv you can refresh independently:
 sudo shepherd-admin yt-dlp install   # re-run periodically to update
 ```
 
-To install an activity backend from Flathub:
+To install an activity backend (Steam via Canonical's snap, Chrome via Flathub —
+matching what shepherd's `type = "steam"` and `kind = "flatpak"` adapters drive):
 
 ```sh
 sudo shepherd-admin apps install steam    # or: chrome
