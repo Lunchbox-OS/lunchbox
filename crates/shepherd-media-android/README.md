@@ -72,15 +72,21 @@ the full design and roadmap.
 - YouTube: a `youtube-playlist` source resolves into a browseable library
   (titles, thumbnails) and tapping an item plays it through libmpv, both via
   yt-dlp (bundled as `youtubedl-android`, called over JNI). Verified on hardware:
-  playlist + stream resolution and video playback work. Two requirements are
-  handled in `src/youtube.rs`: the `android_vr` player client (serves video
-  formats without a PO token; the default `android` client returns audio-only),
-  and an in-app refresh of the AAR's stale bundled yt-dlp to the latest release
-  on first launch (`refresh_ytdlp`). Stream + audio are resolved as separate
-  DASH tracks (`StreamUrls`) and muxed at playback via
-  `PlayerHandle::set_external_audio`. The ~3s stream resolution is prefetched in
-  the background once focus settles on a grid item (cached by watch URL), so
-  tapping play starts almost immediately instead of waiting for yt-dlp.
+  playlist + stream resolution and video playback work, at the per-library
+  quality. Two requirements are handled in `src/youtube.rs`: the player clients
+  — `android_vr` serves the DASH ladder without a PO token, and `android` is
+  listed alongside it so DRM-protected "full episode" uploads (which `android_vr`
+  reports as "not available") fall back to the legacy progressive itag 18; this
+  client selection is shared with the Linux build as
+  `shepherd_media_core::YOUTUBE_EXTRACTOR_ARGS`. The other is an in-app refresh
+  of the AAR's stale bundled yt-dlp to the latest release on first launch
+  (`refresh_ytdlp`). Stream + audio are resolved as separate DASH tracks
+  (`StreamUrls`) and muxed at playback via `PlayerHandle::set_external_audio`. A
+  transient stream error restarts the item a couple of times before giving up
+  (shared `RetryBudget`). To hide the ~3s resolve, stream URLs are prefetched in
+  the background (cached by watch URL): at launch every playlist is resolved,
+  then the leading videos of each; while browsing, the focused tile and its two
+  neighbours go first. Tapping play then reuses the cached resolution.
 - The cdylib cross-compiles for `aarch64-linux-android` and exports
   `android_main` / `ANativeActivity_onCreate`.
 
@@ -92,8 +98,6 @@ the full design and roadmap.
   storage-path bridge is wired (see the `storage` module); a SAF **tree** picker
   for USB-OTG / cloud sources is still open — the single-document SAF picker was
   rejected because it can't resolve an offline library's sibling media.
-- Per-library quality applied to the libmpv `ytdl-format` (currently a single
-  default is set at startup).
 
 ## Vendored libmpv
 
