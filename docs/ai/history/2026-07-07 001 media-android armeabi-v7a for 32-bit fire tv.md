@@ -489,3 +489,23 @@ for Started vs Error): the Bill Nye "full episode" that resolved to `CLOSED`
 non-DRM); a normal video still resolves to 720p DASH. host `yt-dlp` confirms the
 DRM video returns itag 18 with the two clients and the default-client resolve
 errors.
+
+## Follow-up: DRM fallback on the caching path + share the client across all paths
+
+The Linux video-file cache (`download_youtube`) ran `yt-dlp --format …` with no
+`--extractor-args`, so it hit the same wall — a DRM upload wouldn't cache.
+
+The `android_vr,android` client was by now written in three places (Android
+resolve, core mpv `ytdl-raw-options`, and — needed — the Linux cache). Hoisted it
+into one shared constant `shepherd_media_core::YOUTUBE_EXTRACTOR_ARGS` (new
+`core::youtube` module; core is the lowest layer all three depend on) and pointed
+all three at it. The two CLI callers pass it as `--extractor-args <value>`; the
+mpv caller still length-prefix quotes it for `ytdl-raw-options`. The two
+`ytdl-format` strings stay separate on purpose — Android prefers H.264
+(`vcodec^=avc1`) for weak-TV hardware decode, Linux is codec-agnostic — and both
+already carry the muxed fallback, so only the client needed sharing.
+
+Verified the cache path: the exact `download_youtube` command (bounded to 3s)
+on the Bill Nye "full episode" produced an `h264 640x360 + aac` file (itag 18),
+where before it would have failed "not available". Core/Linux/Android all build,
+clippy clean, tests pass.

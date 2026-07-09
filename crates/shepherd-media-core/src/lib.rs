@@ -12,6 +12,7 @@ pub mod resolver;
 pub mod schema;
 pub mod session;
 pub mod uri;
+pub mod youtube;
 pub mod youtube_playlist;
 
 pub use library::{
@@ -23,6 +24,7 @@ pub use protocol::{ProtocolEmitter, ProtocolEvent, UriClass};
 pub use resolver::{PlatformInfo, resolve_source};
 pub use session::{Session, SessionInput, SessionState};
 pub use uri::DrmRejection;
+pub use youtube::YOUTUBE_EXTRACTOR_ARGS;
 pub use youtube_playlist::{
     PlaylistInfo, YoutubePlaylistEntry, build_library_from_entries, is_youtube_playlist_url,
     parse_flat_playlist,

@@ -471,6 +471,10 @@ fn download_youtube(
         .args([
             "--quiet",
             "--no-warnings",
+            // Match playback's player clients so DRM-protected uploads download
+            // their progressive itag-18 fallback instead of failing.
+            "--extractor-args",
+            shepherd_media_core::YOUTUBE_EXTRACTOR_ARGS,
             "--format",
             ytdl_format,
             "--output",
