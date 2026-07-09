@@ -181,17 +181,42 @@ class ShepherdConnection private constructor(
             var currentDelayMs = INITIAL_POLL_DELAY_MS
             var totalReads = 0
             var emptyReads = 0
+            var consecutiveFailures = 0
             while (currentCoroutineContext().isActive && ready.value) {
                 val bytes = try {
                     peripheral.read(char)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    // Disconnect, MTU change mid-read, etc. Break out
-                    // to the outer loop to re-await ready.
-                    Log.w(TAG, "$label read failed after $totalReads reads ($emptyReads empty)", e)
-                    break
+                    // Disconnect, MTU change mid-read, etc. A bare `break`
+                    // here used to fall straight back to the outer
+                    // `ready.first { it }`, which returns *instantly* while
+                    // `ready` is still true — so a Connected-but-unreadable
+                    // link (kable reports Connected while every read throws)
+                    // spun this loop at millions of iterations/sec, pegging
+                    // the (main-thread) dispatcher and starving the very
+                    // state collector that would flip `ready` false. Never
+                    // hot-loop: back off between failures (which also yields
+                    // the dispatcher), and after enough consecutive failures
+                    // force a real disconnect so the reconnect loop rebuilds
+                    // the session instead of retrying a dead link forever.
+                    consecutiveFailures++
+                    Log.w(
+                        TAG,
+                        "$label read failed after $totalReads reads " +
+                            "($emptyReads empty; $consecutiveFailures consecutive)",
+                        e,
+                    )
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
+                        Log.w(TAG, "$label: forcing reconnect after $consecutiveFailures consecutive read failures")
+                        scope.launch { runCatching { peripheral.disconnect() } }
+                        break
+                    }
+                    delay(currentDelayMs.toLong())
+                    currentDelayMs = (currentDelayMs * 2).coerceAtMost(MAX_POLL_DELAY_MS)
+                    continue
                 }
+                consecutiveFailures = 0
                 totalReads++
 
                 if (bytes.isNotEmpty()) {
@@ -379,6 +404,18 @@ class ShepherdConnection private constructor(
          * the screen and nothing is happening server-side.
          */
         private const val MAX_POLL_DELAY_MS: Int = 300
+
+        /**
+         * Consecutive failed reads before the poll loop stops retrying
+         * and forces a real disconnect so the reconnect loop can rebuild
+         * the session. Guards against a *Connected-but-unreadable* link —
+         * kable reporting [State.Connected] while every `read` throws
+         * `NotConnectedException` — which the reader must not sit on
+         * forever. With the adaptive back-off this is ~1.5 s of retries
+         * before giving up, comfortably longer than any transient
+         * mid-read hiccup (an MTU renegotiation, a single dropped PDU).
+         */
+        private const val MAX_CONSECUTIVE_READ_FAILURES: Int = 5
 
         fun fromAdvertisement(advertisement: Advertisement, scope: CoroutineScope): ShepherdConnection =
             ShepherdConnection(
