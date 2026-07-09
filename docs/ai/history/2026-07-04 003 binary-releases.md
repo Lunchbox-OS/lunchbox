@@ -215,6 +215,13 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
   breakage is caught before a release tag.
 - **`INSTALL.md` section** documenting install-from-`.deb` and the required
   post-install `shepherd install config --user` / `groups --user` steps.
+- **yt-dlp guidance.** `yt-dlp` isn't apt-installed; the from-source path builds
+  it into a venv at `/opt/shepherd/ytdlp-venv` via `deps install run`
+  (`install_ytdlp`), which a `.deb` user never runs. The `.deb` only Depends on
+  `python3-venv`. The postinst now prints the venv+pip+symlink commands (paths
+  injected from `deps.sh`'s `YTDLP_VENV`/`YTDLP_LINK` so they can't drift), and
+  `INSTALL.md` documents it. Only YouTube libraries need it; local mpv playback
+  doesn't.
 - **`shepherd-media-android` (#72)** — added as a second `apk` matrix row. Its
   Gradle `assembleRelease` cross-compiles a Rust cdylib via cargo-ndk for both
   packaged ABIs (arm64-v8a + armeabi-v7a), so the row carries a `rust: true`

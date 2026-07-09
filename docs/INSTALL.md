@@ -39,6 +39,20 @@ set for your version. A media-library example ships alongside at
 `/usr/share/shepherd/movies-library.example.toml`; copy it to
 `~kiosk/.config/shepherd/movies.toml` if you use the bundled media entries.
 
+If you use YouTube media libraries, also install `yt-dlp` into its own
+virtualenv and link it onto `PATH`. shepherd deliberately does not use the apt
+`yt-dlp` — YouTube changes formats often and the archived build goes stale — so
+the package depends on `python3-venv` but leaves the venv to you:
+
+```sh
+sudo python3 -m venv /opt/shepherd/ytdlp-venv
+sudo /opt/shepherd/ytdlp-venv/bin/pip install -U yt-dlp
+sudo ln -sf /opt/shepherd/ytdlp-venv/bin/yt-dlp /usr/local/bin/yt-dlp
+```
+
+Re-run the last two commands periodically to keep `yt-dlp` current. (The
+from-source path does this via `shepherd deps install run`.)
+
 Then have `kiosk` log out and back in (so the new group memberships take
 effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is
 still optional — see [below](#kiosk-hardening-optional).

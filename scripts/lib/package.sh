@@ -21,6 +21,10 @@ source "$PACKAGE_LIB_DIR/build.sh"
 source "$PACKAGE_LIB_DIR/install.sh"
 # shellcheck source=version.sh
 source "$PACKAGE_LIB_DIR/version.sh"
+# shellcheck source=deps.sh
+# Sourced for YTDLP_VENV / YTDLP_LINK, injected into the postinst guidance so the
+# yt-dlp setup path can't drift from `shepherd deps install run` (install_ytdlp).
+source "$PACKAGE_LIB_DIR/deps.sh"
 
 # System package conventions: a distro package installs under /usr, not the
 # /usr/local default used by a manual `shepherd install`.
@@ -203,6 +207,8 @@ EOF
         printf 'group=%s\n' "$FIREWALL_GROUP"
         printf 'groups=%s\n' "$all_groups"
         printf 'examples=%s\n' "$PACKAGE_EXAMPLE_DIR"
+        printf 'ytdlp_venv=%s\n' "$YTDLP_VENV"
+        printf 'ytdlp_link=%s\n' "$YTDLP_LINK"
         cat <<'EOF'
 if [ "$1" = "configure" ]; then
     if ! getent group "$group" >/dev/null 2>&1; then
@@ -222,6 +228,13 @@ shepherd-launcher installed. To set up a kiosk user (replace USER):
 
   install -Dm644 -o USER -g USER $examples/config.example.toml ~USER/.config/shepherd/config.toml
   usermod -aG $groups USER
+
+For YouTube media libraries, install yt-dlp into its own venv (kept current
+independently of apt, whose build YouTube quickly breaks) and link it on PATH:
+
+  python3 -m venv $ytdlp_venv
+  $ytdlp_venv/bin/pip install -U yt-dlp
+  ln -sf $ytdlp_venv/bin/yt-dlp $ytdlp_link
 
 Then have USER log out and back in and pick the "Shepherd Kiosk" session.
 A media-library example is at $examples/movies-library.example.toml.
