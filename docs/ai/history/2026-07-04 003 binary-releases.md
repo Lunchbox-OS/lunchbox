@@ -197,6 +197,16 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
 | `SHEPHERD_KEY_ALIAS` | `apk` | signing key alias |
 | `SHEPHERD_KEY_PASSWORD` | `apk` | signing key password |
 
+## Done in follow-up passes (cont.)
+
+- **`workflow_dispatch` dry run** on `release.yml`. `release.yml` otherwise only
+  runs on a `v*` tag, so its first execution would be a production release. A
+  manual trigger with a `publish` input (default off) builds the `.deb` + both
+  signed `.apk`s and runs the collect/checksum step — exercising signing, the
+  media armeabi-v7a cargo-ndk cross-compile, and the artifacts round-trip —
+  without creating a Forgejo release. The guard's tag==VERSION check is skipped
+  for dispatch; the create-release step is gated on `push` or `publish`.
+
 ## Open follow-ups
 
 - **arm64 `.deb`** (#82 follow-up).

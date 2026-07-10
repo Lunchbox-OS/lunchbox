@@ -22,6 +22,17 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual trigger for a dry run: builds the .deb + both signed .apks and
+  # collects them (exercising signing, the media armed cargo-ndk cross-compile,
+  # and the artifacts backend) WITHOUT creating a Forgejo release — unless you
+  # tick `publish`. Run it from the branch to shake the pipeline out before
+  # cutting a real vX.Y.Z tag.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the Forgejo release + upload assets (off = dry run)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,7 +49,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only meaningful for a tag push; a manual dry run has no vX.Y.Z ref.
       - name: Tag matches VERSION
+        if: github.event_name == 'push'
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
           file_version="$(./scripts/shepherd version)"
@@ -214,7 +227,7 @@ jobs:
   # publish: collect all artifacts, checksum, and create the Forgejo release.
   # --------------------------------------------------------------------------
   publish:
-    name: Publish Forgejo release
+    name: Publish / collect
     needs: [deb, apk]
     runs-on: ubuntu-latest
     steps:
@@ -228,6 +241,8 @@ jobs:
         with:
           path: artifacts
 
+      # Always runs — in a dry run this still proves the artifacts round-trip
+      # (upload in the build jobs, download here) and the checksum manifest.
       - name: Collect assets and checksum
         run: |
           mkdir -p release
@@ -236,7 +251,14 @@ jobs:
           echo "Release assets:"
           ls -l release
 
+      - name: Dry run — skip release creation
+        if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
+        run: |
+          echo "Dry run: built + collected the assets above but did NOT create a"
+          echo "Forgejo release. Re-run with 'publish' ticked, or push a vX.Y.Z tag."
+
       - name: Create release and upload assets
+        if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
           SERVER_URL: ${{ github.server_url }}
