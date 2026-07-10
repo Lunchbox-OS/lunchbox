@@ -64,6 +64,7 @@ Commands:
                       shepherd needs (input/video/bluetooth/shepherd-firewall)
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
     apps install APP  Install an activity backend (steam via snap, chrome via Flathub)
+    power-key <cmd>   Map the power button to suspend instead of shutdown
     harden <cmd>      Apply/revert/status kiosk hardening for a user
     bluetooth clear   Force-unpair a user's BLE admin and reset to unclaimed
 
@@ -95,6 +96,9 @@ main() {
             ;;
         apps)
             apps_main "$@"
+            ;;
+        power-key)
+            power_key_main "$@"
             ;;
         harden)
             harden_main "$@"

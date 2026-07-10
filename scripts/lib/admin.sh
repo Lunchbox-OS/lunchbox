@@ -215,3 +215,101 @@ setup_user() {
     info "Have $user log out and back in so the new group memberships apply,"
     info "then pick the \"Shepherd Kiosk\" session at login."
 }
+
+# ---------------------------------------------------------------------------
+# Power-button behaviour
+# ---------------------------------------------------------------------------
+
+# systemd-logind drop-in that maps a short press of the hardware power button.
+# The distro default is `poweroff`; a kiosk usually wants `suspend` (tap to
+# sleep). A long press (HandlePowerKeyLongPress, left at the default) still
+# powers off. shepherdd already listens for logind's PrepareForSleep to draw the
+# suspend cover, so the device wakes back into the session cleanly.
+POWER_KEY_DROPIN="/etc/systemd/logind.conf.d/10-shepherd-power-key.conf"
+
+# Restart logind so a logind.conf change takes effect. Best-effort; on modern
+# systemd active graphical sessions survive the restart.
+_reload_logind() {
+    if command_exists systemctl; then
+        info "Restarting systemd-logind so the change takes effect..."
+        systemctl restart systemd-logind 2>/dev/null \
+            || warn "Could not restart systemd-logind; reboot for the change to apply"
+    else
+        warn "systemctl not found; the change applies after a reboot"
+    fi
+}
+
+# Map the power button to suspend instead of shutdown.
+power_key_suspend() {
+    require_root
+    ensure_dir "$(dirname "$POWER_KEY_DROPIN")" 0755
+    cat > "$POWER_KEY_DROPIN" <<'EOF'
+# Installed by `shepherd-admin power-key suspend`.
+# Tap the hardware power button to suspend instead of powering off. A long press
+# (HandlePowerKeyLongPress, left at the distro default) still powers off.
+[Login]
+HandlePowerKey=suspend
+EOF
+    chmod 0644 "$POWER_KEY_DROPIN"
+    success "Power button now suspends on a short press ($POWER_KEY_DROPIN)"
+    _reload_logind
+}
+
+# Remove the override, restoring the distro default (usually poweroff).
+power_key_default() {
+    require_root
+    if [[ -f "$POWER_KEY_DROPIN" ]]; then
+        rm -f "$POWER_KEY_DROPIN"
+        success "Removed $POWER_KEY_DROPIN; power button reverts to the distro default"
+        _reload_logind
+    else
+        info "No shepherd power-key override present ($POWER_KEY_DROPIN); nothing to do"
+    fi
+}
+
+# Show the current override + what logind reports.
+power_key_status() {
+    if [[ -f "$POWER_KEY_DROPIN" ]]; then
+        echo "shepherd power-key override: present ($POWER_KEY_DROPIN)"
+        grep -E '^HandlePowerKey' "$POWER_KEY_DROPIN" 2>/dev/null || true
+    else
+        echo "shepherd power-key override: not installed (distro default, usually poweroff)"
+    fi
+    if command_exists loginctl; then
+        loginctl show-manager -p HandlePowerKey 2>/dev/null || true
+    fi
+}
+
+# Dispatch for `shepherd-admin power-key <suspend|default|status>`.
+power_key_main() {
+    local subcmd="${1:-}"
+    shift || true
+    case "$subcmd" in
+        suspend)
+            power_key_suspend
+            ;;
+        default|revert)
+            power_key_default
+            ;;
+        status)
+            power_key_status
+            ;;
+        ""|help|-h|--help)
+            cat <<EOF
+Usage: shepherd-admin power-key <suspend|default|status>
+
+Configures how a short press of the hardware power button behaves, via a
+systemd-logind drop-in ($POWER_KEY_DROPIN).
+
+Commands:
+    suspend   Tap power to sleep instead of powering off (a long press still
+              powers off).
+    default   Remove the override; restore the distro default (usually poweroff).
+    status    Show whether the override is installed and what logind reports.
+EOF
+            ;;
+        *)
+            die "Unknown power-key command: $subcmd (try: shepherd-admin power-key help)"
+            ;;
+    esac
+}

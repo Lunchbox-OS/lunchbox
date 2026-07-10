@@ -48,6 +48,13 @@ matching what shepherd's `type = "steam"` and `kind = "flatpak"` adapters drive)
 sudo shepherd-admin apps install steam    # or: chrome
 ```
 
+To make the hardware power button sleep the device instead of shutting it down
+(a long press still powers off):
+
+```sh
+sudo shepherd-admin power-key suspend
+```
+
 `shepherd-admin` also exposes `harden` (kiosk lockdown) and `bluetooth clear`
 (reset a user to unclaimed); run `shepherd-admin --help` for the full list.
 

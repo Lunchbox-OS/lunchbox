@@ -53,11 +53,12 @@ Commands:
     version     Show or bump the project version
     package     Build distributable packages (.deb)
     apps        Install activity backends (steam via snap, chrome via Flathub)
+    power-key   Map the power button to suspend instead of shutdown
     setup-user  Deploy config + add a user to shepherd's groups
 
-Note: the post-install admin tasks (setup-user, apps, harden, bluetooth,
-yt-dlp) are also available on an installed system as 'shepherd-admin', which
-the .deb ships without needing this source tree.
+Note: the post-install admin tasks (setup-user, apps, power-key, harden,
+bluetooth, yt-dlp) are also available on an installed system as
+'shepherd-admin', which the .deb ships without needing this source tree.
 
 Development:
     shepherd deps install dev     Install all development dependencies
@@ -157,6 +158,9 @@ EOF
             ;;
         apps)
             apps_main "$@"
+            ;;
+        power-key)
+            power_key_main "$@"
             ;;
         setup-user)
             setup_user "$@"
