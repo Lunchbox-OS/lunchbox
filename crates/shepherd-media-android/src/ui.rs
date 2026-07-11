@@ -1605,8 +1605,8 @@ fn tv_visuals() -> egui::Visuals {
     let w = &mut visuals.widgets;
     w.active.bg_fill = focus;
     w.active.weak_bg_fill = focus;
-    w.active.bg_stroke = egui::Stroke::new(3.0, egui::Color32::WHITE);
-    w.active.fg_stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+    w.active.bg_stroke = egui::Stroke::new(3.0_f32, egui::Color32::WHITE);
+    w.active.fg_stroke = egui::Stroke::new(2.0_f32, egui::Color32::WHITE);
     w.active.expansion = 3.0;
     visuals
 }
