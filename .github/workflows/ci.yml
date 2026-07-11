@@ -331,45 +331,11 @@ jobs:
               "
           '
 
-  android-portability:
-    name: Android portability (shepherd-media-core)
-    needs: images
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.images.outputs.base-ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-
-      # cargo-ndk and the Android Rust targets are baked into the *android*
-      # image, but this portability check runs on the base image (it only needs
-      # `cargo check`, no linker/NDK), so add the one target it needs here.
-      - name: Add aarch64-linux-android target
-        run: rustup target add aarch64-linux-android
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-android-
-
-      # We `cargo check` rather than `cargo build` because we only need to
-      # verify that shepherd-media-core's dependencies and code compile for
-      # the Android target — we don't need an Android linker. This job exists
-      # to fail loudly if a Linux-specific dep gets added to the core.
-      - name: Check shepherd-media-core for aarch64-linux-android
-        run: |
-          cargo check \
-            --target aarch64-linux-android \
-            --no-default-features \
-            -p shepherd-media-core
+  # (Removed: the `android-portability` job cargo-checked shepherd-media-core
+  # for aarch64-linux-android with --no-default-features. That's now redundant:
+  # `android-media` below builds shepherd-media-android, which depends on core
+  # with `default-features = false` for the same target — a strict superset that
+  # would catch any Linux-specific dep added to the core.)
 
   android-companion:
     name: Android companion (unit tests)
