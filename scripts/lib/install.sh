@@ -156,10 +156,13 @@ install_config() {
     fi
     
     validate_user "$user"
-    
+
+    # Example configs live at the repo root in a source checkout and under
+    # /usr/share/shepherd on a packaged install; get_data_dir picks the right
+    # one so `shepherd-admin setup-user` works without a source tree.
     local repo_root
-    repo_root="$(get_repo_root)"
-    
+    repo_root="$(get_data_dir)"
+
     # Default source is the example config
     if [[ -z "$source_config" ]]; then
         source_config="$repo_root/config.example.toml"
@@ -254,25 +257,23 @@ SHEPHERD_REQUIRED_GROUPS=(
     "bluetooth"
 )
 
-# Add the target user to all groups required by shepherd-launcher.
-# Idempotent: skips any group the user is already in.
-install_user_groups() {
-    local user="${1:-}"
-
-    if [[ -z "$user" ]]; then
-        die "Usage: shepherd install groups --user USER"
-    fi
-
-    require_root
-    validate_user "$user"
+# Add $user to each named group, skipping groups that don't exist on this
+# system or that the user already belongs to. Shared by install_user_groups
+# (from-source `install all`) and setup_user (shepherd-admin, .deb path) so the
+# membership logic lives in one place.
+add_user_to_groups() {
+    local user="$1"
+    shift
 
     local current_groups
     current_groups="$(id -nG "$user")"
 
     local changed=false
-    for group in "${SHEPHERD_REQUIRED_GROUPS[@]}"; do
+    local group
+    for group in "$@"; do
         # Skip groups that don't exist on this system. We don't create
-        # them — they're expected to come from the distro.
+        # them — they're expected to come from the distro (or, for
+        # shepherd-firewall, from install/packaging).
         if ! getent group "$group" >/dev/null 2>&1; then
             warn "Group '$group' does not exist on this system; skipping"
             continue
@@ -291,11 +292,24 @@ install_user_groups() {
     done
 
     if [[ "$changed" == "true" ]]; then
-        success "Updated group memberships for $user"
         info "Group changes take effect on the user's next login."
-    else
-        success "User '$user' already has all required group memberships"
     fi
+}
+
+# Add the target user to all groups required by shepherd-launcher.
+# Idempotent: skips any group the user is already in.
+install_user_groups() {
+    local user="${1:-}"
+
+    if [[ -z "$user" ]]; then
+        die "Usage: shepherd install groups --user USER"
+    fi
+
+    require_root
+    validate_user "$user"
+
+    add_user_to_groups "$user" "${SHEPHERD_REQUIRED_GROUPS[@]}"
+    success "Updated group memberships for $user"
 }
 
 # Install the udev rules shepherd-launcher needs.
@@ -325,6 +339,10 @@ install_udev() {
 
     # Reload + apply only on a real (non-packaging) install. Under DESTDIR
     # these would touch the build host, which is wrong for packaging.
+    #
+    # NOTE: the .deb runs these same steps from its generated postinst instead
+    # (scripts/lib/package.sh, _package_write_control). If you change the
+    # udev reload/trigger here, mirror it there.
     if [[ -z "$destdir" ]]; then
         if command -v udevadm >/dev/null 2>&1; then
             info "Reloading udev rules so the new rule takes effect"
@@ -389,6 +407,10 @@ install_firewall() {
     # Group + user membership + polkit reload only on a real (non-packaging)
     # install. Under DESTDIR these would mutate the build host and the
     # resulting package, which is wrong.
+    #
+    # NOTE: the .deb runs the group-create + polkit-reload from its generated
+    # postinst instead (scripts/lib/package.sh, _package_write_control), and
+    # emits the per-user usermod as printed guidance. Keep them in sync.
     if [[ -z "$destdir" ]]; then
         if ! getent group "$FIREWALL_GROUP" >/dev/null; then
             info "Creating system group: $FIREWALL_GROUP"
@@ -414,6 +436,27 @@ install_firewall() {
     success "Firewall helper installed"
 }
 
+# Install the system-wide components: everything that is host-global and
+# DESTDIR-safe. This is the single source of truth for "what a system install
+# places" — `install_all` (from-source) and `package_deb` (.deb staging, in
+# scripts/lib/package.sh) both call it, so a new system component is added in
+# exactly one place. The per-user steps (config, groups) are deliberately NOT
+# here: install_all appends them, and the package leaves them to the admin.
+#
+# Args:
+#   $1 -- install prefix (default: $DEFAULT_PREFIX)
+#   $2 -- user to add to the shepherd-firewall group (empty under DESTDIR)
+install_system() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+    local firewall_user="${2:-}"
+
+    install_bins "$prefix"
+    install_firewall "$firewall_user" "true"
+    install_sway_config "$prefix"
+    install_desktop_entry "$prefix"
+    install_udev
+}
+
 # Install everything
 install_all() {
     local user="${1:-}"
@@ -429,13 +472,9 @@ install_all() {
 
     info "Installing shepherd-launcher (prefix: $prefix)..."
 
-    install_bins "$prefix"
-    install_firewall "$user" "true"
-    install_sway_config "$prefix"
-    install_desktop_entry "$prefix"
+    install_system "$prefix" "$user"
     install_config "$user" "" "$force"
     install_user_groups "$user"
-    install_udev
 
     success "Installation complete!"
     info ""

@@ -1070,7 +1070,7 @@ mod tests {
 
         // Process should have exited
         match handle.payload() {
-            HostHandlePayload::Linux { pid: _, .. } => {
+            HostHandlePayload::Linux { .. } => {
                 let _procs = host.processes.lock().unwrap();
                 // Process may or may not still be tracked depending on monitor timing
             }

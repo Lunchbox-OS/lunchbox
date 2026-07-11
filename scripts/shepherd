@@ -11,6 +11,8 @@ LIB_DIR="$SCRIPT_DIR/lib"
 # Source shared libraries
 # shellcheck source=lib/common.sh
 source "$LIB_DIR/common.sh"
+# shellcheck source=lib/admin.sh
+source "$LIB_DIR/admin.sh"
 # shellcheck source=lib/deps.sh
 source "$LIB_DIR/deps.sh"
 # shellcheck source=lib/build.sh
@@ -27,6 +29,8 @@ source "$LIB_DIR/config.sh"
 source "$LIB_DIR/bluetooth.sh"
 # shellcheck source=lib/version.sh
 source "$LIB_DIR/version.sh"
+# shellcheck source=lib/package.sh
+source "$LIB_DIR/package.sh"
 
 # Version: read from the canonical repo-root VERSION file (see lib/version.sh).
 VERSION="$(version_read)"
@@ -47,6 +51,14 @@ Commands:
     harden      User hardening for kiosk mode
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
     version     Show or bump the project version
+    package     Build distributable packages (.deb)
+    apps        Install activity backends (steam via snap, chrome via Flathub)
+    power-key   Map the power button to suspend instead of shutdown
+    setup-user  Deploy config + add a user to shepherd's groups
+
+Note: the post-install admin tasks (setup-user, apps, power-key, harden,
+bluetooth, yt-dlp) are also available on an installed system as
+'shepherd-admin', which the .deb ships without needing this source tree.
 
 Development:
     shepherd deps install dev     Install all development dependencies
@@ -56,6 +68,7 @@ Development:
 CI/Build:
     shepherd deps install build   Install build-only dependencies
     shepherd build --release      Build release binaries
+    shepherd package deb          Build the amd64 Debian package
 
 Runtime:
     shepherd deps install run     Install runtime dependencies only
@@ -139,6 +152,18 @@ EOF
             ;;
         version)
             version_main "$@"
+            ;;
+        package)
+            package_main "$@"
+            ;;
+        apps)
+            apps_main "$@"
+            ;;
+        power-key)
+            power_key_main "$@"
+            ;;
+        setup-user)
+            setup_user "$@"
             ;;
         -h|--help|help|"")
             usage

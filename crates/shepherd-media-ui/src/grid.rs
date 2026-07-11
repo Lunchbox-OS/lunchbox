@@ -225,7 +225,7 @@ fn draw_tile(
         painter.rect_stroke(
             rect,
             12.0,
-            egui::Stroke::new(4.0, theme::FOCUS_BORDER),
+            egui::Stroke::new(4.0_f32, theme::FOCUS_BORDER),
             egui::StrokeKind::Outside,
         );
     }

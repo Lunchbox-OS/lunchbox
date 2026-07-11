@@ -3,10 +3,78 @@
 `shepherd-launcher` can be installed on Linux with a modern Wayland compositor.
 It is currently developed and tested on Ubuntu 25.10.
 
-`shepherd-launcher` currently must be built from source. `./scripts/shepherd`
-can help set up your build environment and manage your installation.
+`shepherd-launcher` can be installed either from a prebuilt `.deb` (the quick
+path) or from source (for development). `./scripts/shepherd` can help set up
+your build environment and manage a source installation.
+
+## Installing from a `.deb`
+
+Prebuilt amd64 packages are attached to each
+[release](https://git.armeafamily.com/albert/shepherd-launcher/releases).
+Download the `.deb` for the version you want and install it with `apt`, which
+also pulls in the runtime dependencies (Sway, mpv, BlueZ, …):
+
+```sh
+sudo apt install ./shepherd-launcher_0.2.0_amd64.deb
+```
+
+The package installs the binaries, the privileged firewall helper and its
+polkit assets, the `/dev/uinput` udev rule, the Sway kiosk session, and the
+display-manager session entry. Its post-install step creates the
+`shepherd-firewall` system group and reloads udev/polkit.
+
+A distro package can't know which account is your kiosk user, so per-user setup
+is **not** done automatically. The package ships a `shepherd-admin` CLI for the
+post-install admin tasks (the same code the from-source `./scripts/shepherd`
+runs). Deploy the example config and add the user to shepherd's groups with one
+command (substitute your user for `kiosk`):
+
+```sh
+sudo shepherd-admin setup-user kiosk
+```
+
+If you use YouTube media libraries, also install `yt-dlp`. shepherd deliberately
+does not use the apt `yt-dlp` — YouTube changes formats often and the archived
+build goes stale — so it lives in a venv you can refresh independently:
+
+```sh
+sudo shepherd-admin yt-dlp install   # re-run periodically to update
+```
+
+To install an activity backend (Steam via Canonical's snap, Chrome via Flathub —
+matching what shepherd's `type = "steam"` and `kind = "flatpak"` adapters drive):
+
+```sh
+sudo shepherd-admin apps install steam    # or: chrome
+```
+
+`apps install steam` also connects the snap's `mount-observe` interface and
+permits unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`
+via `/etc/sysctl.d/90-shepherd-userns.conf`) — Steam's sandbox needs one, and
+Ubuntu 23.10+ restricts them by default, otherwise Steam fails with "Steam now
+requires user namespaces to be enabled." This relaxes that hardening
+system-wide; remove the drop-in and reboot to revert.
+
+To make the hardware power button sleep the device instead of shutting it down
+(a long press still powers off):
+
+```sh
+sudo shepherd-admin power-key suspend
+```
+
+`shepherd-admin` also exposes `harden` (kiosk lockdown) and `bluetooth clear`
+(reset a user to unclaimed); run `shepherd-admin --help` for the full list.
+
+Then have `kiosk` log out and back in (so the new group memberships take
+effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is
+still optional — see [below](#kiosk-hardening-optional).
+
+> The companion `.apk` is attached to the same release; sideload it with
+> `adb install shepherd-companion_0.2.0.apk`.
 
 ## Basic setup
+
+The following builds and installs a fully functional local kiosk from source.
 
 ```sh
 # 0. Install build dependencies

@@ -83,6 +83,19 @@ get_repo_root() {
     (cd "$script_dir/../.." && pwd)
 }
 
+# Directory holding shepherd's data files (the example configs). A source
+# checkout keeps them at the repo root; a packaged install (the .deb, driving
+# shepherd-admin) exports SHEPHERD_DATA_DIR=/usr/share/shepherd. Admin tasks that
+# read a data file use this instead of get_repo_root so they work in both
+# layouts — get_repo_root is meaningless once the scripts live under /usr/lib.
+get_data_dir() {
+    if [[ -n "${SHEPHERD_DATA_DIR:-}" ]]; then
+        printf '%s\n' "$SHEPHERD_DATA_DIR"
+    else
+        get_repo_root
+    fi
+}
+
 # Verify we're in the shepherd repository
 verify_repo() {
     local repo_root
