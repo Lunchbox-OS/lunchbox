@@ -109,11 +109,19 @@ jobs:
           api="${SERVER_URL}/api/v1/repos/${REPO}"
           auth="Authorization: token ${RELEASE_TOKEN}"
 
+          # Tags with a -prerelease suffix (e.g. v0.2.0-rc1) publish as a
+          # prerelease so they aren't shown as "latest" — this is how you cut a
+          # release candidate to test the real signed artifacts, then delete it.
+          case "${TAG#v}" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+
           # Create the release; if it already exists (a re-run), fetch it.
           code="$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST "${api}/releases" \
             -H "$auth" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg t "$TAG" \
-                    '{tag_name:$t, name:$t, draft:false, prerelease:false}')" || true)"
+            -d "$(jq -n --arg t "$TAG" --argjson pre "$prerelease" \
+                    '{tag_name:$t, name:$t, draft:false, prerelease:$pre}')" || true)"
           if [ "$code" = "201" ]; then
             id="$(jq -r '.id' /tmp/rel.json)"
           else
