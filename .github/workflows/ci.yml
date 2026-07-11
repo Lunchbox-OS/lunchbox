@@ -428,3 +428,18 @@ jobs:
           shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
           shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh
           shellcheck -e SC1091 run-dev
+
+  arch-neutral:
+    name: Arch neutrality
+    # Static guard: fails if an amd64/x86-specific literal creeps into the build
+    # & packaging path, which would mislabel or break non-amd64 (e.g. arm64)
+    # packages. `shepherd package deb` derives the Debian arch from the host at
+    # runtime (dpkg --print-architecture); this keeps it that way. Needs no build
+    # or container — just bash + grep — so it runs on the default runner even
+    # though the rest of CI executes on amd64 only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check build/packaging path is architecture-neutral
+        run: ./scripts/ci/check-arch-neutral.sh

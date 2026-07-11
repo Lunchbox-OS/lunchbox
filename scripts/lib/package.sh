@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Distro packaging for shepherd-launcher.
 #
-# `shepherd package deb` produces an amd64 Debian package. It does NOT
+# `shepherd package deb` produces a Debian package for the host architecture
+# (amd64, arm64, …). It does NOT
 # re-encode the install layout: it stages the exact tree that a from-source
 # install would create by driving scripts/lib/install.sh with DESTDIR set
 # (which makes those functions skip host mutation — groupadd/usermod/udev/
@@ -32,7 +33,7 @@ PACKAGE_MAINTAINER="Albert Armea <shepherd-launcher-patch@albertarmea.com>"
 # a .deb user has no repo, so they live here for the admin to copy.
 PACKAGE_EXAMPLE_DIR="$PACKAGE_PREFIX/share/shepherd"
 
-# Build the amd64 .deb.
+# Build the .deb for the host architecture.
 package_deb() {
     local out_dir="dist/pkg"
     local do_build="true"
@@ -125,9 +126,15 @@ package_deb() {
 
     _package_stage_admin_cli "$stage" "$repo_root"
 
-    _package_write_control "$stage" "$version" "$repo_root"
+    # Package for the host architecture. cargo built native binaries above, so
+    # the Debian arch (amd64, arm64, …) must match; `dpkg --print-architecture`
+    # yields the Debian name for the running host.
+    local arch
+    arch="$(dpkg --print-architecture)"
 
-    local deb="$out_dir/${PACKAGE_NAME}_${version}_amd64.deb"
+    _package_write_control "$stage" "$version" "$repo_root" "$arch"
+
+    local deb="$out_dir/${PACKAGE_NAME}_${version}_${arch}.deb"
     info "Building $deb..."
     # --root-owner-group forces root:root ownership in the archive regardless
     # of who (or what fakeroot) staged the files.
@@ -159,7 +166,7 @@ _package_stage_admin_cli() {
 # Write the DEBIAN control directory (control, conffiles, maintainer scripts)
 # into the staged tree.
 _package_write_control() {
-    local stage="$1" version="$2" repo_root="$3"
+    local stage="$1" version="$2" repo_root="$3" arch="$4"
     local debian="$stage/DEBIAN"
     ensure_dir "$debian" 0755
 
@@ -176,7 +183,7 @@ _package_write_control() {
     cat > "$debian/control" <<EOF
 Package: $PACKAGE_NAME
 Version: $version
-Architecture: amd64
+Architecture: $arch
 Maintainer: $PACKAGE_MAINTAINER
 Section: admin
 Priority: optional
@@ -269,8 +276,8 @@ package_deb_usage() {
     cat <<EOF
 Usage: shepherd package deb [OPTIONS]
 
-Builds the amd64 Debian package by staging the install tree (via install.sh
-with DESTDIR) and wrapping it with dpkg-deb.
+Builds a Debian package for the host architecture by staging the install tree
+(via install.sh with DESTDIR) and wrapping it with dpkg-deb.
 
 Options:
     --out DIR      Output directory for the .deb (default: dist/pkg)
@@ -300,7 +307,7 @@ package_main() {
 Usage: shepherd package <command> [OPTIONS]
 
 Commands:
-    deb    Build the amd64 Debian package
+    deb    Build the Debian package for the host architecture
 
 Run 'shepherd package deb --help' for options.
 EOF
