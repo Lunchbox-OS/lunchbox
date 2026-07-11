@@ -133,17 +133,23 @@ lifecycle.
   `need` it.
 - **`image` / `image-android` jobs:** mirror `ci.yml` — compute the
   content-hash image ref and build-if-missing. See the DRY note below.
-- **`deb` job:** runs in the base `image` container; `shepherd package deb`;
-  uploads the `.deb` as a workflow artifact.
-- **`apk` job:** **matrix over Android modules** (fan-out for #3). Runs in the
-  `image-android` container; `./gradlew :<module>:assembleRelease` with a
-  signing config fed from secrets; uploads each APK as an artifact. Adding
-  `shepherd-media-android` later is one matrix row.
-- **`publish` job:** downloads all artifacts, computes `SHA256SUMS`, then uses
-  the **Forgejo API** (`${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases`)
-  with a `RELEASE_TOKEN` secret to create the release and upload every asset.
-  Using the raw API keeps the workflow free of third-party action availability
-  assumptions on the self-hosted runner.
+- **`release` job (single):** builds the `.deb` + a signed `.apk` per Android
+  module and, on a tag push (or a dispatch with `publish`), uploads them to a
+  Forgejo release via the **Forgejo API** (`…/api/v1/repos/{owner}/{repo}/releases`)
+  with a `RELEASE_TOKEN` secret.
+
+  > **Why one job, not deb/apk/publish.** The first design used separate jobs
+  > passing files via `actions/upload-artifact@v4` / `download-artifact@v4`. That
+  > protocol (`@actions/artifact` v2+) is **not implemented by Forgejo** — the
+  > runner reports itself as GHES and the action hard-fails
+  > (`GHESNotSupportedError`). No `app.ini` toggle adds it; only a Forgejo
+  > *version* new enough would. So the pipeline was collapsed into one job that
+  > builds everything and uploads straight to the Releases API — zero cross-job
+  > transfer, zero artifact-backend dependency. It runs in the **Android CI
+  > image** (a superset of the base image), which has the Rust + `dpkg` + webui
+  > toolchain *and* the Android SDK/NDK, so a single container builds both the
+  > `.deb` and the APKs. APKs are built by a `build_apk` shell function called
+  > once per module (add a line per new app — the fan-out point for #3).
 
 **Release flow:** `shepherd version set X.Y.Z` → commit → `git tag -a vX.Y.Z`
 → `git push --tags`. CI does the rest.

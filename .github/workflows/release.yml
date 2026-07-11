@@ -11,8 +11,16 @@ name: Release
 #
 # See docs/ai/history/2026-07-04 003 binary-releases.md for the full design.
 #
+# Single-job by necessity: Forgejo does not implement the upload-artifact@v4
+# protocol (the runner reports itself as GHES and the action hard-fails), so we
+# can't pass built files between jobs via artifacts. Instead ONE job builds every
+# asset and uploads them straight to the Forgejo Releases API (which works). The
+# job runs in the Android CI image — a superset of the base image (Rust + dpkg +
+# webui toolchain AND the Android SDK/NDK) — so it can build both the .deb and
+# the APKs.
+#
 # Secrets required (in addition to REGISTRY_TOKEN from ci.yml):
-#   RELEASE_TOKEN               repo-write PAT used to create the release + upload
+#   RELEASE_TOKEN               repo-write PAT to create the release + upload
 #                               assets. (Not FORGEJO_*/GITEA_*/GITHUB_* — Forgejo
 #                               reserves those prefixes for secret names.)
 #   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
@@ -24,11 +32,9 @@ on:
   push:
     tags:
       - 'v*'
-  # Manual trigger for a dry run: builds the .deb + both signed .apks and
-  # collects them (exercising signing, the media armed cargo-ndk cross-compile,
-  # and the artifacts backend) WITHOUT creating a Forgejo release — unless you
-  # tick `publish`. Run it from the branch to shake the pipeline out before
-  # cutting a real vX.Y.Z tag.
+  # Manual dry run: builds the .deb + both signed .apks (exercising signing and
+  # the media armeabi-v7a cargo-ndk cross-compile) WITHOUT creating a Forgejo
+  # release — unless you tick `publish`. Run it before cutting a real vX.Y.Z tag.
   workflow_dispatch:
     inputs:
       publish:
@@ -42,8 +48,7 @@ env:
 jobs:
   # --------------------------------------------------------------------------
   # guard: the tag must match the canonical VERSION, and all synced literals
-  # must be in harmony (reuses the #83 guarantee). Fails the whole release
-  # loudly rather than shipping mismatched artifacts.
+  # must be in harmony (reuses the #83 guarantee).
   # --------------------------------------------------------------------------
   guard:
     name: Guard (tag == VERSION)
@@ -68,7 +73,6 @@ jobs:
 
   # --------------------------------------------------------------------------
   # images: build-if-missing the pre-baked CI images and expose their refs.
-  # Shared with ci.yml via the reusable workflow so the logic isn't duplicated.
   # --------------------------------------------------------------------------
   images:
     name: CI images
@@ -79,14 +83,16 @@ jobs:
     secrets: inherit
 
   # --------------------------------------------------------------------------
-  # deb: stage the install tree via install.sh (DESTDIR) and dpkg-deb it.
+  # release: build the .deb + both signed .apks and (on a tag push, or a
+  # dispatch with `publish`) upload them to a Forgejo release. One job, no
+  # cross-job artifacts — see the header note.
   # --------------------------------------------------------------------------
-  deb:
-    name: Build .deb (amd64)
+  release:
+    name: Build & publish
     needs: [guard, images]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.images.outputs.android-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -99,54 +105,13 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
             target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          # Fall back to ci.yml's host build cache to warm the shared deps.
           restore-keys: |
+            ${{ runner.os }}-cargo-release-
             ${{ runner.os }}-cargo-v2-
-
-      - name: Build .deb
-        # `shepherd package deb` builds --release, stages via
-        # `DESTDIR=… shepherd install …`, generates DEBIAN control + maintainer
-        # scripts, and runs dpkg-deb. Output lands in dist/pkg/.
-        run: ./scripts/shepherd package deb --out dist/pkg
-
-      - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: deb
-          path: dist/pkg/*.deb
-          if-no-files-found: error
-
-  # --------------------------------------------------------------------------
-  # apk: one signed APK per Android module. Add a matrix row per new app.
-  # --------------------------------------------------------------------------
-  apk:
-    name: Build .apk (${{ matrix.module.name }})
-    needs: [guard, images]
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.images.outputs.android-ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - name: companion
-            dir: companion-android
-            gradle_module: app
-            artifact: shepherd-companion
-          # media is a NativeActivity app whose Gradle build cross-compiles a
-          # Rust cdylib via cargo-ndk (rust: true gates the extra toolchain
-          # setup below). Its Gradle project sits inside the crate.
-          - name: media
-            dir: crates/shepherd-media-android/android
-            gradle_module: app
-            artifact: shepherd-media
-            rust: true
-    steps:
-      - uses: actions/checkout@v4
 
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
@@ -154,29 +119,11 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles(format('{0}/gradle/libs.versions.toml', matrix.module.dir), format('{0}/**/build.gradle.kts', matrix.module.dir)) }}
+          key: ${{ runner.os }}-gradle-release-${{ hashFiles('**/*.gradle.kts', '**/libs.versions.toml') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # Rust-native modules only: the Gradle `assembleRelease` invokes cargo-ndk
-      # to cross-compile the cdylib for every ABI in the app's `rustAbis`, so it
-      # needs the Android Rust targets, cargo-ndk, and the NDK on PATH. Cache key
-      # matches the android-media job in ci.yml so they share the built deps.
-      - name: Cache cargo (Rust-native APKs)
-        if: matrix.module.rust
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-ndk
-            target
-          key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-media-android-
-
-      - name: Set up cargo-ndk (Rust-native APKs)
-        if: matrix.module.rust
+      - name: Set up cargo-ndk (for the media APK's Rust cdylib)
         run: |
           # Both ABIs the media app packages (arm64-v8a + armeabi-v7a); the
           # 32-bit target's bindgen path needs libclang, already in the image.
@@ -186,6 +133,12 @@ jobs:
           # (baked into the android image by `deps install android`).
           ndk="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* | head -n1)"
           echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+
+      - name: Build .deb
+        # `shepherd package deb` builds --release, stages via
+        # `DESTDIR=… shepherd install …`, and runs dpkg-deb. Runs as root in the
+        # container, so no fakeroot is needed. Output lands in dist/pkg/.
+        run: ./scripts/shepherd package deb --out dist/pkg
 
       - name: Decode signing keystore
         env:
@@ -197,67 +150,47 @@ jobs:
           fi
           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-release.jks"
 
-      - name: Assemble signed release APK
-        working-directory: ${{ matrix.module.dir }}
+      - name: Build signed release APKs
         env:
           SHEPHERD_KEYSTORE_FILE: ${{ runner.temp }}/shepherd-release.jks
           SHEPHERD_KEYSTORE_PASSWORD: ${{ secrets.SHEPHERD_KEYSTORE_PASSWORD }}
           SHEPHERD_KEY_ALIAS: ${{ secrets.SHEPHERD_KEY_ALIAS }}
           SHEPHERD_KEY_PASSWORD: ${{ secrets.SHEPHERD_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon :${{ matrix.module.gradle_module }}:assembleRelease
-
-      - name: Stage APK with release name
         run: |
-          src="${{ matrix.module.dir }}/${{ matrix.module.gradle_module }}/build/outputs/apk/release"
-          apk="$(find "$src" -name '*.apk' | head -n1)"
-          if [ -z "$apk" ]; then
-            echo "::error::no release APK found under $src"
-            exit 1
-          fi
-          version="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
+          version="$(./scripts/shepherd version)"
           mkdir -p dist/pkg
-          cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
 
-      - name: Upload .apk artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ matrix.module.name }}
-          path: dist/pkg/*.apk
-          if-no-files-found: error
+          # Build one module's release APK and stage it under its release name.
+          build_apk() {
+            local dir="$1" gmod="$2" artifact="$3"
+            echo "::group::assembleRelease $artifact"
+            ( cd "$dir" && ./gradlew --no-daemon ":${gmod}:assembleRelease" )
+            local apk
+            apk="$(find "$dir/$gmod/build/outputs/apk/release" -name '*.apk' | head -n1)"
+            [ -n "$apk" ] || { echo "::error::no release APK under $dir/$gmod"; exit 1; }
+            cp "$apk" "dist/pkg/${artifact}_${version}.apk"
+            echo "::endgroup::"
+          }
 
-  # --------------------------------------------------------------------------
-  # publish: collect all artifacts, checksum, and create the Forgejo release.
-  # --------------------------------------------------------------------------
-  publish:
-    name: Publish / collect
-    needs: [deb, apk]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install jq
+          # companion: pure Kotlin. media: NativeActivity whose Gradle build
+          # cross-compiles a Rust cdylib via cargo-ndk (uses ANDROID_NDK_HOME set
+          # above) for both packaged ABIs. Add a line per new Android module.
+          build_apk companion-android app shepherd-companion
+          build_apk crates/shepherd-media-android/android app shepherd-media
+
+      - name: Checksums
         run: |
-          apt-get update
-          apt-get install -y jq
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      # Always runs — in a dry run this still proves the artifacts round-trip
-      # (upload in the build jobs, download here) and the checksum manifest.
-      - name: Collect assets and checksum
-        run: |
-          mkdir -p release
-          find artifacts -type f \( -name '*.deb' -o -name '*.apk' \) -exec cp {} release/ \;
-          ( cd release && sha256sum ./* > SHA256SUMS )
-          echo "Release assets:"
-          ls -l release
+          set -euo pipefail
+          cd dist/pkg
+          sha256sum ./*.deb ./*.apk > SHA256SUMS
+          echo "Release assets:"; ls -l
 
       - name: Dry run — skip release creation
         if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
         run: |
-          echo "Dry run: built + collected the assets above but did NOT create a"
-          echo "Forgejo release. Re-run with 'publish' ticked, or push a vX.Y.Z tag."
+          echo "Dry run: built the assets above but did NOT create a Forgejo"
+          echo "release. Re-run with 'publish' ticked, or push a vX.Y.Z tag."
 
       - name: Create release and upload assets
         if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
@@ -268,11 +201,12 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          command -v jq >/dev/null 2>&1 || { apt-get update && apt-get install -y jq; }
           api="${SERVER_URL}/api/v1/repos/${REPO}"
           auth="Authorization: token ${RELEASE_TOKEN}"
 
-          # Create the release for this tag (the tag already exists — this push
-          # is what triggered the workflow).
+          # Create the release for this tag (the tag already exists — the push is
+          # what triggered the workflow).
           release_id=$(curl -fsS -X POST "${api}/releases" \
             -H "$auth" -H 'Content-Type: application/json' \
             -d "$(jq -n --arg tag "$TAG" \
@@ -280,12 +214,10 @@ jobs:
             | jq -r '.id')
           echo "Created release id=$release_id"
 
-          for f in release/*; do
+          for f in dist/pkg/*; do
             name="$(basename "$f")"
             echo "Uploading $name"
-            curl -fsS -X POST \
-              "${api}/releases/${release_id}/assets?name=${name}" \
-              -H "$auth" \
-              -F "attachment=@${f}" >/dev/null
+            curl -fsS -X POST "${api}/releases/${release_id}/assets?name=${name}" \
+              -H "$auth" -F "attachment=@${f}" >/dev/null
           done
           echo "Published ${TAG}"
