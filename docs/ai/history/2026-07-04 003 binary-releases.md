@@ -133,23 +133,31 @@ lifecycle.
   `need` it.
 - **`image` / `image-android` jobs:** mirror `ci.yml` — compute the
   content-hash image ref and build-if-missing. See the DRY note below.
-- **`release` job (single):** builds the `.deb` + a signed `.apk` per Android
-  module and, on a tag push (or a dispatch with `publish`), uploads them to a
-  Forgejo release via the **Forgejo API** (`…/api/v1/repos/{owner}/{repo}/releases`)
-  with a `RELEASE_TOKEN` secret.
+- **`create-release` job:** makes (or, on a re-run, fetches) the Forgejo release
+  up front via the **Forgejo API** (`…/api/v1/repos/{owner}/{repo}/releases`,
+  `RELEASE_TOKEN` secret), exposing `release_id`. Runs on every trigger but only
+  calls the API when publishing; a dry run is a no-op.
+- **`deb` job** (base image) and **`apk` job** (android image, **matrix over
+  Android modules** — fan-out for #3) build in **parallel**; each then uploads
+  *its own* asset + a `.sha256` sidecar directly to the release via
+  `scripts/ci/upload-release-asset.sh` (on a tag push or `publish` dispatch).
 
-  > **Why one job, not deb/apk/publish.** The first design used separate jobs
-  > passing files via `actions/upload-artifact@v4` / `download-artifact@v4`. That
+  > **No cross-job artifacts.** The first design passed files between a build and
+  > a publish job via `actions/upload-artifact@v4` / `download-artifact@v4`. That
   > protocol (`@actions/artifact` v2+) is **not implemented by Forgejo** — the
   > runner reports itself as GHES and the action hard-fails
-  > (`GHESNotSupportedError`). No `app.ini` toggle adds it; only a Forgejo
-  > *version* new enough would. So the pipeline was collapsed into one job that
-  > builds everything and uploads straight to the Releases API — zero cross-job
-  > transfer, zero artifact-backend dependency. It runs in the **Android CI
-  > image** (a superset of the base image), which has the Rust + `dpkg` + webui
-  > toolchain *and* the Android SDK/NDK, so a single container builds both the
-  > `.deb` and the APKs. APKs are built by a `build_apk` shell function called
-  > once per module (add a line per new app — the fan-out point for #3).
+  > (`GHESNotSupportedError`); no `app.ini` toggle adds it, only a newer Forgejo
+  > version. So there is no build→publish handoff: `create-release` makes the
+  > release first, and each parallel build job attaches its own asset straight to
+  > it. A per-asset `.sha256` replaces a combined `SHA256SUMS` so no job needs
+  > the others' files. This keeps the jobs parallel with zero artifact-backend
+  > dependency.
+
+  > **cargo-ndk lives in the image, not the jobs.** `cargo-ndk`, the Android Rust
+  > targets, and `ANDROID_NDK_HOME` are baked into the Android CI image (via
+  > `deps install android` → `install_cargo_ndk`, and an `ENV` in
+  > `.ci/Dockerfile.android`), so neither the release `apk` job nor ci.yml's
+  > `android-media` job installs a toolchain at runtime.
 
 **Release flow:** `shepherd version set X.Y.Z` → commit → `git tag -a vX.Y.Z`
 → `git push --tags`. CI does the rest.
