@@ -100,6 +100,44 @@ EOF
 
 FLATHUB_REMOTE_URL="https://flathub.org/repo/flathub.flatpakrepo"
 
+# Ubuntu 23.10+ restricts unprivileged user namespaces via AppArmor
+# (kernel.apparmor_restrict_unprivileged_userns=1). Steam's sandbox — like
+# Flatpak's — needs one, so on a fresh system it fails with "Steam now requires
+# user namespaces to be enabled". (A machine that already ran a Flatpak app
+# usually has userns working, which is why Steam "just works" there.)
+USERNS_SYSCTL="kernel.apparmor_restrict_unprivileged_userns"
+USERNS_DROPIN="/etc/sysctl.d/90-shepherd-userns.conf"
+
+# Permit unprivileged user namespaces so Steam's (and Flatpak's) sandbox can
+# start. No-op when the kernel lacks the knob (older/non-Ubuntu) or it's already
+# permitted. This relaxes an Ubuntu kernel hardening SYSTEM-WIDE; it's the
+# supported way to run these sandboxes and is reversible (remove $USERNS_DROPIN).
+ensure_unprivileged_userns() {
+    # Older kernels / non-Ubuntu systems don't have this knob — nothing to do.
+    if ! sysctl -n "$USERNS_SYSCTL" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$(sysctl -n "$USERNS_SYSCTL" 2>/dev/null || echo 0)" == "0" ]]; then
+        info "Unprivileged user namespaces already permitted."
+        return 0
+    fi
+
+    warn "Enabling unprivileged user namespaces ($USERNS_SYSCTL=0) so Steam's"
+    warn "sandbox can start. This relaxes an Ubuntu kernel hardening system-wide;"
+    warn "remove $USERNS_DROPIN and reboot to revert."
+    ensure_dir "$(dirname "$USERNS_DROPIN")" 0755
+    cat > "$USERNS_DROPIN" <<EOF
+# Installed by \`shepherd-admin apps install steam\`.
+# Steam (like Flatpak) creates an unprivileged user namespace for its sandbox;
+# Ubuntu 23.10+ restricts that by default. Permit it so the sandbox starts.
+$USERNS_SYSCTL=0
+EOF
+    chmod 0644 "$USERNS_DROPIN"
+    sysctl -w "$USERNS_SYSCTL=0" >/dev/null 2>&1 \
+        || warn "Could not apply $USERNS_SYSCTL live; it takes effect after a reboot"
+    success "Unprivileged user namespaces permitted"
+}
+
 # Ensure the system-wide Flathub remote exists (idempotent).
 ensure_flathub() {
     require_command flatpak
@@ -123,6 +161,14 @@ apps_install() {
             require_command snap
             info "Installing the Steam snap (snap install steam)..."
             snap install steam
+            # The snap's sandbox needs the mount-observe interface; current snaps
+            # auto-connect it, but connect explicitly for older installs (no-op
+            # if already connected). This is the steam-snap maintainers' fix for
+            # the "requires user namespaces" error.
+            snap connect steam:mount-observe 2>/dev/null || true
+            # …and unprivileged user namespaces must be permitted for that
+            # sandbox to start (see ensure_unprivileged_userns).
+            ensure_unprivileged_userns
             success "Installed the Steam snap"
             info "Launch Steam once and log in before using type=\"steam\" entries."
             ;;
@@ -152,7 +198,9 @@ Installs a supported activity backend with the packaging shepherd's integration
 expects (they differ):
 
     steam    Canonical's Steam snap (drives type = "steam" entries). Launch it
-             and log in once before those entries will work.
+             and log in once before those entries will work. Also permits
+             unprivileged user namespaces (Ubuntu restricts them by default),
+             which Steam's sandbox needs — see $USERNS_DROPIN.
     chrome   com.google.Chrome from Flathub (for kind = "flatpak" entries).
 EOF
 }

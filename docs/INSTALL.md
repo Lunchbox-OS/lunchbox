@@ -48,6 +48,13 @@ matching what shepherd's `type = "steam"` and `kind = "flatpak"` adapters drive)
 sudo shepherd-admin apps install steam    # or: chrome
 ```
 
+`apps install steam` also connects the snap's `mount-observe` interface and
+permits unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`
+via `/etc/sysctl.d/90-shepherd-userns.conf`) — Steam's sandbox needs one, and
+Ubuntu 23.10+ restricts them by default, otherwise Steam fails with "Steam now
+requires user namespaces to be enabled." This relaxes that hardening
+system-wide; remove the drop-in and reboot to revert.
+
 To make the hardware power button sleep the device instead of shutting it down
 (a long press still powers off):
 
