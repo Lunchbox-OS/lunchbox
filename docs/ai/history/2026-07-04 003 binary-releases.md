@@ -141,7 +141,7 @@ lifecycle.
   `shepherd-media-android` later is one matrix row.
 - **`publish` job:** downloads all artifacts, computes `SHA256SUMS`, then uses
   the **Forgejo API** (`${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases`)
-  with a `FORGEJO_TOKEN` secret to create the release and upload every asset.
+  with a `RELEASE_TOKEN` secret to create the release and upload every asset.
   Using the raw API keeps the workflow free of third-party action availability
   assumptions on the self-hosted runner.
 
@@ -191,7 +191,7 @@ exports `SHEPHERD_KEYSTORE_FILE` + passwords before `assembleRelease`.
 | Secret | Used by | Purpose |
 |---|---|---|
 | `REGISTRY_TOKEN` | image / container pulls | already exists (see `ci.yml`) |
-| `FORGEJO_TOKEN` | `publish` | create release + upload assets (repo write) |
+| `RELEASE_TOKEN` | `publish` | create release + upload assets (repo write). Not `FORGEJO_*` — Forgejo reserves that prefix. |
 | `SHEPHERD_KEYSTORE_B64` | `apk` | base64 of the release keystore |
 | `SHEPHERD_KEYSTORE_PASSWORD` | `apk` | keystore password |
 | `SHEPHERD_KEY_ALIAS` | `apk` | signing key alias |

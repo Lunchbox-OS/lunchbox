@@ -12,7 +12,9 @@ name: Release
 # See docs/ai/history/2026-07-04 003 binary-releases.md for the full design.
 #
 # Secrets required (in addition to REGISTRY_TOKEN from ci.yml):
-#   FORGEJO_TOKEN               repo-write PAT used to create the release + upload assets
+#   RELEASE_TOKEN               repo-write PAT used to create the release + upload
+#                               assets. (Not FORGEJO_*/GITEA_*/GITHUB_* — Forgejo
+#                               reserves those prefixes for secret names.)
 #   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
 #   SHEPHERD_KEYSTORE_PASSWORD  keystore password
 #   SHEPHERD_KEY_ALIAS          signing key alias
@@ -260,14 +262,14 @@ jobs:
       - name: Create release and upload assets
         if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
         env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           SERVER_URL: ${{ github.server_url }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           api="${SERVER_URL}/api/v1/repos/${REPO}"
-          auth="Authorization: token ${FORGEJO_TOKEN}"
+          auth="Authorization: token ${RELEASE_TOKEN}"
 
           # Create the release for this tag (the tag already exists — this push
           # is what triggered the workflow).
