@@ -12,3 +12,7 @@ openjdk-21-jdk-headless
 
 # sdkmanager ships the cmdline-tools as a zip; unzip extracts it.
 unzip
+
+# The DPC's plain-SDK build (dpc-waydroid/build.sh) uses `zip` to add classes.dex
+# to the apk — aapt2 has no equivalent, and the build .deb job builds the DPC.
+zip
