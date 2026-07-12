@@ -7,10 +7,13 @@ launching other apps at the framework level. This is the gold-standard
 containment, stronger than the statusbar-flag `lock_down` shepherd applies by
 default.
 
-> **Status: built and verified, but NOT wired into shepherd by default.** Lock
-> Task Mode is *incompatible* with shepherd's current Android windowing — see
-> [Important limitation](#important-limitation-lock-task--multi-window) below.
-> Treat this as a verified building block for a future full-UI integration.
+> **Status: integrated.** shepherd drives this DPC as the `[service.waydroid]
+> lock_mode = "locktask"` launch path — it presents the app as the single full-UI
+> `Waydroid` surface and pins it via the DPC (see [Lock Task ⊥ multi-window](#important-limitation-lock-task--multi-window)
+> for how that constraint was resolved). The default remains the softer
+> statusbar-flag `lock_mode = "statusbar"`; `locktask` is opt-in per the managed
+> Android configuration. The apk ships in the `.deb` and is set as device owner by
+> `shepherd-admin apps install android`.
 
 ## Build
 
@@ -84,11 +87,13 @@ pinned it is *not* a `waydroid.<pkg>` toplevel (confirmed: the window exists in
 Android with a ready surface, but no Sway toplevel appears; unlocking makes it
 reappear).
 
-So the DPC cannot be dropped into shepherd's current launch path — doing so
+So the DPC cannot be dropped into shepherd's *windowed* launch path — doing so
 would break window-ready detection, per-app fullscreen, and exit detection.
-Integrating it requires switching lock-task Android sessions to **full-UI
-single-surface** presentation (`waydroid show-full-ui`, fullscreen the one
-`Waydroid` surface) and tracking the session via `dumpsys` foreground activity
-instead of a per-app toplevel. That is scoped future work; until then shepherd's
-default `lock_down` (statusbar `send-disable-flag`, which blocks the Settings
-escape) is the practical lock-in.
+**Resolved** (2026-07-12): the `lock_mode = "locktask"` path in
+`crates/shepherd-host-linux/src/adapter.rs` gives lock-task sessions a distinct
+presentation — `waydroid show-full-ui` presents the single `Waydroid` surface
+(fullscreened by a `for_window [app_id="Waydroid"]` rule), the app is pinned via
+the DPC, and stop sway-`kill`s that surface (a graceful close is ignored by the
+renderer) so the window-watch still emits `Exited`. `preboot` forces
+`multi_windows` off for locktask. The softer statusbar `lock_mode = "statusbar"`
+remains the default; see `docs/ai/history/2026-07-12 002 …`.

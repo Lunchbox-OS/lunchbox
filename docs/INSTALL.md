@@ -975,6 +975,19 @@ and stop (by closing the window); the helper only adds reliable process
 reclamation and container preboot. Tune preboot via `[service.waydroid]` in the
 config.
 
+### Kiosk lock-in (`lock_mode`)
+
+`[service.waydroid] lock_mode` controls how launched Android apps are locked in:
+
+- `"statusbar"` (default) — disable the notification shade / quick settings and
+  the nav-bar home/recents buttons. Soft; keeps the multi-window presentation.
+- `"locktask"` — pin the app in Android **Lock Task Mode** via the DPC device
+  owner (hard containment; blocks HOME/Recents/app-switching at the framework
+  level). Requires `shepherd-admin apps install android` to have installed the
+  DPC and set it as device owner (a GApps image; the DPC apk ships in the `.deb`).
+  Presented as a single full-UI surface rather than per-app windows.
+- `"off"` — no lock-in.
+
 ## Kiosk hardening
 
 Intended for devices used by children rather than developer machines — but on
