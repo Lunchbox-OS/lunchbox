@@ -12,6 +12,10 @@
 #
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+# shellcheck source=waydroid.sh
+# Engine-side Android provisioning (GApps init / libndk / DPC) used by the
+# `apps install android` path below.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/waydroid.sh"
 
 # The per-user and per-device operations here are install.sh's, shared rather
 # than reimplemented: setup_user needs install_config / install_user_groups /
@@ -1077,12 +1081,13 @@ apps_install() {
             info "Reference it with kind = \"flatpak\", app_id = \"com.google.Chrome\"."
             ;;
         android)
-            # The shepherd side (helper binary + polkit assets) ships with the
-            # package via install_system; this opt-in step provisions the host:
-            # the shepherd-waydroid group + membership (shared with the
-            # from-source `shepherd install waydroid` via provision_waydroid_host)
-            # and guidance for the Waydroid engine itself, which lives in a
-            # third-party repo and pulls ~2.4 GB of Android images.
+            # Provision the managed Android backend. The shepherd host side
+            # (helper + polkit) ships via install_system; here we add the
+            # shepherd-waydroid group + membership (provision_waydroid_host) and,
+            # on top of an operator-installed Waydroid *engine*, the GApps image,
+            # libndk ARM translation (amd64), and the DPC device owner. The engine
+            # install itself stays guided (see the printed steps below). GApps +
+            # libndk are idempotent, so re-running to finish the DPC is safe.
             local user="${2:-}"
             require_root
             if [[ ! -x "$WAYDROID_HELPER_PATH" ]]; then
@@ -1093,22 +1098,32 @@ apps_install() {
             provision_waydroid_host "$user"
 
             if ! command -v waydroid >/dev/null 2>&1; then
-                warn "Waydroid itself is not installed. Install the engine, then re-run to finish:"
+                warn "Waydroid engine not installed. Install it, then re-run this to finish (GApps + libndk + DPC):"
                 info "  curl https://repo.waydro.id | sudo bash -s \"\$(. /etc/os-release && echo \"\$VERSION_CODENAME\")\""
                 info "  sudo apt install -y waydroid"
                 info "  echo binder_linux | sudo tee /etc/modules-load.d/waydroid.conf && sudo modprobe binder_linux"
-                info "  sudo waydroid init   # downloads the Android images (~2.4 GB)"
-            else
-                info "Waydroid engine detected. If not yet initialized: sudo waydroid init"
+                success "Provisioned the shepherd host side. Re-run once the engine is installed."
+                return 0
             fi
 
-            success "Provisioned the shepherd side of the Android (Waydroid) backend"
-            if [[ -z "$user" ]]; then
-                info "Add the kiosk user to the group with:"
-                info "  shepherd-admin apps install android USER"
+            # Engine present: build the managed image (offline, idempotent).
+            provision_waydroid_gapps "$user"
+            install_libndk
+
+            # The DPC device-owner step needs a booted session and must precede
+            # any Google sign-in (the only gate is accounts=0).
+            if [[ -n "$user" ]] && waydroid_session_running; then
+                install_dpc "$user"
+                success "Android (Waydroid) backend provisioned: GApps + libndk + DPC device owner."
+            else
+                success "Android (Waydroid) image provisioned: GApps + libndk."
+                warn "The DPC device-owner step needs a running Waydroid session (Android booted)."
+                info "Start one as ${user:-USER} (e.g. 'waydroid show-full-ui' in their graphical session,"
+                info "or scripts/integration-tests/test-waydroid.sh), then run — BEFORE any Google sign-in:"
+                info "  shepherd-admin apps install android ${user:-USER}"
             fi
-            info "Reference Android apps with type = \"android\". The Lock Task DPC in"
-            info "dpc-waydroid/ is a verified building block but is NOT wired in by default."
+            info "Then, as ${user:-USER}, sign into Google / certify the device in the Waydroid UI."
+            info "Enable Lock Task lock-in via lock_mode = \"locktask\" in [service.waydroid]."
             ;;
 
         companion|media)
@@ -1167,10 +1182,13 @@ $(retroarch_core_table)
                 without them a reading activity opens PDFs and refuses novels.
                 Installs no books.
 
-    android     Enable the Waydroid backend (drives type = "android" entries).
-                Creates the $WAYDROID_GROUP group, adds USER to it if given,
-                and prints the steps to install the Waydroid engine. The
-                helper + polkit assets already ship with the package.
+    android     Provision the managed Waydroid backend (type = "android"
+                entries): the $WAYDROID_GROUP group + USER membership, and —
+                once the engine is installed — the GApps image, libndk ARM
+                translation (amd64), and the DPC device owner. The engine
+                install itself is guided. GApps + libndk are idempotent;
+                re-run to finish the DPC once a session is up (before any
+                Google sign-in). Helper + polkit assets already ship.
 
     companion   Shepherd Companion, the parent-facing admin app.
     media       Shepherd Media, the media player for phones/tablets/Fire TV.
