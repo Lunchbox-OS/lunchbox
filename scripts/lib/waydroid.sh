@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Engine-side Waydroid (Android activity kind) provisioning: GApps image init,
-# libndk ARM translation (amd64 only), and the DPC device-owner install. These
-# sit on top of an operator-installed Waydroid *engine* (the `apps install
-# android` guidance prints how to install it) and are invoked from admin.sh's
-# `apps install android` path.
+# libndk ARM translation (amd64 only; arm64 runs ARM natively), and the DPC
+# device-owner install. These sit on top of an operator-installed Waydroid
+# *engine* (the `apps install android` guidance prints how to install it) and
+# are invoked from admin.sh's `apps install android` path.
 #
 # Sourced by scripts/lib/admin.sh. Relies on common.sh (info/warn/die/success,
 # require_root/require_command, maybe_sudo, ensure_dir, validate_user,
@@ -115,15 +115,17 @@ provision_waydroid_gapps() {
     fi
 }
 
-# Install the libndk ARM translation layer so ARM-only apps run on an amd64 host.
+# Install the libndk ARM translation layer so ARM-only apps run on amd64 (arm64
+# hosts run them natively, so this is a no-op there).
 # Overlay-based (no system.img surgery): drops the prebuilt libs into the
 # Waydroid system overlay and adds the native-bridge props to waydroid.cfg.
-# Offline + root; takes effect on the next session start. amd64-only + idempotent.
+# Offline + root; takes effect on the next session start. amd64-only (arm64 is
+# native) + idempotent.
 install_libndk() {
     require_root
     local arch; arch="$(dpkg --print-architecture 2>/dev/null || echo unknown)"
-    if [[ "$arch" != "amd64" ]]; then
-        info "libndk ARM translation is only needed on amd64 (host is $arch); skipping — ARM apps run natively here."
+    if [[ "$arch" != "amd64" ]]; then # arm64/aarch64 hosts run ARM apps natively
+        info "libndk ARM translation is only needed on amd64 (host is $arch; arm64 runs ARM natively); skipping."
         return 0
     fi
     require_command waydroid

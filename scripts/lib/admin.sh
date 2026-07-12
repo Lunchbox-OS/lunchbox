@@ -1085,7 +1085,8 @@ apps_install() {
             # (helper + polkit) ships via install_system; here we add the
             # shepherd-waydroid group + membership (provision_waydroid_host) and,
             # on top of an operator-installed Waydroid *engine*, the GApps image,
-            # libndk ARM translation (amd64), and the DPC device owner. The engine
+            # libndk ARM translation (amd64; arm64 is native), and the DPC device
+            # owner. The engine
             # install itself stays guided (see the printed steps below). GApps +
             # libndk are idempotent, so re-running to finish the DPC is safe.
             local user="${2:-}"
@@ -1185,10 +1186,11 @@ $(retroarch_core_table)
     android     Provision the managed Waydroid backend (type = "android"
                 entries): the $WAYDROID_GROUP group + USER membership, and —
                 once the engine is installed — the GApps image, libndk ARM
-                translation (amd64), and the DPC device owner. The engine
-                install itself is guided. GApps + libndk are idempotent;
-                re-run to finish the DPC once a session is up (before any
-                Google sign-in). Helper + polkit assets already ship.
+                translation (amd64; arm64 is native), and the DPC device
+                owner. The engine install is guided. GApps + libndk are
+                idempotent; re-run to finish the DPC once a session is up
+                (before any Google sign-in). Helper + polkit assets already
+                ship.
 
     companion   Shepherd Companion, the parent-facing admin app.
     media       Shepherd Media, the media player for phones/tablets/Fire TV.
