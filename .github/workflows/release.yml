@@ -32,6 +32,16 @@ name: Release
 #   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
 #                               Edit" permission, to publish the config editor
 #   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
+#
+# Optional (the .deb ships the DPC Lock Task backend only when set):
+#   SHEPHERD_DPC_KEYSTORE_B64       base64 of the DPC keystore. UN-ROTATABLE: a
+#                                   device-owner app can only be updated with the
+#                                   SAME key, so this must never change once any
+#                                   device has been provisioned. Keep it distinct
+#                                   from the app-signing keystore above.
+#   SHEPHERD_DPC_KEYSTORE_PASSWORD  DPC keystore password
+#   SHEPHERD_DPC_KEY_ALIAS          DPC signing key alias
+#   SHEPHERD_DPC_KEY_PASSWORD       DPC signing key password
 
 on:
   push:
@@ -145,13 +155,35 @@ jobs:
     name: Build .deb (amd64)
     needs: [guard, images, create-release]
     runs-on: ubuntu-latest
+    # Runs in the android image (a superset of base) so it can build + sign the
+    # DPC apk to bundle into the package; Forgejo has no cross-job artifacts, so
+    # this job builds it rather than pulling it from the apk job.
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.images.outputs.android-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Build + sign the DPC apk
+        # Only when the persistent DPC keystore secret is set — a device-owner
+        # app can only be updated with the SAME key, so we never ship one signed
+        # with an ephemeral key. Without it, `package deb` below simply omits the
+        # apk and the .deb ships without the Lock Task backend.
+        env:
+          DPC_KEYSTORE_B64: ${{ secrets.SHEPHERD_DPC_KEYSTORE_B64 }}
+          DPC_KEYSTORE_PASS: ${{ secrets.SHEPHERD_DPC_KEYSTORE_PASSWORD }}
+          DPC_KEY_PASS: ${{ secrets.SHEPHERD_DPC_KEY_PASSWORD }}
+          DPC_KEY_ALIAS: ${{ secrets.SHEPHERD_DPC_KEY_ALIAS }}
+        run: |
+          if [ -z "$DPC_KEYSTORE_B64" ]; then
+            echo "SHEPHERD_DPC_KEYSTORE_B64 not set; building the .deb without the DPC Lock Task backend."
+            exit 0
+          fi
+          echo "$DPC_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-dpc.jks"
+          DPC_KEYSTORE="$RUNNER_TEMP/shepherd-dpc.jks" ANDROID_SDK_ROOT=/opt/android-sdk \
+            ./dpc-waydroid/build.sh
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -177,6 +209,20 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb
+
+      # Also publish the signed DPC apk as a standalone asset (for adb / manual
+      # install), when it was built above.
+      - name: Upload the DPC apk to the release
+        if: ${{ (github.event_name == 'push' || github.event.inputs.publish == 'true') && hashFiles('dpc-waydroid/shepherd-dpc.apk') != '' }}
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          mkdir -p dist/pkg
+          cp dpc-waydroid/shepherd-dpc.apk "dist/pkg/shepherd-dpc_$(cat VERSION).apk"
+          ./scripts/ci/upload-release-asset.sh dist/pkg/shepherd-dpc_*.apk
 
       # Also publish to Forgejo's Debian package registry so users get an
       # `apt update`/`apt upgrade` path (the release asset above stays the

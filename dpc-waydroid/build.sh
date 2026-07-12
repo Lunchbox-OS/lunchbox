@@ -19,7 +19,16 @@ APK="$HERE/shepherd-dpc.apk"
 # Keystore lives OUTSIDE $OUT (which is wiped each build) so the signing key is
 # stable across rebuilds — otherwise an update fails with a signature mismatch,
 # and (once it's device owner) the app can't be updated at all. Gitignored.
-KS="$HERE/dpc.keystore"
+#
+# CI overrides these to sign with the persistent release keystore (a
+# device-owner app can ONLY be updated with the same key, so that key must never
+# change): DPC_KEYSTORE (path), DPC_KEYSTORE_PASS, DPC_KEY_PASS, DPC_KEY_ALIAS.
+# Unset -> a local dev keystore (auto-generated below), which is fine for dev but
+# must never sign a released apk.
+KS="${DPC_KEYSTORE:-$HERE/dpc.keystore}"
+KS_PASS="${DPC_KEYSTORE_PASS:-android}"
+KEY_PASS="${DPC_KEY_PASS:-android}"
+KEY_ALIAS="${DPC_KEY_ALIAS:-dpc}"
 
 for tool in "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner"; do
     [ -x "$tool" ] || { echo "missing $tool (set ANDROID_SDK_ROOT / ANDROID_BUILD_TOOLS)"; exit 1; }
@@ -55,11 +64,11 @@ echo "[5/6] zipalign"
 
 echo "[6/6] sign"
 if [ ! -f "$KS" ]; then
-    keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
-        -alias dpc -keyalg RSA -keysize 2048 -validity 10000 \
+    keytool -genkeypair -keystore "$KS" -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+        -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
         -dname "CN=Shepherd DPC" >/dev/null 2>&1
 fi
-"$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-    --out "$APK" "$OUT/aligned.apk"
+"$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
+    --ks-key-alias "$KEY_ALIAS" --out "$APK" "$OUT/aligned.apk"
 
 echo "OK -> $APK"
