@@ -946,36 +946,77 @@ never silently hides content.
 ## Android activities via Waydroid (optional)
 
 Activities of `type = "android"` (see `config.example.toml`) launch Android apps
-inside [Waydroid](https://waydro.id/). Install and initialize Waydroid on the
-host first (it provides the `waydroid` CLI and the `waydroid-container`
-service), then enable multi-window mode so each app gets its own window:
+inside [Waydroid](https://waydro.id/), a full Android container. shepherd
+provisions a **managed** Android backend: a GApps image (so Google Play + real
+apps work), the DPC device-owner app for Lock Task containment, and — on amd64 —
+libndk ARM translation so ARM-only apps run. The shepherd-side privileged helper
+(`/usr/libexec/shepherd-waydroid-helper`) and its polkit assets ship dormant in
+the package; the rest is an opt-in, partly-interactive setup.
+
+**Requirements:** amd64 (arm64 hosts skip libndk — ARM apps run natively), a
+Waydroid-supported GPU (**Nvidia is unsupported**), and a kernel with `binder`
+(Ubuntu's generic kernel has it). GApps/ARM performance must be judged on real
+kiosk hardware, not a software-rendered VM.
+
+The whole flow is `shepherd-admin apps install android <user>`, run in stages.
+(From source, `sudo ./scripts/shepherd install waydroid --user kiosk` installs
+the helper in place of the packaged one; the rest is the same.)
+
+### 1. Install the Waydroid engine (guided)
+
+The first run provisions the shepherd side (the `shepherd-waydroid` group +
+membership) and, since the engine isn't installed yet, **prints** the steps to
+install it — Waydroid lives in a third-party repo and pulls ~2.4 GB of images:
 
 ```sh
-waydroid prop set persist.waydroid.multi_windows true
-```
-
-shepherdd runs unprivileged, so two Waydroid operations (force-stopping an app
-and starting the root container service for preboot) go through a small
-privileged helper invoked via pkexec: `/usr/libexec/shepherd-waydroid-helper`,
-plus its polkit policy and rule. The packaged install ships these dormant, so
-enabling Android is a single opt-in step that also creates the
-`shepherd-waydroid` group and adds the user to it:
-
-```sh
-# Packaged (.deb / apt): the helper + polkit assets already ship with the package
 sudo shepherd-admin apps install android kiosk
-
-# From source: build and install the helper in one step
-sudo ./scripts/shepherd install waydroid --user kiosk
+# then run the printed steps:
+curl https://repo.waydro.id | sudo bash -s "$(. /etc/os-release && echo "$VERSION_CODENAME")"
+sudo apt install -y waydroid
+echo binder_linux | sudo tee /etc/modules-load.d/waydroid.conf && sudo modprobe binder_linux
 ```
 
-Both paths add the user to the `shepherd-waydroid` group; the change takes
-effect on the user's next login. Without the helper, Android apps still launch
-and stop (by closing the window); the helper only adds reliable process
-reclamation and container preboot. Tune preboot via `[service.waydroid]` in the
-config.
+### 2. Build the managed image
 
-### Kiosk lock-in (`lock_mode`)
+Re-run the same command once the engine is installed — it's idempotent and now
+does the managed provisioning:
+
+```sh
+sudo shepherd-admin apps install android kiosk
+```
+
+- `waydroid init -s GAPPS` — downloads the GApps system image.
+- libndk ARM translation (amd64 only) — so ARM-only apps install and run.
+- installs the DPC apk and sets it as **device owner**. This must happen
+  **before any Google sign-in** (the only gate is that no account exists yet).
+
+The device-owner step needs a running Waydroid session; if one isn't up the
+command provisions GApps + libndk and tells you to start a session and re-run to
+finish the DPC.
+
+### 3. Sign in + certify (interactive)
+
+These can't be automated. As the kiosk user, in a graphical session:
+
+```sh
+waydroid show-full-ui   # opens the Android UI
+```
+
+- Register the device's GSF Android ID at
+  <https://www.google.com/android/uncertified>, wait a few minutes, then restart
+  the session — otherwise Play stays "uncertified".
+- Sign into Google **after** the device owner is set (step 2). Use a personal or
+  Family Link **child** account; a Google Workspace (custom-domain) account may
+  not be offered children's apps like Khan Academy Kids.
+
+### 4. Configure the activities
+
+Reference installed apps in the config with `type = "android"` and their package
+name (`waydroid app list` lists them). Tune the warm-boot behavior via
+`[service.waydroid]` (`preboot`, `suspend_when_idle`, …), and choose the lock-in
+mode below.
+
+#### Kiosk lock-in (`lock_mode`)
 
 `[service.waydroid] lock_mode` controls how launched Android apps are locked in:
 
@@ -983,8 +1024,7 @@ config.
   the nav-bar home/recents buttons. Soft; keeps the multi-window presentation.
 - `"locktask"` — pin the app in Android **Lock Task Mode** via the DPC device
   owner (hard containment; blocks HOME/Recents/app-switching at the framework
-  level). Requires `shepherd-admin apps install android` to have installed the
-  DPC and set it as device owner (a GApps image; the DPC apk ships in the `.deb`).
+  level). Requires the DPC installed + set as device owner (steps 1–2).
   Presented as a single full-UI surface rather than per-app windows.
 - `"off"` — no lock-in.
 
