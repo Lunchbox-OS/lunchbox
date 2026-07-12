@@ -25,23 +25,17 @@ name: Release
 #                               reserves those prefixes for secret names.)
 #   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
 #                               .deb into Forgejo's Debian (apt) package registry.
-#   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
+#   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore. Signs the
+#                               companion + media apks AND the DPC. UN-ROTATABLE:
+#                               the DPC is a device owner, updatable only with the
+#                               SAME key, so once any device is provisioned this
+#                               shared key must never change.
 #   SHEPHERD_KEYSTORE_PASSWORD  keystore password
 #   SHEPHERD_KEY_ALIAS          signing key alias
 #   SHEPHERD_KEY_PASSWORD       signing key password
 #   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
 #                               Edit" permission, to publish the config editor
 #   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
-#
-# Optional (the .deb ships the DPC Lock Task backend only when set):
-#   SHEPHERD_DPC_KEYSTORE_B64       base64 of the DPC keystore. UN-ROTATABLE: a
-#                                   device-owner app can only be updated with the
-#                                   SAME key, so this must never change once any
-#                                   device has been provisioned. Keep it distinct
-#                                   from the app-signing keystore above.
-#   SHEPHERD_DPC_KEYSTORE_PASSWORD  DPC keystore password
-#   SHEPHERD_DPC_KEY_ALIAS          DPC signing key alias
-#   SHEPHERD_DPC_KEY_PASSWORD       DPC signing key password
 
 on:
   push:
@@ -167,21 +161,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build + sign the DPC apk
-        # Only when the persistent DPC keystore secret is set — a device-owner
-        # app can only be updated with the SAME key, so we never ship one signed
-        # with an ephemeral key. Without it, `package deb` below simply omits the
-        # apk and the .deb ships without the Lock Task backend.
+        # Signed with the shared org release key (same as the companion + media
+        # apks). NOTE: the DPC is a device owner, updatable only with the SAME
+        # key, so once any device is provisioned this key is effectively
+        # un-rotatable. Skipped when the keystore secret is unset — the .deb then
+        # ships without the Lock Task backend rather than with an unusable key.
         env:
-          DPC_KEYSTORE_B64: ${{ secrets.SHEPHERD_DPC_KEYSTORE_B64 }}
-          DPC_KEYSTORE_PASS: ${{ secrets.SHEPHERD_DPC_KEYSTORE_PASSWORD }}
-          DPC_KEY_PASS: ${{ secrets.SHEPHERD_DPC_KEY_PASSWORD }}
-          DPC_KEY_ALIAS: ${{ secrets.SHEPHERD_DPC_KEY_ALIAS }}
+          KEYSTORE_B64: ${{ secrets.SHEPHERD_KEYSTORE_B64 }}
+          DPC_KEYSTORE_PASS: ${{ secrets.SHEPHERD_KEYSTORE_PASSWORD }}
+          DPC_KEY_PASS: ${{ secrets.SHEPHERD_KEY_PASSWORD }}
+          DPC_KEY_ALIAS: ${{ secrets.SHEPHERD_KEY_ALIAS }}
         run: |
-          if [ -z "$DPC_KEYSTORE_B64" ]; then
-            echo "SHEPHERD_DPC_KEYSTORE_B64 not set; building the .deb without the DPC Lock Task backend."
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "SHEPHERD_KEYSTORE_B64 not set; building the .deb without the DPC Lock Task backend."
             exit 0
           fi
-          echo "$DPC_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-dpc.jks"
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-dpc.jks"
           DPC_KEYSTORE="$RUNNER_TEMP/shepherd-dpc.jks" ANDROID_SDK_ROOT=/opt/android-sdk \
             ./dpc-waydroid/build.sh
 

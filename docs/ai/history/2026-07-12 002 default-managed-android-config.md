@@ -54,9 +54,14 @@ full-UI **`Waydroid`** surface (exact app_id, capital W):
 Kiosks have no Android SDK, so the DPC apk ships prebuilt. `build.sh` honors
 `DPC_KEYSTORE`/passwords/alias env; `package.sh` stages a prebuilt
 `shepherd-dpc.apk` into `/usr/share/shepherd/`; the `deb` job runs in the android
-image (Forgejo has no cross-job artifacts) and, when `SHEPHERD_DPC_KEYSTORE_B64`
-is set, builds+signs the apk before packaging + publishes it standalone. **The
-DPC key is un-rotatable** (a device-owner app only updates with the same key).
+image (Forgejo has no cross-job artifacts) and, when the keystore secret is set,
+builds+signs the apk before packaging + publishes it standalone.
+
+The DPC signs with the **shared org release key** (`SHEPHERD_KEYSTORE_B64`, same
+as companion + media) rather than a dedicated one — the user's call, to avoid a
+second secret; the DPC has no signature-permission interop need. Consequence:
+because a device-owner app can only be updated with the **same** key, that shared
+key is now effectively **un-rotatable** once any device is provisioned.
 
 ## Bench findings (the hard-won ones)
 
@@ -80,5 +85,6 @@ Everything in Phase 2b was settled by iterating on the live box:
 
 - Locktask self-exit detection (app finishing *inside* the full UI) isn't
   observed — stop is the exit trigger; Lock Task largely prevents self-exit.
-- The operator must generate the persistent DPC keystore + add the Forgejo
-  secret; Google sign-in + device certification remain interactive.
+- The existing `SHEPHERD_KEYSTORE_*` release secrets now also gate the DPC
+  backend (no new secret); Google sign-in + device certification remain
+  interactive.
