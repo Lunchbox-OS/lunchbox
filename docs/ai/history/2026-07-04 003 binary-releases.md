@@ -133,17 +133,31 @@ lifecycle.
   `need` it.
 - **`image` / `image-android` jobs:** mirror `ci.yml` — compute the
   content-hash image ref and build-if-missing. See the DRY note below.
-- **`deb` job:** runs in the base `image` container; `shepherd package deb`;
-  uploads the `.deb` as a workflow artifact.
-- **`apk` job:** **matrix over Android modules** (fan-out for #3). Runs in the
-  `image-android` container; `./gradlew :<module>:assembleRelease` with a
-  signing config fed from secrets; uploads each APK as an artifact. Adding
-  `shepherd-media-android` later is one matrix row.
-- **`publish` job:** downloads all artifacts, computes `SHA256SUMS`, then uses
-  the **Forgejo API** (`${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases`)
-  with a `RELEASE_TOKEN` secret to create the release and upload every asset.
-  Using the raw API keeps the workflow free of third-party action availability
-  assumptions on the self-hosted runner.
+- **`create-release` job:** makes (or, on a re-run, fetches) the Forgejo release
+  up front via the **Forgejo API** (`…/api/v1/repos/{owner}/{repo}/releases`,
+  `RELEASE_TOKEN` secret), exposing `release_id`. Runs on every trigger but only
+  calls the API when publishing; a dry run is a no-op.
+- **`deb` job** (base image) and **`apk` job** (android image, **matrix over
+  Android modules** — fan-out for #3) build in **parallel**; each then uploads
+  *its own* asset + a `.sha256` sidecar directly to the release via
+  `scripts/ci/upload-release-asset.sh` (on a tag push or `publish` dispatch).
+
+  > **No cross-job artifacts.** The first design passed files between a build and
+  > a publish job via `actions/upload-artifact@v4` / `download-artifact@v4`. That
+  > protocol (`@actions/artifact` v2+) is **not implemented by Forgejo** — the
+  > runner reports itself as GHES and the action hard-fails
+  > (`GHESNotSupportedError`); no `app.ini` toggle adds it, only a newer Forgejo
+  > version. So there is no build→publish handoff: `create-release` makes the
+  > release first, and each parallel build job attaches its own asset straight to
+  > it. A per-asset `.sha256` replaces a combined `SHA256SUMS` so no job needs
+  > the others' files. This keeps the jobs parallel with zero artifact-backend
+  > dependency.
+
+  > **cargo-ndk lives in the image, not the jobs.** `cargo-ndk`, the Android Rust
+  > targets, and `ANDROID_NDK_HOME` are baked into the Android CI image (via
+  > `deps install android` → `install_cargo_ndk`, and an `ENV` in
+  > `.ci/Dockerfile.android`), so neither the release `apk` job nor ci.yml's
+  > `android-media` job installs a toolchain at runtime.
 
 **Release flow:** `shepherd version set X.Y.Z` → commit → `git tag -a vX.Y.Z`
 → `git push --tags`. CI does the rest.

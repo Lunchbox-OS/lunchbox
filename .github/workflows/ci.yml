@@ -331,42 +331,11 @@ jobs:
               "
           '
 
-  android-portability:
-    name: Android portability (shepherd-media-core)
-    needs: images
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.images.outputs.base-ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Add aarch64-linux-android target
-        run: rustup target add aarch64-linux-android
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-android-
-
-      # We `cargo check` rather than `cargo build` because we only need to
-      # verify that shepherd-media-core's dependencies and code compile for
-      # the Android target — we don't need an Android linker. This job exists
-      # to fail loudly if a Linux-specific dep gets added to the core.
-      - name: Check shepherd-media-core for aarch64-linux-android
-        run: |
-          cargo check \
-            --target aarch64-linux-android \
-            --no-default-features \
-            -p shepherd-media-core
+  # (Removed: the `android-portability` job cargo-checked shepherd-media-core
+  # for aarch64-linux-android with --no-default-features. That's now redundant:
+  # `android-media` below builds shepherd-media-android, which depends on core
+  # with `default-features = false` for the same target — a strict superset that
+  # would catch any Linux-specific dep added to the core.)
 
   android-companion:
     name: Android companion (unit tests)
@@ -408,11 +377,11 @@ jobs:
     # `cargoNdkBuild` task in android/app/build.gradle.kts), so a break in the
     # device build fails CI without paying for the full AGP/APK assembly.
     #
-    # Runs on the Android CI image for its prebuilt NDK (baked in at
-    # $ANDROID_SDK_ROOT/ndk by `deps install android`). cargo-ndk and the Rust
-    # target are the only per-run additions, cached so they install at most once
-    # per Cargo.lock; unlike android-portability's `cargo check` of the core,
-    # this fully builds and links the cdylib against the vendored libmpv.
+    # Runs on the Android CI image, which bakes in the NDK, cargo-ndk, and the
+    # Android Rust targets (all via `deps install android`), with ANDROID_NDK_HOME
+    # set — so there's no per-run toolchain install. Unlike android-portability's
+    # `cargo check` of the core, this fully builds and links the cdylib against
+    # the vendored libmpv.
     needs: images
     runs-on: ubuntu-latest
     container:
@@ -423,34 +392,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry, cargo-ndk, and build
+      - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cargo/bin/cargo-ndk
             target
           key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-media-android-
 
-      - name: Install cargo-ndk and the aarch64-linux-android target
-        run: |
-          rustup target add aarch64-linux-android
-          command -v cargo-ndk >/dev/null || cargo install cargo-ndk
-
       # Same cargo-ndk cross-compile as android/app/build.gradle.kts's
       # cargoNdkBuild task, but debug rather than --release: this is a
       # compile-and-link gate, and a debug build catches the same breakage in
-      # roughly half the time. cargo-ndk also auto-detects the NDK under
-      # $ANDROID_SDK_ROOT/ndk, but we point ANDROID_NDK_HOME at it explicitly so
-      # the build never depends on that heuristic.
+      # roughly half the time. cargo-ndk + the target + ANDROID_NDK_HOME come
+      # from the image.
       - name: Build shepherd-media-android cdylib
-        run: |
-          ANDROID_NDK_HOME="$(ls -d "$ANDROID_SDK_ROOT"/ndk/* | head -n1)"
-          export ANDROID_NDK_HOME
-          cargo ndk -t arm64-v8a build -p shepherd-media-android
+        run: cargo ndk -t arm64-v8a build -p shepherd-media-android
 
   shellcheck:
     name: ShellCheck
@@ -467,5 +426,20 @@ jobs:
         run: |
           # SC1091: Not following sourced files (info only, safe to ignore)
           shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
-          shellcheck -e SC1091 scripts/lib/*.sh
+          shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh
           shellcheck -e SC1091 run-dev
+
+  arch-neutral:
+    name: Arch neutrality
+    # Static guard: fails if an amd64/x86-specific literal creeps into the build
+    # & packaging path, which would mislabel or break non-amd64 (e.g. arm64)
+    # packages. `shepherd package deb` derives the Debian arch from the host at
+    # runtime (dpkg --print-architecture); this keeps it that way. Needs no build
+    # or container — just bash + grep — so it runs on the default runner even
+    # though the rest of CI executes on amd64 only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check build/packaging path is architecture-neutral
+        run: ./scripts/ci/check-arch-neutral.sh

@@ -111,7 +111,7 @@ verify_repo() {
 
 # Check Ubuntu version and warn if not supported
 check_ubuntu_version() {
-    local min_version="${1:-25.10}"
+    local min_version="${1:-26.04}"
     
     if [[ ! -f /etc/os-release ]]; then
         warn "Cannot determine OS version (not Linux or missing /etc/os-release)"

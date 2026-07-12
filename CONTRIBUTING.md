@@ -11,7 +11,7 @@ dependencies. Once installed, `./run-dev` will start a development instance.
 
 1. **Linux with Wayland**
 
-   * Any modern Wayland compositor is sufficient. For Ubuntu, this means 25.10 or higher.
+   * Any modern Wayland compositor is sufficient. For Ubuntu, this means 26.04 or higher.
    * Optional (but recommended for realistic testing): TPM-based full disk encryption and a BIOS/UEFI password to prevent local tampering.
 
 2. **System dependencies**

@@ -33,6 +33,13 @@ ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinet
 ANDROID_NDK_VERSION="27.2.12479018"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
+# Rust targets cargo-ndk cross-compiles the shepherd-media-android cdylib for:
+# arm64-v8a (aarch64) and armeabi-v7a (armv7). Installed alongside cargo-ndk in
+# the android set so the CI image bakes them in.
+ANDROID_RUST_TARGETS=(
+    "aarch64-linux-android"
+    "armv7-linux-androideabi"
+)
 ANDROID_SDK_PACKAGES=(
     "platform-tools"
     "platforms;android-35"
@@ -170,6 +177,32 @@ install_android_sdk() {
     fi
 }
 
+# Install cargo-ndk + the Android Rust targets used to cross-compile the
+# shepherd-media-android cdylib. Part of the `android` set so the Android CI
+# image (built FROM the base image, which already has Rust) bakes them in — the
+# release/CI jobs then don't install cargo-ndk at runtime.
+#
+# Requires Rust: skipped with a note when cargo is absent, so `deps install
+# android` still works standalone for the Kotlin-only companion app. On a host
+# that builds shepherd-media-android, run `deps install build` first.
+install_cargo_ndk() {
+    if ! command_exists cargo; then
+        warn "cargo not found; skipping cargo-ndk + Android Rust targets."
+        warn "Run 'shepherd deps install build' first to build shepherd-media-android."
+        return 0
+    fi
+
+    info "Adding Android Rust targets: ${ANDROID_RUST_TARGETS[*]}"
+    rustup target add "${ANDROID_RUST_TARGETS[@]}"
+
+    if command_exists cargo-ndk; then
+        info "cargo-ndk already installed ($(cargo-ndk --version 2>/dev/null || echo '?'))"
+    else
+        info "Installing cargo-ndk (cargo install, ~1-2 min on first build)..."
+        cargo install cargo-ndk
+    fi
+}
+
 # Read a package file, stripping comments and empty lines
 read_package_file() {
     local file="$1"
@@ -267,9 +300,10 @@ deps_install() {
     fi
 
     # For the android set, fetch the SDK after the JDK + unzip apt
-    # packages are present.
+    # packages are present, then cargo-ndk + the Android Rust targets.
     if [[ "$set_name" == "android" ]]; then
         install_android_sdk
+        install_cargo_ndk
     fi
 
     success "Installed $set_name dependencies"
@@ -309,10 +343,14 @@ deps_check() {
         fi
     fi
 
-    # For the android set, also check the SDK.
+    # For the android set, also check the SDK and (when Rust is present) cargo-ndk.
     if [[ "$set_name" == "android" ]]; then
         if ! is_android_sdk_installed; then
             warn "Android SDK is not installed (run: shepherd deps install android)"
+            return 1
+        fi
+        if command_exists cargo && ! command_exists cargo-ndk; then
+            warn "cargo-ndk is not installed (run: shepherd deps install android)"
             return 1
         fi
     fi

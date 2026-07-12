@@ -68,7 +68,7 @@ Development:
 CI/Build:
     shepherd deps install build   Install build-only dependencies
     shepherd build --release      Build release binaries
-    shepherd package deb          Build the amd64 Debian package
+    shepherd package deb          Build the Debian package (host architecture)
 
 Runtime:
     shepherd deps install run     Install runtime dependencies only

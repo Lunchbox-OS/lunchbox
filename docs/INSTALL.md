@@ -1,7 +1,7 @@
 # Installation
 
 `shepherd-launcher` can be installed on Linux with a modern Wayland compositor.
-It is currently developed and tested on Ubuntu 25.10.
+It is currently developed and tested on Ubuntu 26.04.
 
 `shepherd-launcher` can be installed either from a prebuilt `.deb` (the quick
 path) or from source (for development). `./scripts/shepherd` can help set up
