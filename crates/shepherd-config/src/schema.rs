@@ -1090,10 +1090,20 @@ pub struct RawWaydroidConfig {
     /// session before giving up (seconds). Default 60.
     pub boot_ready_timeout_seconds: Option<u64>,
 
-    /// Harden launched Android sessions against a child leaving the kiosk app:
-    /// disable the notification shade / quick settings (which can reach Android
-    /// Settings) and the nav-bar home/recents/search buttons. Default true.
+    /// Kiosk lock-in mode for launched Android sessions:
+    /// - `"statusbar"` (default): disable the notification shade / quick
+    ///   settings (which can reach Android Settings) and the nav-bar
+    ///   home/recents/search buttons. Soft; keeps multi-window presentation.
+    /// - `"locktask"`: pin the app in Android Lock Task Mode via the DPC
+    ///   device-owner app (hard containment, single-surface presentation).
+    ///   Requires `apps install android` to have set the DPC as device owner.
+    /// - `"off"`: no lock-in.
+    ///
     /// Requires the privileged helper (`shepherd install waydroid`).
+    pub lock_mode: Option<String>,
+
+    /// Deprecated: use `lock_mode`. `true`/unset maps to `lock_mode =
+    /// "statusbar"`, `false` to `"off"`. Ignored when `lock_mode` is set.
     pub lock_down: Option<bool>,
 }
 

@@ -200,9 +200,15 @@ launch_timeout_seconds = 30
 multi_window = true           # Each app gets its own Wayland window (app_id "waydroid.<pkg>")
 suspend_when_idle = true      # Freeze the container when idle to save CPU/RAM
 boot_ready_timeout_seconds = 60
-lock_down = true              # Harden against a child leaving the app: disable the
-                              # notification shade / quick settings (route to Settings)
-                              # and nav-bar home/recents. Needs `shepherd install waydroid`.
+lock_mode = "statusbar"       # Kiosk lock-in for launched Android apps:
+                              #   "statusbar" (default) — disable the notification shade /
+                              #     quick settings (route to Settings) + nav-bar home/recents.
+                              #   "locktask" — pin the app in Android Lock Task Mode via the
+                              #     DPC device owner (hard containment; needs
+                              #     `shepherd-admin apps install android` to have set it up).
+                              #   "off" — no lock-in.
+                              # Needs `shepherd install waydroid`. (Legacy `lock_down = true/false`
+                              # still maps to "statusbar"/"off" when lock_mode is unset.)
 
 # HTTP management API (optional)
 # Exposes a REST API for remote control, usage analytics, and daily overrides.

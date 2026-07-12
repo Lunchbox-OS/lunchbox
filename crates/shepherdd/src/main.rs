@@ -17,7 +17,7 @@ use shepherd_api::{
     EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response,
 };
 use shepherd_ble::{BleServer, BleServerConfig};
-use shepherd_config::load_config;
+use shepherd_config::{LockMode, load_config};
 use shepherd_core::{CoreEngine, CoreEvent};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
@@ -26,7 +26,7 @@ use shepherd_host_api::{
 };
 use shepherd_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxNetworkInfo,
-    LinuxVolumeController, PipeWireAudioRouter, SwayIpcBackend,
+    LinuxVolumeController, PipeWireAudioRouter, SwayIpcBackend, WaydroidLockMode,
 };
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
@@ -1057,7 +1057,11 @@ impl Service {
             engine.policy().service.waydroid.multi_window,
             engine.policy().service.waydroid.suspend_when_idle,
             engine.policy().service.waydroid.boot_ready_timeout,
-            engine.policy().service.waydroid.lock_down,
+            match engine.policy().service.waydroid.lock_mode {
+                LockMode::Off => WaydroidLockMode::Off,
+                LockMode::Statusbar => WaydroidLockMode::Statusbar,
+                LockMode::Locktask => WaydroidLockMode::Locktask,
+            },
         );
 
         // Initialize internet connectivity monitor (if configured)

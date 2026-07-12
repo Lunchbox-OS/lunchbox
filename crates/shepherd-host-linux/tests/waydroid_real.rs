@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use shepherd_api::EntryKind;
 use shepherd_host_api::{HostAdapter, HostEvent, SpawnOptions, StopMode};
-use shepherd_host_linux::LinuxHost;
+use shepherd_host_linux::{LinuxHost, WaydroidLockMode};
 use shepherd_util::SessionId;
 
 /// A built-in LineageOS app present in the vanilla Waydroid image.
@@ -101,8 +101,13 @@ async fn waydroid_preboot_enables_multi_window() {
     }
 
     let host = LinuxHost::new();
-    // multi_window=true, suspend=true, 90s boot timeout, lock_down=true.
-    host.configure_waydroid(true, true, Duration::from_secs(90), true);
+    // multi_window=true, suspend=true, 90s boot timeout, statusbar lock-down.
+    host.configure_waydroid(
+        true,
+        true,
+        Duration::from_secs(90),
+        WaydroidLockMode::Statusbar,
+    );
     host.preboot_waydroid();
 
     // Poll for the end state: a running session with multi-window enabled.

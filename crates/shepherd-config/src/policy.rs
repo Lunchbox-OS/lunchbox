@@ -546,6 +546,30 @@ impl Default for SteamConfig {
 /// Default Waydroid session-ready timeout.
 pub const DEFAULT_WAYDROID_BOOT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Kiosk lock-in mode for launched Android sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    /// No lock-in.
+    Off,
+    /// Disable the notification shade / nav buttons (soft; keeps multi-window).
+    Statusbar,
+    /// Pin the app in Android Lock Task Mode via the DPC (hard containment).
+    Locktask,
+}
+
+impl LockMode {
+    /// Parse a `[service.waydroid] lock_mode` string; `None` for an unrecognized
+    /// value (which `validate_config` reports as an error).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "statusbar" => Some(Self::Statusbar),
+            "locktask" => Some(Self::Locktask),
+            _ => None,
+        }
+    }
+}
+
 /// Validated Waydroid (Android activity kind) configuration.
 ///
 /// `preboot` is an `Option` because its default is dynamic: when unset, the
@@ -562,8 +586,8 @@ pub struct WaydroidConfig {
     pub suspend_when_idle: bool,
     /// How long to wait for the session to report ready.
     pub boot_ready_timeout: Duration,
-    /// Whether to harden launched sessions against leaving the kiosk app.
-    pub lock_down: bool,
+    /// How to harden launched sessions against leaving the kiosk app.
+    pub lock_mode: LockMode,
 }
 
 impl WaydroidConfig {
@@ -576,7 +600,16 @@ impl WaydroidConfig {
                 .and_then(|c| c.boot_ready_timeout_seconds)
                 .map(Duration::from_secs)
                 .unwrap_or(DEFAULT_WAYDROID_BOOT_READY_TIMEOUT),
-            lock_down: raw.and_then(|c| c.lock_down).unwrap_or(true),
+            // Explicit lock_mode wins (invalid values rejected by validation, so
+            // default defensively to statusbar). Else honor the legacy lock_down
+            // bool: false -> off, true/unset -> statusbar.
+            lock_mode: match raw.and_then(|c| c.lock_mode.as_deref()) {
+                Some(s) => LockMode::parse(s).unwrap_or(LockMode::Statusbar),
+                None => match raw.and_then(|c| c.lock_down) {
+                    Some(false) => LockMode::Off,
+                    _ => LockMode::Statusbar,
+                },
+            },
         }
     }
 }
@@ -1570,6 +1603,31 @@ pub(crate) fn default_warning_thresholds() -> Vec<WarningThreshold> {
 mod tests {
     use super::*;
     use chrono::{Local, TimeZone};
+
+    #[test]
+    fn waydroid_lock_mode_resolution() {
+        use crate::schema::RawWaydroidConfig;
+        let mk = |mode: Option<&str>, legacy: Option<bool>| {
+            WaydroidConfig::from_raw(Some(&RawWaydroidConfig {
+                lock_mode: mode.map(str::to_string),
+                lock_down: legacy,
+                ..Default::default()
+            }))
+            .lock_mode
+        };
+        // Explicit lock_mode wins (case-insensitive) and overrides legacy lock_down.
+        assert_eq!(mk(Some("locktask"), None), LockMode::Locktask);
+        assert_eq!(mk(Some("STATUSBAR"), None), LockMode::Statusbar);
+        assert_eq!(mk(Some("off"), Some(true)), LockMode::Off);
+        // Unknown value defaults to statusbar (validate_config reports the error).
+        assert_eq!(mk(Some("bogus"), None), LockMode::Statusbar);
+        // Legacy lock_down fallback when lock_mode is unset.
+        assert_eq!(mk(None, Some(false)), LockMode::Off);
+        assert_eq!(mk(None, Some(true)), LockMode::Statusbar);
+        // Nothing set → statusbar default (unchanged from prior lock_down=true).
+        assert_eq!(mk(None, None), LockMode::Statusbar);
+        assert_eq!(WaydroidConfig::default().lock_mode, LockMode::Statusbar);
+    }
 
     #[test]
     fn test_availability_always() {

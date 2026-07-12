@@ -168,6 +168,49 @@ pub async fn lock_down() {
     }
 }
 
+/// Best-effort: launch `package` pinned in Lock Task Mode via the DPC, through
+/// the privileged helper (`pkexec shepherd-waydroid-helper pin --package <pkg>`
+/// → the DPC's `LaunchActivity`). Used by the `lock_mode = "locktask"` launch
+/// path; requires the DPC installed + set as device owner.
+// Wired into spawn_android's locktask branch in the follow-up increment.
+#[allow(dead_code)]
+pub async fn pin(package: &str) {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .args(["pin", "--package", package])
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!(package, "pinned Android app in Lock Task Mode"),
+        Ok(status) => debug!(
+            package,
+            %status,
+            "pin helper did not succeed (helper not installed, DPC not device owner, or polkit denied?)"
+        ),
+        Err(e) => warn!(package, error = %e, "failed to invoke pin helper"),
+    }
+}
+
+/// Best-effort: clear the DPC's Lock Task allowlist so a locked session can end,
+/// via the privileged helper (`pkexec shepherd-waydroid-helper unlock` → the
+/// DPC's `ControlReceiver`).
+// Wired into stop_android's locktask branch in the follow-up increment.
+#[allow(dead_code)]
+pub async fn unlock() {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("unlock")
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!("cleared Waydroid Lock Task allowlist"),
+        Ok(status) => {
+            debug!(%status, "unlock helper did not succeed (helper not installed or polkit denied?)")
+        }
+        Err(e) => warn!(error = %e, "failed to invoke unlock helper"),
+    }
+}
+
 /// Read a persistent Waydroid property (session user), trimmed. `None` on any
 /// failure or empty value.
 pub async fn get_prop(key: &str) -> Option<String> {

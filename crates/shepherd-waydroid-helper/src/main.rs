@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly three narrow, fixed actions:
+//! and exposes exactly five narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -13,8 +13,13 @@
 //!   container service up so shepherdd can then start the user-level session.
 //! - `lock-down`: `waydroid shell cmd statusbar send-disable-flag <flags>` to
 //!   harden the session against the child leaving the kiosk app.
+//! - `pin --package <pkg>`: drive the DPC's `LaunchActivity` to launch `<pkg>`
+//!   pinned in Lock Task Mode (`lock_mode = "locktask"`). Same package trust
+//!   boundary as force-stop.
+//! - `unlock`: broadcast to the DPC's `ControlReceiver` to clear the Lock Task
+//!   allowlist so a locked session can end.
 //!
-//! `preboot`/`lock-down` take no arguments and every action `exec`s a fixed
+//! The no-argument actions take no arguments and every action `exec`s a fixed
 //! command (the only caller-controlled value is the validated package name).
 //! Parsing/validation is split into the pure [`parse_args`] + [`Action`] so the
 //! trust boundary is unit-tested without exec. See README.md.
@@ -42,7 +47,12 @@ const LOCK_DOWN_FLAGS: &[&str] = &[
     "search",
 ];
 
-const USAGE: &str = "expected 'force-stop', 'preboot', or 'lock-down'";
+/// The DPC (Device Policy Controller) components `pin`/`unlock` drive. Hardcoded
+/// so the privileged action targets only shepherd's own device-owner app.
+const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity";
+const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
+
+const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', or 'unlock'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
@@ -50,6 +60,8 @@ enum Action {
     ForceStop { package: String },
     Preboot,
     LockDown,
+    Pin { package: String },
+    Unlock,
 }
 
 impl Action {
@@ -77,6 +89,36 @@ impl Action {
                 argv.extend(LOCK_DOWN_FLAGS.iter().map(|f| f.to_string()));
                 ("waydroid", argv)
             }
+            // `shell --` stops waydroid from parsing the forwarded `--es` flags
+            // as its own; the component is fixed and the package pre-validated.
+            Action::Pin { package } => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "--".into(),
+                    "am".into(),
+                    "start".into(),
+                    "-n".into(),
+                    DPC_LAUNCH_COMPONENT.into(),
+                    "--es".into(),
+                    "pkg".into(),
+                    package.clone(),
+                ],
+            ),
+            Action::Unlock => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "--".into(),
+                    "am".into(),
+                    "broadcast".into(),
+                    "-n".into(),
+                    DPC_CONTROL_COMPONENT.into(),
+                    "--es".into(),
+                    "action".into(),
+                    "unlock".into(),
+                ],
+            ),
         }
     }
 }
@@ -91,15 +133,23 @@ fn die(msg: impl AsRef<str>) -> ! {
 /// boundary are unit-testable.
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> {
     match args.next().as_deref() {
-        Some("force-stop") => parse_force_stop(args),
+        Some("force-stop") => {
+            parse_validated_package(args).map(|package| Action::ForceStop { package })
+        }
         Some("preboot") => no_extra_args(args, "preboot").map(|()| Action::Preboot),
         Some("lock-down") => no_extra_args(args, "lock-down").map(|()| Action::LockDown),
+        Some("pin") => parse_validated_package(args).map(|package| Action::Pin { package }),
+        Some("unlock") => no_extra_args(args, "unlock").map(|()| Action::Unlock),
         Some(other) => Err(format!("unknown subcommand '{other}' ({USAGE})")),
         None => Err(format!("missing subcommand ({USAGE})")),
     }
 }
 
-fn parse_force_stop(mut args: impl Iterator<Item = String>) -> Result<Action, String> {
+/// Parse `--package <pkg>` and enforce the shared trust boundary — the only
+/// caller-controlled value in any `waydroid shell` action. The strict rule
+/// forbids leading '-', whitespace, and shell metacharacters, so passing it as a
+/// single argv element is injection-safe. Shared by `force-stop` and `pin`.
+fn parse_validated_package(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     let mut package: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -113,14 +163,10 @@ fn parse_force_stop(mut args: impl Iterator<Item = String>) -> Result<Action, St
         }
     }
     let package = package.ok_or_else(|| "--package is required".to_string())?;
-
-    // The trust boundary: never run `am force-stop` on an unvalidated string.
-    // The strict rule forbids leading '-', whitespace, and shell metacharacters,
-    // so passing it as a single argv element is injection-safe.
     if !is_valid_android_package(&package) {
         return Err(format!("invalid package name '{package}'"));
     }
-    Ok(Action::ForceStop { package })
+    Ok(package)
 }
 
 fn no_extra_args(mut args: impl Iterator<Item = String>, name: &str) -> Result<(), String> {
@@ -192,6 +238,27 @@ mod tests {
         assert!(parse(&[]).is_err());
     }
 
+    #[test]
+    fn pin_shares_the_force_stop_package_trust_boundary() {
+        assert_eq!(
+            parse(&["pin", "--package", "com.android.calculator2"]),
+            Ok(Action::Pin {
+                package: "com.android.calculator2".into()
+            })
+        );
+        assert!(parse(&["pin", "--package", "com.app;rm -rf"]).is_err());
+        assert!(parse(&["pin", "--package", "-rf"]).is_err());
+        assert!(parse(&["pin", "--package", "noseparator"]).is_err());
+        assert!(parse(&["pin"]).is_err());
+        assert!(parse(&["pin", "--package", "a.b", "extra"]).is_err());
+    }
+
+    #[test]
+    fn unlock_takes_no_args() {
+        assert_eq!(parse(&["unlock"]), Ok(Action::Unlock));
+        assert!(parse(&["unlock", "x"]).is_err());
+    }
+
     /// argv as `&str`s, for ergonomic comparison.
     fn cmd_of(action: Action) -> (&'static str, Vec<String>) {
         action.command()
@@ -226,6 +293,44 @@ mod tests {
                 "statusbar-expansion",
                 "notification-peek",
                 "search",
+            ]
+        );
+
+        let (prog, argv) = cmd_of(Action::Pin {
+            package: "com.x.y".into(),
+        });
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(
+            argv,
+            [
+                "shell",
+                "--",
+                "am",
+                "start",
+                "-n",
+                "com.armeafamily.shepherd.dpc/.LaunchActivity",
+                "--es",
+                "pkg",
+                "com.x.y",
+            ]
+        );
+
+        let (prog, argv) = cmd_of(Action::Unlock);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(
+            argv,
+            [
+                "shell",
+                "--",
+                "am",
+                "broadcast",
+                "-n",
+                "com.armeafamily.shepherd.dpc/.ControlReceiver",
+                "--es",
+                "action",
+                "unlock",
             ]
         );
     }

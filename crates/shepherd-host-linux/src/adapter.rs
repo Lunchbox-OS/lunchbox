@@ -324,13 +324,26 @@ struct SteamSession {
     seen_game: bool,
 }
 
+/// Kiosk lock-in mode for launched Android sessions. Host-linux's own copy of
+/// `shepherd_config::LockMode` (kept independent of shepherd-config, mirroring
+/// how `configure_waydroid` takes primitives); the daemon maps between them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaydroidLockMode {
+    /// No lock-in.
+    Off,
+    /// Disable the notification shade / nav buttons (soft; keeps multi-window).
+    Statusbar,
+    /// Pin the app in Android Lock Task Mode via the DPC (hard containment).
+    Locktask,
+}
+
 /// Validated `[service.waydroid]` settings, applied at preboot.
 #[derive(Clone, Copy, Debug)]
 struct WaydroidSettings {
     multi_window: bool,
     suspend_when_idle: bool,
     boot_ready_timeout: Duration,
-    lock_down: bool,
+    lock_mode: WaydroidLockMode,
 }
 
 impl Default for WaydroidSettings {
@@ -339,7 +352,7 @@ impl Default for WaydroidSettings {
             multi_window: true,
             suspend_when_idle: true,
             boot_ready_timeout: Duration::from_secs(60),
-            lock_down: true,
+            lock_mode: WaydroidLockMode::Statusbar,
         }
     }
 }
@@ -550,13 +563,13 @@ impl LinuxHost {
         multi_window: bool,
         suspend_when_idle: bool,
         boot_ready_timeout: Duration,
-        lock_down: bool,
+        lock_mode: WaydroidLockMode,
     ) {
         *self.waydroid_settings.lock().unwrap() = Some(WaydroidSettings {
             multi_window,
             suspend_when_idle,
             boot_ready_timeout,
-            lock_down,
+            lock_mode,
         });
     }
 
@@ -1974,17 +1987,27 @@ impl LinuxHost {
             handle: handle.clone(),
         });
 
-        // Harden the session against the child leaving the app (disable the
-        // notification shade / nav buttons). Re-applied per launch because the
-        // flags reset on a SystemUI restart.
-        let lock_down = self
+        // Harden the session against the child leaving the app. Re-applied per
+        // launch because the statusbar flags reset on a SystemUI restart.
+        let lock_mode = self
             .waydroid_settings
             .lock()
             .unwrap()
             .unwrap_or_default()
-            .lock_down;
-        if lock_down {
-            waydroid::lock_down().await;
+            .lock_mode;
+        match lock_mode {
+            WaydroidLockMode::Off => {}
+            WaydroidLockMode::Statusbar => waydroid::lock_down().await,
+            WaydroidLockMode::Locktask => {
+                // The full DPC Lock Task path (pin + single-surface + dumpsys
+                // tracking) is the next increment; until then apply the
+                // statusbar lock-down so `locktask` is never weaker than it.
+                warn!(
+                    package = %package_name,
+                    "lock_mode=locktask: full DPC Lock Task path not yet wired; applying statusbar lock-down"
+                );
+                waydroid::lock_down().await;
+            }
         }
 
         self.spawn_android_window_watch(handle.clone(), app_id, package_name.to_string());
