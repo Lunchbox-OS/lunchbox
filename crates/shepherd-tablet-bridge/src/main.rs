@@ -45,12 +45,6 @@ struct Args {
     /// auto-detected.
     #[arg(long = "device", value_name = "PATH")]
     devices: Vec<PathBuf>,
-
-    /// Compositor output scale (e.g. 1.5). Absolute coordinates are divided by
-    /// this so contacts land in logical, not physical, pixels. Defaults to 1.0
-    /// (no scaling); shepherd-launcher passes the live sway scale.
-    #[arg(long = "output-scale", default_value_t = 1.0)]
-    output_scale: f64,
 }
 
 /// Touch state update emitted by reader threads.
@@ -331,8 +325,7 @@ fn main() -> Result<()> {
 
     let device_range = device_range.ok_or_else(|| anyhow!("no usable device range"))?;
 
-    let mut sink = UinputSink::new_touchscreen(args.output_scale)
-        .context("failed to create uinput touchscreen")?;
+    let mut sink = UinputSink::new_touchscreen().context("failed to create uinput touchscreen")?;
 
     info!("Tablet-to-touch bridge ready");
 

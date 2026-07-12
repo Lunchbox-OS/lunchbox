@@ -40,12 +40,6 @@ struct Args {
     #[arg(long = "device", value_name = "PATH")]
     devices: Vec<PathBuf>,
 
-    /// Compositor output scale (e.g. 1.5). Absolute coordinates are divided
-    /// by this so the cursor lands in logical, not physical, pixels. Defaults
-    /// to 1.0 (no scaling); shepherd-launcher passes the live sway scale.
-    #[arg(long = "output-scale", default_value_t = 1.0)]
-    output_scale: f64,
-
     /// Grab every touchscreen and discard its events instead of translating
     /// them to pointer motion. Disables the touchscreen for the lifetime of
     /// the bridge; no synthetic events are emitted and no `/dev/uinput`
@@ -338,8 +332,7 @@ fn main() -> Result<()> {
 
     let device_range = device_range.ok_or_else(|| anyhow!("no usable device range"))?;
 
-    let mut sink =
-        UinputSink::new_absolute(args.output_scale).context("failed to create uinput pointer")?;
+    let mut sink = UinputSink::new_absolute().context("failed to create uinput pointer")?;
 
     info!("Touch-to-mouse bridge ready");
 

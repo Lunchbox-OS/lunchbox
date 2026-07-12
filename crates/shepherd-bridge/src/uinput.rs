@@ -71,14 +71,6 @@ pub struct UinputSink {
     /// First emit error since the last [`flush`](OutputSink::flush), surfaced
     /// there so the caller can react.
     error: Option<anyhow::Error>,
-    /// Compositor output scale applied to absolute coordinates. libinput maps
-    /// the device's `0..=ABS_MAX` range onto the output's physical pixels, but
-    /// the cursor lives in logical (scaled) coordinates, so a full-surface
-    /// sweep would overshoot by the scale factor (touching `1/scale` of the
-    /// pad would already cover the whole screen). Dividing emitted absolute
-    /// coordinates by the scale corrects this. `1.0` for relative devices and
-    /// unscaled outputs, where it is a no-op.
-    abs_scale: f64,
     /// Active multitouch contacts: slot → assigned tracking ID, for the MT
     /// type-B protocol on a touchscreen device. Empty for pointer/keyboard
     /// devices, which never emit `Touch*` events. Drives the `BTN_TOUCH`
@@ -109,14 +101,16 @@ impl UinputSink {
             .build()
             .context("create uinput virtual device")?;
 
-        Ok(Self::ready(device, 1.0))
+        Ok(Self::ready(device))
     }
 
     /// Build an absolute pointer device (touch bridge).
     ///
-    /// `output_scale` is the compositor's output scale (e.g. `1.5`); pass
-    /// `1.0` when scaling is unknown or disabled. See [`UinputSink::abs_scale`].
-    pub fn new_absolute(output_scale: f64) -> Result<Self> {
+    /// The device declares a `0..=ABS_MAX` range that libinput maps onto the
+    /// output's logical layout space, so a full-pad sweep already covers the
+    /// whole screen 1:1 at any output scale — no per-scale correction is
+    /// applied (see [`rescale_abs`]).
+    pub fn new_absolute() -> Result<Self> {
         let abs_info = AbsInfo::new(0, 0, ABS_MAX, 0, 0, 0);
         let abs_x = UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_info);
         let abs_y = UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_info);
@@ -134,7 +128,7 @@ impl UinputSink {
             .build()
             .context("create uinput virtual device")?;
 
-        Ok(Self::ready(device, output_scale))
+        Ok(Self::ready(device))
     }
 
     /// Build a multitouch touchscreen device (tablet bridge).
@@ -142,8 +136,9 @@ impl UinputSink {
     /// Emits the MT type-B protocol and declares `INPUT_PROP_DIRECT`, so
     /// libinput classifies the device as a touchscreen and the compositor
     /// delivers real `wl_touch` events to activities — not pointer events.
-    /// `output_scale` has the same meaning as in [`UinputSink::new_absolute`].
-    pub fn new_touchscreen(output_scale: f64) -> Result<Self> {
+    /// Like [`UinputSink::new_absolute`], the declared range maps onto the
+    /// output's logical space, so no per-scale correction is applied.
+    pub fn new_touchscreen() -> Result<Self> {
         let abs_info = AbsInfo::new(0, 0, ABS_MAX, 0, 0, 0);
         let slot_info = AbsInfo::new(0, 0, MAX_SLOT, 0, 0, 0);
         let id_info = AbsInfo::new(0, 0, i32::from(u16::MAX), 0, 0, 0);
@@ -189,10 +184,10 @@ impl UinputSink {
             .build()
             .context("create uinput virtual device")?;
 
-        Ok(Self::ready(device, output_scale))
+        Ok(Self::ready(device))
     }
 
-    fn ready(device: VirtualDevice, abs_scale: f64) -> Self {
+    fn ready(device: VirtualDevice) -> Self {
         // Give udev/the compositor a moment to bind the new node before any
         // events are emitted.
         thread::sleep(SETTLE);
@@ -200,7 +195,6 @@ impl UinputSink {
             device,
             pending: Vec::new(),
             error: None,
-            abs_scale,
             touch_tracking: BTreeMap::new(),
             next_tracking_id: 0,
         }
@@ -215,9 +209,8 @@ impl UinputSink {
     /// Emit a contact position on both the MT axes and the single-touch
     /// `ABS_X`/`ABS_Y` axes (the latter keeps non-MT consumers in sync).
     fn push_touch_position(&mut self, x: u32, y: u32, x_extent: u32, y_extent: u32) {
-        let scale = self.abs_scale;
-        let rx = rescale_abs(x, x_extent, scale);
-        let ry = rescale_abs(y, y_extent, scale);
+        let rx = rescale_abs(x, x_extent);
+        let ry = rescale_abs(y, y_extent);
         self.pending
             .push(InputEvent::new(EV_ABS, ABS_MT_POSITION_X, rx));
         self.pending
@@ -246,17 +239,10 @@ impl OutputSink for UinputSink {
                 x_extent,
                 y_extent,
             } => {
-                let scale = self.abs_scale;
-                self.pending.push(InputEvent::new(
-                    EV_ABS,
-                    ABS_X,
-                    rescale_abs(x, x_extent, scale),
-                ));
-                self.pending.push(InputEvent::new(
-                    EV_ABS,
-                    ABS_Y,
-                    rescale_abs(y, y_extent, scale),
-                ));
+                self.pending
+                    .push(InputEvent::new(EV_ABS, ABS_X, rescale_abs(x, x_extent)));
+                self.pending
+                    .push(InputEvent::new(EV_ABS, ABS_Y, rescale_abs(y, y_extent)));
             }
             OutputEvent::PointerButton { button, pressed } => {
                 self.pending
@@ -345,17 +331,19 @@ impl OutputSink for UinputSink {
 }
 
 /// Rescale a raw absolute coordinate in `0..=extent` into the device's
-/// declared `0..=ABS_MAX` range, dividing by the compositor `scale` so the
-/// mapped position lands in logical (scaled) coordinates rather than physical
-/// pixels. At `scale == 1.0` this is the plain range remap. The result is
-/// clamped to the declared range (relevant for downscaling, `scale < 1.0`).
-fn rescale_abs(value: u32, extent: u32, scale: f64) -> i32 {
+/// declared `0..=ABS_MAX` range. libinput maps that range onto the output's
+/// logical layout space, so a full-extent sweep lands 1:1 on the screen at any
+/// output scale — no scale correction is applied here. (An earlier version
+/// divided by the compositor scale (issue #58); that was wrong in principle —
+/// it only appeared correct because it was only ever run with the XWayland
+/// HiDPI workaround forcing scale to 1.0, where the divide is a no-op — and it
+/// caused the touch-compat offset in issue #47 on scaled outputs.)
+fn rescale_abs(value: u32, extent: u32) -> i32 {
     if extent == 0 {
         return 0;
     }
-    let scale = if scale > 0.0 { scale } else { 1.0 };
     let frac = f64::from(value.min(extent)) / f64::from(extent);
-    let v = (frac / scale * f64::from(ABS_MAX)).round();
+    let v = (frac * f64::from(ABS_MAX)).round();
     v.clamp(0.0, f64::from(ABS_MAX)) as i32
 }
 
@@ -395,38 +383,16 @@ mod tests {
 
     #[test]
     fn rescale_maps_endpoints_and_midpoint() {
-        assert_eq!(rescale_abs(0, 1000, 1.0), 0);
-        assert_eq!(rescale_abs(1000, 1000, 1.0), ABS_MAX);
-        near(rescale_abs(500, 1000, 1.0), ABS_MAX / 2);
+        // A full-extent sweep maps 1:1 onto the declared range at every scale;
+        // libinput maps that range onto the output's logical space (issue #47).
+        assert_eq!(rescale_abs(0, 1000), 0);
+        assert_eq!(rescale_abs(1000, 1000), ABS_MAX);
+        near(rescale_abs(500, 1000), ABS_MAX / 2);
     }
 
     #[test]
     fn rescale_clamps_and_guards_zero_extent() {
-        assert_eq!(rescale_abs(2000, 1000, 1.0), ABS_MAX); // clamped to extent
-        assert_eq!(rescale_abs(5, 0, 1.0), 0); // degenerate range
-    }
-
-    #[test]
-    fn rescale_divides_by_scale() {
-        // Under output scale, a full-surface sweep must reach only
-        // `1/scale` of the device range so the cursor lands at the logical
-        // (not physical) screen edge.
-        near(rescale_abs(1000, 1000, 2.0), ABS_MAX / 2);
-        near(
-            rescale_abs(1000, 1000, 1.5),
-            (f64::from(ABS_MAX) / 1.5) as i32,
-        );
-        near(rescale_abs(500, 1000, 2.0), ABS_MAX / 4);
-    }
-
-    #[test]
-    fn rescale_downscale_clamps() {
-        // scale < 1.0 would push a full sweep past the declared range; clamp.
-        assert_eq!(rescale_abs(1000, 1000, 0.5), ABS_MAX);
-    }
-
-    #[test]
-    fn rescale_nonpositive_scale_treated_as_one() {
-        assert_eq!(rescale_abs(1000, 1000, 0.0), ABS_MAX);
+        assert_eq!(rescale_abs(2000, 1000), ABS_MAX); // clamped to extent
+        assert_eq!(rescale_abs(5, 0), 0); // degenerate range
     }
 }

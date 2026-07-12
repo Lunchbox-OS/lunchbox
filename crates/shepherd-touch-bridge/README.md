@@ -45,7 +45,7 @@ its pointer through `/dev/uinput`; `--grab-only` does not.
 ## CLI
 
 ```
-shepherd-touch-bridge [--device PATH]... [--output-scale SCALE] [--grab-only]
+shepherd-touch-bridge [--device PATH]... [--grab-only]
 ```
 
 If no `--device` arguments are given, all touchscreens are auto-detected.
