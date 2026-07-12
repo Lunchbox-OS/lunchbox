@@ -79,8 +79,9 @@ Commands:
     va-api <cmd>      Install/detect VA-API drivers for hardware video decoding
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
     apps install APP  Install an activity backend (steam via snap, chrome via
-                      Flathub, retroarch) or an Android app (companion/media)
-                      onto an attached phone or TV stick over adb
+                      Flathub, retroarch, okular, android via Waydroid) or an
+                      Android app (companion/media) onto an attached phone or
+                      TV stick over adb
     power-key <cmd>   Map the power button to suspend instead of shutdown
     harden <cmd>      Apply/revert/status kiosk hardening for a user
     bluetooth clear   Force-unpair the device's BLE admin and reset to unclaimed

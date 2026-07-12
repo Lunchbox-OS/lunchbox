@@ -106,12 +106,12 @@ on the CPU. `shepherd-media` asks YouTube for H.264 first for exactly that
 reason.
 
 To install an activity backend (Steam via Canonical's snap, Chrome via Flathub,
-RetroArch and Okular from the distro's own packages — matching what shepherd's
-`type = "steam"`, `kind = "flatpak"`, `type = "retroarch"` and `type = "ebook"`
-adapters drive):
+RetroArch and Okular from the distro's own packages, or Android via Waydroid —
+matching what shepherd's `type = "steam"`, `kind = "flatpak"`,
+`type = "retroarch"`, `type = "ebook"` and `type = "android"` adapters drive):
 
 ```sh
-sudo shepherd-admin apps install steam    # or: chrome
+sudo shepherd-admin apps install steam    # or: chrome, android
 ```
 
 `apps install retroarch` takes the libretro cores to install, named the way an
@@ -157,6 +157,12 @@ so there is nothing to set up by hand.
 belongs in that store's app (a browser or Android activity). See
 [ebooks.md](./ebooks.md) for configuring an activity, where reading positions
 live, and what the restrictions do and do not cover.
+
+`apps install android` provisions the shepherd side of the Android backend (the
+`shepherd-waydroid` group and, with a `USER` argument, that user's membership);
+the helper + polkit assets already ship with the package. It then prints the
+steps to install the Waydroid engine itself. See
+[Android activities via Waydroid](#android-activities-via-waydroid-optional) below.
 
 `apps install steam` also connects the snap's `mount-observe` interface and
 permits unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`
@@ -950,15 +956,20 @@ waydroid prop set persist.waydroid.multi_windows true
 
 shepherdd runs unprivileged, so two Waydroid operations (force-stopping an app
 and starting the root container service for preboot) go through a small
-privileged helper invoked via pkexec. Install it and join the
-`shepherd-waydroid` group:
+privileged helper invoked via pkexec: `/usr/libexec/shepherd-waydroid-helper`,
+plus its polkit policy and rule. The packaged install ships these dormant, so
+enabling Android is a single opt-in step that also creates the
+`shepherd-waydroid` group and adds the user to it:
 
 ```sh
+# Packaged (.deb / apt): the helper + polkit assets already ship with the package
+sudo shepherd-admin apps install android kiosk
+
+# From source: build and install the helper in one step
 sudo ./scripts/shepherd install waydroid --user kiosk
 ```
 
-This installs `/usr/libexec/shepherd-waydroid-helper`, its polkit policy and
-rule, and adds the user to the `shepherd-waydroid` group. The group change takes
+Both paths add the user to the `shepherd-waydroid` group; the change takes
 effect on the user's next login. Without the helper, Android apps still launch
 and stop (by closing the window); the helper only adds reliable process
 reclamation and container preboot. Tune preboot via `[service.waydroid]` in the

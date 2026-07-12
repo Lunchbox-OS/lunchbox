@@ -1037,10 +1037,11 @@ EOF
 # apps, using whichever packaging each actually expects — they all differ. The
 # type="steam" adapter drives Canonical's Steam *snap* (config.example.toml
 # documents `snap install steam`), Chrome is wrapped as the Flathub flatpak
-# `com.google.Chrome`, RetroArch comes from the distro's own packages, and the
-# companion/media apps are APKs pushed over adb to an attached phone or TV
-# stick (see the Android-apps section above). Add rows here as new backends are
-# supported.
+# `com.google.Chrome`, RetroArch comes from the distro's own packages,
+# type="android" runs on Waydroid (shepherd ships the privileged helper; this
+# provisions the group + points at the engine install), and the companion/media
+# apps are APKs pushed over adb to an attached phone or TV stick (see the
+# Android-apps section above). Add rows here as new backends are supported.
 apps_install() {
     local app="${1:-}"
     shift || true
@@ -1075,6 +1076,41 @@ apps_install() {
             success "Installed com.google.Chrome"
             info "Reference it with kind = \"flatpak\", app_id = \"com.google.Chrome\"."
             ;;
+        android)
+            # The shepherd side (helper binary + polkit assets) ships with the
+            # package via install_system; this opt-in step provisions the host:
+            # the shepherd-waydroid group + membership (shared with the
+            # from-source `shepherd install waydroid` via provision_waydroid_host)
+            # and guidance for the Waydroid engine itself, which lives in a
+            # third-party repo and pulls ~2.4 GB of Android images.
+            local user="${2:-}"
+            require_root
+            if [[ ! -x "$WAYDROID_HELPER_PATH" ]]; then
+                die "shepherd-waydroid-helper missing at $WAYDROID_HELPER_PATH; reinstall shepherd-launcher (the package ships it)."
+            fi
+            [[ -n "$user" ]] && validate_user "$user"
+
+            provision_waydroid_host "$user"
+
+            if ! command -v waydroid >/dev/null 2>&1; then
+                warn "Waydroid itself is not installed. Install the engine, then re-run to finish:"
+                info "  curl https://repo.waydro.id | sudo bash -s \"\$(. /etc/os-release && echo \"\$VERSION_CODENAME\")\""
+                info "  sudo apt install -y waydroid"
+                info "  echo binder_linux | sudo tee /etc/modules-load.d/waydroid.conf && sudo modprobe binder_linux"
+                info "  sudo waydroid init   # downloads the Android images (~2.4 GB)"
+            else
+                info "Waydroid engine detected. If not yet initialized: sudo waydroid init"
+            fi
+
+            success "Provisioned the shepherd side of the Android (Waydroid) backend"
+            if [[ -z "$user" ]]; then
+                info "Add the kiosk user to the group with:"
+                info "  shepherd-admin apps install android USER"
+            fi
+            info "Reference Android apps with type = \"android\". The Lock Task DPC in"
+            info "dpc-waydroid/ is a verified building block but is NOT wired in by default."
+            ;;
+
         companion|media)
             android_app_install "$app" "$@"
             ;;
@@ -1083,7 +1119,7 @@ apps_install() {
             return 0
             ;;
         *)
-            die "Unknown app '$app' (supported: steam, chrome, retroarch, okular, companion, media)"
+            die "Unknown app '$app' (supported: steam, chrome, retroarch, okular, android, companion, media)"
             ;;
     esac
 }
@@ -1091,6 +1127,7 @@ apps_install() {
 apps_usage() {
     cat <<EOF
 Usage: shepherd-admin apps install <steam|chrome|retroarch [core...]|okular>
+       shepherd-admin apps install android [USER]
        shepherd-admin apps install <companion|media> [options]
 
 Installs a supported activity backend, or one of shepherd's own Android apps,
@@ -1129,6 +1166,11 @@ $(retroarch_core_table)
                 EPUB support is packaged separately from Okular itself, so
                 without them a reading activity opens PDFs and refuses novels.
                 Installs no books.
+
+    android     Enable the Waydroid backend (drives type = "android" entries).
+                Creates the $WAYDROID_GROUP group, adds USER to it if given,
+                and prints the steps to install the Waydroid engine. The
+                helper + polkit assets already ship with the package.
 
     companion   Shepherd Companion, the parent-facing admin app.
     media       Shepherd Media, the media player for phones/tablets/Fire TV.

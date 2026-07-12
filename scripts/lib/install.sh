@@ -795,15 +795,22 @@ install_firewall() {
     success "Firewall helper installed"
 }
 
-# Install the Waydroid (Android activity kind) helper and its polkit assets.
+# Stage the Waydroid (Android activity kind) helper binary and its polkit
+# assets. Files only — DESTDIR-safe and host-neutral, so this is the part the
+# base system install ships: install_system calls it, which means both the .deb
+# and `install all` carry the helper + polkit rule. The rule references the
+# shepherd-waydroid group, which is harmless until that group exists.
+#
+# The host-mutating provisioning (creating the group, adding a user, and
+# installing/initializing Waydroid itself) is deliberately NOT here: it is
+# opt-in via `provision_waydroid_host` — reached from `shepherd install waydroid`
+# on a source box and `shepherd-admin apps install android` on a packaged one —
+# mirroring how the Steam backend is provisioned on demand.
 #
 # Args:
-#   $1 -- target user to add to the shepherd-waydroid group (optional;
-#         skipped when DESTDIR is set so packaging doesn't mutate hosts)
-#   $2 -- "true" for release binary, "false" for debug (default: true)
-install_waydroid() {
-    local user="${1:-}"
-    local release="${2:-true}"
+#   $1 -- "true" for the release binary, "false" for debug (default: true)
+install_waydroid_assets() {
+    local release="${1:-true}"
     local destdir="${DESTDIR:-}"
     local repo_root
     repo_root="$(get_repo_root)"
@@ -840,30 +847,60 @@ install_waydroid() {
     info "Installing polkit rule to $rules_dst..."
     ensure_dir "$(dirname "$rules_dst")" 0755
     install -m 0644 -o root -g root "$rules_src" "$rules_dst"
+}
 
-    # Group + user membership + polkit reload only on a real (non-packaging)
-    # install (see install_firewall for the DESTDIR rationale).
-    if [[ -z "$destdir" ]]; then
-        if ! getent group "$WAYDROID_GROUP" >/dev/null; then
-            info "Creating system group: $WAYDROID_GROUP"
-            groupadd --system "$WAYDROID_GROUP"
-        fi
-        if [[ -n "$user" ]]; then
-            if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "$WAYDROID_GROUP"; then
-                info "$user is already a member of $WAYDROID_GROUP"
-            else
-                info "Adding $user to $WAYDROID_GROUP"
-                usermod -aG "$WAYDROID_GROUP" "$user"
-                warn "$user must log out and back in for the new group membership to take effect."
-            fi
-        fi
-        if systemctl is-active --quiet polkit 2>/dev/null; then
-            info "Reloading polkit so the new rule takes effect"
-            systemctl reload polkit 2>/dev/null \
-                || systemctl restart polkit 2>/dev/null \
-                || warn "Could not reload polkit; restart it manually for the rule to apply"
+# Host-mutating Waydroid provisioning, shared by the from-source installer and
+# the packaged `shepherd-admin apps install android`: create the
+# shepherd-waydroid group, add $user (if given) to it, and reload polkit so the
+# shipped rule takes effect. A no-op under DESTDIR (packaging mutates no host).
+# Provisioning Waydroid itself (the engine + images) is left to the caller.
+#
+# Args:
+#   $1 -- user to add to the shepherd-waydroid group (optional)
+provision_waydroid_host() {
+    local user="${1:-}"
+
+    if [[ -n "${DESTDIR:-}" ]]; then
+        return 0
+    fi
+
+    require_root
+
+    if ! getent group "$WAYDROID_GROUP" >/dev/null; then
+        info "Creating system group: $WAYDROID_GROUP"
+        groupadd --system "$WAYDROID_GROUP"
+    fi
+    if [[ -n "$user" ]]; then
+        if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "$WAYDROID_GROUP"; then
+            info "$user is already a member of $WAYDROID_GROUP"
+        else
+            info "Adding $user to $WAYDROID_GROUP"
+            usermod -aG "$WAYDROID_GROUP" "$user"
+            warn "$user must log out and back in for the new group membership to take effect."
         fi
     fi
+    if systemctl is-active --quiet polkit 2>/dev/null; then
+        info "Reloading polkit so the new rule takes effect"
+        systemctl reload polkit 2>/dev/null \
+            || systemctl restart polkit 2>/dev/null \
+            || warn "Could not reload polkit; restart it manually for the rule to apply"
+    fi
+}
+
+# From-source convenience for `shepherd install waydroid`: stage the assets and
+# provision the host in one step. The packaged/apt path instead ships the assets
+# via install_system and provisions through `shepherd-admin apps install
+# android`, which reuses provision_waydroid_host.
+#
+# Args:
+#   $1 -- target user to add to the shepherd-waydroid group (optional)
+#   $2 -- "true" for release binary, "false" for debug (default: true)
+install_waydroid() {
+    local user="${1:-}"
+    local release="${2:-true}"
+
+    install_waydroid_assets "$release"
+    provision_waydroid_host "$user"
 
     success "Waydroid helper installed"
 }
@@ -1303,6 +1340,11 @@ install_system() {
 
     install_bins "$prefix"
     install_firewall "$firewall_user" "true"
+    # Ship the Waydroid helper + polkit assets everywhere (files only). Enabling
+    # the Android kind — the shepherd-waydroid group + the Waydroid engine — is
+    # opt-in via `shepherd-admin apps install android`, so nothing here mutates
+    # the host or forces Waydroid onto installs that never use it.
+    install_waydroid_assets "true"
     install_state "$firewall_user" "true"
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"

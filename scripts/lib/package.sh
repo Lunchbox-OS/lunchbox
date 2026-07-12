@@ -434,10 +434,12 @@ Description: Parent-guided kiosk desktop environment for Wayland
  console. Policy lives outside the applications being run; sessions end
  predictably and enforceably.
  .
- This package installs the binaries, the privileged firewall helper and its
- polkit assets, the udev rule for the input-compat sidecars, the Sway kiosk
- session, and the display-manager session entry. After installing, deploy a
- user config and group memberships with:
+ This package installs the binaries, the privileged firewall and Waydroid
+ helpers and their polkit assets, the udev rule for the input-compat sidecars,
+ the Sway kiosk session, and the display-manager session entry. The Android
+ (Waydroid) backend ships dormant; enable it with
+ \`shepherd-admin apps install android\`. After installing, deploy a user config
+ and group memberships with:
  shepherd install config --user USER && shepherd install groups --user USER
 EOF
 
@@ -594,7 +596,7 @@ Before downgrading to a release without the custodian, move the state back:
 
   shepherd-admin restore-state
 
-Other admin tasks: shepherd-admin apps install steam|chrome, harden, bluetooth.
+Other admin tasks: shepherd-admin apps install steam|chrome|android, harden, bluetooth.
 EOM
 fi
 exit 0
