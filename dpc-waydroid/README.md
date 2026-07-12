@@ -38,9 +38,15 @@ key. Build artifacts and the APK are gitignored.
 ## Provisioning + use (verified on Waydroid)
 
 ```sh
-# install the DPC
-waydroid app install shepherd-dpc.apk
-# set it as device owner (fresh Waydroid, no accounts) — needs root
+# install the DPC. `waydroid app install` is the documented path, but it can
+# silently no-op in a headless/scripted session — the reliable method is to push
+# the APK into the container's /data and pm install it:
+sudo install -D -m 0644 shepherd-dpc.apk \
+    ~/.local/share/waydroid/data/local/tmp/dpc.apk        # == container /data/local/tmp
+sudo waydroid --details-to-stdout shell -- pm install -r -g /data/local/tmp/dpc.apk
+# set it as device owner (needs root). The one hard rule: NO Google account yet
+# (accounts=0). A GAPPS-provisioned device is fine — device_provisioned=1 does
+# NOT block this.
 sudo waydroid shell -- dpm set-device-owner com.armeafamily.shepherd.dpc/.AdminReceiver
 # launch a kiosk app pinned in Lock Task Mode (note the `--` so waydroid forwards
 # the dashed args to am)
@@ -54,6 +60,15 @@ sudo waydroid shell -- am broadcast -n com.armeafamily.shepherd.dpc/.ControlRece
 Verified on the bench: device owner set; `mLockTaskModeState=LOCKED`; injecting
 `KEYCODE_HOME` no longer escaped (foreground stayed on the app) — the framework
 blocked it.
+
+**On GAPPS specifically** (prototyped 2026-07-12, see
+`docs/ai/history/2026-07-12 001 …`): device owner works the same as on vanilla,
+but two things differ. (1) Play Protect delays `pm install` registration ~15 s —
+`Success` prints immediately, but `pm list packages` won't show the package for
+up to ~15 s (vanilla is instant). (2) `waydroid init -f -s GAPPS` does **not**
+wipe `~/.local/share/waydroid/data`; for a truly clean device add
+`sudo rm -rf ~/.local/share/waydroid/data`. Google sign-in *after* device owner,
+and Play/paid-app behaviour on a managed uncertified instance, remain untested.
 
 To remove the device owner during development (it can't be uninstalled while it
 is owner, and `dpm remove-active-admin` is refused on a user build), stop the

@@ -113,6 +113,12 @@ This runbook is environment- and account-specific and was **not** executed on
 the dev box (no Google account / paid Minecraft / ARM layer here, and the VM is
 software-rendered). It belongs in operator docs, not the codebase.
 
+> **Update 2026-07-12 ([2026-07-12 001]):** steps 1's GAPPS init and the DPC
+> device-owner part *were* since prototyped on the dev box — GAPPS init works
+> (note: `init -f` does **not** wipe `~/.local/share/waydroid/data`), and
+> `dpm set-device-owner` succeeds on a fresh account-free GAPPS instance. Still
+> unrun here: Google sign-in, Play certification, paid/ARM apps (need an account).
+
 ## Status
 
 Issue #2 is functionally complete for the trusted-app child-kiosk case:

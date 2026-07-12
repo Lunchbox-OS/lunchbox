@@ -76,3 +76,9 @@ HOME blocked), and committed with provisioning docs. The honest blocker — Lock
 Task vs. Waydroid multi-window — is documented with a concrete path to resolve
 it. shepherd's behavior is unchanged (no regression); `lock_down` stays the
 default lock-in.
+
+> **Update 2026-07-12 ([2026-07-12 001]):** the device-owner half was verified on
+> vanilla only here; it has since been prototyped on a **GAPPS** image too —
+> `dpm set-device-owner` succeeds on GAPPS even with `device_provisioned=1`; the
+> only gate is `accounts=0` (set owner before any Google sign-in). The Lock Task
+> ⊥ multi-window blocker above is unchanged.
