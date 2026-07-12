@@ -642,6 +642,29 @@ jobs:
         working-directory: companion-android
         run: ./gradlew --no-daemon :app:testDebugUnitTest
 
+  android-dpc:
+    name: Android DPC (build apk)
+    # Build dpc-waydroid/shepherd-dpc.apk via its plain-SDK pipeline (aapt2 ->
+    # javac -> d8 -> zipalign -> apksigner) on the android image, so a break in
+    # that build (a missing tool, a broken source file) is caught on every push
+    # rather than only at release. CI signs with an ephemeral dev key that
+    # build.sh auto-generates; the release job re-signs with the persistent org
+    # key. No gradle cache — it's a fast, dependency-free SDK build.
+    needs: images
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.images.outputs.android-ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the DPC apk
+        run: |
+          ANDROID_SDK_ROOT=/opt/android-sdk ./dpc-waydroid/build.sh
+          test -f dpc-waydroid/shepherd-dpc.apk
+
   android-media:
     name: Android media (cargo-ndk build)
     # Cross-compiles the shepherd-media-android Rust cdylib for
