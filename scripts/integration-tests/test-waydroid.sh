@@ -56,10 +56,13 @@ else
     sudo systemctl start waydroid-container || true
 fi
 
-# Nested headless sway with the production fullscreen-match rule.
+# Nested headless sway with the production fullscreen-match rules (per-app
+# `waydroid.<pkg>` toplevels for windowed mode, plus the single `Waydroid`
+# full-UI surface for the locktask path).
 cat >"$SWAY_CONF" <<'EOF'
 default_border none
 for_window [app_id="^waydroid\..*"] fullscreen enable
+for_window [app_id="Waydroid"] fullscreen enable
 output HEADLESS-1 resolution 1280x800
 EOF
 info "Starting nested headless sway..."
@@ -133,3 +136,17 @@ if [[ -n "$DIS" && "$DIS" != "mDisabled1=0x0" ]]; then
 else
     echo "[WARN] lock-down flags not detected ($DIS)"
 fi
+
+# 3. locktask test: the DPC device-owner Lock Task path (`lock_mode =
+#    "locktask"`). It presents the single full-UI `Waydroid` surface, so restart
+#    the session with multi_windows OFF first. The test skips if the DPC isn't
+#    set as device owner (`shepherd-admin apps install android`).
+info "Starting a full-UI session for the locktask test (multi_windows off)..."
+waydroid session stop >/dev/null 2>&1 || true
+sleep 2
+waydroid prop set persist.waydroid.multi_windows false
+: >"$SESSION_LOG"  # truncate so wait_session_ready sees the NEW ready line
+WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" SWAYSOCK="$SWAYSOCK" \
+    waydroid session start >"$SESSION_LOG" 2>&1 &
+wait_session_ready || skip "Waydroid session did not become ready"
+run_test waydroid_locktask_launch_and_stop

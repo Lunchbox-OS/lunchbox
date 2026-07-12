@@ -58,6 +58,12 @@ fn android_window_present(package: &str) -> bool {
     cmd_stdout("swaymsg", &["-t", "get_tree", "--raw"]).contains(&needle)
 }
 
+/// Whether the single full-UI `Waydroid` surface (locktask presentation) is on
+/// screen.
+fn full_ui_present() -> bool {
+    cmd_stdout("swaymsg", &["-t", "get_tree", "--raw"]).contains("\"app_id\": \"Waydroid\"")
+}
+
 /// Await a host event matching `pred`, up to `timeout`.
 async fn wait_for_event(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<HostEvent>,
@@ -213,4 +219,160 @@ async fn waydroid_launch_and_stop() {
     }
     assert!(gone, "Android window should be gone after stop()");
     println!("[OK] Android session stopped, window gone, Exited emitted");
+}
+
+/// Exercises the `lock_mode = "locktask"` launch path against real Waydroid + the
+/// DPC device owner: configure locktask, preboot (which flips multi_windows off),
+/// spawn an app, and assert it is presented as the single full-UI `Waydroid`
+/// surface (no per-app toplevel) with `WindowReady`; then stop and assert
+/// `Exited` and that the surface is gone. Requires the DPC installed and set as
+/// device owner (`shepherd-admin apps install android`); skips otherwise.
+#[tokio::test]
+#[ignore = "requires Waydroid + DPC device owner + Sway; run via test-waydroid.sh"]
+async fn waydroid_locktask_launch_and_stop() {
+    if !cmd_ok("waydroid", &["--version"]) {
+        skip("waydroid CLI not available");
+        return;
+    }
+    if std::env::var_os("SWAYSOCK").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        skip("no SWAYSOCK/WAYLAND_DISPLAY (need a running sway)");
+        return;
+    }
+    if !cmd_ok("swaymsg", &["-t", "get_version"]) {
+        skip("swaymsg cannot reach a compositor");
+        return;
+    }
+    // The DPC must be device owner for Lock Task to engage. Check the on-disk
+    // device-owner record (session-independent — `dpm list-owners` needs a booted
+    // session, which preboot only starts below).
+    let owner_file = format!(
+        "{}/.local/share/waydroid/data/system/device_owner_2.xml",
+        std::env::var("HOME").unwrap_or_default()
+    );
+    let is_owner = std::fs::read(&owner_file)
+        .map(|b| String::from_utf8_lossy(&b).contains("com.armeafamily.shepherd.dpc"))
+        .unwrap_or(false);
+    if !is_owner {
+        skip("DPC is not device owner (run: shepherd-admin apps install android)");
+        return;
+    }
+
+    let host = LinuxHost::new();
+    // multi_window=true is deliberately overridden: locktask forces full-UI
+    // (multi_windows off) at preboot.
+    host.configure_waydroid(
+        true,
+        true,
+        Duration::from_secs(90),
+        WaydroidLockMode::Locktask,
+    );
+    host.preboot_waydroid();
+
+    // Preboot should leave a running session with multi_windows disabled.
+    let mut ready = false;
+    for _ in 0..120 {
+        let running = cmd_stdout("waydroid", &["status"]).contains("RUNNING");
+        let multi = cmd_stdout(
+            "waydroid",
+            &["prop", "get", "persist.waydroid.multi_windows"],
+        )
+        .trim()
+            == "true";
+        if running && !multi {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(
+        ready,
+        "preboot(locktask) should leave a running session with multi_windows=false"
+    );
+
+    let mut rx = host.subscribe();
+    let entry = EntryKind::Android {
+        package_name: TEST_PACKAGE.into(),
+        args: vec![],
+    };
+    let handle = host
+        .spawn(SessionId::new(), &entry, SpawnOptions::default())
+        .await
+        .expect("spawn(Android locktask) should succeed against a running session");
+
+    let ready_ev = wait_for_event(&mut rx, Duration::from_secs(45), |ev| {
+        matches!(ev, HostEvent::WindowReady { .. })
+    })
+    .await;
+    assert!(
+        ready_ev.is_some(),
+        "expected HostEvent::WindowReady for the locktask session"
+    );
+
+    // Presented as the single full-UI surface — NOT a per-app toplevel.
+    assert!(
+        full_ui_present(),
+        "expected the full-UI Waydroid surface on screen under locktask"
+    );
+    assert!(
+        !android_window_present(TEST_PACKAGE),
+        "locktask should not present a per-app waydroid.{TEST_PACKAGE} toplevel"
+    );
+    // Lock Task engages a beat after the pinned app resumes (WindowReady fires
+    // as soon as the surface + pin land), so poll for it. Needs root dumpsys; if
+    // sudo is unavailable the check is skipped rather than failing.
+    let mut locked = false;
+    let mut saw_dumpsys = false;
+    for _ in 0..15 {
+        let lock = cmd_stdout(
+            "sudo",
+            &[
+                "waydroid",
+                "--details-to-stdout",
+                "shell",
+                "--",
+                "dumpsys",
+                "activity",
+            ],
+        );
+        if !lock.is_empty() {
+            saw_dumpsys = true;
+            if lock.contains("mLockTaskModeState=LOCKED") {
+                locked = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(
+        locked || !saw_dumpsys,
+        "expected Lock Task LOCKED while the app is pinned"
+    );
+    println!("[OK] locktask: full-UI Waydroid surface up, no per-app toplevel, Lock Task engaged");
+
+    // Stop → unlock + kill the full-UI child → surface gone → Exited.
+    host.stop(&handle, StopMode::Force)
+        .await
+        .expect("stop(Android locktask) should succeed");
+
+    let exited = wait_for_event(&mut rx, Duration::from_secs(15), |ev| {
+        matches!(ev, HostEvent::Exited { .. })
+    })
+    .await;
+    assert!(
+        exited.is_some(),
+        "expected HostEvent::Exited after stopping the locktask session"
+    );
+    let mut gone = false;
+    for _ in 0..12 {
+        if !full_ui_present() {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        gone,
+        "the full-UI Waydroid surface should be gone after stop()"
+    );
+    println!("[OK] locktask: stopped, surface gone, Exited emitted");
 }

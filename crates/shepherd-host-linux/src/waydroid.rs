@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use shepherd_host_api::{HostError, HostResult};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -51,6 +51,12 @@ fn waydroid_helper_path() -> String {
 pub fn app_id_for_package(package: &str) -> String {
     format!("waydroid.{package}")
 }
+
+/// The single Wayland `app_id` of the full-UI surface (`waydroid show-full-ui`),
+/// which renders the whole Android display. The `locktask` path tracks this
+/// instead of a per-app toplevel, because Lock Task Mode suppresses those.
+/// Confirmed exactly `"Waydroid"` on the bench.
+pub const FULL_UI_APP_ID: &str = "Waydroid";
 
 /// `argv` to launch an Android app as the session user.
 pub fn launch_argv(package: &str) -> Vec<String> {
@@ -168,12 +174,19 @@ pub async fn lock_down() {
     }
 }
 
+/// Present the Waydroid full UI — a single `Waydroid` Wayland surface rendering
+/// the whole Android display — as a detached child. Used by the `locktask`
+/// launch path, where the pinned app has no per-app toplevel. Runs as the
+/// session user (attaches to the caller's compositor via WAYLAND_DISPLAY /
+/// SWAYSOCK); the process exits when its window is closed or it is killed.
+pub fn show_full_ui() -> std::io::Result<Child> {
+    Command::new("waydroid").arg("show-full-ui").spawn()
+}
+
 /// Best-effort: launch `package` pinned in Lock Task Mode via the DPC, through
 /// the privileged helper (`pkexec shepherd-waydroid-helper pin --package <pkg>`
 /// → the DPC's `LaunchActivity`). Used by the `lock_mode = "locktask"` launch
 /// path; requires the DPC installed + set as device owner.
-// Wired into spawn_android's locktask branch in the follow-up increment.
-#[allow(dead_code)]
 pub async fn pin(package: &str) {
     let result = Command::new("pkexec")
         .arg(waydroid_helper_path())
@@ -194,8 +207,6 @@ pub async fn pin(package: &str) {
 /// Best-effort: clear the DPC's Lock Task allowlist so a locked session can end,
 /// via the privileged helper (`pkexec shepherd-waydroid-helper unlock` → the
 /// DPC's `ControlReceiver`).
-// Wired into stop_android's locktask branch in the follow-up increment.
-#[allow(dead_code)]
 pub async fn unlock() {
     let result = Command::new("pkexec")
         .arg(waydroid_helper_path())

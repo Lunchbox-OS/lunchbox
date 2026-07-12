@@ -417,6 +417,10 @@ pub struct LinuxHost {
     lock_process: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
     /// Validated `[service.waydroid]` settings, set by `configure_waydroid`.
     waydroid_settings: Arc<Mutex<Option<WaydroidSettings>>>,
+    /// Active `locktask` full-UI (`waydroid show-full-ui`) children, keyed by
+    /// session, so stop can kill the surface (which the window-watch then
+    /// observes as gone → Exited).
+    waydroid_full_ui: Arc<Mutex<HashMap<SessionId, tokio::process::Child>>>,
 }
 
 /// What the reconciliation sweep needs to decide whether a window on screen is
@@ -552,6 +556,7 @@ impl LinuxHost {
             // stalls the subscription; a lagged watcher re-checks anyway.
             window_created_tx: broadcast::channel(64).0,
             waydroid_settings: Arc::new(Mutex::new(None)),
+            waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -588,22 +593,24 @@ impl LinuxHost {
             //    read at session start, so if it isn't already enabled we set it
             //    and (re)start the session once for it to take effect.
             let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-            if settings.multi_window {
-                let enabled = waydroid::get_prop("persist.waydroid.multi_windows")
-                    .await
-                    .as_deref()
-                    == Some("true");
-                if !enabled {
-                    if let Err(e) =
-                        waydroid::set_prop("persist.waydroid.multi_windows", "true").await
-                    {
-                        warn!(error = %e, "failed to enable waydroid multi-window mode");
-                    } else if started {
-                        // Restart so the new prop takes effect.
-                        waydroid::session_stop().await;
-                        started =
-                            waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-                    }
+            // Enforce the presentation mode. `locktask` uses full-UI single-surface
+            // presentation, which needs multi-window OFF; every other mode keeps it
+            // as configured. The prop is read at session start, so if it differs we
+            // set it and (re)start the session once for it to take effect.
+            let want_multi =
+                settings.multi_window && settings.lock_mode != WaydroidLockMode::Locktask;
+            let want = if want_multi { "true" } else { "false" };
+            if waydroid::get_prop("persist.waydroid.multi_windows")
+                .await
+                .as_deref()
+                != Some(want)
+            {
+                if let Err(e) = waydroid::set_prop("persist.waydroid.multi_windows", want).await {
+                    warn!(error = %e, want, "failed to set waydroid multi-window mode");
+                } else if started {
+                    // Restart so the new prop takes effect.
+                    waydroid::session_stop().await;
+                    started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
                 }
             }
 
@@ -1945,9 +1952,14 @@ impl LinuxHost {
             ));
         }
 
-        waydroid::launch_app(package_name).await?;
+        let lock_mode = self
+            .waydroid_settings
+            .lock()
+            .unwrap()
+            .unwrap_or_default()
+            .lock_mode;
+        let locktask = lock_mode == WaydroidLockMode::Locktask;
 
-        let app_id = waydroid::app_id_for_package(package_name);
         let handle = HostSessionHandle::new(
             session_id.clone(),
             HostHandlePayload::Android {
@@ -1955,13 +1967,53 @@ impl LinuxHost {
             },
         );
 
-        // The toplevel appears asynchronously a few seconds after launch.
-        if !wait_for_android_window(&app_id, ANDROID_WINDOW_TIMEOUT).await {
-            waydroid::force_stop(package_name).await;
-            return Err(HostError::SpawnFailed(format!(
-                "Android app {package_name} did not present a window within {}s",
-                ANDROID_WINDOW_TIMEOUT.as_secs()
-            )));
+        // The surface shepherd tracks differs by mode: a windowed app gets a
+        // per-app `waydroid.<pkg>` toplevel; a locktask session is the single
+        // full-UI `Waydroid` surface (Lock Task suppresses per-app toplevels)
+        // with the app pinned inside it via the DPC device owner.
+        let surface_app_id = if locktask {
+            waydroid::FULL_UI_APP_ID.to_string()
+        } else {
+            waydroid::app_id_for_package(package_name)
+        };
+
+        if locktask {
+            // Present the full UI (creates the `Waydroid` surface), wait for it,
+            // then pin the app in Lock Task Mode.
+            let full_ui = waydroid::show_full_ui().map_err(|e| {
+                HostError::SpawnFailed(format!("failed to start Waydroid full UI: {e}"))
+            })?;
+            if !wait_for_android_window(&surface_app_id, ANDROID_WINDOW_TIMEOUT).await {
+                let mut full_ui = full_ui;
+                let _ = full_ui.start_kill();
+                return Err(HostError::SpawnFailed(format!(
+                    "Waydroid full UI did not present within {}s",
+                    ANDROID_WINDOW_TIMEOUT.as_secs()
+                )));
+            }
+            // Pin in Lock Task Mode. Right after the session comes up the DPC's
+            // LaunchActivity can briefly be unresolvable ("Activity class does
+            // not exist"), so pin, settle, and pin once more — re-pinning an
+            // already-locked app is a harmless no-op.
+            waydroid::pin(package_name).await;
+            tokio::time::sleep(ANDROID_LOCKTASK_PIN_SETTLE).await;
+            waydroid::pin(package_name).await;
+            // Keep the child so stop can kill the surface (which the window-watch
+            // then observes as gone → Exited).
+            self.waydroid_full_ui
+                .lock()
+                .unwrap()
+                .insert(session_id.clone(), full_ui);
+        } else {
+            waydroid::launch_app(package_name).await?;
+            // The toplevel appears asynchronously a few seconds after launch.
+            if !wait_for_android_window(&surface_app_id, ANDROID_WINDOW_TIMEOUT).await {
+                waydroid::force_stop(package_name).await;
+                return Err(HostError::SpawnFailed(format!(
+                    "Android app {package_name} did not present a window within {}s",
+                    ANDROID_WINDOW_TIMEOUT.as_secs()
+                )));
+            }
         }
 
         // Track the session so the window-watch task can dedup its single
@@ -1987,39 +2039,25 @@ impl LinuxHost {
             handle: handle.clone(),
         });
 
-        // Harden the session against the child leaving the app. Re-applied per
-        // launch because the statusbar flags reset on a SystemUI restart.
-        let lock_mode = self
-            .waydroid_settings
-            .lock()
-            .unwrap()
-            .unwrap_or_default()
-            .lock_mode;
+        // Harden the session against the child leaving the app. Locktask already
+        // engaged containment via the pin above; statusbar disables the shade /
+        // nav buttons, re-applied per launch (they reset on a SystemUI restart).
         match lock_mode {
-            WaydroidLockMode::Off => {}
+            WaydroidLockMode::Off | WaydroidLockMode::Locktask => {}
             WaydroidLockMode::Statusbar => waydroid::lock_down().await,
-            WaydroidLockMode::Locktask => {
-                // The full DPC Lock Task path (pin + single-surface + dumpsys
-                // tracking) is the next increment; until then apply the
-                // statusbar lock-down so `locktask` is never weaker than it.
-                warn!(
-                    package = %package_name,
-                    "lock_mode=locktask: full DPC Lock Task path not yet wired; applying statusbar lock-down"
-                );
-                waydroid::lock_down().await;
-            }
         }
 
-        self.spawn_android_window_watch(handle.clone(), app_id, package_name.to_string());
+        self.spawn_android_window_watch(handle.clone(), surface_app_id, package_name.to_string());
 
         info!(session_id = %session_id, package = %package_name, "Spawned Android (Waydroid) session");
         Ok(handle)
     }
 
-    /// Watch an Android app's Wayland toplevel; when it disappears (the user
-    /// closed it, or `stop` closed it), best-effort reclaim the cached Android
-    /// process and emit [`HostEvent::Exited`]. This is the single exit path for
-    /// Android sessions — `stop` only closes the window and lets this fire.
+    /// Watch the Android session's tracked surface (the per-app `waydroid.<pkg>`
+    /// toplevel, or the full-UI `Waydroid` surface under locktask); when it
+    /// disappears (the user closed it, or `stop` did), best-effort reclaim the
+    /// cached Android process and emit [`HostEvent::Exited`]. This is the single
+    /// exit path for Android sessions — `stop` only removes the surface.
     fn spawn_android_window_watch(
         &self,
         handle: HostSessionHandle,
@@ -2028,6 +2066,7 @@ impl LinuxHost {
     ) {
         let event_tx = self.event_tx.clone();
         let session_info = self.session_info.clone();
+        let full_ui = self.waydroid_full_ui.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(ANDROID_WATCH_INTERVAL).await;
@@ -2041,6 +2080,10 @@ impl LinuxHost {
                     .remove(&handle.session_id)
                     .is_some();
                 if was_tracked {
+                    // Kill any lingering locktask full-UI child for this session.
+                    if let Some(mut child) = full_ui.lock().unwrap().remove(&handle.session_id) {
+                        let _ = child.start_kill();
+                    }
                     waydroid::force_stop(&package_name).await;
                     let _ = event_tx.send(HostEvent::Exited {
                         handle,
@@ -2052,18 +2095,46 @@ impl LinuxHost {
         });
     }
 
-    /// Stop an Android (Waydroid) session: close its Wayland toplevel (the
-    /// user-level, always-available way to end the session) and best-effort
-    /// reclaim the cached process. The window-watch task observes the close and
-    /// emits [`HostEvent::Exited`], so this does not emit it itself.
-    async fn stop_android(&self, package_name: &str) -> HostResult<()> {
-        let app_id = waydroid::app_id_for_package(package_name);
-        if let Some(window_id) = android_window_id(&app_id).await
-            && let Err(e) = crate::sway::act_on_window(window_id, WindowAction::Close).await
-        {
-            warn!(package = %package_name, error = %e, "failed to close Android window via sway");
+    /// Stop an Android (Waydroid) session. In windowed mode: close the per-app
+    /// toplevel and reclaim the cached process. In locktask mode: clear Lock Task
+    /// (unlock), reclaim the app, and kill the full-UI child so its `Waydroid`
+    /// surface disappears. Either way the window-watch observes the surface go
+    /// away and emits [`HostEvent::Exited`], so this does not emit it itself.
+    async fn stop_android(&self, session_id: &SessionId, package_name: &str) -> HostResult<()> {
+        let locktask = self
+            .waydroid_settings
+            .lock()
+            .unwrap()
+            .unwrap_or_default()
+            .lock_mode
+            == WaydroidLockMode::Locktask;
+
+        if locktask {
+            waydroid::unlock().await;
+            waydroid::force_stop(package_name).await;
+            // Kill the full-UI `Waydroid` surface. `act_on_window(Close)` runs
+            // sway `kill` (forced) — a graceful close is ignored by the Waydroid
+            // renderer, and killing the `show-full-ui` child doesn't destroy the
+            // surface (the renderer is detached). The window-watch then sees the
+            // surface go and emits Exited.
+            if let Some(window_id) = android_window_id(waydroid::FULL_UI_APP_ID).await
+                && let Err(e) = crate::sway::act_on_window(window_id, WindowAction::Close).await
+            {
+                warn!(package = %package_name, error = %e, "failed to kill Waydroid full-UI window via sway");
+            }
+            // Drop the tracked full-UI child handle (best-effort cleanup).
+            if let Some(mut child) = self.waydroid_full_ui.lock().unwrap().remove(session_id) {
+                let _ = child.start_kill();
+            }
+        } else {
+            let app_id = waydroid::app_id_for_package(package_name);
+            if let Some(window_id) = android_window_id(&app_id).await
+                && let Err(e) = crate::sway::act_on_window(window_id, WindowAction::Close).await
+            {
+                warn!(package = %package_name, error = %e, "failed to close Android window via sway");
+            }
+            waydroid::force_stop(package_name).await;
         }
-        waydroid::force_stop(package_name).await;
         Ok(())
     }
 }
@@ -2106,6 +2177,9 @@ const ANDROID_WINDOW_TIMEOUT: Duration = Duration::from_secs(45);
 const ANDROID_WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Poll cadence for the window-watch exit task.
 const ANDROID_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+/// Settle between the two locktask pin attempts — long enough for the DPC's
+/// activities to register after the session comes up (see the re-pin comment).
+const ANDROID_LOCKTASK_PIN_SETTLE: Duration = Duration::from_secs(2);
 
 impl Default for LinuxHost {
     fn default() -> Self {
@@ -2675,7 +2749,7 @@ impl HostAdapter for LinuxHost {
         // Android (Waydroid) sessions have no host pid; stop by closing the
         // Wayland toplevel. Both stop modes map to the same action.
         if let HostHandlePayload::Android { package_name } = handle.payload() {
-            return self.stop_android(package_name).await;
+            return self.stop_android(&handle.session_id, package_name).await;
         }
         let (pid, pgid) = match handle.payload() {
             HostHandlePayload::Linux { pid, pgid } => (*pid, *pgid),
