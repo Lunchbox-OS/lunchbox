@@ -50,9 +50,6 @@ warning.
 ## Flags
 
 - `--device PATH` — grab a specific device; repeatable. Omit to auto-detect.
-- `--output-scale N` — compositor output scale; absolute coordinates are
-  divided by it so contacts land in logical (not physical) pixels.
-  shepherd-launcher passes the live sway scale.
 
 ## Requirements
 
