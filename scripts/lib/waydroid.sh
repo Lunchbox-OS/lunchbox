@@ -214,16 +214,18 @@ install_dpc() {
     install_out="$(waydroid_shell pm install -r -g "/data/local/tmp/$DPC_APK_NAME")"
     waydroid_shell settings put global verifier_verify_adb_installs "$prev_verify" >/dev/null 2>&1 || true
 
-    # Registration can still lag a couple seconds; poll briefly.
+    # Even with verification disabled, GApps still lags registering the package
+    # in `pm list packages` (GMS VerifyApps runs a separate ~15 s pass), so poll
+    # generously — the install itself has already returned Success by here.
     local ok=false _
-    for _ in $(seq 1 8); do
+    for _ in $(seq 1 30); do
         if waydroid_shell pm list packages | grep -qx "package:$DPC_PACKAGE"; then
             ok=true
             break
         fi
         sleep 2
     done
-    [[ "$ok" == "true" ]] || die "DPC package did not register. pm install said: ${install_out:-<no output>}"
+    [[ "$ok" == "true" ]] || die "DPC package did not register within 60s. pm install said: ${install_out:-<no output>}"
 
     if waydroid_shell dumpsys account | grep -qi 'type=com.google'; then
         die "A Google account is already present; set-device-owner requires accounts=0. Provision the DPC on a fresh device BEFORE signing in (or reset the device)."
