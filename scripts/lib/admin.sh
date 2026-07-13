@@ -1116,15 +1116,19 @@ apps_install() {
             if [[ -n "$user" ]] && waydroid_session_running; then
                 install_dpc "$user"
                 success "Android (Waydroid) backend provisioned: GApps + libndk + DPC device owner."
+                # Prints the GSF Android ID + how to register it only if the
+                # device isn't Play-certified yet; a quiet no-op once certified.
+                waydroid_report_certification
+                info "Sign into Google as ${user:-USER} in the Waydroid UI (a personal or Family Link child account)."
+                info "Enable Lock Task lock-in via lock_mode = \"locktask\" in [service.waydroid]."
             else
                 success "Android (Waydroid) image provisioned: GApps + libndk."
                 warn "The DPC device-owner step needs a running Waydroid session (Android booted)."
                 info "Start one as ${user:-USER} (e.g. 'waydroid show-full-ui' in their graphical session,"
                 info "or scripts/integration-tests/test-waydroid.sh), then run — BEFORE any Google sign-in:"
                 info "  shepherd-admin apps install android ${user:-USER}"
+                info "Then sign into Google / self-certify the device, and set lock_mode in [service.waydroid]."
             fi
-            info "Then, as ${user:-USER}, sign into Google / certify the device in the Waydroid UI."
-            info "Enable Lock Task lock-in via lock_mode = \"locktask\" in [service.waydroid]."
             ;;
 
         companion|media)

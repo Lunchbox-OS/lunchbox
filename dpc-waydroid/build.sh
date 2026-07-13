@@ -30,6 +30,14 @@ KS_PASS="${DPC_KEYSTORE_PASS:-android}"
 KEY_PASS="${DPC_KEY_PASS:-android}"
 KEY_ALIAS="${DPC_KEY_ALIAS:-dpc}"
 
+# The DPC version tracks the shepherd release version (repo-root VERSION), so a
+# provisioned device can tell an installed DPC apart from a new one (see
+# scripts/lib/waydroid.sh:install_dpc). versionCode packs semver like the Gradle
+# apps (major*10000 + minor*100 + patch). Overridable via DPC_VERSION_*.
+VER="$( { cat "$HERE/../VERSION" 2>/dev/null || echo 0.0.0; } | head -n1 | tr -d '[:space:]')"
+IFS=. read -r _maj _min _pat <<< "$VER"
+VCODE=$(( 10#${_maj:-0} * 10000 + 10#${_min:-0} * 100 + 10#${_pat:-0} ))
+
 for tool in "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner"; do
     [ -x "$tool" ] || { echo "missing $tool (set ANDROID_SDK_ROOT / ANDROID_BUILD_TOOLS)"; exit 1; }
 done
@@ -47,7 +55,7 @@ echo "[2/6] aapt2 link"
     --manifest "$HERE/AndroidManifest.xml" \
     -R "$OUT/res.zip" \
     --java "$OUT/gen" \
-    --version-code "${DPC_VERSION_CODE:-1}" --version-name "${DPC_VERSION_NAME:-1.0}" \
+    --version-code "${DPC_VERSION_CODE:-$VCODE}" --version-name "${DPC_VERSION_NAME:-$VER}" \
     --min-sdk-version 28 --target-sdk-version 33
 
 echo "[3/6] javac"

@@ -56,8 +56,11 @@ waydroid_session_running() {
 # Root `waydroid shell` with stdout captured (the global --details-to-stdout is
 # required for output; `waydroid shell` itself needs root). CRLF stripped.
 waydroid_shell() {
-    waydroid --details-to-stdout shell -- "$@" 2>&1 | tr -d '\r' \
-        | grep -vE '^\[[0-9:]+\][[:space:]]*%[[:space:]]*lxc-info|^\[[0-9:]+\][[:space:]]*RUNNING$'
+    # Strip waydroid's own `[HH:MM:SS]`-prefixed status lines (lxc-info /
+    # RUNNING, and the lxc-freeze / lxc-unfreeze / FROZEN chatter emitted when
+    # the idle-suspended container is thawed to run the command). Real command
+    # output never carries that prefix.
+    waydroid --details-to-stdout shell -- "$@" 2>&1 | tr -d '\r' | grep -vE '^\[[0-9:]+\]'
 }
 
 # Upsert keys into waydroid.cfg's [properties] section. Uses python3 (guaranteed
@@ -175,62 +178,114 @@ install_libndk() {
 # BEFORE any Google sign-in (the only device-owner gate is accounts=0).
 #
 # Args: $1 -- kiosk user (the session/data owner)
+# True if the device is NOT Play-certified. GMS caches an `uncertified_status`
+# GServices flag (1 = uncertified, 0 = certified); absent/unknown is treated as
+# uncertified so we never skip a needed certification step. Requires a session.
+waydroid_is_uncertified() {
+    local status
+    status="$(waydroid_shell sqlite3 /data/data/com.google.android.gsf/databases/gservices.db \
+        "select value from main where name='uncertified_status';" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$status" != "0" ]]
+}
+
+# The GSF (Google Services Framework) Android ID — the value to register at
+# google.com/android/uncertified. Empty until GMS has generated it.
+waydroid_gsf_android_id() {
+    waydroid_shell sqlite3 /data/data/com.google.android.gsf/databases/gservices.db \
+        "select value from main where name='android_id';" 2>/dev/null | tr -d '[:space:]'
+}
+
+# On an uncertified device, print the GSF Android ID and how to register it; on a
+# certified device this is a quiet no-op. Requires a running session.
+waydroid_report_certification() {
+    if ! waydroid_is_uncertified; then
+        info "Device is Play-certified."
+        return 0
+    fi
+    warn "Device is NOT Play-certified — Play sign-in / app installs won't work until you register it:"
+    local gsf; gsf="$(waydroid_gsf_android_id)"
+    if [[ -n "$gsf" ]]; then
+        info "  1. Register this GSF Android ID at https://www.google.com/android/uncertified"
+        info "       $gsf"
+    else
+        info "  1. Open the Play Store once (to generate the GSF ID), then re-run to print it;"
+        info "     register it at https://www.google.com/android/uncertified"
+    fi
+    info "  2. Wait a few minutes, then restart the Waydroid session."
+}
+
 install_dpc() {
     local user="${1:-}"
     require_root
     [[ -n "$user" ]] || die "install_dpc requires the kiosk user"
     validate_user "$user"
 
-    # Resolve the apk: packaged at /usr/share/shepherd/, else the source tree's
-    # dpc-waydroid/ (built out-of-band by dpc-waydroid/build.sh).
-    local data_dir apk
-    data_dir="$(get_data_dir)"
-    apk="$data_dir/$DPC_APK_NAME"
-    [[ -f "$apk" ]] || apk="$data_dir/dpc-waydroid/$DPC_APK_NAME"
-    if [[ ! -f "$apk" ]]; then
-        die "DPC apk not found (looked in $data_dir). From source, build it first: (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
-    fi
-
     if ! waydroid_session_running; then
         die "The DPC install needs a running Waydroid session (Android booted). Start one as $user (e.g. 'waydroid show-full-ui' in their graphical session, or scripts/integration-tests/test-waydroid.sh), then re-run. IMPORTANT: set the device owner BEFORE signing into any Google account."
     fi
 
-    # Push into the session user's /data and pm install (waydroid app install is
-    # unreliable headless).
-    local dst; dst="$(get_user_home "$user")/.local/share/waydroid/data/local/tmp/$DPC_APK_NAME"
-    install -D -m 0644 "$apk" "$dst"
+    # (Re)install the apk unless the same DPC version is already present. The
+    # apk's versionName is shepherd's VERSION (dpc-waydroid/build.sh), which also
+    # ships to $(get_data_dir)/VERSION — comparing avoids a needless reinstall
+    # (which re-triggers the GApps registration lag and reinstalls a device-owner
+    # app for no reason). A different (newer) version still reinstalls.
+    local want_ver installed_ver
+    want_ver="$(head -n1 "$(get_data_dir)/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    installed_ver="$(waydroid_shell dumpsys package "$DPC_PACKAGE" 2>/dev/null \
+        | grep -oE 'versionName=[^[:space:]]+' | head -n1 | cut -d= -f2)"
 
-    # GApps Play Protect (GMS VerifyApps) gates pm install: before the device has
-    # checked in (no certification / no account yet) it can stall or fail
-    # verification outright, so the install never registers. Skip verification
-    # for this local install of our own trusted apk, restoring the prior setting
-    # after.
-    info "Installing the DPC (Play Protect verification disabled for this sideload)..."
-    local prev_verify
-    prev_verify="$(waydroid_shell settings get global verifier_verify_adb_installs | tr -d '[:space:]')"
-    [[ "$prev_verify" =~ ^[01]$ ]] || prev_verify=1  # default is verify-on
-    waydroid_shell settings put global verifier_verify_adb_installs 0 >/dev/null 2>&1 || true
-    local install_out
-    install_out="$(waydroid_shell pm install -r -g "/data/local/tmp/$DPC_APK_NAME")"
-    waydroid_shell settings put global verifier_verify_adb_installs "$prev_verify" >/dev/null 2>&1 || true
+    if [[ -n "$installed_ver" && "$installed_ver" == "$want_ver" ]]; then
+        info "DPC $installed_ver is already installed; skipping the reinstall."
+    else
+        # Resolve the apk: packaged at /usr/share/shepherd/, else the source tree.
+        local data_dir apk
+        data_dir="$(get_data_dir)"
+        apk="$data_dir/$DPC_APK_NAME"
+        [[ -f "$apk" ]] || apk="$data_dir/dpc-waydroid/$DPC_APK_NAME"
+        [[ -f "$apk" ]] || die "DPC apk not found (looked in $data_dir). From source, build it first: (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
 
-    # Even with verification disabled, GApps still lags registering the package
-    # in `pm list packages` (GMS VerifyApps runs a separate ~15 s pass), so poll
-    # generously — the install itself has already returned Success by here.
-    local ok=false _
-    for _ in $(seq 1 30); do
-        if waydroid_shell pm list packages | grep -qx "package:$DPC_PACKAGE"; then
-            ok=true
-            break
-        fi
-        sleep 2
-    done
-    [[ "$ok" == "true" ]] || die "DPC package did not register within 60s. pm install said: ${install_out:-<no output>}"
+        # Push into the session user's /data and pm install (waydroid app install
+        # is unreliable headless).
+        local dst; dst="$(get_user_home "$user")/.local/share/waydroid/data/local/tmp/$DPC_APK_NAME"
+        install -D -m 0644 "$apk" "$dst"
 
-    # A real signed-in account shows as `Account {name=…, type=com.google}`; the
-    # always-present GMS `AuthenticatorDescription {type=com.google}` is NOT an
-    # account, so match the former only (a loose `type=com.google` false-positives
-    # on a fresh device and would wrongly refuse set-device-owner).
+        # GApps Play Protect gates pm install: before the device has checked in
+        # (no certification / no account yet) it can stall or fail verification,
+        # so the install never registers. Skip verification for our own trusted
+        # apk, restoring the prior setting after.
+        info "Installing the DPC${installed_ver:+ (updating $installed_ver -> $want_ver)} (Play Protect verification disabled for this sideload)..."
+        local prev_verify
+        prev_verify="$(waydroid_shell settings get global verifier_verify_adb_installs | tr -d '[:space:]')"
+        [[ "$prev_verify" =~ ^[01]$ ]] || prev_verify=1  # default is verify-on
+        waydroid_shell settings put global verifier_verify_adb_installs 0 >/dev/null 2>&1 || true
+        local install_out
+        install_out="$(waydroid_shell pm install -r -g "/data/local/tmp/$DPC_APK_NAME")"
+        waydroid_shell settings put global verifier_verify_adb_installs "$prev_verify" >/dev/null 2>&1 || true
+
+        # Even with verification disabled, GApps lags registering the package in
+        # `pm list packages` (GMS VerifyApps runs a separate ~15 s pass), so poll
+        # generously — the install itself has already returned Success by here.
+        local ok=false _
+        for _ in $(seq 1 30); do
+            if waydroid_shell pm list packages | grep -qx "package:$DPC_PACKAGE"; then
+                ok=true
+                break
+            fi
+            sleep 2
+        done
+        [[ "$ok" == "true" ]] || die "DPC package did not register within 60s. pm install said: ${install_out:-<no output>}"
+    fi
+
+    # Updating an already-provisioned device keeps the DPC as owner — done.
+    if waydroid_shell dpm list-owners | grep -qi "$DPC_PACKAGE"; then
+        success "DPC ${want_ver:-} present; already device owner."
+        return 0
+    fi
+
+    # Device owner requires no Google account yet. A real signed-in account shows
+    # as `Account {name=…, type=com.google}`; the always-present GMS
+    # `AuthenticatorDescription {type=com.google}` is NOT an account, so match the
+    # former only (a loose `type=com.google` false-positives on a fresh device).
     if waydroid_shell dumpsys account | grep -qE 'Account \{[^}]*type=com\.google'; then
         die "A Google account is already present; set-device-owner requires accounts=0. Provision the DPC on a fresh device BEFORE signing in (or reset the device)."
     fi
