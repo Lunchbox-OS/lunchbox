@@ -227,7 +227,11 @@ install_dpc() {
     done
     [[ "$ok" == "true" ]] || die "DPC package did not register within 60s. pm install said: ${install_out:-<no output>}"
 
-    if waydroid_shell dumpsys account | grep -qi 'type=com.google'; then
+    # A real signed-in account shows as `Account {name=…, type=com.google}`; the
+    # always-present GMS `AuthenticatorDescription {type=com.google}` is NOT an
+    # account, so match the former only (a loose `type=com.google` false-positives
+    # on a fresh device and would wrongly refuse set-device-owner).
+    if waydroid_shell dumpsys account | grep -qE 'Account \{[^}]*type=com\.google'; then
         die "A Google account is already present; set-device-owner requires accounts=0. Provision the DPC on a fresh device BEFORE signing in (or reset the device)."
     fi
 
