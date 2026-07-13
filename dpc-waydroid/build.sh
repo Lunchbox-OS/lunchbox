@@ -37,6 +37,7 @@ KEY_ALIAS="${DPC_KEY_ALIAS:-dpc}"
 VER="$( { cat "$HERE/../VERSION" 2>/dev/null || echo 0.0.0; } | head -n1 | tr -d '[:space:]')"
 IFS=. read -r _maj _min _pat <<< "$VER"
 VCODE=$(( 10#${_maj:-0} * 10000 + 10#${_min:-0} * 100 + 10#${_pat:-0} ))
+VNAME="${DPC_VERSION_NAME:-$VER}"
 
 for tool in "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner"; do
     [ -x "$tool" ] || { echo "missing $tool (set ANDROID_SDK_ROOT / ANDROID_BUILD_TOOLS)"; exit 1; }
@@ -55,7 +56,7 @@ echo "[2/6] aapt2 link"
     --manifest "$HERE/AndroidManifest.xml" \
     -R "$OUT/res.zip" \
     --java "$OUT/gen" \
-    --version-code "${DPC_VERSION_CODE:-$VCODE}" --version-name "${DPC_VERSION_NAME:-$VER}" \
+    --version-code "${DPC_VERSION_CODE:-$VCODE}" --version-name "$VNAME" \
     --min-sdk-version 28 --target-sdk-version 33
 
 echo "[3/6] javac"
@@ -79,4 +80,8 @@ fi
 "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
     --ks-key-alias "$KEY_ALIAS" --out "$APK" "$OUT/aligned.apk"
 
-echo "OK -> $APK"
+# Record the apk's versionName next to it so install_dpc can compare against an
+# installed DPC without an Android SDK (aapt) on the target.
+printf '%s\n' "$VNAME" > "$APK.version"
+
+echo "OK -> $APK ($VNAME)"

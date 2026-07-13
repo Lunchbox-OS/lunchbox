@@ -173,11 +173,6 @@ install_libndk() {
     success "libndk ARM translation installed (takes effect on the next session start)."
 }
 
-# Install the DPC apk and set it as device owner. Needs a RUNNING session
-# (Android booted) because pm/dpm run inside the container, and must happen
-# BEFORE any Google sign-in (the only device-owner gate is accounts=0).
-#
-# Args: $1 -- kiosk user (the session/data owner)
 # True if the device is NOT Play-certified. GMS caches an `uncertified_status`
 # GServices flag (1 = uncertified, 0 = certified); absent/unknown is treated as
 # uncertified so we never skip a needed certification step. Requires a session.
@@ -214,6 +209,11 @@ waydroid_report_certification() {
     info "  2. Wait a few minutes, then restart the Waydroid session."
 }
 
+# Install the DPC apk and set it as device owner. Needs a RUNNING session
+# (Android booted) because pm/dpm run inside the container, and must happen
+# BEFORE any Google sign-in (the only device-owner gate is accounts=0).
+#
+# Args: $1 -- kiosk user (the session/data owner)
 install_dpc() {
     local user="${1:-}"
     require_root
@@ -224,24 +224,24 @@ install_dpc() {
         die "The DPC install needs a running Waydroid session (Android booted). Start one as $user (e.g. 'waydroid show-full-ui' in their graphical session, or scripts/integration-tests/test-waydroid.sh), then re-run. IMPORTANT: set the device owner BEFORE signing into any Google account."
     fi
 
-    # (Re)install the apk unless the same DPC version is already present. The
-    # apk's versionName is shepherd's VERSION (dpc-waydroid/build.sh), which also
-    # ships to $(get_data_dir)/VERSION — comparing avoids a needless reinstall
-    # (which re-triggers the GApps registration lag and reinstalls a device-owner
-    # app for no reason). A different (newer) version still reinstalls.
-    local want_ver installed_ver
-    want_ver="$(head -n1 "$(get_data_dir)/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    # (Re)install the apk unless the same DPC version is already installed. The
+    # apk's version comes from the `.version` sidecar build.sh writes next to it
+    # (a kiosk has no Android SDK / aapt to read the apk's manifest). Skipping a
+    # same-version reinstall avoids the GApps registration lag and needlessly
+    # reinstalling a device-owner app. A different (newer) version still installs;
+    # an apk whose version we can't read (an old build with no sidecar) never
+    # clobbers an already-installed DPC.
+    local data_dir apk apk_ver installed_ver
+    data_dir="$(get_data_dir)"
+    apk="$data_dir/$DPC_APK_NAME"
+    [[ -f "$apk" ]] || apk="$data_dir/dpc-waydroid/$DPC_APK_NAME"
+    [[ -f "$apk" ]] && apk_ver="$(head -n1 "$apk.version" 2>/dev/null | tr -d '[:space:]')"
     installed_ver="$(waydroid_shell dumpsys package "$DPC_PACKAGE" 2>/dev/null \
         | grep -oE 'versionName=[^[:space:]]+' | head -n1 | cut -d= -f2)"
 
-    if [[ -n "$installed_ver" && "$installed_ver" == "$want_ver" ]]; then
+    if [[ -n "$installed_ver" && ( -z "${apk_ver:-}" || "$apk_ver" == "$installed_ver" ) ]]; then
         info "DPC $installed_ver is already installed; skipping the reinstall."
     else
-        # Resolve the apk: packaged at /usr/share/shepherd/, else the source tree.
-        local data_dir apk
-        data_dir="$(get_data_dir)"
-        apk="$data_dir/$DPC_APK_NAME"
-        [[ -f "$apk" ]] || apk="$data_dir/dpc-waydroid/$DPC_APK_NAME"
         [[ -f "$apk" ]] || die "DPC apk not found (looked in $data_dir). From source, build it first: (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
 
         # Push into the session user's /data and pm install (waydroid app install
@@ -253,7 +253,7 @@ install_dpc() {
         # (no certification / no account yet) it can stall or fail verification,
         # so the install never registers. Skip verification for our own trusted
         # apk, restoring the prior setting after.
-        info "Installing the DPC${installed_ver:+ (updating $installed_ver -> $want_ver)} (Play Protect verification disabled for this sideload)..."
+        info "Installing the DPC${installed_ver:+ (updating $installed_ver -> ${apk_ver:-?})} (Play Protect verification disabled for this sideload)..."
         local prev_verify
         prev_verify="$(waydroid_shell settings get global verifier_verify_adb_installs | tr -d '[:space:]')"
         [[ "$prev_verify" =~ ^[01]$ ]] || prev_verify=1  # default is verify-on
@@ -278,7 +278,7 @@ install_dpc() {
 
     # Updating an already-provisioned device keeps the DPC as owner — done.
     if waydroid_shell dpm list-owners | grep -qi "$DPC_PACKAGE"; then
-        success "DPC ${want_ver:-} present; already device owner."
+        success "DPC ${apk_ver:-$installed_ver} present; already device owner."
         return 0
     fi
 

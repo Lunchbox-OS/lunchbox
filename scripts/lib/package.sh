@@ -145,6 +145,9 @@ package_deb() {
     local dpc_apk="$repo_root/dpc-waydroid/shepherd-dpc.apk"
     if [[ -f "$dpc_apk" ]]; then
         install -m 0644 "$dpc_apk" "$ex_stage/shepherd-dpc.apk"
+        # The .version sidecar lets install_dpc compare an installed DPC against
+        # this apk without an Android SDK on the target (see waydroid.sh).
+        [[ -f "$dpc_apk.version" ]] && install -m 0644 "$dpc_apk.version" "$ex_stage/shepherd-dpc.apk.version"
         info "Staged the DPC apk ($dpc_apk)"
     else
         warn "DPC apk not found ($dpc_apk); the Android Lock Task backend won't be installable from this .deb. Build it via dpc-waydroid/build.sh."
