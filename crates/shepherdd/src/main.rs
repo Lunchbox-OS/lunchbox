@@ -1511,6 +1511,16 @@ impl Service {
             .entries
             .iter()
             .any(|e| matches!(e.kind, EntryKind::Android { .. }));
+        if has_android {
+            // Hide Android activities until the Waydroid session is up, mirroring
+            // Steam (issue #76): a launch hard-errors unless the session is
+            // running. Seeded here so the very first served snapshot already gates
+            // Android; the host's readiness watcher flips it as the session comes
+            // up / goes down (see HostEvent::KindReadinessChanged). Runs
+            // independent of pre-boot so a manually-started session un-gates too.
+            self.engine.set_kind_readiness(EntryKindTag::Android, false);
+            self.host.spawn_waydroid_readiness_watcher();
+        }
         let should_preboot =
             should_preboot_waydroid(self.engine.policy().service.waydroid.preboot, has_android);
         if should_preboot {

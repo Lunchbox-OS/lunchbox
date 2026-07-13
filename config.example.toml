@@ -197,6 +197,9 @@ launch_timeout_seconds = 30
 [service.waydroid]
 # preboot = true              # Start + keep Android warm at daemon startup. When
                               # unset, preboots iff any android entry is configured.
+                              # Android activities stay hidden from the launcher
+                              # until the Waydroid session is up (like Steam), so
+                              # they only appear once they can actually launch.
 multi_window = true           # Each app gets its own Wayland window (app_id "waydroid.<pkg>")
 suspend_when_idle = true      # Freeze the container when idle to save CPU/RAM
 boot_ready_timeout_seconds = 60
