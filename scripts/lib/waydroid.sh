@@ -196,22 +196,34 @@ install_dpc() {
     fi
 
     # Push into the session user's /data and pm install (waydroid app install is
-    # unreliable headless). Play Protect delays registration ~15 s on GApps, so
-    # poll rather than trust the immediate "Success".
+    # unreliable headless).
     local dst; dst="$(get_user_home "$user")/.local/share/waydroid/data/local/tmp/$DPC_APK_NAME"
     install -D -m 0644 "$apk" "$dst"
-    info "Installing the DPC (Play Protect may delay registration ~15 s on GApps)..."
-    waydroid_shell pm install -r -g "/data/local/tmp/$DPC_APK_NAME" >/dev/null 2>&1 || true
 
+    # GApps Play Protect (GMS VerifyApps) gates pm install: before the device has
+    # checked in (no certification / no account yet) it can stall or fail
+    # verification outright, so the install never registers. Skip verification
+    # for this local install of our own trusted apk, restoring the prior setting
+    # after.
+    info "Installing the DPC (Play Protect verification disabled for this sideload)..."
+    local prev_verify
+    prev_verify="$(waydroid_shell settings get global verifier_verify_adb_installs | tr -d '[:space:]')"
+    [[ "$prev_verify" =~ ^[01]$ ]] || prev_verify=1  # default is verify-on
+    waydroid_shell settings put global verifier_verify_adb_installs 0 >/dev/null 2>&1 || true
+    local install_out
+    install_out="$(waydroid_shell pm install -r -g "/data/local/tmp/$DPC_APK_NAME")"
+    waydroid_shell settings put global verifier_verify_adb_installs "$prev_verify" >/dev/null 2>&1 || true
+
+    # Registration can still lag a couple seconds; poll briefly.
     local ok=false _
-    for _ in $(seq 1 15); do
+    for _ in $(seq 1 8); do
         if waydroid_shell pm list packages | grep -qx "package:$DPC_PACKAGE"; then
             ok=true
             break
         fi
         sleep 2
     done
-    [[ "$ok" == "true" ]] || die "DPC package did not register after install (pm install failed?)."
+    [[ "$ok" == "true" ]] || die "DPC package did not register. pm install said: ${install_out:-<no output>}"
 
     if waydroid_shell dumpsys account | grep -qi 'type=com.google'; then
         die "A Google account is already present; set-device-owner requires accounts=0. Provision the DPC on a fresh device BEFORE signing in (or reset the device)."
