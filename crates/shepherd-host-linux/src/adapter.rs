@@ -104,11 +104,12 @@ const RECONCILE_SAFETY_NET_TICKS: u64 = 600;
 /// transition looks like, which is how the Steam client is parked.
 const RECONCILE_CHANGES: &[&str] = &["new", "close", "move", "floating"];
 
-/// How often to poll the Waydroid session state to gate Android activities
-/// (issue #76). Unlike Steam's one-shot load signal, the session can come and
-/// go, so this watcher runs for the daemon's lifetime; a launch takes tens of
-/// seconds anyway, so a slightly relaxed interval keeps `waydroid status`
-/// spawns cheap without adding noticeable un-gating latency.
+/// How often to poll Waydroid readiness to gate Android activities (issue #76).
+/// Unlike Steam's one-shot load signal, the session can come and go, so this
+/// watcher runs for the daemon's lifetime; Android takes tens of seconds to
+/// boot, so a slightly relaxed interval adds no noticeable un-gating latency
+/// while keeping the polls (a `waydroid status`, plus a privileged
+/// `boot-completed` check only while still booting) cheap.
 const WAYDROID_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Expand `~` at the beginning of a path to the user's home directory
@@ -638,23 +639,29 @@ impl LinuxHost {
         });
     }
 
-    /// Watch the Waydroid session and gate Android activities on whether it is
-    /// up, so Android tiles stay hidden from the launcher until a launch could
-    /// actually succeed (mirrors the Steam readiness gate, issue #76).
+    /// Watch Waydroid readiness and gate Android activities on it, so Android
+    /// tiles stay hidden from the launcher until a launch would land on a booted
+    /// Android rather than the boot animation (mirrors the Steam readiness gate,
+    /// issue #76).
     ///
-    /// Unlike Steam's one-shot initial-load signal, a Waydroid session comes and
-    /// goes (pre-boot, idle-suspend recovery, a manual `waydroid session stop`,
-    /// crashes), and [`spawn_android`](Self::spawn_android) hard-errors unless the
-    /// session is RUNNING. So this is a *live* gate: it re-hides Android if the
-    /// session goes away and re-shows it once it returns, keeping the tile
-    /// visible exactly when a launch would succeed.
+    /// "Ready" is the session running AND Android having finished booting
+    /// (`sys.boot_completed`): [`waydroid::session_running`] flips true within a
+    /// second of `session start`, but Android isn't usable for ~20-60s more, and
+    /// [`spawn_android`](Self::spawn_android) launched in that window shows the
+    /// child the boot screen. Unlike Steam's one-shot initial-load signal a
+    /// Waydroid session comes and goes (pre-boot, a manual `waydroid session
+    /// stop`, crashes), so this is a *live* gate: it re-hides Android if the
+    /// session drops and re-shows it once it has booted again.
     ///
     /// Emits `KindReadinessChanged { Android, false }` immediately, then polls
-    /// [`waydroid::session_running`] and emits on every transition.
+    /// and emits on every transition. The privileged `boot-completed` check runs
+    /// only while still waiting to become ready — once ready, a cheap `waydroid
+    /// status` is enough to notice the session dropping (Android can't un-boot
+    /// without the session going away first).
     pub fn spawn_waydroid_readiness_watcher(&self) {
         let event_tx = self.event_tx.clone();
 
-        // Gate Android until the first poll confirms a running session. Harmless
+        // Gate Android until the first poll confirms a booted session. Harmless
         // if the engine was already seeded not-ready at startup (a no-op there).
         let _ = event_tx.send(HostEvent::KindReadinessChanged {
             kind: EntryKindTag::Android,
@@ -664,18 +671,24 @@ impl LinuxHost {
         tokio::spawn(async move {
             let mut last: Option<bool> = None;
             loop {
-                let running = waydroid::session_running().await;
-                if last != Some(running) {
-                    if running {
-                        info!("Waydroid session is up; un-gating Android activities");
+                let ready = if !waydroid::session_running().await {
+                    false
+                } else if last == Some(true) {
+                    true // still up + already booted; skip the privileged check
+                } else {
+                    waydroid::boot_completed().await
+                };
+                if last != Some(ready) {
+                    if ready {
+                        info!("Waydroid finished booting; un-gating Android activities");
                     } else if last.is_some() {
                         info!("Waydroid session went down; hiding Android activities");
                     }
                     let _ = event_tx.send(HostEvent::KindReadinessChanged {
                         kind: EntryKindTag::Android,
-                        ready: running,
+                        ready,
                     });
-                    last = Some(running);
+                    last = Some(ready);
                 }
                 tokio::time::sleep(WAYDROID_READY_POLL_INTERVAL).await;
             }

@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly five narrow, fixed actions:
+//! and exposes exactly six narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -18,9 +18,17 @@
 //!   boundary as force-stop.
 //! - `unlock`: broadcast to the DPC's `ControlReceiver` to clear the Lock Task
 //!   allowlist so a locked session can end.
+//! - `boot-completed`: exit 0 iff `waydroid shell getprop sys.boot_completed`
+//!   prints `1` — Android inside the running session has finished booting. The
+//!   readiness gate polls this to keep Android activities hidden until a launch
+//!   would land on a booted system instead of the boot animation. Alone among
+//!   the actions it is a *query* that inspects the command's output (getprop
+//!   always exits 0), so it does not `exec` — see [`main`].
 //!
-//! The no-argument actions take no arguments and every action `exec`s a fixed
-//! command (the only caller-controlled value is the validated package name).
+//! The no-argument actions take no arguments and every action but
+//! `boot-completed` `exec`s a fixed command (the only caller-controlled value is
+//! the validated package name); `boot-completed` runs the same kind of fixed,
+//! shell-free command but reads its output rather than replacing the process.
 //! Parsing/validation is split into the pure [`parse_args`] + [`Action`] so the
 //! trust boundary is unit-tested without exec. See README.md.
 
@@ -52,16 +60,24 @@ const LOCK_DOWN_FLAGS: &[&str] = &[
 const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity";
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
-const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', or 'unlock'";
+const USAGE: &str =
+    "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', or 'boot-completed'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
-    ForceStop { package: String },
+    ForceStop {
+        package: String,
+    },
     Preboot,
     LockDown,
-    Pin { package: String },
+    Pin {
+        package: String,
+    },
     Unlock,
+    /// Query: exit 0 iff Android has finished booting. Inspects output, so
+    /// [`main`] handles it specially instead of `exec`ing.
+    BootCompleted,
 }
 
 impl Action {
@@ -119,6 +135,14 @@ impl Action {
                     "unlock".into(),
                 ],
             ),
+            Action::BootCompleted => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "getprop".into(),
+                    "sys.boot_completed".into(),
+                ],
+            ),
         }
     }
 }
@@ -140,6 +164,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
         Some("lock-down") => no_extra_args(args, "lock-down").map(|()| Action::LockDown),
         Some("pin") => parse_validated_package(args).map(|package| Action::Pin { package }),
         Some("unlock") => no_extra_args(args, "unlock").map(|()| Action::Unlock),
+        Some("boot-completed") => {
+            no_extra_args(args, "boot-completed").map(|()| Action::BootCompleted)
+        }
         Some(other) => Err(format!("unknown subcommand '{other}' ({USAGE})")),
         None => Err(format!("missing subcommand ({USAGE})")),
     }
@@ -178,10 +205,28 @@ fn no_extra_args(mut args: impl Iterator<Item = String>, name: &str) -> Result<(
 
 fn main() -> ExitCode {
     let action = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| die(e));
+    // `boot-completed` is a query: it must inspect the getprop output ("1" once
+    // Android has booted) rather than the always-zero getprop exit code, so it
+    // can't use the exec() path below.
+    if action == Action::BootCompleted {
+        return boot_completed_exit_code(&action);
+    }
     let (program, args) = action.command();
     // exec() replaces this process; it only returns on failure to launch.
     let err = Command::new(program).args(&args).exec();
     die(format!("failed to exec {program}: {err}"));
+}
+
+/// Run the fixed `boot-completed` command and map its output to an exit code:
+/// success iff it prints `1` (Android finished booting). Any failure to run it
+/// (session down, waydroid missing) or any other value is a non-success exit, so
+/// the caller treats Android as not-yet-ready.
+fn boot_completed_exit_code(action: &Action) -> ExitCode {
+    let (program, args) = action.command();
+    match Command::new(program).args(&args).output() {
+        Ok(out) if String::from_utf8_lossy(&out.stdout).trim() == "1" => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +304,12 @@ mod tests {
         assert!(parse(&["unlock", "x"]).is_err());
     }
 
+    #[test]
+    fn boot_completed_takes_no_args() {
+        assert_eq!(parse(&["boot-completed"]), Ok(Action::BootCompleted));
+        assert!(parse(&["boot-completed", "x"]).is_err());
+    }
+
     /// argv as `&str`s, for ergonomic comparison.
     fn cmd_of(action: Action) -> (&'static str, Vec<String>) {
         action.command()
@@ -333,5 +384,10 @@ mod tests {
                 "unlock",
             ]
         );
+
+        let (prog, argv) = cmd_of(Action::BootCompleted);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(argv, ["shell", "getprop", "sys.boot_completed"]);
     }
 }

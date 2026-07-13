@@ -95,6 +95,28 @@ pub async fn session_running() -> bool {
     }
 }
 
+/// Whether Android inside the running session has finished booting
+/// (`sys.boot_completed == 1`), via the privileged helper (`waydroid shell
+/// getprop` needs root). This differs from [`session_running`], which only
+/// reports the *session process* is up — true within a second of `session
+/// start`, ~20-60s before Android is usable. Launching in that window drops the
+/// child on the boot animation, so the readiness gate keys on this instead.
+/// Returns false if the session is down or the helper isn't installed.
+pub async fn boot_completed() -> bool {
+    match Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("boot-completed")
+        .status()
+        .await
+    {
+        Ok(status) => status.success(),
+        Err(e) => {
+            debug!(error = %e, "boot-completed helper failed; treating Android as not booted");
+            false
+        }
+    }
+}
+
 /// Launch an Android app by package name (session user). Returns once the
 /// launch command returns — the app's window appears asynchronously after.
 pub async fn launch_app(package: &str) -> HostResult<()> {
