@@ -95,6 +95,7 @@ impl SharedState {
                 confirm_on_close: _,
                 can_reset: _,
                 can_turn_pages: _,
+                kind_tag: _,
             } => {
                 tracing::info!(session_id = %session_id, label = %label, "Session started event");
                 let now = shepherd_util::now();

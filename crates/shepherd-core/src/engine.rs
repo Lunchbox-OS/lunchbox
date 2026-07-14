@@ -1284,6 +1284,7 @@ impl CoreEngine {
             can_reset: entry.kind.supports_reset(),
             can_turn_pages: entry.kind.supports_page_turn(),
             hud_orientation: entry.hud_orientation,
+            kind_tag: view.kind_tag,
         };
 
         if let Some(max_dur) = max_duration {
@@ -1319,6 +1320,7 @@ impl CoreEngine {
             confirm_on_close: session.plan.confirm_on_close,
             can_reset: session.plan.can_reset,
             can_turn_pages: session.plan.can_turn_pages,
+            kind_tag: session.plan.kind_tag,
         };
 
         // Log to audit

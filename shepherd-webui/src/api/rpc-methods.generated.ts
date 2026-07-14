@@ -54,6 +54,7 @@ export type RpcMethod =
   | "stop_current"
   | "reset_current"
   | "extend_current"
+  | "back"
   | "list_overrides"
   | "get_override"
   | "upsert_override"

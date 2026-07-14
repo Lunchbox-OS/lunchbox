@@ -306,6 +306,13 @@ pub trait HostAdapter: Send + Sync {
         Err(HostError::Internal("Not supported".into()))
     }
 
+    /// Optional: send a "back" navigation to the session (e.g. Android
+    /// `KEYCODE_BACK`). Backs the HUD back button for kinds whose window
+    /// decoration is hidden (Android in `lock_mode = "statusbar"`).
+    async fn send_back(&self, _handle: &HostSessionHandle) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
     /// Optional: turn the displays on or off (DPMS).
     ///
     /// The idle timer stays outside shepherd — `swayidle` is what notices that

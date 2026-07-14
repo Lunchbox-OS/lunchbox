@@ -794,6 +794,25 @@ fn build_hud_content(
         .valign(gtk4::Align::Fill)
         .build();
 
+    // Back button — shown only while an Android activity is open. In
+    // `lock_mode = "statusbar"` the app is fullscreened under the HUD, which
+    // hides Android's own caption back button, so the HUD provides one.
+    let back_icon = gtk4::Image::from_icon_name("go-previous-symbolic");
+    back_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let back_button = gtk4::Button::builder()
+        .child(&back_icon)
+        .has_frame(false)
+        .tooltip_text("Back")
+        .visible(false)
+        .build();
+    back_button.add_css_class("indicator-button");
+    back_button.connect_clicked(|_| {
+        spawn_action(default_socket_path(), "back", |mut client| async move {
+            client.back().await
+        });
+    });
+    orientation.flow_append(&left_box, &back_button);
+
     // Page-turn buttons, shown only for activities that read (issue #160).
     // A reader turns pages on a key, a D-pad or a wheel; a touchscreen
     // produces none of those and has no swipe gesture to fall back on, so on a
@@ -1470,6 +1489,7 @@ fn build_hud_content(
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
     let display_button_clone = display_button.clone();
+    let back_button_clone = back_button.clone();
     let lock_button_clone = lock_button.clone();
     let taskbar_box_clone = taskbar_box.clone();
     let window_buttons_clone = window_buttons.clone();
@@ -1484,7 +1504,7 @@ fn build_hud_content(
     // page-turn pair were missed when they were added in #160 — latent, since a
     // reading activity is unlikely to be `xwayland_native_resolution`, but
     // wrong by the same rule.
-    let scaled_icons: [gtk4::Image; 9] = [
+    let scaled_icons: [gtk4::Image; 10] = [
         warning_icon.clone(),
         battery_icon.clone(),
         volume_icon.clone(),
@@ -1492,6 +1512,7 @@ fn build_hud_content(
         action_icon.clone(),
         network_icon.clone(),
         display_icon.clone(),
+        back_icon.clone(),
         page_back_icon.clone(),
         page_forward_icon.clone(),
     ];
@@ -1646,6 +1667,9 @@ fn build_hud_content(
         // Update session state
         let session_state = state.session_state();
         let has_session = session_state.session_id().is_some();
+        // The back button drives Android BACK; only meaningful for an open
+        // Android activity (whose caption back may be hidden under the HUD).
+        back_button_clone.set_visible(session_state.is_android());
         if has_session {
             action_icon_clone.set_icon_name(Some("window-close-symbolic"));
             action_button_clone.set_tooltip_text(Some("End session"));

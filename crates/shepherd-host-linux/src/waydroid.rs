@@ -142,6 +142,26 @@ pub async fn maximize(package: &str) {
     }
 }
 
+/// Best-effort: send Android `KEYCODE_BACK` to the foreground app, via the
+/// privileged helper (`pkexec shepherd-waydroid-helper back`). Drives the HUD's
+/// back button — in `lock_mode = "statusbar"` the app is fullscreened under the
+/// HUD, which hides Android's own caption back button. Logs and returns on
+/// failure.
+pub async fn back() {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("back")
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!("sent Android back key"),
+        Ok(status) => {
+            debug!(%status, "back helper did not succeed (helper not installed or polkit denied?)")
+        }
+        Err(e) => warn!(error = %e, "failed to invoke back helper"),
+    }
+}
+
 /// Launch an Android app by package name (session user). Returns once the
 /// launch command returns — the app's window appears asynchronously after.
 pub async fn launch_app(package: &str) -> HostResult<()> {

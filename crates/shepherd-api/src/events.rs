@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use shepherd_util::{EntryId, SessionId};
 use std::time::Duration;
 
-use crate::types::default_confirm_on_close;
+use crate::types::{default_confirm_on_close, default_kind_tag};
 use crate::{
-    API_VERSION, AudioOutput, HudOrientation, ServiceStateSnapshot, SessionEndReason,
+    API_VERSION, AudioOutput, EntryKindTag, HudOrientation, ServiceStateSnapshot, SessionEndReason,
     VolumeRestrictions, WarningSeverity,
 };
 
@@ -58,6 +58,9 @@ pub enum EventPayload {
         /// (issue #160). Defaults to `false` when absent, like `can_reset`.
         #[serde(default)]
         can_turn_pages: bool,
+        /// The entry's kind, so the HUD can adapt its chrome (Android back).
+        #[serde(default = "default_kind_tag")]
+        kind_tag: EntryKindTag,
     },
 
     /// Warning issued for current session
@@ -196,6 +199,7 @@ mod tests {
             confirm_on_close: true,
             can_reset: false,
             can_turn_pages: false,
+            kind_tag: EntryKindTag::Android,
         });
 
         let json = serde_json::to_string(&event).unwrap();
@@ -219,6 +223,7 @@ mod tests {
             confirm_on_close: false,
             can_reset: false,
             can_turn_pages: false,
+            kind_tag: EntryKindTag::Process,
         });
 
         let json = serde_json::to_string(&event).unwrap();

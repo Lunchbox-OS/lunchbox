@@ -22,6 +22,8 @@ pub enum CoreEvent {
         can_reset: bool,
         /// Whether the HUD should offer page-turn buttons (issue #160).
         can_turn_pages: bool,
+        /// The entry's kind, so the HUD can adapt its chrome (Android back).
+        kind_tag: shepherd_api::EntryKindTag,
     },
 
     /// The set of available entries has changed (e.g., due to time window boundaries)

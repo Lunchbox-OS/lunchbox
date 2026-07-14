@@ -30,6 +30,9 @@ pub struct SessionPlan {
     /// The screen edge this activity wants the HUD on, if it asked for one
     /// (issue #171). `None` leaves the global `[service.hud]` setting alone.
     pub hud_orientation: Option<shepherd_api::HudOrientation>,
+    /// The entry's kind, carried so the HUD can adapt its chrome (e.g. an
+    /// Android back button when the window decoration is hidden).
+    pub kind_tag: shepherd_api::EntryKindTag,
 }
 
 impl SessionPlan {
@@ -321,6 +324,7 @@ impl ActiveSession {
             confirm_on_close: self.plan.confirm_on_close,
             can_reset: self.plan.can_reset,
             can_turn_pages: self.plan.can_turn_pages,
+            kind_tag: self.plan.kind_tag,
         }
     }
 }
@@ -376,6 +380,7 @@ mod tests {
             can_reset: false,
             hud_orientation: None,
             can_turn_pages: false,
+            kind_tag: shepherd_api::EntryKindTag::Process,
         }
     }
 
@@ -428,6 +433,7 @@ mod tests {
             can_reset: false,
             hud_orientation: None,
             can_turn_pages: false,
+            kind_tag: shepherd_api::EntryKindTag::Process,
         };
 
         let times = plan.warning_times();

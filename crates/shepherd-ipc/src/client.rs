@@ -177,6 +177,11 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// Send a "back" navigation to the current session (Android `KEYCODE_BACK`).
+    pub async fn back(&mut self) -> IpcResult<()> {
+        self.call::<Value>("back", Value::Null).await.map(|_| ())
+    }
+
     /// The compositor's windows (issue #154), for the administrator taskbar.
     pub async fn list_windows(&mut self) -> IpcResult<Vec<shepherd_api::WindowInfo>> {
         self.call::<Vec<shepherd_api::WindowInfo>>("list_windows", Value::Null)

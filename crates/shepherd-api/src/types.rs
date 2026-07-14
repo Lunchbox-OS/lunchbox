@@ -1055,12 +1055,23 @@ pub struct SessionInfo {
     /// [`EntryKind::supports_page_turn`].
     #[serde(default)]
     pub can_turn_pages: bool,
+    /// The entry's kind, so the HUD can adapt its chrome (e.g. show an Android
+    /// back button). Defaults to `Process` when absent so older payloads
+    /// deserialize and never spuriously enable Android-only affordances.
+    #[serde(default = "default_kind_tag")]
+    pub kind_tag: EntryKindTag,
 }
 
 /// Default for [`SessionInfo::confirm_on_close`] / the `SessionStarted` event:
 /// confirmation is enabled unless a config explicitly opts out.
 pub(crate) fn default_confirm_on_close() -> bool {
     true
+}
+
+/// Default for [`SessionInfo::kind_tag`] / the `SessionStarted` event: a
+/// non-Android kind, so a missing tag never turns on Android-only HUD chrome.
+pub(crate) fn default_kind_tag() -> EntryKindTag {
+    EntryKindTag::Process
 }
 
 /// Status of a single internet connectivity check target

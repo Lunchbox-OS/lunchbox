@@ -69,6 +69,9 @@ impl ManagementService for MockSvc {
     async fn extend_current(&self, _seconds: i64) -> ManagementResult<Option<DateTime<Local>>> {
         Ok(None)
     }
+    async fn back(&self) -> ManagementResult<()> {
+        Err(ManagementError::NotFound("none".into()))
+    }
     async fn list_groups(&self, _at: DateTime<Local>) -> Vec<GroupView> {
         vec![]
     }

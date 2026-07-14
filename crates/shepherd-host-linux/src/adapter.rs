@@ -3234,6 +3234,18 @@ impl HostAdapter for LinuxHost {
         Ok(())
     }
 
+    async fn send_back(&self, handle: &HostSessionHandle) -> HostResult<()> {
+        match handle.payload() {
+            HostHandlePayload::Android { .. } => {
+                waydroid::back().await;
+                Ok(())
+            }
+            _ => Err(HostError::Internal(
+                "back is only supported for Android".into(),
+            )),
+        }
+    }
+
     fn subscribe(&self) -> mpsc::UnboundedReceiver<HostEvent> {
         self.event_rx
             .lock()

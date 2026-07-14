@@ -3,8 +3,9 @@
 //! The HUD subscribes to events from shepherdd and tracks session state.
 
 use shepherd_api::{
-    AudioOutput, BrightnessInfo, BrightnessRestrictions, DisplayState, Event, EventPayload,
-    HudOrientation, InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
+    AudioOutput, BrightnessInfo, BrightnessRestrictions, DisplayState, EntryKindTag, Event,
+    EventPayload, HudOrientation, InternetStatusView, VolumeInfo, VolumeRestrictions,
+    WarningSeverity,
 };
 use shepherd_util::{EntryId, SessionId};
 use std::sync::Arc;
@@ -32,6 +33,9 @@ pub enum SessionState {
         can_reset: bool,
         /// Whether this activity offers the page-turn buttons (issue #160).
         can_turn_pages: bool,
+        /// The entry's kind, so the HUD can show kind-specific chrome (an
+        /// Android back button when the freeform caption is hidden).
+        kind_tag: EntryKindTag,
     },
 
     /// Warning shown - time running low
@@ -52,6 +56,8 @@ pub enum SessionState {
         can_reset: bool,
         /// Whether this activity offers the page-turn buttons (issue #160).
         can_turn_pages: bool,
+        /// The entry's kind (carried across the Active→Warning transition).
+        kind_tag: EntryKindTag,
     },
 
     /// Session is ending
@@ -89,6 +95,21 @@ impl SessionState {
             }
             SessionState::NoSession | SessionState::Ending { .. } => None,
         }
+    }
+
+    /// Whether the current session is an Android activity, so the HUD can show
+    /// the Android back button. `false` when there is no active session.
+    pub fn is_android(&self) -> bool {
+        matches!(
+            self,
+            SessionState::Active {
+                kind_tag: EntryKindTag::Android,
+                ..
+            } | SessionState::Warning {
+                kind_tag: EntryKindTag::Android,
+                ..
+            }
+        )
     }
 
     /// Whether ending the current activity via the HUD "X" button should be
@@ -420,6 +441,7 @@ impl SharedState {
                 confirm_on_close,
                 can_reset,
                 can_turn_pages,
+                kind_tag,
             } => {
                 let now = shepherd_util::now();
                 // For unlimited sessions (deadline=None), time_remaining is None
@@ -440,6 +462,7 @@ impl SharedState {
                     confirm_on_close: *confirm_on_close,
                     can_reset: *can_reset,
                     can_turn_pages: *can_turn_pages,
+                    kind_tag: *kind_tag,
                 });
             }
 
@@ -465,6 +488,7 @@ impl SharedState {
                         confirm_on_close,
                         can_reset,
                         can_turn_pages,
+                        kind_tag,
                         ..
                     } = state
                     {
@@ -480,6 +504,7 @@ impl SharedState {
                                 confirm_on_close: *confirm_on_close,
                                 can_reset: *can_reset,
                                 can_turn_pages: *can_turn_pages,
+                                kind_tag: *kind_tag,
                             };
                         }
                     }
@@ -491,6 +516,7 @@ impl SharedState {
                         confirm_on_close,
                         can_reset,
                         can_turn_pages,
+                        kind_tag,
                         ..
                     } = state
                         && sid == session_id
@@ -506,6 +532,7 @@ impl SharedState {
                             confirm_on_close: *confirm_on_close,
                             can_reset: *can_reset,
                             can_turn_pages: *can_turn_pages,
+                            kind_tag: *kind_tag,
                         };
                     }
                 });
@@ -557,6 +584,7 @@ impl SharedState {
                         confirm_on_close: session.confirm_on_close,
                         can_reset: session.can_reset,
                         can_turn_pages: session.can_turn_pages,
+                        kind_tag: session.kind_tag,
                     });
                 } else {
                     self.set_session_state(SessionState::NoSession);
@@ -639,6 +667,7 @@ mod tests {
             confirm_on_close,
             can_reset: false,
             can_turn_pages: false,
+            kind_tag: EntryKindTag::Process,
         }
     }
 
@@ -667,6 +696,7 @@ mod tests {
             confirm_on_close: true,
             can_reset: false,
             can_turn_pages: true,
+            kind_tag: EntryKindTag::Ebook,
         };
         assert!(reading.can_turn_pages());
     }

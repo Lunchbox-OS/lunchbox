@@ -23,6 +23,7 @@ object RpcMethods {
     const val STOP_CURRENT: String = "stop_current"
     const val RESET_CURRENT: String = "reset_current"
     const val EXTEND_CURRENT: String = "extend_current"
+    const val BACK: String = "back"
     const val LIST_OVERRIDES: String = "list_overrides"
     const val GET_OVERRIDE: String = "get_override"
     const val UPSERT_OVERRIDE: String = "upsert_override"

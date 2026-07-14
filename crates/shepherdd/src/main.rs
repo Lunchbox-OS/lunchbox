@@ -2506,6 +2506,7 @@ impl Service {
                 confirm_on_close,
                 can_reset,
                 can_turn_pages,
+                kind_tag,
             } => {
                 Self::broadcast(
                     ipc,
@@ -2518,6 +2519,7 @@ impl Service {
                         confirm_on_close: *confirm_on_close,
                         can_reset: *can_reset,
                         can_turn_pages: *can_turn_pages,
+                        kind_tag: *kind_tag,
                     }),
                 );
             }

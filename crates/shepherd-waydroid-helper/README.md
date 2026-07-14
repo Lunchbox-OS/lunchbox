@@ -14,6 +14,7 @@ shepherd-waydroid-helper pin --package <android.package.name>
 shepherd-waydroid-helper unlock
 shepherd-waydroid-helper boot-completed
 shepherd-waydroid-helper maximize --package <android.package.name>
+shepherd-waydroid-helper back
 ```
 
 - `force-stop` → `waydroid shell am force-stop <pkg>`. Reclaims the cached
@@ -45,6 +46,13 @@ shepherd-waydroid-helper maximize --package <android.package.name>
   landscape rather than honoring a portrait lock). Multi-step (read the top task
   + display size, verify `<pkg>` is on top, then resize), so like
   `boot-completed` it does not `exec`.
+- `back` → `waydroid shell input keyevent 4` (Android `KEYCODE_BACK`) to the
+  foreground app. Takes no arguments. Backs the HUD's back button: in
+  `lock_mode = "statusbar"` the app is fullscreened under the HUD, hiding
+  Android's own caption back button, so the HUD provides one. The key is
+  dispatched to the *input-focused* window, which Waydroid only sets once the app
+  has been interacted with (fine while the child is using the app; a
+  just-launched, untouched app has no focused window yet).
 
 ## Trust boundary
 
@@ -58,9 +66,9 @@ shepherd-waydroid-helper maximize --package <android.package.name>
   uses, so the check cannot drift — which forbids leading `-`, whitespace, `/`,
   and shell metacharacters. The validated value is passed as a single argv
   element with **no shell**, so it cannot inject options or commands.
-- `preboot`, `unlock`, and `boot-completed` take no arguments, and every fixed
-  command (systemd unit, DPC components, getprop name) is hardcoded, so the
-  actions cannot be aimed at any other service.
+- `preboot`, `unlock`, `boot-completed`, and `back` take no arguments, and every
+  fixed command (systemd unit, DPC components, getprop name, keyevent) is
+  hardcoded, so the actions cannot be aimed at any other service.
 - Dependencies are limited to `shepherd-util` (for the shared validator) plus
   std, keeping the audit surface small.
 

@@ -79,6 +79,9 @@ pub trait ManagementService: Send + Sync {
     async fn reset_current(&self) -> ManagementResult<()>;
     #[rpc(wrap_result = "new_deadline")]
     async fn extend_current(&self, seconds: i64) -> ManagementResult<Option<DateTime<Local>>>;
+    /// Send a "back" navigation to the current session (Android `KEYCODE_BACK`).
+    /// Drives the HUD back button; a no-op error if no Android session is active.
+    async fn back(&self) -> ManagementResult<()>;
 
     // Overrides
     #[rpc(default(date = "today"))]
@@ -707,6 +710,7 @@ impl ManagementService for DefaultManagementService {
                     confirm_on_close: plan_confirm_on_close,
                     can_reset: plan_can_reset,
                     can_turn_pages: plan_can_turn_pages,
+                    kind_tag: kind.tag(),
                 }));
 
                 Ok(LaunchOutcome::Approved {
@@ -900,6 +904,21 @@ impl ManagementService for DefaultManagementService {
                     "Relaunch after reset failed: {e}"
                 )))
             }
+        }
+    }
+
+    async fn back(&self) -> ManagementResult<()> {
+        let handle = {
+            let eng = self.engine.lock().await;
+            eng.current_session().and_then(|s| s.host_handle.clone())
+        };
+        match handle {
+            Some(h) => self
+                .host
+                .send_back(&h)
+                .await
+                .map_err(|e| ManagementError::Internal(e.to_string())),
+            None => Err(ManagementError::NotFound("No active session".into())),
         }
     }
 

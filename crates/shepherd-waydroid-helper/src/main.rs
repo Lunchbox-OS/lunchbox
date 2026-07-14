@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly seven narrow, fixed actions:
+//! and exposes exactly eight narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -29,6 +29,12 @@
 //!   its host window instead of Waydroid's small default freeform size. Like
 //!   `boot-completed` it is multi-step (read the top task + display size, verify
 //!   `<pkg>` is on top, then resize), so it does not `exec` — see [`main`].
+//! - `back`: `waydroid shell input keyevent 4` (Android `KEYCODE_BACK`) to the
+//!   foreground app. Backs the HUD's back button (`lock_mode = "statusbar"`
+//!   fullscreens the app under the HUD, hiding Android's own caption back). The
+//!   key is dispatched to the *input-focused* window, which Waydroid only sets
+//!   once the app has been interacted with — fine in practice (the child is
+//!   using the app), but a just-launched, untouched app has no focus yet.
 //!
 //! The no-argument actions take no arguments and every action but
 //! `boot-completed`/`maximize` `exec`s a fixed command (the only caller-controlled
@@ -66,7 +72,7 @@ const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
 const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', \
-     'boot-completed', or 'maximize'";
+     'boot-completed', 'maximize', or 'back'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
@@ -88,6 +94,8 @@ enum Action {
     Maximize {
         package: String,
     },
+    /// Send Android `KEYCODE_BACK` to the foreground app (the HUD back button).
+    Back,
 }
 
 impl Action {
@@ -164,6 +172,16 @@ impl Action {
                     "activities".into(),
                 ],
             ),
+            // KEYCODE_BACK (4) to the input-focused foreground app.
+            Action::Back => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "input".into(),
+                    "keyevent".into(),
+                    "4".into(),
+                ],
+            ),
         }
     }
 }
@@ -191,6 +209,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
         Some("maximize") => {
             parse_validated_package(args).map(|package| Action::Maximize { package })
         }
+        Some("back") => no_extra_args(args, "back").map(|()| Action::Back),
         Some(other) => Err(format!("unknown subcommand '{other}' ({USAGE})")),
         None => Err(format!("missing subcommand ({USAGE})")),
     }
@@ -424,6 +443,12 @@ mod tests {
     }
 
     #[test]
+    fn back_takes_no_args() {
+        assert_eq!(parse(&["back"]), Ok(Action::Back));
+        assert!(parse(&["back", "x"]).is_err());
+    }
+
+    #[test]
     fn parses_top_task_id() {
         let dump = "  mFocusedApp=...\n  mCurTaskIdForUser={0=13}\n  more=stuff\n";
         assert_eq!(parse_top_task_id(dump), Some(13));
@@ -530,5 +555,10 @@ mod tests {
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         assert_eq!(prog, "waydroid");
         assert_eq!(argv, ["shell", "dumpsys", "activity", "activities"]);
+
+        let (prog, argv) = cmd_of(Action::Back);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(argv, ["shell", "input", "keyevent", "4"]);
     }
 }
