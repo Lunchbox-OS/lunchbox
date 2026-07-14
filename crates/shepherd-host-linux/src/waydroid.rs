@@ -117,6 +117,31 @@ pub async fn boot_completed() -> bool {
     }
 }
 
+/// Best-effort: grow a just-launched multi-window app to fill the display, via
+/// the privileged helper (`pkexec shepherd-waydroid-helper maximize`). Waydroid
+/// opens each multi-window app in a small default freeform window and does not
+/// resize the Android task to follow the host window, so without this the app is
+/// a scaled partial window; the helper `am task resize`s it to the full display
+/// (freeform, so the app fills in landscape rather than honoring a portrait
+/// lock). Only meaningful in the multi-window modes (statusbar/off), not
+/// locktask's single full-UI surface. Logs and returns on failure.
+pub async fn maximize(package: &str) {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .args(["maximize", "--package", package])
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!(package, "maximized Android app window"),
+        Ok(status) => debug!(
+            package,
+            %status,
+            "maximize helper did not succeed (helper not installed, app not on top, or resize unsupported)"
+        ),
+        Err(e) => warn!(package, error = %e, "failed to invoke maximize helper"),
+    }
+}
+
 /// Launch an Android app by package name (session user). Returns once the
 /// launch command returns — the app's window appears asynchronously after.
 pub async fn launch_app(package: &str) -> HostResult<()> {

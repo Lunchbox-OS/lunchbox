@@ -2078,6 +2078,11 @@ impl LinuxHost {
                     ANDROID_WINDOW_TIMEOUT.as_secs()
                 )));
             }
+            // Waydroid opens multi-window apps in a small default freeform window
+            // and doesn't grow the Android task to fill the host window, so
+            // expand it to fill the display (best-effort). The window is mapped
+            // (and thus the task is on top) by here.
+            waydroid::maximize(package_name).await;
         }
 
         // Track the session so the window-watch task can dedup its single

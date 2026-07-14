@@ -13,6 +13,7 @@ shepherd-waydroid-helper lock-down
 shepherd-waydroid-helper pin --package <android.package.name>
 shepherd-waydroid-helper unlock
 shepherd-waydroid-helper boot-completed
+shepherd-waydroid-helper maximize --package <android.package.name>
 ```
 
 - `force-stop` → `waydroid shell am force-stop <pkg>`. Reclaims the cached
@@ -34,8 +35,16 @@ shepherd-waydroid-helper boot-completed
   prints `1` (Android inside the running session has finished booting). Takes no
   arguments. shepherdd's readiness gate polls this to keep Android activities
   hidden from the launcher until a launch would land on a booted system rather
-  than the boot animation. Alone among the subcommands it is a *query* that
-  inspects the command's output, so it does not `exec` (getprop always exits 0).
+  than the boot animation. It is a *query* that inspects the command's output, so
+  it does not `exec` (getprop always exits 0).
+- `maximize --package <pkg>` → grows the foreground app's freeform window to fill
+  the display (`am task resize`). Waydroid opens each multi-window app
+  (`lock_mode = "statusbar"` / `"off"`) in a small default freeform window and
+  does not resize the Android task to follow the host window, so shepherdd calls
+  this after launch to make the app fill its window (in freeform the app fills in
+  landscape rather than honoring a portrait lock). Multi-step (read the top task
+  + display size, verify `<pkg>` is on top, then resize), so like
+  `boot-completed` it does not `exec`.
 
 ## Trust boundary
 
@@ -55,11 +64,13 @@ shepherd-waydroid-helper boot-completed
 - Dependencies are limited to `shepherd-util` (for the shared validator) plus
   std, keeping the audit surface small.
 
-Every subcommand but `boot-completed` `exec()`s a fixed command, so the helper's
-pid becomes `waydroid`/`systemctl` and shepherdd's `pkexec … .status()` returns
-when it exits. `boot-completed` instead runs the fixed command, inspects its
-output, and returns its own exit code (getprop always exits 0, so the value
-must be read).
+Every subcommand but `boot-completed`/`maximize` `exec()`s a fixed command, so
+the helper's pid becomes `waydroid`/`systemctl` and shepherdd's `pkexec …
+.status()` returns when it exits. Those two instead run fixed, shell-free
+commands, inspect their output, and return their own exit code — `boot-completed`
+because getprop always exits 0, `maximize` because it must read the top task id
+and display size before issuing the resize (the only variable parts of that
+second command are integers it parsed).
 
 ## Install
 

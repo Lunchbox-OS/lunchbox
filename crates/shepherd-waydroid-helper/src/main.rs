@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly six narrow, fixed actions:
+//! and exposes exactly seven narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -24,13 +24,18 @@
 //!   would land on a booted system instead of the boot animation. Alone among
 //!   the actions it is a *query* that inspects the command's output (getprop
 //!   always exits 0), so it does not `exec` — see [`main`].
+//! - `maximize --package <pkg>`: grow the foreground app's freeform window to
+//!   fill the display (`am task resize`), so a multi-window Android app fills
+//!   its host window instead of Waydroid's small default freeform size. Like
+//!   `boot-completed` it is multi-step (read the top task + display size, verify
+//!   `<pkg>` is on top, then resize), so it does not `exec` — see [`main`].
 //!
 //! The no-argument actions take no arguments and every action but
-//! `boot-completed` `exec`s a fixed command (the only caller-controlled value is
-//! the validated package name); `boot-completed` runs the same kind of fixed,
-//! shell-free command but reads its output rather than replacing the process.
-//! Parsing/validation is split into the pure [`parse_args`] + [`Action`] so the
-//! trust boundary is unit-tested without exec. See README.md.
+//! `boot-completed`/`maximize` `exec`s a fixed command (the only caller-controlled
+//! value is the validated package name); those two instead run fixed, shell-free
+//! commands and read their output rather than replacing the process. Parsing and
+//! validation are split into the pure [`parse_args`] + [`Action`] so the trust
+//! boundary is unit-tested without exec. See README.md.
 
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
@@ -60,8 +65,8 @@ const LOCK_DOWN_FLAGS: &[&str] = &[
 const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity";
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
-const USAGE: &str =
-    "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', or 'boot-completed'";
+const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', \
+     'boot-completed', or 'maximize'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
@@ -78,6 +83,11 @@ enum Action {
     /// Query: exit 0 iff Android has finished booting. Inspects output, so
     /// [`main`] handles it specially instead of `exec`ing.
     BootCompleted,
+    /// Grow `package`'s foreground freeform window to fill the display. Multi-step
+    /// (read state, then resize), so [`main`] handles it specially, not `exec`.
+    Maximize {
+        package: String,
+    },
 }
 
 impl Action {
@@ -143,6 +153,17 @@ impl Action {
                     "sys.boot_completed".into(),
                 ],
             ),
+            // The state read that `maximize` starts from; it then parses the top
+            // task + display size and issues a second `am task resize` command.
+            Action::Maximize { .. } => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "dumpsys".into(),
+                    "activity".into(),
+                    "activities".into(),
+                ],
+            ),
         }
     }
 }
@@ -166,6 +187,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
         Some("unlock") => no_extra_args(args, "unlock").map(|()| Action::Unlock),
         Some("boot-completed") => {
             no_extra_args(args, "boot-completed").map(|()| Action::BootCompleted)
+        }
+        Some("maximize") => {
+            parse_validated_package(args).map(|package| Action::Maximize { package })
         }
         Some(other) => Err(format!("unknown subcommand '{other}' ({USAGE})")),
         None => Err(format!("missing subcommand ({USAGE})")),
@@ -205,11 +229,12 @@ fn no_extra_args(mut args: impl Iterator<Item = String>, name: &str) -> Result<(
 
 fn main() -> ExitCode {
     let action = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| die(e));
-    // `boot-completed` is a query: it must inspect the getprop output ("1" once
-    // Android has booted) rather than the always-zero getprop exit code, so it
-    // can't use the exec() path below.
-    if action == Action::BootCompleted {
-        return boot_completed_exit_code(&action);
+    // These two are multi-step / output-inspecting rather than a single
+    // fire-and-forget command, so they can't use the exec() path below.
+    match &action {
+        Action::BootCompleted => return boot_completed_exit_code(&action),
+        Action::Maximize { package } => return maximize_exit_code(&action, package),
+        _ => {}
     }
     let (program, args) = action.command();
     // exec() replaces this process; it only returns on failure to launch.
@@ -227,6 +252,79 @@ fn boot_completed_exit_code(action: &Action) -> ExitCode {
         Ok(out) if String::from_utf8_lossy(&out.stdout).trim() == "1" => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     }
+}
+
+/// Grow the foreground app's freeform window to fill the display: read the
+/// activity state, confirm `package` is the resumed app (so we never resize an
+/// unrelated task — e.g. the app already closed), find the top task and the
+/// display size, then `am task resize` the task to the full display. Any
+/// failure is a non-success exit; the caller treats it as best-effort.
+///
+/// `action.command()` is the activity-state read; the resize is a second fixed
+/// command whose only variable parts are integers parsed here.
+fn maximize_exit_code(action: &Action, package: &str) -> ExitCode {
+    let (program, args) = action.command();
+    let dump = match Command::new(program).args(&args).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => return ExitCode::FAILURE,
+    };
+    // Only resize when the requested package is actually on top.
+    let on_top = dump
+        .lines()
+        .any(|l| l.contains("ResumedActivity") && l.contains(&format!("{package}/")));
+    if !on_top {
+        return ExitCode::FAILURE;
+    }
+    let Some(task) = parse_top_task_id(&dump) else {
+        return ExitCode::FAILURE;
+    };
+    let size = Command::new("waydroid")
+        .args(["shell", "wm", "size"])
+        .output();
+    let Some((w, h)) = size
+        .ok()
+        .and_then(|o| parse_wm_size(&String::from_utf8_lossy(&o.stdout)))
+    else {
+        return ExitCode::FAILURE;
+    };
+    // task/w/h are all integers parsed above, so this argv is injection-safe.
+    match Command::new("waydroid")
+        .args([
+            "shell",
+            "am",
+            "task",
+            "resize",
+            &task.to_string(),
+            "0",
+            "0",
+            &w.to_string(),
+            &h.to_string(),
+        ])
+        .status()
+    {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// Parse the top task id for user 0 (`mCurTaskIdForUser={0=<id>}`) from a
+/// `dumpsys activity activities` dump — the task of the just-launched app.
+fn parse_top_task_id(dump: &str) -> Option<u32> {
+    let rest = dump.split("mCurTaskIdForUser={0=").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Parse the display size from `wm size` output (`Physical size: WxH`, or
+/// `Override size: WxH` when an explicit override is set — that one wins).
+fn parse_wm_size(out: &str) -> Option<(u32, u32)> {
+    let pick = |prefix: &str| {
+        out.lines().find_map(|l| {
+            let (w, h) = l.trim().strip_prefix(prefix)?.trim().split_once('x')?;
+            Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+        })
+    };
+    pick("Override size:").or_else(|| pick("Physical size:"))
 }
 
 #[cfg(test)]
@@ -310,6 +408,42 @@ mod tests {
         assert!(parse(&["boot-completed", "x"]).is_err());
     }
 
+    #[test]
+    fn maximize_shares_the_force_stop_package_trust_boundary() {
+        assert_eq!(
+            parse(&["maximize", "--package", "com.android.calculator2"]),
+            Ok(Action::Maximize {
+                package: "com.android.calculator2".into()
+            })
+        );
+        assert!(parse(&["maximize", "--package", "com.app;rm -rf"]).is_err());
+        assert!(parse(&["maximize", "--package", "-rf"]).is_err());
+        assert!(parse(&["maximize", "--package", "noseparator"]).is_err());
+        assert!(parse(&["maximize"]).is_err());
+        assert!(parse(&["maximize", "--package", "a.b", "extra"]).is_err());
+    }
+
+    #[test]
+    fn parses_top_task_id() {
+        let dump = "  mFocusedApp=...\n  mCurTaskIdForUser={0=13}\n  more=stuff\n";
+        assert_eq!(parse_top_task_id(dump), Some(13));
+        assert_eq!(parse_top_task_id("no task here"), None);
+    }
+
+    #[test]
+    fn parses_wm_size() {
+        assert_eq!(
+            parse_wm_size("Physical size: 1920x999\n"),
+            Some((1920, 999))
+        );
+        // Override wins when both are present.
+        assert_eq!(
+            parse_wm_size("Physical size: 1920x1080\nOverride size: 1280x720\n"),
+            Some((1280, 720))
+        );
+        assert_eq!(parse_wm_size("garbage"), None);
+    }
+
     /// argv as `&str`s, for ergonomic comparison.
     fn cmd_of(action: Action) -> (&'static str, Vec<String>) {
         action.command()
@@ -389,5 +523,12 @@ mod tests {
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         assert_eq!(prog, "waydroid");
         assert_eq!(argv, ["shell", "getprop", "sys.boot_completed"]);
+
+        let (prog, argv) = cmd_of(Action::Maximize {
+            package: "com.x.y".into(),
+        });
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(argv, ["shell", "dumpsys", "activity", "activities"]);
     }
 }
