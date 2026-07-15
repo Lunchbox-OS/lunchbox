@@ -232,17 +232,23 @@ get_packages() {
         android)
             read_package_file "$DEPS_DIR/android.pkgs"
             ;;
+        agent)
+            read_package_file "$DEPS_DIR/agent.pkgs"
+            ;;
         dev)
-            # Union of all four sets, deduplicated
+            # Union of build + run + test + agent + dev extras, deduplicated.
+            # `agent` is included so a dev checkout can drive `shepherd dev
+            # headless` (grim/wtype/jq) out of the box.
             {
                 read_package_file "$DEPS_DIR/build.pkgs"
                 read_package_file "$DEPS_DIR/run.pkgs"
                 read_package_file "$DEPS_DIR/test.pkgs"
+                read_package_file "$DEPS_DIR/agent.pkgs"
                 read_package_file "$DEPS_DIR/dev.pkgs"
             } | sort -u
             ;;
         *)
-            die "Unknown package set: $set_name (valid: build, run, test, android, dev)"
+            die "Unknown package set: $set_name (valid: build, run, test, android, agent, dev)"
             ;;
     esac
 }
@@ -394,7 +400,8 @@ Package sets:
     test     Extra packages needed for the shepherd-e2e harness
     android  JDK + Android SDK + NDK for the companion-android and
              shepherd-media-android apps
-    dev      All dependencies (build + run + test + dev extras + Rust)
+    agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
+    dev      All dependencies (build + run + test + agent + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
       The 'android' set is standalone (not part of 'dev') because it
