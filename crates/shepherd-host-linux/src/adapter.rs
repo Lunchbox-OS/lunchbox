@@ -251,6 +251,17 @@ fn resolve_browser_root() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
 }
 
+/// The primary output's physical mode `(width, height)`, for pinning Waydroid's
+/// resolution so it isn't sized to the *logical* (scale-divided) output. The
+/// primary is the first active output (shepherd's convention, issue #87). None
+/// if sway isn't reachable or the output reports no current mode.
+async fn primary_physical_mode() -> Option<(u32, u32)> {
+    let displays = crate::sway::get_displays().await.ok()?;
+    let primary = displays.into_iter().find(|d| d.active)?;
+    let mode = primary.current_mode?;
+    Some((mode.width, mode.height))
+}
+
 /// Pop any sidecars registered for `pid` and terminate them on a blocking
 /// thread so the async monitor isn't stalled by SIGTERM/SIGKILL waits.
 fn reap_sidecars(sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>, pid: u32) {
@@ -591,9 +602,9 @@ impl LinuxHost {
     }
 
     /// Pre-boot Android in the background so the first launch is fast: bring up
-    /// the (root) container via the helper, ensure multi-window mode, start the
-    /// session, and enable idle-suspend. Fire-and-forget, like [`preload_steam`]
-    /// — all steps are best-effort and logged.
+    /// the (root) container via the helper, pin the resolution + multi-window
+    /// mode, start the session, and enable idle-suspend. Fire-and-forget, like
+    /// [`preload_steam`] — all steps are best-effort and logged.
     pub fn preboot_waydroid(&self) {
         let settings = self.waydroid_settings.lock().unwrap().unwrap_or_default();
         tokio::spawn(async move {
@@ -601,29 +612,48 @@ impl LinuxHost {
             // 1. Ensure the root container service is up (no-op if already enabled).
             waydroid::preboot_container().await;
 
-            // 2. Enforce multi-window before relying on the session. The prop is
-            //    read at session start, so if it isn't already enabled we set it
-            //    and (re)start the session once for it to take effect.
-            let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-            // Enforce the presentation mode. `locktask` uses full-UI single-surface
-            // presentation, which needs multi-window OFF; every other mode keeps it
-            // as configured. The prop is read at session start, so if it differs we
-            // set it and (re)start the session once for it to take effect.
+            // 2. Pin the persist props the session reads at start-up, then start
+            //    (or, if already running with different props, restart once) so
+            //    they take effect. Props: the display resolution and the
+            //    presentation (multi-window) mode.
+            //
+            //    Resolution: Waydroid otherwise sizes its buffer to the output's
+            //    *logical* size, so on a fractional scale (e.g. `output * scale
+            //    1.5`) it renders 1/scale too small — and a mid-session restart
+            //    (idle-suspend or wedge recovery) re-triggers it. Pinning to the
+            //    primary output's *physical* mode keeps it filling the panel at
+            //    any scale, restart-proof.
+            //
+            //    Presentation: `locktask` uses a full-UI single surface (needs
+            //    multi-window OFF); every other mode keeps it as configured.
             let want_multi =
                 settings.multi_window && settings.lock_mode != WaydroidLockMode::Locktask;
-            let want = if want_multi { "true" } else { "false" };
-            if waydroid::get_prop("persist.waydroid.multi_windows")
-                .await
-                .as_deref()
-                != Some(want)
-            {
-                if let Err(e) = waydroid::set_prop("persist.waydroid.multi_windows", want).await {
-                    warn!(error = %e, want, "failed to set waydroid multi-window mode");
-                } else if started {
-                    // Restart so the new prop takes effect.
-                    waydroid::session_stop().await;
-                    started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+            let mut desired: Vec<(&str, String)> = vec![(
+                "persist.waydroid.multi_windows",
+                if want_multi { "true" } else { "false" }.to_string(),
+            )];
+            if let Some((w, h)) = primary_physical_mode().await {
+                desired.push(("persist.waydroid.width", w.to_string()));
+                desired.push(("persist.waydroid.height", h.to_string()));
+            }
+
+            let mut prop_changed = false;
+            for (key, value) in &desired {
+                if waydroid::get_prop(key).await.as_deref() != Some(value.as_str()) {
+                    prop_changed = true;
+                    if let Err(e) = waydroid::set_prop(key, value).await {
+                        warn!(error = %e, key, value, "failed to set waydroid prop");
+                    }
                 }
+            }
+
+            let was_running = waydroid::session_running().await;
+            let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+            // A fresh session start already picked up the props; a warm session
+            // with changed props needs one restart to apply them.
+            if started && was_running && prop_changed {
+                waydroid::session_stop().await;
+                started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
             }
 
             // 3. Idle-suspend to keep the warm session cheap.
