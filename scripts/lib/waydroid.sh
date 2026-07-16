@@ -17,6 +17,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 WAYDROID_CFG="/var/lib/waydroid/waydroid.cfg"
 WAYDROID_OVERLAY="/var/lib/waydroid/overlay"
+# Generated from waydroid.cfg's [properties] by `waydroid init`/`upgrade`, read at
+# each container start to build the Android prop set. The apply-cfg-props trigger.
+WAYDROID_BASE_PROP="/var/lib/waydroid/waydroid_base.prop"
 
 # libndk ARM-translation payload for Android 13 / LineageOS 20. Pinned to the
 # exact upstream commit + md5 that casualsnek/waydroid_script ships, so the
@@ -171,6 +174,35 @@ install_libndk() {
 
     rm -rf "$tmp_zip" "$tmp_extract"
     success "libndk ARM translation installed (takes effect on the next session start)."
+}
+
+# Hide Android's software navigation bar. In a shepherd kiosk it's redundant: the
+# HUD surfaces Back, and lock-down disables home/recents/search — so the bar only
+# ever shows a Back button (or nothing), which the HUD already covers. Setting
+# qemu.hw.mainkeys=1 makes Android treat the device as having hardware nav keys,
+# so SystemUI draws no software nav bar at all (immersive/policy_control was
+# removed in Android 13 and can't do this at runtime).
+#
+# The prop is applied at container start from waydroid_base.prop, which is only
+# regenerated from waydroid.cfg's [properties] by `waydroid init`/`upgrade`. So we
+# record it in the cfg (durable across future upgrades) and run `waydroid upgrade
+# -o` (offline: no image download) once to bake it in. Idempotent on the baked
+# base.prop, so a re-run — e.g. the second `apps install android` pass that
+# provisions the DPC against a *running* session — is a no-op and won't restart
+# the container out from under that session.
+configure_waydroid_navbar() {
+    require_root
+    require_command waydroid
+    if grep -qxE 'qemu\.hw\.mainkeys=1' "$WAYDROID_BASE_PROP" 2>/dev/null; then
+        info "Android nav bar already hidden (qemu.hw.mainkeys=1)."
+        return 0
+    fi
+    info "Hiding the redundant Android nav bar (qemu.hw.mainkeys=1)..."
+    waydroid_cfg_set_props "qemu.hw.mainkeys=1"
+    # Regenerate waydroid_base.prop from the cfg so the prop takes effect at the
+    # next session start. Offline; stops/restarts the container if it was running.
+    waydroid upgrade -o
+    success "Android nav bar hidden (applies on the next session start)."
 }
 
 # True if the device is NOT Play-certified. GMS caches an `uncertified_status`

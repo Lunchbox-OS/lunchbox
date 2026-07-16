@@ -1110,6 +1110,7 @@ apps_install() {
             # Engine present: build the managed image (offline, idempotent).
             provision_waydroid_gapps "$user"
             install_libndk
+            configure_waydroid_navbar
 
             # The DPC device-owner step needs a booted session and must precede
             # any Google sign-in (the only gate is accounts=0).
