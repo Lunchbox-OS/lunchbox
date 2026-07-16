@@ -6,6 +6,11 @@ Agents: please use the existing documentation for setup.
 
 Please ensure that your changes build and pass tests and lint, and run `cargo fmt --all` to match your changes to the rest of the code.
 
+To see or verify a UI change end-to-end without a graphical login session, drive
+the headless dev session (`./scripts/shepherd dev headless` → `dev shot` →
+`dev stop`); see the `headless-dev` skill and the "Headless development" section
+of <CONTRIBUTING.md>. Prefer this over `./run-dev`, which requires a login session.
+
 If you changed the example configuration at <config.example.toml>, make sure that it passes config validation.
 
 Each of the Rust crates in <crates> contains a README.md that describes each at a high level.

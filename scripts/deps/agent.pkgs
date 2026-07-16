@@ -1,0 +1,23 @@
+# Agent / headless-development packages for shepherd-launcher.
+#
+# These power `shepherd dev headless`, which boots the real launcher stack in a
+# GPU-less, login-session-less headless Sway so an automated agent (or a
+# developer over SSH) can screenshot and drive it. See
+# docs/ai/history for the design.
+# One package per line, comments start with #
+
+# Sway is what we boot headless (already in run/test, listed for standalone use).
+sway
+
+# grim: screenshot the headless virtual output via the wlr-screencopy protocol.
+# Works against the pixman software buffer with no GPU and no physical display.
+grim
+
+# wtype: inject keystrokes/text via the virtual-keyboard protocol. No daemon and
+# no root (unlike ydotool). Pointer taps/clicks go through `swaymsg seat cursor`,
+# so no extra pointer tool is needed.
+wtype
+
+# jq: parse `swaymsg -t get_tree`/`get_outputs` JSON for structural assertions
+# (which app_id is focused/fullscreen) — cheaper and less flaky than pixel diffs.
+jq

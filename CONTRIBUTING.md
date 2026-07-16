@@ -74,6 +74,31 @@ using a tool like [DB Browser for SQLite](https://sqlitebrowser.org/) while the
 service is not running to inject application usage. The schema is defined in
 the [shepherd-store crate](./crates/shepherd-store/).
 
+### Headless development (no login session, for SSH / CI / agents)
+
+`./run-dev` boots a *nested* Sway that needs a graphical login session. To run
+and **screenshot** the full stack without one — over SSH, in CI, or from a
+coding agent — use the headless session, which boots the same `sway.conf`,
+`config.example.toml`, and binaries against the GPU-less headless wlroots
+backend:
+
+```sh
+./scripts/shepherd deps install agent          # grim + wtype + jq (also in `deps install dev`)
+./scripts/shepherd dev headless                # build + boot, detached
+./scripts/shepherd dev tree                    # window tree (app_id / focus)
+./scripts/shepherd dev shot home.png           # screenshot the virtual output
+./scripts/shepherd dev key Down                # inject input; also: dev type / dev click
+./scripts/shepherd dev stop                    # tear down
+```
+
+Useful flags on `dev headless`: `--time "2025-12-25 21:00:00"` (mock the clock
+for availability/bedtime/time-limit testing), `--config PATH` (boot an arbitrary
+config), `--user NAME` (run the stack as another user — their groups, `HOME`, and
+default `~/.config/shepherd/config.toml`), `--size WxH`, `--gpu`, `--no-build`.
+Connection state lives in `dev-runtime/headless/session.env`; the compositor log
+is `dev-runtime/headless/sway.log`. See the design notes in
+[`docs/ai/history`](./docs/ai/history/) for internals.
+
 ### Web UI
 
 The management API HTTP server (`shepherd-http`) embeds the React SPA at compile

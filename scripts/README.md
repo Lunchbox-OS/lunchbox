@@ -19,7 +19,15 @@ This directory contains the unified script system for shepherd-launcher.
 ./shepherd config validate [path]
 
 # Development
-./shepherd dev run
+./shepherd dev run                  # nested sway (needs a graphical login session)
+
+# Headless, agent/SSH-drivable session (no login session, no GPU)
+./shepherd deps install agent       # grim + wtype + jq
+./shepherd dev headless [--config PATH] [--user NAME] [--time "..."] [--size WxH]
+./shepherd dev shot [out.png]       # screenshot the virtual output
+./shepherd dev tree                 # window-tree summary (app_id/focus)
+./shepherd dev key Down / type "x" / click X Y   # inject input
+./shepherd dev stop
 
 # Installation
 ./shepherd install all --user USER [--prefix PREFIX]
