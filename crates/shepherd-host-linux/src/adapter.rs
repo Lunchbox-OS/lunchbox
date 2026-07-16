@@ -429,6 +429,9 @@ pub struct LinuxHost {
     /// session, so stop can kill the surface (which the window-watch then
     /// observes as gone → Exited).
     waydroid_full_ui: Arc<Mutex<HashMap<SessionId, tokio::process::Child>>>,
+    /// True while a wedged-Waydroid session restart is in flight, so concurrent
+    /// launch wedges don't kick off overlapping restarts.
+    waydroid_recovering: Arc<AtomicBool>,
 }
 
 /// What the reconciliation sweep needs to decide whether a window on screen is
@@ -565,6 +568,7 @@ impl LinuxHost {
             window_created_tx: broadcast::channel(64).0,
             waydroid_settings: Arc::new(Mutex::new(None)),
             waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
+            waydroid_recovering: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -692,6 +696,42 @@ impl LinuxHost {
                 }
                 tokio::time::sleep(WAYDROID_READY_POLL_INTERVAL).await;
             }
+        });
+    }
+
+    /// Recover a wedged Waydroid session after a launch timed out (the host↔
+    /// platform bridge is stuck — see [`waydroid::LaunchError::Wedged`]). Re-gate
+    /// Android immediately (so the launcher hides it while it's down), then
+    /// restart the session in the background; the readiness watcher un-gates it
+    /// once it boots again. Guarded so overlapping wedges restart only once.
+    fn recover_wedged_waydroid(&self) {
+        if self.waydroid_recovering.swap(true, Ordering::SeqCst) {
+            return; // a restart is already in flight
+        }
+        let event_tx = self.event_tx.clone();
+        let recovering = self.waydroid_recovering.clone();
+        let boot_timeout = self
+            .waydroid_settings
+            .lock()
+            .unwrap()
+            .unwrap_or_default()
+            .boot_ready_timeout;
+        // Hide Android now; the readiness watcher re-confirms on the way back up.
+        let _ = event_tx.send(HostEvent::KindReadinessChanged {
+            kind: EntryKindTag::Android,
+            ready: false,
+        });
+        tokio::spawn(async move {
+            warn!("Recovering wedged Waydroid: restarting the session");
+            waydroid::session_stop().await;
+            // Make sure the (root) container is up before re-starting the session.
+            waydroid::preboot_container().await;
+            if waydroid::start_session_and_wait(boot_timeout).await {
+                info!("Waydroid session restarted after a launch wedge");
+            } else {
+                warn!("Waydroid session did not come back after a wedge restart");
+            }
+            recovering.store(false, Ordering::SeqCst);
         });
     }
 
@@ -2069,7 +2109,19 @@ impl LinuxHost {
                 .unwrap()
                 .insert(session_id.clone(), full_ui);
         } else {
-            waydroid::launch_app(package_name).await?;
+            match waydroid::launch_app(package_name).await {
+                Ok(()) => {}
+                Err(waydroid::LaunchError::Wedged) => {
+                    // The session's platform bridge is stuck; kick off a restart
+                    // so the next launch works, and fail this one cleanly.
+                    self.recover_wedged_waydroid();
+                    return Err(HostError::SpawnFailed(format!(
+                        "Waydroid launch for {package_name} wedged; restarting the Android \
+                         session — try again in a moment"
+                    )));
+                }
+                Err(waydroid::LaunchError::Failed(e)) => return Err(e),
+            }
             // The toplevel appears asynchronously a few seconds after launch.
             if !wait_for_android_window(&surface_app_id, ANDROID_WINDOW_TIMEOUT).await {
                 waydroid::force_stop(package_name).await;

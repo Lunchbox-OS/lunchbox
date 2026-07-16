@@ -172,9 +172,19 @@ pub async fn back() {
 /// the session ends and the launcher returns to the grid.
 const LAUNCH_APP_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Why [`launch_app`] failed, so the adapter can react differently.
+pub enum LaunchError {
+    /// `waydroid app launch` did not return within [`LAUNCH_APP_TIMEOUT`] — the
+    /// session's host↔platform (`waydroidplatform`) bridge is wedged (seen after
+    /// racing launch/close churn). Recover by restarting the session.
+    Wedged,
+    /// Any other launch failure.
+    Failed(HostError),
+}
+
 /// Launch an Android app by package name (session user). Returns once the
 /// launch command returns — the app's window appears asynchronously after.
-pub async fn launch_app(package: &str) -> HostResult<()> {
+pub async fn launch_app(package: &str) -> Result<(), LaunchError> {
     let argv = launch_argv(package);
     // Spawn (not `.status()`) so we can kill it if it hangs. `kill_on_drop`
     // reaps it if we bail on any error path.
@@ -182,26 +192,31 @@ pub async fn launch_app(package: &str) -> HostResult<()> {
         .args(&argv[1..])
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| HostError::SpawnFailed(format!("failed to invoke waydroid: {e}")))?;
+        .map_err(|e| {
+            LaunchError::Failed(HostError::SpawnFailed(format!(
+                "failed to invoke waydroid: {e}"
+            )))
+        })?;
     let status = match tokio::time::timeout(LAUNCH_APP_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => {
-            return Err(HostError::SpawnFailed(format!(
+            return Err(LaunchError::Failed(HostError::SpawnFailed(format!(
                 "waydroid app launch {package} failed: {e}"
-            )));
+            ))));
         }
         Err(_) => {
             let _ = child.start_kill();
-            return Err(HostError::SpawnFailed(format!(
-                "waydroid app launch {package} did not return within {}s (Waydroid session wedged?)",
-                LAUNCH_APP_TIMEOUT.as_secs()
-            )));
+            warn!(
+                package,
+                "waydroid app launch wedged (platform bridge stuck)"
+            );
+            return Err(LaunchError::Wedged);
         }
     };
     if !status.success() {
-        return Err(HostError::SpawnFailed(format!(
+        return Err(LaunchError::Failed(HostError::SpawnFailed(format!(
             "waydroid app launch {package} exited with {status}"
-        )));
+        ))));
     }
     Ok(())
 }
