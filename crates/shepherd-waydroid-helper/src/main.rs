@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly ten narrow, fixed actions:
+//! and exposes exactly eleven narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -41,6 +41,11 @@
 //!   caps loudness; maxing it hands the full range to shepherd. `--set` rejects an
 //!   out-of-range index and the max is ROM-specific, so it is multi-step (read the
 //!   max from `--get`, then `--set` it) and does not `exec` — see [`main`].
+//! - `scale-density <permille>`: set Android's UI density to `permille`/1000 of the
+//!   panel's base density (1500 = 1.5x), so a fractional-scale kiosk gets a larger
+//!   Android UI. Waydroid can't handle a fractional wl_output scale (its buffer is
+//!   boot-locked), so shepherd runs it at native scale 1 and carries the zoom as
+//!   density instead. Multi-step (read base density, then set), so no `exec`.
 //! - `is-running --package <pkg>`: exit 0 iff `<pkg>` has a live Android process
 //!   (`waydroid shell pidof <pkg>` prints a pid). The pre-launch guard polls this
 //!   so a fast reopen waits for the previous instance to finish dying rather than
@@ -48,12 +53,12 @@
 //!   inspects output (pidof's exit code isn't reliable through `waydroid shell`),
 //!   so it does not `exec` — see [`main`].
 //!
-//! Every action but `boot-completed`/`maximize`/`max-volume`/`is-running` `exec`s
-//! a fixed command (the only caller-controlled value is the validated package
-//! name); those four instead run fixed, shell-free commands and read their output
-//! rather than replacing the process. Parsing and validation are split into the
-//! pure [`parse_args`] + [`Action`] so the trust boundary is unit-tested without
-//! exec. See README.md.
+//! Every action but `boot-completed`/`maximize`/`max-volume`/`scale-density`/
+//! `is-running` `exec`s a fixed command (the only caller-controlled values are the
+//! validated package name and the bounded permille); those five instead run fixed,
+//! shell-free commands and read their output rather than replacing the process.
+//! Parsing and validation are split into the pure [`parse_args`] + [`Action`] so
+//! the trust boundary is unit-tested without exec. See README.md.
 
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
@@ -84,7 +89,7 @@ const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
 const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', \
-     'boot-completed', 'maximize', 'back', 'max-volume', or 'is-running'";
+     'boot-completed', 'maximize', 'back', 'max-volume', 'scale-density', or 'is-running'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
@@ -111,6 +116,14 @@ enum Action {
     /// Pin Android's media stream to max so shepherd's host volume owns the full
     /// dynamic range instead of it being pre-attenuated inside Android.
     MaxVolume,
+    /// Scale Android's UI density to `permille`/1000 of the panel's base density,
+    /// so a fractional-scale kiosk (e.g. `output * scale 1.5`) gets a proportionally
+    /// larger Android UI (Waydroid renders at native scale 1; density carries the
+    /// zoom). Multi-step (read base density, then set), so [`main`] handles it
+    /// specially, not `exec`.
+    ScaleDensity {
+        permille: u32,
+    },
     /// Query: exit 0 iff `package` has a live Android process. Inspects output
     /// (pidof), so [`main`] handles it specially, not `exec`.
     IsRunning {
@@ -220,6 +233,12 @@ impl Action {
                     "--get".into(),
                 ],
             ),
+            // The base-density read scale-density starts from; `main` parses the
+            // "Physical density: N" line and issues a second `wm density <scaled>`.
+            Action::ScaleDensity { .. } => (
+                "waydroid",
+                vec!["shell".into(), "wm".into(), "density".into()],
+            ),
             // pidof <pkg> — `main` reads its output to decide the exit code.
             Action::IsRunning { package } => (
                 "waydroid",
@@ -254,6 +273,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
         }
         Some("back") => no_extra_args(args, "back").map(|()| Action::Back),
         Some("max-volume") => no_extra_args(args, "max-volume").map(|()| Action::MaxVolume),
+        Some("scale-density") => {
+            parse_permille(args).map(|permille| Action::ScaleDensity { permille })
+        }
         Some("is-running") => {
             parse_validated_package(args).map(|package| Action::IsRunning { package })
         }
@@ -293,6 +315,25 @@ fn no_extra_args(mut args: impl Iterator<Item = String>, name: &str) -> Result<(
     }
 }
 
+/// Parse the single `<permille>` argument of `scale-density`: the target density
+/// as thousandths of the base (1500 = 1.5x). A plain positive integer, bounded to
+/// a sane range so a typo can't drive Android to an unusable density.
+fn parse_permille(mut args: impl Iterator<Item = String>) -> Result<u32, String> {
+    let raw = args
+        .next()
+        .ok_or_else(|| "scale-density needs a <permille> value".to_string())?;
+    if let Some(extra) = args.next() {
+        return Err(format!("unexpected argument '{extra}'"));
+    }
+    let permille: u32 = raw
+        .parse()
+        .map_err(|_| format!("invalid permille '{raw}' (expected a positive integer)"))?;
+    if !(500..=4000).contains(&permille) {
+        return Err(format!("permille {permille} out of range [500, 4000]"));
+    }
+    Ok(permille)
+}
+
 fn main() -> ExitCode {
     let action = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| die(e));
     // These are multi-step / output-inspecting rather than a single
@@ -301,6 +342,7 @@ fn main() -> ExitCode {
         Action::BootCompleted => return boot_completed_exit_code(&action),
         Action::Maximize { package } => return maximize_exit_code(&action, package),
         Action::MaxVolume => return max_volume_exit_code(&action),
+        Action::ScaleDensity { permille } => return scale_density_exit_code(&action, *permille),
         Action::IsRunning { .. } => return is_running_exit_code(&action),
         _ => {}
     }
@@ -431,6 +473,51 @@ fn parse_volume_max(out: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Scale Android's UI density to `permille`/1000 of the panel's *base* (physical)
+/// density: read `wm density`'s "Physical density: N" (the base, unaffected by any
+/// prior override), compute `N * permille / 1000`, and set it as the override. Any
+/// failure is a non-success exit (best-effort).
+///
+/// `action.command()` is the `wm density` read; the set is a second fixed command
+/// whose only variable part is the integer density computed here. Reading the
+/// *physical* line keeps this idempotent — re-running never compounds an override.
+fn scale_density_exit_code(action: &Action, permille: u32) -> ExitCode {
+    let (program, args) = action.command();
+    let out = match Command::new(program).args(&args).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => return ExitCode::FAILURE,
+    };
+    let Some(base) = parse_physical_density(&out) else {
+        return ExitCode::FAILURE;
+    };
+    // permille is bounded in parse_permille and base comes from the device, so the
+    // product can't overflow u32; the result is an integer, so the argv is safe.
+    let target = (u64::from(base) * u64::from(permille) / 1000) as u32;
+    if target == 0 {
+        return ExitCode::FAILURE;
+    }
+    match Command::new("waydroid")
+        .args(["shell", "wm", "density", &target.to_string()])
+        .status()
+    {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// Parse the base density from `wm density` output, whose first line reads
+/// `Physical density: N`. Deliberately ignores any `Override density:` line so the
+/// scaling is always relative to the panel's true base.
+fn parse_physical_density(out: &str) -> Option<u32> {
+    out.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("Physical density:")?
+            .trim()
+            .parse()
+            .ok()
+    })
+}
+
 /// Parse the top task id for user 0 (`mCurTaskIdForUser={0=<id>}`) from a
 /// `dumpsys activity activities` dump — the task of the just-launched app.
 fn parse_top_task_id(dump: &str) -> Option<u32> {
@@ -557,6 +644,34 @@ mod tests {
     fn max_volume_takes_no_args() {
         assert_eq!(parse(&["max-volume"]), Ok(Action::MaxVolume));
         assert!(parse(&["max-volume", "x"]).is_err());
+    }
+
+    #[test]
+    fn scale_density_parses_bounded_permille() {
+        assert_eq!(
+            parse(&["scale-density", "1500"]),
+            Ok(Action::ScaleDensity { permille: 1500 })
+        );
+        assert_eq!(
+            parse(&["scale-density", "1000"]),
+            Ok(Action::ScaleDensity { permille: 1000 })
+        );
+        assert!(parse(&["scale-density"]).is_err()); // missing value
+        assert!(parse(&["scale-density", "1500", "x"]).is_err()); // extra arg
+        assert!(parse(&["scale-density", "abc"]).is_err()); // non-numeric
+        assert!(parse(&["scale-density", "-5"]).is_err()); // negative
+        assert!(parse(&["scale-density", "100"]).is_err()); // below range
+        assert!(parse(&["scale-density", "9000"]).is_err()); // above range
+    }
+
+    #[test]
+    fn parses_physical_density() {
+        assert_eq!(
+            parse_physical_density("Physical density: 180\nOverride density: 270\n"),
+            Some(180)
+        );
+        assert_eq!(parse_physical_density("Physical density: 240"), Some(240));
+        assert_eq!(parse_physical_density("garbage"), None);
     }
 
     #[test]
@@ -712,6 +827,11 @@ mod tests {
                 "--get"
             ]
         );
+
+        let (prog, argv) = cmd_of(Action::ScaleDensity { permille: 1500 });
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(argv, ["shell", "wm", "density"]);
 
         let (prog, argv) = cmd_of(Action::IsRunning {
             package: "com.x.y".into(),

@@ -16,6 +16,7 @@ shepherd-waydroid-helper boot-completed
 shepherd-waydroid-helper maximize --package <android.package.name>
 shepherd-waydroid-helper back
 shepherd-waydroid-helper max-volume
+shepherd-waydroid-helper scale-density <permille>
 shepherd-waydroid-helper is-running --package <android.package.name>
 ```
 
@@ -63,6 +64,13 @@ shepherd-waydroid-helper is-running --package <android.package.name>
   launch (the setting can drift within a session). `--set` rejects an out-of-range
   index and the max is ROM-specific, so it is multi-step (read the max from `--get`,
   then `--set` it) and — like `boot-completed` — does not `exec`.
+- `scale-density <permille>` → set Android's UI density to `permille`/1000 of the
+  panel's base density (1500 = 1.5x). `<permille>` is a bounded positive integer.
+  Waydroid can't render at a fractional `wl_output` scale — its Wayland buffer is
+  fixed at session-boot scale — so shepherd runs the session at native scale 1 and
+  carries a fractional panel's zoom as Android density instead. Multi-step (read the
+  "Physical density" base, compute, then `wm density <scaled>`) and idempotent
+  (always relative to the physical base, never a prior override), so no `exec`.
 - `is-running --package <pkg>` → exits 0 iff `<pkg>` has a live Android process
   (`waydroid shell pidof <pkg>` prints a pid). shepherdd's pre-launch guard polls
   this so a fast reopen waits for the previous instance to finish dying instead of

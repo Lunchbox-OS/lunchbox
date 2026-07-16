@@ -443,6 +443,12 @@ pub struct LinuxHost {
     /// True while a wedged-Waydroid session restart is in flight, so concurrent
     /// launch wedges don't kick off overlapping restarts.
     waydroid_recovering: Arc<AtomicBool>,
+    /// True once the current Waydroid session is known to have booted at output
+    /// scale 1 (so its buffer matches the panel's native pixel grid). Every session
+    /// (re)start that isn't guaranteed scale-1 clears it (preboot/recovery/repin);
+    /// the first scaled Android launch then restarts the session at scale 1 and
+    /// sets it. Lets subsequent launches skip the restart. See [`spawn_android`].
+    waydroid_scale1_booted: Arc<AtomicBool>,
 }
 
 /// What the reconciliation sweep needs to decide whether a window on screen is
@@ -580,6 +586,7 @@ impl LinuxHost {
             waydroid_settings: Arc::new(Mutex::new(None)),
             waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
             waydroid_recovering: Arc::new(AtomicBool::new(false)),
+            waydroid_scale1_booted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -607,6 +614,9 @@ impl LinuxHost {
     /// [`preload_steam`] — all steps are best-effort and logged.
     pub fn preboot_waydroid(&self) {
         let settings = self.waydroid_settings.lock().unwrap().unwrap_or_default();
+        // Preboot happens at the grid's (possibly fractional) output scale, so this
+        // session is not the native-scale-1 boot a fractional Android launch needs.
+        self.waydroid_scale1_booted.store(false, Ordering::SeqCst);
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -740,12 +750,16 @@ impl LinuxHost {
         }
         let event_tx = self.event_tx.clone();
         let recovering = self.waydroid_recovering.clone();
+        let scale1_booted = self.waydroid_scale1_booted.clone();
         let boot_timeout = self
             .waydroid_settings
             .lock()
             .unwrap()
             .unwrap_or_default()
             .boot_ready_timeout;
+        // The restarted session boots at the grid's scale, not a guaranteed
+        // native scale 1, so the next scaled Android launch must re-verify.
+        scale1_booted.store(false, Ordering::SeqCst);
         // Hide Android now; the readiness watcher re-confirms on the way back up.
         let _ = event_tx.send(HostEvent::KindReadinessChanged {
             kind: EntryKindTag::Android,
@@ -780,6 +794,7 @@ impl LinuxHost {
         };
         let event_tx = self.event_tx.clone();
         let guard = self.waydroid_recovering.clone();
+        let scale1_booted = self.waydroid_scale1_booted.clone();
         let boot_timeout = settings.boot_ready_timeout;
         tokio::spawn(async move {
             let Some((w, h)) = primary_physical_mode().await else {
@@ -815,6 +830,8 @@ impl LinuxHost {
                     kind: EntryKindTag::Android,
                     ready: false,
                 });
+                // Reboots at the new mode's (grid) scale — re-verify on next launch.
+                scale1_booted.store(false, Ordering::SeqCst);
                 waydroid::session_stop().await;
                 waydroid::start_session_and_wait(boot_timeout).await;
             }
@@ -2134,6 +2151,7 @@ impl LinuxHost {
         &self,
         session_id: SessionId,
         package_name: &str,
+        android_ui_scale: Option<f64>,
     ) -> HostResult<HostSessionHandle> {
         if !waydroid::session_running().await {
             return Err(HostError::SpawnFailed(
@@ -2143,13 +2161,36 @@ impl LinuxHost {
             ));
         }
 
-        let lock_mode = self
-            .waydroid_settings
-            .lock()
-            .unwrap()
-            .unwrap_or_default()
-            .lock_mode;
+        let settings = self.waydroid_settings.lock().unwrap().unwrap_or_default();
+        let lock_mode = settings.lock_mode;
         let locktask = lock_mode == WaydroidLockMode::Locktask;
+
+        // Fractional-scale panels: the caller (via the HiDPI workaround) has already
+        // dropped the output to scale 1. But Waydroid's Wayland buffer is fixed at
+        // session-boot scale and can't follow a live scale change — a session
+        // prebooted at 1.5 keeps a 1.5x buffer that the compositor then magnifies
+        // and clips. So ensure the session actually booted at scale 1 (restart it
+        // once if not — the output is scale 1 now, so it reboots correctly), then
+        // carry the panel's zoom as Android UI density instead. Best-effort.
+        if let Some(scale) = android_ui_scale
+            && scale > 1.0
+        {
+            if !self.waydroid_scale1_booted.load(Ordering::SeqCst) {
+                info!(
+                    scale,
+                    "Restarting Waydroid at native scale 1 for the fractional-scale panel"
+                );
+                waydroid::session_stop().await;
+                if waydroid::start_session_and_wait(settings.boot_ready_timeout).await {
+                    self.waydroid_scale1_booted.store(true, Ordering::SeqCst);
+                } else {
+                    warn!("Waydroid did not come back after the native-scale restart");
+                }
+            }
+            // Density carries the display zoom (1.5x -> 1500 permille). Re-applied
+            // per launch since a fresh scale-1 boot resets it to the base density.
+            waydroid::scale_density((scale * 1000.0).round() as u32).await;
+        }
 
         let handle = HostSessionHandle::new(
             session_id.clone(),
@@ -2423,7 +2464,9 @@ impl HostAdapter for LinuxHost {
         // it on a dedicated path rather than threading it through the
         // pid/`ManagedProcess` machinery below.
         if let EntryKind::Android { package_name, .. } = entry_kind {
-            return self.spawn_android(session_id, package_name).await;
+            return self
+                .spawn_android(session_id, package_name, options.android_ui_scale)
+                .await;
         }
 
         // Some kinds need a longer grace period on stop than the generic

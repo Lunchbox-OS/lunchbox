@@ -43,8 +43,9 @@ struct RecordingHidpi {
 
 #[async_trait]
 impl HidpiController for RecordingHidpi {
-    async fn apply(&self) {
+    async fn apply(&self) -> f64 {
         self.log.lock().unwrap().push("hidpi.apply");
+        1.0
     }
     async fn restore(&self) {
         self.log.lock().unwrap().push("hidpi.restore");

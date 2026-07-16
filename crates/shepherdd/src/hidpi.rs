@@ -78,19 +78,20 @@ impl XwaylandHidpi {
 #[async_trait]
 impl HidpiController for XwaylandHidpi {
     /// Capture the current sway output scales, drop them to 1.0, and
-    /// broadcast the captured scale as the HUD's compensating factor.
-    /// No-op if already active (guards against re-entry).
-    async fn apply(&self) {
+    /// broadcast the captured scale as the HUD's compensating factor. Returns
+    /// that factor so an Android launch can match it in density. No-op if already
+    /// active (guards against re-entry), returning `1.0`.
+    async fn apply(&self) -> f64 {
         let mut guard = self.saved.lock().await;
         if guard.is_some() {
             warn!("XWayland HiDPI workaround already active; refusing to re-apply");
-            return;
+            return 1.0;
         }
         let outputs = match get_outputs().await {
             Ok(o) => o,
             Err(e) => {
                 warn!(error = %e, "Failed to query sway outputs; skipping XWayland HiDPI workaround");
-                return;
+                return 1.0;
             }
         };
         // Pick the largest scale among active outputs as the HUD factor.
@@ -126,6 +127,7 @@ impl HidpiController for XwaylandHidpi {
         // Re-assert the mirror after changing scales so the activity launches
         // into a correctly-configured docked layout (issue #87).
         self.reassert_display().await;
+        factor
     }
 
     /// The factor a shell should currently be counter-scaling by: the largest

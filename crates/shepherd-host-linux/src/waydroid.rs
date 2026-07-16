@@ -183,6 +183,26 @@ pub async fn max_volume() {
     }
 }
 
+/// Best-effort: scale Android's UI density to `permille`/1000 of the panel's base
+/// density (1500 = 1.5x), via the privileged helper. Waydroid can't render at a
+/// fractional wl_output scale (its buffer is boot-locked), so shepherd runs it at
+/// native scale 1 and carries the display's zoom as Android density instead. Logs
+/// on failure.
+pub async fn scale_density(permille: u32) {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .args(["scale-density", &permille.to_string()])
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!(permille, "scaled Android UI density"),
+        Ok(status) => {
+            debug!(%status, permille, "scale-density helper did not succeed (helper not installed?)")
+        }
+        Err(e) => warn!(error = %e, "failed to invoke scale-density helper"),
+    }
+}
+
 /// How long to wait for `waydroid app launch` before giving up. It normally
 /// returns in ~1s (it just delivers the launch intent; the window maps later).
 /// But when the Waydroid session's platform service is wedged — e.g. after many

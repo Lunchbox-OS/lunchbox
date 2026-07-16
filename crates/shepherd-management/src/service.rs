@@ -672,7 +672,7 @@ impl ManagementService for DefaultManagementService {
             eng.start_session(plan, now, now_mono);
         }
 
-        let (entry_kind, spawn_opts, needs_hidpi) = {
+        let (entry_kind, mut spawn_opts, needs_hidpi) = {
             let eng = self.engine.lock().await;
             resolve_spawn(&eng, &id, now)
         };
@@ -685,9 +685,13 @@ impl ManagementService for DefaultManagementService {
 
         // Apply the XWayland HiDPI workaround before spawning so the client
         // sees the native scale on first map (mirror of the IPC launch path
-        // in shepherdd::main).
+        // in shepherdd::main). For Android, thread the captured scale into the
+        // spawn so the Waydroid host can match it in density.
         if needs_hidpi {
-            self.hidpi.apply().await;
+            let factor = self.hidpi.apply().await;
+            if matches!(kind, EntryKind::Android { .. }) {
+                spawn_opts.android_ui_scale = Some(factor);
+            }
         }
         // Before the spawn, like the scale hack above and for the same reason:
         // the HUD should already be on the right edge, with its exclusive zone
@@ -2609,7 +2613,13 @@ fn resolve_spawn(
             api: sb.api.clone(),
         }
     });
-    let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
+    // Android also needs the native-scale drop, but for a different reason
+    // than XWayland: Waydroid's Wayland buffer is fixed at session-boot
+    // scale and can't follow a fractional output scale, so it renders at
+    // scale 1 and carries the zoom as density (see spawn_android).
+    let needs_hidpi = entry.is_some_and(|e| {
+        e.xwayland_native_resolution || matches!(e.kind, EntryKind::Android { .. })
+    });
 
     let log_path = eng.policy().service.capture_child_output.then(|| {
         let timestamp = now.format("%Y%m%d_%H%M%S").to_string();

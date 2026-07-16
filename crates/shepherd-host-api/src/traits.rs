@@ -135,6 +135,13 @@ pub struct SpawnOptions {
     /// service default separate is what lets an entry turn the feature on for
     /// itself as well as off.
     pub media_sponsorblock: Option<SponsorBlockSpec>,
+
+    /// The captured pre-launch output scale for an Android activity on a
+    /// fractional-scale panel (from [`HidpiController::apply`]). `Some(1.5)` tells
+    /// the Waydroid host to ensure its session booted at native scale 1 and to
+    /// scale Android's UI density to match. `None`/`Some(1.0)` = no adjustment
+    /// (non-Android activities, or an unscaled panel).
+    pub android_ui_scale: Option<f64>,
 }
 
 /// Service-wide SponsorBlock settings for a media activity (issue #159).
@@ -410,8 +417,12 @@ pub trait HostAdapter: Send + Sync {
 ///   don't have a compositor.
 #[async_trait]
 pub trait HidpiController: Send + Sync {
-    /// Apply the workaround for the next activity launch.
-    async fn apply(&self);
+    /// Apply the workaround for the next activity launch. Returns the captured
+    /// pre-launch scale factor (the largest active output scale, `1.0` when none
+    /// was above 1.0 or the query failed) so an Android launch can carry the same
+    /// zoom into its density — Waydroid's boot-locked buffer can't follow a
+    /// fractional output scale, so it renders at native 1.0 and scales via density.
+    async fn apply(&self) -> f64;
     /// Restore the captured scale (and HUD scale factor).
     async fn restore(&self);
     /// The counter-scale factor currently in force — 1.0 unless the workaround
@@ -432,7 +443,9 @@ pub struct NoOpHidpiController;
 
 #[async_trait]
 impl HidpiController for NoOpHidpiController {
-    async fn apply(&self) {}
+    async fn apply(&self) -> f64 {
+        1.0
+    }
     async fn restore(&self) {}
     async fn factor(&self) -> f64 {
         1.0
