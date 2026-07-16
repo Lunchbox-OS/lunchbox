@@ -2081,6 +2081,12 @@ impl LinuxHost {
             waydroid::app_id_for_package(package_name)
         };
 
+        // Guard: on a fast close/reopen the previous instance may still be tearing
+        // down in Android; launching into that race wedges the platform bridge, so
+        // wait for it to finish dying first. Fast (a single check) when it's
+        // already gone, which is the common case.
+        waydroid::ensure_app_stopped(package_name).await;
+
         if locktask {
             // Present the full UI (creates the `Waydroid` surface), wait for it,
             // then pin the app in Lock Task Mode.

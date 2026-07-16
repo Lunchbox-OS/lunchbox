@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly eight narrow, fixed actions:
+//! and exposes exactly nine narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -35,9 +35,15 @@
 //!   key is dispatched to the *input-focused* window, which Waydroid only sets
 //!   once the app has been interacted with — fine in practice (the child is
 //!   using the app), but a just-launched, untouched app has no focus yet.
+//! - `is-running --package <pkg>`: exit 0 iff `<pkg>` has a live Android process
+//!   (`waydroid shell pidof <pkg>` prints a pid). The pre-launch guard polls this
+//!   so a fast reopen waits for the previous instance to finish dying rather than
+//!   racing its teardown (which wedges the platform bridge). A *query* that
+//!   inspects output (pidof's exit code isn't reliable through `waydroid shell`),
+//!   so it does not `exec` — see [`main`].
 //!
 //! The no-argument actions take no arguments and every action but
-//! `boot-completed`/`maximize` `exec`s a fixed command (the only caller-controlled
+//! `boot-completed`/`maximize`/`is-running` `exec`s a fixed command (the only caller-controlled
 //! value is the validated package name); those two instead run fixed, shell-free
 //! commands and read their output rather than replacing the process. Parsing and
 //! validation are split into the pure [`parse_args`] + [`Action`] so the trust
@@ -72,7 +78,7 @@ const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
 const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', \
-     'boot-completed', 'maximize', or 'back'";
+     'boot-completed', 'maximize', 'back', or 'is-running'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
@@ -96,6 +102,11 @@ enum Action {
     },
     /// Send Android `KEYCODE_BACK` to the foreground app (the HUD back button).
     Back,
+    /// Query: exit 0 iff `package` has a live Android process. Inspects output
+    /// (pidof), so [`main`] handles it specially, not `exec`.
+    IsRunning {
+        package: String,
+    },
 }
 
 impl Action {
@@ -182,6 +193,11 @@ impl Action {
                     "4".into(),
                 ],
             ),
+            // pidof <pkg> — `main` reads its output to decide the exit code.
+            Action::IsRunning { package } => (
+                "waydroid",
+                vec!["shell".into(), "pidof".into(), package.clone()],
+            ),
         }
     }
 }
@@ -210,6 +226,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
             parse_validated_package(args).map(|package| Action::Maximize { package })
         }
         Some("back") => no_extra_args(args, "back").map(|()| Action::Back),
+        Some("is-running") => {
+            parse_validated_package(args).map(|package| Action::IsRunning { package })
+        }
         Some(other) => Err(format!("unknown subcommand '{other}' ({USAGE})")),
         None => Err(format!("missing subcommand ({USAGE})")),
     }
@@ -253,6 +272,7 @@ fn main() -> ExitCode {
     match &action {
         Action::BootCompleted => return boot_completed_exit_code(&action),
         Action::Maximize { package } => return maximize_exit_code(&action, package),
+        Action::IsRunning { .. } => return is_running_exit_code(&action),
         _ => {}
     }
     let (program, args) = action.command();
@@ -269,6 +289,18 @@ fn boot_completed_exit_code(action: &Action) -> ExitCode {
     let (program, args) = action.command();
     match Command::new(program).args(&args).output() {
         Ok(out) if String::from_utf8_lossy(&out.stdout).trim() == "1" => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// Run `pidof <pkg>` and map its output to an exit code: success iff it printed
+/// a pid (the package has a live process). `pidof`'s own exit code isn't reliable
+/// through `waydroid shell`, so inspect stdout. Any run failure is a non-success
+/// exit — the caller treats the app as not running.
+fn is_running_exit_code(action: &Action) -> ExitCode {
+    let (program, args) = action.command();
+    match Command::new(program).args(&args).output() {
+        Ok(out) if !String::from_utf8_lossy(&out.stdout).trim().is_empty() => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     }
 }
@@ -449,6 +481,19 @@ mod tests {
     }
 
     #[test]
+    fn is_running_shares_the_force_stop_package_trust_boundary() {
+        assert_eq!(
+            parse(&["is-running", "--package", "com.android.calculator2"]),
+            Ok(Action::IsRunning {
+                package: "com.android.calculator2".into()
+            })
+        );
+        assert!(parse(&["is-running", "--package", "com.app;rm -rf"]).is_err());
+        assert!(parse(&["is-running", "--package", "-rf"]).is_err());
+        assert!(parse(&["is-running"]).is_err());
+    }
+
+    #[test]
     fn parses_top_task_id() {
         let dump = "  mFocusedApp=...\n  mCurTaskIdForUser={0=13}\n  more=stuff\n";
         assert_eq!(parse_top_task_id(dump), Some(13));
@@ -560,5 +605,12 @@ mod tests {
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         assert_eq!(prog, "waydroid");
         assert_eq!(argv, ["shell", "input", "keyevent", "4"]);
+
+        let (prog, argv) = cmd_of(Action::IsRunning {
+            package: "com.x.y".into(),
+        });
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(argv, ["shell", "pidof", "com.x.y"]);
     }
 }

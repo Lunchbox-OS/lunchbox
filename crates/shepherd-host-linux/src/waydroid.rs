@@ -243,6 +243,57 @@ pub async fn force_stop(package: &str) {
     }
 }
 
+/// Whether `package` has a live Android process, via the privileged helper
+/// (`pkexec shepherd-waydroid-helper is-running`). False if it isn't running or
+/// the helper couldn't run — the caller then proceeds (treats it as stopped).
+pub async fn is_app_running(package: &str) -> bool {
+    match Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .args(["is-running", "--package", package])
+        .status()
+        .await
+    {
+        Ok(status) => status.success(),
+        Err(e) => {
+            debug!(package, error = %e, "is-running helper failed; treating app as stopped");
+            false
+        }
+    }
+}
+
+/// How long the pre-launch guard waits for a previous instance to die.
+const APP_STOP_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long to let Android settle after the process is gone (ActivityManager
+/// finishes removing the task) before relaunching.
+const APP_STOP_SETTLE: Duration = Duration::from_millis(400);
+
+/// Make sure no previous instance of `package` is still tearing down before we
+/// relaunch it. Rapid close/reopen otherwise races the teardown and wedges the
+/// host↔platform bridge (see [`LaunchError::Wedged`]); a graceful reopen that
+/// waits is fine. Force-stops it (in case a prior stop is still in flight), then
+/// polls [`is_app_running`] until the process is gone (bounded — if it won't die
+/// we relaunch anyway rather than block forever), plus a short settle. Fast when
+/// nothing is running (one `is-running` check ≈ tens of ms).
+pub async fn ensure_app_stopped(package: &str) {
+    if !is_app_running(package).await {
+        return; // already gone — no wait, no force-stop
+    }
+    force_stop(package).await;
+    let deadline = Instant::now() + APP_STOP_TIMEOUT;
+    while Instant::now() < deadline {
+        if !is_app_running(package).await {
+            tokio::time::sleep(APP_STOP_SETTLE).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    warn!(
+        package,
+        "previous instance still running after {}s; launching anyway",
+        APP_STOP_TIMEOUT.as_secs()
+    );
+}
+
 /// Best-effort: ensure the (root) `waydroid-container` service is up, via the
 /// privileged helper (`pkexec shepherd-waydroid-helper preboot`). On a host
 /// where the service is already enabled at boot this is a no-op; it exists so

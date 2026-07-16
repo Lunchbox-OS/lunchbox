@@ -15,6 +15,7 @@ shepherd-waydroid-helper unlock
 shepherd-waydroid-helper boot-completed
 shepherd-waydroid-helper maximize --package <android.package.name>
 shepherd-waydroid-helper back
+shepherd-waydroid-helper is-running --package <android.package.name>
 ```
 
 - `force-stop` → `waydroid shell am force-stop <pkg>`. Reclaims the cached
@@ -53,6 +54,11 @@ shepherd-waydroid-helper back
   dispatched to the *input-focused* window, which Waydroid only sets once the app
   has been interacted with (fine while the child is using the app; a
   just-launched, untouched app has no focused window yet).
+- `is-running --package <pkg>` → exits 0 iff `<pkg>` has a live Android process
+  (`waydroid shell pidof <pkg>` prints a pid). shepherdd's pre-launch guard polls
+  this so a fast reopen waits for the previous instance to finish dying instead of
+  racing its teardown (which wedges the platform bridge). A *query* that inspects
+  output (pidof's exit code isn't reliable through `waydroid shell`), so no `exec`.
 
 ## Trust boundary
 
@@ -72,13 +78,14 @@ shepherd-waydroid-helper back
 - Dependencies are limited to `shepherd-util` (for the shared validator) plus
   std, keeping the audit surface small.
 
-Every subcommand but `boot-completed`/`maximize` `exec()`s a fixed command, so
-the helper's pid becomes `waydroid`/`systemctl` and shepherdd's `pkexec …
-.status()` returns when it exits. Those two instead run fixed, shell-free
-commands, inspect their output, and return their own exit code — `boot-completed`
-because getprop always exits 0, `maximize` because it must read the top task id
-and display size before issuing the resize (the only variable parts of that
-second command are integers it parsed).
+Every subcommand but `boot-completed`/`maximize`/`is-running` `exec()`s a fixed
+command, so the helper's pid becomes `waydroid`/`systemctl` and shepherdd's
+`pkexec … .status()` returns when it exits. Those three instead run fixed,
+shell-free commands, inspect their output, and return their own exit code —
+`boot-completed` and `is-running` because the inner command's exit code isn't
+meaningful through `waydroid shell` (getprop/pidof), and `maximize` because it
+must read the top task id and display size before issuing the resize (the only
+variable parts of that second command are integers it parsed).
 
 ## Install
 
