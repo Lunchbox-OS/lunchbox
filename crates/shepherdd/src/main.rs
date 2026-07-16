@@ -2038,7 +2038,7 @@ impl Service {
         if let Some(mgr) = display_manager {
             let init_mgr = mgr.clone();
             tokio::spawn(async move { init_mgr.initialize().await });
-            display_watch::spawn(mgr, shutdown_rx.clone()).await;
+            display_watch::spawn(mgr, host.clone(), shutdown_rx.clone()).await;
         }
 
         // The peer allow-list was decided at construction, before there was

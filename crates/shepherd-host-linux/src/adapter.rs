@@ -765,6 +765,63 @@ impl LinuxHost {
         });
     }
 
+    /// Re-pin the Waydroid resolution after a display change (issue #87 docking).
+    /// The `persist.waydroid.{width,height}` pinned at preboot go stale when the
+    /// primary output's physical mode changes, so a later session start would
+    /// render the wrong size. Update the props to the new physical mode; if they
+    /// changed and a session is up, restart it (re-gating Android meanwhile) so it
+    /// takes effect now. No-op when Waydroid isn't configured, the mode is
+    /// unchanged, or a restart is already in flight (which will pick up the new
+    /// props). Safe to call repeatedly for a hotplug burst — it self-debounces on
+    /// the prop comparison.
+    pub fn repin_waydroid_resolution(&self) {
+        let Some(settings) = *self.waydroid_settings.lock().unwrap() else {
+            return; // Android backend not configured
+        };
+        let event_tx = self.event_tx.clone();
+        let guard = self.waydroid_recovering.clone();
+        let boot_timeout = settings.boot_ready_timeout;
+        tokio::spawn(async move {
+            let Some((w, h)) = primary_physical_mode().await else {
+                return;
+            };
+            let mut changed = false;
+            for (key, value) in [
+                ("persist.waydroid.width", w.to_string()),
+                ("persist.waydroid.height", h.to_string()),
+            ] {
+                if waydroid::get_prop(key).await.as_deref() != Some(value.as_str()) {
+                    changed = true;
+                    if let Err(e) = waydroid::set_prop(key, &value).await {
+                        warn!(error = %e, key, "failed to re-pin waydroid resolution");
+                    }
+                }
+            }
+            if !changed {
+                return; // resolution unchanged since the last pin
+            }
+            // Apply it now by restarting the session, unless one is already in
+            // flight (that restart will read the props we just set).
+            if guard.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if waydroid::session_running().await {
+                info!(
+                    width = w,
+                    height = h,
+                    "Display changed; restarting Waydroid at the new resolution"
+                );
+                let _ = event_tx.send(HostEvent::KindReadinessChanged {
+                    kind: EntryKindTag::Android,
+                    ready: false,
+                });
+                waydroid::session_stop().await;
+                waydroid::start_session_and_wait(boot_timeout).await;
+            }
+            guard.store(false, Ordering::SeqCst);
+        });
+    }
+
     /// Give the host somewhere to report administrator-facing conditions.
     ///
     /// A setter rather than a constructor argument because the daemon builds

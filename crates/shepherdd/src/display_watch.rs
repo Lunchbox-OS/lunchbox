@@ -16,6 +16,7 @@
 //! ending, not that the compositor will be back.
 
 use crate::display::DisplayManager;
+use shepherd_host_linux::LinuxHost;
 use shepherd_host_linux::sway_ipc::Subscription;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -26,8 +27,12 @@ use tracing::{info, warn};
 /// The subscription is opened here rather than inside the task so a compositor
 /// that cannot be reached is reported to the caller, and so the connection
 /// exists before anything downstream depends on it.
+///
+/// `host` is nudged to re-pin the Waydroid resolution on the same events, since
+/// the props pinned at preboot go stale when the physical mode changes (#87).
 pub async fn spawn(
     manager: Arc<DisplayManager>,
+    host: Arc<LinuxHost>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let subscription = match Subscription::open(&["output"]).await {
@@ -52,8 +57,12 @@ pub async fn spawn(
                     match event {
                         // Each event is one output change (connect / disconnect
                         // / mode change). We don't inspect the payload —
-                        // reconcile re-queries the full topology.
-                        Ok(_) => manager.on_output_changed().await,
+                        // reconcile re-queries the full topology, and the host
+                        // re-pins Waydroid's resolution (self-debounced).
+                        Ok(_) => {
+                            manager.on_output_changed().await;
+                            host.repin_waydroid_resolution();
+                        }
                         Err(e) => {
                             warn!(error = %e, "Sway output event stream ended; docking hotplug is over");
                             return;
