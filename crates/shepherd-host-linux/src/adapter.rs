@@ -2253,6 +2253,11 @@ impl LinuxHost {
             handle: handle.clone(),
         });
 
+        // Hand the full volume range to shepherd's host control: max Android's
+        // media stream so it doesn't pre-attenuate playback (its 5/15 default made
+        // videos quiet). All modes — media plays in locktask too. Best-effort.
+        waydroid::max_volume().await;
+
         // Harden the session against the child leaving the app. Locktask already
         // engaged containment via the pin above; statusbar disables the shade /
         // nav buttons, re-applied per launch (they reset on a SystemUI restart).

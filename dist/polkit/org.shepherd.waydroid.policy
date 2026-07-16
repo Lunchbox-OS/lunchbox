@@ -17,11 +17,11 @@
   <vendor_url>https://git.armeafamily.com/albert/shepherd-launcher</vendor_url>
 
   <!--
-    One action covers both helper subcommands because polkit's
+    One action covers every helper subcommand because polkit's
     `org.freedesktop.policykit.exec.path` annotation gates execution of the
     binary as a whole, regardless of argv. This is safe because the binary
-    itself only performs two narrow, fixed actions (force-stop a validated
-    package, or start the hardcoded waydroid-container unit).
+    itself only performs narrow, fixed actions whose sole caller-controlled
+    input (an Android package name) is validated against a strict allowlist.
   -->
   <action id="org.shepherd.waydroid.helper">
     <description>Manage Android (Waydroid) activities for shepherd-launcher</description>

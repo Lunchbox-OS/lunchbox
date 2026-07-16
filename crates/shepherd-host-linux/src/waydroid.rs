@@ -162,6 +162,27 @@ pub async fn back() {
     }
 }
 
+/// Best-effort: pin Android's media stream (STREAM_MUSIC) to max via the
+/// privileged helper (`pkexec shepherd-waydroid-helper max-volume`). Android's
+/// per-stream volume sits *before* the host PulseAudio sink shepherd controls, so
+/// a mid-range media volume (its 5/15 default) silently caps the loudness shepherd
+/// can reach. Maxing it hands the full dynamic range to shepherd's own volume.
+/// Re-applied per launch (the setting can drift within a session). Logs on failure.
+pub async fn max_volume() {
+    let result = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("max-volume")
+        .status()
+        .await;
+    match result {
+        Ok(status) if status.success() => debug!("pinned Android media volume to max"),
+        Ok(status) => {
+            debug!(%status, "max-volume helper did not succeed (helper not installed or media service down?)")
+        }
+        Err(e) => warn!(error = %e, "failed to invoke max-volume helper"),
+    }
+}
+
 /// How long to wait for `waydroid app launch` before giving up. It normally
 /// returns in ~1s (it just delivers the launch intent; the window maps later).
 /// But when the Waydroid session's platform service is wedged — e.g. after many

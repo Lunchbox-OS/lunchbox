@@ -3,7 +3,7 @@
 //! shepherdd runs unprivileged but a few Waydroid operations need root. This
 //! tiny helper is invoked via `pkexec` (gated by polkit — see
 //! `dist/polkit/org.shepherd.waydroid.policy` and `50-shepherd-waydroid.rules`)
-//! and exposes exactly nine narrow, fixed actions:
+//! and exposes exactly ten narrow, fixed actions:
 //!
 //! - `force-stop --package <pkg>`: `waydroid shell am force-stop <pkg>` to
 //!   reclaim the cached Android process after its window is closed. The package
@@ -35,6 +35,12 @@
 //!   key is dispatched to the *input-focused* window, which Waydroid only sets
 //!   once the app has been interacted with — fine in practice (the child is
 //!   using the app), but a just-launched, untouched app has no focus yet.
+//! - `max-volume`: pin Android's media stream (STREAM_MUSIC) to max via
+//!   `cmd media_session volume`. Android's per-stream volume pre-attenuates
+//!   playback before the host sink shepherd controls, so its mid-range default
+//!   caps loudness; maxing it hands the full range to shepherd. `--set` rejects an
+//!   out-of-range index and the max is ROM-specific, so it is multi-step (read the
+//!   max from `--get`, then `--set` it) and does not `exec` — see [`main`].
 //! - `is-running --package <pkg>`: exit 0 iff `<pkg>` has a live Android process
 //!   (`waydroid shell pidof <pkg>` prints a pid). The pre-launch guard polls this
 //!   so a fast reopen waits for the previous instance to finish dying rather than
@@ -42,12 +48,12 @@
 //!   inspects output (pidof's exit code isn't reliable through `waydroid shell`),
 //!   so it does not `exec` — see [`main`].
 //!
-//! The no-argument actions take no arguments and every action but
-//! `boot-completed`/`maximize`/`is-running` `exec`s a fixed command (the only caller-controlled
-//! value is the validated package name); those two instead run fixed, shell-free
-//! commands and read their output rather than replacing the process. Parsing and
-//! validation are split into the pure [`parse_args`] + [`Action`] so the trust
-//! boundary is unit-tested without exec. See README.md.
+//! Every action but `boot-completed`/`maximize`/`max-volume`/`is-running` `exec`s
+//! a fixed command (the only caller-controlled value is the validated package
+//! name); those four instead run fixed, shell-free commands and read their output
+//! rather than replacing the process. Parsing and validation are split into the
+//! pure [`parse_args`] + [`Action`] so the trust boundary is unit-tested without
+//! exec. See README.md.
 
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
@@ -78,7 +84,7 @@ const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
 const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', \
-     'boot-completed', 'maximize', 'back', or 'is-running'";
+     'boot-completed', 'maximize', 'back', 'max-volume', or 'is-running'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
@@ -102,6 +108,9 @@ enum Action {
     },
     /// Send Android `KEYCODE_BACK` to the foreground app (the HUD back button).
     Back,
+    /// Pin Android's media stream to max so shepherd's host volume owns the full
+    /// dynamic range instead of it being pre-attenuated inside Android.
+    MaxVolume,
     /// Query: exit 0 iff `package` has a live Android process. Inspects output
     /// (pidof), so [`main`] handles it specially, not `exec`.
     IsRunning {
@@ -193,6 +202,24 @@ impl Action {
                     "4".into(),
                 ],
             ),
+            // The volume *read* max-volume starts from: STREAM_MUSIC (3) is the
+            // media stream playback uses. `--set INDEX` rejects an out-of-range
+            // index (no clamping) and the max is ROM-specific, so `main` parses it
+            // from `--get`'s `[0..N]` and issues a second `--set N`. `shell --`
+            // keeps waydroid from eating the forwarded `--stream`/`--get` flags.
+            Action::MaxVolume => (
+                "waydroid",
+                vec![
+                    "shell".into(),
+                    "--".into(),
+                    "cmd".into(),
+                    "media_session".into(),
+                    "volume".into(),
+                    "--stream".into(),
+                    "3".into(),
+                    "--get".into(),
+                ],
+            ),
             // pidof <pkg> — `main` reads its output to decide the exit code.
             Action::IsRunning { package } => (
                 "waydroid",
@@ -226,6 +253,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
             parse_validated_package(args).map(|package| Action::Maximize { package })
         }
         Some("back") => no_extra_args(args, "back").map(|()| Action::Back),
+        Some("max-volume") => no_extra_args(args, "max-volume").map(|()| Action::MaxVolume),
         Some("is-running") => {
             parse_validated_package(args).map(|package| Action::IsRunning { package })
         }
@@ -267,11 +295,12 @@ fn no_extra_args(mut args: impl Iterator<Item = String>, name: &str) -> Result<(
 
 fn main() -> ExitCode {
     let action = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| die(e));
-    // These two are multi-step / output-inspecting rather than a single
+    // These are multi-step / output-inspecting rather than a single
     // fire-and-forget command, so they can't use the exec() path below.
     match &action {
         Action::BootCompleted => return boot_completed_exit_code(&action),
         Action::Maximize { package } => return maximize_exit_code(&action, package),
+        Action::MaxVolume => return max_volume_exit_code(&action),
         Action::IsRunning { .. } => return is_running_exit_code(&action),
         _ => {}
     }
@@ -356,6 +385,50 @@ fn maximize_exit_code(action: &Action, package: &str) -> ExitCode {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     }
+}
+
+/// Pin Android's media stream to its max: read the current volume (whose output
+/// carries the valid range), parse the max, then `--set` it. `--set` rejects an
+/// out-of-range index rather than clamping and the max is ROM-specific, so a
+/// fixed value can't be used. Any failure is a non-success exit (best-effort).
+///
+/// `action.command()` is the `--get` read; the `--set` is a second fixed command
+/// whose only variable part is the integer max parsed here.
+fn max_volume_exit_code(action: &Action) -> ExitCode {
+    let (program, args) = action.command();
+    let out = match Command::new(program).args(&args).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => return ExitCode::FAILURE,
+    };
+    let Some(max) = parse_volume_max(&out) else {
+        return ExitCode::FAILURE;
+    };
+    // `max` is an integer parsed above, so this argv is injection-safe.
+    match Command::new("waydroid")
+        .args([
+            "shell",
+            "--",
+            "cmd",
+            "media_session",
+            "volume",
+            "--stream",
+            "3",
+            "--set",
+            &max.to_string(),
+        ])
+        .status()
+    {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// Parse the max volume index from `media_session volume --get` output, whose key
+/// line reads `volume is <cur> in range [0..<max>]`.
+fn parse_volume_max(out: &str) -> Option<u32> {
+    let rest = out.split("in range [0..").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// Parse the top task id for user 0 (`mCurTaskIdForUser={0=<id>}`) from a
@@ -481,6 +554,12 @@ mod tests {
     }
 
     #[test]
+    fn max_volume_takes_no_args() {
+        assert_eq!(parse(&["max-volume"]), Ok(Action::MaxVolume));
+        assert!(parse(&["max-volume", "x"]).is_err());
+    }
+
+    #[test]
     fn is_running_shares_the_force_stop_package_trust_boundary() {
         assert_eq!(
             parse(&["is-running", "--package", "com.android.calculator2"]),
@@ -491,6 +570,17 @@ mod tests {
         assert!(parse(&["is-running", "--package", "com.app;rm -rf"]).is_err());
         assert!(parse(&["is-running", "--package", "-rf"]).is_err());
         assert!(parse(&["is-running"]).is_err());
+    }
+
+    #[test]
+    fn parses_volume_max() {
+        let out = "[V] will control stream=3 (STREAM_MUSIC)\n[V] volume is 4 in range [0..15]\n";
+        assert_eq!(parse_volume_max(out), Some(15));
+        assert_eq!(
+            parse_volume_max("[V] volume is 7 in range [0..25]"),
+            Some(25)
+        );
+        assert_eq!(parse_volume_max("no range here"), None);
     }
 
     #[test]
@@ -605,6 +695,23 @@ mod tests {
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         assert_eq!(prog, "waydroid");
         assert_eq!(argv, ["shell", "input", "keyevent", "4"]);
+
+        let (prog, argv) = cmd_of(Action::MaxVolume);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        assert_eq!(prog, "waydroid");
+        assert_eq!(
+            argv,
+            [
+                "shell",
+                "--",
+                "cmd",
+                "media_session",
+                "volume",
+                "--stream",
+                "3",
+                "--get"
+            ]
+        );
 
         let (prog, argv) = cmd_of(Action::IsRunning {
             package: "com.x.y".into(),

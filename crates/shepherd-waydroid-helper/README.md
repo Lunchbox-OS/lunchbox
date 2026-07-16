@@ -15,6 +15,7 @@ shepherd-waydroid-helper unlock
 shepherd-waydroid-helper boot-completed
 shepherd-waydroid-helper maximize --package <android.package.name>
 shepherd-waydroid-helper back
+shepherd-waydroid-helper max-volume
 shepherd-waydroid-helper is-running --package <android.package.name>
 ```
 
@@ -54,6 +55,14 @@ shepherd-waydroid-helper is-running --package <android.package.name>
   dispatched to the *input-focused* window, which Waydroid only sets once the app
   has been interacted with (fine while the child is using the app; a
   just-launched, untouched app has no focused window yet).
+- `max-volume` → pin Android's media stream (STREAM_MUSIC) to max via
+  `waydroid shell -- cmd media_session volume`. Takes no arguments. Android's
+  per-stream media volume sits *before* the host PulseAudio sink shepherd controls,
+  so its mid-range default (5/15) silently caps playback loudness; maxing it hands
+  the full dynamic range to shepherd's own volume. shepherdd calls it after each
+  launch (the setting can drift within a session). `--set` rejects an out-of-range
+  index and the max is ROM-specific, so it is multi-step (read the max from `--get`,
+  then `--set` it) and — like `boot-completed` — does not `exec`.
 - `is-running --package <pkg>` → exits 0 iff `<pkg>` has a live Android process
   (`waydroid shell pidof <pkg>` prints a pid). shepherdd's pre-launch guard polls
   this so a fast reopen waits for the previous instance to finish dying instead of
