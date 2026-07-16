@@ -162,15 +162,42 @@ pub async fn back() {
     }
 }
 
+/// How long to wait for `waydroid app launch` before giving up. It normally
+/// returns in ~1s (it just delivers the launch intent; the window maps later).
+/// But when the Waydroid session's platform service is wedged — e.g. after many
+/// launch/close cycles — it instead loops "Failed to get service
+/// waydroidplatform" *forever*. Without a bound, `spawn_android` blocks on it and
+/// the launcher is stuck on a "Loading" spinner with no way to cancel (issue:
+/// close/reopen wedge). Bounding it turns the wedge into a clean SpawnFailed so
+/// the session ends and the launcher returns to the grid.
+const LAUNCH_APP_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Launch an Android app by package name (session user). Returns once the
 /// launch command returns — the app's window appears asynchronously after.
 pub async fn launch_app(package: &str) -> HostResult<()> {
     let argv = launch_argv(package);
-    let status = Command::new(&argv[0])
+    // Spawn (not `.status()`) so we can kill it if it hangs. `kill_on_drop`
+    // reaps it if we bail on any error path.
+    let mut child = Command::new(&argv[0])
         .args(&argv[1..])
-        .status()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| HostError::SpawnFailed(format!("failed to invoke waydroid: {e}")))?;
+    let status = match tokio::time::timeout(LAUNCH_APP_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            return Err(HostError::SpawnFailed(format!(
+                "waydroid app launch {package} failed: {e}"
+            )));
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            return Err(HostError::SpawnFailed(format!(
+                "waydroid app launch {package} did not return within {}s (Waydroid session wedged?)",
+                LAUNCH_APP_TIMEOUT.as_secs()
+            )));
+        }
+    };
     if !status.success() {
         return Err(HostError::SpawnFailed(format!(
             "waydroid app launch {package} exited with {status}"
