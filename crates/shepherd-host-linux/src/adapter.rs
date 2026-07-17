@@ -449,6 +449,13 @@ pub struct LinuxHost {
     /// the first scaled Android launch then restarts the session at scale 1 and
     /// sets it. Lets subsequent launches skip the restart. See [`spawn_android`].
     waydroid_scale1_booted: Arc<AtomicBool>,
+    /// The primary output's *physical* mode last pinned into
+    /// `persist.waydroid.{width,height}`. [`repin_waydroid_resolution`] compares the
+    /// current mode against this — not the (possibly-stopped) Android session's
+    /// props — so an output *scale* change (from the HiDPI workaround) is a clean
+    /// no-op and can't be misread as a resolution change mid-restart. `None` until
+    /// the first preboot pins it.
+    waydroid_pinned_mode: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
 /// What the reconciliation sweep needs to decide whether a window on screen is
@@ -587,6 +594,7 @@ impl LinuxHost {
             waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
             waydroid_recovering: Arc::new(AtomicBool::new(false)),
             waydroid_scale1_booted: Arc::new(AtomicBool::new(false)),
+            waydroid_pinned_mode: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -617,6 +625,7 @@ impl LinuxHost {
         // Preboot happens at the grid's (possibly fractional) output scale, so this
         // session is not the native-scale-1 boot a fractional Android launch needs.
         self.waydroid_scale1_booted.store(false, Ordering::SeqCst);
+        let pinned_mode = self.waydroid_pinned_mode.clone();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -645,6 +654,9 @@ impl LinuxHost {
             if let Some((w, h)) = primary_physical_mode().await {
                 desired.push(("persist.waydroid.width", w.to_string()));
                 desired.push(("persist.waydroid.height", h.to_string()));
+                // Record what we pinned so repin compares mode-to-mode (not against
+                // the live session, which may be stopped mid-restart).
+                *pinned_mode.lock().unwrap() = Some((w, h));
             }
 
             let mut prop_changed = false;
@@ -795,31 +807,37 @@ impl LinuxHost {
         let event_tx = self.event_tx.clone();
         let guard = self.waydroid_recovering.clone();
         let scale1_booted = self.waydroid_scale1_booted.clone();
+        let pinned_mode = self.waydroid_pinned_mode.clone();
         let boot_timeout = settings.boot_ready_timeout;
         tokio::spawn(async move {
             let Some((w, h)) = primary_physical_mode().await else {
                 return;
             };
-            let mut changed = false;
+            // Compare against the last-pinned *mode* held in host state, NOT the
+            // live session's props. An output *scale* change (from the HiDPI
+            // workaround dropping to scale 1 and restoring) leaves the physical
+            // mode unchanged, so this is a clean no-op — crucially, it never reads
+            // the session, which may be stopped mid-restart (reading it there
+            // returns empty and would be misread as a resolution change, kicking
+            // off a racing restart that wedges the session — the leibniz bug).
+            if *pinned_mode.lock().unwrap() == Some((w, h)) {
+                return; // physical mode unchanged since the last pin
+            }
+            // Genuine mode change (docked a different-resolution panel). Take the
+            // restart guard so we don't race a wedge recovery or the scale-1 launch
+            // restart; if one's already in flight it will pick up the new props.
+            if guard.swap(true, Ordering::SeqCst) {
+                return;
+            }
             for (key, value) in [
                 ("persist.waydroid.width", w.to_string()),
                 ("persist.waydroid.height", h.to_string()),
             ] {
-                if waydroid::get_prop(key).await.as_deref() != Some(value.as_str()) {
-                    changed = true;
-                    if let Err(e) = waydroid::set_prop(key, &value).await {
-                        warn!(error = %e, key, "failed to re-pin waydroid resolution");
-                    }
+                if let Err(e) = waydroid::set_prop(key, &value).await {
+                    warn!(error = %e, key, "failed to re-pin waydroid resolution");
                 }
             }
-            if !changed {
-                return; // resolution unchanged since the last pin
-            }
-            // Apply it now by restarting the session, unless one is already in
-            // flight (that restart will read the props we just set).
-            if guard.swap(true, Ordering::SeqCst) {
-                return;
-            }
+            *pinned_mode.lock().unwrap() = Some((w, h));
             if waydroid::session_running().await {
                 info!(
                     width = w,
@@ -2175,16 +2193,25 @@ impl LinuxHost {
         if let Some(scale) = android_ui_scale
             && scale > 1.0
         {
+            // Take the restart guard so this can't race a wedge recovery or a
+            // docking repin restart (which would leave the session wedged). If one
+            // is already in flight, skip our restart and leave the flag unset so a
+            // later launch re-verifies once it settles.
             if !self.waydroid_scale1_booted.load(Ordering::SeqCst) {
-                info!(
-                    scale,
-                    "Restarting Waydroid at native scale 1 for the fractional-scale panel"
-                );
-                waydroid::session_stop().await;
-                if waydroid::start_session_and_wait(settings.boot_ready_timeout).await {
-                    self.waydroid_scale1_booted.store(true, Ordering::SeqCst);
+                if self.waydroid_recovering.swap(true, Ordering::SeqCst) {
+                    warn!("Skipping native-scale restart; a Waydroid restart is already in flight");
                 } else {
-                    warn!("Waydroid did not come back after the native-scale restart");
+                    info!(
+                        scale,
+                        "Restarting Waydroid at native scale 1 for the fractional-scale panel"
+                    );
+                    waydroid::session_stop().await;
+                    if waydroid::start_session_and_wait(settings.boot_ready_timeout).await {
+                        self.waydroid_scale1_booted.store(true, Ordering::SeqCst);
+                    } else {
+                        warn!("Waydroid did not come back after the native-scale restart");
+                    }
+                    self.waydroid_recovering.store(false, Ordering::SeqCst);
                 }
             }
             // Density carries the display zoom (1.5x -> 1500 permille). Re-applied
