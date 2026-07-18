@@ -39,10 +39,10 @@ use shepherd_management::ManagementService;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
-use crate::admin::{AdminStore, check_reset_sentinel};
+use crate::admin::{AdminRecord, AdminStore, check_reset_sentinel};
 use crate::agent::{PairingDisplay, build_agent};
 use crate::claim::{AuthDecision, ClaimMachine, PeerIdentity};
 use crate::framing::{FrameReader, encode_frame};
@@ -99,6 +99,10 @@ pub struct BleServer {
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
     display: Arc<dyn PairingDisplay>,
+    /// Admin record captured when the reset sentinel fired in `new`, so
+    /// `run` can ask BlueZ to forget the previously-bonded peer once an
+    /// adapter is available. `None` when no sentinel reset happened.
+    pending_unbond: Option<AdminRecord>,
 }
 
 impl BleServer {
@@ -113,11 +117,22 @@ impl BleServer {
     ) -> anyhow::Result<Self> {
         let store = AdminStore::new(config.admin_record_path.clone());
 
+        let mut pending_unbond = None;
         if check_reset_sentinel(&config.reset_sentinel_path) {
             warn!(
                 sentinel = %config.reset_sentinel_path.display(),
                 "Factory-reset sentinel present at startup; clearing admin record",
             );
+            // Capture the record *before* clearing it so `run` can remove
+            // the matching BlueZ bond. Without this the phone stays bonded
+            // while the device goes Unclaimed, so every reconnect is
+            // accepted at the link layer and then rejected with
+            // `not_claimed` — a lockout that re-pairing can't clear because
+            // the bond already exists.
+            pending_unbond = store.load().unwrap_or_else(|e| {
+                warn!(error = %e, "Could not read admin record before reset; BlueZ bond will not be removed");
+                None
+            });
             store.clear()?;
         }
 
@@ -127,6 +142,7 @@ impl BleServer {
             svc,
             claim,
             display,
+            pending_unbond,
         })
     }
 
@@ -150,7 +166,7 @@ impl BleServer {
     /// 5. Start LE advertising under the configured device name.
     /// 6. Spawn the events forwarder task.
     /// 7. Wait for shutdown.
-    pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
+    pub async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let session = bluer::Session::new().await.map_err(|e| {
             anyhow::anyhow!(
                 "BlueZ D-Bus session unavailable ({e}); is bluetoothd running and reachable on the system bus?"
@@ -178,10 +194,21 @@ impl BleServer {
         // Best-effort bond removal after a sentinel-triggered reset.
         // We tolerate failures: the next restart will retry, and the
         // admin record itself is already gone.
-        if let Some(prev) = persisted_admin_for_unbond(&self.claim).await
-            && let Err(e) = adapter.remove_device(prev.identity_address.parse()?).await
-        {
-            warn!(error = %e, "BlueZ bond removal after reset failed (best-effort)");
+        if let Some(prev) = self.pending_unbond.take() {
+            match prev.identity_address.parse::<Address>() {
+                Ok(addr) => {
+                    if let Err(e) = adapter.remove_device(addr).await {
+                        warn!(error = %e, "BlueZ bond removal after reset failed (best-effort)");
+                    } else {
+                        info!(peer = %addr, "Removed BlueZ bond after factory-reset sentinel");
+                    }
+                }
+                Err(e) => warn!(
+                    address = %prev.identity_address,
+                    error = %e,
+                    "Could not parse admin identity address; BlueZ bond not removed after reset",
+                ),
+            }
         }
 
         let _agent_handle = register_agent(&session, self.display.clone())
@@ -203,12 +230,20 @@ impl BleServer {
             Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
         let last_peer: Arc<Mutex<Option<PeerIdentity>>> = Arc::new(Mutex::new(None));
 
+        // A successful `factory_reset` RPC must also forget the BlueZ
+        // bond, or the same lockout as the sentinel path results. The RPC
+        // handler runs deep in the GATT write path with no adapter access,
+        // so it hands the peer address to this task, which owns the
+        // adapter and calls `remove_device`.
+        let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
+
         let application = build_application(
             self.config.clone(),
             self.svc.clone(),
             self.claim.clone(),
             reader.clone(),
             last_peer.clone(),
+            unbond_tx,
             response_outbox.clone(),
             events_outbox.clone(),
         );
@@ -244,12 +279,27 @@ impl BleServer {
             events_outbox.clone(),
         ));
 
+        // Drain factory-reset unbond requests for the server's lifetime.
+        let unbond_adapter = adapter.clone();
+        let unbond_task = tokio::spawn(async move {
+            while let Some(addr) = unbond_rx.recv().await {
+                match unbond_adapter.remove_device(addr).await {
+                    Ok(()) => info!(peer = %addr, "Removed BlueZ bond after factory_reset"),
+                    Err(e) => {
+                        warn!(peer = %addr, error = %e, "BlueZ bond removal after factory_reset failed")
+                    }
+                }
+            }
+        });
+
         let _ = shutdown_rx.wait_for(|v| *v).await;
         info!("BLE management server shutting down");
         events_task.abort();
         let _ = events_task.await;
         disconnect_task.abort();
         let _ = disconnect_task.await;
+        unbond_task.abort();
+        let _ = unbond_task.await;
         Ok(())
     }
 }
@@ -418,16 +468,6 @@ async fn reset_transport_session(
     events_outbox.clear().await;
 }
 
-/// Returns the admin record we just cleared (and therefore want BlueZ
-/// to forget). Currently always `None` because `check_reset_sentinel`
-/// runs in `new` and we don't thread the previous record through —
-/// reserved for when we do.
-async fn persisted_admin_for_unbond(
-    _claim: &Arc<ClaimMachine>,
-) -> Option<crate::admin::AdminRecord> {
-    None
-}
-
 async fn register_agent(
     session: &bluer::Session,
     display: Arc<dyn PairingDisplay>,
@@ -443,6 +483,7 @@ fn build_application(
     claim: Arc<ClaimMachine>,
     reader: Arc<Mutex<FrameReader>>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+    unbond_tx: mpsc::Sender<Address>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
 ) -> Application {
@@ -457,6 +498,7 @@ fn build_application(
                     claim,
                     reader,
                     last_peer,
+                    unbond_tx,
                     response_outbox.clone(),
                     events_outbox.clone(),
                 ),
@@ -523,6 +565,7 @@ fn request_characteristic(
     claim: Arc<ClaimMachine>,
     reader: Arc<Mutex<FrameReader>>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+    unbond_tx: mpsc::Sender<Address>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
 ) -> Characteristic {
@@ -542,6 +585,7 @@ fn request_characteristic(
                 let claim = claim.clone();
                 let reader = reader.clone();
                 let last_peer = last_peer.clone();
+                let unbond_tx = unbond_tx.clone();
                 let response_outbox = response_outbox.clone();
                 let events_outbox = events_outbox.clone();
                 async move {
@@ -561,6 +605,7 @@ fn request_characteristic(
                         last_peer,
                         claim,
                         svc,
+                        &unbond_tx,
                         response_outbox,
                         events_outbox,
                     )
@@ -649,6 +694,7 @@ async fn handle_write(
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     claim: Arc<ClaimMachine>,
     svc: Arc<dyn ManagementService>,
+    unbond_tx: &mpsc::Sender<Address>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
 ) -> bluer::gatt::local::ReqResult<()> {
@@ -676,8 +722,16 @@ async fn handle_write(
             match r.pop_frame() {
                 Ok(Some(frame)) => {
                     drop(r);
-                    dispatch_frame(peer, &frame, &claim, &svc, &response_outbox, &events_outbox)
-                        .await;
+                    dispatch_frame(
+                        peer,
+                        &frame,
+                        &claim,
+                        &svc,
+                        unbond_tx,
+                        &response_outbox,
+                        &events_outbox,
+                    )
+                    .await;
                     r = reader.lock().await;
                 }
                 Ok(None) => break,
@@ -692,11 +746,13 @@ async fn handle_write(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_frame(
     peer: &PeerIdentity,
     frame: &[u8],
     claim: &Arc<ClaimMachine>,
     svc: &Arc<dyn ManagementService>,
+    unbond_tx: &mpsc::Sender<Address>,
     response_outbox: &Arc<Outbox>,
     events_outbox: &Arc<Outbox>,
 ) {
@@ -741,7 +797,7 @@ async fn dispatch_frame(
     );
     let response = match request.method.as_str() {
         "claim" => handle_claim_rpc(id, request.params, peer, claim).await,
-        "factory_reset" => handle_factory_reset_rpc(id, peer, claim).await,
+        "factory_reset" => handle_factory_reset_rpc(id, peer, claim, unbond_tx).await,
         _ => match claim.authorize(peer) {
             AuthDecision::Allow => dispatch_management(svc.as_ref(), request).await,
             AuthDecision::Deny { reason } => {
@@ -793,12 +849,25 @@ async fn handle_factory_reset_rpc(
     id: u32,
     peer: &PeerIdentity,
     claim: &Arc<ClaimMachine>,
+    unbond_tx: &mpsc::Sender<Address>,
 ) -> RpcResponse {
     // factory_reset is admin-gated: only the current admin (or no admin,
     // in which case it's a no-op) may invoke it.
     match claim.authorize(peer) {
         AuthDecision::Allow => match claim.factory_reset() {
-            Ok(_) => RpcResponse::ok(id, serde_json::Value::Null),
+            // On a real reset (there was an admin), tell the unbond task
+            // to forget the BlueZ bond too — otherwise the peer stays
+            // bonded while the device is Unclaimed and every reconnect is
+            // link-accepted then rejected with `not_claimed`. The response
+            // is queued before this fires, but removing the device
+            // disconnects the peer, so delivery of the ok is best-effort —
+            // acceptable, since a factory reset ends the session anyway.
+            Ok(previous) => {
+                if let Some(record) = previous {
+                    request_unbond(unbond_tx, &record.identity_address).await;
+                }
+                RpcResponse::ok(id, serde_json::Value::Null)
+            }
             Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
         },
         AuthDecision::Deny { reason } => {
@@ -810,6 +879,28 @@ async fn handle_factory_reset_rpc(
                 RpcResponse::err(id, ErrorCode::PermissionDenied, reason)
             }
         }
+    }
+}
+
+/// Ask the unbond task (which owns the adapter) to remove the BlueZ bond
+/// for `identity_address`. Best-effort: a parse failure or a closed
+/// channel is logged, not surfaced to the caller, since the admin record
+/// is already cleared and the reset itself succeeded.
+async fn request_unbond(unbond_tx: &mpsc::Sender<Address>, identity_address: &str) {
+    match identity_address.parse::<Address>() {
+        Ok(addr) => {
+            if unbond_tx.send(addr).await.is_err() {
+                warn!(
+                    peer = %addr,
+                    "unbond channel closed; BlueZ bond not removed after factory_reset",
+                );
+            }
+        }
+        Err(e) => warn!(
+            address = %identity_address,
+            error = %e,
+            "Could not parse admin identity address; BlueZ bond not removed after factory_reset",
+        ),
     }
 }
 
@@ -837,8 +928,10 @@ mod tests {
 
     use super::*;
     use crate::admin::AdminRecord;
+    use crate::agent::NoopPairingDisplay;
     use crate::claim::ClaimState;
     use crate::testsupport::{MockSvc, req};
+    use tempfile::TempDir;
 
     fn peer(address: &str) -> PeerIdentity {
         PeerIdentity {
@@ -860,6 +953,16 @@ mod tests {
 
     fn outbox() -> Arc<Outbox> {
         Arc::new(Outbox::new("test", RESPONSE_OUTBOX_BYTES))
+    }
+
+    /// A live unbond sender for the write path. None of these tests drive
+    /// `factory_reset`, so nothing is ever sent; the background drainer
+    /// just keeps the receiver alive so `send` wouldn't fail on a closed
+    /// channel if one ever did.
+    fn unbond_sender() -> mpsc::Sender<Address> {
+        let (tx, mut rx) = mpsc::channel::<Address>(4);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        tx
     }
 
     /// Encode a request the way the companion does: JSON body wrapped in
@@ -906,6 +1009,7 @@ mod tests {
             &body,
             &claim,
             &svc,
+            &unbond_sender(),
             &response_outbox,
             &events_outbox,
         )
@@ -941,6 +1045,7 @@ mod tests {
             &body,
             &claim,
             &svc,
+            &unbond_sender(),
             &response_outbox,
             &events_outbox,
         )
@@ -970,6 +1075,7 @@ mod tests {
             last_peer.clone(),
             claim.clone(),
             svc.clone(),
+            &unbond_sender(),
             response_outbox.clone(),
             events_outbox.clone(),
         )
@@ -990,6 +1096,7 @@ mod tests {
             last_peer.clone(),
             claim.clone(),
             svc.clone(),
+            &unbond_sender(),
             response_outbox.clone(),
             events_outbox.clone(),
         )
@@ -1023,6 +1130,7 @@ mod tests {
             last_peer.clone(),
             claim.clone(),
             svc.clone(),
+            &unbond_sender(),
             response_outbox.clone(),
             events_outbox.clone(),
         )
@@ -1039,6 +1147,7 @@ mod tests {
             last_peer.clone(),
             claim.clone(),
             svc.clone(),
+            &unbond_sender(),
             response_outbox.clone(),
             events_outbox.clone(),
         )
@@ -1085,5 +1194,112 @@ mod tests {
             .expect("a complete frame is present");
         let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
         assert_eq!(parsed.id, 8);
+    }
+
+    /// A successful `factory_reset` RPC clears the admin record *and*
+    /// queues the bonded peer's address for BlueZ bond removal — without
+    /// the latter the phone stays bonded but Unclaimed, locking itself
+    /// out with `not_claimed` on every reconnect.
+    #[tokio::test]
+    async fn factory_reset_requests_bond_removal() {
+        // `claimed_machine`'s record identity is AA:BB:CC:DD:EE:FF and its
+        // store path doesn't exist, so `factory_reset` clears in memory
+        // (the file remove is a no-op) and returns the previous record.
+        let claim = claimed_machine();
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+        let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
+
+        let body = serde_json::to_vec(&req(5, "factory_reset", serde_json::Value::Null)).unwrap();
+        dispatch_frame(
+            &peer("AA:BB:CC:DD:EE:FF"),
+            &body,
+            &claim,
+            &svc,
+            &unbond_tx,
+            &response_outbox,
+            &events_outbox,
+        )
+        .await;
+
+        assert!(!claim.is_claimed(), "device is Unclaimed after reset");
+        let addr = unbond_rx.try_recv().expect("bond removal was requested");
+        assert_eq!(addr.to_string(), "AA:BB:CC:DD:EE:FF");
+
+        // The reset still returns a success response to the peer.
+        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].id, 5);
+        assert!(responses[0].error.is_none());
+    }
+
+    /// A `factory_reset` on an already-unclaimed device is a no-op success
+    /// and must not queue a bond removal (there is no bond to forget).
+    #[tokio::test]
+    async fn factory_reset_when_unclaimed_requests_no_removal() {
+        let store = AdminStore::new(PathBuf::from("/nonexistent/shepherd-ble-test/admin.toml"));
+        let claim: Arc<ClaimMachine> = Arc::new(ClaimMachine::new(store, ClaimState::Unclaimed));
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+        let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
+
+        let body = serde_json::to_vec(&req(1, "factory_reset", serde_json::Value::Null)).unwrap();
+        dispatch_frame(
+            &peer("AA:BB:CC:DD:EE:FF"),
+            &body,
+            &claim,
+            &svc,
+            &unbond_tx,
+            &response_outbox,
+            &events_outbox,
+        )
+        .await;
+
+        assert!(matches!(
+            unbond_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].error.is_none());
+    }
+
+    /// The factory-reset *sentinel* path captures the previously-bonded
+    /// admin so `run` can remove the BlueZ bond, and clears the record.
+    #[test]
+    fn sentinel_reset_captures_bond_for_removal() {
+        let dir = TempDir::new().unwrap();
+        let admin_path = dir.path().join("admin.toml");
+        let sentinel_path = dir.path().join(".factory-reset-ble");
+
+        let store = AdminStore::new(admin_path.clone());
+        store
+            .save(&AdminRecord::new(
+                "AA:BB:CC:DD:EE:FF".into(),
+                "public".into(),
+                "phone".into(),
+            ))
+            .unwrap();
+        std::fs::write(&sentinel_path, "").unwrap();
+
+        let config = BleServerConfig {
+            device_name: "shepherd".into(),
+            firmware_version: "test".into(),
+            admin_record_path: admin_path.clone(),
+            reset_sentinel_path: sentinel_path,
+        };
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
+        let server = BleServer::new(config, svc, display).unwrap();
+
+        assert!(
+            !server.claim.is_claimed(),
+            "device is Unclaimed after reset"
+        );
+        assert!(!admin_path.exists(), "admin record file was removed");
+        let pending = server.pending_unbond.expect("bond queued for removal");
+        assert_eq!(pending.identity_address, "AA:BB:CC:DD:EE:FF");
     }
 }
