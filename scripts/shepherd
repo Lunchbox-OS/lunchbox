@@ -50,6 +50,7 @@ Commands:
     config      Configuration validation
     dev         Development commands
     install     Install shepherd to the system
+    uninstall   Remove installed shepherd binaries and system files
     harden      User hardening for kiosk mode
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
     version     Show or bump the project version
@@ -79,6 +80,8 @@ Installation:
     shepherd install all --user USER          Full installation
     shepherd install bins --prefix /usr       Install binaries only
     shepherd install config --user USER       Deploy user config
+    shepherd uninstall bins                    Remove installed binaries
+    shepherd uninstall all                     Remove all system files
 
 Hardening:
     shepherd harden apply --user USER         Apply kiosk restrictions
@@ -163,6 +166,9 @@ EOF
             ;;
         install)
             install_main "$@"
+            ;;
+        uninstall)
+            uninstall_main "$@"
             ;;
         harden)
             harden_main "$@"
