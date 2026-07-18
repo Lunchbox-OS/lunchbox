@@ -311,34 +311,27 @@ class ShepherdConnection private constructor(
     }
 
     /**
-     * Connect, discover services, negotiate MTU, then synchronously
-     * drain any stale bytes the server may have buffered before
-     * declaring the connection ready.
-     *
-     * The drain is the key sequencing point: the server-side outbox
-     * persists across BLE disconnects, so a reopen after a clean
-     * disconnect can find leftover bytes (a half-delivered response,
-     * stale events accumulated while disconnected) sitting at the
-     * head of the queue. Without draining, those bytes would feed
-     * into a fresh per-process FrameAssembler and produce garbage.
-     * We discard them here, before [ready] flips true and the
-     * pollers (or any user-side [call]) start consuming the stream
-     * — that guarantees the first frame the assembler ever sees
-     * starts at a real frame boundary.
-     */
-    /**
-     * Connect, negotiate MTU, and drain any stale bytes before flipping
+     * Connect, discover services, negotiate MTU, then synchronously drain
+     * any stale bytes the server may have buffered before flipping
      * [ready].
      *
-     * @param probeEncryptedLink when true (reconnect to a bonded device),
-     *   a failure draining the encrypted Response/Events characteristics
-     *   is treated as a **one-sided bond** and raised as
-     *   [LinkUnauthenticatedException] so the caller can recover. When
-     *   false (the initial pairing flow, before the bond exists), the
-     *   encrypted chars aren't reachable yet — the drain read would fail
-     *   (and can even kick off OS pairing) — so failures are swallowed and
-     *   the caller proceeds to bond + claim. Draining is meaningless
-     *   pre-bond anyway (an unclaimed device has nothing queued).
+     * The drain is the key sequencing point: the server-side outbox
+     * persists across BLE disconnects, so a reopen can find leftover bytes
+     * (a half-delivered response, stale events) at the head of the queue.
+     * Discarding them here, before [ready] flips true and the pollers (or
+     * any user-side [call]) start consuming, guarantees the first frame the
+     * assembler sees starts at a real frame boundary.
+     *
+     * @param probeEncryptedLink when true (reconnect to a bonded device), a
+     *   failure draining the encrypted Response/Events characteristics
+     *   fails the whole connect (as [LinkUnauthenticatedException]) rather
+     *   than declaring a dead link "ready". The caller treats this like any
+     *   other connect failure — it is NOT on its own proof of a lost bond
+     *   (a running-but-serviceless or one-sided peer both fail here), so
+     *   recovery is left to the caller's scan-based give-up logic. When
+     *   false (initial pairing, before the bond exists) the encrypted chars
+     *   aren't reachable yet, so drain failures are swallowed and the caller
+     *   proceeds to bond + claim.
      */
     suspend fun connect(probeEncryptedLink: Boolean = true) {
         ready.value = false
@@ -346,11 +339,10 @@ class ShepherdConnection private constructor(
         chunkSize = runCatching {
             peripheral.maximumWriteValueLengthForType(WriteType.WithoutResponse)
         }.getOrDefault(20).coerceAtLeast(20)
-        // A successful GATT connect does NOT prove the bond works:
-        // encryption is only exercised on the first authenticated
-        // characteristic access. On reconnect, a throw here means the link
-        // is up but one-sided (the peer forgot our bond) — surface it so
-        // the reconnect loop can recover rather than spin on a dead link.
+        // A successful GATT connect does NOT prove the encrypted service is
+        // usable (bond intact + serving). On reconnect a throw here fails
+        // the connect so the loop retries / gives up cleanly, instead of
+        // flipping ready on a link that can't actually carry RPCs.
         try {
             drainAndDiscard("response", responseChar)
             drainAndDiscard("events", eventsChar)

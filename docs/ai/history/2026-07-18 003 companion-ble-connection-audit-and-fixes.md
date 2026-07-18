@@ -116,6 +116,27 @@ Passed:
    "Pairing failed". Fixed with `connect(probeEncryptedLink = false)` in
    `pair()` (pre-bond drain failures are expected and swallowed).
 
+### Follow-up: false re-pair when shepherd isn't running
+
+Reported after the on-device pass: if the managed box is on and the bond
+is intact but **shepherd isn't running** (a different user is signed in),
+the encrypted-drain read in `connect()` fails the same way a genuinely
+one-sided bond does — the GATT service just isn't being served. The
+original recovery kept a `LinkUnauthenticatedException` fast-path that ran
+`removeBond` after two such failures, so it wiped a perfectly good bond
+and forced a needless re-pair.
+
+Fix: **delete that fast-path**. Every connect/drain failure now flows
+through the single give-up path, and the **scan-probe is the only thing
+that removes a bond** — and only on positive evidence (the device is
+still advertising the *shepherd service*, i.e. shepherd is up and in
+range, yet the encrypted link still won't hold). With shepherd down the
+service isn't advertised, so the scan finds nothing and the app settles on
+a retryable `Disconnected` with the bond intact — the pre-change behavior.
+(`MAX_AUTH_FAILURES` and the VM's `LinkUnauthenticatedException` handling
+are gone; `connect()` still raises it to fail the connect, but the caller
+treats it like any other connect failure.)
+
 ### Note on manual pairing / headless
 
 Passkey Entry (this controller is BT 4.0/Legacy) requires typing the

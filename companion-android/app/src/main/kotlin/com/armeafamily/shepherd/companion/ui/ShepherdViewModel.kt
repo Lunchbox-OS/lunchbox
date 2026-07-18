@@ -5,7 +5,6 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.armeafamily.shepherd.companion.appContainer
-import com.armeafamily.shepherd.companion.ble.LinkUnauthenticatedException
 import com.armeafamily.shepherd.companion.ble.RpcException
 import com.armeafamily.shepherd.companion.ble.ShepherdConnection
 import com.armeafamily.shepherd.companion.domain.AdminRecord
@@ -150,40 +149,29 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runConnectionLoop(record: ShepherdRecord, conn: ShepherdConnection) {
         val backoffs = longArrayOf(1_000, 2_000, 5_000)
         var failures = 0
-        var authFailures = 0
         while (viewModelScope.isActive) {
             _state.update {
-                it.copy(link = if (failures == 0 && authFailures == 0) LinkStatus.Connecting else LinkStatus.Reconnecting)
+                it.copy(link = if (failures == 0) LinkStatus.Connecting else LinkStatus.Reconnecting)
             }
             try {
                 conn.connect()
                 failures = 0
-                authFailures = 0
                 _state.update { it.copy(link = LinkStatus.Connected) }
                 refreshAll()
                 // Suspend here until the link drops, then loop to reconnect.
                 conn.state.first { it is State.Disconnected }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: LinkUnauthenticatedException) {
-                // GATT connected but the encrypted link is unusable — the
-                // device forgot our bond (factory reset / bond wipe) while
-                // Android still lists us as bonded. Retrying can't fix a
-                // one-sided bond, but confirm it a couple of times before
-                // dropping the bond so a transient first-read hiccup
-                // doesn't trigger a spurious re-pair prompt.
-                authFailures++
-                if (authFailures >= MAX_AUTH_FAILURES) {
-                    runCatching { container.bondManager.removeBond(record.androidIdentifier) }
-                    releaseConnection(conn)
-                    _state.update { it.copy(link = LinkStatus.NeedsRepair) }
-                    return
-                }
-                delay(backoffs[0])
             } catch (_: Exception) {
-                // Couldn't establish (or hold) the link: out of range,
-                // powered off, a one-sided bond, or a revoked
-                // BLUETOOTH_CONNECT permission (hence the guarded isBonded).
+                // Any connect/drain failure lands here — out of range, the
+                // box powered off, shepherd not running (bond fine but the
+                // GATT service is absent), a genuinely one-sided bond, or a
+                // revoked BLUETOOTH_CONNECT permission (hence the guarded
+                // isBonded). We deliberately do NOT treat an encrypted-read
+                // failure on its own as a lost bond: a running-but-serviceless
+                // peer fails identically, and wiping the bond there would
+                // force a needless re-pair. The scan-probe below is the only
+                // thing that removes a bond, and only on positive evidence.
                 val stillBonded =
                     runCatching { container.bondManager.isBonded(record.androidIdentifier) }.getOrDefault(true)
                 if (!stillBonded) {
@@ -195,16 +183,15 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 failures++
                 if (failures > backoffs.size) {
-                    // Exhausted retries while still OS-bonded. A one-sided
-                    // bond (the device forgot its LTK — e.g. factory reset)
-                    // fails link encryption inside connect() with the same
-                    // generic NotConnectedException as an out-of-range
-                    // device, so we can't tell them apart from the exception.
-                    // Disambiguate by scanning: if the device is still
-                    // advertising yet we can't hold an encrypted link, the
-                    // bond is stale — drop it and prompt re-pair. If it's not
-                    // advertising, it's simply unreachable — a retryable
-                    // Disconnected.
+                    // Exhausted retries while still OS-bonded. Distinguish a
+                    // stale one-sided bond from a device that's simply
+                    // unreachable (off, out of range, or shepherd not
+                    // running) by scanning for the *shepherd service*: only if
+                    // the device is still advertising it — i.e. shepherd is up
+                    // and in range — yet we still can't hold an encrypted
+                    // link is the bond provably stale. Then drop it and prompt
+                    // re-pair; otherwise surface a retryable Disconnected and
+                    // leave the bond intact.
                     releaseConnection(conn)
                     val link = if (deviceIsReachable(record)) {
                         runCatching { container.bondManager.removeBond(record.androidIdentifier) }
@@ -547,16 +534,6 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
-        /**
-         * Consecutive [LinkUnauthenticatedException]s before we conclude
-         * the bond is genuinely one-sided and drop it. Two tolerates a
-         * transient first-read hiccup without a spurious re-pair prompt.
-         * (This path fires on stacks that connect at GATT level before
-         * encrypting; on others the failure surfaces inside connect() and
-         * the scan-probe give-up path below handles it.)
-         */
-        const val MAX_AUTH_FAILURES = 2
-
         /** How long to scan for the device before concluding it's unreachable. */
         const val SCAN_PROBE_MS = 5_000L
     }
