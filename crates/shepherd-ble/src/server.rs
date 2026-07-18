@@ -33,8 +33,10 @@ use bluer::gatt::local::{
     Application, ApplicationHandle, Characteristic, CharacteristicRead, CharacteristicWrite,
     CharacteristicWriteMethod, Service,
 };
-use futures_util::FutureExt;
+use bluer::{AdapterEvent, Address, DeviceEvent, DeviceProperty};
+use futures_util::{FutureExt, StreamExt};
 use shepherd_management::ManagementService;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
@@ -193,10 +195,20 @@ impl BleServer {
         let response_outbox = Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES));
         let events_outbox = Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES));
 
+        // Request-side reassembly state, shared with the disconnect
+        // monitor so a peer drop can wipe any half-written frame (see
+        // `disconnect_monitor`). v1 holds a single reader because we
+        // only expect one admin connection at a time.
+        let reader: Arc<Mutex<FrameReader>> =
+            Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
+        let last_peer: Arc<Mutex<Option<PeerIdentity>>> = Arc::new(Mutex::new(None));
+
         let application = build_application(
             self.config.clone(),
             self.svc.clone(),
             self.claim.clone(),
+            reader.clone(),
+            last_peer.clone(),
             response_outbox.clone(),
             events_outbox.clone(),
         );
@@ -220,10 +232,24 @@ impl BleServer {
 
         let events_task = tokio::spawn(events_forwarder(self.svc.clone(), events_outbox.clone()));
 
+        // Wipe stale transport bytes when a peer drops, so a companion
+        // that resumes the same connection across a transient BLE
+        // reconnect (no fresh `id == 1` sentinel) doesn't inherit a
+        // desynced byte stream.
+        let disconnect_task = tokio::spawn(disconnect_monitor(
+            adapter.clone(),
+            reader,
+            last_peer,
+            response_outbox.clone(),
+            events_outbox.clone(),
+        ));
+
         let _ = shutdown_rx.wait_for(|v| *v).await;
         info!("BLE management server shutting down");
         events_task.abort();
         let _ = events_task.await;
+        disconnect_task.abort();
+        let _ = disconnect_task.await;
         Ok(())
     }
 }
@@ -256,6 +282,142 @@ async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) 
     }
 }
 
+/// Watch the adapter for BLE peer disconnects and reset the transport
+/// session state (both read-poll outboxes plus the Request-side frame
+/// reader) whenever one drops.
+///
+/// The outboxes and the reassembly reader carry per-session byte
+/// streams. The only *other* reset is the client's `id == 1` sentinel
+/// in [`dispatch_frame`], which a companion sends only when it builds a
+/// *fresh* [`ShepherdConnection`]. On a transient BLE drop (BT toggle,
+/// brief out-of-range) the companion keeps the same connection and
+/// resumes its RPC id counter mid-sequence, so `id == 1` never fires —
+/// any bytes left over from before the drop (an unread response, a
+/// half-written request frame, events that piled up while nothing was
+/// polling) would then desync the reassembler on the reused link. This
+/// monitor closes that gap by wiping on the disconnect event itself.
+///
+/// v1 assumes a single admin connection at a time, so clearing on *any*
+/// peer disconnect is safe: there is never a second live session whose
+/// in-flight bytes we'd disturb. The `Connected(false)` event fires at
+/// drop time, well before the reconnect + next write, so the wipe can't
+/// race a fresh response into oblivion.
+async fn disconnect_monitor(
+    adapter: bluer::Adapter,
+    reader: Arc<Mutex<FrameReader>>,
+    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
+) {
+    let mut events = match adapter.events().await {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "BLE disconnect monitor could not subscribe to adapter events; \
+                 stale-byte cleanup on transient reconnect is disabled",
+            );
+            return;
+        }
+    };
+
+    // Devices BlueZ already knows about at startup — most importantly the
+    // bonded admin, which persists across daemon restarts as a known
+    // device and therefore won't arrive as a later `DeviceAdded`.
+    let mut watched: HashSet<Address> = HashSet::new();
+    match adapter.device_addresses().await {
+        Ok(addrs) => {
+            for addr in addrs {
+                if watched.insert(addr) {
+                    spawn_device_watcher(
+                        &adapter,
+                        addr,
+                        reader.clone(),
+                        last_peer.clone(),
+                        response_outbox.clone(),
+                        events_outbox.clone(),
+                    );
+                }
+            }
+        }
+        Err(e) => debug!(error = %e, "could not enumerate known devices for disconnect watch"),
+    }
+
+    while let Some(ev) = events.next().await {
+        match ev {
+            AdapterEvent::DeviceAdded(addr) => {
+                if watched.insert(addr) {
+                    spawn_device_watcher(
+                        &adapter,
+                        addr,
+                        reader.clone(),
+                        last_peer.clone(),
+                        response_outbox.clone(),
+                        events_outbox.clone(),
+                    );
+                }
+            }
+            // A removed device may later be re-added; drop it from the set
+            // so we re-attach a watcher if that happens.
+            AdapterEvent::DeviceRemoved(addr) => {
+                watched.remove(&addr);
+            }
+            AdapterEvent::PropertyChanged(_) => {}
+        }
+    }
+}
+
+/// Spawn a task that clears the transport session state each time
+/// `addr` transitions to disconnected. The task lives until the device
+/// object is removed from BlueZ (its event stream ends), which spans
+/// many connect/disconnect cycles for a bonded peer.
+fn spawn_device_watcher(
+    adapter: &bluer::Adapter,
+    addr: Address,
+    reader: Arc<Mutex<FrameReader>>,
+    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
+) {
+    let device = match adapter.device(addr) {
+        Ok(d) => d,
+        Err(e) => {
+            debug!(peer = %addr, error = %e, "could not open device for disconnect watch");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let mut events = match device.events().await {
+            Ok(e) => e,
+            Err(e) => {
+                debug!(peer = %addr, error = %e, "device event stream unavailable");
+                return;
+            }
+        };
+        while let Some(DeviceEvent::PropertyChanged(prop)) = events.next().await {
+            if matches!(prop, DeviceProperty::Connected(false)) {
+                info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
+                reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox)
+                    .await;
+            }
+        }
+    });
+}
+
+/// Drop every byte of per-session transport state: any half-assembled
+/// request frame, the last-peer marker, and both read-poll outboxes.
+async fn reset_transport_session(
+    reader: &Arc<Mutex<FrameReader>>,
+    last_peer: &Arc<Mutex<Option<PeerIdentity>>>,
+    response_outbox: &Arc<Outbox>,
+    events_outbox: &Arc<Outbox>,
+) {
+    *reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
+    *last_peer.lock().await = None;
+    response_outbox.clear().await;
+    events_outbox.clear().await;
+}
+
 /// Returns the admin record we just cleared (and therefore want BlueZ
 /// to forget). Currently always `None` because `check_reset_sentinel`
 /// runs in `new` and we don't thread the previous record through —
@@ -274,10 +436,13 @@ async fn register_agent(
     session.register_agent(agent).await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_application(
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
+    reader: Arc<Mutex<FrameReader>>,
+    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
 ) -> Application {
@@ -287,7 +452,14 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(svc, claim, response_outbox.clone(), events_outbox.clone()),
+                request_characteristic(
+                    svc,
+                    claim,
+                    reader,
+                    last_peer,
+                    response_outbox.clone(),
+                    events_outbox.clone(),
+                ),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
                     response_outbox,
@@ -349,15 +521,16 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
 fn request_characteristic(
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
+    reader: Arc<Mutex<FrameReader>>,
+    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
 ) -> Characteristic {
-    // Per-device frame reassembly buffer. v1 holds a single reader
-    // because we only expect one admin connection at a time; if a
-    // second device writes here we wipe the buffer and start fresh.
-    let reader: Arc<Mutex<FrameReader>> = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-    let last_peer: Arc<Mutex<Option<PeerIdentity>>> = Arc::new(Mutex::new(None));
-
+    // `reader`/`last_peer` are the single-connection frame reassembly
+    // state (v1 expects one admin connection at a time). They're created
+    // in `run` and shared with `disconnect_monitor` so a peer drop can
+    // reset a half-written frame; if a second device writes here we wipe
+    // the buffer and start fresh.
     Characteristic {
         uuid: SHEPHERD_REQUEST_CHAR_UUID,
         write: Some(CharacteristicWrite {
@@ -876,5 +1049,41 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 2);
         assert!(responses[0].error.is_none());
+    }
+
+    /// On a peer disconnect the monitor wipes every scrap of per-session
+    /// transport state — both outboxes, the last-peer marker, and any
+    /// half-assembled request frame — so a companion that resumes the
+    /// same connection across a transient drop (no fresh `id == 1`)
+    /// doesn't inherit a desynced byte stream.
+    #[tokio::test]
+    async fn reset_transport_session_wipes_all_session_state() {
+        let response_outbox = outbox();
+        let events_outbox = outbox();
+        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
+        let last_peer = Arc::new(Mutex::new(Some(peer("AA:BB:CC:DD:EE:FF"))));
+
+        // Bytes a dropped session left behind: unread outbox frames plus
+        // the head of a request frame whose tail never arrived.
+        response_outbox.push(encode_frame(b"stale-response")).await;
+        events_outbox.push(encode_frame(b"stale-event")).await;
+        reader.lock().await.push(&request_frame(7, "health")[..3]);
+
+        reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox).await;
+
+        assert_eq!(response_outbox.pending_bytes().await, 0);
+        assert_eq!(events_outbox.pending_bytes().await, 0);
+        assert!(last_peer.lock().await.is_none());
+
+        // The reader kept no leftover prefix: a full frame pushed now
+        // parses as itself rather than stitched onto the discarded head.
+        let mut r = reader.lock().await;
+        r.push(&request_frame(8, "health"));
+        let frame = r
+            .pop_frame()
+            .expect("frame parses cleanly")
+            .expect("a complete frame is present");
+        let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(parsed.id, 8);
     }
 }
