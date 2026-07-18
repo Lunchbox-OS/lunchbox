@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -35,6 +36,35 @@ class BondManager(private val context: Context) {
 
     fun isBonded(identifier: String): Boolean =
         bondState(identifier) == BluetoothDevice.BOND_BONDED
+
+    /**
+     * Remove the OS-level bond for [identifier] via the hidden
+     * `BluetoothDevice.removeBond` API (reflection).
+     *
+     * Recovers from a *one-sided* bond: after the device is factory-reset
+     * it calls BlueZ `remove_device`, but Android still lists the peer as
+     * `BOND_BONDED`. That stale bond makes reconnects come up at GATT
+     * level yet fail to encrypt, and it short-circuits [ensureBonded] so a
+     * fresh pairing never starts. Clearing it lets the user re-pair
+     * cleanly. Best-effort: returns `false` (logged) if the platform
+     * blocks the hidden call, in which case the user must "Forget" the
+     * device in system Bluetooth settings.
+     */
+    @SuppressLint("MissingPermission")
+    fun removeBond(identifier: String): Boolean {
+        val device = adapter.getRemoteDevice(identifier)
+        if (device.bondState == BluetoothDevice.BOND_NONE) return true
+        return runCatching {
+            BluetoothDevice::class.java.getMethod("removeBond").invoke(device) as Boolean
+        }.getOrElse { e ->
+            Log.w(TAG, "removeBond reflection failed for $identifier", e)
+            false
+        }
+    }
+
+    private companion object {
+        const val TAG = "ShepherdBle"
+    }
 
     /**
      * Ensure the device at [identifier] is bonded, initiating pairing if

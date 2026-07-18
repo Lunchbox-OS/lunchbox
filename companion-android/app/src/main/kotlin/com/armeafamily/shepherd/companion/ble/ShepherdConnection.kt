@@ -61,6 +61,20 @@ import kotlin.uuid.ExperimentalUuidApi
  * on the [scope] passed in, so they outlive transient disconnects and
  * resume on reconnect.
  */
+/**
+ * The GATT link connected but the bonded, encrypted channel is not
+ * usable — the peer likely forgot its side of the bond (e.g. after a
+ * device factory reset that called BlueZ `remove_device`) while Android
+ * still lists us as bonded. Distinct from an ordinary connect failure so
+ * the reconnect loop can drop the stale bond and prompt a re-pair rather
+ * than spin on a link that will never carry an RPC.
+ */
+class LinkUnauthenticatedException(cause: Throwable) :
+    Exception("bonded link is not usable; the peer may have forgotten the bond", cause)
+
+/** An in-flight [ShepherdConnection.call] failed because the link dropped. */
+class ConnectionDroppedException : Exception("BLE link dropped before the response arrived")
+
 class ShepherdConnection private constructor(
     private val peripheral: Peripheral,
     private val scope: CoroutineScope,
@@ -110,6 +124,11 @@ class ShepherdConnection private constructor(
 
     private var pollers: List<Job> = emptyList()
 
+    // close() is idempotent — teardown paths (give-up, concurrent
+    // pairing/session ownership) can call it more than once.
+    @Volatile
+    private var closed = false
+
     /** Wire up Response/Events poll loops. Idempotent; call before [connect]. */
     fun start() {
         if (pollers.isNotEmpty()) return
@@ -120,7 +139,15 @@ class ShepherdConnection private constructor(
             // the next post-connect drain.
             scope.launch {
                 peripheral.state.collect { s ->
-                    if (s !is State.Connected) ready.value = false
+                    if (s !is State.Connected) {
+                        ready.value = false
+                        // Fail any RPC awaiting a response now instead of
+                        // letting it hang for the full REQUEST_TIMEOUT_MS.
+                        // A transient reconnect reuses this instance and
+                        // never calls close(), so this is the only place
+                        // in-flight calls get released on a drop.
+                        failPending()
+                    }
                 }
             },
             scope.launch {
@@ -251,14 +278,12 @@ class ShepherdConnection private constructor(
         var consecutiveEmpty = 0
         var totalDropped = 0
         while (consecutiveEmpty < 2) {
-            val bytes = try {
-                peripheral.read(char)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                Log.w(TAG, "$label drain read failed", e)
-                return
-            }
+            // Read failures propagate to connect(): the Response/Events
+            // characteristics require an authenticated-encrypted link, so
+            // a *throw* here (as opposed to an empty read) is the signal
+            // that the bonded link isn't actually usable. connect() turns
+            // it into a LinkUnauthenticatedException.
+            val bytes = peripheral.read(char)
             if (bytes.isEmpty()) {
                 consecutiveEmpty++
             } else {
@@ -301,14 +326,40 @@ class ShepherdConnection private constructor(
      * — that guarantees the first frame the assembler ever sees
      * starts at a real frame boundary.
      */
-    suspend fun connect() {
+    /**
+     * Connect, negotiate MTU, and drain any stale bytes before flipping
+     * [ready].
+     *
+     * @param probeEncryptedLink when true (reconnect to a bonded device),
+     *   a failure draining the encrypted Response/Events characteristics
+     *   is treated as a **one-sided bond** and raised as
+     *   [LinkUnauthenticatedException] so the caller can recover. When
+     *   false (the initial pairing flow, before the bond exists), the
+     *   encrypted chars aren't reachable yet — the drain read would fail
+     *   (and can even kick off OS pairing) — so failures are swallowed and
+     *   the caller proceeds to bond + claim. Draining is meaningless
+     *   pre-bond anyway (an unclaimed device has nothing queued).
+     */
+    suspend fun connect(probeEncryptedLink: Boolean = true) {
         ready.value = false
         peripheral.connect()
         chunkSize = runCatching {
             peripheral.maximumWriteValueLengthForType(WriteType.WithoutResponse)
         }.getOrDefault(20).coerceAtLeast(20)
-        drainAndDiscard("response", responseChar)
-        drainAndDiscard("events", eventsChar)
+        // A successful GATT connect does NOT prove the bond works:
+        // encryption is only exercised on the first authenticated
+        // characteristic access. On reconnect, a throw here means the link
+        // is up but one-sided (the peer forgot our bond) — surface it so
+        // the reconnect loop can recover rather than spin on a dead link.
+        try {
+            drainAndDiscard("response", responseChar)
+            drainAndDiscard("events", eventsChar)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (probeEncryptedLink) throw LinkUnauthenticatedException(e)
+            Log.i(TAG, "connect: pre-bond drain failed (expected during pairing): ${e.message}")
+        }
         ready.value = true
         Log.i(TAG, "connect: ready")
     }
@@ -316,11 +367,26 @@ class ShepherdConnection private constructor(
     suspend fun disconnect() = peripheral.disconnect()
 
     fun close() {
+        if (closed) return
+        closed = true
         pollers.forEach(Job::cancel)
         pollers = emptyList()
         pending.values.forEach { it.cancel() }
         pending.clear()
         peripheral.close()
+    }
+
+    /**
+     * Complete every in-flight [call] with [ConnectionDroppedException].
+     * Invoked on any disconnect so a pending RPC fails promptly rather
+     * than blocking on `deferred.await()` until [REQUEST_TIMEOUT_MS].
+     */
+    private fun failPending() {
+        if (pending.isEmpty()) return
+        val dropped = ConnectionDroppedException()
+        for (id in pending.keys.toList()) {
+            pending.remove(id)?.completeExceptionally(dropped)
+        }
     }
 
     /** Read the unencrypted DeviceInfo characteristic (raw JSON, unframed). */
