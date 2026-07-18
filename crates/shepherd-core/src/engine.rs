@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Local};
 use shepherd_api::{
-    API_VERSION, EntryKindTag, EntryView, InternetStatusView, ReasonCode, ServiceStateSnapshot,
-    SessionEndReason, WarningSeverity,
+    API_VERSION, EntryKindTag, EntryView, InputDeviceType, InternetStatusView, ReasonCode,
+    ServiceStateSnapshot, SessionEndReason, WarningSeverity,
 };
 use shepherd_config::{Entry, InternetCheckTarget, Policy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -44,6 +44,13 @@ pub struct CoreEngine {
     /// treated as ready; a kind mapped to `false` is warming up and its
     /// entries are neither shown nor launchable until it reports ready.
     kind_readiness: HashMap<EntryKindTag, bool>,
+    /// Set of physical input device types currently connected (issue #96).
+    /// `None` means detection has not reported yet — treated as "everything
+    /// present" so a detection failure fails open (input-gated entries stay
+    /// visible) rather than hiding activities. Once the host's input monitor
+    /// runs its first scan this becomes `Some(set)` and gating reflects the
+    /// real hardware.
+    connected_inputs: Option<HashSet<InputDeviceType>>,
 }
 
 impl CoreEngine {
@@ -67,6 +74,7 @@ impl CoreEngine {
             last_availability_set: HashSet::new(),
             internet_status: HashMap::new(),
             kind_readiness: HashMap::new(),
+            connected_inputs: None,
         }
     }
 
@@ -112,6 +120,39 @@ impl CoreEngine {
     /// that has never reported readiness is treated as ready.
     fn kind_ready(&self, kind: EntryKindTag) -> bool {
         self.kind_readiness.get(&kind).copied().unwrap_or(true)
+    }
+
+    /// Update the set of currently-connected input device types (issue #96).
+    /// Called by the host's input-device monitor on its initial scan and on
+    /// every hotplug. Returns true if the stored set changed, so callers can
+    /// broadcast a fresh state snapshot.
+    pub fn set_connected_inputs(&mut self, connected: HashSet<InputDeviceType>) -> bool {
+        if self.connected_inputs.as_ref() == Some(&connected) {
+            return false;
+        }
+        self.connected_inputs = Some(connected);
+        true
+    }
+
+    /// Device types an entry requires that are not currently connected, sorted
+    /// and deduplicated. Empty when the entry has no requirement or all of its
+    /// required devices are present. Before the first detection report
+    /// (`connected_inputs` is `None`) nothing is considered missing, so the
+    /// gate fails open.
+    fn missing_inputs(&self, entry: &Entry) -> Vec<InputDeviceType> {
+        if entry.requires_input.is_empty() {
+            return Vec::new();
+        }
+        let Some(connected) = self.connected_inputs.as_ref() else {
+            return Vec::new();
+        };
+        // `entry.requires_input` is already sorted and deduplicated by config.
+        entry
+            .requires_input
+            .iter()
+            .copied()
+            .filter(|dev| !connected.contains(dev))
+            .collect()
     }
 
     /// List the configured internet connectivity checks and their latest
@@ -231,6 +272,15 @@ impl CoreEngine {
                     check: check.map(|target| target.original.clone()),
                 });
             }
+        }
+
+        // Check required input devices (issue #96): a "learn to type" activity
+        // requiring a keyboard is hidden until one is connected. Fails open
+        // before the first detection report (see `missing_inputs`).
+        let missing = self.missing_inputs(entry);
+        if !missing.is_empty() {
+            enabled = false;
+            reasons.push(ReasonCode::RequiredInputUnavailable { devices: missing });
         }
 
         // Check if another session is active
@@ -805,6 +855,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -871,6 +922,57 @@ mod tests {
         // ready un-gates the entry.
         assert!(!engine.set_kind_readiness(EntryKindTag::Process, false));
         assert!(engine.set_kind_readiness(EntryKindTag::Process, true));
+        assert!(engine.list_entries(now)[0].enabled);
+        assert!(engine.list_entries(now)[0].reasons.is_empty());
+    }
+
+    #[test]
+    fn test_required_input_gates_show_and_launch() {
+        use shepherd_api::{InputDeviceType, ReasonCode};
+
+        let mut policy = make_test_policy();
+        policy.entries[0].requires_input = vec![InputDeviceType::Keyboard];
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let mut engine = CoreEngine::new(policy, store, caps);
+
+        let entry_id = EntryId::new("test-game");
+        let now = shepherd_util::now();
+
+        // Before any detection report the gate fails open: the entry is shown
+        // and launchable so a detection failure never hides activities.
+        assert!(engine.list_entries(now)[0].enabled);
+        assert!(matches!(
+            engine.request_launch(&entry_id, now),
+            LaunchDecision::Approved(_)
+        ));
+
+        // Report a scan with no keyboard: the entry is gated with a
+        // RequiredInputUnavailable reason naming the missing device.
+        assert!(engine.set_connected_inputs(HashSet::from([InputDeviceType::Mouse])));
+        let entries = engine.list_entries(now);
+        assert!(!entries[0].enabled, "should be gated without a keyboard");
+        assert!(
+            entries[0].reasons.iter().any(|r| matches!(
+                r,
+                ReasonCode::RequiredInputUnavailable { devices }
+                    if devices == &[InputDeviceType::Keyboard]
+            )),
+            "expected RequiredInputUnavailable reason, got: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, now),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Reporting the same set again is a no-op; plugging in a keyboard
+        // un-gates the entry.
+        assert!(!engine.set_connected_inputs(HashSet::from([InputDeviceType::Mouse])));
+        assert!(engine.set_connected_inputs(HashSet::from([
+            InputDeviceType::Mouse,
+            InputDeviceType::Keyboard,
+        ])));
         assert!(engine.list_entries(now)[0].enabled);
         assert!(engine.list_entries(now)[0].reasons.is_empty());
     }
@@ -945,6 +1047,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1039,6 +1142,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1141,6 +1245,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1219,6 +1324,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1314,6 +1420,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1392,6 +1499,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1481,6 +1589,7 @@ mod tests {
                 browser: None,
                 input_compat: vec![],
                 input_compat_options: Default::default(),
+                requires_input: vec![],
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],

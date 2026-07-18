@@ -380,6 +380,32 @@ always = true
 # type = "process"
 # command = "/usr/bin/example"
 
+# `requires_input` gates an activity on a class of physical input device being
+# connected (issue #96). The activity is hidden from the launcher — and cannot
+# be launched — whenever any listed device type is absent, and reappears as soon
+# as it is plugged in. This is different from `input_compat` above: that one
+# *translates* input while an activity runs, whereas `requires_input` decides
+# *whether the activity is shown at all*.
+#
+# The classic use is a typing tutor installed on a gaming handheld that should
+# only appear once a real keyboard is attached:
+#
+# [[entries]]
+# id = "typing-tutor"
+# label = "Learn to Type"
+# requires_input = "keyboard"        # or a list: ["keyboard", "mouse"]
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/tuxtype"
+#
+# Supported device types: "mouse", "touch", "keyboard", "gamepad". (Camera,
+# microphone, and MIDI are planned but not yet supported.) A list requires ALL
+# of the named types to be connected. Detecting devices reads /dev/input, so the
+# user running shepherdd must be in the `input` group (see docs/INSTALL.md) —
+# the same requirement as the `input_compat` bridges. If detection can't run,
+# the gate fails open (the activity stays visible) rather than hiding it.
+
 # `xwayland_native_resolution = true` is a workaround for issue #45: sway
 # does not pass output scaling to XWayland clients, so an XWayland game on
 # a panel configured with `output * scale 1.5` only renders at 1280x720 of

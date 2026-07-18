@@ -191,6 +191,21 @@ sudo ./scripts/shepherd install udev
 The group change takes effect on the user's next login; the udev rule applies
 after the next `/dev/uinput` access (or a reboot).
 
+## Input-device dependencies (optional)
+
+Activities can also declare a hardware dependency via `requires_input` (see
+`config.example.toml`) — for example a typing tutor that should only appear
+once a physical keyboard is connected. Supported types are `mouse`, `touch`,
+`keyboard`, and `gamepad`.
+
+Unlike the sidecars above, this is enforced by `shepherdd` itself: it reads
+`/dev/input/event*` to see which device types are attached and hides gated
+activities until they are. It therefore needs the daemon's user in the `input`
+group (the same `shepherd install groups` / login step as above); `/dev/uinput`
+is **not** required. If the daemon can't read `/dev/input` the gate fails open
+— gated activities stay visible and a warning is logged — so a missing group
+never silently hides content.
+
 ## Kiosk hardening (optional)
 
 Kiosk hardening is optional and intended for devices primarily used by

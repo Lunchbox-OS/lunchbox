@@ -3,7 +3,7 @@
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use shepherd_api::EntryView;
+use shepherd_api::{EntryView, ReasonCode};
 use std::cell::RefCell;
 
 mod imp {
@@ -129,7 +129,7 @@ impl LauncherTile {
         // Add tooltip with reason if not available
         if !available && !entry.reasons.is_empty() {
             // Format the first reason for tooltip
-            let reason_text = format!("{:?}", entry.reasons[0]);
+            let reason_text = reason_tooltip(&entry.reasons[0]);
             self.set_tooltip_text(Some(&reason_text));
         } else {
             self.set_tooltip_text(None);
@@ -154,5 +154,27 @@ impl LauncherTile {
 impl Default for LauncherTile {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A short, human-readable tooltip for why a tile is unavailable. Most reasons
+/// fall back to their `Debug` form (as before); the input-dependency reason
+/// (issue #96) is spelled out and names the missing device(s) so a parent can
+/// tell at a glance what to plug in.
+fn reason_tooltip(reason: &ReasonCode) -> String {
+    match reason {
+        ReasonCode::RequiredInputUnavailable { devices } => {
+            let list = devices
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if list.is_empty() {
+                "Requires an input device".to_string()
+            } else {
+                format!("Requires: {list}")
+            }
+        }
+        other => format!("{other:?}"),
     }
 }
