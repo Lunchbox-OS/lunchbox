@@ -139,6 +139,25 @@ sudo ./scripts/shepherd install bins --prefix /usr/local
 sudo ./scripts/shepherd install config --user kiosk
 ```
 
+### Uninstalling
+
+`shepherd uninstall` reverses a from-source install, removing the files
+`shepherd install` placed system-wide (binaries, firewall helper + polkit
+assets, sway config, desktop entry, udev rule). It deliberately leaves
+per-user config under `~/.config/shepherd` and group memberships in place —
+remove those by hand if you want them gone.
+
+```sh
+# Remove just the binaries (use the same --prefix you installed with)
+sudo ./scripts/shepherd uninstall bins --prefix /usr/local
+
+# Remove everything installed system-wide
+sudo ./scripts/shepherd uninstall all
+```
+
+(If you installed the `.deb`, use `sudo apt-get remove shepherd-launcher`
+instead.)
+
 ## Input compatibility sidecars (optional)
 
 Activities can opt into one or more input-compat sidecars via the

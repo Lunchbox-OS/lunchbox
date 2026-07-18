@@ -486,6 +486,234 @@ install_all() {
     info "  4. Optionally run 'shepherd harden apply --user $user' for kiosk mode"
 }
 
+# --- Uninstall -------------------------------------------------------------
+#
+# The uninstall_* functions below reverse the matching install_* steps. They
+# only remove host-global, shepherd-owned files; they deliberately leave user
+# data alone (per-user config under ~/.config/shepherd) and group memberships
+# (input/video/bluetooth/shepherd-firewall) in place, since removing those can
+# affect a user's other software and isn't reversible from a backup. Each
+# function is a no-op for files that are already gone, so uninstall is safe to
+# re-run and safe to run after a partial install.
+
+# Remove a single file if it exists, logging what happened.
+remove_path() {
+    local path="$1"
+    if [[ -e "$path" || -L "$path" ]]; then
+        info "  Removing $path"
+        rm -f "$path"
+    fi
+}
+
+# Remove the installed binaries from the bindir.
+uninstall_bins() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local bindir="$destdir$prefix/$DEFAULT_BINDIR"
+
+    info "Removing binaries from $bindir..."
+    for binary in "${SHEPHERD_BINARIES[@]}"; do
+        remove_path "$bindir/$binary"
+    done
+
+    success "Removed binaries from $bindir"
+}
+
+# Remove the firewall helper and its polkit assets. Mirrors install_firewall.
+uninstall_firewall() {
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    info "Removing firewall helper and polkit assets..."
+    remove_path "$destdir$FIREWALL_HELPER_PATH"
+    remove_path "$destdir$POLKIT_ACTIONS_DIR/$FIREWALL_POLICY_NAME"
+    remove_path "$destdir$POLKIT_RULES_DIR/$FIREWALL_RULES_NAME"
+
+    # Reload polkit on a real (non-packaging) uninstall so the dropped rule
+    # stops applying. The shepherd-firewall system group is intentionally left
+    # in place: it's harmless, and leftover files or other users may still
+    # reference it. This mirrors the .deb postrm (scripts/lib/package.sh).
+    if [[ -z "$destdir" ]]; then
+        if systemctl is-active --quiet polkit 2>/dev/null; then
+            info "Reloading polkit so the removed rule stops applying"
+            systemctl reload polkit 2>/dev/null \
+                || systemctl restart polkit 2>/dev/null \
+                || warn "Could not reload polkit; restart it manually"
+        fi
+    fi
+
+    success "Removed firewall helper"
+}
+
+# Remove the installed sway configuration. Mirrors install_sway_config.
+uninstall_sway_config() {
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local dst_dir="$destdir$SWAY_CONFIG_DIR"
+
+    info "Removing sway configuration from $dst_dir..."
+    remove_path "$dst_dir/$SHEPHERD_SWAY_CONFIG"
+
+    # Remove the site-override drop-in dir only if it is empty, to preserve any
+    # files a site placed there. Also try to remove the /etc/sway dir itself if
+    # it's now empty (it may be shared with a system sway, so ignore failure).
+    if rmdir "$dst_dir/$SHEPHERD_SWAY_CONFD" 2>/dev/null; then
+        info "  Removed empty $dst_dir/$SHEPHERD_SWAY_CONFD"
+    fi
+    rmdir "$dst_dir" 2>/dev/null || true
+
+    success "Removed sway configuration"
+}
+
+# Remove the display-manager desktop entry. Mirrors install_desktop_entry.
+uninstall_desktop_entry() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local dst_entry="$destdir$prefix/$DESKTOP_ENTRY_DIR/$DESKTOP_ENTRY_NAME"
+
+    info "Removing desktop entry..."
+    remove_path "$dst_entry"
+
+    success "Removed desktop entry"
+}
+
+# Remove the udev rule. Mirrors install_udev.
+uninstall_udev() {
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local rules_dst="$destdir$UDEV_RULES_DIR/$UINPUT_RULES_NAME"
+
+    info "Removing udev rule..."
+    remove_path "$rules_dst"
+
+    # Reload rules on a real (non-packaging) uninstall so the dropped rule
+    # stops applying. Mirrors the .deb postrm (scripts/lib/package.sh).
+    if [[ -z "$destdir" ]]; then
+        if command -v udevadm >/dev/null 2>&1; then
+            info "Reloading udev rules"
+            udevadm control --reload-rules 2>/dev/null \
+                || warn "Could not reload udev rules; reboot to fully apply"
+        fi
+    fi
+
+    success "Removed udev rule"
+}
+
+# Remove all system-wide components. The mirror of install_system: reverses
+# every host-global file an `install all` / .deb places. Per-user config and
+# group memberships are left untouched (see the note atop the uninstall block).
+uninstall_system() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+
+    uninstall_bins "$prefix"
+    uninstall_firewall
+    uninstall_sway_config
+    uninstall_desktop_entry "$prefix"
+    uninstall_udev
+}
+
+# Remove everything shepherd installed system-wide.
+uninstall_all() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+
+    require_root
+
+    info "Uninstalling shepherd-launcher (prefix: $prefix)..."
+
+    uninstall_system "$prefix"
+
+    success "Uninstall complete!"
+    info ""
+    info "Left in place (remove by hand if you want them gone):"
+    info "  - Per-user config under ~/.config/shepherd/ (config.toml, movies.toml)"
+    info "  - Group memberships (input, video, bluetooth, shepherd-firewall)"
+    info "  - The shepherd-firewall system group"
+}
+
+# Main uninstall command dispatcher. Parallels install_main.
+uninstall_main() {
+    local subcmd="${1:-}"
+    shift || true
+
+    local prefix="$DEFAULT_PREFIX"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --prefix)
+                prefix="$2"
+                shift 2
+                ;;
+            *)
+                die "Unknown option: $1"
+                ;;
+        esac
+    done
+
+    case "$subcmd" in
+        bins)
+            uninstall_bins "$prefix"
+            ;;
+        firewall)
+            uninstall_firewall
+            ;;
+        sway-config)
+            uninstall_sway_config
+            ;;
+        desktop-entry)
+            uninstall_desktop_entry "$prefix"
+            ;;
+        udev)
+            uninstall_udev
+            ;;
+        all)
+            uninstall_all "$prefix"
+            ;;
+        ""|help|-h|--help)
+            cat <<EOF
+Usage: shepherd uninstall <command> [OPTIONS]
+
+Removes files that 'shepherd install' placed system-wide. Per-user config
+(~/.config/shepherd) and group memberships are left untouched.
+
+Commands:
+    bins              Remove the installed binaries
+    firewall          Remove the firewall helper + polkit assets
+    sway-config       Remove the sway configuration
+    desktop-entry     Remove the display-manager desktop entry
+    udev              Remove the udev rule
+    all               Remove everything installed system-wide
+
+Options:
+    --prefix PREFIX   Installation prefix the files were installed under
+                      (default: $DEFAULT_PREFIX)
+
+Environment:
+    DESTDIR           Removal root, mirroring 'install' (default: empty).
+                      When set, firewall/udev skip the polkit/udev reload.
+
+Examples:
+    shepherd uninstall bins
+    shepherd uninstall bins --prefix /usr
+    shepherd uninstall all
+EOF
+            ;;
+        *)
+            die "Unknown uninstall command: $subcmd (try: shepherd uninstall help)"
+            ;;
+    esac
+}
+
 # Main install command dispatcher
 install_main() {
     local subcmd="${1:-}"
