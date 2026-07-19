@@ -92,6 +92,25 @@ Example (bedtime restriction):
 
 ## Gotchas (read before trusting a screenshot)
 
+- **`dev click` doesn't reliably activate GTK widgets.** The synthetic pointer
+  (`swaymsg seat seat0 cursor set/press/release`) does not fire GTK4
+  `connect_clicked` handlers here — a launcher grid tile won't launch and a HUD
+  button won't respond, at either logical or physical coordinates. Drive the app
+  a different way:
+  - **Launch/stop an activity** (and anything else shepherdd exposes): send
+    newline-delimited JSON-RPC to the daemon socket at
+    `./dev-runtime/shepherd.sock`, e.g.
+    `printf '{"request_id":1,"api_version":1,"method":"launch","params":{"id":"<entry-id>"}}\n' | nc -U dev-runtime/shepherd.sock`.
+    This runs the real launch path (incl. the HiDPI scale hack for
+    `xwayland_native_resolution` entries). Method names/params are in
+    `crates/shepherd-ipc/src/client.rs`.
+  - **A HUD-only UI action** (e.g. opening the "End session" confirm popover):
+    add a temporary one-shot debug hook gated behind an env var that calls
+    `widget.emit_clicked()`, boot with the env var set (it propagates from the
+    `dev headless` invocation into the sway-spawned HUD), screenshot, then remove
+    the hook. `dev key` (keyboard) *does* reach the focused surface, but the
+    always-on HUD bar uses `KeyboardMode::None`, so keys won't reach it unless a
+    popover raises it to `OnDemand`.
 - **Settle after "ready".** `dev headless` returns once the launcher *surface*
   maps, but async icon/tile loading can lag a beat (a tile may still say
   "Loading…"). For the fully-painted UI, poll `dev tree` for the specific entry,

@@ -18,3 +18,5 @@ Each of the Rust crates in <crates> contains a README.md that describes each at 
 <.github/workflows/ci.yml> and <docs/INSTALL.md> describes exact environment setup, especially if coming from Ubuntu 24.04 (shepherd-launcher requires 26.04).
 
 Historical prompts and design docs provided to agents are placed in <docs/ai/history>. Please refer there for history, and if this prompt is substantial, write it along with any relevant context (like the GitHub issue) to that directory as well.
+
+When you learn something durable and project-specific (a workflow quirk, a tooling gotcha, a non-obvious invariant), prefer writing it into in-repo documentation — this file, the relevant `.claude/skills/*/SKILL.md`, a crate `README.md`, `CONTRIBUTING.md`, or a <docs/ai/history> note — over your own private memory. In-repo docs are versioned, reviewable, and shared with every agent and human on the project; private memory is not.
