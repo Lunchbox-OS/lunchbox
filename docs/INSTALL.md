@@ -3,13 +3,38 @@
 `shepherd-launcher` can be installed on Linux with a modern Wayland compositor.
 It is currently developed and tested on Ubuntu 26.04.
 
-`shepherd-launcher` can be installed either from a prebuilt `.deb` (the quick
-path) or from source (for development). `./scripts/shepherd` can help set up
-your build environment and manage a source installation.
+`shepherd-launcher` can be installed from the apt repository (the quick path,
+with automatic upgrades), from a standalone prebuilt `.deb`, or from source (for
+development). `./scripts/shepherd` can help set up your build environment and
+manage a source installation.
 
-## Installing from a `.deb`
+## Installing from the apt repository
 
-Prebuilt amd64 packages are attached to each
+Prebuilt amd64 packages are published to this project's Forgejo Debian package
+registry, so you can install and then `apt upgrade` on future releases. Add the
+repository's signing key and source list once (prereleases are deliberately not
+published here, so `apt upgrade` only tracks stable versions):
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://git.armeafamily.com/api/packages/albert/debian/repository.key \
+  -o /etc/apt/keyrings/forgejo-albert.asc
+echo "deb [signed-by=/etc/apt/keyrings/forgejo-albert.asc] \
+https://git.armeafamily.com/api/packages/albert/debian stable main" \
+  | sudo tee /etc/apt/sources.list.d/shepherd.list
+sudo apt update
+sudo apt install shepherd-launcher
+```
+
+`apt` pulls in the runtime dependencies (Sway, mpv, BlueZ, …) from the Ubuntu
+archive; the Forgejo repository only carries `shepherd-launcher` itself. Post-
+install (package contents, per-user setup) is identical to the standalone `.deb`
+below — continue with the `shepherd-admin setup-user` step described there.
+
+## Installing from a standalone `.deb`
+
+If you'd rather not add the apt repository, prebuilt amd64 packages are also
+attached to each
 [release](https://git.armeafamily.com/albert/shepherd-launcher/releases).
 Download the `.deb` for the version you want and install it with `apt`, which
 also pulls in the runtime dependencies (Sway, mpv, BlueZ, …):
