@@ -45,8 +45,14 @@ for f in "$@"; do
     name="$(basename "$f")"
     echo "Publishing $name to ${dist}/${component}"
     body="$(mktemp)"
+    # Send the .deb as a raw body with an explicit octet-stream Content-Type.
+    # curl's --data-binary otherwise defaults to application/x-www-form-urlencoded,
+    # which Forgejo's upload handler treats as a form upload and runs through the
+    # multipart parser — failing with a 500 "request Content-Type isn't
+    # multipart/form-data". A non-form content type takes the raw-body path.
     code="$(curl -sS -o "$body" -w '%{http_code}' -X PUT "$url" \
-        -H "$auth" --data-binary @"$f")"
+        -H "$auth" -H 'Content-Type: application/octet-stream' \
+        --data-binary @"$f")"
     case "$code" in
         201) echo "  published $name" ;;
         409) echo "  already published $name (idempotent)" ;;
