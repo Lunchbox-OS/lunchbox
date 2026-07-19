@@ -209,6 +209,50 @@ impl InputCompatMode {
     }
 }
 
+/// A category of physical input device an activity can depend on (issue #96).
+///
+/// Distinct from [`InputCompatMode`], which changes how input is *translated*
+/// while an activity runs. `InputDeviceType` is a *gating* concept: an activity
+/// can require one or more of these device types to be connected before it is
+/// shown or launchable. The canonical example is a "learn to type" activity
+/// installed on a gaming handheld that should only appear once a physical
+/// keyboard is attached.
+///
+/// Camera/microphone and MIDI are intentionally omitted for now; the issue
+/// marks them as future work and this enum is closed, so configuring one is a
+/// parse error rather than a silently-ignored value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputDeviceType {
+    /// A relative pointing device (mouse, trackball, trackpad).
+    Mouse,
+    /// A finger touchscreen (an absolute, direct-input touch device).
+    Touch,
+    /// A physical alphabetic keyboard.
+    Keyboard,
+    /// A gamepad / game controller / joystick.
+    Gamepad,
+}
+
+impl InputDeviceType {
+    /// Lowercase, human-facing label ("mouse", "touch", ...). Matches the
+    /// snake_case config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mouse => "mouse",
+            Self::Touch => "touch",
+            Self::Keyboard => "keyboard",
+            Self::Gamepad => "gamepad",
+        }
+    }
+}
+
+impl std::fmt::Display for InputDeviceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How a supervised browser activity launches its window.
 ///
 /// Translated by the host adapter into Chrome command-line flags. Shared by
@@ -311,6 +355,10 @@ pub enum ReasonCode {
     InternetUnavailable { check: Option<String> },
     /// Entry is manually disabled for the day via a daily override
     ManuallyDisabled { until: NaiveDate },
+    /// One or more required input devices (issue #96) are not currently
+    /// connected. `devices` lists the missing device types, sorted and
+    /// deduplicated.
+    RequiredInputUnavailable { devices: Vec<InputDeviceType> },
 }
 
 /// Warning severity level

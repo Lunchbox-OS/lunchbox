@@ -42,6 +42,7 @@ use tracing_subscriber::EnvFilter;
 mod display;
 mod display_watch;
 mod hidpi;
+mod input_devices;
 mod internet;
 mod pairing_display;
 mod system_events;
@@ -83,6 +84,7 @@ struct Service {
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
     internet_monitor: Option<internet::InternetMonitor>,
+    input_monitor: Option<input_devices::InputMonitor>,
 }
 
 impl Service {
@@ -164,6 +166,10 @@ impl Service {
         // Initialize internet connectivity monitor (if configured)
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
+        // Initialize input-device dependency monitor (issue #96). Only runs when
+        // some entry declares `requires_input`.
+        let input_monitor = input_devices::InputMonitor::from_policy(engine.policy());
+
         // Initialize IPC server
         let mut ipc = IpcServer::new(&socket_path);
         ipc.start().await?;
@@ -184,6 +190,7 @@ impl Service {
             store,
             rate_limiter,
             internet_monitor,
+            input_monitor,
         })
     }
 
@@ -451,6 +458,22 @@ impl Service {
         } else {
             None
         };
+
+        // Input-device dependency monitor (issue #96): tracks which input device
+        // types are connected and re-broadcasts availability on hotplug so
+        // input-gated entries (e.g. a typing tutor requiring a keyboard) show and
+        // hide as hardware is attached/removed.
+        if let Some(monitor) = self.input_monitor {
+            let engine_ref = engine.clone();
+            let ipc_for_monitor = ipc_ref.clone();
+            let event_tx_for_monitor = event_tx.clone();
+            tokio::spawn(async move {
+                monitor
+                    .run(engine_ref, ipc_for_monitor, event_tx_for_monitor)
+                    .await;
+            });
+        }
+
         {
             let ipc_for_sys = ipc_ref.clone();
             let event_tx_for_sys = event_tx.clone();

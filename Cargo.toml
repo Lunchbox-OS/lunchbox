@@ -96,6 +96,10 @@ nix = { version = "0.29", features = ["signal", "process", "user", "socket"] }
 # File watching
 notify = "6"
 
+# Input device enumeration (evdev). Shared with the input-compat bridges,
+# which pin the same version directly.
+evdev = "0.13"
+
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
 

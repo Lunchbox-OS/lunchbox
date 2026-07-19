@@ -182,6 +182,7 @@ fn test_policy() -> Policy {
             browser: None,
             input_compat: vec![],
             input_compat_options: Default::default(),
+            requires_input: vec![],
             xwayland_native_resolution: false,
             confirm_on_close: false,
         }],

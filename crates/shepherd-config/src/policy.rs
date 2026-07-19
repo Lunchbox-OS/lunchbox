@@ -8,13 +8,13 @@ use crate::internet::{
 use crate::schema::{
     RawAutoBrightnessConfig, RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig,
     RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
-    RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
-    RawWarningThreshold,
+    RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawSteamConfig,
+    RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
-    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InterstitialKind, WarningSeverity,
-    WarningThreshold,
+    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InputDeviceType, InterstitialKind,
+    WarningSeverity, WarningThreshold,
 };
 use shepherd_util::{
     DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
@@ -359,6 +359,11 @@ pub struct Entry {
     /// validated (no conflicting gamepad presets) by `Entry::from_raw`.
     pub input_compat: Vec<InputCompatMode>,
     pub input_compat_options: InputCompatOptions,
+    /// Physical input device types this entry depends on (issue #96). The
+    /// entry is gated (shown as unavailable) whenever any listed type is not
+    /// currently connected. Sorted and deduplicated by `Entry::from_raw`; an
+    /// empty list means no requirement.
+    pub requires_input: Vec<InputDeviceType>,
     /// Drop sway's output scale to 1.0 while this activity is running so
     /// XWayland clients get the panel's native pixel grid. See the
     /// corresponding field on [`RawEntry`] for the full rationale.
@@ -406,6 +411,7 @@ impl Entry {
             .as_ref()
             .map(convert_input_compat_options)
             .unwrap_or_default();
+        let requires_input = convert_input_device_list(&raw.requires_input);
 
         Self {
             id: EntryId::new(raw.id),
@@ -424,6 +430,7 @@ impl Entry {
             browser,
             input_compat,
             input_compat_options,
+            requires_input,
             xwayland_native_resolution: raw.xwayland_native_resolution,
             confirm_on_close: raw.confirm_on_close,
         }
@@ -798,6 +805,25 @@ fn convert_input_compat_options(raw: &RawInputCompatOptions) -> InputCompatOptio
         gamepad_mouse_speed: raw.gamepad_mouse_speed,
         gamepad_scroll_speed: raw.gamepad_scroll_speed,
     }
+}
+
+fn convert_input_device(raw: RawInputDevice) -> InputDeviceType {
+    match raw {
+        RawInputDevice::Mouse => InputDeviceType::Mouse,
+        RawInputDevice::Touch => InputDeviceType::Touch,
+        RawInputDevice::Keyboard => InputDeviceType::Keyboard,
+        RawInputDevice::Gamepad => InputDeviceType::Gamepad,
+    }
+}
+
+/// Convert a raw `requires_input` list into a sorted, deduplicated set of
+/// device types. Sorting keeps the gating reason (and any UI text derived from
+/// it) stable regardless of config order.
+fn convert_input_device_list(raw: &[RawInputDevice]) -> Vec<InputDeviceType> {
+    let mut out: Vec<InputDeviceType> = raw.iter().copied().map(convert_input_device).collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn convert_entry_internet(raw: Option<&crate::schema::RawEntryInternet>) -> EntryInternetPolicy {

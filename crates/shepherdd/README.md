@@ -53,6 +53,12 @@ The Shepherd background service.
   to external-only at native resolution. A `swaymsg` output-event subscription
   drives reconciliation on hotplug. Exactly one logical output is active in
   every mode, preserving the one-activity-at-a-time invariant.
+- `input_devices` (`InputMonitor`) — input-device dependencies (issue #96).
+  When an entry declares `requires_input`, enumerates `/dev/input` via `evdev`
+  to see which device types (mouse/touch/keyboard/gamepad) are connected, feeds
+  the set into the engine, and re-broadcasts availability on hotplug (a `notify`
+  watch on `/dev/input` plus a slow fallback re-scan). Gates fail open when
+  `/dev/input` isn't readable.
 
 ## Usage
 

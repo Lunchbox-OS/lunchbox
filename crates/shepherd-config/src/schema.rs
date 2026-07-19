@@ -142,6 +142,15 @@ pub struct RawEntry {
     #[serde(default)]
     pub input_compat_options: Option<RawInputCompatOptions>,
 
+    /// Physical input devices this entry depends on (issue #96). The entry is
+    /// only shown / launchable while every listed device type is connected;
+    /// e.g. `requires_input = "keyboard"` hides a typing tutor until a keyboard
+    /// is attached. Accepts a single string (`requires_input = "keyboard"`) or
+    /// a list (`requires_input = ["keyboard", "mouse"]`). Empty / absent means
+    /// no input requirement.
+    #[serde(default, deserialize_with = "deserialize_input_device_list")]
+    pub requires_input: Vec<RawInputDevice>,
+
     /// Drop the compositor output scale to 1.0 for the duration of this
     /// activity so XWayland clients render at the panel's native resolution.
     /// Sway doesn't pass scale through to XWayland (issue #45), so without
@@ -297,6 +306,46 @@ where
     enum OneOrMany {
         One(RawInputCompat),
         Many(Vec<RawInputCompat>),
+    }
+
+    match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Ok(Vec::new()),
+        Some(OneOrMany::One(v)) => Ok(vec![v]),
+        Some(OneOrMany::Many(v)) => Ok(v),
+    }
+}
+
+/// A category of physical input device an activity can depend on (issue #96).
+///
+/// Unlike [`RawInputCompat`], which is a *spawn-time behaviour* (it launches an
+/// input-translation sidecar), this is a *gating* condition: the activity is
+/// only shown / launchable when every listed device type is connected. The
+/// enum is closed, so `camera`, `microphone`, and `midi` (future work) fail to
+/// parse rather than being silently accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawInputDevice {
+    /// A relative pointing device (mouse, trackball, trackpad).
+    Mouse,
+    /// A finger touchscreen.
+    Touch,
+    /// A physical alphabetic keyboard.
+    Keyboard,
+    /// A gamepad / game controller / joystick.
+    Gamepad,
+}
+
+/// Accept either a single `RawInputDevice` value or a list of them. Empty list
+/// and missing field both deserialize to `vec![]`.
+fn deserialize_input_device_list<'de, D>(deserializer: D) -> Result<Vec<RawInputDevice>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(RawInputDevice),
+        Many(Vec<RawInputDevice>),
     }
 
     match Option::<OneOrMany>::deserialize(deserializer)? {
@@ -740,6 +789,72 @@ mod tests {
         "#;
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert!(config.entries[0].input_compat.is_empty());
+    }
+
+    #[test]
+    fn parse_requires_input_scalar() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "typing"
+            label = "Typing Tutor"
+            kind = { type = "process", command = "/bin/typing" }
+            requires_input = "keyboard"
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.entries[0].requires_input,
+            vec![RawInputDevice::Keyboard]
+        );
+    }
+
+    #[test]
+    fn parse_requires_input_list() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "typing"
+            label = "Typing Tutor"
+            kind = { type = "process", command = "/bin/typing" }
+            requires_input = ["keyboard", "mouse"]
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.entries[0].requires_input,
+            vec![RawInputDevice::Keyboard, RawInputDevice::Mouse]
+        );
+    }
+
+    #[test]
+    fn parse_requires_input_absent() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.entries[0].requires_input.is_empty());
+    }
+
+    #[test]
+    fn parse_requires_input_rejects_future_types() {
+        // camera/microphone/midi are future work; the closed enum should make
+        // configuring one a parse error rather than a silent no-op.
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+            kind = { type = "process", command = "/bin/g" }
+            requires_input = "camera"
+        "#;
+        assert!(toml::from_str::<RawConfig>(toml_str).is_err());
     }
 
     #[test]
