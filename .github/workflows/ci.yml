@@ -274,6 +274,10 @@ jobs:
         # >= 1.23 (Ubuntu 26.04, this image) produces by default. package.sh
         # pins `-Zxz`; assert both members are xz here so a drift back to the
         # zstd default is caught on every PR, not at release-tag time.
+        #
+        # shell: bash — the Forgejo runner defaults inline `run:` to sh (dash),
+        # which can't parse the array/here-string below.
+        shell: bash
         run: |
           set -euo pipefail
           debs=(dist/pkg/*.deb)
