@@ -538,6 +538,13 @@ fn build_hud_content(
     let confirm_popover = gtk4::Popover::new();
     confirm_popover.set_parent(&action_button);
     confirm_popover.add_css_class("confirm-close-popover");
+    // Drop the prompt straight down from the "X" button. The button sits at the
+    // extreme right of the bar, so the default (horizontally centered) placement
+    // would put half the popover past the right screen edge — and neither GTK
+    // nor the compositor slides an oversized layer-shell popup back on-screen,
+    // so it gets clipped (issue #97). `popup()` below additionally offsets it
+    // left to keep it fully visible; Bottom gives it unlimited vertical room.
+    confirm_popover.set_position(gtk4::PositionType::Bottom);
     // Autohide so the prompt dismisses itself when it loses focus (the user
     // taps the activity, presses Escape, etc.). Autohide relies on an input
     // grab that needs the layer surface to accept keyboard focus, so we switch
@@ -589,8 +596,9 @@ fn build_hud_content(
 
     let state_for_action = state.clone();
     let popover_for_action = confirm_popover.clone();
+    let confirm_box_for_offset = confirm_box.clone();
     let window_for_action = window.clone();
-    action_button.connect_clicked(move |_| {
+    action_button.connect_clicked(move |btn| {
         let session_state = state_for_action.session_state();
         let socket_path = default_socket_path();
         if session_state.session_id().is_some() {
@@ -603,6 +611,25 @@ fn build_hud_content(
                     confirm_label.set_text("End this activity? Unsaved progress may be lost.");
                 }
                 window_for_action.set_keyboard_mode(KeyboardMode::OnDemand);
+                // Right-align the popover to the button instead of letting it
+                // center and spill off the right screen edge (issue #97). A
+                // Bottom popover is centered on the button, so shifting its
+                // center left by (popover_width - button_width)/2 lands its
+                // right edge on the button's right edge — fully on-screen, and
+                // independent of the compositor doing any slide-to-fit.
+                //
+                // Measure the content box (a plain widget) rather than the
+                // popover itself: a GtkPopover is a native surface and reports a
+                // near-zero preferred size before it is mapped. Add the popover
+                // chrome (the `> contents` padding, which scales with the HUD
+                // factor) so the whole surface, not just the content, clears the
+                // edge.
+                let (_, content_w, _, _) =
+                    confirm_box_for_offset.measure(gtk4::Orientation::Horizontal, -1);
+                let chrome = (2.0 * 14.0 * state_for_action.scale_factor()).round() as i32;
+                let popover_w = content_w + chrome;
+                let (_, button_w, _, _) = btn.measure(gtk4::Orientation::Horizontal, -1);
+                popover_for_action.set_offset((button_w - popover_w) / 2, 0);
                 popover_for_action.popup();
             } else {
                 request_stop_current(socket_path);
