@@ -268,6 +268,28 @@ jobs:
       - name: Inspect package metadata
         run: dpkg-deb -I dist/pkg/*.deb
 
+      - name: Assert .deb uses xz compression
+        # Forgejo's Debian registry (Gitea-compat 1.22) answers the apt-registry
+        # upload with HTTP 500 on a zstd control.tar — which is what dpkg-deb
+        # >= 1.23 (Ubuntu 26.04, this image) produces by default. package.sh
+        # pins `-Zxz`; assert both members are xz here so a drift back to the
+        # zstd default is caught on every PR, not at release-tag time.
+        run: |
+          set -euo pipefail
+          debs=(dist/pkg/*.deb)
+          deb="${debs[0]}"
+          members="$(ar t "$deb")"
+          echo "$deb members:"
+          echo "$members"
+          for m in control data; do
+            if ! grep -Fxq "$m.tar.xz" <<<"$members"; then
+              found="$(grep "^$m\.tar" <<<"$members" || echo '(none)')"
+              echo "::error::$deb: expected $m.tar.xz but found: $found"
+              exit 1
+            fi
+          done
+          echo "OK: control.tar.xz + data.tar.xz"
+
   versions:
     name: Version harmony
     # No custom image needed: the default job container (node:20-bookworm) has
