@@ -22,6 +22,19 @@ env:
 # registry on this Forgejo instance (it authenticates fine for read but 401s on
 # push). `secrets: inherit` passes REGISTRY_TOKEN through to the reusable
 # workflow.
+#
+# Cargo caching is split in two so the parallel compile jobs cooperate instead
+# of racing:
+#   * The dep registry (~/.cargo/registry + ~/.cargo/git) lives under ONE shared
+#     key. The `warmup` job below populates it once (via `cargo fetch`) before
+#     any compile job starts, so build/test/e2e/lint/package don't each cold-
+#     download the same crates in parallel. Those jobs restore it read-only
+#     (actions/cache/restore) — only `warmup` ever writes it, so there's no
+#     save race on the shared key.
+#   * target/ lives under a PER-JOB key. `cargo test --all-targets`,
+#     `cargo clippy --all-targets`, and a plain build produce different target/
+#     contents, so a single shared key had them clobbering each other's save.
+#     Per-job keys let each keep its own incremental artifacts.
 
 jobs:
   images:
@@ -31,8 +44,8 @@ jobs:
       packages: write
     secrets: inherit
 
-  build:
-    name: Build
+  warmup:
+    name: Warm cargo registry
     needs: images
     runs-on: ubuntu-latest
     container:
@@ -43,26 +56,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry and build
+      # Populate (and, on a lockfile change, refresh) the shared dep registry
+      # once. This job is the ONLY writer of the registry key; downstream
+      # compile jobs restore it read-only. actions/cache skips the post-run
+      # save on an exact-key hit, so a warm run costs nothing extra here.
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
-          # The image already provides ~/.cargo/bin (bpf-linker) and
-          # ~/.rustup/toolchains; only the dep registry and target/
-          # vary by branch and warrant per-branch caching.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-registry-v1-
+
+      - name: Fetch dependencies
+        # --locked also guards against a stale committed Cargo.lock: it fails
+        # here (before any compile job) rather than silently updating it in-CI.
+        run: cargo fetch --locked
+
+  build:
+    name: Build
+    needs: [images, warmup]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.images.outputs.base-ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image already provides ~/.cargo/bin (bpf-linker) and
+      # ~/.rustup/toolchains; only the dep registry (shared, populated by
+      # `warmup`) and target/ (per-job) vary and warrant caching.
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-v1-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-build-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-build-v1-
 
       - name: Build
         run: ./scripts/shepherd build
 
   test:
     name: Test
-    needs: images
+    needs: [images, warmup]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.images.outputs.base-ref }}
@@ -72,23 +123,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-registry-v1-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-test-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-test-v1-
 
       - name: Run tests
         run: cargo test --all-targets
 
   e2e:
     name: E2E
-    needs: images
+    needs: [images, warmup]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.images.outputs.base-ref }}
@@ -98,16 +156,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-registry-v1-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-e2e-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-e2e-v1-
 
       - name: Build binaries (e2e harness execs them from target/debug)
         run: ./scripts/shepherd build
@@ -117,7 +182,7 @@ jobs:
 
   lint:
     name: Clippy
-    needs: images
+    needs: [images, warmup]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.images.outputs.base-ref }}
@@ -127,16 +192,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-registry-v1-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-clippy-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-clippy-v1-
 
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -162,7 +234,7 @@ jobs:
     # a release tag ever runs release.yml. Nothing is published — this only
     # proves `shepherd package deb` (release build → DESTDIR stage → dpkg-deb)
     # still works. Runs as root in the container, so no fakeroot is needed.
-    needs: images
+    needs: [images, warmup]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.images.outputs.base-ref }}
@@ -172,16 +244,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-registry-v1-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-package-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-package-v1-
 
       - name: Build .deb
         run: ./scripts/shepherd package deb --out dist/pkg
