@@ -23,6 +23,8 @@ name: Release
 #   RELEASE_TOKEN               repo-write PAT to create the release + upload
 #                               assets. (Not FORGEJO_*/GITEA_*/GITHUB_* — Forgejo
 #                               reserves those prefixes for secret names.)
+#   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
+#                               .deb into Forgejo's Debian (apt) package registry.
 #   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
 #   SHEPHERD_KEYSTORE_PASSWORD  keystore password
 #   SHEPHERD_KEY_ALIAS          signing key alias
@@ -172,6 +174,22 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb
+
+      # Also publish to Forgejo's Debian package registry so users get an
+      # `apt update`/`apt upgrade` path (the release asset above stays the
+      # offline/manual download). Forgejo signs the repo metadata itself, so the
+      # .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1) are
+      # skipped so RC builds never reach `apt upgrade` users — they still get the
+      # signed release asset for manual testing. See docs/INSTALL.md.
+      - name: Publish .deb to the apt registry
+        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+          APT_DIST: stable
+          APT_COMPONENT: main
+        run: ./scripts/ci/publish-apt.sh dist/pkg/*.deb
 
       - name: Dry run note
         if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
