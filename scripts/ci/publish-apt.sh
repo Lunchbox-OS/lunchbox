@@ -44,14 +44,20 @@ for f in "$@"; do
     fi
     name="$(basename "$f")"
     echo "Publishing $name to ${dist}/${component}"
-    code="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$url" \
+    body="$(mktemp)"
+    code="$(curl -sS -o "$body" -w '%{http_code}' -X PUT "$url" \
         -H "$auth" --data-binary @"$f")"
     case "$code" in
         201) echo "  published $name" ;;
         409) echo "  already published $name (idempotent)" ;;
         *)
             echo "::error::PUT $url -> HTTP $code" >&2
+            # Surface the server's response so a failure is diagnosable from the
+            # job log (e.g. an unsupported-compression 500 from the registry).
+            sed 's/^/  /' "$body" >&2 || true
+            rm -f "$body"
             exit 1
             ;;
     esac
+    rm -f "$body"
 done

@@ -138,7 +138,13 @@ package_deb() {
     info "Building $deb..."
     # --root-owner-group forces root:root ownership in the archive regardless
     # of who (or what fakeroot) staged the files.
-    dpkg-deb --root-owner-group --build "$stage" "$deb"
+    #
+    # -Zxz forces xz for BOTH the control.tar and data.tar members. dpkg-deb
+    # >= 1.23 (Ubuntu 26.04) defaults to zstd, but Forgejo's Debian package
+    # registry (Gitea-compat 1.22) can't decompress a zstd control.tar and
+    # answers the apt-registry upload with HTTP 500. xz is understood by every
+    # apt tool and every Forgejo/Gitea Debian parser, so we pin it.
+    dpkg-deb -Zxz --root-owner-group --build "$stage" "$deb"
 
     success "Built $deb"
     echo "$deb"
