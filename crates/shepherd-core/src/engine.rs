@@ -3,7 +3,7 @@
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     API_VERSION, EntryKindTag, EntryView, GroupView, InputDeviceType, InternetStatusView,
-    ReasonCode, ServiceStateSnapshot, SessionEndReason, WarningSeverity,
+    ReasonCode, ServiceStateSnapshot, SessionEndReason, TokenStatus, WarningSeverity,
 };
 use shepherd_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -28,6 +28,18 @@ pub enum LaunchDecision {
 pub enum StopDecision {
     Stopped(StopResult),
     NoActiveSession,
+}
+
+/// Why a manual token adjustment couldn't be applied (issue #8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenAdjustError {
+    /// No entry or group with that ID.
+    UnknownSubject,
+    /// The subject exists but has no `[tokens]` gate, so a balance on it would
+    /// be written and never read.
+    NotGated,
+    /// The balance could not be persisted.
+    Store(String),
 }
 
 /// The core policy engine
@@ -243,6 +255,10 @@ impl CoreEngine {
                         quota_delta,
                         availability == Some(true),
                     ),
+                    tokens: group
+                        .tokens
+                        .as_ref()
+                        .map(|t| self.token_status_of(&group.subject(), t, today)),
                 }
             })
             .collect()
@@ -312,10 +328,10 @@ impl CoreEngine {
         // If manually disabled by a parent override — on the entry or on its
         // group — short-circuit all other checks
         if daily_override.as_ref().and_then(|o| o.availability) == Some(false) {
-            return Self::manually_disabled_view(entry, today, None);
+            return self.manually_disabled_view(entry, today, None);
         }
         if group_override.as_ref().and_then(|o| o.availability) == Some(false) {
-            return Self::manually_disabled_view(entry, today, group);
+            return self.manually_disabled_view(entry, today, group);
         }
 
         // A force-enable on either the entry or its group lifts the entry's own
@@ -469,6 +485,10 @@ impl CoreEngine {
             enabled,
             group: entry.group.clone(),
             reasons,
+            tokens: entry
+                .tokens
+                .as_ref()
+                .map(|t| self.token_status_of(&entry.subject(), t, today)),
             max_run_if_started_now,
         }
     }
@@ -561,7 +581,12 @@ impl CoreEngine {
 
     /// The view for an entry a parent has switched off for the day, either
     /// directly or via its group.
-    fn manually_disabled_view(entry: &Entry, today: NaiveDate, group: Option<&Group>) -> EntryView {
+    fn manually_disabled_view(
+        &self,
+        entry: &Entry,
+        today: NaiveDate,
+        group: Option<&Group>,
+    ) -> EntryView {
         let reason = ReasonCode::ManuallyDisabled { until: today };
         EntryView {
             entry_id: entry.id.clone(),
@@ -578,6 +603,12 @@ impl CoreEngine {
                 },
                 None => reason,
             }],
+            // Still reported: a caregiver switching an activity back on wants
+            // to know whether there is banked time waiting for it.
+            tokens: entry
+                .tokens
+                .as_ref()
+                .map(|t| self.token_status_of(&entry.subject(), t, today)),
             max_run_if_started_now: None,
         }
     }
@@ -678,6 +709,89 @@ impl CoreEngine {
                 TokenState::default()
             }
         }
+    }
+
+    /// A subject's gate as a caregiver-facing view (issue #8).
+    fn token_status_of(
+        &self,
+        subject: &LimitSubject,
+        tokens: &TokensPolicy,
+        today: NaiveDate,
+    ) -> TokenStatus {
+        let state = self.token_state_of(subject, tokens, today);
+        TokenStatus {
+            balance: state.balance,
+            minimum: tokens.minimum,
+            unlocked: tokens.unlocked(state.balance, state.ratcheted),
+            max_balance: tokens.max_balance,
+            carry_over: tokens.carry_over,
+        }
+    }
+
+    /// Grant or revoke banked time on a gate (issue #8).
+    ///
+    /// Granted time behaves exactly like earned time: it lands in the same
+    /// balance, is capped by `max_balance`, is spent by the gated activity's
+    /// sessions, and opens the gate only once the balance reaches
+    /// `minimum_seconds`. A caregiver who wants an activity on regardless has
+    /// the availability override for that.
+    pub fn adjust_tokens(
+        &self,
+        subject: &LimitSubject,
+        delta_seconds: i64,
+        now: DateTime<Local>,
+    ) -> Result<TokenStatus, TokenAdjustError> {
+        let tokens = self
+            .policy
+            .tokens_of(subject)
+            .ok_or_else(|| match subject {
+                LimitSubject::Entry(id) if self.policy.get_entry(id).is_some() => {
+                    TokenAdjustError::NotGated
+                }
+                LimitSubject::Group(id) if self.policy.get_group(id).is_some() => {
+                    TokenAdjustError::NotGated
+                }
+                _ => TokenAdjustError::UnknownSubject,
+            })?;
+
+        let today = now.date_naive();
+        let state = self
+            .store
+            .adjust_token_balance(subject, today, tokens.carry_over, delta_seconds)
+            .map_err(|e| TokenAdjustError::Store(e.to_string()))?;
+
+        // Claw back anything past the ceiling, the same as earning does.
+        let mut balance = state.balance;
+        if let Some(max_balance) = tokens.max_balance
+            && balance > max_balance
+        {
+            let excess = (balance - max_balance).as_secs() as i64;
+            match self
+                .store
+                .adjust_token_balance(subject, today, tokens.carry_over, -excess)
+            {
+                Ok(state) => balance = state.balance,
+                Err(e) => warn!(subject = %subject, error = %e, "Failed to cap token balance"),
+            }
+        }
+
+        if balance >= tokens.minimum
+            && let Err(e) = self
+                .store
+                .set_token_ratchet(subject, today, tokens.carry_over)
+        {
+            warn!(subject = %subject, error = %e, "Failed to record token gate unlock");
+        }
+
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::TokensAdjusted {
+                subject: subject.clone(),
+                delta_seconds,
+                balance,
+            }));
+
+        Ok(self.token_status_of(subject, tokens, today))
     }
 
     /// A subject's banked token balance under the given gate.
@@ -3022,6 +3136,134 @@ mod tests {
         assert!(
             !view(&engine.list_entries(now), "minecraft").enabled,
             "the ratchet should release once the balance is spent"
+        );
+    }
+
+    /// A caregiver's grant behaves exactly like earned time: banked, capped,
+    /// spendable, and opening the gate only at `minimum_seconds` (issue #8).
+    #[test]
+    fn test_manual_grant_banks_time_and_ratchets_at_the_minimum() {
+        let policy = make_token_policy(TokensPolicy {
+            from: vec![LimitSubject::entry("scratch")],
+            earn_ratio: 1.0,
+            minimum: Duration::from_secs(600),
+            max_balance: Some(Duration::from_secs(900)),
+            carry_over: false,
+        });
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+        let minecraft = LimitSubject::entry("minecraft");
+
+        // Short of the threshold: banked, still locked. A grant is not a
+        // bypass — the availability override is the tool for that.
+        let status = engine.adjust_tokens(&minecraft, 300, now).unwrap();
+        assert_eq!(status.balance, Duration::from_secs(300));
+        assert!(!status.unlocked);
+        assert!(!view(&engine.list_entries(now), "minecraft").enabled);
+
+        // Crossing it opens the gate.
+        let status = engine.adjust_tokens(&minecraft, 300, now).unwrap();
+        assert!(status.unlocked);
+        let entries = engine.list_entries(now);
+        let v = view(&entries, "minecraft");
+        assert!(v.enabled);
+        assert_eq!(v.max_run_if_started_now, Some(Duration::from_secs(600)));
+
+        // Granted time is spent by a session like any other.
+        run_session(&mut engine, "minecraft", Duration::from_secs(200), now);
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(400)
+        );
+
+        // The ceiling applies to grants too, and revoking saturates at zero.
+        assert_eq!(
+            engine.adjust_tokens(&minecraft, 5000, now).unwrap().balance,
+            Duration::from_secs(900),
+        );
+        assert_eq!(
+            engine
+                .adjust_tokens(&minecraft, -5000, now)
+                .unwrap()
+                .balance,
+            Duration::ZERO,
+        );
+        assert!(!view(&engine.list_entries(now), "minecraft").enabled);
+    }
+
+    #[test]
+    fn test_manual_grant_rejects_subjects_with_no_gate() {
+        let policy = make_token_policy(tokens_from(&["scratch"]));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // An ungated entry has no balance anything would read, so writing one
+        // would be a silent no-op rather than a grant.
+        assert_eq!(
+            engine
+                .adjust_tokens(&LimitSubject::entry("scratch"), 300, now)
+                .unwrap_err(),
+            TokenAdjustError::NotGated,
+        );
+        assert_eq!(
+            engine
+                .adjust_tokens(&LimitSubject::entry("nope"), 300, now)
+                .unwrap_err(),
+            TokenAdjustError::UnknownSubject,
+        );
+        assert_eq!(
+            engine
+                .adjust_tokens(&LimitSubject::group("nope"), 300, now)
+                .unwrap_err(),
+            TokenAdjustError::UnknownSubject,
+        );
+    }
+
+    /// A grant on a category unlocks every member, and the views report it.
+    #[test]
+    fn test_manual_grant_on_a_group_unlocks_its_members() {
+        let policy = make_group_policy(group(
+            "games",
+            no_limits(),
+            Some(TokensPolicy {
+                from: vec![LimitSubject::entry("ungrouped")],
+                earn_ratio: 1.0,
+                minimum: Duration::from_secs(600),
+                max_balance: None,
+                carry_over: false,
+            }),
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        let status = engine
+            .adjust_tokens(&LimitSubject::group("games"), 600, now)
+            .unwrap();
+        assert!(status.unlocked);
+
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            assert!(
+                view(&entries, id).enabled,
+                "{id} should unlock with its category"
+            );
+        }
+
+        // And the caregiver-facing status rides along on the views.
+        let groups = engine.list_groups(now);
+        let tokens = groups[0]
+            .tokens
+            .as_ref()
+            .expect("group gate should be reported");
+        assert_eq!(tokens.balance, Duration::from_secs(600));
+        assert_eq!(tokens.minimum, Duration::from_secs(600));
+        assert!(tokens.unlocked);
+        assert!(
+            view(&entries, "game-a").tokens.is_none(),
+            "a member has no gate of its own; the category's is on the GroupView"
         );
     }
 

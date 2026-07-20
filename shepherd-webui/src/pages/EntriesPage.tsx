@@ -20,6 +20,7 @@ import {
   listGroups,
   listOverrides,
   upsertOverride,
+  adjustTokens,
 } from "../api/client";
 import {
   durationToSecs,
@@ -28,6 +29,7 @@ import {
   type DailyOverride,
   type EntryView,
   type GroupView,
+  type TokenStatus,
 } from "../api/types";
 
 import { useEvents } from "../hooks/useEvents";
@@ -142,6 +144,25 @@ export function EntriesPage() {
     onSettled: () => setBusyId(null),
   });
 
+  // Granting banked time (issue #8). Unlike the quota delta this is not an
+  // override field: it moves the same balance that playing a source activity
+  // fills and the gated activity spends, so it commits straight through.
+  const adjustTokensMutation = useMutation({
+    mutationFn: ({ target, deltaSeconds }: { target: LimitTarget; deltaSeconds: number }) =>
+      adjustTokens(target.subject, deltaSeconds),
+    onMutate: ({ target }) => setBusyId(target.subject),
+    onSuccess: (status, { target, deltaSeconds }) => {
+      const sign = deltaSeconds > 0 ? "+" : "−";
+      flash(
+        `${target.label}: earned time ${sign}${formatDurationHuman(Math.abs(deltaSeconds))} ` +
+          `(now ${formatDurationHuman(status.balance.secs)})`,
+      );
+      invalidateAll();
+    },
+    onError: (e: Error) => flash(e.message),
+    onSettled: () => setBusyId(null),
+  });
+
   // Instant-commit quota adjustment — matches how availability changes
   // are already applied. Preserves the current availability override
   // (if any) so bumping quota doesn't accidentally clear an "Off today"
@@ -245,6 +266,9 @@ export function EntriesPage() {
                       currentAvailability: override?.availability ?? null,
                     });
                   }}
+                  onAdjustTokens={(deltaSeconds) =>
+                    adjustTokensMutation.mutate({ target, deltaSeconds })
+                  }
                 />
               );
             })}
@@ -276,6 +300,9 @@ export function EntriesPage() {
                   currentAvailability: override?.availability ?? null,
                 });
               }}
+              onAdjustTokens={(deltaSeconds) =>
+                adjustTokensMutation.mutate({ target: entryTarget(entry), deltaSeconds })
+              }
             />
           );
         })}
@@ -293,6 +320,64 @@ export function EntriesPage() {
  *  companion's `−5` / `+5` stepper. */
 const QUOTA_STEP_SECS = 5 * 60;
 
+/** Step (seconds) for granting banked time. Same size as the quota step. */
+const TOKEN_STEP_SECS = 5 * 60;
+
+/**
+ * Banked time on a token gate, with a stepper to grant or revoke it (issue #8).
+ *
+ * Shown for entries and categories alike; the caller supplies the subject via
+ * `onAdjust`. Says how much is banked and what it takes to unlock, because
+ * granting blind is how a caregiver ends up handing out a balance that is
+ * still below `minimum_seconds` and wondering why nothing changed.
+ */
+function TokenRow({
+  tokens,
+  busy,
+  onAdjust,
+}: {
+  tokens: TokenStatus;
+  busy: boolean;
+  onAdjust: (deltaSeconds: number) => void;
+}) {
+  const balance = tokens.balance.secs;
+  const minimum = tokens.minimum.secs;
+  const atCeiling =
+    tokens.max_balance != null && balance >= tokens.max_balance.secs;
+
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5, flexWrap: "wrap" }}>
+      <Typography variant="caption" color="text.secondary">
+        Earned {formatDurationHuman(balance)}
+        {!tokens.unlocked && minimum > 0
+          ? ` — needs ${formatDurationHuman(minimum)} to unlock`
+          : ""}
+        {atCeiling ? " (at the maximum)" : ""}
+      </Typography>
+      <Button
+        size="small"
+        variant="text"
+        color="inherit"
+        onClick={() => onAdjust(-TOKEN_STEP_SECS)}
+        disabled={busy || balance === 0}
+        sx={{ minWidth: 0, px: 1 }}
+      >
+        −5m
+      </Button>
+      <Button
+        size="small"
+        variant="text"
+        color="inherit"
+        onClick={() => onAdjust(TOKEN_STEP_SECS)}
+        disabled={busy || atCeiling}
+        sx={{ minWidth: 0, px: 1 }}
+      >
+        +5m
+      </Button>
+    </Box>
+  );
+}
+
 function EntryCard({
   entry,
   groupLabel,
@@ -303,6 +388,7 @@ function EntryCard({
   onClear,
   onEnable,
   onAdjustQuota,
+  onAdjustTokens,
 }: {
   entry: EntryView;
   groupLabel: string | undefined;
@@ -313,6 +399,7 @@ function EntryCard({
   onClear: () => void;
   onEnable: () => void;
   onAdjustQuota: (stepSeconds: number) => void;
+  onAdjustTokens: (deltaSeconds: number) => void;
 }) {
   const manuallyDisabled = override?.availability === false;
   const manuallyEnabled = override?.availability === true;
@@ -367,6 +454,10 @@ function EntryCard({
           <Typography variant="caption" color="text.secondary">
             Up to {formatDurationHuman(maxRunSecs)}
           </Typography>
+        )}
+
+        {entry.tokens && (
+          <TokenRow tokens={entry.tokens} busy={busy} onAdjust={onAdjustTokens} />
         )}
 
         {/* Quota adjustment: the Android companion has this same
@@ -443,6 +534,7 @@ function GroupCard({
   onClear,
   onEnable,
   onAdjustQuota,
+  onAdjustTokens,
 }: {
   group: GroupView;
   override: DailyOverride | undefined;
@@ -451,6 +543,7 @@ function GroupCard({
   onClear: () => void;
   onEnable: () => void;
   onAdjustQuota: (stepSeconds: number) => void;
+  onAdjustTokens: (deltaSeconds: number) => void;
 }) {
   const manuallyDisabled = override?.availability === false;
   const manuallyEnabled = override?.availability === true;
@@ -507,6 +600,10 @@ function GroupCard({
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
             Up to {formatDurationHuman(capSecs)} per session
           </Typography>
+        )}
+
+        {group.tokens && (
+          <TokenRow tokens={group.tokens} busy={busy} onAdjust={onAdjustTokens} />
         )}
 
         <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>

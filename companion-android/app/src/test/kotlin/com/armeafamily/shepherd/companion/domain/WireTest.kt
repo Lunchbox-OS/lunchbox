@@ -97,6 +97,47 @@ class WireTest {
     }
 
     @Test
+    fun `token status rides along on the entry and group views`() {
+        val entry = decode<EntryView>(
+            """{"entry_id":"minecraft","label":"Minecraft","kind_tag":"process",
+                "enabled":false,"reasons":[],
+                "tokens":{"balance":{"secs":300,"nanos":0},
+                          "minimum":{"secs":600,"nanos":0},
+                          "unlocked":false,
+                          "max_balance":{"secs":3600,"nanos":0},
+                          "carry_over":false}}""",
+        )
+        val tokens = entry.tokens!!
+        assertEquals(300, tokens.balance.secs)
+        assertEquals(600, tokens.minimum.secs)
+        assertEquals(false, tokens.unlocked)
+        assertEquals(3600, tokens.maxBalance?.secs)
+
+        // Absent when the activity has no gate, and on a device predating the
+        // field — both must decode rather than throw.
+        val ungated = decode<EntryView>(
+            """{"entry_id":"solo","label":"Solo","kind_tag":"process",
+                "enabled":true,"reasons":[]}""",
+        )
+        assertNull(ungated.tokens)
+
+        // A category carries the gate its members share. `max_balance` is
+        // nullable on the wire (0 = unlimited becomes None).
+        val group = decode<GroupView>(
+            """{"group_id":"games","label":"Games","member_ids":["game-a"],
+                "enabled":true,"reasons":[],
+                "used_today":{"secs":0,"nanos":0},
+                "daily_quota":null,"max_run_if_started_now":null,
+                "tokens":{"balance":{"secs":900,"nanos":0},
+                          "minimum":{"secs":0,"nanos":0},
+                          "unlocked":true,"carry_over":true}}""",
+        )
+        assertEquals(900, group.tokens?.balance?.secs)
+        assertEquals(true, group.tokens?.carryOver)
+        assertNull(group.tokens?.maxBalance)
+    }
+
+    @Test
     fun `every reason code the device can emit decodes`() {
         // These four were added to shepherdd after the app shipped and were
         // missing here, so any entry carrying one failed the decode of the

@@ -48,6 +48,7 @@ import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.ui.components.ReasonLines
+import com.armeafamily.shepherd.companion.ui.components.TokenCard
 import com.armeafamily.shepherd.companion.ui.override.OverrideSection
 import com.armeafamily.shepherd.companion.util.Formatting
 import kotlinx.coroutines.delay
@@ -115,6 +116,10 @@ fun EntryDetailScreen(
                 SessionSection(session, onExtend = vm::extendCurrent, onStop = vm::stopCurrent)
             } else {
                 LaunchSection(entry, onLaunch = { vm.launchEntry(entry.entryId) })
+            }
+
+            entry.tokens?.let { tokens ->
+                TokenCard(tokens) { delta -> vm.adjustTokens(entryId, delta) }
             }
 
             OverrideSection(vm, entryId)

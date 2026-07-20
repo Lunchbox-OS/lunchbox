@@ -21,6 +21,7 @@ import com.armeafamily.shepherd.companion.domain.ShepherdRecord
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.domain.VolumeInfo
 import com.armeafamily.shepherd.companion.ble.Protocol
+import com.armeafamily.shepherd.companion.util.Formatting
 import com.armeafamily.shepherd.companion.util.ReasonText
 import com.juul.kable.State
 import kotlinx.coroutines.CancellationException
@@ -396,6 +397,21 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         c.upsertOverride(id, date, availability, quotaDeltaSeconds)
         _message.value = "Override saved."
         onDone()
+    }
+
+    /**
+     * Grant or revoke banked time on a token gate (issue #8).
+     *
+     * Refreshes entries and categories afterwards: the grant may have opened
+     * or closed the gate, which changes what every other screen shows.
+     */
+    fun adjustTokens(subject: String, deltaSeconds: Long) = action { c ->
+        val status = c.adjustTokens(subject, deltaSeconds)
+        val sign = if (deltaSeconds >= 0) "+" else "−"
+        val amount = Formatting.coarse(kotlin.math.abs(deltaSeconds))
+        _message.value =
+            "Earned time $sign$amount (now ${Formatting.coarse(status.balance.secs)})."
+        refreshSnapshot()
     }
 
     fun deleteOverride(id: String, date: String?, onDone: () -> Unit) = action { c ->

@@ -50,6 +50,18 @@ class ManagementClient(private val connection: ShepherdConnection) {
     suspend fun listGroups(at: IsoTimestamp? = null): List<GroupView> =
         decode(call("list_groups", buildJsonObject { put("at", at.toJson()) }))
 
+    // --- tokens (issue #8) ---------------------------------------------
+
+    /**
+     * Grant (positive) or revoke (negative) banked time on a token gate.
+     * [subject] is an entry ID, or `group:<id>` for a whole category.
+     */
+    suspend fun adjustTokens(subject: String, deltaSeconds: Long): TokenStatus =
+        decode(call("adjust_tokens", buildJsonObject {
+            put("id", JsonPrimitive(subject))
+            put("delta_seconds", JsonPrimitive(deltaSeconds))
+        }))
+
     // --- sessions ------------------------------------------------------
 
     suspend fun currentSession(): SessionInfo? = decodeNullable(call("current_session", empty()))

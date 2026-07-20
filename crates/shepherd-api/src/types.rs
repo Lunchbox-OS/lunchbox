@@ -317,6 +317,29 @@ impl EntryKind {
     }
 }
 
+/// A token gate's current state, for caregiver UIs (issue #8).
+///
+/// Banked time is a currency: source activities earn it and the gated activity
+/// spends it. Without this a management UI can only report that something is
+/// locked, never how close it is to unlocking, and a manual grant would be
+/// made blind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TokenStatus {
+    /// Time banked and not yet spent.
+    pub balance: Duration,
+    /// Balance needed to open the gate. Zero means any balance opens it.
+    pub minimum: Duration,
+    /// Whether the gate is open right now. Not simply `balance >= minimum`:
+    /// once opened it stays open until the balance is spent to zero.
+    pub unlocked: bool,
+    /// Ceiling on the balance. None means unlimited. A grant past this is
+    /// clawed back, so a UI should say so rather than let it vanish.
+    pub max_balance: Option<Duration>,
+    /// Whether the balance survives local midnight.
+    pub carry_over: bool,
+}
+
 /// View of an entry for UI display
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -331,6 +354,11 @@ pub struct EntryView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupId>,
     pub reasons: Vec<ReasonCode>,
+    /// The entry's own token gate (issue #8), if it has one. A member of a
+    /// token-gated group carries its own gate only; the category's is on the
+    /// `GroupView`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenStatus>,
     /// Maximum run duration if started now. None means:
     /// - If enabled=false: entry is not available
     /// - If enabled=true: entry has no time limit (unlimited)
@@ -363,6 +391,10 @@ pub struct GroupView {
     /// Longest session the group's limits would currently allow a member.
     /// None means the group imposes no cap of its own.
     pub max_run_if_started_now: Option<Duration>,
+    /// The category's token gate (issue #8), if it has one. Shared by every
+    /// member, so it belongs here rather than on any one of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenStatus>,
 }
 
 /// Structured reason codes for why an entry is unavailable

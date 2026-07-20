@@ -167,6 +167,49 @@ neither cross-level override spent a balance (54 s and 152 s both unchanged);
 and the group screen now reads **"Up to 2m per session"** where it previously
 said "Up to 0s".
 
+## Manual token grants (follow-up in the same branch)
+
+> Prompt: *"also add an API+UI to manually add tokens"*
+
+The #8 scope listed "no caregiver visibility" and a way to grant tokens as
+follow-ups. Both landed here.
+
+**Shape, decided with the user:** a dedicated `adjust_tokens {id, delta_seconds}`
+RPC that moves the stored balance, rather than a `token_delta_seconds` field on
+`DailyOverride`. A read-time delta fights the spend path — the stored balance
+decrements underneath it — and with `carry_over = true` the delta would expire at
+midnight while the balance it modified does not. The RPC mirrors how the engine
+already earns and spends, works the same for an entry or a `group:<id>`, and is
+audit-logged (`AuditEventType::TokensAdjusted`).
+
+**Semantics:** granted time is indistinguishable from earned time. It is capped
+by `max_balance_seconds`, spent by the gated activity's sessions, and opens the
+gate only once the balance reaches `minimum_seconds` — a grant is not a bypass,
+and the availability override remains the tool for "on regardless". Errors are
+typed: `Unprocessable` for a subject with no `[tokens]` block (writing a balance
+nothing reads is worse than refusing), `NotFound` for an unknown one.
+
+**Visibility:** `EntryView` and `GroupView` gained `tokens: Option<TokenStatus>`
+(balance, minimum, unlocked, max_balance, carry_over), so both apps can show how
+close a gate is to opening instead of only that it is shut. A member of a
+token-gated group carries no gate of its own — the category's is on the
+`GroupView`, where the shared budget belongs.
+
+**UI:** an "Earned time" card on the Android entry and category screens with a
+±5 min stepper and progress toward the minimum, and an equivalent inline row on
+both web cards. `−5 min` disables at a zero balance, `+5 min` at the ceiling.
+
+Verified on the device: a grant over HTTP unlocked a category and its members;
+the same grant from the phone moved the balance 300 → 600 s, showed
+"Earned time +5m (now 10m).", and wrote the audit row; a −600 s revoke re-locked
+the category. Error paths checked over the wire. New coverage: 3 engine tests,
+2 dispatch tests, 1 Kotlin wire test.
+
+**Verification gap:** the *web* token row was not visually checked this round —
+this box has no Chromium any more, and the Firefox snap won't start inside the
+kiosk session (exit 1, snap confinement). It typechecks and renders the same
+`TokenStatus` payload confirmed on the wire, but the rendering is unexercised.
+
 ## Smaller UI observations
 
 The first three were fixed in a follow-up commit; the last is not a code issue.

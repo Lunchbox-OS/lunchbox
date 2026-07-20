@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use shepherd_api::{EntryKind, Event};
 use shepherd_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
-    ServiceConfig, VolumePolicy,
+    ServiceConfig, TokensPolicy, VolumePolicy,
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
@@ -28,7 +28,7 @@ use shepherd_management::{
     RpcDispatchError, dispatch_json,
 };
 use shepherd_store::SqliteStore;
-use shepherd_util::{DaysOfWeek, EntryId, TimeWindow, WallClock};
+use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -555,6 +555,80 @@ async fn upsert_override_accepts_a_group_subject() {
     assert!(
         body.is_null(),
         "an entry id must not match a group override"
+    );
+}
+
+/// The manual-grant wire contract (issue #8): `adjust_tokens` takes a limit
+/// subject and a signed delta, and reports the gate's state back.
+#[tokio::test]
+async fn adjust_tokens_grants_banked_time_and_reports_the_gate() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.entries[0].tokens = Some(TokensPolicy {
+        from: vec![LimitSubject::entry("other")],
+        earn_ratio: 1.0,
+        minimum: Duration::from_secs(600),
+        max_balance: None,
+        carry_over: false,
+    });
+    let svc = make_svc(policy, cfg.path().to_path_buf());
+
+    let body = ok(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "test-game", "delta_seconds": 300 }),
+    )
+    .await;
+    assert_eq!(body["balance"]["secs"], 300);
+    assert_eq!(body["minimum"]["secs"], 600);
+    assert_eq!(body["unlocked"], false);
+
+    // Crossing the minimum opens the gate; the balance is cumulative.
+    let body = ok(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "test-game", "delta_seconds": 300 }),
+    )
+    .await;
+    assert_eq!(body["balance"]["secs"], 600);
+    assert_eq!(body["unlocked"], true);
+}
+
+#[tokio::test]
+async fn adjust_tokens_rejects_an_ungated_subject() {
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+
+    // `test-game` exists but has no [tokens] block, so a balance on it would
+    // be written and never read.
+    let err = rpc(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "test-game", "delta_seconds": 300 }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::Unprocessable(_))
+        ),
+        "expected Unprocessable, got {err:?}"
+    );
+
+    let err = rpc(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "group:nope", "delta_seconds": 300 }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::NotFound(_))
+        ),
+        "expected NotFound, got {err:?}"
     );
 }
 

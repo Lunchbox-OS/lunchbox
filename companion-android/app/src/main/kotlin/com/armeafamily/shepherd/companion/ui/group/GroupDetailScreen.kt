@@ -27,6 +27,7 @@ import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.subject
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.ui.components.ReasonLines
+import com.armeafamily.shepherd.companion.ui.components.TokenCard
 import com.armeafamily.shepherd.companion.ui.override.OverrideSection
 import com.armeafamily.shepherd.companion.util.Formatting
 
@@ -76,6 +77,10 @@ fun GroupDetailScreen(
 
             SharedLimitsCard(group)
             MembersCard(group, state.entries.associate { it.entryId to it.label })
+            group.tokens?.let { tokens ->
+                TokenCard(tokens) { delta -> vm.adjustTokens(group.subject, delta) }
+            }
+
             OverrideSection(vm, group.subject)
         }
     }

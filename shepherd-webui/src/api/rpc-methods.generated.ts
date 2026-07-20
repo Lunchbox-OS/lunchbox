@@ -24,6 +24,7 @@ export type RpcMethod =
   | "get_override"
   | "upsert_override"
   | "delete_override"
+  | "adjust_tokens"
   | "usage_all"
   | "usage_entry"
   | "get_volume"

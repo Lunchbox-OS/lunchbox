@@ -48,7 +48,9 @@ codegen consumes). At time of writing:
 - Health & state: `health`, `service_state`, `ping`
 - Entries: `list_entries`, `get_entry`
 - Sessions: `current_session`, `launch`, `stop_current`, `extend_current`
+- Groups: `list_groups`
 - Overrides: `list_overrides`, `get_override`, `upsert_override`, `delete_override`
+- Tokens: `adjust_tokens`
 - Usage: `usage_all`, `usage_entry`
 - Volume: `get_volume`, `set_volume`, `set_mute`, `volume_up`, `volume_down`, `toggle_mute`
 - Brightness: `get_brightness`, `set_brightness`, `brightness_up`, `brightness_down`

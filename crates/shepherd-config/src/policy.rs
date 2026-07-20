@@ -136,6 +136,15 @@ impl Policy {
         entry.group.as_ref().and_then(|id| self.get_group(id))
     }
 
+    /// The token gate on a limit subject — an entry's own, or a group's
+    /// (issue #8). None when the subject doesn't exist or isn't gated.
+    pub fn tokens_of(&self, subject: &LimitSubject) -> Option<&TokensPolicy> {
+        match subject {
+            LimitSubject::Entry(id) => self.get_entry(id).and_then(|e| e.tokens.as_ref()),
+            LimitSubject::Group(id) => self.get_group(id).and_then(|g| g.tokens.as_ref()),
+        }
+    }
+
     /// Every entry belonging to a group.
     pub fn group_members(&self, id: &GroupId) -> impl Iterator<Item = &Entry> {
         self.entries

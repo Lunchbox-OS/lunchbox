@@ -362,6 +362,12 @@ data class EntryView(
      */
     val maxRunIfStartedNow: DurationSecs? = null,
     val reasons: List<ReasonCode>,
+    /**
+     * The entry's own token gate (issue #8), if it has one. A member of a
+     * token-gated group carries its own gate only; the category's is on the
+     * `GroupView`.
+     */
+    val tokens: TokenStatus? = null,
 )
 
 /**
@@ -405,6 +411,11 @@ data class GroupView(
      * `ReasonCode::GroupRestricted`.
      */
     val reasons: List<ReasonCode>,
+    /**
+     * The category's token gate (issue #8), if it has one. Shared by every
+     * member, so it belongs here rather than on any one of them.
+     */
+    val tokens: TokenStatus? = null,
     /**
      * Combined usage across all members today.
      */
@@ -870,6 +881,40 @@ enum class StopMode {
      */
     @SerialName("force") FORCE,
 }
+
+/**
+ * A token gate's current state, for caregiver UIs (issue #8).
+ *
+ * Banked time is a currency: source activities earn it and the gated activity
+ * spends it. Without this a management UI can only report that something is
+ * locked, never how close it is to unlocking, and a manual grant would be
+ * made blind.
+ */
+@Serializable
+data class TokenStatus(
+    /**
+     * Time banked and not yet spent.
+     */
+    val balance: DurationSecs,
+    /**
+     * Whether the balance survives local midnight.
+     */
+    val carryOver: Boolean,
+    /**
+     * Ceiling on the balance. None means unlimited. A grant past this is
+     * clawed back, so a UI should say so rather than let it vanish.
+     */
+    val maxBalance: DurationSecs? = null,
+    /**
+     * Balance needed to open the gate. Zero means any balance opens it.
+     */
+    val minimum: DurationSecs,
+    /**
+     * Whether the gate is open right now. Not simply `balance >= minimum`:
+     * once opened it stays open until the balance is spent to zero.
+     */
+    val unlocked: Boolean,
+)
 
 /**
  * Screen-time usage for a single entry on a single day

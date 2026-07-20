@@ -10,17 +10,21 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.ReasonCode
+import com.armeafamily.shepherd.companion.domain.TokenStatus
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.ui.LinkStatus
 import com.armeafamily.shepherd.companion.util.Formatting
@@ -138,6 +142,74 @@ fun ReasonLines(reasons: List<ReasonCode>) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
+        }
+    }
+}
+
+/** Step for the earned-time stepper, matching the quota stepper's ±5 min. */
+private const val TOKEN_STEP_SECONDS = 5L * 60
+
+/**
+ * Banked time on a token gate, with a stepper to grant or revoke it (issue #8).
+ *
+ * Used for an activity's own gate and for a category's alike — the caller
+ * passes the subject through [onAdjust]. The progress toward `minimum` is the
+ * point of the card: granting blind is how a caregiver hands out time that is
+ * still short of the threshold and wonders why nothing unlocked.
+ */
+@Composable
+fun TokenCard(tokens: TokenStatus, onAdjust: (Long) -> Unit) {
+    val balance = tokens.balance.secs
+    val minimum = tokens.minimum.secs
+    val atCeiling = tokens.maxBalance?.let { balance >= it.secs } == true
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Earned time",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                buildString {
+                    append(Formatting.coarse(balance))
+                    if (minimum > 0) append(" of ${Formatting.coarse(minimum)} needed")
+                    append(if (tokens.unlocked) " · unlocked" else " · locked")
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (minimum > 0 && !tokens.unlocked) {
+                LinearProgressIndicator(
+                    progress = { (balance.toFloat() / minimum.toFloat()).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (atCeiling) {
+                Text(
+                    "At the maximum — more time can't be banked.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            if (!tokens.carryOver) {
+                Text(
+                    "Unspent time expires at midnight.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { onAdjust(-TOKEN_STEP_SECONDS) },
+                    enabled = balance > 0,
+                    modifier = Modifier.weight(1f),
+                ) { Text("−5 min") }
+                OutlinedButton(
+                    onClick = { onAdjust(TOKEN_STEP_SECONDS) },
+                    enabled = !atCeiling,
+                    modifier = Modifier.weight(1f),
+                ) { Text("+5 min") }
+            }
         }
     }
 }

@@ -271,6 +271,13 @@ Things to watch for when combining a token gate with the other limits:
   the entry — a 20-second balance buys a 20-second session. Warnings whose
   `seconds_before` exceeds the session length are skipped, so such a session ends
   with no countdown at all.
+- **A caregiver can grant time directly.** `adjust_tokens {"id": "<subject>",
+  "delta_seconds": 600}` banks time on an entry or a `group:<id>`, and a
+  negative delta takes it back. Granted time is indistinguishable from earned
+  time: capped by `max_balance_seconds`, spent by the gated activity's sessions,
+  and it opens the gate only once the balance reaches `minimum_seconds`. To
+  switch an activity on regardless of its balance, use an availability override.
+  Both management apps expose this as a ±5 min stepper beside the balance.
 - **`minimum_seconds` is a threshold to cross, not one to stay above.** Once the
   balance reaches it the gate ratchets open and stays open until the balance is
   spent to zero, so a short session doesn't re-lock the activity and strand the

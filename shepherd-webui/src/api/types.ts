@@ -110,6 +110,22 @@ export interface SessionInfo {
   confirm_on_close: boolean;
 }
 
+/**
+ * A token gate's current state (issue #8). Banked time is a currency: source
+ * activities earn it, the gated activity spends it.
+ */
+export interface TokenStatus {
+  balance: Duration;
+  minimum: Duration;
+  /**
+   * Whether the gate is open. Not simply `balance >= minimum` — once open it
+   * stays open until the balance is spent to zero.
+   */
+  unlocked: boolean;
+  max_balance: Duration | null;
+  carry_over: boolean;
+}
+
 export interface EntryView {
   entry_id: string;
   label: string;
@@ -119,6 +135,8 @@ export interface EntryView {
   /** Category this activity shares a schedule and budget with (issue #5). */
   group?: string | null;
   reasons: ReasonCode[];
+  /** This activity's own token gate (issue #8), if it has one. */
+  tokens?: TokenStatus | null;
   max_run_if_started_now: Duration | null;
 }
 
@@ -132,6 +150,8 @@ export interface GroupView {
   used_today: Duration;
   daily_quota: Duration | null;
   max_run_if_started_now: Duration | null;
+  /** The category's token gate (issue #8), shared by every member. */
+  tokens?: TokenStatus | null;
 }
 
 // `LaunchResponse` is now exported from `./client` — it's a UI-friendly

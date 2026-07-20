@@ -3,7 +3,7 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use shepherd_api::SessionEndReason;
-use shepherd_util::{EntryId, SessionId};
+use shepherd_util::{EntryId, LimitSubject, SessionId};
 use std::time::Duration;
 
 /// Types of audit events
@@ -40,6 +40,14 @@ pub enum AuditEventType {
         entry_id: EntryId,
         reason: SessionEndReason,
         duration: Duration,
+    },
+
+    /// Banked time granted or revoked by a caregiver (issue #8)
+    TokensAdjusted {
+        subject: LimitSubject,
+        delta_seconds: i64,
+        /// Balance after the adjustment, including any `max_balance` clawback.
+        balance: Duration,
     },
 
     /// Launch denied

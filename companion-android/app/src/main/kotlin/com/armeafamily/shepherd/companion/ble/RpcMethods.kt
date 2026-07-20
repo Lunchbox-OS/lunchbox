@@ -26,6 +26,7 @@ object RpcMethods {
     const val GET_OVERRIDE: String = "get_override"
     const val UPSERT_OVERRIDE: String = "upsert_override"
     const val DELETE_OVERRIDE: String = "delete_override"
+    const val ADJUST_TOKENS: String = "adjust_tokens"
     const val USAGE_ALL: String = "usage_all"
     const val USAGE_ENTRY: String = "usage_entry"
     const val GET_VOLUME: String = "get_volume"
