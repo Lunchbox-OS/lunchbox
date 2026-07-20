@@ -156,7 +156,9 @@ export function EntriesPage() {
   const filtered = (entries ?? []).filter((e) =>
     e.label.toLowerCase().includes(search.toLowerCase()),
   );
-  const overrideMap = new Map((overrides ?? []).map((ov) => [ov.entry_id, ov]));
+  // Keyed by limit subject; an entry's subject is its bare ID, so the lookup
+  // below still works, and group overrides simply don't match an entry.
+  const overrideMap = new Map((overrides ?? []).map((ov) => [ov.subject, ov]));
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>

@@ -2,9 +2,10 @@
 
 use crate::internet::InternetCheckTarget;
 use crate::schema::{
-    RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawTimeWindow,
-    RawTokens,
+    RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawGroup,
+    RawTimeWindow, RawTokens,
 };
+use shepherd_util::GROUP_SUBJECT_PREFIX;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -18,6 +19,12 @@ pub enum ValidationError {
 
     #[error("Duplicate entry ID: {0}")]
     DuplicateEntryId(String),
+
+    #[error("Group '{group_id}': {message}")]
+    GroupError { group_id: String, message: String },
+
+    #[error("Duplicate group ID: {0}")]
+    DuplicateGroupId(String),
 
     #[error("Invalid time format '{value}': {message}")]
     InvalidTimeFormat { value: String, message: String },
@@ -151,9 +158,58 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
+    // Check for duplicate group IDs (issue #5)
+    let mut seen_groups = HashSet::new();
+    for group in &config.groups {
+        if !seen_groups.insert(&group.id) {
+            errors.push(ValidationError::DuplicateGroupId(group.id.clone()));
+        }
+    }
+
     // Validate each entry
     for entry in &config.entries {
         errors.extend(validate_entry(entry, config));
+    }
+
+    // Validate each group
+    for group in &config.groups {
+        errors.extend(validate_group(group, config));
+    }
+
+    errors
+}
+
+/// Validate a group definition (issue #5).
+fn validate_group(group: &RawGroup, config: &RawConfig) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    let err = |message: String| ValidationError::GroupError {
+        group_id: group.id.clone(),
+        message,
+    };
+
+    if group.id.is_empty() {
+        errors.push(err("group id cannot be empty".into()));
+    }
+
+    // The subject key reserves this prefix to tell groups from entries.
+    if group.id.starts_with(GROUP_SUBJECT_PREFIX) {
+        errors.push(err(format!(
+            "group id cannot start with '{GROUP_SUBJECT_PREFIX}' (the prefix is reserved)"
+        )));
+    }
+
+    if let Some(availability) = &group.availability {
+        for window in &availability.windows {
+            errors.extend(validate_time_window(window, &group.id));
+        }
+    }
+
+    if let Some(tokens) = &group.tokens {
+        errors.extend(validate_tokens(
+            tokens,
+            TokenGateOwner::Group(&group.id),
+            config,
+        ));
     }
 
     errors
@@ -229,9 +285,34 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
         }
     }
 
+    // The subject key reserves this prefix to tell groups from entries.
+    if entry.id.starts_with(GROUP_SUBJECT_PREFIX) {
+        errors.push(ValidationError::EntryError {
+            entry_id: entry.id.clone(),
+            message: format!(
+                "entry id cannot start with '{GROUP_SUBJECT_PREFIX}' (the prefix is reserved \
+                 for groups)"
+            ),
+        });
+    }
+
+    // Validate group membership (issue #5)
+    if let Some(group) = &entry.group
+        && !config.groups.iter().any(|g| &g.id == group)
+    {
+        errors.push(ValidationError::EntryError {
+            entry_id: entry.id.clone(),
+            message: format!("group '{group}' is not defined"),
+        });
+    }
+
     // Validate the token gate (issue #8)
     if let Some(tokens) = &entry.tokens {
-        errors.extend(validate_tokens(tokens, entry, config));
+        errors.extend(validate_tokens(
+            tokens,
+            TokenGateOwner::Entry(entry),
+            config,
+        ));
     }
 
     // Validate warning thresholds vs max_run
@@ -299,36 +380,117 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
     errors
 }
 
-/// Validate an entry's token gate (issue #8).
+/// What a token gate is attached to — an entry or a whole group (issue #5).
+#[derive(Clone, Copy)]
+enum TokenGateOwner<'a> {
+    Entry(&'a RawEntry),
+    Group(&'a str),
+}
+
+impl TokenGateOwner<'_> {
+    fn error(&self, message: String) -> ValidationError {
+        match self {
+            Self::Entry(entry) => ValidationError::EntryError {
+                entry_id: entry.id.clone(),
+                message,
+            },
+            Self::Group(id) => ValidationError::GroupError {
+                group_id: (*id).to_string(),
+                message,
+            },
+        }
+    }
+
+    /// The TOML table the gate was written in, for error messages.
+    fn table(&self) -> &'static str {
+        match self {
+            Self::Entry(_) => "[entries.tokens]",
+            Self::Group(_) => "[groups.tokens]",
+        }
+    }
+}
+
+/// Validate a token gate (issue #8), on either an entry or a group (issue #5).
 ///
-/// This is the one per-entry rule that has to resolve IDs against the rest of
-/// the config, which is why `validate_entry` is handed the whole `RawConfig`.
+/// This is the one rule that has to resolve IDs against the rest of the config,
+/// which is why the validators are handed the whole `RawConfig`.
 fn validate_tokens(
     tokens: &RawTokens,
-    entry: &RawEntry,
+    owner: TokenGateOwner<'_>,
     config: &RawConfig,
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
-    let err = |message: String| ValidationError::EntryError {
-        entry_id: entry.id.clone(),
-        message,
-    };
+    let err = |message: String| owner.error(message);
 
     if tokens.from.is_empty() {
-        errors.push(err(
-            "tokens.from cannot be empty; remove [entries.tokens] if the entry is not gated".into(),
-        ));
+        errors.push(err(format!(
+            "tokens.from cannot be empty; remove {} if it is not gated",
+            owner.table()
+        )));
     }
 
     for source in &tokens.from {
-        if source == &entry.id {
-            errors.push(err(
-                "tokens.from cannot list the entry itself; an activity cannot unlock itself".into(),
-            ));
-        } else if !config.entries.iter().any(|e| &e.id == source) {
-            errors.push(err(format!(
-                "tokens.from references unknown entry '{source}'"
-            )));
+        match source.strip_prefix(GROUP_SUBJECT_PREFIX) {
+            // A group source: every member's time counts toward this gate.
+            Some(group_id) => {
+                if !config.groups.iter().any(|g| g.id == group_id) {
+                    errors.push(err(format!(
+                        "tokens.from references unknown group '{group_id}'"
+                    )));
+                    continue;
+                }
+                match owner {
+                    // A group cannot be unlocked by its own members' time.
+                    TokenGateOwner::Group(id) if id == group_id => {
+                        errors.push(err(
+                            "tokens.from cannot list the group itself; a category cannot \
+                             unlock itself"
+                                .into(),
+                        ));
+                    }
+                    // Nor can an entry be unlocked by time spent on itself via
+                    // the group it belongs to.
+                    TokenGateOwner::Entry(entry) if entry.group.as_deref() == Some(group_id) => {
+                        errors.push(err(format!(
+                            "tokens.from cannot list group '{group_id}', which this entry \
+                             belongs to; an activity cannot unlock itself"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            // An entry source.
+            None => {
+                if !config.entries.iter().any(|e| &e.id == source) {
+                    errors.push(err(format!(
+                        "tokens.from references unknown entry '{source}'"
+                    )));
+                    continue;
+                }
+                match owner {
+                    TokenGateOwner::Entry(entry) if &entry.id == source => {
+                        errors.push(err(
+                            "tokens.from cannot list the entry itself; an activity cannot \
+                             unlock itself"
+                                .into(),
+                        ));
+                    }
+                    // A member's time must not unlock the group gating it.
+                    TokenGateOwner::Group(group_id) => {
+                        let belongs = config
+                            .entries
+                            .iter()
+                            .any(|e| &e.id == source && e.group.as_deref() == Some(group_id));
+                        if belongs {
+                            errors.push(err(format!(
+                                "tokens.from cannot list '{source}', which is a member of this \
+                                 group; a category cannot unlock itself"
+                            )));
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -857,6 +1019,7 @@ mod tests {
         let config = RawConfig {
             config_version: 1,
             service: Default::default(),
+            groups: vec![],
             entries: vec![
                 RawEntry {
                     id: "game".into(),
@@ -882,6 +1045,7 @@ mod tests {
                     input_compat_options: None,
                     requires_input: vec![],
                     tokens: None,
+                    group: None,
                     xwayland_native_resolution: false,
                     confirm_on_close: true,
                 },
@@ -909,6 +1073,7 @@ mod tests {
                     input_compat_options: None,
                     requires_input: vec![],
                     tokens: None,
+                    group: None,
                     xwayland_native_resolution: false,
                     confirm_on_close: true,
                 },
@@ -1033,6 +1198,180 @@ mod tests {
                    max_balance_seconds = 0"#
             )
             .is_empty()
+        );
+    }
+
+    /// A config with one group ("games"), a member, and a non-member.
+    fn config_with_group(extra: &str) -> RawConfig {
+        let toml = format!(
+            r#"
+            config_version = 1
+
+            [[groups]]
+            id = "games"
+            label = "Games"
+
+            [[entries]]
+            id = "member"
+            label = "Member"
+            group = "games"
+            [entries.kind]
+            type = "process"
+            command = "member"
+
+            [[entries]]
+            id = "outsider"
+            label = "Outsider"
+            [entries.kind]
+            type = "process"
+            command = "outsider"
+
+            {extra}
+            "#
+        );
+        toml::from_str(&toml).expect("test config should parse")
+    }
+
+    fn group_errors(extra: &str) -> Vec<String> {
+        validate_config(&config_with_group(extra))
+            .iter()
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn valid_group_config_passes() {
+        assert!(group_errors("").is_empty());
+    }
+
+    #[test]
+    fn entry_referencing_unknown_group_is_rejected() {
+        let errors = group_errors(
+            r#"[[entries]]
+               id = "stray"
+               label = "Stray"
+               group = "nope"
+               [entries.kind]
+               type = "process"
+               command = "stray""#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("group 'nope' is not defined")),
+            "expected an unknown-group error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_group_ids_are_rejected() {
+        let errors = group_errors(
+            r#"[[groups]]
+               id = "games"
+               label = "Games Again""#,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("Duplicate group ID")),
+            "expected a duplicate-group error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_group_prefix_is_rejected_on_ids() {
+        // The subject key uses this prefix to tell groups from entries, so
+        // neither kind of ID may start with it.
+        let errors = group_errors(
+            r#"[[entries]]
+               id = "group:sneaky"
+               label = "Sneaky"
+               [entries.kind]
+               type = "process"
+               command = "sneaky"
+
+               [[groups]]
+               id = "group:nested"
+               label = "Nested""#,
+        );
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|e| e.contains("prefix is reserved"))
+                .count(),
+            2,
+            "both the entry and the group ID should be rejected, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn token_gate_resolves_group_sources() {
+        // A group source is legal...
+        assert!(
+            group_errors(
+                r#"[entries.tokens]
+                   from = ["group:games"]"#
+            )
+            .is_empty(),
+            "an entry gated on a whole category should validate"
+        );
+
+        // ...but must exist.
+        let errors = group_errors(
+            r#"[entries.tokens]
+               from = ["group:missing"]"#,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("unknown group 'missing'")),
+            "expected an unknown-group source error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn token_gate_rejects_self_unlocking_through_a_group() {
+        // A member gated on the group it belongs to would unlock itself.
+        let errors = group_errors(
+            r#"[[entries]]
+               id = "member-2"
+               label = "Member 2"
+               group = "games"
+               [entries.kind]
+               type = "process"
+               command = "member-2"
+               [entries.tokens]
+               from = ["group:games"]"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("which this entry belongs to")),
+            "expected a self-unlock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn group_token_gate_rejects_self_and_member_sources() {
+        // A category cannot be unlocked by itself...
+        let errors = group_errors(
+            r#"[[groups]]
+               id = "other"
+               label = "Other"
+               [groups.tokens]
+               from = ["group:other"]"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("cannot list the group itself")),
+            "expected a group self-reference error, got: {errors:?}"
+        );
+
+        // ...nor by the time its own members spend.
+        let errors = group_errors(
+            r#"[groups.tokens]
+               from = ["member"]"#,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("member of this group")),
+            "expected a member-source error, got: {errors:?}"
         );
     }
 }

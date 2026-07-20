@@ -17,6 +17,38 @@ pub struct RawConfig {
     /// List of allowed entries
     #[serde(default)]
     pub entries: Vec<RawEntry>,
+
+    /// Groups of entries sharing a schedule and limits (issue #5)
+    #[serde(default)]
+    pub groups: Vec<RawGroup>,
+}
+
+/// A group of entries that share an availability schedule and a set of limits
+/// (issue #5).
+///
+/// The daily quota is the *combined* usage of every member, so once the
+/// category's budget is spent all of its activities disappear at once.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawGroup {
+    /// Unique stable ID, referenced by `group = "..."` on entries
+    pub id: String,
+
+    /// Display label, used when explaining why a member is unavailable
+    pub label: String,
+
+    /// Availability windows shared by every member
+    #[serde(default)]
+    pub availability: Option<RawAvailability>,
+
+    /// Limits shared by every member. `daily_quota_seconds` is the combined
+    /// total across members; `max_run_seconds` and `cooldown_seconds` apply to
+    /// each member's session.
+    #[serde(default)]
+    pub limits: Option<RawLimits>,
+
+    /// Token gate on the whole group: earning unlocks every member at once
+    #[serde(default)]
+    pub tokens: Option<RawTokens>,
 }
 
 /// Service-level settings
@@ -101,6 +133,11 @@ pub struct RawEntry {
     /// Token gate (issue #8): time banked by other activities unlocks this one
     #[serde(default)]
     pub tokens: Option<RawTokens>,
+
+    /// Group this entry belongs to (issue #5). The group's schedule and limits
+    /// apply on top of this entry's own; the strictest of each wins.
+    #[serde(default)]
+    pub group: Option<String>,
 
     /// Warning configuration
     #[serde(default)]
@@ -477,7 +514,8 @@ pub struct RawLimits {
 /// `from` banks a balance that this entry spends down as it runs.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawTokens {
-    /// Entry IDs whose sessions bank time toward this entry.
+    /// Subjects whose sessions bank time toward this one: an entry ID, or a
+    /// group ID prefixed with `group:` to count every member of a category.
     #[serde(default)]
     pub from: Vec<String>,
 

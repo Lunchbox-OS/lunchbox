@@ -36,6 +36,131 @@ impl From<&str> for EntryId {
     }
 }
 
+/// Unique identifier for a group of entries sharing a schedule and limits
+/// (issue #5)
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GroupId(String);
+
+impl GroupId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<String> for GroupId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for GroupId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Prefix distinguishing a group from an entry in a [`LimitSubject`] key.
+pub const GROUP_SUBJECT_PREFIX: &str = "group:";
+
+/// Something a limit can be attached to: an individual entry, or a group of
+/// them (issue #5).
+///
+/// Cooldowns, token balances, and daily overrides are all keyed by a subject so
+/// that a group can carry the same state an entry can.
+///
+/// The string form of an entry subject is the bare entry ID, and only groups
+/// take the `group:` prefix. That keeps every pre-existing entry-keyed row and
+/// API call valid without rewriting them — which is why entry IDs are forbidden
+/// from starting with `group:` at config-validation time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LimitSubject {
+    Entry(EntryId),
+    Group(GroupId),
+}
+
+impl LimitSubject {
+    pub fn entry(id: impl Into<String>) -> Self {
+        Self::Entry(EntryId::new(id))
+    }
+
+    pub fn group(id: impl Into<String>) -> Self {
+        Self::Group(GroupId::new(id))
+    }
+
+    /// The entry ID, if this subject is an entry.
+    pub fn as_entry(&self) -> Option<&EntryId> {
+        match self {
+            Self::Entry(id) => Some(id),
+            Self::Group(_) => None,
+        }
+    }
+
+    /// The group ID, if this subject is a group.
+    pub fn as_group(&self) -> Option<&GroupId> {
+        match self {
+            Self::Group(id) => Some(id),
+            Self::Entry(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for LimitSubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Entry(id) => write!(f, "{id}"),
+            Self::Group(id) => write!(f, "{GROUP_SUBJECT_PREFIX}{id}"),
+        }
+    }
+}
+
+impl std::str::FromStr for LimitSubject {
+    type Err = std::convert::Infallible;
+
+    /// Never fails: an unprefixed string is an entry ID, which is what every
+    /// pre-group caller and stored row looks like.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.strip_prefix(GROUP_SUBJECT_PREFIX) {
+            Some(group) => Self::Group(GroupId::new(group)),
+            None => Self::Entry(EntryId::new(s)),
+        })
+    }
+}
+
+impl From<EntryId> for LimitSubject {
+    fn from(id: EntryId) -> Self {
+        Self::Entry(id)
+    }
+}
+
+impl From<GroupId> for LimitSubject {
+    fn from(id: GroupId) -> Self {
+        Self::Group(id)
+    }
+}
+
+impl Serialize for LimitSubject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for LimitSubject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(s.parse().expect("LimitSubject parsing is infallible"))
+    }
+}
+
 /// Unique identifier for a running session
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
@@ -111,6 +236,37 @@ mod tests {
         let s1 = SessionId::new();
         let s2 = SessionId::new();
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn limit_subject_string_form_is_backward_compatible() {
+        // An entry subject is the bare ID, so rows and API calls written before
+        // groups existed still parse and still match on lookup.
+        assert_eq!(LimitSubject::entry("tuxmath").to_string(), "tuxmath");
+        assert_eq!(
+            "tuxmath".parse::<LimitSubject>().unwrap(),
+            LimitSubject::entry("tuxmath")
+        );
+
+        // Only groups take a prefix.
+        assert_eq!(LimitSubject::group("games").to_string(), "group:games");
+        assert_eq!(
+            "group:games".parse::<LimitSubject>().unwrap(),
+            LimitSubject::group("games")
+        );
+    }
+
+    #[test]
+    fn limit_subject_round_trips_through_json_as_a_string() {
+        for subject in [LimitSubject::entry("tuxmath"), LimitSubject::group("games")] {
+            let json = serde_json::to_string(&subject).unwrap();
+            assert!(
+                json.starts_with('"'),
+                "should serialize as a string: {json}"
+            );
+            let parsed: LimitSubject = serde_json::from_str(&json).unwrap();
+            assert_eq!(subject, parsed);
+        }
     }
 
     #[test]

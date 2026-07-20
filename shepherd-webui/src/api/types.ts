@@ -49,7 +49,13 @@ export type ReasonCode =
   | { code: "internet_unavailable"; check: string | null }
   | { code: "manually_disabled"; until: string }
   | { code: "required_input_unavailable"; devices: string[] }
-  | { code: "tokens_insufficient"; balance: Duration; required: Duration };
+  | { code: "tokens_insufficient"; balance: Duration; required: Duration }
+  | {
+      code: "group_restricted";
+      group: string;
+      label: string;
+      reason: ReasonCode;
+    };
 
 export function reasonLabel(r: ReasonCode): string {
   switch (r.code) {
@@ -77,6 +83,10 @@ export function reasonLabel(r: ReasonCode): string {
         : "Requires an input device";
     case "tokens_insufficient":
       return "Not enough time earned yet";
+    // Name the category, so it's clear the limit is shared rather than
+    // specific to this activity.
+    case "group_restricted":
+      return `${r.label}: ${reasonLabel(r.reason)}`;
   }
 }
 
@@ -114,7 +124,8 @@ export interface EntryView {
 // normalisation of the on-wire `LaunchOutcome` shape.
 
 export interface DailyOverride {
-  entry_id: string;
+  /** A limit subject: a bare entry ID, or `group:<id>` for a whole category. */
+  subject: string;
   date: string;
   availability: boolean | null;
   quota_delta_seconds: number | null;

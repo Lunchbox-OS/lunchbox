@@ -175,6 +175,11 @@ fn reason_tooltip(reason: &ReasonCode) -> String {
                 format!("Requires: {list}")
             }
         }
+        // Name the category, so a parent can see the limit is shared rather
+        // than specific to this activity (issue #5).
+        ReasonCode::GroupRestricted { label, reason, .. } => {
+            format!("{label}: {}", reason_tooltip(reason))
+        }
         other => format!("{other:?}"),
     }
 }

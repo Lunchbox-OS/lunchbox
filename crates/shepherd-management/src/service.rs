@@ -15,7 +15,7 @@ use shepherd_host_api::{
     SpawnOptions, VolumeController,
 };
 use shepherd_store::Store;
-use shepherd_util::{EntryId, MonotonicInstant};
+use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,22 +61,24 @@ pub trait ManagementService: Send + Sync {
     // Overrides
     #[rpc(default(date = "today"))]
     async fn list_overrides(&self, date: NaiveDate) -> ManagementResult<Vec<DailyOverride>>;
+    /// `id` is a limit subject: a bare entry ID, or `group:<id>` to override a
+    /// whole category for the day (issue #5).
     #[rpc(default(date = "today"))]
     async fn get_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>>;
     #[rpc(default(date = "today"))]
     async fn upsert_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
         availability: Option<bool>,
         quota_delta_seconds: Option<i64>,
     ) -> ManagementResult<DailyOverride>;
     #[rpc(default(date = "today"), wrap_result = "deleted")]
-    async fn delete_override(&self, id: &EntryId, date: NaiveDate) -> ManagementResult<bool>;
+    async fn delete_override(&self, id: &LimitSubject, date: NaiveDate) -> ManagementResult<bool>;
 
     // Usage
     #[rpc(default(from = "today", to = "today"))]
@@ -423,7 +425,7 @@ impl ManagementService for DefaultManagementService {
 
     async fn get_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>> {
         self.store
@@ -433,7 +435,7 @@ impl ManagementService for DefaultManagementService {
 
     async fn upsert_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
         availability: Option<bool>,
         quota_delta_seconds: Option<i64>,
@@ -455,7 +457,7 @@ impl ManagementService for DefaultManagementService {
         Ok(ov)
     }
 
-    async fn delete_override(&self, id: &EntryId, date: NaiveDate) -> ManagementResult<bool> {
+    async fn delete_override(&self, id: &LimitSubject, date: NaiveDate) -> ManagementResult<bool> {
         let deleted = self
             .store
             .clear_daily_override(id, date)

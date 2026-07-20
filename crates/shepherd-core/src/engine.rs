@@ -5,10 +5,10 @@ use shepherd_api::{
     API_VERSION, EntryKindTag, EntryView, InputDeviceType, InternetStatusView, ReasonCode,
     ServiceStateSnapshot, SessionEndReason, WarningSeverity,
 };
-use shepherd_config::{Entry, InternetCheckTarget, Policy};
+use shepherd_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
 use shepherd_store::{AuditEvent, AuditEventType, Store};
-use shepherd_util::{EntryId, MonotonicInstant, SessionId};
+use shepherd_util::{EntryId, LimitSubject, MonotonicInstant, SessionId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -198,30 +198,53 @@ impl CoreEngine {
     /// Evaluate a single entry for availability
     fn evaluate_entry(&self, entry: &Entry, now: DateTime<Local>) -> EntryView {
         let today = now.date_naive();
+        let group = self.policy.group_of(entry);
         let daily_override = self
             .store
-            .get_daily_override(&entry.id, today)
+            .get_daily_override(&entry.subject(), today)
             .ok()
             .flatten();
+        // A group override applies to every member (issue #5).
+        let group_override = group.and_then(|g| {
+            self.store
+                .get_daily_override(&g.subject(), today)
+                .ok()
+                .flatten()
+        });
 
-        // If manually disabled by a parent override, short-circuit all other checks
+        // If manually disabled by a parent override — on the entry or on its
+        // group — short-circuit all other checks
         if daily_override.as_ref().and_then(|o| o.availability) == Some(false) {
-            return EntryView {
-                entry_id: entry.id.clone(),
-                label: entry.label.clone(),
-                icon_ref: entry.icon_ref.clone(),
-                kind_tag: entry.kind.tag(),
-                enabled: false,
-                reasons: vec![ReasonCode::ManuallyDisabled { until: today }],
-                max_run_if_started_now: None,
-            };
+            return Self::manually_disabled_view(entry, today, None);
+        }
+        if group_override.as_ref().and_then(|o| o.availability) == Some(false) {
+            return Self::manually_disabled_view(entry, today, group);
         }
 
-        let manually_enabled = daily_override.as_ref().and_then(|o| o.availability) == Some(true);
+        // A force-enable on either the entry or its group lifts the entry's own
+        // limits: enabling a whole category for the day means its activities
+        // are on today, whatever their individual schedules say.
+        let manually_enabled = daily_override.as_ref().and_then(|o| o.availability) == Some(true)
+            || group_override.as_ref().and_then(|o| o.availability) == Some(true);
         let quota_delta = daily_override.as_ref().and_then(|o| o.quota_delta_seconds);
+        let group_quota_delta = group_override.as_ref().and_then(|o| o.quota_delta_seconds);
 
         let mut reasons = Vec::new();
         let mut enabled = true;
+
+        // Check the group's shared restrictions (issue #5). Each is the group
+        // analogue of an entry-level check below and is bypassed by a
+        // force-enable wherever its entry-level twin is.
+        if let Some(group) = group {
+            for reason in self.group_reasons(group, now, manually_enabled, group_quota_delta) {
+                enabled = false;
+                reasons.push(ReasonCode::GroupRestricted {
+                    group: group.id.clone(),
+                    label: group.label.clone(),
+                    reason: Box::new(reason),
+                });
+            }
+        }
 
         // Check if explicitly disabled (skipped when an enable-today override is set)
         if !manually_enabled && entry.disabled {
@@ -293,7 +316,7 @@ impl CoreEngine {
         }
 
         // Check cooldown
-        if let Ok(Some(until)) = self.store.get_cooldown_until(&entry.id)
+        if let Ok(Some(until)) = self.store.get_cooldown_until(&entry.subject())
             && until > now
         {
             enabled = false;
@@ -336,7 +359,7 @@ impl CoreEngine {
 
         // Calculate max run if enabled (None when disabled, Some(None) flattened for unlimited)
         let max_run_if_started_now = if enabled {
-            self.compute_max_duration(entry, now, quota_delta, manually_enabled)
+            self.compute_max_duration(entry, now, quota_delta, group_quota_delta, manually_enabled)
         } else {
             None
         };
@@ -359,9 +382,18 @@ impl CoreEngine {
         entry: &Entry,
         now: DateTime<Local>,
         quota_delta: Option<i64>,
+        group_quota_delta: Option<i64>,
         manually_enabled: bool,
     ) -> Option<Duration> {
         let mut max = entry.limits.max_run;
+
+        // Clamp helper: the tightest limit wins.
+        fn clamp(max: &mut Option<Duration>, limit: Duration) {
+            *max = Some(match *max {
+                Some(m) => m.min(limit),
+                None => limit,
+            });
+        }
 
         // Limit by time window remaining, unless an admin override bypasses the window.
         if !manually_enabled
@@ -392,14 +424,145 @@ impl CoreEngine {
         // than has been earned. Lifted by an enable-today override, matching the
         // daily quota.
         if !manually_enabled && entry.tokens.is_some() {
-            let balance = self.token_balance(entry, now.date_naive());
-            max = Some(match max {
-                Some(m) => m.min(balance),
-                None => balance,
-            });
+            clamp(&mut max, self.token_balance(entry, now.date_naive()));
+        }
+
+        // Apply the same four limits again at group level (issue #5), so a
+        // member's session is capped by whichever of the two is tighter.
+        if let Some(group) = self.policy.group_of(entry) {
+            let today = now.date_naive();
+
+            if let Some(group_max_run) = group.limits.max_run {
+                clamp(&mut max, group_max_run);
+            }
+
+            if !manually_enabled {
+                if let Some(window_remaining) = group.availability.remaining_in_window(&now) {
+                    clamp(&mut max, window_remaining);
+                }
+
+                if let Some(quota) = group.limits.daily_quota {
+                    let effective_quota = apply_quota_delta(quota, group_quota_delta);
+                    clamp(
+                        &mut max,
+                        effective_quota.saturating_sub(self.group_usage(group, today)),
+                    );
+                }
+
+                if let Some(tokens) = &group.tokens {
+                    clamp(
+                        &mut max,
+                        self.token_balance_of(&group.subject(), tokens, today),
+                    );
+                }
+            }
         }
 
         max
+    }
+
+    /// The view for an entry a parent has switched off for the day, either
+    /// directly or via its group.
+    fn manually_disabled_view(entry: &Entry, today: NaiveDate, group: Option<&Group>) -> EntryView {
+        let reason = ReasonCode::ManuallyDisabled { until: today };
+        EntryView {
+            entry_id: entry.id.clone(),
+            label: entry.label.clone(),
+            icon_ref: entry.icon_ref.clone(),
+            kind_tag: entry.kind.tag(),
+            enabled: false,
+            reasons: vec![match group {
+                Some(group) => ReasonCode::GroupRestricted {
+                    group: group.id.clone(),
+                    label: group.label.clone(),
+                    reason: Box::new(reason),
+                },
+                None => reason,
+            }],
+            max_run_if_started_now: None,
+        }
+    }
+
+    /// The group-level restrictions currently blocking a member (issue #5),
+    /// unwrapped — the caller wraps each in `GroupRestricted`.
+    ///
+    /// The daily quota here is the *combined* usage of every member, so one
+    /// activity can spend the whole category's budget.
+    fn group_reasons(
+        &self,
+        group: &Group,
+        now: DateTime<Local>,
+        manually_enabled: bool,
+        quota_delta: Option<i64>,
+    ) -> Vec<ReasonCode> {
+        let mut reasons = Vec::new();
+        let today = now.date_naive();
+
+        if !manually_enabled && !group.availability.is_available(&now) {
+            reasons.push(ReasonCode::OutsideTimeWindow {
+                next_window_start: None,
+            });
+        }
+
+        // The group cooldown is not bypassed by an override, matching the
+        // entry-level cooldown.
+        if let Ok(Some(until)) = self.store.get_cooldown_until(&group.subject())
+            && until > now
+        {
+            reasons.push(ReasonCode::CooldownActive {
+                available_at: until,
+            });
+        }
+
+        if !manually_enabled && let Some(quota) = group.limits.daily_quota {
+            let used = self.group_usage(group, today);
+            let effective_quota = apply_quota_delta(quota, quota_delta);
+            if used >= effective_quota {
+                reasons.push(ReasonCode::QuotaExhausted {
+                    used,
+                    quota: effective_quota,
+                });
+            }
+        }
+
+        if !manually_enabled && let Some(tokens) = &group.tokens {
+            let balance = self.token_balance_of(&group.subject(), tokens, today);
+            if !tokens.unlocked(balance) {
+                reasons.push(ReasonCode::TokensInsufficient {
+                    balance,
+                    required: tokens.minimum,
+                });
+            }
+        }
+
+        reasons
+    }
+
+    /// Combined usage of every member of a group on `day`.
+    fn group_usage(&self, group: &Group, day: NaiveDate) -> Duration {
+        let Ok(all) = self.store.get_all_usage_for_date(day) else {
+            return Duration::ZERO;
+        };
+        self.policy
+            .group_members(&group.id)
+            .filter_map(|member| {
+                all.iter()
+                    .find(|(id, _)| id == &member.id)
+                    .map(|(_, used)| *used)
+            })
+            .sum()
+    }
+
+    /// A subject's banked token balance under the given gate.
+    fn token_balance_of(
+        &self,
+        subject: &LimitSubject,
+        tokens: &TokensPolicy,
+        today: NaiveDate,
+    ) -> Duration {
+        self.store
+            .get_token_balance(subject, today, tokens.carry_over)
+            .unwrap_or(Duration::ZERO)
     }
 
     /// An entry's banked token balance, or zero if it is not token-gated.
@@ -407,75 +570,131 @@ impl CoreEngine {
         let Some(tokens) = &entry.tokens else {
             return Duration::ZERO;
         };
-        self.store
-            .get_token_balance(&entry.id, today, tokens.carry_over)
-            .unwrap_or(Duration::ZERO)
+        self.token_balance_of(&entry.subject(), tokens, today)
     }
 
-    /// Whether a force-enable daily override is in effect for an entry.
-    fn manually_enabled(&self, entry_id: &EntryId, today: NaiveDate) -> bool {
+    /// Whether a force-enable daily override is in effect for a subject.
+    fn manually_enabled(&self, subject: &LimitSubject, today: NaiveDate) -> bool {
         self.store
-            .get_daily_override(entry_id, today)
+            .get_daily_override(subject, today)
             .ok()
             .flatten()
             .and_then(|o| o.availability)
             == Some(true)
     }
 
-    /// Settle token balances after a session on `ended_entry_id` of `duration`
-    /// (issue #8): every entry gated on it banks time, and if it is itself
-    /// token-gated it spends its own balance down.
+    /// Settle token balances after a session on `ended` of `duration` (issue
+    /// #8): every gate fed by that session banks time, and any gate on the
+    /// activity itself spends its balance down.
     ///
-    /// An entry can legitimately be both a source and a target, in which case
-    /// both halves apply.
-    fn settle_tokens(&self, ended_entry_id: &EntryId, duration: Duration, today: NaiveDate) {
-        for target in &self.policy.entries {
-            let Some(tokens) = &target.tokens else {
-                continue;
-            };
+    /// Both entries and groups can be gated, and a session settles against
+    /// whichever apply — an entry that is itself gated *and* sits in a gated
+    /// group pays both.
+    fn settle_tokens(&self, ended: &Entry, duration: Duration, today: NaiveDate) {
+        // Which subjects this session banks time for: the entry, and the group
+        // it belongs to (issue #5).
+        let ended_subjects: Vec<LimitSubject> = std::iter::once(ended.subject())
+            .chain(ended.group.clone().map(LimitSubject::Group))
+            .collect();
 
-            // Earn: this session was on one of the target's source activities.
-            if tokens.from.contains(ended_entry_id) {
-                let earned = tokens.earned(duration);
-                if !earned.is_zero() {
-                    let balance = self
-                        .store
-                        .adjust_token_balance(
-                            &target.id,
-                            today,
-                            tokens.carry_over,
-                            earned.as_secs() as i64,
-                        )
-                        .unwrap_or(Duration::ZERO);
+        // Every gate in the policy, on entries and on groups alike.
+        let gates = self
+            .policy
+            .entries
+            .iter()
+            .filter_map(|e| e.tokens.as_ref().map(|t| (e.subject(), t)))
+            .chain(
+                self.policy
+                    .groups
+                    .iter()
+                    .filter_map(|g| g.tokens.as_ref().map(|t| (g.subject(), t))),
+            );
 
-                    // Apply the ceiling here rather than in the store, which has
-                    // no view of policy.
-                    if let Some(max_balance) = tokens.max_balance
-                        && balance > max_balance
-                    {
-                        let excess = (balance - max_balance).as_secs() as i64;
-                        let _ = self.store.adjust_token_balance(
-                            &target.id,
-                            today,
-                            tokens.carry_over,
-                            -excess,
-                        );
-                    }
-                }
+        for (target, tokens) in gates {
+            // Earn: the session was on one of this gate's source activities,
+            // either directly or as a member of a source group.
+            if tokens.from.iter().any(|src| ended_subjects.contains(src)) {
+                self.earn_tokens(&target, tokens, duration, today);
             }
 
-            // Spend: this session was on the gated entry itself. A session run
-            // under a force-enable override is exempt — the caregiver granted
-            // that time, so the child shouldn't be billed for it, consistent
-            // with the override bypassing the gate in the first place.
-            if &target.id == ended_entry_id && !self.manually_enabled(ended_entry_id, today) {
+            // Spend: the gate is on the activity that just ran, or on the group
+            // it belongs to. A session run under a force-enable override is
+            // exempt — the caregiver granted that time, so the child shouldn't
+            // be billed for it, consistent with the override bypassing the gate
+            // in the first place.
+            if ended_subjects.contains(&target) && !self.manually_enabled(&target, today) {
                 let _ = self.store.adjust_token_balance(
-                    &target.id,
+                    &target,
                     today,
                     tokens.carry_over,
                     -(duration.as_secs() as i64),
                 );
             }
+        }
+    }
+
+    /// Everything that has to settle when a session ends: token balances, and
+    /// the cooldowns for the entry and for its group.
+    ///
+    /// A group cooldown is started by *any* member's session and applies to
+    /// every member, so a child can't hop between activities in a category to
+    /// dodge it (issue #5).
+    fn settle_session_end(
+        &self,
+        ended_entry_id: &EntryId,
+        duration: Duration,
+        now: DateTime<Local>,
+        today: NaiveDate,
+    ) {
+        let Some(entry) = self.policy.get_entry(ended_entry_id) else {
+            return;
+        };
+
+        self.settle_tokens(entry, duration, today);
+
+        let cooldowns = [
+            (entry.subject(), entry.limits.cooldown),
+            match self.policy.group_of(entry) {
+                Some(group) => (group.subject(), group.limits.cooldown),
+                None => (entry.subject(), None),
+            },
+        ];
+        for (subject, cooldown) in cooldowns {
+            if let Some(cooldown) = cooldown
+                && let Ok(delta) = chrono::Duration::from_std(cooldown)
+            {
+                let _ = self.store.set_cooldown_until(&subject, now + delta);
+            }
+        }
+    }
+
+    /// Bank time on a gate, applying its `max_balance` ceiling.
+    fn earn_tokens(
+        &self,
+        target: &LimitSubject,
+        tokens: &TokensPolicy,
+        duration: Duration,
+        today: NaiveDate,
+    ) {
+        let earned = tokens.earned(duration);
+        if earned.is_zero() {
+            return;
+        }
+
+        let balance = self
+            .store
+            .adjust_token_balance(target, today, tokens.carry_over, earned.as_secs() as i64)
+            .unwrap_or(Duration::ZERO);
+
+        // Apply the ceiling here rather than in the store, which has no view of
+        // policy.
+        if let Some(max_balance) = tokens.max_balance
+            && balance > max_balance
+        {
+            let excess = (balance - max_balance).as_secs() as i64;
+            let _ = self
+                .store
+                .adjust_token_balance(target, today, tokens.carry_over, -excess);
         }
     }
 
@@ -704,16 +923,9 @@ impl CoreEngine {
             .store
             .add_usage(&session.plan.entry_id, today, duration);
 
-        // Settle token balances (issue #8)
-        self.settle_tokens(&session.plan.entry_id, duration, today);
-
-        // Set cooldown if configured
-        if let Some(entry) = self.policy.get_entry(&session.plan.entry_id)
-            && let Some(cooldown) = entry.limits.cooldown
-        {
-            let until = now + chrono::Duration::from_std(cooldown).unwrap();
-            let _ = self.store.set_cooldown_until(&session.plan.entry_id, until);
-        }
+        // Settle token balances (issue #8) and cooldowns, on the entry and on
+        // its group (issue #5)
+        self.settle_session_end(&session.plan.entry_id, duration, now, today);
 
         // Log to audit
         let _ = self
@@ -761,16 +973,9 @@ impl CoreEngine {
             .store
             .add_usage(&session.plan.entry_id, today, duration);
 
-        // Settle token balances (issue #8)
-        self.settle_tokens(&session.plan.entry_id, duration, today);
-
-        // Set cooldown if configured
-        if let Some(entry) = self.policy.get_entry(&session.plan.entry_id)
-            && let Some(cooldown) = entry.limits.cooldown
-        {
-            let until = now + chrono::Duration::from_std(cooldown).unwrap();
-            let _ = self.store.set_cooldown_until(&session.plan.entry_id, until);
-        }
+        // Settle token balances (issue #8) and cooldowns, on the entry and on
+        // its group (issue #5)
+        self.settle_session_end(&session.plan.entry_id, duration, now, today);
 
         // Log to audit
         let _ = self
@@ -928,13 +1133,15 @@ fn apply_quota_delta(quota: Duration, delta: Option<i64>) -> Duration {
 mod tests {
     use super::*;
     use shepherd_api::EntryKind;
-    use shepherd_config::{AvailabilityPolicy, Entry, LimitsPolicy, TokensPolicy};
+    use shepherd_config::{AvailabilityPolicy, Entry, Group, LimitsPolicy, TokensPolicy};
     use shepherd_store::SqliteStore;
+    use shepherd_util::GroupId;
     use std::collections::HashMap;
 
     fn make_test_policy() -> Policy {
         Policy {
             service: Default::default(),
+            groups: vec![],
             entries: vec![Entry {
                 id: EntryId::new("test-game"),
                 label: "Test Game".into(),
@@ -966,6 +1173,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1124,6 +1332,7 @@ mod tests {
     #[test]
     fn test_tick_warnings() {
         let policy = Policy {
+            groups: vec![],
             entries: vec![Entry {
                 id: EntryId::new("test"),
                 label: "Test".into(),
@@ -1159,6 +1368,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1220,6 +1430,7 @@ mod tests {
     #[test]
     fn test_extend_reschedules_warning() {
         let policy = Policy {
+            groups: vec![],
             entries: vec![Entry {
                 id: EntryId::new("test"),
                 label: "Test".into(),
@@ -1255,6 +1466,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1328,6 +1540,7 @@ mod tests {
     #[test]
     fn test_session_expiry() {
         let policy = Policy {
+            groups: vec![],
             entries: vec![Entry {
                 id: EntryId::new("test"),
                 label: "Test".into(),
@@ -1359,6 +1572,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1404,6 +1618,7 @@ mod tests {
         let entry_id = EntryId::new("time-restricted");
         let policy = Policy {
             service: Default::default(),
+            groups: vec![],
             entries: vec![Entry {
                 id: entry_id.clone(),
                 label: "Time Restricted".into(),
@@ -1439,6 +1654,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1475,7 +1691,12 @@ mod tests {
 
         // Set availability=true override for today
         store
-            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .upsert_daily_override(
+                &LimitSubject::Entry(entry_id.clone()),
+                today,
+                Some(true),
+                None,
+            )
             .unwrap();
 
         // With override: should be enabled even outside the window
@@ -1501,6 +1722,7 @@ mod tests {
         let entry_id = EntryId::new("time-restricted");
         let policy = Policy {
             service: Default::default(),
+            groups: vec![],
             entries: vec![Entry {
                 id: entry_id.clone(),
                 label: "Time Restricted".into(),
@@ -1536,6 +1758,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1562,7 +1785,12 @@ mod tests {
 
         // Set availability=false override for today
         store
-            .upsert_daily_override(&entry_id, today, Some(false), None)
+            .upsert_daily_override(
+                &LimitSubject::Entry(entry_id.clone()),
+                today,
+                Some(false),
+                None,
+            )
             .unwrap();
 
         // With override: disabled even though we're inside the window
@@ -1588,6 +1816,7 @@ mod tests {
         let entry_id = EntryId::new("config-disabled");
         let policy = Policy {
             service: Default::default(),
+            groups: vec![],
             entries: vec![Entry {
                 id: entry_id.clone(),
                 label: "Config Disabled".into(),
@@ -1616,6 +1845,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1651,7 +1881,12 @@ mod tests {
 
         // Set availability=true override for today
         store
-            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .upsert_daily_override(
+                &LimitSubject::Entry(entry_id.clone()),
+                today,
+                Some(true),
+                None,
+            )
             .unwrap();
 
         // With override: should be enabled even though disabled by config
@@ -1679,6 +1914,7 @@ mod tests {
         let entry_id = EntryId::new("quota-limited");
         let policy = Policy {
             service: Default::default(),
+            groups: vec![],
             entries: vec![Entry {
                 id: entry_id.clone(),
                 label: "Quota Limited".into(),
@@ -1707,6 +1943,7 @@ mod tests {
                 input_compat_options: Default::default(),
                 requires_input: vec![],
                 tokens: None,
+                group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1747,7 +1984,12 @@ mod tests {
 
         // Set availability=true override for today.
         store
-            .upsert_daily_override(&entry_id, today, Some(true), None)
+            .upsert_daily_override(
+                &LimitSubject::Entry(entry_id.clone()),
+                today,
+                Some(true),
+                None,
+            )
             .unwrap();
 
         // With override: enabled despite the exhausted quota, and the daily cap
@@ -1804,6 +2046,7 @@ mod tests {
             input_compat: vec![],
             input_compat_options: Default::default(),
             requires_input: vec![],
+            group: None,
             xwayland_native_resolution: false,
             confirm_on_close: true,
         }
@@ -1814,6 +2057,7 @@ mod tests {
     fn make_token_policy(tokens: TokensPolicy) -> Policy {
         Policy {
             service: Default::default(),
+            groups: vec![],
             entries: vec![
                 token_entry("scratch", None),
                 token_entry("typing", None),
@@ -1829,7 +2073,7 @@ mod tests {
 
     fn tokens_from(sources: &[&str]) -> TokensPolicy {
         TokensPolicy {
-            from: sources.iter().map(|s| EntryId::new(*s)).collect(),
+            from: sources.iter().map(|s| LimitSubject::entry(*s)).collect(),
             earn_ratio: 1.0,
             minimum: Duration::ZERO,
             max_balance: None,
@@ -2034,7 +2278,12 @@ mod tests {
         // Bank a little, then force-enable for the day.
         run_session(&mut engine, "scratch", Duration::from_secs(300), now);
         store
-            .upsert_daily_override(&entry_id, now.date_naive(), Some(true), None)
+            .upsert_daily_override(
+                &LimitSubject::Entry(entry_id.clone()),
+                now.date_naive(),
+                Some(true),
+                None,
+            )
             .unwrap();
 
         let entries = engine.list_entries(now);
@@ -2058,5 +2307,300 @@ mod tests {
             Duration::from_secs(300),
             "an overridden session should not spend banked tokens"
         );
+    }
+
+    // --- Grouped time limits (issue #5) -----------------------------------
+
+    fn group(id: &str, limits: LimitsPolicy, tokens: Option<TokensPolicy>) -> Group {
+        Group {
+            id: GroupId::new(id),
+            label: format!("{id} group"),
+            availability: AvailabilityPolicy::default(),
+            limits,
+            tokens,
+        }
+    }
+
+    fn no_limits() -> LimitsPolicy {
+        LimitsPolicy {
+            max_run: None,
+            daily_quota: None,
+            cooldown: None,
+        }
+    }
+
+    /// Two activities in one group, plus an ungrouped control.
+    fn make_group_policy(group: Group) -> Policy {
+        let mut member_a = token_entry("game-a", None);
+        let mut member_b = token_entry("game-b", None);
+        member_a.group = Some(group.id.clone());
+        member_b.group = Some(group.id.clone());
+
+        Policy {
+            service: Default::default(),
+            groups: vec![group],
+            entries: vec![member_a, member_b, token_entry("ungrouped", None)],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+            brightness: Default::default(),
+            auto_brightness: Default::default(),
+        }
+    }
+
+    fn group_reason(view: &EntryView) -> Option<&ReasonCode> {
+        view.reasons.iter().find_map(|r| match r {
+            ReasonCode::GroupRestricted { reason, .. } => Some(&**reason),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn test_group_quota_is_shared_across_members() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                daily_quota: Some(Duration::from_secs(1800)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // Playing one member spends the *category* budget, so the other
+        // member's remaining session shrinks too.
+        run_session(&mut engine, "game-a", Duration::from_secs(1200), now);
+        let entries = engine.list_entries(now);
+        assert_eq!(
+            view(&entries, "game-b").max_run_if_started_now,
+            Some(Duration::from_secs(600)),
+            "a sibling's usage should eat into this member's session"
+        );
+
+        // Spending the rest removes every member at once.
+        run_session(&mut engine, "game-b", Duration::from_secs(600), now);
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            let v = view(&entries, id);
+            assert!(
+                !v.enabled,
+                "{id} should be gone once the group quota is spent"
+            );
+            assert!(
+                matches!(group_reason(v), Some(ReasonCode::QuotaExhausted { .. })),
+                "expected a group QuotaExhausted for {id}, got: {:?}",
+                v.reasons
+            );
+        }
+        // An activity outside the group is untouched.
+        assert!(view(&entries, "ungrouped").enabled);
+    }
+
+    #[test]
+    fn test_group_max_run_caps_each_member() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                max_run: Some(Duration::from_secs(900)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+
+        let entries = engine.list_entries(noon());
+        assert_eq!(
+            view(&entries, "game-a").max_run_if_started_now,
+            Some(Duration::from_secs(900)),
+            "the group's short-burst cap should apply to a member with no cap of its own"
+        );
+        assert_eq!(
+            view(&entries, "ungrouped").max_run_if_started_now,
+            None,
+            "an ungrouped entry keeps its own (unlimited) cap"
+        );
+    }
+
+    #[test]
+    fn test_group_cooldown_blocks_a_different_member() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                cooldown: Some(Duration::from_secs(600)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "game-a", Duration::from_secs(300), now);
+
+        // Hopping to a sibling must not dodge the category's cooldown.
+        let entries = engine.list_entries(now);
+        let sibling = view(&entries, "game-b");
+        assert!(
+            !sibling.enabled,
+            "the cooldown should cover the whole group"
+        );
+        assert!(matches!(
+            group_reason(sibling),
+            Some(ReasonCode::CooldownActive { .. })
+        ));
+        assert!(view(&entries, "ungrouped").enabled);
+    }
+
+    #[test]
+    fn test_group_token_gate_unlocks_every_member() {
+        let policy = make_group_policy(group(
+            "games",
+            no_limits(),
+            Some(TokensPolicy {
+                from: vec![LimitSubject::entry("ungrouped")],
+                earn_ratio: 1.0,
+                minimum: Duration::ZERO,
+                max_balance: None,
+                carry_over: false,
+            }),
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // Locked until earned.
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            assert!(!view(&entries, id).enabled, "{id} should start locked");
+        }
+
+        // Earning on the source unlocks the whole category at once.
+        run_session(&mut engine, "ungrouped", Duration::from_secs(900), now);
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            let v = view(&entries, id);
+            assert!(v.enabled, "{id} should unlock with the group");
+            assert_eq!(v.max_run_if_started_now, Some(Duration::from_secs(900)));
+        }
+
+        // Either member's session spends the shared balance.
+        run_session(&mut engine, "game-a", Duration::from_secs(400), now);
+        assert_eq!(
+            view(&engine.list_entries(now), "game-b").max_run_if_started_now,
+            Some(Duration::from_secs(500)),
+            "a sibling's play should spend the group's banked time"
+        );
+    }
+
+    #[test]
+    fn test_group_source_banks_time_from_any_member() {
+        // A gate fed by a whole category: playing any member earns.
+        let mut reward = token_entry(
+            "reward",
+            Some(TokensPolicy {
+                from: vec![LimitSubject::group("games")],
+                earn_ratio: 1.0,
+                minimum: Duration::ZERO,
+                max_balance: None,
+                carry_over: false,
+            }),
+        );
+        reward.group = None;
+
+        let mut policy = make_group_policy(group("games", no_limits(), None));
+        policy.entries.push(reward);
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        assert!(!view(&engine.list_entries(now), "reward").enabled);
+
+        run_session(&mut engine, "game-b", Duration::from_secs(600), now);
+        let entries = engine.list_entries(now);
+        let v = view(&entries, "reward");
+        assert!(v.enabled, "any member of a source group should bank time");
+        assert_eq!(v.max_run_if_started_now, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn test_group_override_enables_and_disables_every_member() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                daily_quota: Some(Duration::from_secs(600)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+        let today = now.date_naive();
+        let games = LimitSubject::group("games");
+
+        // Spend the category's quota so both members are gone.
+        run_session(&mut engine, "game-a", Duration::from_secs(600), now);
+        assert!(!view(&engine.list_entries(now), "game-b").enabled);
+
+        // One override re-enables the whole category, uncapped.
+        store
+            .upsert_daily_override(&games, today, Some(true), None)
+            .unwrap();
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            let v = view(&entries, id);
+            assert!(v.enabled, "{id} should be enabled by the group override");
+            assert!(v.reasons.is_empty(), "no reasons: {:?}", v.reasons);
+            assert_eq!(v.max_run_if_started_now, None);
+        }
+
+        // And a force-disable switches the whole category off.
+        store
+            .upsert_daily_override(&games, today, Some(false), None)
+            .unwrap();
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            assert!(
+                !view(&entries, id).enabled,
+                "{id} should be disabled by the group override"
+            );
+        }
+        assert!(view(&entries, "ungrouped").enabled);
+    }
+
+    #[test]
+    fn test_group_quota_delta_extends_the_category() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                daily_quota: Some(Duration::from_secs(600)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "game-a", Duration::from_secs(600), now);
+        assert!(!view(&engine.list_entries(now), "game-b").enabled);
+
+        // Granting the category more time brings every member back.
+        store
+            .upsert_daily_override(
+                &LimitSubject::group("games"),
+                now.date_naive(),
+                None,
+                Some(300),
+            )
+            .unwrap();
+        let entries = engine.list_entries(now);
+        let v = view(&entries, "game-b");
+        assert!(v.enabled);
+        assert_eq!(v.max_run_if_started_now, Some(Duration::from_secs(300)));
     }
 }

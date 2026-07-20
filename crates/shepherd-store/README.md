@@ -47,16 +47,16 @@ pub trait Store: Send + Sync {
     fn get_usage(&self, entry_id: &EntryId, day: NaiveDate) -> StoreResult<Duration>;
     fn add_usage(&self, entry_id: &EntryId, day: NaiveDate, duration: Duration) -> StoreResult<()>;
 
-    // Token balances (issue #8)
-    fn get_token_balance(&self, entry_id: &EntryId, day: NaiveDate, carry_over: bool)
+    // Token balances (issue #8), keyed by limit subject
+    fn get_token_balance(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool)
         -> StoreResult<Duration>;
-    fn adjust_token_balance(&self, entry_id: &EntryId, day: NaiveDate, carry_over: bool,
+    fn adjust_token_balance(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool,
         delta_secs: i64) -> StoreResult<Duration>;
 
-    // Cooldown tracking
-    fn get_cooldown_until(&self, entry_id: &EntryId) -> StoreResult<Option<DateTime<Local>>>;
-    fn set_cooldown_until(&self, entry_id: &EntryId, until: DateTime<Local>) -> StoreResult<()>;
-    fn clear_cooldown(&self, entry_id: &EntryId) -> StoreResult<()>;
+    // Cooldown tracking, keyed by limit subject
+    fn get_cooldown_until(&self, subject: &LimitSubject) -> StoreResult<Option<DateTime<Local>>>;
+    fn set_cooldown_until(&self, subject: &LimitSubject, until: DateTime<Local>) -> StoreResult<()>;
+    fn clear_cooldown(&self, subject: &LimitSubject) -> StoreResult<()>;
 
     // State snapshot
     fn load_snapshot(&self) -> StoreResult<Option<StateSnapshot>>;
@@ -198,18 +198,18 @@ CREATE TABLE usage (
     PRIMARY KEY (entry_id, day)
 );
 
--- Token balances (one row per gated entry). `updated_day` is the local date of
--- the last mutation, so a non-carrying balance resets lazily at midnight rather
--- than needing a sweep job.
+-- Token balances (one row per gated subject). `updated_day` is the local date
+-- of the last mutation, so a non-carrying balance resets lazily at midnight
+-- rather than needing a sweep job.
 CREATE TABLE token_balances (
-    entry_id TEXT PRIMARY KEY,
+    subject TEXT PRIMARY KEY,
     balance_secs INTEGER NOT NULL DEFAULT 0,
     updated_day TEXT NOT NULL  -- YYYY-MM-DD
 );
 
 -- Cooldown tracking
 CREATE TABLE cooldowns (
-    entry_id TEXT PRIMARY KEY,
+    subject TEXT PRIMARY KEY,
     until TEXT NOT NULL  -- ISO 8601 timestamp
 );
 
@@ -219,6 +219,20 @@ CREATE TABLE snapshot (
     data TEXT NOT NULL  -- JSON
 );
 ```
+
+## Schema Migration
+
+There is no migration framework: `init_schema` is a batch of
+`CREATE TABLE IF NOT EXISTS`, which is a no-op against an existing table. Any
+change to an existing table's shape must therefore be applied explicitly *before*
+those statements run.
+
+The one such migration today is `rename_legacy_key_column`, which renames the
+`entry_id` key column of `cooldowns` and `daily_overrides` to `subject`
+(issue #5). It is metadata-only: an entry's `LimitSubject` string form *is* its
+bare entry ID, so every pre-existing row is already valid and no data is read or
+rewritten. It is guarded by a `PRAGMA table_info` check, so it is a no-op on a
+fresh or already-migrated database and safe to run on every startup.
 
 ## Design Philosophy
 

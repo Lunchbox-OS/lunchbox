@@ -151,6 +151,54 @@ severity = "critical"
 message = "10 seconds remaining!"
 
 # -----------------------------------------------------------------------------
+# Groups (issue #5)
+# -----------------------------------------------------------------------------
+# A group lets a category of activities share one schedule and one budget.
+# Entries join with `group = "<id>"`. The group's limits apply *on top of* each
+# member's own, and the stricter of the two wins.
+#
+# The daily quota is the key part: it is the COMBINED usage of every member, so
+# one game can spend the whole category's budget, and when it runs out every
+# member disappears at once.
+
+[[groups]]
+id = "attention-heavy"
+label = "Games"
+
+# One schedule for the whole category, instead of repeating identical
+# `[entries.availability]` blocks on each member.
+[groups.availability]
+[[groups.availability.windows]]
+days = "weekdays"
+start = "16:00"
+end = "18:00"
+
+[[groups.availability.windows]]
+days = "weekends"
+start = "10:00"
+end = "18:00"
+
+[groups.limits]
+# Per-session cap for any member — "short bursts" without repeating it per entry.
+max_run_seconds = 900
+# COMBINED daily total across every member (0 = unlimited).
+daily_quota_seconds = 3600
+# Any member's session starts this cooldown for the WHOLE category, so a child
+# can't hop between games in it to dodge the wait.
+cooldown_seconds = 600
+
+# A group can also be token-gated (issue #8): earning unlocks every member at
+# once. Uncomment to require educational time before any of these appear.
+# [groups.tokens]
+# from = ["tuxmath", "gcompris"]
+# earn_ratio = 0.5
+# minimum_seconds = 600
+
+# A caregiver can override a whole category for the day through the management
+# API by passing `group:attention-heavy` as the override id — one call enables
+# or disables every member.
+
+# -----------------------------------------------------------------------------
 # Entries
 # -----------------------------------------------------------------------------
 
@@ -281,6 +329,9 @@ cooldown_seconds = 0  # No cooldown
 [[entries]]
 id = "steam-celeste"
 label = "Celeste"
+# Shares the "Games" schedule, short-burst cap, combined quota, and cooldown
+# with the other members of this category (issue #5).
+group = "attention-heavy"
 # icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_504230"
 # icon = "~/Games/Icons/Celeste.png"  # Override with a custom image if preferred
 
@@ -359,6 +410,7 @@ carry_over = false
 [[entries]]
 id = "steam-a-short-hike"
 label = "A Short Hike"
+group = "attention-heavy"  # Shares the "Games" budget with Celeste
 # icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_1055540"
 # icon = "~/Games/Icons/A_Short_Hike.png"  # Override with a custom image if preferred
 

@@ -246,5 +246,8 @@ fn reason_to_message(reason: &ReasonCode) -> &'static str {
         ReasonCode::ManuallyDisabled { .. } => "Disabled by parent for today",
         ReasonCode::RequiredInputUnavailable { .. } => "Requires an input device",
         ReasonCode::TokensInsufficient { .. } => "Not enough time earned yet",
+        // The group's restriction is what actually blocks the entry, so report
+        // it; `reason_tooltip` names the group.
+        ReasonCode::GroupRestricted { reason, .. } => reason_to_message(reason),
     }
 }

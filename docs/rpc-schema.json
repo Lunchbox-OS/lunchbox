@@ -111,7 +111,7 @@
         {
           "name": "id",
           "required": true,
-          "type": "EntryId"
+          "type": "LimitSubject"
         },
         {
           "name": "date",
@@ -129,7 +129,7 @@
         {
           "name": "id",
           "required": true,
-          "type": "EntryId"
+          "type": "LimitSubject"
         },
         {
           "name": "date",
@@ -157,7 +157,7 @@
         {
           "name": "id",
           "required": true,
-          "type": "EntryId"
+          "type": "LimitSubject"
         },
         {
           "name": "date",

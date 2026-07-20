@@ -165,6 +165,7 @@ For each entry, the engine evaluates:
 5. **Cooldown** - Has enough time passed since the last session?
 6. **Daily quota** - Is there remaining quota for today?
 7. **Token gate** - Has enough time been earned on this entry's source activities?
+8. **Group restrictions** - Every check above, repeated for the entry's group
 
 Each check that fails adds a `ReasonCode` to the entry view, allowing UIs to explain unavailability.
 
@@ -179,6 +180,22 @@ same point where usage is recorded.
 A force-enable daily override bypasses the gate and the cap, and a session run
 under that override does not spend the balance: the caregiver granted that time,
 so it isn't billed to the child.
+
+## Groups
+
+A group (issue #5) carries the same limits an entry does — window, quota,
+`max_run`, cooldown, token gate — shared by every member. Evaluation applies both
+levels and the strictest of each wins; a group-level failure is reported as
+`GroupRestricted` wrapping the underlying reason.
+
+The group daily quota is the *combined* usage of its members, summed from
+`Store::get_all_usage_for_date`, so one activity can spend the category's whole
+budget. A group cooldown is started by any member's session and applies to all of
+them, which is what stops a child hopping between activities to dodge it.
+
+Cooldowns, token balances, and daily overrides are keyed by `LimitSubject`, so a
+group holds the same state an entry does — including its own daily override,
+which enables or disables every member at once.
 
 ## Design Philosophy
 

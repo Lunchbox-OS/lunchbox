@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
-use shepherd_util::{EntryId, SessionId};
+use shepherd_util::{EntryId, GroupId, LimitSubject, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -368,6 +368,14 @@ pub enum ReasonCode {
         /// unlocks it, i.e. the entry is simply out of banked time.
         required: Duration,
     },
+    /// The restriction comes from the entry's group rather than the entry
+    /// itself (issue #5) — e.g. the whole category's daily quota is spent.
+    /// `label` is the group's display name, for explaining it to a caregiver.
+    GroupRestricted {
+        group: GroupId,
+        label: String,
+        reason: Box<ReasonCode>,
+    },
 }
 
 /// Warning severity level
@@ -718,7 +726,10 @@ impl DisplayState {
 /// A parent-set daily override for a single entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyOverride {
-    pub entry_id: EntryId,
+    /// What the override applies to: an entry, or a whole group (issue #5).
+    /// Serializes as a bare entry ID, or `group:<id>` for a group, so overrides
+    /// written before groups existed round-trip unchanged.
+    pub subject: LimitSubject,
     pub date: NaiveDate,
     /// Override the entry's availability for this day.
     /// `Some(false)` blocks it entirely; `Some(true)` allows it outside its time window.

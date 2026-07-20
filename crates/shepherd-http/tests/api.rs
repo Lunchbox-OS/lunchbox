@@ -153,6 +153,7 @@ impl BrightnessController for MockBrightness {
 fn test_policy() -> Policy {
     Policy {
         service: ServiceConfig::default(),
+        groups: vec![],
         entries: vec![Entry {
             id: EntryId::new("test-game"),
             label: "Test Game".into(),
@@ -184,6 +185,7 @@ fn test_policy() -> Policy {
             input_compat_options: Default::default(),
             requires_input: vec![],
             tokens: None,
+            group: None,
             xwayland_native_resolution: false,
             confirm_on_close: false,
         }],

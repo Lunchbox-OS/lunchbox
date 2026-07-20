@@ -11,7 +11,7 @@ use shepherd_api::{
     VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_management::{LaunchOutcome, ManagementError, ManagementResult, ManagementService};
-use shepherd_util::EntryId;
+use shepherd_util::{EntryId, LimitSubject};
 use tokio::sync::broadcast;
 
 use crate::protocol::RpcRequest;
@@ -69,21 +69,25 @@ impl ManagementService for MockSvc {
     }
     async fn get_override(
         &self,
-        _id: &EntryId,
+        _id: &LimitSubject,
         _date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>> {
         Ok(None)
     }
     async fn upsert_override(
         &self,
-        _id: &EntryId,
+        _id: &LimitSubject,
         _date: NaiveDate,
         _availability: Option<bool>,
         _quota_delta_seconds: Option<i64>,
     ) -> ManagementResult<DailyOverride> {
         Err(ManagementError::BadRequest("nope".into()))
     }
-    async fn delete_override(&self, _id: &EntryId, _date: NaiveDate) -> ManagementResult<bool> {
+    async fn delete_override(
+        &self,
+        _id: &LimitSubject,
+        _date: NaiveDate,
+    ) -> ManagementResult<bool> {
         Ok(false)
     }
     async fn usage_all(
