@@ -1,6 +1,6 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Run `cargo run -p shepherd-management --bin rpc-codegen`
+// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 // after changing the `ManagementService` trait in
 // `crates/shepherd-management/src/service.rs`.
 

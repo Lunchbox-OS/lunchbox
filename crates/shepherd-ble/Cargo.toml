@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Bluetooth LE management transport for shepherdd"
 
 [dependencies]
+schemars = { workspace = true, optional = true }
 shepherd-util = { workspace = true }
 shepherd-api = { workspace = true }
 shepherd-management = { workspace = true }
@@ -28,3 +29,6 @@ rand = "0.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+schema = ["dep:schemars", "shepherd-api/schema", "shepherd-management/schema"]

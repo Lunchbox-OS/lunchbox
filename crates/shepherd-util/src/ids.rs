@@ -5,8 +5,9 @@ use std::fmt;
 use uuid::Uuid;
 
 /// Unique identifier for an entry in the policy whitelist
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct EntryId(String);
 
 impl EntryId {
@@ -39,8 +40,9 @@ impl From<&str> for EntryId {
 
 /// Unique identifier for a group of entries sharing a schedule and limits
 /// (issue #5)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct GroupId(String);
 
 impl GroupId {
@@ -87,8 +89,9 @@ pub const GROUP_SUBJECT_PREFIX: &str = "group:";
 // Hand-written Serialize/Deserialize render this as a single string
 // (`<entry-id>` / `group:<id>`), so the schema must say "string" rather than
 // describe the enum shape.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, schemars::JsonSchema)]
-#[schemars(with = "String")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(with = "String"))]
 pub enum LimitSubject {
     Entry(EntryId),
     Group(GroupId),
@@ -168,8 +171,9 @@ impl<'de> Deserialize<'de> for LimitSubject {
 }
 
 /// Unique identifier for a running session
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct SessionId(Uuid);
 
 impl SessionId {
@@ -199,8 +203,9 @@ impl fmt::Display for SessionId {
 }
 
 /// Unique identifier for a connected IPC client
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transparent))]
 pub struct ClientId(Uuid);
 
 impl ClientId {

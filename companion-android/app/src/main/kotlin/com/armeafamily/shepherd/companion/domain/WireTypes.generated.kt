@@ -1,7 +1,7 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
 // Rendered from the Rust wire types by
-// `cargo run -p shepherd-management --bin rpc-codegen`.
+// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
 // Edit `crates/shepherd-api/src/types.rs` and re-run instead.
 //
 // Helper affordances (extension properties, custom serializers, and the
@@ -25,6 +25,34 @@ typealias IsoTimestamp = String
 
 /** ISO-8601 local date, e.g. "2026-06-21". */
 typealias IsoDate = String
+
+@Serializable
+data class AdminRecord(
+    /**
+     * `"public"` or `"random"` — matches `bluer`'s `AddressType` enum
+     * so the server can compare on reconnect without a parse step.
+     */
+    val addressType: String,
+    val bondedAt: IsoTimestamp,
+    val deviceName: String,
+    /**
+     * Bearer token also accepted by the HTTP API. See the unified-identity
+     * section of the BLE management design.
+     */
+    val httpToken: String,
+    /**
+     * The BlueZ-resolved identity address for the bonded peer. Once
+     * pairing completes BlueZ presents this address regardless of the
+     * peer's random MAC rotation, so it doubles as the stable identity.
+     */
+    val identityAddress: String,
+    val role: AdminRole,
+)
+
+@Serializable
+enum class AdminRole {
+    @SerialName("admin") ADMIN,
+}
 
 /**
  * Screen brightness status information
@@ -81,6 +109,12 @@ data class BrightnessRestrictions(
     val minBrightness: Long? = null,
 )
 
+@Serializable
+enum class ClaimStateTag {
+    @SerialName("unclaimed") UNCLAIMED,
+    @SerialName("claimed") CLAIMED,
+}
+
 /**
  * A parent-set daily override for a single entry
  */
@@ -106,6 +140,19 @@ data class DailyOverride(
      */
     val subject: LimitSubject,
     val updatedAt: IsoTimestamp,
+)
+
+/**
+ * Shape returned from the `DeviceInfo` characteristic. Readable
+ * unencrypted; carries only what the companion app needs to decide
+ * whether to initiate pairing.
+ */
+@Serializable
+data class DeviceInfo(
+    val claimState: ClaimStateTag,
+    val deviceName: String,
+    val firmwareVersion: String,
+    val protocolVersion: Long,
 )
 
 /**

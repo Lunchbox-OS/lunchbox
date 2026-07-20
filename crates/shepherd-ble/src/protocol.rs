@@ -74,6 +74,7 @@ pub struct RpcError {
 /// directly so the companion app can render meaningful UX without
 /// string-matching messages.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     ParseError,
@@ -142,6 +143,7 @@ impl RpcResponse {
 /// unencrypted; carries only what the companion app needs to decide
 /// whether to initiate pairing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceInfo {
     pub protocol_version: u32,
     pub firmware_version: String,
@@ -150,6 +152,7 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimStateTag {
     Unclaimed,

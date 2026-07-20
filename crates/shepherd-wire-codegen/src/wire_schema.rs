@@ -53,9 +53,12 @@ struct WireTypes {
     input_compat_mode: shepherd_api::InputCompatMode,
     event: shepherd_api::Event,
     event_payload: shepherd_api::EventPayload,
-    // Lives in this crate, so it only joins the schema because the
-    // aggregator sits above shepherd-api rather than inside it.
-    launch_outcome: crate::LaunchOutcome,
+    launch_outcome: shepherd_management::LaunchOutcome,
+    // Reachable only because this crate sits above shepherd-ble; a generator
+    // inside shepherd-management would hit a dependency cycle.
+    device_info: shepherd_ble::protocol::DeviceInfo,
+    claim_state_tag: shepherd_ble::protocol::ClaimStateTag,
+    admin_record: shepherd_ble::admin::AdminRecord,
 }
 
 /// The `$defs` block describing every wire type, keyed by Rust type name.

@@ -28,6 +28,41 @@ members = [
     "crates/shepherd-touch-bridge",
     "crates/shepherd-tablet-bridge",
     "crates/shepherd-gamepad-bridge",
+    "crates/shepherd-wire-codegen",
+]
+# Everything except the codegen crate. `cargo build` at the repo root must not
+# build shepherd-wire-codegen, because doing so would unify its `schema`
+# feature into shepherd-api and compile schemars into shepherdd and the
+# launcher. Use `-p shepherd-wire-codegen` (or `--workspace`, as the tests do)
+# to reach it deliberately.
+default-members = [
+    "crates/shepherd-util",
+    "crates/shepherd-api",
+    "crates/shepherd-host-api",
+    "crates/shepherd-config",
+    "crates/shepherd-firewall-helper",
+    "crates/shepherd-store",
+    "crates/shepherd-core",
+    "crates/shepherd-host-linux",
+    "crates/shepherd-ipc",
+    "crates/shepherd-management",
+    "crates/shepherd-management-macros",
+    "crates/shepherd-http",
+    "crates/shepherd-ble",
+    "crates/shepherdd",
+    "crates/shepherd-launcher-ui",
+    "crates/shepherd-hud",
+    "crates/shepherd-pairing-display",
+    "crates/shepherd-e2e",
+    "crates/shepherd-media-core",
+    "crates/shepherd-media-app",
+    "crates/shepherd-media-ui",
+    "crates/shepherd-media-android",
+    "crates/shepherd-media",
+    "crates/shepherd-bridge",
+    "crates/shepherd-touch-bridge",
+    "crates/shepherd-tablet-bridge",
+    "crates/shepherd-gamepad-bridge",
 ]
 # shepherd-firewall-bpf targets bpfel-unknown-none on nightly and is built
 # separately by shepherd-firewall-helper's build.rs (via aya-build). Excluded
@@ -59,6 +94,7 @@ shepherd-management-macros = { path = "crates/shepherd-management-macros" }
 shepherd-http = { path = "crates/shepherd-http" }
 shepherd-ble = { path = "crates/shepherd-ble" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
+shepherd-wire-codegen = { path = "crates/shepherd-wire-codegen" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

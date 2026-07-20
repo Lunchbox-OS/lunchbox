@@ -2,7 +2,7 @@
 //!
 //! The companion's payload types were hand-written and drifted from the
 //! device twice (see `wire_schema.rs`). This turns
-//! [`shepherd_management::wire_schema::wire_schema`] into
+//! [`crate::wire_schema::wire_schema`] into
 //! `kotlinx.serialization` declarations so the mirrors can't fall behind
 //! without CI noticing.
 //!
@@ -380,7 +380,7 @@ pub fn render(defs: &Map<String, Value>) -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n//\n");
     out.push_str("// Rendered from the Rust wire types by\n");
-    out.push_str("// `cargo run -p shepherd-management --bin rpc-codegen`.\n");
+    out.push_str("// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.\n");
     out.push_str("// Edit `crates/shepherd-api/src/types.rs` and re-run instead.\n//\n");
     out.push_str("// Helper affordances (extension properties, custom serializers, and the\n");
     out.push_str("// types listed as hand-written in `kotlin_types.rs`) live in\n");

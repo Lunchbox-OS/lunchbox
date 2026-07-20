@@ -1,6 +1,6 @@
 //! Fail CI when the committed codegen outputs no longer match what
 //! the current `ManagementService` trait would produce. Running
-//! `cargo run -p shepherd-management --bin rpc-codegen` should always
+//! `cargo run -p shepherd-wire-codegen --bin rpc-codegen` should always
 //! be idempotent; if this test starts failing, that's the fix.
 //!
 //! The alternative — regenerating on every build via `build.rs` —
@@ -31,7 +31,7 @@ fn codegen_outputs_match_checked_in() {
             "run",
             "--quiet",
             "-p",
-            "shepherd-management",
+            "shepherd-wire-codegen",
             "--bin",
             "rpc-codegen",
             "--",
@@ -70,7 +70,7 @@ fn codegen_outputs_match_checked_in() {
         assert_eq!(
             checked_in_contents, regenerated,
             "{} drifted from what the current trait would produce; run\n  \
-             cargo run -p shepherd-management --bin rpc-codegen\n\
+             cargo run -p shepherd-wire-codegen --bin rpc-codegen\n\
              from the repo root to regenerate.",
             checked_in
         );

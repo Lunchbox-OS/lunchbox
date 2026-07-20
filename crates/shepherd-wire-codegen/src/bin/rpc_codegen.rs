@@ -14,7 +14,7 @@
 //!   plus a per-method result-type helper (only string-level today,
 //!   full type mapping is a follow-on).
 //!
-//! Run as `cargo run -p shepherd-management --bin rpc-codegen`
+//! Run as `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 //! from the repo root. The binary is deterministic: same schema in,
 //! same files out, so it's safe to invoke from a pre-commit hook or
 //! a CI check that fails on drift.
@@ -107,7 +107,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.
 fn render_wire_types() -> String {
-    shepherd_management::kotlin_types::render(&shepherd_management::wire_schema::wire_schema())
+    shepherd_wire_codegen::kotlin_types::render(&shepherd_wire_codegen::wire_schema::wire_schema())
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ fn render_kotlin(schema: &Schema) -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n");
     out.push_str("//\n");
-    out.push_str("// Run `cargo run -p shepherd-management --bin rpc-codegen`\n");
+    out.push_str("// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/shepherd-management/src/service.rs`.\n\n");
     out.push_str("package com.armeafamily.shepherd.companion.ble\n\n");
@@ -171,7 +171,7 @@ fn render_ts(schema: &Schema) -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n");
     out.push_str("//\n");
-    out.push_str("// Run `cargo run -p shepherd-management --bin rpc-codegen`\n");
+    out.push_str("// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/shepherd-management/src/service.rs`.\n\n");
     out.push_str("/**\n");

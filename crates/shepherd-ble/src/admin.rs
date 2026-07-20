@@ -12,12 +12,14 @@ use thiserror::Error;
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AdminRole {
     Admin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AdminRecord {
     /// The BlueZ-resolved identity address for the bonded peer. Once
     /// pairing completes BlueZ presents this address regardless of the

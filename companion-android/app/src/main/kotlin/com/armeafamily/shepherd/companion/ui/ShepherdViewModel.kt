@@ -583,6 +583,6 @@ private fun AdminRecord.toShepherdRecord(androidIdentifier: String) = ShepherdRe
     deviceName = deviceName,
     bondedAt = bondedAt,
     httpToken = httpToken,
-    role = role,
+    role = role.name.lowercase(),
     androidIdentifier = androidIdentifier,
 )

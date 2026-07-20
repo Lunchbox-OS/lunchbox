@@ -4219,6 +4219,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "rand",
+ "schemars",
  "serde",
  "serde_json",
  "shepherd-api",
@@ -4619,6 +4620,20 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "shepherd-wire-codegen"
+version = "0.2.4"
+dependencies = [
+ "anyhow",
+ "schemars",
+ "serde",
+ "serde_json",
+ "shepherd-api",
+ "shepherd-ble",
+ "shepherd-management",
+ "tempfile",
 ]
 
 [[package]]

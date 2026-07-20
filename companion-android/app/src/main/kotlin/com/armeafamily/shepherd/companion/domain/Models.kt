@@ -22,9 +22,6 @@ import kotlinx.serialization.json.put
  *   bespoke serializer.
  * - [Event] / [EventPayload]: the `state_changed` variant flattens a `$ref`
  *   beside its tag, which kotlinx cannot express as a sealed subclass.
- * - The claim/admin types below describe the BLE pairing protocol, which
- *   lives in `shepherd-ble` — a crate the generator cannot depend on without
- *   a dependency cycle.
  * - Convenience affordances on generated types, as extensions.
  */
 
@@ -100,33 +97,6 @@ object LaunchOutcomeSerializer : kotlinx.serialization.KSerializer<LaunchOutcome
     }
 }
 
-// --- device info / claim ---------------------------------------------
-
-@Serializable
-enum class ClaimStateTag {
-    @SerialName("unclaimed") UNCLAIMED,
-    @SerialName("claimed") CLAIMED,
-}
-
-/** Payload of the unencrypted DeviceInfo characteristic. */
-@Serializable
-data class DeviceInfo(
-    val protocolVersion: Int,
-    val firmwareVersion: String,
-    val claimState: ClaimStateTag,
-    val deviceName: String,
-)
-
-/** Result of a successful `claim`. The `http_token` is secret. */
-@Serializable
-data class AdminRecord(
-    val identityAddress: String,
-    val addressType: String,
-    val deviceName: String,
-    val bondedAt: IsoTimestamp,
-    val httpToken: String,
-    val role: String,
-)
 // --- events -----------------------------------------------------------
 
 

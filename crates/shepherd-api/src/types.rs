@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Entry kind tag for capability matching
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKindTag {
     Process,
@@ -27,7 +28,8 @@ pub enum EntryKindTag {
 ///
 /// This enum is the canonical catalog: config validates against it, and the
 /// host adapter attaches the per-kind CEF detection signatures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InterstitialKind {
     /// "Unable to Sync" Steam Cloud warning shown when launching offline with
@@ -91,7 +93,8 @@ impl InterstitialKind {
 }
 
 /// Entry kind with launch details
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntryKind {
     Process {
@@ -165,7 +168,8 @@ pub enum EntryKind {
 /// are the exception — `TouchToMouse`, `TabletToTouch`, and `DisableTouch` all
 /// grab or produce the touchscreen, so at most one of them can be active at a
 /// time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InputCompatMode {
     /// Grab touchscreens and emit synthesized pointer events via
@@ -221,19 +225,8 @@ impl InputCompatMode {
 /// Camera/microphone and MIDI are intentionally omitted for now; the issue
 /// marks them as future work and this enum is closed, so configuring one is a
 /// parse error rather than a silently-ignored value.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InputDeviceType {
     /// A relative pointing device (mouse, trackball, trackpad).
@@ -270,7 +263,8 @@ impl std::fmt::Display for InputDeviceType {
 /// Translated by the host adapter into Chrome command-line flags. Shared by
 /// `shepherd-config`'s validated `BrowserPolicy` and `shepherd-host-api`'s
 /// `BrowserSpec` so there is a single source of truth for the mode vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserMode {
     /// Fullscreen, no browser chrome (`--kiosk`).
@@ -287,7 +281,8 @@ pub enum BrowserMode {
 /// `None`. Only the gamepad fields are populated today, but the struct lives
 /// alongside the mode list so future tunables for other modes can be added
 /// without another schema change.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputCompatOptions {
     /// Gamepad analog-stick deadzone as a fraction of full deflection (0..1).
     /// Below this magnitude the stick is treated as centered.
@@ -323,7 +318,8 @@ impl EntryKind {
 }
 
 /// View of an entry for UI display
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EntryView {
     pub entry_id: EntryId,
     pub label: String,
@@ -346,7 +342,8 @@ pub struct EntryView {
 /// A group's limits are shared by its members, so a management UI needs to
 /// show the *category's* state — combined usage against the combined quota,
 /// and whatever is currently restricting it — separately from any one member.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GroupView {
     pub group_id: GroupId,
     pub label: String,
@@ -369,7 +366,8 @@ pub struct GroupView {
 }
 
 /// Structured reason codes for why an entry is unavailable
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum ReasonCode {
     /// Outside allowed time window
@@ -422,7 +420,8 @@ pub enum ReasonCode {
 }
 
 /// Warning severity level
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WarningSeverity {
     Info,
@@ -431,7 +430,8 @@ pub enum WarningSeverity {
 }
 
 /// Warning threshold configuration
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WarningThreshold {
     /// Seconds before expiry to issue this warning
     pub seconds_before: u64,
@@ -440,7 +440,8 @@ pub struct WarningThreshold {
 }
 
 /// Session end reason
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEndReason {
     /// Session expired (time limit reached)
@@ -460,7 +461,8 @@ pub enum SessionEndReason {
 }
 
 /// Current session state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Launching,
@@ -471,7 +473,8 @@ pub enum SessionState {
 }
 
 /// Active session information
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionInfo {
     pub session_id: SessionId,
     pub entry_id: EntryId,
@@ -497,7 +500,8 @@ pub(crate) fn default_confirm_on_close() -> bool {
 }
 
 /// Status of a single internet connectivity check target
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InternetStatusView {
     /// Original check string as configured (e.g. "https://example.com")
     pub target: String,
@@ -506,7 +510,8 @@ pub struct InternetStatusView {
 }
 
 /// Full service state snapshot
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ServiceStateSnapshot {
     pub api_version: u32,
     pub policy_loaded: bool,
@@ -522,7 +527,8 @@ pub struct ServiceStateSnapshot {
 }
 
 /// Role for authorization
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ClientRole {
     /// UI/HUD - can view state, launch entries, stop current
@@ -552,7 +558,8 @@ impl ClientRole {
 }
 
 /// Stop mode for session termination
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum StopMode {
     /// Try graceful termination first
@@ -562,7 +569,8 @@ pub enum StopMode {
 }
 
 /// Health status
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HealthStatus {
     pub live: bool,
     pub ready: bool,
@@ -572,7 +580,8 @@ pub struct HealthStatus {
 }
 
 /// Volume status information
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VolumeInfo {
     /// Volume percentage (0-100)
     pub percent: u8,
@@ -587,7 +596,8 @@ pub struct VolumeInfo {
 }
 
 /// Volume restrictions that are currently in effect
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VolumeRestrictions {
     /// Maximum volume percentage allowed
     pub max_volume: Option<u8>,
@@ -634,7 +644,8 @@ impl VolumeInfo {
 }
 
 /// Screen brightness status information
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BrightnessInfo {
     /// Brightness percentage (0-100)
     pub percent: u8,
@@ -656,7 +667,8 @@ pub struct BrightnessInfo {
 }
 
 /// Brightness restrictions that are currently in effect
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BrightnessRestrictions {
     /// Maximum brightness percentage allowed
     pub max_brightness: Option<u8>,
@@ -701,7 +713,8 @@ impl BrightnessInfo {
 /// `refresh_mhz` is millihertz, matching sway's `get_outputs` JSON (60 Hz is
 /// `60000`). Refresh participates in equality, but [`VideoMode::area`] ignores
 /// it so "highest resolution" comparisons are purely by pixel count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VideoMode {
     pub width: u32,
     pub height: u32,
@@ -720,7 +733,8 @@ impl VideoMode {
 ///
 /// Exactly one logical output is ever active in every variant, so the
 /// one-activity-at-a-time invariant always holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayMode {
     /// Only the internal/primary panel is active — the state when no external
@@ -749,7 +763,8 @@ impl DisplayMode {
 
 /// Snapshot of the compositor's display arrangement, broadcast to shells so the
 /// HUD can show/hide and label its mirror/external toggle (issue #87).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DisplayState {
     pub mode: DisplayMode,
     /// Connector name of the primary (internal, first-enumerated) output.
@@ -767,7 +782,8 @@ impl DisplayState {
 }
 
 /// A parent-set daily override for a single entry
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DailyOverride {
     /// What the override applies to: an entry, or a whole group (issue #5).
     /// Serializes as a bare entry ID, or `group:<id>` for a group, so overrides
@@ -786,7 +802,8 @@ pub struct DailyOverride {
 }
 
 /// Screen-time usage for a single entry on a single day
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UsageStat {
     pub entry_id: EntryId,
     pub label: String,
@@ -795,7 +812,8 @@ pub struct UsageStat {
 }
 
 /// An action that can be performed on a window via the debug API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WindowAction {
     /// Ask the window to close (sway `kill`).
@@ -811,7 +829,8 @@ pub enum WindowAction {
 /// Currently surfaced via the management API for debugging the Sway tree —
 /// in particular, to see which windows have been moved to the scratchpad
 /// (e.g. the hidden Steam client) versus which are on-screen.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WindowInfo {
     /// Compositor-assigned window/container id.
     pub id: u64,
