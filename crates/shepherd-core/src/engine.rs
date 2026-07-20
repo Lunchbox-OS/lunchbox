@@ -7,12 +7,12 @@ use shepherd_api::{
 };
 use shepherd_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
-use shepherd_store::{AuditEvent, AuditEventType, Store};
+use shepherd_store::{AuditEvent, AuditEventType, Store, TokenState};
 use shepherd_util::{EntryId, LimitSubject, MonotonicInstant, SessionId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{ActiveSession, CoreEvent, SessionPlan, StopResult};
 
@@ -237,7 +237,12 @@ impl CoreEngine {
                         .limits
                         .daily_quota
                         .map(|q| apply_quota_delta(q, quota_delta)),
-                    max_run_if_started_now: self.group_max_duration(group, now, quota_delta),
+                    max_run_if_started_now: self.group_max_duration(
+                        group,
+                        now,
+                        quota_delta,
+                        availability == Some(true),
+                    ),
                 }
             })
             .collect()
@@ -246,11 +251,17 @@ impl CoreEngine {
     /// The longest session a group's own limits would allow a member right
     /// now, ignoring the member's individual limits. None means the group
     /// imposes no cap.
+    ///
+    /// `manually_enabled` must match what `compute_max_duration` was told, or
+    /// this reports a cap the members are not actually held to — a force-enabled
+    /// category would read as "up to 0s per session" while its members run
+    /// uncapped.
     fn group_max_duration(
         &self,
         group: &Group,
         now: DateTime<Local>,
         quota_delta: Option<i64>,
+        manually_enabled: bool,
     ) -> Option<Duration> {
         let today = now.date_naive();
         let mut max = group.limits.max_run;
@@ -260,6 +271,12 @@ impl CoreEngine {
                 None => limit,
             });
         };
+
+        // A force-enable lifts the window, quota and token caps but not the
+        // per-session `max_run`, exactly as in `compute_max_duration`.
+        if manually_enabled {
+            return max;
+        }
 
         if let Some(window_remaining) = group.availability.remaining_in_window(&now) {
             clamp(window_remaining);
@@ -427,11 +444,11 @@ impl CoreEngine {
         // Skipped when an enable-today override is set, like the window and
         // daily-quota checks above.
         if !manually_enabled && let Some(tokens) = &entry.tokens {
-            let balance = self.token_balance(entry, today);
-            if !tokens.unlocked(balance) {
+            let state = self.token_state_of(&entry.subject(), tokens, today);
+            if !tokens.unlocked(state.balance, state.ratcheted) {
                 enabled = false;
                 reasons.push(ReasonCode::TokensInsufficient {
-                    balance,
+                    balance: state.balance,
                     required: tokens.minimum,
                 });
             }
@@ -608,10 +625,10 @@ impl CoreEngine {
         }
 
         if !manually_enabled && let Some(tokens) = &group.tokens {
-            let balance = self.token_balance_of(&group.subject(), tokens, today);
-            if !tokens.unlocked(balance) {
+            let state = self.token_state_of(&group.subject(), tokens, today);
+            if !tokens.unlocked(state.balance, state.ratcheted) {
                 reasons.push(ReasonCode::TokensInsufficient {
-                    balance,
+                    balance: state.balance,
                     required: tokens.minimum,
                 });
             }
@@ -635,6 +652,34 @@ impl CoreEngine {
             .sum()
     }
 
+    /// A subject's banked token state under the given gate.
+    ///
+    /// A failed read is reported rather than swallowed silently: it degrades to
+    /// a zero balance, which locks the gate, and a locked gate with no
+    /// explanation is exactly the failure that is impossible to diagnose from
+    /// the outside.
+    fn token_state_of(
+        &self,
+        subject: &LimitSubject,
+        tokens: &TokensPolicy,
+        today: NaiveDate,
+    ) -> TokenState {
+        match self
+            .store
+            .get_token_state(subject, today, tokens.carry_over)
+        {
+            Ok(state) => state,
+            Err(e) => {
+                warn!(
+                    subject = %subject,
+                    error = %e,
+                    "Failed to read token balance; treating the gate as locked"
+                );
+                TokenState::default()
+            }
+        }
+    }
+
     /// A subject's banked token balance under the given gate.
     fn token_balance_of(
         &self,
@@ -642,9 +687,7 @@ impl CoreEngine {
         tokens: &TokensPolicy,
         today: NaiveDate,
     ) -> Duration {
-        self.store
-            .get_token_balance(subject, today, tokens.carry_over)
-            .unwrap_or(Duration::ZERO)
+        self.token_state_of(subject, tokens, today).balance
     }
 
     /// An entry's banked token balance, or zero if it is not token-gated.
@@ -679,6 +722,15 @@ impl CoreEngine {
             .chain(ended.group.clone().map(LimitSubject::Group))
             .collect();
 
+        // Whether a caregiver granted this session, on the entry or on its
+        // group. `evaluate_entry` treats an override at *either* level as a
+        // force-enable that lifts both the gate and the clamp, so the spend
+        // exemption below has to be scoped the same way: billing a balance for
+        // a session whose cap was lifted can drain it to zero.
+        let granted = ended_subjects
+            .iter()
+            .any(|subject| self.manually_enabled(subject, today));
+
         // Every gate in the policy, on entries and on groups alike.
         let gates = self
             .policy
@@ -704,13 +756,16 @@ impl CoreEngine {
             // exempt — the caregiver granted that time, so the child shouldn't
             // be billed for it, consistent with the override bypassing the gate
             // in the first place.
-            if ended_subjects.contains(&target) && !self.manually_enabled(&target, today) {
-                let _ = self.store.adjust_token_balance(
+            if ended_subjects.contains(&target)
+                && !granted
+                && let Err(e) = self.store.adjust_token_balance(
                     &target,
                     today,
                     tokens.carry_over,
                     -(duration.as_secs() as i64),
-                );
+                )
+            {
+                warn!(subject = %target, error = %e, "Failed to spend token balance");
             }
         }
     }
@@ -763,10 +818,18 @@ impl CoreEngine {
             return;
         }
 
-        let balance = self
-            .store
-            .adjust_token_balance(target, today, tokens.carry_over, earned.as_secs() as i64)
-            .unwrap_or(Duration::ZERO);
+        let mut balance = match self.store.adjust_token_balance(
+            target,
+            today,
+            tokens.carry_over,
+            earned.as_secs() as i64,
+        ) {
+            Ok(state) => state.balance,
+            Err(e) => {
+                warn!(subject = %target, error = %e, "Failed to bank earned tokens");
+                return;
+            }
+        };
 
         // Apply the ceiling here rather than in the store, which has no view of
         // policy.
@@ -774,9 +837,24 @@ impl CoreEngine {
             && balance > max_balance
         {
             let excess = (balance - max_balance).as_secs() as i64;
-            let _ = self
+            match self
                 .store
-                .adjust_token_balance(target, today, tokens.carry_over, -excess);
+                .adjust_token_balance(target, today, tokens.carry_over, -excess)
+            {
+                Ok(state) => balance = state.balance,
+                Err(e) => warn!(subject = %target, error = %e, "Failed to cap token balance"),
+            }
+        }
+
+        // Earning is the only way a balance grows, so this is the only place
+        // the gate can ratchet open (issue #8). Once open it stays open until
+        // the balance is spent to zero, which the store handles.
+        if balance >= tokens.minimum
+            && let Err(e) = self
+                .store
+                .set_token_ratchet(target, today, tokens.carry_over)
+        {
+            warn!(subject = %target, error = %e, "Failed to record token gate unlock");
         }
     }
 
@@ -2200,6 +2278,17 @@ mod tests {
         engine.token_balance(entry, now.date_naive())
     }
 
+    fn group_balance_of(engine: &CoreEngine, id: &str, now: DateTime<Local>) -> Duration {
+        let group = engine
+            .policy
+            .groups
+            .iter()
+            .find(|g| g.id.as_str() == id)
+            .unwrap();
+        let tokens = group.tokens.as_ref().expect("group should be token-gated");
+        engine.token_balance_of(&group.subject(), tokens, now.date_naive())
+    }
+
     fn noon() -> DateTime<Local> {
         use chrono::TimeZone;
         chrono::Local
@@ -2790,5 +2879,190 @@ mod tests {
             Some("games")
         );
         assert!(view(&entries, "ungrouped").group.is_none());
+    }
+
+    /// A force-enable on the *group* lifts a member's own token gate and clamp,
+    /// so it must exempt that member's balance from being spent too. Billing it
+    /// while the clamp is lifted drains a balance the child never chose to
+    /// spend.
+    #[test]
+    fn test_group_override_exempts_a_members_own_token_balance() {
+        let mut policy = make_group_policy(group("games", no_limits(), None));
+        let gated = policy
+            .entries
+            .iter_mut()
+            .find(|e| e.id.as_str() == "game-a")
+            .unwrap();
+        gated.tokens = Some(TokensPolicy {
+            from: vec![LimitSubject::entry("ungrouped")],
+            earn_ratio: 1.0,
+            minimum: Duration::from_secs(300),
+            max_balance: None,
+            carry_over: false,
+        });
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "ungrouped", Duration::from_secs(600), now);
+        store
+            .upsert_daily_override(
+                &LimitSubject::group("games"),
+                now.date_naive(),
+                Some(true),
+                None,
+            )
+            .unwrap();
+
+        // The category is on for the day, so the member's own gate and clamp
+        // are lifted...
+        assert!(
+            view(&engine.list_entries(now), "game-a")
+                .max_run_if_started_now
+                .is_none(),
+            "a group force-enable should lift the member's token clamp"
+        );
+
+        // ...and a session under it is not billed to that member's balance.
+        run_session(&mut engine, "game-a", Duration::from_secs(1800), now);
+        assert_eq!(
+            balance_of(&engine, "game-a", now),
+            Duration::from_secs(600),
+            "a session granted at group level should not spend the entry's tokens"
+        );
+    }
+
+    /// The mirror case: a force-enable on the *member* lifts the group's token
+    /// gate, so the category's shared balance must not be spent either — the
+    /// siblings would otherwise pay for a session a caregiver granted.
+    #[test]
+    fn test_member_override_exempts_the_groups_token_balance() {
+        let policy = make_group_policy(group(
+            "games",
+            no_limits(),
+            Some(TokensPolicy {
+                from: vec![LimitSubject::entry("ungrouped")],
+                earn_ratio: 1.0,
+                minimum: Duration::from_secs(300),
+                max_balance: None,
+                carry_over: false,
+            }),
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "ungrouped", Duration::from_secs(600), now);
+        store
+            .upsert_daily_override(
+                &LimitSubject::entry("game-a"),
+                now.date_naive(),
+                Some(true),
+                None,
+            )
+            .unwrap();
+
+        run_session(&mut engine, "game-a", Duration::from_secs(1800), now);
+        assert_eq!(
+            group_balance_of(&engine, "games", now),
+            Duration::from_secs(600),
+            "a session granted on one member should not spend the category's tokens"
+        );
+        assert!(
+            view(&engine.list_entries(now), "game-b").enabled,
+            "the sibling should still be unlocked by the untouched balance"
+        );
+    }
+
+    /// `minimum_seconds` is a threshold to cross, not one to stay above: a
+    /// partial spend must not re-lock the activity and strand the remainder.
+    #[test]
+    fn test_token_gate_ratchets_open_after_a_partial_spend() {
+        let policy = make_token_policy(TokensPolicy {
+            from: vec![LimitSubject::entry("scratch")],
+            earn_ratio: 1.0,
+            minimum: Duration::from_secs(600),
+            max_balance: None,
+            carry_over: false,
+        });
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // Just short of the threshold: still locked.
+        run_session(&mut engine, "scratch", Duration::from_secs(500), now);
+        assert!(!view(&engine.list_entries(now), "minecraft").enabled);
+
+        // Crossing it opens the gate.
+        run_session(&mut engine, "scratch", Duration::from_secs(200), now);
+        assert!(view(&engine.list_entries(now), "minecraft").enabled);
+
+        // Spending part of the balance leaves it below the threshold, but the
+        // gate stays open for what's left rather than stranding it.
+        run_session(&mut engine, "minecraft", Duration::from_secs(300), now);
+        let entries = engine.list_entries(now);
+        let minecraft = view(&entries, "minecraft");
+        assert!(
+            minecraft.enabled,
+            "a partial spend should not re-lock the entry: {:?}",
+            minecraft.reasons
+        );
+        assert_eq!(
+            minecraft.max_run_if_started_now,
+            Some(Duration::from_secs(400)),
+            "the remaining balance should still be spendable"
+        );
+
+        // Spending it all the way down re-locks, and the threshold has to be
+        // crossed again from zero.
+        run_session(&mut engine, "minecraft", Duration::from_secs(400), now);
+        assert!(!view(&engine.list_entries(now), "minecraft").enabled);
+        run_session(&mut engine, "scratch", Duration::from_secs(100), now);
+        assert!(
+            !view(&engine.list_entries(now), "minecraft").enabled,
+            "the ratchet should release once the balance is spent"
+        );
+    }
+
+    /// `list_groups` must report the cap the members are actually held to.
+    #[test]
+    fn test_group_view_max_run_honours_a_force_enable() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                max_run: Some(Duration::from_secs(900)),
+                daily_quota: Some(Duration::from_secs(600)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+
+        // Spend the category's quota, then switch it on for the day anyway.
+        run_session(&mut engine, "game-a", Duration::from_secs(600), now);
+        store
+            .upsert_daily_override(
+                &LimitSubject::group("games"),
+                now.date_naive(),
+                Some(true),
+                None,
+            )
+            .unwrap();
+
+        let groups = engine.list_groups(now);
+        let games = groups.first().expect("the group should be listed");
+        assert_eq!(
+            games.max_run_if_started_now,
+            Some(Duration::from_secs(900)),
+            "an overridden group should report its per-session cap, not a spent quota"
+        );
+        assert_eq!(
+            view(&engine.list_entries(now), "game-b").max_run_if_started_now,
+            games.max_run_if_started_now,
+            "the group's reported cap should match what its members get"
+        );
     }
 }

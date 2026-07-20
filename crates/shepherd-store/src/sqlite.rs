@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-use crate::{AuditEvent, StateSnapshot, Store, StoreResult};
+use crate::{AuditEvent, StateSnapshot, Store, StoreResult, TokenState};
 
 /// SQLite-based store
 pub struct SqliteStore {
@@ -64,6 +64,102 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Add a column to an existing table if it is missing.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already
+    /// exists, so a column added after a table shipped has to be applied by
+    /// hand. Guarded by `PRAGMA table_info`, so it is a no-op on a fresh or
+    /// already-migrated database.
+    fn add_missing_column(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> StoreResult<()> {
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                params![table],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !table_exists {
+            return Ok(());
+        }
+
+        let has_column: bool = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == column);
+
+        if !has_column {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))?;
+            debug!(table, column, "Added missing column");
+        }
+
+        Ok(())
+    }
+
+    /// The raw `token_balances` row for a subject: balance, day, ratchet.
+    fn read_token_row(
+        conn: &Connection,
+        subject: &LimitSubject,
+    ) -> StoreResult<Option<(i64, String, bool)>> {
+        Ok(conn
+            .query_row(
+                "SELECT balance_secs, updated_day, ratcheted FROM token_balances WHERE subject = ?",
+                params![subject.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .optional()?)
+    }
+
+    /// A raw row as of `day_str`, applying the lazy midnight reset: a
+    /// non-carrying row from an earlier day has expired, balance and ratchet
+    /// alike.
+    fn effective_token_state(
+        row: Option<(i64, String, bool)>,
+        day_str: &str,
+        carry_over: bool,
+    ) -> TokenState {
+        match row {
+            Some((_, updated_day, _)) if !carry_over && updated_day != day_str => {
+                TokenState::default()
+            }
+            Some((secs, _, ratcheted)) => TokenState {
+                balance: Duration::from_secs(secs.max(0) as u64),
+                ratcheted,
+            },
+            None => TokenState::default(),
+        }
+    }
+
+    fn write_token_row(
+        conn: &Connection,
+        subject: &LimitSubject,
+        balance_secs: i64,
+        day_str: &str,
+        ratcheted: bool,
+    ) -> StoreResult<()> {
+        conn.execute(
+            r#"
+            INSERT INTO token_balances (subject, balance_secs, updated_day, ratcheted)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(subject)
+            DO UPDATE SET
+                balance_secs = excluded.balance_secs,
+                updated_day = excluded.updated_day,
+                ratcheted = excluded.ratcheted
+            "#,
+            params![subject.to_string(), balance_secs, day_str, ratcheted as i64],
+        )?;
+        Ok(())
+    }
+
     fn init_schema(&self) -> StoreResult<()> {
         let conn = self.conn.lock().unwrap();
 
@@ -72,6 +168,18 @@ impl SqliteStore {
         // thing that brings it up to the current shape.
         Self::rename_legacy_key_column(&conn, "cooldowns")?;
         Self::rename_legacy_key_column(&conn, "daily_overrides")?;
+        // `token_balances` shipped one commit earlier, keyed by a bare entry ID
+        // like the two above. Left unmigrated, every `WHERE subject = ?` fails
+        // and — because the engine treats a failed balance read as zero — every
+        // token gate locks silently.
+        Self::rename_legacy_key_column(&conn, "token_balances")?;
+        // The ratchet flag was added after `token_balances` shipped.
+        Self::add_missing_column(
+            &conn,
+            "token_balances",
+            "ratcheted",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         conn.execute_batch(
             r#"
@@ -92,11 +200,14 @@ impl SqliteStore {
 
             -- Token balances (issue #8), keyed by limit subject. `updated_day`
             -- is the local date of the last mutation, so a non-carrying balance
-            -- resets lazily at midnight.
+            -- resets lazily at midnight. `ratcheted` records that the gate has
+            -- already opened for this balance, so spending it part-way down
+            -- doesn't strand the remainder below `minimum_seconds`.
             CREATE TABLE IF NOT EXISTS token_balances (
                 subject TEXT PRIMARY KEY,
                 balance_secs INTEGER NOT NULL DEFAULT 0,
-                updated_day TEXT NOT NULL
+                updated_day TEXT NOT NULL,
+                ratcheted INTEGER NOT NULL DEFAULT 0
             );
 
             -- Cooldowns, keyed by limit subject
@@ -222,31 +333,17 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    fn get_token_balance(
+    fn get_token_state(
         &self,
         subject: &LimitSubject,
         day: NaiveDate,
         carry_over: bool,
-    ) -> StoreResult<Duration> {
+    ) -> StoreResult<TokenState> {
         let conn = self.conn.lock().unwrap();
         let day_str = day.format("%Y-%m-%d").to_string();
 
-        let row: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT balance_secs, updated_day FROM token_balances WHERE subject = ?",
-                params![subject.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-
-        let secs = match row {
-            // A non-carrying balance from an earlier day has already expired.
-            Some((_, updated_day)) if !carry_over && updated_day != day_str => 0,
-            Some((secs, _)) => secs.max(0),
-            None => 0,
-        };
-
-        Ok(Duration::from_secs(secs as u64))
+        let row = Self::read_token_row(&conn, subject)?;
+        Ok(Self::effective_token_state(row, &day_str, carry_over))
     }
 
     fn adjust_token_balance(
@@ -255,37 +352,23 @@ impl Store for SqliteStore {
         day: NaiveDate,
         carry_over: bool,
         delta_secs: i64,
-    ) -> StoreResult<Duration> {
+    ) -> StoreResult<TokenState> {
         // Read-modify-write under one transaction so a concurrent adjustment
         // can't lose an update.
         let mut conn = self.conn.lock().unwrap();
         let day_str = day.format("%Y-%m-%d").to_string();
         let tx = conn.transaction()?;
 
-        let row: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT balance_secs, updated_day FROM token_balances WHERE subject = ?",
-                params![subject.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+        let row = Self::read_token_row(&tx, subject)?;
+        let current = Self::effective_token_state(row, &day_str, carry_over);
+        let updated = (current.balance.as_secs() as i64)
+            .saturating_add(delta_secs)
+            .max(0);
+        // An empty balance is locked whatever it once held, so spending it all
+        // the way down releases the ratchet too.
+        let ratcheted = current.ratcheted && updated > 0;
 
-        let current = match row {
-            Some((_, updated_day)) if !carry_over && updated_day != day_str => 0,
-            Some((secs, _)) => secs.max(0),
-            None => 0,
-        };
-        let updated = current.saturating_add(delta_secs).max(0);
-
-        tx.execute(
-            r#"
-            INSERT INTO token_balances (subject, balance_secs, updated_day)
-            VALUES (?, ?, ?)
-            ON CONFLICT(subject)
-            DO UPDATE SET balance_secs = excluded.balance_secs, updated_day = excluded.updated_day
-            "#,
-            params![subject.to_string(), updated, day_str],
-        )?;
+        Self::write_token_row(&tx, subject, updated, &day_str, ratcheted)?;
         tx.commit()?;
 
         debug!(
@@ -293,9 +376,42 @@ impl Store for SqliteStore {
             day = %day_str,
             delta_secs,
             balance_secs = updated,
+            ratcheted,
             "Token balance adjusted"
         );
-        Ok(Duration::from_secs(updated as u64))
+        Ok(TokenState {
+            balance: Duration::from_secs(updated as u64),
+            ratcheted,
+        })
+    }
+
+    fn set_token_ratchet(
+        &self,
+        subject: &LimitSubject,
+        day: NaiveDate,
+        carry_over: bool,
+    ) -> StoreResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let day_str = day.format("%Y-%m-%d").to_string();
+        let tx = conn.transaction()?;
+
+        let row = Self::read_token_row(&tx, subject)?;
+        let current = Self::effective_token_state(row, &day_str, carry_over);
+        if current.ratcheted || current.balance.is_zero() {
+            return Ok(());
+        }
+
+        Self::write_token_row(
+            &tx,
+            subject,
+            current.balance.as_secs() as i64,
+            &day_str,
+            true,
+        )?;
+        tx.commit()?;
+
+        debug!(subject = %subject, day = %day_str, "Token gate ratcheted open");
+        Ok(())
     }
 
     fn get_cooldown_until(&self, subject: &LimitSubject) -> StoreResult<Option<DateTime<Local>>> {
@@ -684,7 +800,10 @@ mod tests {
 
         // Initially zero
         assert_eq!(
-            store.get_token_balance(&entry_id, today, false).unwrap(),
+            store
+                .get_token_state(&entry_id, today, false)
+                .unwrap()
+                .balance,
             Duration::ZERO
         );
 
@@ -692,13 +811,16 @@ mod tests {
         let balance = store
             .adjust_token_balance(&entry_id, today, false, 600)
             .unwrap();
-        assert_eq!(balance, Duration::from_secs(600));
+        assert_eq!(balance.balance, Duration::from_secs(600));
         let balance = store
             .adjust_token_balance(&entry_id, today, false, 300)
             .unwrap();
-        assert_eq!(balance, Duration::from_secs(900));
+        assert_eq!(balance.balance, Duration::from_secs(900));
         assert_eq!(
-            store.get_token_balance(&entry_id, today, false).unwrap(),
+            store
+                .get_token_state(&entry_id, today, false)
+                .unwrap()
+                .balance,
             Duration::from_secs(900)
         );
 
@@ -707,9 +829,12 @@ mod tests {
         let balance = store
             .adjust_token_balance(&entry_id, today, false, -5000)
             .unwrap();
-        assert_eq!(balance, Duration::ZERO);
+        assert_eq!(balance.balance, Duration::ZERO);
         assert_eq!(
-            store.get_token_balance(&entry_id, today, false).unwrap(),
+            store
+                .get_token_state(&entry_id, today, false)
+                .unwrap()
+                .balance,
             Duration::ZERO
         );
     }
@@ -727,12 +852,18 @@ mod tests {
 
         // Read as of today: the balance expired at local midnight.
         assert_eq!(
-            store.get_token_balance(&entry_id, today, false).unwrap(),
+            store
+                .get_token_state(&entry_id, today, false)
+                .unwrap()
+                .balance,
             Duration::ZERO
         );
         // ...but it is still there for a carry-over entry.
         assert_eq!(
-            store.get_token_balance(&entry_id, today, true).unwrap(),
+            store
+                .get_token_state(&entry_id, today, true)
+                .unwrap()
+                .balance,
             Duration::from_secs(1800)
         );
 
@@ -741,7 +872,7 @@ mod tests {
         let balance = store
             .adjust_token_balance(&entry_id, today, false, 600)
             .unwrap();
-        assert_eq!(balance, Duration::from_secs(600));
+        assert_eq!(balance.balance, Duration::from_secs(600));
     }
 
     #[test]
@@ -757,7 +888,7 @@ mod tests {
         let balance = store
             .adjust_token_balance(&entry_id, today, true, 600)
             .unwrap();
-        assert_eq!(balance, Duration::from_secs(2400));
+        assert_eq!(balance.balance, Duration::from_secs(2400));
     }
 
     /// A database written before groups existed keys cooldowns and overrides by
@@ -789,7 +920,20 @@ mod tests {
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (entry_id, date)
                 );
+                -- Shipped by the token system (issue #8) one commit before
+                -- groups re-keyed it, and without the ratchet column.
+                CREATE TABLE token_balances (
+                    entry_id TEXT PRIMARY KEY,
+                    balance_secs INTEGER NOT NULL DEFAULT 0,
+                    updated_day TEXT NOT NULL
+                );
                 "#,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO token_balances (entry_id, balance_secs, updated_day) \
+                 VALUES ('game-1', 900, ?)",
+                params![today.format("%Y-%m-%d").to_string()],
             )
             .unwrap();
             conn.execute(
@@ -834,10 +978,101 @@ mod tests {
             "a group cooldown must not disturb an entry's"
         );
 
+        // A banked balance survives too — left unmigrated, every read would
+        // fail and the engine would report a silently locked gate.
+        let state = store.get_token_state(&subject, today, false).unwrap();
+        assert_eq!(
+            state.balance,
+            Duration::from_secs(900),
+            "the legacy token balance should still be readable"
+        );
+        assert!(
+            !state.ratcheted,
+            "a balance from before the ratchet existed defaults to locked"
+        );
+
         // Re-opening is a no-op rather than an error.
         drop(store);
         let reopened = SqliteStore::open(&path).unwrap();
         assert!(reopened.get_cooldown_until(&subject).unwrap().is_some());
+        assert_eq!(
+            reopened
+                .get_token_state(&subject, today, false)
+                .unwrap()
+                .balance,
+            Duration::from_secs(900)
+        );
+    }
+
+    /// The ratchet is remembered alongside the balance and released when the
+    /// balance is spent to zero (issue #8).
+    #[test]
+    fn test_token_ratchet_persists_until_the_balance_is_spent() {
+        let store = SqliteStore::in_memory().unwrap();
+        let subject = LimitSubject::entry("minecraft");
+        let today = shepherd_util::now().date_naive();
+
+        store
+            .adjust_token_balance(&subject, today, false, 600)
+            .unwrap();
+        store.set_token_ratchet(&subject, today, false).unwrap();
+        assert!(
+            store
+                .get_token_state(&subject, today, false)
+                .unwrap()
+                .ratcheted,
+            "the ratchet should be remembered"
+        );
+
+        // A partial spend keeps it.
+        let state = store
+            .adjust_token_balance(&subject, today, false, -400)
+            .unwrap();
+        assert_eq!(state.balance, Duration::from_secs(200));
+        assert!(state.ratcheted);
+
+        // Spending it out releases it, so the threshold has to be crossed again.
+        let state = store
+            .adjust_token_balance(&subject, today, false, -200)
+            .unwrap();
+        assert!(state.balance.is_zero());
+        assert!(!state.ratcheted);
+        let state = store
+            .adjust_token_balance(&subject, today, false, 100)
+            .unwrap();
+        assert!(
+            !state.ratcheted,
+            "re-earning must not silently re-open the gate"
+        );
+    }
+
+    /// The ratchet expires with the balance it belongs to.
+    #[test]
+    fn test_token_ratchet_resets_at_midnight_unless_carried_over() {
+        let store = SqliteStore::in_memory().unwrap();
+        let subject = LimitSubject::entry("minecraft");
+        let today = shepherd_util::now().date_naive();
+        let yesterday = today - chrono::Duration::days(1);
+
+        store
+            .adjust_token_balance(&subject, yesterday, false, 600)
+            .unwrap();
+        store.set_token_ratchet(&subject, yesterday, false).unwrap();
+
+        assert!(
+            !store
+                .get_token_state(&subject, today, false)
+                .unwrap()
+                .ratcheted,
+            "a non-carrying ratchet should expire with its balance"
+        );
+        assert!(
+            store
+                .get_token_state(&subject, today, true)
+                .unwrap()
+                .ratcheted,
+            "a carried-over balance keeps its ratchet"
+        );
     }
 
     #[test]

@@ -7,6 +7,18 @@ use std::time::Duration;
 
 use crate::{AuditEvent, StoreResult};
 
+/// A subject's banked token state for a day (issue #8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenState {
+    /// Time banked and not yet spent.
+    pub balance: Duration,
+    /// Whether the gate has already opened for this balance. Once the balance
+    /// has reached `minimum_seconds` the gate ratchets open and stays open
+    /// until the balance is spent to zero, so a partial spend can't strand the
+    /// remainder below the threshold.
+    pub ratcheted: bool,
+}
+
 /// Main store trait
 pub trait Store: Send + Sync {
     // Audit log
@@ -27,29 +39,45 @@ pub trait Store: Send + Sync {
 
     // Token balances (issue #8)
 
-    /// Get a subject's banked token balance as of `day`.
+    /// Get a subject's banked token state as of `day`.
     ///
     /// When `carry_over` is false and the balance was last touched on an
-    /// earlier day, this returns zero — the balance resets lazily at local
-    /// midnight rather than being swept by a job.
-    fn get_token_balance(
+    /// earlier day, this returns the zero state — the balance resets lazily at
+    /// local midnight rather than being swept by a job.
+    fn get_token_state(
         &self,
         subject: &LimitSubject,
         day: NaiveDate,
         carry_over: bool,
-    ) -> StoreResult<Duration>;
+    ) -> StoreResult<TokenState>;
 
     /// Apply a signed adjustment to a subject's token balance, returning the new
-    /// balance. Saturates at zero; `carry_over` has the same meaning as in
-    /// [`Store::get_token_balance`], so a non-carrying balance from an earlier
+    /// state. Saturates at zero; `carry_over` has the same meaning as in
+    /// [`Store::get_token_state`], so a non-carrying balance from an earlier
     /// day is treated as zero before the delta is applied.
+    ///
+    /// A balance that reaches zero also clears the ratchet: an empty balance is
+    /// locked whatever it once held.
     fn adjust_token_balance(
         &self,
         subject: &LimitSubject,
         day: NaiveDate,
         carry_over: bool,
         delta_secs: i64,
-    ) -> StoreResult<Duration>;
+    ) -> StoreResult<TokenState>;
+
+    /// Record that a subject's gate has been unlocked, so it stays unlocked
+    /// while the balance lasts (issue #8).
+    ///
+    /// Only the engine knows the `minimum_seconds` threshold, so it decides
+    /// when the ratchet catches; the store just remembers it alongside the
+    /// balance, and resets it with the balance at local midnight.
+    fn set_token_ratchet(
+        &self,
+        subject: &LimitSubject,
+        day: NaiveDate,
+        carry_over: bool,
+    ) -> StoreResult<()>;
 
     // Cooldown tracking
 

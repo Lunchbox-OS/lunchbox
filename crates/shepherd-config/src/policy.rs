@@ -574,9 +574,16 @@ pub struct TokensPolicy {
 }
 
 impl TokensPolicy {
-    /// Whether `balance` is enough to unlock the entry.
-    pub fn unlocked(&self, balance: Duration) -> bool {
-        !balance.is_zero() && balance >= self.minimum
+    /// Whether the gate is open for `balance`.
+    ///
+    /// `minimum` is a threshold to *cross*, not one to stay above: once the
+    /// balance has reached it the gate ratchets open (`ratcheted`) and stays
+    /// open until the balance is spent to zero. Otherwise a session that spent
+    /// the balance part-way down would re-lock the activity and strand the
+    /// remainder — earned time the child could never use, and which
+    /// `carry_over = false` destroys at midnight.
+    pub fn unlocked(&self, balance: Duration, ratcheted: bool) -> bool {
+        !balance.is_zero() && (ratcheted || balance >= self.minimum)
     }
 
     /// Time banked by a session of `duration` on one of the source entries,

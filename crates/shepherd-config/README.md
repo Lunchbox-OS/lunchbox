@@ -271,6 +271,12 @@ Things to watch for when combining a token gate with the other limits:
   the entry — a 20-second balance buys a 20-second session. Warnings whose
   `seconds_before` exceeds the session length are skipped, so such a session ends
   with no countdown at all.
+- **`minimum_seconds` is a threshold to cross, not one to stay above.** Once the
+  balance reaches it the gate ratchets open and stays open until the balance is
+  spent to zero, so a short session doesn't re-lock the activity and strand the
+  rest. With `minimum_seconds = 600` and 700 s banked, a 5-minute session leaves
+  400 s that are still spendable. Spending the balance out closes the gate again,
+  and the threshold has to be crossed from zero.
 - **Cooldowns stack on both ends**: a gated entry still cools down after
   spending, and a cooldown on a *source* throttles the rate of earning.
 

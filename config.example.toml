@@ -375,6 +375,9 @@ earn_ratio = 0.5
 # Worth setting on every gate: with the default of 0, a 20-second balance buys
 # a 20-second session, and warnings longer than the session are skipped, so it
 # ends with no countdown at all.
+# This is a threshold to *cross*, not one to stay above: once it is reached the
+# gate stays open until the balance is spent to zero, so a short session can't
+# re-lock the activity and strand the time already earned.
 minimum_seconds = 600
 
 # Ceiling on banked time, so a long rainy Saturday doesn't bank a week of

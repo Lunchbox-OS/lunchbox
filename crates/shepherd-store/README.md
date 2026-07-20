@@ -48,10 +48,12 @@ pub trait Store: Send + Sync {
     fn add_usage(&self, entry_id: &EntryId, day: NaiveDate, duration: Duration) -> StoreResult<()>;
 
     // Token balances (issue #8), keyed by limit subject
-    fn get_token_balance(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool)
-        -> StoreResult<Duration>;
+    fn get_token_state(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool)
+        -> StoreResult<TokenState>;
     fn adjust_token_balance(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool,
-        delta_secs: i64) -> StoreResult<Duration>;
+        delta_secs: i64) -> StoreResult<TokenState>;
+    fn set_token_ratchet(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool)
+        -> StoreResult<()>;
 
     // Cooldown tracking, keyed by limit subject
     fn get_cooldown_until(&self, subject: &LimitSubject) -> StoreResult<Option<DateTime<Local>>>;
@@ -200,11 +202,15 @@ CREATE TABLE usage (
 
 -- Token balances (one row per gated subject). `updated_day` is the local date
 -- of the last mutation, so a non-carrying balance resets lazily at midnight
--- rather than needing a sweep job.
+-- rather than needing a sweep job. `ratcheted` records that the balance has
+-- already reached `minimum_seconds`; it is cleared when the balance is spent to
+-- zero, and it expires with the balance. Only the engine knows the threshold,
+-- so the engine sets it and the store just remembers it.
 CREATE TABLE token_balances (
     subject TEXT PRIMARY KEY,
     balance_secs INTEGER NOT NULL DEFAULT 0,
-    updated_day TEXT NOT NULL  -- YYYY-MM-DD
+    updated_day TEXT NOT NULL,  -- YYYY-MM-DD
+    ratcheted INTEGER NOT NULL DEFAULT 0
 );
 
 -- Cooldown tracking
@@ -227,12 +233,21 @@ There is no migration framework: `init_schema` is a batch of
 change to an existing table's shape must therefore be applied explicitly *before*
 those statements run.
 
-The one such migration today is `rename_legacy_key_column`, which renames the
-`entry_id` key column of `cooldowns` and `daily_overrides` to `subject`
-(issue #5). It is metadata-only: an entry's `LimitSubject` string form *is* its
-bare entry ID, so every pre-existing row is already valid and no data is read or
-rewritten. It is guarded by a `PRAGMA table_info` check, so it is a no-op on a
-fresh or already-migrated database and safe to run on every startup.
+Two helpers do this, both guarded by a `PRAGMA table_info` check so they are
+no-ops on a fresh or already-migrated database and safe to run on every startup:
+
+- `rename_legacy_key_column` renames the `entry_id` key column of `cooldowns`,
+  `daily_overrides` and `token_balances` to `subject` (issue #5). It is
+  metadata-only: an entry's `LimitSubject` string form *is* its bare entry ID, so
+  every pre-existing row is already valid and no data is read or rewritten.
+- `add_missing_column` adds a column to a table that already exists — today,
+  `token_balances.ratcheted`.
+
+**Every table listed in a migration has to stay listed.** `token_balances` was
+originally left out of the rename, and the failure mode is the argument for the
+rule: the reads fail with "no such column", the engine treats a failed balance
+read as zero, and every token gate locks with no error anywhere. Add the table to
+the migration when you re-key it, not when someone reports it.
 
 ## Design Philosophy
 
