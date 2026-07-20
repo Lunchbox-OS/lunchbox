@@ -1,6 +1,6 @@
 //! Core policy engine
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     API_VERSION, EntryKindTag, EntryView, InputDeviceType, InternetStatusView, ReasonCode,
     ServiceStateSnapshot, SessionEndReason, WarningSeverity,
@@ -319,6 +319,21 @@ impl CoreEngine {
             }
         }
 
+        // Check the token gate (issue #8): an entry whose time has to be earned
+        // on other activities stays unavailable until enough is banked.
+        // Skipped when an enable-today override is set, like the window and
+        // daily-quota checks above.
+        if !manually_enabled && let Some(tokens) = &entry.tokens {
+            let balance = self.token_balance(entry, today);
+            if !tokens.unlocked(balance) {
+                enabled = false;
+                reasons.push(ReasonCode::TokensInsufficient {
+                    balance,
+                    required: tokens.minimum,
+                });
+            }
+        }
+
         // Calculate max run if enabled (None when disabled, Some(None) flattened for unlimited)
         let max_run_if_started_now = if enabled {
             self.compute_max_duration(entry, now, quota_delta, manually_enabled)
@@ -373,7 +388,95 @@ impl CoreEngine {
             }
         }
 
+        // Limit by banked tokens (issue #8), so a session can never spend more
+        // than has been earned. Lifted by an enable-today override, matching the
+        // daily quota.
+        if !manually_enabled && entry.tokens.is_some() {
+            let balance = self.token_balance(entry, now.date_naive());
+            max = Some(match max {
+                Some(m) => m.min(balance),
+                None => balance,
+            });
+        }
+
         max
+    }
+
+    /// An entry's banked token balance, or zero if it is not token-gated.
+    fn token_balance(&self, entry: &Entry, today: NaiveDate) -> Duration {
+        let Some(tokens) = &entry.tokens else {
+            return Duration::ZERO;
+        };
+        self.store
+            .get_token_balance(&entry.id, today, tokens.carry_over)
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// Whether a force-enable daily override is in effect for an entry.
+    fn manually_enabled(&self, entry_id: &EntryId, today: NaiveDate) -> bool {
+        self.store
+            .get_daily_override(entry_id, today)
+            .ok()
+            .flatten()
+            .and_then(|o| o.availability)
+            == Some(true)
+    }
+
+    /// Settle token balances after a session on `ended_entry_id` of `duration`
+    /// (issue #8): every entry gated on it banks time, and if it is itself
+    /// token-gated it spends its own balance down.
+    ///
+    /// An entry can legitimately be both a source and a target, in which case
+    /// both halves apply.
+    fn settle_tokens(&self, ended_entry_id: &EntryId, duration: Duration, today: NaiveDate) {
+        for target in &self.policy.entries {
+            let Some(tokens) = &target.tokens else {
+                continue;
+            };
+
+            // Earn: this session was on one of the target's source activities.
+            if tokens.from.contains(ended_entry_id) {
+                let earned = tokens.earned(duration);
+                if !earned.is_zero() {
+                    let balance = self
+                        .store
+                        .adjust_token_balance(
+                            &target.id,
+                            today,
+                            tokens.carry_over,
+                            earned.as_secs() as i64,
+                        )
+                        .unwrap_or(Duration::ZERO);
+
+                    // Apply the ceiling here rather than in the store, which has
+                    // no view of policy.
+                    if let Some(max_balance) = tokens.max_balance
+                        && balance > max_balance
+                    {
+                        let excess = (balance - max_balance).as_secs() as i64;
+                        let _ = self.store.adjust_token_balance(
+                            &target.id,
+                            today,
+                            tokens.carry_over,
+                            -excess,
+                        );
+                    }
+                }
+            }
+
+            // Spend: this session was on the gated entry itself. A session run
+            // under a force-enable override is exempt — the caregiver granted
+            // that time, so the child shouldn't be billed for it, consistent
+            // with the override bypassing the gate in the first place.
+            if &target.id == ended_entry_id && !self.manually_enabled(ended_entry_id, today) {
+                let _ = self.store.adjust_token_balance(
+                    &target.id,
+                    today,
+                    tokens.carry_over,
+                    -(duration.as_secs() as i64),
+                );
+            }
+        }
     }
 
     /// Request to launch an entry
@@ -601,6 +704,9 @@ impl CoreEngine {
             .store
             .add_usage(&session.plan.entry_id, today, duration);
 
+        // Settle token balances (issue #8)
+        self.settle_tokens(&session.plan.entry_id, duration, today);
+
         // Set cooldown if configured
         if let Some(entry) = self.policy.get_entry(&session.plan.entry_id)
             && let Some(cooldown) = entry.limits.cooldown
@@ -654,6 +760,9 @@ impl CoreEngine {
         let _ = self
             .store
             .add_usage(&session.plan.entry_id, today, duration);
+
+        // Settle token balances (issue #8)
+        self.settle_tokens(&session.plan.entry_id, duration, today);
 
         // Set cooldown if configured
         if let Some(entry) = self.policy.get_entry(&session.plan.entry_id)
@@ -819,7 +928,7 @@ fn apply_quota_delta(quota: Duration, delta: Option<i64>) -> Duration {
 mod tests {
     use super::*;
     use shepherd_api::EntryKind;
-    use shepherd_config::{AvailabilityPolicy, Entry, LimitsPolicy};
+    use shepherd_config::{AvailabilityPolicy, Entry, LimitsPolicy, TokensPolicy};
     use shepherd_store::SqliteStore;
     use std::collections::HashMap;
 
@@ -856,6 +965,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1048,6 +1158,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1143,6 +1254,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1246,6 +1358,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1325,6 +1438,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1421,6 +1535,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1500,6 +1615,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1590,6 +1706,7 @@ mod tests {
                 input_compat: vec![],
                 input_compat_options: Default::default(),
                 requires_input: vec![],
+                tokens: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
             }],
@@ -1654,5 +1771,292 @@ mod tests {
             engine.request_launch(&entry_id, noon),
             LaunchDecision::Approved(_)
         ));
+    }
+
+    // --- Token system (issue #8) ------------------------------------------
+
+    fn token_entry(id: &str, tokens: Option<TokensPolicy>) -> Entry {
+        Entry {
+            id: EntryId::new(id),
+            label: id.into(),
+            icon_ref: None,
+            kind: EntryKind::Process {
+                command: "game".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+            availability: AvailabilityPolicy::default(),
+            limits: LimitsPolicy {
+                max_run: None,
+                daily_quota: None,
+                cooldown: None,
+            },
+            tokens,
+            warnings: vec![],
+            volume: None,
+            brightness: None,
+            disabled: false,
+            disabled_reason: None,
+            internet: Default::default(),
+            firewall: None,
+            browser: None,
+            input_compat: vec![],
+            input_compat_options: Default::default(),
+            requires_input: vec![],
+            xwayland_native_resolution: false,
+            confirm_on_close: true,
+        }
+    }
+
+    /// Policy with two source activities ("scratch", "typing") and a
+    /// token-gated target ("minecraft").
+    fn make_token_policy(tokens: TokensPolicy) -> Policy {
+        Policy {
+            service: Default::default(),
+            entries: vec![
+                token_entry("scratch", None),
+                token_entry("typing", None),
+                token_entry("minecraft", Some(tokens)),
+            ],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+            brightness: Default::default(),
+            auto_brightness: Default::default(),
+        }
+    }
+
+    fn tokens_from(sources: &[&str]) -> TokensPolicy {
+        TokensPolicy {
+            from: sources.iter().map(|s| EntryId::new(*s)).collect(),
+            earn_ratio: 1.0,
+            minimum: Duration::ZERO,
+            max_balance: None,
+            carry_over: false,
+        }
+    }
+
+    fn view<'a>(entries: &'a [EntryView], id: &str) -> &'a EntryView {
+        entries
+            .iter()
+            .find(|e| e.entry_id.as_str() == id)
+            .expect("entry should be listed")
+    }
+
+    /// Run a complete session on `entry_id` lasting `duration`, bypassing the
+    /// host so the engine's accounting is exercised end to end.
+    fn run_session(
+        engine: &mut CoreEngine,
+        entry_id: &str,
+        duration: Duration,
+        now: DateTime<Local>,
+    ) {
+        let entry_id = EntryId::new(entry_id);
+        let plan = match engine.request_launch(&entry_id, now) {
+            LaunchDecision::Approved(plan) => plan,
+            LaunchDecision::Denied { reasons } => {
+                panic!("launch of {entry_id} denied: {reasons:?}")
+            }
+        };
+        let started = MonotonicInstant::now();
+        engine.start_session(plan, now, started);
+        engine.notify_session_exited(Some(0), started + duration, now);
+    }
+
+    fn balance_of(engine: &CoreEngine, id: &str, now: DateTime<Local>) -> Duration {
+        let entry = engine
+            .policy
+            .entries
+            .iter()
+            .find(|e| e.id.as_str() == id)
+            .unwrap();
+        engine.token_balance(entry, now.date_naive())
+    }
+
+    fn noon() -> DateTime<Local> {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, 12, 0, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_token_gate_locks_until_time_is_earned() {
+        use shepherd_api::ReasonCode;
+
+        let policy = make_token_policy(tokens_from(&["scratch", "typing"]));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // Nothing banked: the target is gated, the sources are not.
+        let entries = engine.list_entries(now);
+        assert!(view(&entries, "scratch").enabled);
+        let minecraft = view(&entries, "minecraft");
+        assert!(
+            !minecraft.enabled,
+            "target should be locked with no balance"
+        );
+        assert!(
+            minecraft.reasons.iter().any(|r| matches!(
+                r,
+                ReasonCode::TokensInsufficient {
+                    balance: Duration::ZERO,
+                    ..
+                }
+            )),
+            "expected TokensInsufficient, got: {:?}",
+            minecraft.reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&EntryId::new("minecraft"), now),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Half an hour of Scratch banks half an hour of Minecraft.
+        run_session(&mut engine, "scratch", Duration::from_secs(1800), now);
+
+        let entries = engine.list_entries(now);
+        let minecraft = view(&entries, "minecraft");
+        assert!(
+            minecraft.enabled,
+            "target should unlock once time is banked"
+        );
+        assert!(minecraft.reasons.is_empty());
+        assert_eq!(
+            minecraft.max_run_if_started_now,
+            Some(Duration::from_secs(1800)),
+            "session should be capped at the banked balance"
+        );
+    }
+
+    #[test]
+    fn test_token_sources_accumulate_toward_one_gate() {
+        let policy = make_token_policy(tokens_from(&["scratch", "typing"]));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "scratch", Duration::from_secs(600), now);
+        run_session(&mut engine, "typing", Duration::from_secs(300), now);
+
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(900),
+            "any combination of sources should add up"
+        );
+    }
+
+    #[test]
+    fn test_token_minimum_balance_gates_unlock() {
+        let mut tokens = tokens_from(&["scratch"]);
+        tokens.minimum = Duration::from_secs(1800);
+
+        let policy = make_token_policy(tokens);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // Some banked time, but under the minimum: still locked.
+        run_session(&mut engine, "scratch", Duration::from_secs(600), now);
+        assert!(
+            !view(&engine.list_entries(now), "minecraft").enabled,
+            "balance below the minimum should not unlock the entry"
+        );
+
+        // Crossing the minimum unlocks it.
+        run_session(&mut engine, "scratch", Duration::from_secs(1200), now);
+        assert!(view(&engine.list_entries(now), "minecraft").enabled);
+    }
+
+    #[test]
+    fn test_token_earn_ratio_and_balance_ceiling() {
+        let mut tokens = tokens_from(&["scratch"]);
+        tokens.earn_ratio = 0.5;
+        tokens.max_balance = Some(Duration::from_secs(900));
+
+        let policy = make_token_policy(tokens);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // Half rate: 20 minutes of Scratch banks 10.
+        run_session(&mut engine, "scratch", Duration::from_secs(1200), now);
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(600)
+        );
+
+        // A long stretch is capped, so a whole Saturday can't bank a week.
+        run_session(&mut engine, "scratch", Duration::from_secs(7200), now);
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(900),
+            "balance should be capped at max_balance"
+        );
+    }
+
+    #[test]
+    fn test_token_session_spends_balance_and_relocks() {
+        let policy = make_token_policy(tokens_from(&["scratch"]));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "scratch", Duration::from_secs(1800), now);
+
+        // Spending part of the balance leaves the rest banked.
+        run_session(&mut engine, "minecraft", Duration::from_secs(600), now);
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(1200)
+        );
+        assert!(view(&engine.list_entries(now), "minecraft").enabled);
+
+        // Spending the rest re-locks it: the time has to be earned again.
+        run_session(&mut engine, "minecraft", Duration::from_secs(1200), now);
+        assert_eq!(balance_of(&engine, "minecraft", now), Duration::ZERO);
+        assert!(
+            !view(&engine.list_entries(now), "minecraft").enabled,
+            "entry should re-lock once its balance is spent"
+        );
+    }
+
+    #[test]
+    fn test_enable_override_bypasses_token_gate_without_spending() {
+        let policy = make_token_policy(tokens_from(&["scratch"]));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+        let entry_id = EntryId::new("minecraft");
+
+        // Bank a little, then force-enable for the day.
+        run_session(&mut engine, "scratch", Duration::from_secs(300), now);
+        store
+            .upsert_daily_override(&entry_id, now.date_naive(), Some(true), None)
+            .unwrap();
+
+        let entries = engine.list_entries(now);
+        let minecraft = view(&entries, "minecraft");
+        assert!(minecraft.enabled);
+        assert!(
+            minecraft.reasons.is_empty(),
+            "no reasons when overridden: {:?}",
+            minecraft.reasons
+        );
+        assert!(
+            minecraft.max_run_if_started_now.is_none(),
+            "the banked balance should not cap an overridden session: {:?}",
+            minecraft.max_run_if_started_now
+        );
+
+        // The caregiver granted this time, so it isn't billed to the balance.
+        run_session(&mut engine, "minecraft", Duration::from_secs(1800), now);
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(300),
+            "an overridden session should not spend banked tokens"
+        );
     }
 }

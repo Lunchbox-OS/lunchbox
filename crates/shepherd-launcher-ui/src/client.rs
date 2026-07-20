@@ -245,5 +245,6 @@ fn reason_to_message(reason: &ReasonCode) -> &'static str {
         ReasonCode::InternetUnavailable { .. } => "Internet connection unavailable",
         ReasonCode::ManuallyDisabled { .. } => "Disabled by parent for today",
         ReasonCode::RequiredInputUnavailable { .. } => "Requires an input device",
+        ReasonCode::TokensInsufficient { .. } => "Not enough time earned yet",
     }
 }

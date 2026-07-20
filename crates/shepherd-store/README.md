@@ -47,6 +47,12 @@ pub trait Store: Send + Sync {
     fn get_usage(&self, entry_id: &EntryId, day: NaiveDate) -> StoreResult<Duration>;
     fn add_usage(&self, entry_id: &EntryId, day: NaiveDate, duration: Duration) -> StoreResult<()>;
 
+    // Token balances (issue #8)
+    fn get_token_balance(&self, entry_id: &EntryId, day: NaiveDate, carry_over: bool)
+        -> StoreResult<Duration>;
+    fn adjust_token_balance(&self, entry_id: &EntryId, day: NaiveDate, carry_over: bool,
+        delta_secs: i64) -> StoreResult<Duration>;
+
     // Cooldown tracking
     fn get_cooldown_until(&self, entry_id: &EntryId) -> StoreResult<Option<DateTime<Local>>>;
     fn set_cooldown_until(&self, entry_id: &EntryId, until: DateTime<Local>) -> StoreResult<()>;
@@ -190,6 +196,15 @@ CREATE TABLE usage (
     day TEXT NOT NULL,  -- YYYY-MM-DD
     duration_secs INTEGER NOT NULL,
     PRIMARY KEY (entry_id, day)
+);
+
+-- Token balances (one row per gated entry). `updated_day` is the local date of
+-- the last mutation, so a non-carrying balance resets lazily at midnight rather
+-- than needing a sweep job.
+CREATE TABLE token_balances (
+    entry_id TEXT PRIMARY KEY,
+    balance_secs INTEGER NOT NULL DEFAULT 0,
+    updated_day TEXT NOT NULL  -- YYYY-MM-DD
 );
 
 -- Cooldown tracking

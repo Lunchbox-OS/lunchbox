@@ -44,9 +44,12 @@ export type ReasonCode =
   | { code: "cooldown_active"; available_at: string }
   | { code: "session_active"; entry_id: string; remaining: Duration | null }
   | { code: "unsupported_kind"; kind: EntryKindTag }
+  | { code: "not_ready"; kind: EntryKindTag }
   | { code: "disabled"; reason: string | null }
   | { code: "internet_unavailable"; check: string | null }
-  | { code: "manually_disabled"; until: string };
+  | { code: "manually_disabled"; until: string }
+  | { code: "required_input_unavailable"; devices: string[] }
+  | { code: "tokens_insufficient"; balance: Duration; required: Duration };
 
 export function reasonLabel(r: ReasonCode): string {
   switch (r.code) {
@@ -60,12 +63,20 @@ export function reasonLabel(r: ReasonCode): string {
       return "Another session is running";
     case "unsupported_kind":
       return "Not supported on this device";
+    case "not_ready":
+      return "Still starting up";
     case "disabled":
       return r.reason ?? "Disabled";
     case "internet_unavailable":
       return "No internet connection";
     case "manually_disabled":
       return "Disabled for today";
+    case "required_input_unavailable":
+      return r.devices.length > 0
+        ? `Requires: ${r.devices.join(", ")}`
+        : "Requires an input device";
+    case "tokens_insufficient":
+      return "Not enough time earned yet";
   }
 }
 

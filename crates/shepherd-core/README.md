@@ -164,8 +164,21 @@ For each entry, the engine evaluates:
 4. **Active session** - Is another session already running?
 5. **Cooldown** - Has enough time passed since the last session?
 6. **Daily quota** - Is there remaining quota for today?
+7. **Token gate** - Has enough time been earned on this entry's source activities?
 
 Each check that fails adds a `ReasonCode` to the entry view, allowing UIs to explain unavailability.
+
+## Token System
+
+An entry with an `[entries.tokens]` gate (issue #8) has to be *earned*: sessions
+on its `from` activities bank a balance, which the entry's own sessions spend
+back down. `compute_max_duration` caps a session at the banked balance, so it can
+never be overspent, and `settle_tokens` moves the balance at session end — the
+same point where usage is recorded.
+
+A force-enable daily override bypasses the gate and the cap, and a session run
+under that override does not spend the balance: the caregiver granted that time,
+so it isn't billed to the child.
 
 ## Design Philosophy
 

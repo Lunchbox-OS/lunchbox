@@ -359,6 +359,15 @@ pub enum ReasonCode {
     /// connected. `devices` lists the missing device types, sorted and
     /// deduplicated.
     RequiredInputUnavailable { devices: Vec<InputDeviceType> },
+    /// Not enough time banked on this entry's token gate (issue #8): the
+    /// activity has to be earned by spending time on its source activities.
+    TokensInsufficient {
+        /// Time currently banked toward this entry.
+        balance: Duration,
+        /// Balance needed before it unlocks. Zero means any balance above zero
+        /// unlocks it, i.e. the entry is simply out of banked time.
+        required: Duration,
+    },
 }
 
 /// Warning severity level

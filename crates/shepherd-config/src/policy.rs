@@ -345,6 +345,8 @@ pub struct Entry {
     pub kind: EntryKind,
     pub availability: AvailabilityPolicy,
     pub limits: LimitsPolicy,
+    /// Token gate (issue #8). `None` means the entry is not token-gated.
+    pub tokens: Option<TokensPolicy>,
     pub warnings: Vec<WarningThreshold>,
     pub volume: Option<VolumePolicy>,
     pub brightness: Option<BrightnessPolicy>,
@@ -395,6 +397,7 @@ impl Entry {
                 daily_quota: None, // None means unlimited
                 cooldown: None,
             });
+        let tokens = raw.tokens.as_ref().map(convert_tokens);
         let warnings = raw
             .warnings
             .map(|w| w.into_iter().map(convert_warning).collect())
@@ -420,6 +423,7 @@ impl Entry {
             kind,
             availability,
             limits,
+            tokens,
             warnings,
             volume,
             brightness,
@@ -464,6 +468,42 @@ impl AvailabilityPolicy {
             return None; // No limit from windows
         }
         self.windows.iter().find_map(|w| w.remaining_duration(dt))
+    }
+}
+
+/// Token gate for an entry (issue #8)
+///
+/// Sessions on the entries in `from` bank time on this entry's balance, which
+/// this entry's own sessions then spend down. The entry is unavailable while
+/// the balance is zero or below `minimum`.
+#[derive(Debug, Clone)]
+pub struct TokensPolicy {
+    /// Entry IDs whose sessions bank time toward this entry. Sorted and
+    /// deduplicated by `convert_tokens`; validated to be non-empty and to
+    /// exclude this entry's own ID.
+    pub from: Vec<EntryId>,
+    /// Seconds banked per second spent on a source entry.
+    pub earn_ratio: f64,
+    /// Balance required before this entry unlocks. `Duration::ZERO` means any
+    /// balance above zero unlocks it.
+    pub minimum: Duration,
+    /// Ceiling on the banked balance. None means unlimited.
+    pub max_balance: Option<Duration>,
+    /// Whether the balance survives local midnight.
+    pub carry_over: bool,
+}
+
+impl TokensPolicy {
+    /// Whether `balance` is enough to unlock the entry.
+    pub fn unlocked(&self, balance: Duration) -> bool {
+        !balance.is_zero() && balance >= self.minimum
+    }
+
+    /// Time banked by a session of `duration` on one of the source entries,
+    /// before the `max_balance` ceiling is applied. Truncated to whole
+    /// seconds, matching the storage granularity.
+    pub fn earned(&self, duration: Duration) -> Duration {
+        Duration::from_secs((duration.as_secs() as f64 * self.earn_ratio).floor() as u64)
     }
 }
 
@@ -869,6 +909,23 @@ fn convert_limits(
             .daily_quota_seconds
             .and_then(seconds_to_duration_or_unlimited),
         cooldown: raw.cooldown_seconds.map(Duration::from_secs),
+    }
+}
+
+fn convert_tokens(raw: &crate::schema::RawTokens) -> TokensPolicy {
+    let mut from: Vec<String> = raw.from.clone();
+    from.sort();
+    from.dedup();
+    let from: Vec<EntryId> = from.into_iter().map(EntryId::new).collect();
+
+    TokensPolicy {
+        from,
+        earn_ratio: raw.earn_ratio.unwrap_or(1.0),
+        minimum: Duration::from_secs(raw.minimum_seconds.unwrap_or(0)),
+        max_balance: raw
+            .max_balance_seconds
+            .and_then(seconds_to_duration_or_unlimited),
+        carry_over: raw.carry_over,
     }
 }
 

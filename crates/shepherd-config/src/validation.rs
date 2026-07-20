@@ -3,6 +3,7 @@
 use crate::internet::InternetCheckTarget;
 use crate::schema::{
     RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawTimeWindow,
+    RawTokens,
 };
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -228,6 +229,11 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
         }
     }
 
+    // Validate the token gate (issue #8)
+    if let Some(tokens) = &entry.tokens {
+        errors.extend(validate_tokens(tokens, entry, config));
+    }
+
     // Validate warning thresholds vs max_run
     // Skip validation if max_run is 0 (unlimited) since there's no expiry to warn about
     let max_run = entry
@@ -288,6 +294,62 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
                 });
             }
         }
+    }
+
+    errors
+}
+
+/// Validate an entry's token gate (issue #8).
+///
+/// This is the one per-entry rule that has to resolve IDs against the rest of
+/// the config, which is why `validate_entry` is handed the whole `RawConfig`.
+fn validate_tokens(
+    tokens: &RawTokens,
+    entry: &RawEntry,
+    config: &RawConfig,
+) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    let err = |message: String| ValidationError::EntryError {
+        entry_id: entry.id.clone(),
+        message,
+    };
+
+    if tokens.from.is_empty() {
+        errors.push(err(
+            "tokens.from cannot be empty; remove [entries.tokens] if the entry is not gated".into(),
+        ));
+    }
+
+    for source in &tokens.from {
+        if source == &entry.id {
+            errors.push(err(
+                "tokens.from cannot list the entry itself; an activity cannot unlock itself".into(),
+            ));
+        } else if !config.entries.iter().any(|e| &e.id == source) {
+            errors.push(err(format!(
+                "tokens.from references unknown entry '{source}'"
+            )));
+        }
+    }
+
+    if let Some(ratio) = tokens.earn_ratio
+        && (!ratio.is_finite() || ratio <= 0.0)
+    {
+        errors.push(err(format!(
+            "tokens.earn_ratio must be a positive finite number, got {ratio}"
+        )));
+    }
+
+    // A minimum above the ceiling can never be reached, so the entry would be
+    // permanently unavailable.
+    if let (Some(minimum), Some(max)) = (tokens.minimum_seconds, tokens.max_balance_seconds)
+        && max > 0
+        && minimum > max
+    {
+        errors.push(err(format!(
+            "tokens.minimum_seconds ({minimum}) exceeds max_balance_seconds ({max}), so the \
+             entry could never unlock"
+        )));
     }
 
     errors
@@ -819,6 +881,7 @@ mod tests {
                     input_compat: vec![],
                     input_compat_options: None,
                     requires_input: vec![],
+                    tokens: None,
                     xwayland_native_resolution: false,
                     confirm_on_close: true,
                 },
@@ -845,6 +908,7 @@ mod tests {
                     input_compat: vec![],
                     input_compat_options: None,
                     requires_input: vec![],
+                    tokens: None,
                     xwayland_native_resolution: false,
                     confirm_on_close: true,
                 },
@@ -856,6 +920,119 @@ mod tests {
             errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::DuplicateEntryId(_)))
+        );
+    }
+
+    /// Build a two-entry config where "minecraft" is gated on "scratch", with
+    /// `tokens_toml` supplying the gate body.
+    fn config_with_token_gate(tokens_toml: &str) -> RawConfig {
+        let toml = format!(
+            r#"
+            config_version = 1
+
+            [[entries]]
+            id = "scratch"
+            label = "Scratch"
+            [entries.kind]
+            type = "process"
+            command = "scratch"
+
+            [[entries]]
+            id = "minecraft"
+            label = "Minecraft"
+            [entries.kind]
+            type = "process"
+            command = "minecraft"
+            [entries.tokens]
+            {tokens_toml}
+            "#
+        );
+        toml::from_str(&toml).expect("test config should parse")
+    }
+
+    fn token_errors(tokens_toml: &str) -> Vec<String> {
+        validate_config(&config_with_token_gate(tokens_toml))
+            .iter()
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn valid_token_gate_passes() {
+        assert!(
+            token_errors(
+                r#"from = ["scratch"]
+                   earn_ratio = 0.5
+                   minimum_seconds = 1800
+                   max_balance_seconds = 3600"#
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn token_gate_rejects_unknown_source() {
+        let errors = token_errors(r#"from = ["scratch", "nonexistent"]"#);
+        assert!(
+            errors.iter().any(|e| e.contains("unknown entry")),
+            "expected an unknown-entry error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn token_gate_rejects_self_reference() {
+        let errors = token_errors(r#"from = ["minecraft"]"#);
+        assert!(
+            errors.iter().any(|e| e.contains("cannot list the entry")),
+            "expected a self-reference error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn token_gate_rejects_empty_source_list() {
+        let errors = token_errors("from = []");
+        assert!(
+            errors.iter().any(|e| e.contains("cannot be empty")),
+            "expected an empty-list error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn token_gate_rejects_nonpositive_earn_ratio() {
+        for ratio in ["0.0", "-1.0", "nan"] {
+            let errors = token_errors(&format!(
+                r#"from = ["scratch"]
+                   earn_ratio = {ratio}"#
+            ));
+            assert!(
+                errors.iter().any(|e| e.contains("earn_ratio")),
+                "expected an earn_ratio error for {ratio}, got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_gate_rejects_unreachable_minimum() {
+        // A minimum above the ceiling could never be banked, so the entry would
+        // be permanently unavailable.
+        let errors = token_errors(
+            r#"from = ["scratch"]
+               minimum_seconds = 7200
+               max_balance_seconds = 3600"#,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("could never unlock")),
+            "expected an unreachable-minimum error, got: {errors:?}"
+        );
+
+        // An unlimited ceiling (0) is not a conflict.
+        assert!(
+            token_errors(
+                r#"from = ["scratch"]
+                   minimum_seconds = 7200
+                   max_balance_seconds = 0"#
+            )
+            .is_empty()
         );
     }
 }

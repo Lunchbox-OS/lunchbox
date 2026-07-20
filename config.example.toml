@@ -302,6 +302,58 @@ end = "20:00"
 # No [entries.limits] section - uses service defaults
 # Omitting limits entirely uses default_max_run_seconds
 
+# `[entries.tokens]` gates this activity on time spent elsewhere (issue #8):
+# Celeste has to be *earned* by playing the educational activities first.
+# Time works like a currency. Sessions on the `from` entries bank a balance on
+# this entry; this entry's own sessions spend that balance back down, and the
+# session is capped at whatever is banked, so it can never be overspent. Once
+# the balance runs out the activity disappears from the launcher again until
+# more is earned.
+[entries.tokens]
+# Activities whose time counts toward this one. Any combination adds up.
+from = ["tuxmath", "gcompris", "scummvm-putt-putt"]
+
+# Seconds banked per second spent on a source activity. Default 1.0. Use a
+# fraction to make the trade less generous: 0.5 means two minutes of Tux Math
+# earns one minute of Celeste.
+earn_ratio = 0.5
+
+# Minimum balance before the activity unlocks at all. Default 0, meaning any
+# banked time unlocks it. Set this to avoid two-minute sessions: at 0.5 above,
+# 600s requires 20 minutes of educational activities before Celeste appears.
+# Worth setting on every gate: with the default of 0, a 20-second balance buys
+# a 20-second session, and warnings longer than the session are skipped, so it
+# ends with no countdown at all.
+minimum_seconds = 600
+
+# Ceiling on banked time, so a long rainy Saturday doesn't bank a week of
+# Celeste. 0 (the default) means unlimited.
+max_balance_seconds = 3600
+
+# Whether the balance survives local midnight. Default false, so unspent time
+# expires nightly like the daily quota. Set true to let it accumulate.
+carry_over = false
+
+# How this interacts with the other time restrictions:
+#
+# * A parent's "Enable Today" override bypasses the gate entirely, and a session
+#   run under that override does not spend the balance.
+# * The availability window, daily quota, and cooldown all still apply on top of
+#   the gate. The activity shows only if it passes every one of them, and the
+#   session is capped by whichever limit is tightest — so a token-gated activity
+#   is never unlimited, even without a `max_run_seconds`.
+# * CAUTION: a `daily_quota_seconds` on a gated activity can strand earned time.
+#   If the quota is spent, the activity is hidden even with a healthy balance,
+#   and with `carry_over = false` that banked time expires at midnight — the
+#   child did the work and the reward vanished. Prefer leaving the quota off a
+#   gated activity entirely: the gate is already the budget. If you want both,
+#   set `carry_over = true` so earned time survives to the next day. An
+#   availability window can strand time the same way.
+# * Time on a *source* activity still counts against that activity's own daily
+#   quota, which quietly caps how much can be earned per day.
+# * Time is deducted for what was actually played, whichever limit ended the
+#   session, so an early cutoff leaves the rest of the balance banked.
+
 # A Short Hike via Steam
 # https://store.steampowered.com/app/1055540/A_Short_Hike/
 [[entries]]

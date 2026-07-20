@@ -98,6 +98,10 @@ pub struct RawEntry {
     #[serde(default)]
     pub limits: Option<RawLimits>,
 
+    /// Token gate (issue #8): time banked by other activities unlocks this one
+    #[serde(default)]
+    pub tokens: Option<RawTokens>,
+
     /// Warning configuration
     #[serde(default)]
     pub warnings: Option<Vec<RawWarningThreshold>>,
@@ -465,6 +469,32 @@ pub struct RawLimits {
 
     /// Cooldown after session ends, in seconds
     pub cooldown_seconds: Option<u64>,
+}
+
+/// Token gate (issue #8)
+///
+/// Configured on the *target* entry: time spent on the entries listed in
+/// `from` banks a balance that this entry spends down as it runs.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RawTokens {
+    /// Entry IDs whose sessions bank time toward this entry.
+    #[serde(default)]
+    pub from: Vec<String>,
+
+    /// Seconds earned per second spent on a source entry. Default 1.0.
+    pub earn_ratio: Option<f64>,
+
+    /// Balance required before this entry unlocks at all. Default 0, meaning
+    /// any balance above zero unlocks it.
+    pub minimum_seconds: Option<u64>,
+
+    /// Ceiling on the banked balance. 0 (the default) means unlimited.
+    pub max_balance_seconds: Option<u64>,
+
+    /// Whether the balance survives local midnight. Default false, matching
+    /// how the daily quota resets.
+    #[serde(default)]
+    pub carry_over: bool,
 }
 
 /// Warning threshold

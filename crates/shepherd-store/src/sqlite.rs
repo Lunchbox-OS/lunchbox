@@ -57,6 +57,14 @@ impl SqliteStore {
                 PRIMARY KEY (entry_id, day)
             );
 
+            -- Token balances (issue #8). `updated_day` is the local date of the
+            -- last mutation, so a non-carrying balance resets lazily at midnight.
+            CREATE TABLE IF NOT EXISTS token_balances (
+                entry_id TEXT PRIMARY KEY,
+                balance_secs INTEGER NOT NULL DEFAULT 0,
+                updated_day TEXT NOT NULL
+            );
+
             -- Cooldowns
             CREATE TABLE IF NOT EXISTS cooldowns (
                 entry_id TEXT PRIMARY KEY,
@@ -177,6 +185,82 @@ impl Store for SqliteStore {
 
         debug!(entry_id = %entry_id, day = %day_str, added_secs = secs, "Usage added");
         Ok(())
+    }
+
+    fn get_token_balance(
+        &self,
+        entry_id: &EntryId,
+        day: NaiveDate,
+        carry_over: bool,
+    ) -> StoreResult<Duration> {
+        let conn = self.conn.lock().unwrap();
+        let day_str = day.format("%Y-%m-%d").to_string();
+
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT balance_secs, updated_day FROM token_balances WHERE entry_id = ?",
+                params![entry_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let secs = match row {
+            // A non-carrying balance from an earlier day has already expired.
+            Some((_, updated_day)) if !carry_over && updated_day != day_str => 0,
+            Some((secs, _)) => secs.max(0),
+            None => 0,
+        };
+
+        Ok(Duration::from_secs(secs as u64))
+    }
+
+    fn adjust_token_balance(
+        &self,
+        entry_id: &EntryId,
+        day: NaiveDate,
+        carry_over: bool,
+        delta_secs: i64,
+    ) -> StoreResult<Duration> {
+        // Read-modify-write under one transaction so a concurrent adjustment
+        // can't lose an update.
+        let mut conn = self.conn.lock().unwrap();
+        let day_str = day.format("%Y-%m-%d").to_string();
+        let tx = conn.transaction()?;
+
+        let row: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT balance_secs, updated_day FROM token_balances WHERE entry_id = ?",
+                params![entry_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let current = match row {
+            Some((_, updated_day)) if !carry_over && updated_day != day_str => 0,
+            Some((secs, _)) => secs.max(0),
+            None => 0,
+        };
+        let updated = current.saturating_add(delta_secs).max(0);
+
+        tx.execute(
+            r#"
+            INSERT INTO token_balances (entry_id, balance_secs, updated_day)
+            VALUES (?, ?, ?)
+            ON CONFLICT(entry_id)
+            DO UPDATE SET balance_secs = excluded.balance_secs, updated_day = excluded.updated_day
+            "#,
+            params![entry_id.as_str(), updated, day_str],
+        )?;
+        tx.commit()?;
+
+        debug!(
+            entry_id = %entry_id,
+            day = %day_str,
+            delta_secs,
+            balance_secs = updated,
+            "Token balance adjusted"
+        );
+        Ok(Duration::from_secs(updated as u64))
     }
 
     fn get_cooldown_until(&self, entry_id: &EntryId) -> StoreResult<Option<DateTime<Local>>> {
@@ -549,6 +633,90 @@ mod tests {
             .unwrap();
         let usage = store.get_usage(&entry_id, today).unwrap();
         assert_eq!(usage, Duration::from_secs(500));
+    }
+
+    #[test]
+    fn test_token_balance_accrues_and_saturates() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry_id = EntryId::new("minecraft");
+        let today = shepherd_util::now().date_naive();
+
+        // Initially zero
+        assert_eq!(
+            store.get_token_balance(&entry_id, today, false).unwrap(),
+            Duration::ZERO
+        );
+
+        // Earning accumulates, and the adjustment returns the new balance
+        let balance = store
+            .adjust_token_balance(&entry_id, today, false, 600)
+            .unwrap();
+        assert_eq!(balance, Duration::from_secs(600));
+        let balance = store
+            .adjust_token_balance(&entry_id, today, false, 300)
+            .unwrap();
+        assert_eq!(balance, Duration::from_secs(900));
+        assert_eq!(
+            store.get_token_balance(&entry_id, today, false).unwrap(),
+            Duration::from_secs(900)
+        );
+
+        // Spending more than is banked saturates at zero rather than going
+        // negative, so an overrun can't leave a debt behind.
+        let balance = store
+            .adjust_token_balance(&entry_id, today, false, -5000)
+            .unwrap();
+        assert_eq!(balance, Duration::ZERO);
+        assert_eq!(
+            store.get_token_balance(&entry_id, today, false).unwrap(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn test_token_balance_resets_at_midnight_unless_carried_over() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry_id = EntryId::new("minecraft");
+        let yesterday = shepherd_util::now().date_naive() - chrono::Duration::days(1);
+        let today = shepherd_util::now().date_naive();
+
+        store
+            .adjust_token_balance(&entry_id, yesterday, false, 1800)
+            .unwrap();
+
+        // Read as of today: the balance expired at local midnight.
+        assert_eq!(
+            store.get_token_balance(&entry_id, today, false).unwrap(),
+            Duration::ZERO
+        );
+        // ...but it is still there for a carry-over entry.
+        assert_eq!(
+            store.get_token_balance(&entry_id, today, true).unwrap(),
+            Duration::from_secs(1800)
+        );
+
+        // Earning today starts from zero for a non-carrying balance rather than
+        // stacking on yesterday's.
+        let balance = store
+            .adjust_token_balance(&entry_id, today, false, 600)
+            .unwrap();
+        assert_eq!(balance, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_token_balance_carries_over_across_days() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry_id = EntryId::new("minecraft");
+        let yesterday = shepherd_util::now().date_naive() - chrono::Duration::days(1);
+        let today = shepherd_util::now().date_naive();
+
+        store
+            .adjust_token_balance(&entry_id, yesterday, true, 1800)
+            .unwrap();
+        let balance = store
+            .adjust_token_balance(&entry_id, today, true, 600)
+            .unwrap();
+        assert_eq!(balance, Duration::from_secs(2400));
     }
 
     #[test]

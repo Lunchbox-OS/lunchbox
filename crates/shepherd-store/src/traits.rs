@@ -25,6 +25,32 @@ pub trait Store: Send + Sync {
     /// Add usage for an entry on a specific day
     fn add_usage(&self, entry_id: &EntryId, day: NaiveDate, duration: Duration) -> StoreResult<()>;
 
+    // Token balances (issue #8)
+
+    /// Get an entry's banked token balance as of `day`.
+    ///
+    /// When `carry_over` is false and the balance was last touched on an
+    /// earlier day, this returns zero — the balance resets lazily at local
+    /// midnight rather than being swept by a job.
+    fn get_token_balance(
+        &self,
+        entry_id: &EntryId,
+        day: NaiveDate,
+        carry_over: bool,
+    ) -> StoreResult<Duration>;
+
+    /// Apply a signed adjustment to an entry's token balance, returning the new
+    /// balance. Saturates at zero; `carry_over` has the same meaning as in
+    /// [`Store::get_token_balance`], so a non-carrying balance from an earlier
+    /// day is treated as zero before the delta is applied.
+    fn adjust_token_balance(
+        &self,
+        entry_id: &EntryId,
+        day: NaiveDate,
+        carry_over: bool,
+        delta_secs: i64,
+    ) -> StoreResult<Duration>;
+
     // Cooldown tracking
 
     /// Get cooldown expiry time for an entry
