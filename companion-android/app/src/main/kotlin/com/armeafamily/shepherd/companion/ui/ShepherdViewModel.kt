@@ -378,8 +378,19 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         onDone()
     }
 
-    suspend fun loadOverride(id: String, date: String?): DailyOverride? =
-        client?.let { runCatching { it.getOverride(id, date) }.getOrNull() }
+    /**
+     * Load today's override for a limit subject (an entry ID, or `group:<id>`).
+     *
+     * Returns `success(null)` when no override is set, and `failure` when the
+     * lookup itself failed. Those two cases must stay distinguishable: a
+     * failure previously collapsed to `null`, which rendered the editor as
+     * "no override set" and let a caregiver silently overwrite a real one.
+     */
+    suspend fun loadOverride(id: String, date: String?): Result<DailyOverride?> {
+        val c = client ?: return Result.failure(IllegalStateException("Not connected."))
+        return runCatching { c.getOverride(id, date) }
+            .onFailure { _message.value = "Couldn't load today's override: ${it.message ?: "unknown error"}" }
+    }
 
     suspend fun loadUsage(id: String, from: String, to: String): List<UsageStat> =
         client?.let { runCatching { it.usageEntry(id, from, to) }.getOrDefault(emptyList()) } ?: emptyList()

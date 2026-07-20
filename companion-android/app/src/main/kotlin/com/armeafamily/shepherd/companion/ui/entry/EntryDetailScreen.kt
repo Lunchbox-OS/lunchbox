@@ -165,9 +165,14 @@ private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
     var loaded by remember(entryId) { mutableStateOf<DailyOverride?>(null) }
     var availability by remember(entryId) { mutableStateOf<Boolean?>(null) }
     var quotaDeltaMinutes by remember(entryId) { mutableStateOf(0) }
+    // Distinct from "no override set": if the lookup failed we must not offer
+    // an empty form, or saving from it would silently clobber a real override.
+    var loadFailed by remember(entryId) { mutableStateOf(false) }
 
     suspend fun reload() {
-        val ov = vm.loadOverride(entryId, today)
+        val result = vm.loadOverride(entryId, today)
+        loadFailed = result.isFailure
+        val ov = result.getOrNull()
         loaded = ov
         availability = ov?.availability
         quotaDeltaMinutes = ((ov?.quotaDeltaSeconds ?: 0) / 60).toInt()
@@ -177,6 +182,15 @@ private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Today's override", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+
+            if (loadFailed) {
+                Text(
+                    "Couldn't read today's override, so it can't be edited safely. " +
+                        "Reopen this screen to retry.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
 
             Text("Availability", style = MaterialTheme.typography.labelMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -194,7 +208,7 @@ private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     modifier = Modifier.weight(1f),
-                    enabled = availability != null || quotaDeltaMinutes != 0,
+                    enabled = !loadFailed && (availability != null || quotaDeltaMinutes != 0),
                     onClick = {
                         // Re-read the persisted override after a save so
                         // the Clear button reflects the freshly-created
@@ -218,9 +232,10 @@ private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
                     // to back out without saving; the web version
                     // handles the same case via a single "Clear
                     // Override" button that resets both.
-                    enabled = loaded != null
-                        || availability != null
-                        || quotaDeltaMinutes != 0,
+                    enabled = !loadFailed
+                        && (loaded != null
+                            || availability != null
+                            || quotaDeltaMinutes != 0),
                     onClick = {
                         if (loaded != null) {
                             vm.deleteOverride(entryId, today, onDone = {

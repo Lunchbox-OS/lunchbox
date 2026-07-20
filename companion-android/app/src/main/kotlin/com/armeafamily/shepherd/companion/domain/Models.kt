@@ -101,6 +101,45 @@ sealed interface ReasonCode {
     @Serializable
     @SerialName("manually_disabled")
     data class ManuallyDisabled(val until: IsoDate) : ReasonCode
+
+    @Serializable
+    @SerialName("not_ready")
+    data class NotReady(val kind: EntryKindTag) : ReasonCode
+
+    @Serializable
+    @SerialName("required_input_unavailable")
+    data class RequiredInputUnavailable(val devices: List<String> = emptyList()) : ReasonCode
+
+    @Serializable
+    @SerialName("tokens_insufficient")
+    data class TokensInsufficient(
+        val balance: DurationSecs,
+        val required: DurationSecs,
+    ) : ReasonCode
+
+    /** A limit that comes from the entry's group rather than the entry (issue #5). */
+    @Serializable
+    @SerialName("group_restricted")
+    data class GroupRestricted(
+        val group: String,
+        val label: String,
+        val reason: ReasonCode,
+    ) : ReasonCode
+
+    /**
+     * A reason this build of the app doesn't know about.
+     *
+     * Registered as the polymorphic default (see
+     * [com.armeafamily.shepherd.companion.ble.ShepherdJson]) so a device
+     * running a newer shepherdd degrades to "unavailable for some reason"
+     * instead of failing the decode of the whole response. Without this, one
+     * unrecognised reason code takes down the entire entry list — `reasons`
+     * is nested inside [EntryView], so the failure is not contained to the
+     * entry that carries it.
+     */
+    @Serializable
+    @SerialName("__unknown")
+    data class Unknown(val code: String? = null) : ReasonCode
 }
 
 // --- sessions ---------------------------------------------------------
@@ -194,7 +233,12 @@ data class ExtendResult(val newDeadline: IsoTimestamp? = null)
 
 @Serializable
 data class DailyOverride(
-    val entryId: String,
+    /**
+     * What the override applies to: a bare entry ID, or `group:<id>` for a
+     * whole category (issue #5). Renamed from `entry_id` when limits gained
+     * group-level subjects.
+     */
+    val subject: String,
     val date: IsoDate,
     val availability: Boolean? = null,
     val quotaDeltaSeconds: Long? = null,

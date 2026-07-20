@@ -3,9 +3,12 @@ package com.armeafamily.shepherd.companion.ble
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import com.armeafamily.shepherd.companion.domain.ReasonCode
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNamingStrategy
+import kotlinx.serialization.modules.SerializersModule
+import kotlinx.serialization.modules.polymorphic
 
 /**
  * Shared JSON codec for the BLE wire protocol.
@@ -23,6 +26,12 @@ import kotlinx.serialization.json.JsonNamingStrategy
  * - `classDiscriminator = "type"`: default for our internally-tagged
  *   enums; [com.armeafamily.shepherd.companion.domain.ReasonCode] overrides it to
  *   `"code"`.
+ *
+ * `ignoreUnknownKeys` covers unknown *fields*, but not unknown polymorphic
+ * discriminator *values* — those throw. Since `reasons` is nested inside
+ * `EntryView`, a single unrecognised reason code from a newer device would
+ * otherwise fail the decode of the entire entry list, so
+ * [ReasonCode.Unknown] is registered as the default below.
  */
 @OptIn(ExperimentalSerializationApi::class)
 val ShepherdJson: Json = Json {
@@ -31,6 +40,11 @@ val ShepherdJson: Json = Json {
     explicitNulls = false
     encodeDefaults = true
     classDiscriminator = "type"
+    serializersModule = SerializersModule {
+        polymorphic(ReasonCode::class) {
+            defaultDeserializer { ReasonCode.Unknown.serializer() }
+        }
+    }
 }
 
 /** Request written to the Request characteristic. */
