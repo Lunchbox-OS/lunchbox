@@ -144,6 +144,30 @@ freshly booted session. Then the same with the session *booted* at 1.5 → conte
 fills the output crisply (buffer at physical resolution, not logical, not
 magnified). `waydroid.display_scale` tracks the compositor's current value.
 
+## Patch validation status (2026-07-19)
+
+A patched `hwcomposer.waydroid.so` (installed via the Waydroid overlay at
+`/var/lib/waydroid/overlay/vendor/lib64/hw/`) was validated against the criteria
+above on the headless rig (1920x1080 mode, wlroots/sway, pixman):
+
+- **Warm live-flip relaunch: PASS.** Boot at scale 1 → flip 1.5 → flip 1 →
+  relaunch renders identical to a fresh boot (previously: permanent half-size).
+- **Freeze/thaw flip relaunch: PASS.** Same flips queued across
+  `lxc-freeze`/`lxc-unfreeze`: relaunch correct.
+- **Kiosk end-to-end: PASS.** Full launcher flow at config-time `output * scale
+  1.5`: one scale-1 session restart on the first open, then four consecutive
+  close/reopen cycles each **1-2 s** and pixel-perfect (was ~30-60 s per open).
+- **Fractional steady state (booted at scale 1.5): improved but still wrong.**
+  No squash and crisp 1:1 presentation, but the Android display is sized
+  logical x scale^2 (1280x720 logical -> `wm size 2880x1620` instead of
+  1920x1080) — the scale looks double-applied — so layouts overflow and clip on
+  the right/bottom third. `waydroid.display_scale` correctly reports 1.5 at boot
+  but still does not track warm output-scale changes (boot-latched; the fix
+  evidently re-evaluates per surface, which is what the kiosk flow needs).
+
+Remaining upstream work: the steady-state double-scale above, and dynamic
+`preferred_scale` tracking on warm sessions.
+
 ## Workaround shipped in shepherd meanwhile
 
 Reboot the Waydroid session while the output is at scale 1 before every launch
