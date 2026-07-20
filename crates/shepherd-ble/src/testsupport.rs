@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, HealthStatus, ServiceStateSnapshot, SessionInfo, StopMode, UsageStat, VolumeInfo,
-    VolumeRestrictions, WindowAction, WindowInfo,
+    Event, GroupView, HealthStatus, ServiceStateSnapshot, SessionInfo, StopMode, UsageStat,
+    VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_management::{LaunchOutcome, ManagementError, ManagementResult, ManagementService};
 use shepherd_util::{EntryId, LimitSubject};
@@ -63,6 +63,9 @@ impl ManagementService for MockSvc {
     }
     async fn extend_current(&self, _seconds: i64) -> ManagementResult<Option<DateTime<Local>>> {
         Ok(None)
+    }
+    async fn list_groups(&self, _at: DateTime<Local>) -> Vec<GroupView> {
+        vec![]
     }
     async fn list_overrides(&self, _date: NaiveDate) -> ManagementResult<Vec<DailyOverride>> {
         Ok(vec![])

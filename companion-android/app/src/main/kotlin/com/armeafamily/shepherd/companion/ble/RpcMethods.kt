@@ -17,6 +17,7 @@ object RpcMethods {
     const val SERVICE_STATE: String = "service_state"
     const val LIST_ENTRIES: String = "list_entries"
     const val GET_ENTRY: String = "get_entry"
+    const val LIST_GROUPS: String = "list_groups"
     const val CURRENT_SESSION: String = "current_session"
     const val LAUNCH: String = "launch"
     const val STOP_CURRENT: String = "stop_current"

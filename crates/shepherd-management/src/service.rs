@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, EventPayload, HealthStatus, ServiceStateSnapshot, SessionEndReason, SessionInfo,
-    StopMode, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot, SessionEndReason,
+    SessionInfo, StopMode, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{CoreEngine, LaunchDecision, StopDecision};
@@ -49,6 +49,12 @@ pub trait ManagementService: Send + Sync {
     async fn list_entries(&self, at: DateTime<Local>) -> Vec<EntryView>;
     #[rpc(default(at = "shepherd_util::now"))]
     async fn get_entry(&self, id: &EntryId, at: DateTime<Local>) -> ManagementResult<EntryView>;
+
+    // Groups (issue #5)
+    /// Categories that share a schedule and a combined budget. Returns the
+    /// group's own state; a member's individual limits are on its `EntryView`.
+    #[rpc(default(at = "shepherd_util::now"))]
+    async fn list_groups(&self, at: DateTime<Local>) -> Vec<GroupView>;
 
     // Sessions
     async fn current_session(&self) -> Option<SessionInfo>;
@@ -199,6 +205,12 @@ impl ManagementService for DefaultManagementService {
             .into_iter()
             .find(|e| e.entry_id == *id)
             .ok_or_else(|| ManagementError::NotFound(format!("No entry with id '{id}'")))
+    }
+
+    // ---------------------------------------------------------------- groups
+    async fn list_groups(&self, at: DateTime<Local>) -> Vec<GroupView> {
+        let eng = self.engine.lock().await;
+        eng.list_groups(at)
     }
 
     // -------------------------------------------------------------- sessions

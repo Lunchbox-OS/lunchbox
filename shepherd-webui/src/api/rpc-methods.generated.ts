@@ -15,6 +15,7 @@ export type RpcMethod =
   | "service_state"
   | "list_entries"
   | "get_entry"
+  | "list_groups"
   | "current_session"
   | "launch"
   | "stop_current"

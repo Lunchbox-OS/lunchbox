@@ -116,7 +116,21 @@ export interface EntryView {
   icon_ref: string | null;
   kind_tag: EntryKindTag;
   enabled: boolean;
+  /** Category this activity shares a schedule and budget with (issue #5). */
+  group?: string | null;
   reasons: ReasonCode[];
+  max_run_if_started_now: Duration | null;
+}
+
+/** A category of activities sharing one schedule and one combined budget. */
+export interface GroupView {
+  group_id: string;
+  label: string;
+  member_ids: string[];
+  enabled: boolean;
+  reasons: ReasonCode[];
+  used_today: Duration;
+  daily_quota: Duration | null;
   max_run_if_started_now: Duration | null;
 }
 

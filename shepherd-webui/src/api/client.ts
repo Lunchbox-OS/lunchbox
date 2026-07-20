@@ -11,6 +11,7 @@ import type { RpcMethod } from "./rpc-methods.generated";
 import type {
   BrightnessInfo,
   DailyOverride,
+  GroupView,
   EntryView,
   ReasonCode,
   SessionInfo,
@@ -122,6 +123,8 @@ export const stopSession = () => call<null>("stop_current");
 
 export const extendSession = (seconds: number) =>
   call<{ new_deadline: string | null }>("extend_current", { seconds });
+
+export const listGroups = () => call<GroupView[]>("list_groups", {});
 
 // Daily overrides
 export const listOverrides = (date?: string) =>

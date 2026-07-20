@@ -318,10 +318,41 @@ pub struct EntryView {
     pub icon_ref: Option<String>,
     pub kind_tag: EntryKindTag,
     pub enabled: bool,
+    /// The group this entry belongs to (issue #5), if any. Management UIs use
+    /// it to show that an activity's schedule and budget are shared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupId>,
     pub reasons: Vec<ReasonCode>,
     /// Maximum run duration if started now. None means:
     /// - If enabled=false: entry is not available
     /// - If enabled=true: entry has no time limit (unlimited)
+    pub max_run_if_started_now: Option<Duration>,
+}
+
+/// View of a group for UI display (issue #5).
+///
+/// A group's limits are shared by its members, so a management UI needs to
+/// show the *category's* state — combined usage against the combined quota,
+/// and whatever is currently restricting it — separately from any one member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupView {
+    pub group_id: GroupId,
+    pub label: String,
+    /// Members, in policy order.
+    pub member_ids: Vec<EntryId>,
+    /// Whether the group's own restrictions currently permit its members.
+    /// Individual members may still be unavailable for their own reasons.
+    pub enabled: bool,
+    /// Why the group is restricting its members, if it is. These are the
+    /// unwrapped reasons — the same ones members carry inside
+    /// `ReasonCode::GroupRestricted`.
+    pub reasons: Vec<ReasonCode>,
+    /// Combined usage across all members today.
+    pub used_today: Duration,
+    /// Effective daily quota after any override delta. None means unlimited.
+    pub daily_quota: Option<Duration>,
+    /// Longest session the group's limits would currently allow a member.
+    /// None means the group imposes no cap of its own.
     pub max_run_if_started_now: Option<Duration>,
 }
 

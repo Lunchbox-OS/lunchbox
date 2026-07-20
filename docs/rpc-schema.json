@@ -46,6 +46,19 @@
       }
     },
     {
+      "name": "list_groups",
+      "params": [
+        {
+          "name": "at",
+          "required": false,
+          "type": "DateTime<Local>"
+        }
+      ],
+      "result": {
+        "type": "Vec<GroupView>"
+      }
+    },
+    {
       "name": "current_session",
       "params": [],
       "result": {

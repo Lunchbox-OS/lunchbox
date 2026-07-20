@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    API_VERSION, EntryKindTag, EntryView, InputDeviceType, InternetStatusView, ReasonCode,
-    ServiceStateSnapshot, SessionEndReason, WarningSeverity,
+    API_VERSION, EntryKindTag, EntryView, GroupView, InputDeviceType, InternetStatusView,
+    ReasonCode, ServiceStateSnapshot, SessionEndReason, WarningSeverity,
 };
 use shepherd_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -195,6 +195,86 @@ impl CoreEngine {
             .collect()
     }
 
+    /// List all groups with their shared state (issue #5).
+    ///
+    /// A group's limits are shared, so management UIs need the *category's*
+    /// combined usage and restrictions rather than inferring them from a
+    /// member that happens to be blocked.
+    pub fn list_groups(&self, now: DateTime<Local>) -> Vec<GroupView> {
+        let today = now.date_naive();
+        self.policy
+            .groups
+            .iter()
+            .map(|group| {
+                let daily_override = self
+                    .store
+                    .get_daily_override(&group.subject(), today)
+                    .ok()
+                    .flatten();
+                let availability = daily_override.as_ref().and_then(|o| o.availability);
+                let quota_delta = daily_override.as_ref().and_then(|o| o.quota_delta_seconds);
+
+                // A force-disable is the whole story; otherwise report the
+                // same restrictions its members see.
+                let reasons = if availability == Some(false) {
+                    vec![ReasonCode::ManuallyDisabled { until: today }]
+                } else {
+                    self.group_reasons(group, now, availability == Some(true), quota_delta)
+                };
+
+                GroupView {
+                    group_id: group.id.clone(),
+                    label: group.label.clone(),
+                    member_ids: self
+                        .policy
+                        .group_members(&group.id)
+                        .map(|e| e.id.clone())
+                        .collect(),
+                    enabled: reasons.is_empty(),
+                    reasons,
+                    used_today: self.group_usage(group, today),
+                    daily_quota: group
+                        .limits
+                        .daily_quota
+                        .map(|q| apply_quota_delta(q, quota_delta)),
+                    max_run_if_started_now: self.group_max_duration(group, now, quota_delta),
+                }
+            })
+            .collect()
+    }
+
+    /// The longest session a group's own limits would allow a member right
+    /// now, ignoring the member's individual limits. None means the group
+    /// imposes no cap.
+    fn group_max_duration(
+        &self,
+        group: &Group,
+        now: DateTime<Local>,
+        quota_delta: Option<i64>,
+    ) -> Option<Duration> {
+        let today = now.date_naive();
+        let mut max = group.limits.max_run;
+        let mut clamp = |limit: Duration| {
+            max = Some(match max {
+                Some(m) => m.min(limit),
+                None => limit,
+            });
+        };
+
+        if let Some(window_remaining) = group.availability.remaining_in_window(&now) {
+            clamp(window_remaining);
+        }
+        if let Some(quota) = group.limits.daily_quota {
+            let effective = apply_quota_delta(quota, quota_delta);
+            clamp(effective.saturating_sub(self.group_usage(group, today)));
+        }
+        if let Some(tokens) = &group.tokens {
+            clamp(self.token_balance_of(&group.subject(), tokens, today));
+        }
+
+        max
+    }
+
     /// Evaluate a single entry for availability
     fn evaluate_entry(&self, entry: &Entry, now: DateTime<Local>) -> EntryView {
         let today = now.date_naive();
@@ -370,6 +450,7 @@ impl CoreEngine {
             icon_ref: entry.icon_ref.clone(),
             kind_tag,
             enabled,
+            group: entry.group.clone(),
             reasons,
             max_run_if_started_now,
         }
@@ -471,6 +552,7 @@ impl CoreEngine {
             icon_ref: entry.icon_ref.clone(),
             kind_tag: entry.kind.tag(),
             enabled: false,
+            group: entry.group.clone(),
             reasons: vec![match group {
                 Some(group) => ReasonCode::GroupRestricted {
                     group: group.id.clone(),
@@ -2602,5 +2684,111 @@ mod tests {
         let v = view(&entries, "game-b");
         assert!(v.enabled);
         assert_eq!(v.max_run_if_started_now, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_list_groups_reports_shared_state() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                max_run: Some(Duration::from_secs(900)),
+                daily_quota: Some(Duration::from_secs(1800)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+
+        let groups = engine.list_groups(now);
+        assert_eq!(groups.len(), 1);
+        let g = &groups[0];
+        assert_eq!(g.group_id.as_str(), "games");
+        assert_eq!(g.label, "games group");
+        assert_eq!(
+            g.member_ids.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
+            vec!["game-a", "game-b"],
+            "members are listed so a UI can show what shares the budget"
+        );
+        assert!(g.enabled);
+        assert_eq!(g.used_today, Duration::ZERO);
+        assert_eq!(g.daily_quota, Some(Duration::from_secs(1800)));
+        // Capped by max_run, which is tighter than the remaining quota.
+        assert_eq!(g.max_run_if_started_now, Some(Duration::from_secs(900)));
+
+        // Usage from any member rolls up into the category's total.
+        run_session(&mut engine, "game-a", Duration::from_secs(900), now);
+        let g = &engine.list_groups(now)[0];
+        assert_eq!(g.used_today, Duration::from_secs(900));
+        assert_eq!(g.max_run_if_started_now, Some(Duration::from_secs(900)));
+
+        // Spending the rest reports the category as restricted, with the
+        // reason unwrapped rather than buried in GroupRestricted.
+        run_session(&mut engine, "game-b", Duration::from_secs(900), now);
+        let g = &engine.list_groups(now)[0];
+        assert!(!g.enabled);
+        assert_eq!(g.used_today, Duration::from_secs(1800));
+        assert!(
+            g.reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::QuotaExhausted { .. })),
+            "expected a bare QuotaExhausted, got: {:?}",
+            g.reasons
+        );
+    }
+
+    #[test]
+    fn test_list_groups_reflects_overrides() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                daily_quota: Some(Duration::from_secs(600)),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store.clone(), HostCapabilities::minimal());
+        let now = noon();
+        let today = now.date_naive();
+        let games = LimitSubject::group("games");
+
+        run_session(&mut engine, "game-a", Duration::from_secs(600), now);
+        assert!(!engine.list_groups(now)[0].enabled);
+
+        // A quota delta raises the category's effective budget.
+        store
+            .upsert_daily_override(&games, today, None, Some(300))
+            .unwrap();
+        let g = &engine.list_groups(now)[0];
+        assert!(g.enabled);
+        assert_eq!(g.daily_quota, Some(Duration::from_secs(900)));
+        assert_eq!(g.max_run_if_started_now, Some(Duration::from_secs(300)));
+
+        // A force-disable is reported as such, not as an exhausted quota.
+        store
+            .upsert_daily_override(&games, today, Some(false), None)
+            .unwrap();
+        let g = &engine.list_groups(now)[0];
+        assert!(!g.enabled);
+        assert!(matches!(
+            g.reasons.as_slice(),
+            [ReasonCode::ManuallyDisabled { .. }]
+        ));
+    }
+
+    #[test]
+    fn test_entry_view_reports_group_membership() {
+        let policy = make_group_policy(group("games", no_limits(), None));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+
+        let entries = engine.list_entries(noon());
+        assert_eq!(
+            view(&entries, "game-a").group.as_ref().map(|g| g.as_str()),
+            Some("games")
+        );
+        assert!(view(&entries, "ungrouped").group.is_none());
     }
 }
