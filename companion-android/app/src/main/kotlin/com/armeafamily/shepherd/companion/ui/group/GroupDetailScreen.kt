@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.GroupView
+import com.armeafamily.shepherd.companion.domain.subject
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.ui.override.OverrideSection
 import com.armeafamily.shepherd.companion.util.Formatting

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod auto_brightness;
 pub mod dispatch;
 pub mod error;
+pub mod kotlin_types;
 pub mod service;
 pub mod types;
 pub mod wire_schema;

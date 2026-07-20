@@ -61,13 +61,14 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 3] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 4] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
             (base.join("rpc-schema.json"), format!("{pretty}\n")),
             (base.join("RpcMethods.kt"), render_kotlin(&schema)),
             (base.join("rpc-methods.generated.ts"), render_ts(&schema)),
+            (base.join("WireTypes.generated.kt"), render_wire_types()),
         ]
     } else {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -89,6 +90,10 @@ fn main() -> anyhow::Result<()> {
                 repo.join("shepherd-webui/src/api/rpc-methods.generated.ts"),
                 render_ts(&schema),
             ),
+            (
+                repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt"),
+                render_wire_types(),
+            ),
         ]
     };
 
@@ -98,6 +103,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.
+fn render_wire_types() -> String {
+    shepherd_management::kotlin_types::render(&shepherd_management::wire_schema::wire_schema())
 }
 
 // ---------------------------------------------------------------------------

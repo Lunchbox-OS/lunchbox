@@ -3,12 +3,10 @@ package com.armeafamily.shepherd.companion.ble
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import com.armeafamily.shepherd.companion.domain.ReasonCode
+import com.armeafamily.shepherd.companion.domain.ShepherdWireModule
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNamingStrategy
-import kotlinx.serialization.modules.SerializersModule
-import kotlinx.serialization.modules.polymorphic
 
 /**
  * Shared JSON codec for the BLE wire protocol.
@@ -40,11 +38,10 @@ val ShepherdJson: Json = Json {
     explicitNulls = false
     encodeDefaults = true
     classDiscriminator = "type"
-    serializersModule = SerializersModule {
-        polymorphic(ReasonCode::class) {
-            defaultDeserializer { ReasonCode.Unknown.serializer() }
-        }
-    }
+    // Generated: one polymorphic default per tagged enum, so an unrecognised
+    // discriminator from a newer device degrades to that enum's `Unknown`
+    // instead of failing the decode of the whole response.
+    serializersModule = ShepherdWireModule
 }
 
 /** Request written to the Request characteristic. */

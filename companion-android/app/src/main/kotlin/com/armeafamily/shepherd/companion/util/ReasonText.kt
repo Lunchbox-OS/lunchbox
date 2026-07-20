@@ -38,8 +38,10 @@ object ReasonText {
             "Still starting up"
 
         is ReasonCode.RequiredInputUnavailable ->
+            // Generated as an enum, so render the wire spelling rather than
+            // Kotlin's SHOUTING constant names.
             if (reason.devices.isEmpty()) "Needs an input device"
-            else "Needs: ${reason.devices.joinToString(", ")}"
+            else "Needs: ${reason.devices.joinToString(", ") { it.name.lowercase() }}"
 
         is ReasonCode.TokensInsufficient ->
             if (reason.required.secs > 0)

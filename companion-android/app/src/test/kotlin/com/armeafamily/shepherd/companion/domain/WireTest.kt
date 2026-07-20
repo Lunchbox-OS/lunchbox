@@ -106,7 +106,12 @@ class WireTest {
         val inputs = decode<ReasonCode>(
             """{"code":"required_input_unavailable","devices":["keyboard","mouse"]}""",
         )
-        assertEquals(listOf("keyboard", "mouse"), (inputs as ReasonCode.RequiredInputUnavailable).devices)
+        // Generated from the Rust enum, so these decode as typed values rather
+        // than bare strings.
+        assertEquals(
+            listOf(InputDeviceType.KEYBOARD, InputDeviceType.MOUSE),
+            (inputs as ReasonCode.RequiredInputUnavailable).devices,
+        )
 
         val tokens = decode<ReasonCode>(
             """{"code":"tokens_insufficient","balance":{"secs":300,"nanos":0},"required":{"secs":1800,"nanos":0}}""",

@@ -52,6 +52,13 @@ fn codegen_outputs_match_checked_in() {
             "shepherd-webui/src/api/rpc-methods.generated.ts",
             "rpc-methods.generated.ts",
         ),
+        // The payload types. This is the artifact that matters most: the
+        // companion's hand-written mirrors drifted twice before they were
+        // generated, and neither drift was catchable from the method schema.
+        (
+            "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt",
+            "WireTypes.generated.kt",
+        ),
     ];
 
     for (checked_in, temp_name) in files {
