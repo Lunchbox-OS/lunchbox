@@ -168,6 +168,28 @@ above on the headless rig (1920x1080 mode, wlroots/sway, pixman):
 Remaining upstream work: the steady-state double-scale above, and dynamic
 `preferred_scale` tracking on warm sessions.
 
+### Second patch iteration (2026-07-20, hash 6f9aa8c5…)
+
+Revalidated in full; all previous passes **hold** (warm live-flip relaunch,
+freeze/thaw relaunch, kiosk end-to-end: one restart on first open then reopens at
+1–2 s, pixel-perfect).
+
+- **`waydroid.display_scale` now tracks live output-scale changes in both
+  directions** within ~3 s on a warm session (1.0→1.5→1.0 observed) — the
+  boot-latch on the *scale value* is fixed.
+- **The Android display still does not reconfigure on a warm change**: after the
+  tracked scale changes, `wm size` keeps its boot-time dimensions. Harmless for
+  relaunch-based flows (new surfaces are correct) but a live foreground app does
+  not adapt.
+- **The steady-state double-scale is unchanged**: booting with the output at
+  scale 1.5 still yields `wm size 2880x1620` (logical x scale^2) instead of
+  1920x1080, content clipped past the visible third. Since the *tracking* fix
+  lives in the hwcomposer and behaves correctly, the boot-time display sizing —
+  possibly in a different component (e.g. the display HAL /
+  `vendor.waydroid.display@…` service or wherever the initial display geometry is
+  derived) — still multiplies by the scale twice. That is now the single
+  remaining defect blocking pin-free fractional operation.
+
 ## Workaround shipped in shepherd meanwhile
 
 Reboot the Waydroid session while the output is at scale 1 before every launch
