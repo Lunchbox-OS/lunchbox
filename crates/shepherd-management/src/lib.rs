@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod error;
 pub mod service;
 pub mod types;
+pub mod wire_schema;
 
 pub use auth::AdminAuthority;
 pub use auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};

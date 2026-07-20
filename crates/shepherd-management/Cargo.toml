@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Transport-agnostic management service trait shared by shepherd-http and (planned) shepherd-ble"
 
 [dependencies]
+schemars = { workspace = true }
 shepherd-util = { workspace = true }
 shepherd-api = { workspace = true }
 shepherd-host-api = { workspace = true }

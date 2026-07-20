@@ -6,6 +6,7 @@ license.workspace = true
 description = "Shared utilities for shepherdd: time, IDs, error types, rate limiting, gamepad navigation"
 
 [dependencies]
+schemars = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
