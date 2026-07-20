@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Category
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -44,9 +47,9 @@ import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
+import com.armeafamily.shepherd.companion.ui.components.ReasonLines
 import com.armeafamily.shepherd.companion.ui.override.OverrideSection
 import com.armeafamily.shepherd.companion.util.Formatting
-import com.armeafamily.shepherd.companion.util.ReasonText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -57,10 +60,12 @@ fun EntryDetailScreen(
     vm: ShepherdViewModel,
     entryId: String,
     onBack: () -> Unit,
+    onOpenGroup: (String) -> Unit,
 ) {
     val state by vm.state.collectAsState()
     val entry = state.entries.firstOrNull { it.entryId == entryId }
     val session = state.currentSession?.takeIf { it.entryId == entryId }
+    val group = entry?.let { state.groupOf(it) }
 
     Scaffold(
         topBar = {
@@ -89,6 +94,23 @@ fun EntryDetailScreen(
                 color = MaterialTheme.colorScheme.outline,
             )
 
+            // The category is where a shared limit can actually be inspected or
+            // overridden, and it is often the thing blocking this activity, so
+            // offer the way there rather than only naming it (issue #5).
+            if (group != null) {
+                AssistChip(
+                    onClick = { onOpenGroup(group.groupId) },
+                    label = { Text(group.label) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Category,
+                            contentDescription = null,
+                            modifier = Modifier.size(AssistChipDefaults.IconSize),
+                        )
+                    },
+                )
+            }
+
             if (session != null) {
                 SessionSection(session, onExtend = vm::extendCurrent, onStop = vm::stopCurrent)
             } else {
@@ -114,9 +136,7 @@ private fun LaunchSection(entry: EntryView, onLaunch: () -> Unit) {
                 },
                 style = MaterialTheme.typography.bodyMedium,
             )
-            entry.reasons.firstOrNull()?.let {
-                Text(ReasonText.describe(it), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            }
+            ReasonLines(entry.reasons)
             Button(onClick = onLaunch, enabled = entry.enabled, modifier = Modifier.fillMaxWidth()) {
                 Text("Launch")
             }

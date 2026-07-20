@@ -26,9 +26,9 @@ import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.subject
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
+import com.armeafamily.shepherd.companion.ui.components.ReasonLines
 import com.armeafamily.shepherd.companion.ui.override.OverrideSection
 import com.armeafamily.shepherd.companion.util.Formatting
-import com.armeafamily.shepherd.companion.util.ReasonText
 
 /**
  * A category's shared state and its override editor (issue #5).
@@ -104,22 +104,20 @@ private fun SharedLimitsCard(group: GroupView) {
                 )
             }
 
-            group.maxRunIfStartedNow?.let {
-                Text(
-                    "Up to ${Formatting.coarse(it.secs)} per session",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
-            }
-
-            if (!group.enabled) {
-                group.reasons.forEach { reason ->
+            // Only meaningful while the category actually allows a session: a
+            // blocked one reports a cap of zero, and "Up to 0s per session"
+            // reads as a limit rather than as "not right now". The reasons
+            // below say what is really going on.
+            if (group.enabled) {
+                group.maxRunIfStartedNow?.let {
                     Text(
-                        ReasonText.describe(reason),
+                        "Up to ${Formatting.coarse(it.secs)} per session",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = MaterialTheme.colorScheme.outline,
                     )
                 }
+            } else {
+                ReasonLines(group.reasons)
             }
         }
     }

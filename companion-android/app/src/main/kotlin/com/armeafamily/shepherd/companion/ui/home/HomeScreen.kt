@@ -35,9 +35,9 @@ import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.ui.components.LinkBanner
+import com.armeafamily.shepherd.companion.ui.components.ReasonLines
 import com.armeafamily.shepherd.companion.ui.components.StatusBadge
 import com.armeafamily.shepherd.companion.util.Formatting
-import com.armeafamily.shepherd.companion.util.ReasonText
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -203,13 +203,8 @@ private fun GroupRow(group: GroupView, onClick: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
             )
-            val reason = group.reasons.firstOrNull()
-            if (!group.enabled && reason != null) {
-                Text(
-                    ReasonText.describe(reason),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+            if (!group.enabled) {
+                ReasonLines(group.reasons)
             }
         }
     }
@@ -245,13 +240,11 @@ private fun EntryRow(
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
-            val reason = entry.reasons.firstOrNull()
-            if (!entry.enabled && reason != null) {
-                Text(
-                    ReasonText.describe(reason),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+            // The running activity is "unavailable" only against itself — it
+            // carries `SessionActive` like everything else — so reporting
+            // "Another activity is running" on its own row would be nonsense.
+            if (!entry.enabled && !inSession) {
+                ReasonLines(entry.reasons)
             }
         }
     }

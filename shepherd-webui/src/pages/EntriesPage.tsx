@@ -354,9 +354,12 @@ function EntryCard({
           )}
         </Box>
 
+        {/* Every reason, not just the first: an activity blocked by both a
+            cooldown and a spent quota would otherwise reveal the second only
+            once the first is cleared. Matches the category card below. */}
         {!entry.enabled && entry.reasons.length > 0 && (
           <Typography variant="caption" color="text.secondary">
-            {reasonLabel(entry.reasons[0])}
+            {entry.reasons.map(reasonLabel).join(" · ")}
           </Typography>
         )}
 

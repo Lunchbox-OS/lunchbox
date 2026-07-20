@@ -1,6 +1,7 @@
 package com.armeafamily.shepherd.companion.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -19,9 +20,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.GroupView
+import com.armeafamily.shepherd.companion.domain.ReasonCode
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.ui.LinkStatus
 import com.armeafamily.shepherd.companion.util.Formatting
+import com.armeafamily.shepherd.companion.util.ReasonText
 
 /** A banner reflecting the BLE link state, with recovery actions. */
 @Composable
@@ -116,5 +119,25 @@ object StatusBadge {
                 disabledLabelColor = color,
             ),
         )
+    }
+}
+
+/**
+ * Every reason an activity or category is unavailable, one per line.
+ *
+ * All of them, not just the first: something blocked by both a cooldown and a
+ * spent quota would otherwise reveal the second reason only once the first is
+ * cleared, which reads like the limit moved.
+ */
+@Composable
+fun ReasonLines(reasons: List<ReasonCode>) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        reasons.forEach { reason ->
+            Text(
+                ReasonText.describe(reason),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }

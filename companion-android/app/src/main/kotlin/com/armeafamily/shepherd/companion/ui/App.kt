@@ -118,6 +118,7 @@ fun App() {
                     vm = vm,
                     entryId = entryId,
                     onBack = { navController.popBackStack() },
+                    onOpenGroup = { id -> navController.navigate(Routes.group(id)) },
                 )
             }
             composable("${Routes.GROUP}/{groupId}") { backStackEntry ->

@@ -167,19 +167,27 @@ neither cross-level override spent a balance (54 s and 152 s both unchanged);
 and the group screen now reads **"Up to 2m per session"** where it previously
 said "Up to 0s".
 
-## Smaller UI observations (not blockers)
+## Smaller UI observations
 
-- Group rows, entry rows, and the entry detail screen each render only
-  `reasons.firstOrNull()`. A member blocked by both a cooldown and a token gate
-  shows only the cooldown, so clearing it reveals a second reason the caregiver
-  was never told about. The group detail screen already renders all reasons.
-- The entry detail screen names no category and offers no way to reach it; the
-  category is only visible on the home row.
-- The row for the activity that is *currently running* shows the error line
-  "Another activity is running", because it carries `SessionActive` against
-  itself. Pre-existing, not group/token related.
+The first three were fixed in a follow-up commit; the last is not a code issue.
+
+- **Only the first reason was rendered** on group rows, entry rows and the entry
+  detail screen, so a member blocked by both a cooldown and a spent quota
+  revealed the second reason only once the first cleared — which reads like the
+  limit moved. A shared `ReasonLines` composable now renders all of them, and
+  the web UI's activity card joins them the way its category card already did.
+- **The entry detail screen named no category** and offered no way to reach it,
+  though the category screen is where a shared limit can be inspected or
+  overridden. It now shows a chip that navigates there.
+- **The running activity's own row showed "Another activity is running"** — it
+  carries `SessionActive` against itself. Suppressed for the in-session row.
+  Pre-existing, but rendering every reason made it worse, so it was fixed here
+  rather than left as a visible regression.
+- **A blocked category read "Up to 0s per session"** — the true cap, but it
+  reads as a limit rather than as "not right now". The line is now shown only
+  while the category is available; the reasons below carry the message.
 - The device chip row showed two identically-named "Pixel 10a" records — a
-  duplicate `ShepherdRecord`, unrelated to this branch.
+  duplicate `ShepherdRecord`, unrelated to this branch and not a code fix.
 
 ## Notes for the next agent
 
