@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.EntryView
+import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.ui.LinkStatus
 import com.armeafamily.shepherd.companion.util.Formatting
@@ -83,6 +84,17 @@ object StatusBadge {
             inSession -> "In session" to MaterialTheme.colorScheme.tertiary
             entry.enabled -> "Available" to MaterialTheme.colorScheme.primary
             else -> "Blocked" to MaterialTheme.colorScheme.error
+        }
+        chip(label, color)
+    }
+
+    /** Category status (issue #5): whether the shared limits currently allow its members. */
+    @Composable
+    fun forGroup(group: GroupView) {
+        val (label, color) = if (group.enabled) {
+            "Available" to MaterialTheme.colorScheme.primary
+        } else {
+            "Blocked" to MaterialTheme.colorScheme.error
         }
         chip(label, color)
     }

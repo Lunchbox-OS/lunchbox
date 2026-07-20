@@ -32,6 +32,7 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.armeafamily.shepherd.companion.ui.device.DeviceControlsScreen
 import com.armeafamily.shepherd.companion.ui.entry.EntryDetailScreen
+import com.armeafamily.shepherd.companion.ui.group.GroupDetailScreen
 import com.armeafamily.shepherd.companion.ui.home.HomeScreen
 import com.armeafamily.shepherd.companion.ui.pairing.PairingScreen
 import com.armeafamily.shepherd.companion.ui.settings.SettingsScreen
@@ -43,6 +44,8 @@ object Routes {
     const val SETTINGS = "settings"
     const val ENTRY = "entry"
     fun entry(id: String) = "$ENTRY/$id"
+    const val GROUP = "group"
+    fun group(id: String) = "$GROUP/$id"
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -97,6 +100,7 @@ fun App() {
                     vm = vm,
                     onAddDevice = { navController.navigate(Routes.PAIR) },
                     onOpenEntry = { id -> navController.navigate(Routes.entry(id)) },
+                    onOpenGroup = { id -> navController.navigate(Routes.group(id)) },
                     onOpenControls = { navController.navigate(Routes.CONTROLS) },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                 )
@@ -113,6 +117,14 @@ fun App() {
                 EntryDetailScreen(
                     vm = vm,
                     entryId = entryId,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable("${Routes.GROUP}/{groupId}") { backStackEntry ->
+                val groupId = backStackEntry.arguments?.getString("groupId").orEmpty()
+                GroupDetailScreen(
+                    vm = vm,
+                    groupId = groupId,
                     onBack = { navController.popBackStack() },
                 )
             }

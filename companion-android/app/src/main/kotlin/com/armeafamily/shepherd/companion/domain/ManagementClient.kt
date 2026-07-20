@@ -45,6 +45,11 @@ class ManagementClient(private val connection: ShepherdConnection) {
             put("at", at.toJson())
         }))
 
+    // --- groups (issue #5) ---------------------------------------------
+
+    suspend fun listGroups(at: IsoTimestamp? = null): List<GroupView> =
+        decode(call("list_groups", buildJsonObject { put("at", at.toJson()) }))
+
     // --- sessions ------------------------------------------------------
 
     suspend fun currentSession(): SessionInfo? = decodeNullable(call("current_session", empty()))

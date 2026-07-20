@@ -327,3 +327,65 @@ members of a category reported `max_run` clamped to the group's combined 120s
 quota while the ungrouped entry stayed uncapped; after one member's session the
 whole category disappeared from the launcher on the shared cooldown, and the
 ungrouped entry remained.
+
+## Management-app support (follow-up in the same branch)
+
+The initial group implementation left both management apps blind to groups —
+`EntryView` carried no group, there was no way to enumerate categories, and
+every override control addressed an entry. Auditing that also turned up a
+pre-existing break in the Android companion.
+
+### Android repair (commit `4360c02`)
+
+The companion's `ReasonCode` mirror had drifted **four** variants behind the
+device: `not_ready` (#76) and `required_input_unavailable` (#96) were already
+missing before this branch added `tokens_insufficient` and `group_restricted`.
+kotlinx.serialization throws on an unknown polymorphic discriminator —
+`ignoreUnknownKeys` only covers unknown *fields* — and `reasons` is nested
+inside `EntryView`, so a single unrecognised reason failed the decode of the
+whole `list_entries` response.
+
+The fix registers `ReasonCode.Unknown` as the polymorphic default, which
+addresses the class of bug rather than the instance. Note the API is
+`polymorphic(ReasonCode::class) { defaultDeserializer { … } }`; the flatter
+`polymorphicDefaultDeserializer` does not resolve on kotlinx 1.7.3.
+
+`DailyOverride` also still read `entry_id`. Worse than the decode failure was
+how it surfaced: `loadOverride` swallowed the exception with
+`runCatching{}.getOrNull()`, making a failed load indistinguishable from "no
+override set" — the editor rendered a blank form over a real override, and
+saving would have silently overwritten it. It now returns a `Result` and the
+UI disables Save/Clear when the load failed.
+
+**Lesson for the codegen:** `RpcMethods.kt` is method-name constants only, and
+`ManagementClient` uses raw string literals rather than those constants, so the
+codegen drift test gives *zero* protection against payload-shape drift. The
+wire tests in `WireTest.kt` are the only guard, which is why every new reason
+variant and the subject-keyed override now have one.
+
+### Group UI (commits `938e091`, `<this>`)
+
+`EntryView` gained `group`, and a new `GroupView` / `list_groups` RPC reports
+what no single member can answer: members, combined usage against the combined
+quota, the cap the group's limits impose, and its current restrictions with the
+reasons *unwrapped* (`GroupRestricted` is only meaningful wrapping a member's
+view).
+
+Both apps now show a Categories section above Activities and let a caregiver
+override a whole category. The web UI generalises its four override mutations
+to a `LimitTarget` (subject + label) so category cards drive the same code path
+as activity cards; Android extracts `OverrideSection` into
+`ui/override/OverrideSection.kt` keyed by subject, reused by the entry and
+group detail screens. Activity rows in both apps name their category.
+
+### Verification gap
+
+The web UI was verified visually against the real stack (Chromium headless —
+Firefox's `--screenshot` fires on `load`, before React Query resolves, and
+Chromium needs `--timeout` rather than `--virtual-time-budget` because the page
+holds an open SSE stream that never goes network-idle).
+
+**The Android UI was not visually verified.** It needs an emulator plus a real
+BLE device; CI runs JVM unit tests only and the pair/claim path is a documented
+manual smoke test. Coverage there is the wire tests plus compilation — the
+rendering is unexercised.

@@ -62,9 +62,34 @@ data class EntryView(
     val iconRef: String? = null,
     val kindTag: EntryKindTag,
     val enabled: Boolean,
+    /** Category this activity shares a schedule and budget with (issue #5). */
+    val group: String? = null,
     val reasons: List<ReasonCode> = emptyList(),
     val maxRunIfStartedNow: DurationSecs? = null,
 )
+
+/**
+ * A category of activities sharing one schedule and one combined budget
+ * (issue #5).
+ *
+ * `usedToday` is the *combined* usage of every member, and `reasons` are the
+ * group's own restrictions — the same ones members carry wrapped in
+ * [ReasonCode.GroupRestricted].
+ */
+@Serializable
+data class GroupView(
+    val groupId: String,
+    val label: String,
+    val memberIds: List<String> = emptyList(),
+    val enabled: Boolean,
+    val reasons: List<ReasonCode> = emptyList(),
+    val usedToday: DurationSecs,
+    val dailyQuota: DurationSecs? = null,
+    val maxRunIfStartedNow: DurationSecs? = null,
+) {
+    /** The limit subject addressing this category in override calls. */
+    val subject: String get() = "group:" + groupId
+}
 
 /** Tagged enum; discriminator is `code` (not the global `type`). */
 @Serializable

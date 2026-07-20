@@ -31,10 +31,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.EntryView
+import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.ui.components.LinkBanner
 import com.armeafamily.shepherd.companion.ui.components.StatusBadge
+import com.armeafamily.shepherd.companion.util.Formatting
 import com.armeafamily.shepherd.companion.util.ReasonText
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,6 +45,7 @@ fun HomeScreen(
     vm: ShepherdViewModel,
     onAddDevice: () -> Unit,
     onOpenEntry: (String) -> Unit,
+    onOpenGroup: (String) -> Unit,
     onOpenControls: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -99,10 +102,34 @@ fun HomeScreen(
             }
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Categories first: their limits are shared, so a member can
+                // become unavailable because a sibling was played (issue #5).
+                if (state.groups.isNotEmpty()) {
+                    item {
+                        Text(
+                            "Categories",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    items(state.groups, key = { "group:" + it.groupId }) { group ->
+                        GroupRow(group = group, onClick = { onOpenGroup(group.groupId) })
+                    }
+                    item {
+                        Text(
+                            "Activities",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
                 items(state.entries, key = { it.entryId }) { entry ->
                     EntryRow(
                         entry = entry,
                         session = session,
+                        groupLabel = state.groupOf(entry)?.label,
                         onClick = { onOpenEntry(entry.entryId) },
                     )
                 }
@@ -147,8 +174,54 @@ private fun CurrentSessionCard(session: SessionInfo, onClick: () -> Unit) {
     }
 }
 
+/** A category row: shared budget usage and whatever is restricting it. */
 @Composable
-private fun EntryRow(entry: EntryView, session: SessionInfo?, onClick: () -> Unit) {
+private fun GroupRow(group: GroupView, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    group.label,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                StatusBadge.forGroup(group)
+            }
+            Text(
+                buildString {
+                    append(Formatting.coarse(group.usedToday.secs))
+                    val quota = group.dailyQuota
+                    if (quota != null) append(" of ${Formatting.coarse(quota.secs)}")
+                    append(" used today · ")
+                    append("${group.memberIds.size} activit")
+                    append(if (group.memberIds.size == 1) "y" else "ies")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+            val reason = group.reasons.firstOrNull()
+            if (!group.enabled && reason != null) {
+                Text(
+                    ReasonText.describe(reason),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EntryRow(
+    entry: EntryView,
+    session: SessionInfo?,
+    groupLabel: String?,
+    onClick: () -> Unit,
+) {
     val inSession = session?.entryId == entry.entryId
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -163,6 +236,14 @@ private fun EntryRow(entry: EntryView, session: SessionInfo?, onClick: () -> Uni
                     fontWeight = FontWeight.SemiBold,
                 )
                 StatusBadge.forEntry(entry, inSession)
+            }
+            // Name the category so it's obvious the limits are shared.
+            if (groupLabel != null) {
+                Text(
+                    groupLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
             }
             val reason = entry.reasons.firstOrNull()
             if (!entry.enabled && reason != null) {

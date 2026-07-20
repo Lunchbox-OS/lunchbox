@@ -56,6 +56,47 @@ class WireTest {
     }
 
     @Test
+    fun `group view decodes and derives its override subject`() {
+        val group = decode<GroupView>(
+            """
+            {
+              "group_id": "games",
+              "label": "Games",
+              "member_ids": ["game-a", "game-b"],
+              "enabled": false,
+              "reasons": [{"code":"quota_exhausted","used":{"secs":1800,"nanos":0},
+                           "quota":{"secs":1800,"nanos":0}}],
+              "used_today": {"secs": 1800, "nanos": 0},
+              "daily_quota": {"secs": 1800, "nanos": 0},
+              "max_run_if_started_now": {"secs": 900, "nanos": 0}
+            }
+            """.trimIndent(),
+        )
+        assertEquals("games", group.groupId)
+        assertEquals(listOf("game-a", "game-b"), group.memberIds)
+        assertEquals(1800, group.usedToday.secs)
+        assertEquals(900, group.maxRunIfStartedNow?.secs)
+        // The subject is what override calls address the category by.
+        assertEquals("group:games", group.subject)
+    }
+
+    @Test
+    fun `entry view carries its category`() {
+        val entry = decode<EntryView>(
+            """{"entry_id":"game-a","label":"Game A","kind_tag":"process",
+                "enabled":true,"group":"games","reasons":[]}""",
+        )
+        assertEquals("games", entry.group)
+
+        // Absent for an ungrouped activity, and for a device predating groups.
+        val ungrouped = decode<EntryView>(
+            """{"entry_id":"solo","label":"Solo","kind_tag":"process",
+                "enabled":true,"reasons":[]}""",
+        )
+        assertNull(ungrouped.group)
+    }
+
+    @Test
     fun `every reason code the device can emit decodes`() {
         // These four were added to shepherdd after the app shipped and were
         // missing here, so any entry carrying one failed the decode of the
