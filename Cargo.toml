@@ -73,7 +73,7 @@ exclude = ["crates/shepherd-firewall-bpf"]
 # Canonical version lives in the repo-root VERSION file; Cargo can't read it at
 # parse time, so this literal is written by `shepherd version set` and verified
 # by `shepherd version check` (run in CI). Don't hand-edit — bump via the tool.
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0"
 authors = ["Albert Armea"]
