@@ -682,7 +682,37 @@ gap is cheap, in two tiers:
   fails the release if the repo wouldn't build.
 
 The second is the valuable one, and it is the only `release.yml` change under C2 —
-a validation step, not a publish step.
+a validation step, not a publish step. **Implemented** (see "Implementation
+notes" below); the PR-time tier was dropped as redundant once the release-time
+check existed.
+
+## Implementation notes (things only building it revealed)
+
+1. **`fdroid update` reports a rejected APK as a warning and exits 0.** Verified
+   by pinning a wrong-but-well-formed key: it logs
+   `WARNING: Removing repo/shepherd-media_0.3.0.apk`, signs an index without it,
+   prints `INFO: Finished`, and returns success. A publish step that trusts the
+   exit code would quietly serve a repo with an app missing. `shepherd package
+   fdroid` therefore asserts every input APK appears in `index-v2.json` and fails
+   otherwise — and the server-side service must do the same (spec §"step 7").
+2. **`--no-install-recommends` is not optional.** `apt install fdroidserver`
+   pulls 269 packages / ~300 MB; with `--no-install-recommends` it is 67 / ~78 MB.
+   The difference is matplotlib + tk, arriving as Recommends of androguard.
+3. **fdroidserver ignores `JAVA_HOME` for index signing.** `common.py`
+   unconditionally prefers `/usr/lib/jvm/default-java` when that directory exists
+   ("always prefer the built-in"), and does not check that the binary is there —
+   so on a box whose default is a JRE, the run dies at the last step with
+   `OSError … /usr/lib/jvm/default-java/bin/jarsigner`. Not overridable from
+   `config.yml` either, since `fill_config_defaults` clobbers the key. Both the
+   local command and the CI step now require `default-jdk-headless`.
+4. **`fdroid update` already emits a landing page.** The generated repo contains
+   `index.html` and `index.png` — the latter being a QR code of the repo URL — so
+   the "onboard a phone by scanning" nicety costs nothing to build.
+5. **Icons confirmed.** The run produced `icons/`, `icons-120/` … `icons-640/`,
+   which is the concrete form of Finding 4: those subdirectories are exactly what
+   the flat-namespace hosts (A/B) cannot express.
+6. **Both apps share one signing certificate** (`b96abc13…041e`), so one pinned
+   value covers the repo. Verified against the published v0.3.0 assets.
 
 ### 9.4 Docs
 

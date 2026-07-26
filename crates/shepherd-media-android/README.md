@@ -147,6 +147,15 @@ cargo ndk -t arm64-v8a build -p shepherd-media-android --release
 
 The resulting `libshepherd_media_android.so` is what the APK packages.
 
+## Install a released build
+
+Released builds are published to this project's F-Droid repository and attached
+to each release as an APK — see
+[Installing the Android apps](../../docs/INSTALL.md#installing-the-android-apps).
+App listing metadata lives in [`dist/fdroid/`](../../dist/fdroid/README.md).
+Fire TV sticks are the sideload case: F-Droid has no remote-friendly interface,
+so `adb install` stays the practical route there.
+
 ## Build the APK
 
 The Gradle project under [`android/`](./android) is a pure-`NativeActivity` app

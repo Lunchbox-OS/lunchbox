@@ -11,6 +11,13 @@ Implements the spec at
 The wire protocol mirrors `crates/shepherd-ble` and `crates/shepherd-api`
 in the parent repo.
 
+## Install
+
+Released builds are published to this project's F-Droid repository (which keeps
+the app updated) and attached to each release as an APK. See
+[Installing the Android apps](../docs/INSTALL.md#installing-the-android-apps).
+App listing metadata lives in [`dist/fdroid/`](../dist/fdroid/README.md).
+
 ## Build
 
 The Android SDK and a JDK are installed by the parent repo's tooling:
