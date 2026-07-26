@@ -1,6 +1,6 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Run `cargo run -p shepherd-management --bin rpc-codegen`
+// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 // after changing the `ManagementService` trait in
 // `crates/shepherd-management/src/service.rs`.
 
@@ -17,6 +17,7 @@ object RpcMethods {
     const val SERVICE_STATE: String = "service_state"
     const val LIST_ENTRIES: String = "list_entries"
     const val GET_ENTRY: String = "get_entry"
+    const val LIST_GROUPS: String = "list_groups"
     const val CURRENT_SESSION: String = "current_session"
     const val LAUNCH: String = "launch"
     const val STOP_CURRENT: String = "stop_current"
@@ -25,6 +26,7 @@ object RpcMethods {
     const val GET_OVERRIDE: String = "get_override"
     const val UPSERT_OVERRIDE: String = "upsert_override"
     const val DELETE_OVERRIDE: String = "delete_override"
+    const val ADJUST_TOKENS: String = "adjust_tokens"
     const val USAGE_ALL: String = "usage_all"
     const val USAGE_ENTRY: String = "usage_entry"
     const val GET_VOLUME: String = "get_volume"

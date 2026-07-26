@@ -7,11 +7,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, HealthStatus, ServiceStateSnapshot, SessionInfo, StopMode, UsageStat, VolumeInfo,
-    VolumeRestrictions, WindowAction, WindowInfo,
+    Event, GroupView, HealthStatus, ServiceStateSnapshot, SessionInfo, StopMode, TokenStatus,
+    UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_management::{LaunchOutcome, ManagementError, ManagementResult, ManagementService};
-use shepherd_util::EntryId;
+use shepherd_util::{EntryId, LimitSubject};
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::protocol::RpcRequest;
@@ -64,26 +65,46 @@ impl ManagementService for MockSvc {
     async fn extend_current(&self, _seconds: i64) -> ManagementResult<Option<DateTime<Local>>> {
         Ok(None)
     }
+    async fn list_groups(&self, _at: DateTime<Local>) -> Vec<GroupView> {
+        vec![]
+    }
+    async fn adjust_tokens(
+        &self,
+        _id: &LimitSubject,
+        delta_seconds: i64,
+    ) -> ManagementResult<TokenStatus> {
+        Ok(TokenStatus {
+            balance: Duration::from_secs(delta_seconds.max(0) as u64),
+            minimum: Duration::ZERO,
+            unlocked: delta_seconds > 0,
+            max_balance: None,
+            carry_over: false,
+        })
+    }
     async fn list_overrides(&self, _date: NaiveDate) -> ManagementResult<Vec<DailyOverride>> {
         Ok(vec![])
     }
     async fn get_override(
         &self,
-        _id: &EntryId,
+        _id: &LimitSubject,
         _date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>> {
         Ok(None)
     }
     async fn upsert_override(
         &self,
-        _id: &EntryId,
+        _id: &LimitSubject,
         _date: NaiveDate,
         _availability: Option<bool>,
         _quota_delta_seconds: Option<i64>,
     ) -> ManagementResult<DailyOverride> {
         Err(ManagementError::BadRequest("nope".into()))
     }
-    async fn delete_override(&self, _id: &EntryId, _date: NaiveDate) -> ManagementResult<bool> {
+    async fn delete_override(
+        &self,
+        _id: &LimitSubject,
+        _date: NaiveDate,
+    ) -> ManagementResult<bool> {
         Ok(false)
     }
     async fn usage_all(

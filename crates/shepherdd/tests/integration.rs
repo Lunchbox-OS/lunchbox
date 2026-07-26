@@ -43,6 +43,8 @@ fn make_test_entry(id: &str) -> Entry {
         input_compat: vec![],
         input_compat_options: Default::default(),
         requires_input: vec![],
+        tokens: None,
+        group: None,
         xwayland_native_resolution: false,
         confirm_on_close: true,
     }
@@ -51,6 +53,7 @@ fn make_test_entry(id: &str) -> Entry {
 fn make_test_policy() -> Policy {
     Policy {
         service: Default::default(),
+        groups: vec![],
         entries: vec![Entry {
             id: EntryId::new("test-game"),
             label: "Test Game".into(),
@@ -92,6 +95,8 @@ fn make_test_policy() -> Policy {
             input_compat: vec![],
             input_compat_options: Default::default(),
             requires_input: vec![],
+            tokens: None,
+            group: None,
             xwayland_native_resolution: false,
             confirm_on_close: true,
         }],
@@ -377,6 +382,7 @@ fn test_reload_policy_emits_event() {
 
     let new_policy = Policy {
         service: Default::default(),
+        groups: vec![],
         entries: vec![make_test_entry("game-a"), make_test_entry("game-b")],
         default_warnings: vec![],
         default_max_run: None,
@@ -410,6 +416,7 @@ fn test_reload_policy_updates_entry_list() {
 
     let new_policy = Policy {
         service: Default::default(),
+        groups: vec![],
         entries: vec![make_test_entry("game-a"), make_test_entry("game-b")],
         default_warnings: vec![],
         default_max_run: None,
@@ -452,6 +459,7 @@ fn test_reload_policy_preserves_active_session() {
     // Reload with a completely different set of entries
     let new_policy = Policy {
         service: Default::default(),
+        groups: vec![],
         entries: vec![make_test_entry("game-a")],
         default_warnings: vec![],
         default_max_run: None,

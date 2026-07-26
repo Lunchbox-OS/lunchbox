@@ -10,4 +10,9 @@ shepherd-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+schemars = { workspace = true, optional = true }
 thiserror = { workspace = true }
+
+[features]
+# Emit JSON Schema for the wire types (see shepherd-wire-codegen).
+schema = ["dep:schemars", "shepherd-util/schema"]

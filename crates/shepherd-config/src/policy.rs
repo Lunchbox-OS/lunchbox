@@ -17,8 +17,8 @@ use shepherd_api::{
     WarningSeverity, WarningThreshold,
 };
 use shepherd_util::{
-    DaysOfWeek, EntryId, TimeWindow, WallClock, default_data_dir, default_log_dir,
-    socket_path_without_env,
+    DaysOfWeek, EntryId, GroupId, LimitSubject, TimeWindow, WallClock, default_data_dir,
+    default_log_dir, socket_path_without_env,
 };
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -34,6 +34,9 @@ pub struct Policy {
 
     /// Validated entries
     pub entries: Vec<Entry>,
+
+    /// Validated groups (issue #5). Entries reference these by ID.
+    pub groups: Vec<Group>,
 
     /// Default warning thresholds
     pub default_warnings: Vec<WarningThreshold>,
@@ -90,6 +93,8 @@ impl Policy {
             .map(convert_auto_brightness_config)
             .unwrap_or_default();
 
+        let groups = raw.groups.iter().map(Group::from_raw).collect();
+
         let entries = raw
             .entries
             .into_iter()
@@ -107,6 +112,7 @@ impl Policy {
         Self {
             service: ServiceConfig::from_raw(raw.service),
             entries,
+            groups,
             default_warnings,
             default_max_run,
             volume: global_volume,
@@ -118,6 +124,78 @@ impl Policy {
     /// Get entry by ID
     pub fn get_entry(&self, id: &EntryId) -> Option<&Entry> {
         self.entries.iter().find(|e| &e.id == id)
+    }
+
+    /// Get group by ID
+    pub fn get_group(&self, id: &GroupId) -> Option<&Group> {
+        self.groups.iter().find(|g| &g.id == id)
+    }
+
+    /// The group an entry belongs to, if any.
+    pub fn group_of(&self, entry: &Entry) -> Option<&Group> {
+        entry.group.as_ref().and_then(|id| self.get_group(id))
+    }
+
+    /// The token gate on a limit subject — an entry's own, or a group's
+    /// (issue #8). None when the subject doesn't exist or isn't gated.
+    pub fn tokens_of(&self, subject: &LimitSubject) -> Option<&TokensPolicy> {
+        match subject {
+            LimitSubject::Entry(id) => self.get_entry(id).and_then(|e| e.tokens.as_ref()),
+            LimitSubject::Group(id) => self.get_group(id).and_then(|g| g.tokens.as_ref()),
+        }
+    }
+
+    /// Every entry belonging to a group.
+    pub fn group_members(&self, id: &GroupId) -> impl Iterator<Item = &Entry> {
+        self.entries
+            .iter()
+            .filter(move |e| e.group.as_ref() == Some(id))
+    }
+}
+
+/// A group of entries sharing an availability schedule and limits (issue #5).
+///
+/// The group's daily quota is spent by the *combined* usage of its members, so
+/// one member can burn the whole category's budget; when it is gone, every
+/// member becomes unavailable at once.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: GroupId,
+    pub label: String,
+    pub availability: AvailabilityPolicy,
+    pub limits: LimitsPolicy,
+    /// Token gate on the whole group: earning unlocks every member.
+    pub tokens: Option<TokensPolicy>,
+}
+
+impl Group {
+    fn from_raw(raw: &crate::schema::RawGroup) -> Self {
+        Self {
+            id: GroupId::new(raw.id.clone()),
+            label: raw.label.clone(),
+            availability: raw
+                .availability
+                .clone()
+                .map(convert_availability)
+                .unwrap_or_default(),
+            // Unlike an entry, a group has no service-level max_run default:
+            // an absent group limit means "no group-level cap", not "one hour".
+            limits: raw
+                .limits
+                .clone()
+                .map(|l| convert_limits(l, None))
+                .unwrap_or(LimitsPolicy {
+                    max_run: None,
+                    daily_quota: None,
+                    cooldown: None,
+                }),
+            tokens: raw.tokens.as_ref().map(convert_tokens),
+        }
+    }
+
+    /// This group as a limit subject, for cooldown / token / override lookups.
+    pub fn subject(&self) -> LimitSubject {
+        LimitSubject::Group(self.id.clone())
     }
 }
 
@@ -345,6 +423,11 @@ pub struct Entry {
     pub kind: EntryKind,
     pub availability: AvailabilityPolicy,
     pub limits: LimitsPolicy,
+    /// Token gate (issue #8). `None` means the entry is not token-gated.
+    pub tokens: Option<TokensPolicy>,
+    /// Group this entry belongs to (issue #5), whose schedule and limits apply
+    /// on top of this entry's own.
+    pub group: Option<GroupId>,
     pub warnings: Vec<WarningThreshold>,
     pub volume: Option<VolumePolicy>,
     pub brightness: Option<BrightnessPolicy>,
@@ -375,6 +458,11 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// This entry as a limit subject, for cooldown / token / override lookups.
+    pub fn subject(&self) -> LimitSubject {
+        LimitSubject::Entry(self.id.clone())
+    }
+
     fn from_raw(
         raw: RawEntry,
         default_warnings: &[WarningThreshold],
@@ -395,6 +483,8 @@ impl Entry {
                 daily_quota: None, // None means unlimited
                 cooldown: None,
             });
+        let tokens = raw.tokens.as_ref().map(convert_tokens);
+        let group = raw.group.as_ref().map(GroupId::new);
         let warnings = raw
             .warnings
             .map(|w| w.into_iter().map(convert_warning).collect())
@@ -420,6 +510,8 @@ impl Entry {
             kind,
             availability,
             limits,
+            tokens,
+            group,
             warnings,
             volume,
             brightness,
@@ -464,6 +556,50 @@ impl AvailabilityPolicy {
             return None; // No limit from windows
         }
         self.windows.iter().find_map(|w| w.remaining_duration(dt))
+    }
+}
+
+/// Token gate for an entry (issue #8)
+///
+/// Sessions on the entries in `from` bank time on this entry's balance, which
+/// this entry's own sessions then spend down. The entry is unavailable while
+/// the balance is zero or below `minimum`.
+#[derive(Debug, Clone)]
+pub struct TokensPolicy {
+    /// Subjects whose sessions bank time toward this one — individual entries,
+    /// or whole groups (issue #5). Sorted and deduplicated by `convert_tokens`;
+    /// validated to be non-empty and to exclude anything that would let the
+    /// gated activity unlock itself.
+    pub from: Vec<LimitSubject>,
+    /// Seconds banked per second spent on a source entry.
+    pub earn_ratio: f64,
+    /// Balance required before this entry unlocks. `Duration::ZERO` means any
+    /// balance above zero unlocks it.
+    pub minimum: Duration,
+    /// Ceiling on the banked balance. None means unlimited.
+    pub max_balance: Option<Duration>,
+    /// Whether the balance survives local midnight.
+    pub carry_over: bool,
+}
+
+impl TokensPolicy {
+    /// Whether the gate is open for `balance`.
+    ///
+    /// `minimum` is a threshold to *cross*, not one to stay above: once the
+    /// balance has reached it the gate ratchets open (`ratcheted`) and stays
+    /// open until the balance is spent to zero. Otherwise a session that spent
+    /// the balance part-way down would re-lock the activity and strand the
+    /// remainder — earned time the child could never use, and which
+    /// `carry_over = false` destroys at midnight.
+    pub fn unlocked(&self, balance: Duration, ratcheted: bool) -> bool {
+        !balance.is_zero() && (ratcheted || balance >= self.minimum)
+    }
+
+    /// Time banked by a session of `duration` on one of the source entries,
+    /// before the `max_balance` ceiling is applied. Truncated to whole
+    /// seconds, matching the storage granularity.
+    pub fn earned(&self, duration: Duration) -> Duration {
+        Duration::from_secs((duration.as_secs() as f64 * self.earn_ratio).floor() as u64)
     }
 }
 
@@ -869,6 +1005,27 @@ fn convert_limits(
             .daily_quota_seconds
             .and_then(seconds_to_duration_or_unlimited),
         cooldown: raw.cooldown_seconds.map(Duration::from_secs),
+    }
+}
+
+fn convert_tokens(raw: &crate::schema::RawTokens) -> TokensPolicy {
+    let mut from: Vec<String> = raw.from.clone();
+    from.sort();
+    from.dedup();
+    // Parsing is infallible: an unprefixed ID is an entry, `group:` marks a group.
+    let from: Vec<LimitSubject> = from
+        .into_iter()
+        .map(|s| s.parse().expect("LimitSubject parsing is infallible"))
+        .collect();
+
+    TokensPolicy {
+        from,
+        earn_ratio: raw.earn_ratio.unwrap_or(1.0),
+        minimum: Duration::from_secs(raw.minimum_seconds.unwrap_or(0)),
+        max_balance: raw
+            .max_balance_seconds
+            .and_then(seconds_to_duration_or_unlimited),
+        carry_over: raw.carry_over,
     }
 }
 

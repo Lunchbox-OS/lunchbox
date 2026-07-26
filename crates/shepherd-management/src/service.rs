@@ -5,17 +5,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, EventPayload, HealthStatus, ServiceStateSnapshot, SessionEndReason, SessionInfo,
-    StopMode, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot, SessionEndReason,
+    SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction,
+    WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
-use shepherd_core::{CoreEngine, LaunchDecision, StopDecision};
+use shepherd_core::{CoreEngine, LaunchDecision, StopDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
     SpawnOptions, VolumeController,
 };
 use shepherd_store::Store;
-use shepherd_util::{EntryId, MonotonicInstant};
+use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +51,12 @@ pub trait ManagementService: Send + Sync {
     #[rpc(default(at = "shepherd_util::now"))]
     async fn get_entry(&self, id: &EntryId, at: DateTime<Local>) -> ManagementResult<EntryView>;
 
+    // Groups (issue #5)
+    /// Categories that share a schedule and a combined budget. Returns the
+    /// group's own state; a member's individual limits are on its `EntryView`.
+    #[rpc(default(at = "shepherd_util::now"))]
+    async fn list_groups(&self, at: DateTime<Local>) -> Vec<GroupView>;
+
     // Sessions
     async fn current_session(&self) -> Option<SessionInfo>;
     async fn launch(&self, id: EntryId) -> ManagementResult<LaunchOutcome>;
@@ -61,22 +68,38 @@ pub trait ManagementService: Send + Sync {
     // Overrides
     #[rpc(default(date = "today"))]
     async fn list_overrides(&self, date: NaiveDate) -> ManagementResult<Vec<DailyOverride>>;
+    /// `id` is a limit subject: a bare entry ID, or `group:<id>` to override a
+    /// whole category for the day (issue #5).
     #[rpc(default(date = "today"))]
     async fn get_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>>;
     #[rpc(default(date = "today"))]
     async fn upsert_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
         availability: Option<bool>,
         quota_delta_seconds: Option<i64>,
     ) -> ManagementResult<DailyOverride>;
     #[rpc(default(date = "today"), wrap_result = "deleted")]
-    async fn delete_override(&self, id: &EntryId, date: NaiveDate) -> ManagementResult<bool>;
+    async fn delete_override(&self, id: &LimitSubject, date: NaiveDate) -> ManagementResult<bool>;
+
+    // Tokens (issue #8)
+    /// Grant or revoke banked time on a token gate. `id` is a limit subject —
+    /// a bare entry ID, or `group:<id>` for a whole category.
+    ///
+    /// Granted time is indistinguishable from earned time: it is capped by
+    /// `max_balance_seconds`, spent by the gated activity's sessions, and opens
+    /// the gate only once the balance reaches `minimum_seconds`. To switch an
+    /// activity on regardless, use an availability override.
+    async fn adjust_tokens(
+        &self,
+        id: &LimitSubject,
+        delta_seconds: i64,
+    ) -> ManagementResult<TokenStatus>;
 
     // Usage
     #[rpc(default(from = "today", to = "today"))]
@@ -197,6 +220,12 @@ impl ManagementService for DefaultManagementService {
             .into_iter()
             .find(|e| e.entry_id == *id)
             .ok_or_else(|| ManagementError::NotFound(format!("No entry with id '{id}'")))
+    }
+
+    // ---------------------------------------------------------------- groups
+    async fn list_groups(&self, at: DateTime<Local>) -> Vec<GroupView> {
+        let eng = self.engine.lock().await;
+        eng.list_groups(at)
     }
 
     // -------------------------------------------------------------- sessions
@@ -423,7 +452,7 @@ impl ManagementService for DefaultManagementService {
 
     async fn get_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
     ) -> ManagementResult<Option<DailyOverride>> {
         self.store
@@ -433,7 +462,7 @@ impl ManagementService for DefaultManagementService {
 
     async fn upsert_override(
         &self,
-        id: &EntryId,
+        id: &LimitSubject,
         date: NaiveDate,
         availability: Option<bool>,
         quota_delta_seconds: Option<i64>,
@@ -455,7 +484,7 @@ impl ManagementService for DefaultManagementService {
         Ok(ov)
     }
 
-    async fn delete_override(&self, id: &EntryId, date: NaiveDate) -> ManagementResult<bool> {
+    async fn delete_override(&self, id: &LimitSubject, date: NaiveDate) -> ManagementResult<bool> {
         let deleted = self
             .store
             .clear_daily_override(id, date)
@@ -465,6 +494,34 @@ impl ManagementService for DefaultManagementService {
             (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
         }
         Ok(deleted)
+    }
+
+    // ---------------------------------------------------------------- tokens
+    async fn adjust_tokens(
+        &self,
+        id: &LimitSubject,
+        delta_seconds: i64,
+    ) -> ManagementResult<TokenStatus> {
+        let status = {
+            let eng = self.engine.lock().await;
+            eng.adjust_tokens(id, delta_seconds, shepherd_util::now())
+                .map_err(|e| match e {
+                    TokenAdjustError::UnknownSubject => {
+                        ManagementError::NotFound(format!("No entry or group '{id}'"))
+                    }
+                    TokenAdjustError::NotGated => ManagementError::Unprocessable(format!(
+                        "'{id}' has no token gate, so it has no balance to adjust"
+                    )),
+                    TokenAdjustError::Store(msg) => ManagementError::Internal(msg),
+                })?
+        };
+
+        // The gate may have just opened or closed, so every client's entry
+        // list is stale.
+        let snap = self.engine.lock().await.get_state();
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+
+        Ok(status)
     }
 
     // ----------------------------------------------------------------- usage

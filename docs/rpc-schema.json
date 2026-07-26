@@ -46,6 +46,19 @@
       }
     },
     {
+      "name": "list_groups",
+      "params": [
+        {
+          "name": "at",
+          "required": false,
+          "type": "DateTime<Local>"
+        }
+      ],
+      "result": {
+        "type": "Vec<GroupView>"
+      }
+    },
+    {
       "name": "current_session",
       "params": [],
       "result": {
@@ -111,7 +124,7 @@
         {
           "name": "id",
           "required": true,
-          "type": "EntryId"
+          "type": "LimitSubject"
         },
         {
           "name": "date",
@@ -129,7 +142,7 @@
         {
           "name": "id",
           "required": true,
-          "type": "EntryId"
+          "type": "LimitSubject"
         },
         {
           "name": "date",
@@ -157,7 +170,7 @@
         {
           "name": "id",
           "required": true,
-          "type": "EntryId"
+          "type": "LimitSubject"
         },
         {
           "name": "date",
@@ -168,6 +181,24 @@
       "result": {
         "type": "bool",
         "wrap_field": "deleted"
+      }
+    },
+    {
+      "name": "adjust_tokens",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "LimitSubject"
+        },
+        {
+          "name": "delta_seconds",
+          "required": true,
+          "type": "i64"
+        }
+      ],
+      "result": {
+        "type": "TokenStatus"
       }
     },
     {

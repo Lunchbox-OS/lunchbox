@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use shepherd_api::ReasonCode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum LaunchOutcome {
     Approved {
         session_id: String,

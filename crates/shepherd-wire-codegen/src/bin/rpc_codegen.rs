@@ -14,7 +14,7 @@
 //!   plus a per-method result-type helper (only string-level today,
 //!   full type mapping is a follow-on).
 //!
-//! Run as `cargo run -p shepherd-management --bin rpc-codegen`
+//! Run as `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 //! from the repo root. The binary is deterministic: same schema in,
 //! same files out, so it's safe to invoke from a pre-commit hook or
 //! a CI check that fails on drift.
@@ -61,13 +61,14 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 3] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 4] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
             (base.join("rpc-schema.json"), format!("{pretty}\n")),
             (base.join("RpcMethods.kt"), render_kotlin(&schema)),
             (base.join("rpc-methods.generated.ts"), render_ts(&schema)),
+            (base.join("WireTypes.generated.kt"), render_wire_types()),
         ]
     } else {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -89,6 +90,10 @@ fn main() -> anyhow::Result<()> {
                 repo.join("shepherd-webui/src/api/rpc-methods.generated.ts"),
                 render_ts(&schema),
             ),
+            (
+                repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt"),
+                render_wire_types(),
+            ),
         ]
     };
 
@@ -98,6 +103,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.
+fn render_wire_types() -> String {
+    shepherd_wire_codegen::kotlin_types::render(&shepherd_wire_codegen::wire_schema::wire_schema())
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +122,7 @@ fn render_kotlin(schema: &Schema) -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n");
     out.push_str("//\n");
-    out.push_str("// Run `cargo run -p shepherd-management --bin rpc-codegen`\n");
+    out.push_str("// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/shepherd-management/src/service.rs`.\n\n");
     out.push_str("package com.armeafamily.shepherd.companion.ble\n\n");
@@ -161,7 +171,7 @@ fn render_ts(schema: &Schema) -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n");
     out.push_str("//\n");
-    out.push_str("// Run `cargo run -p shepherd-management --bin rpc-codegen`\n");
+    out.push_str("// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/shepherd-management/src/service.rs`.\n\n");
     out.push_str("/**\n");

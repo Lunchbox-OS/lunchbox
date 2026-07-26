@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Transport-agnostic management service trait shared by shepherd-http and (planned) shepherd-ble"
 
 [dependencies]
+schemars = { workspace = true, optional = true }
 shepherd-util = { workspace = true }
 shepherd-api = { workspace = true }
 shepherd-host-api = { workspace = true }
@@ -27,9 +28,9 @@ async-trait = "0.1"
 # surface via `[[bin]]` in the parent workspace's build graph.
 anyhow = { workspace = true }
 
-[[bin]]
-name = "rpc-codegen"
-path = "src/bin/rpc_codegen.rs"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+schema = ["dep:schemars", "shepherd-api/schema"]

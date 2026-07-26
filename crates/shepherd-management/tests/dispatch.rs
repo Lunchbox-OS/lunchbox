@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use shepherd_api::{EntryKind, Event};
 use shepherd_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
-    ServiceConfig, VolumePolicy,
+    ServiceConfig, TokensPolicy, VolumePolicy,
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
@@ -28,7 +28,7 @@ use shepherd_management::{
     RpcDispatchError, dispatch_json,
 };
 use shepherd_store::SqliteStore;
-use shepherd_util::{DaysOfWeek, EntryId, TimeWindow, WallClock};
+use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -176,6 +176,7 @@ impl LightSensor for MockLightSensor {
 fn test_policy() -> Policy {
     Policy {
         service: ServiceConfig::default(),
+        groups: vec![],
         entries: vec![Entry {
             id: EntryId::new("test-game"),
             label: "Test Game".into(),
@@ -206,6 +207,8 @@ fn test_policy() -> Policy {
             input_compat: vec![],
             input_compat_options: Default::default(),
             requires_input: vec![],
+            tokens: None,
+            group: None,
             xwayland_native_resolution: false,
             confirm_on_close: false,
         }],
@@ -526,8 +529,107 @@ async fn upsert_override_creates_record() {
         json!({ "id": "test-game", "availability": true }),
     )
     .await;
-    assert_eq!(body["entry_id"], "test-game");
+    assert_eq!(body["subject"], "test-game");
     assert_eq!(body["availability"], true);
+}
+
+#[tokio::test]
+async fn upsert_override_accepts_a_group_subject() {
+    // A caregiver can switch a whole category off for the day with one call
+    // (issue #5); `group:` marks the id as a group rather than an entry.
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    let body = ok(
+        &svc,
+        "upsert_override",
+        json!({ "id": "group:games", "availability": false }),
+    )
+    .await;
+    assert_eq!(body["subject"], "group:games");
+    assert_eq!(body["availability"], false);
+
+    // It round-trips as a group, distinct from an entry of the same name.
+    let body = ok(&svc, "get_override", json!({ "id": "group:games" })).await;
+    assert_eq!(body["subject"], "group:games");
+    let body = ok(&svc, "get_override", json!({ "id": "games" })).await;
+    assert!(
+        body.is_null(),
+        "an entry id must not match a group override"
+    );
+}
+
+/// The manual-grant wire contract (issue #8): `adjust_tokens` takes a limit
+/// subject and a signed delta, and reports the gate's state back.
+#[tokio::test]
+async fn adjust_tokens_grants_banked_time_and_reports_the_gate() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.entries[0].tokens = Some(TokensPolicy {
+        from: vec![LimitSubject::entry("other")],
+        earn_ratio: 1.0,
+        minimum: Duration::from_secs(600),
+        max_balance: None,
+        carry_over: false,
+    });
+    let svc = make_svc(policy, cfg.path().to_path_buf());
+
+    let body = ok(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "test-game", "delta_seconds": 300 }),
+    )
+    .await;
+    assert_eq!(body["balance"]["secs"], 300);
+    assert_eq!(body["minimum"]["secs"], 600);
+    assert_eq!(body["unlocked"], false);
+
+    // Crossing the minimum opens the gate; the balance is cumulative.
+    let body = ok(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "test-game", "delta_seconds": 300 }),
+    )
+    .await;
+    assert_eq!(body["balance"]["secs"], 600);
+    assert_eq!(body["unlocked"], true);
+}
+
+#[tokio::test]
+async fn adjust_tokens_rejects_an_ungated_subject() {
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+
+    // `test-game` exists but has no [tokens] block, so a balance on it would
+    // be written and never read.
+    let err = rpc(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "test-game", "delta_seconds": 300 }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::Unprocessable(_))
+        ),
+        "expected Unprocessable, got {err:?}"
+    );
+
+    let err = rpc(
+        &svc,
+        "adjust_tokens",
+        json!({ "id": "group:nope", "delta_seconds": 300 }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::NotFound(_))
+        ),
+        "expected NotFound, got {err:?}"
+    );
 }
 
 #[tokio::test]

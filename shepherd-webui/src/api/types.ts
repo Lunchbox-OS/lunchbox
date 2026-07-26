@@ -44,9 +44,18 @@ export type ReasonCode =
   | { code: "cooldown_active"; available_at: string }
   | { code: "session_active"; entry_id: string; remaining: Duration | null }
   | { code: "unsupported_kind"; kind: EntryKindTag }
+  | { code: "not_ready"; kind: EntryKindTag }
   | { code: "disabled"; reason: string | null }
   | { code: "internet_unavailable"; check: string | null }
-  | { code: "manually_disabled"; until: string };
+  | { code: "manually_disabled"; until: string }
+  | { code: "required_input_unavailable"; devices: string[] }
+  | { code: "tokens_insufficient"; balance: Duration; required: Duration }
+  | {
+      code: "group_restricted";
+      group: string;
+      label: string;
+      reason: ReasonCode;
+    };
 
 export function reasonLabel(r: ReasonCode): string {
   switch (r.code) {
@@ -60,12 +69,24 @@ export function reasonLabel(r: ReasonCode): string {
       return "Another session is running";
     case "unsupported_kind":
       return "Not supported on this device";
+    case "not_ready":
+      return "Still starting up";
     case "disabled":
       return r.reason ?? "Disabled";
     case "internet_unavailable":
       return "No internet connection";
     case "manually_disabled":
       return "Disabled for today";
+    case "required_input_unavailable":
+      return r.devices.length > 0
+        ? `Requires: ${r.devices.join(", ")}`
+        : "Requires an input device";
+    case "tokens_insufficient":
+      return "Not enough time earned yet";
+    // Name the category, so it's clear the limit is shared rather than
+    // specific to this activity.
+    case "group_restricted":
+      return `${r.label}: ${reasonLabel(r.reason)}`;
   }
 }
 
@@ -89,21 +110,56 @@ export interface SessionInfo {
   confirm_on_close: boolean;
 }
 
+/**
+ * A token gate's current state (issue #8). Banked time is a currency: source
+ * activities earn it, the gated activity spends it.
+ */
+export interface TokenStatus {
+  balance: Duration;
+  minimum: Duration;
+  /**
+   * Whether the gate is open. Not simply `balance >= minimum` — once open it
+   * stays open until the balance is spent to zero.
+   */
+  unlocked: boolean;
+  max_balance: Duration | null;
+  carry_over: boolean;
+}
+
 export interface EntryView {
   entry_id: string;
   label: string;
   icon_ref: string | null;
   kind_tag: EntryKindTag;
   enabled: boolean;
+  /** Category this activity shares a schedule and budget with (issue #5). */
+  group?: string | null;
   reasons: ReasonCode[];
+  /** This activity's own token gate (issue #8), if it has one. */
+  tokens?: TokenStatus | null;
   max_run_if_started_now: Duration | null;
+}
+
+/** A category of activities sharing one schedule and one combined budget. */
+export interface GroupView {
+  group_id: string;
+  label: string;
+  member_ids: string[];
+  enabled: boolean;
+  reasons: ReasonCode[];
+  used_today: Duration;
+  daily_quota: Duration | null;
+  max_run_if_started_now: Duration | null;
+  /** The category's token gate (issue #8), shared by every member. */
+  tokens?: TokenStatus | null;
 }
 
 // `LaunchResponse` is now exported from `./client` — it's a UI-friendly
 // normalisation of the on-wire `LaunchOutcome` shape.
 
 export interface DailyOverride {
-  entry_id: string;
+  /** A limit subject: a bare entry ID, or `group:<id>` for a whole category. */
+  subject: string;
   date: string;
   availability: boolean | null;
   quota_delta_seconds: number | null;

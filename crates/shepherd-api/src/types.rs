@@ -2,13 +2,14 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
-use shepherd_util::{EntryId, SessionId};
+use shepherd_util::{EntryId, GroupId, LimitSubject, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 /// Entry kind tag for capability matching
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKindTag {
     Process,
@@ -28,6 +29,7 @@ pub enum EntryKindTag {
 /// This enum is the canonical catalog: config validates against it, and the
 /// host adapter attaches the per-kind CEF detection signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InterstitialKind {
     /// "Unable to Sync" Steam Cloud warning shown when launching offline with
@@ -92,6 +94,7 @@ impl InterstitialKind {
 
 /// Entry kind with launch details
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntryKind {
     Process {
@@ -166,6 +169,7 @@ pub enum EntryKind {
 /// grab or produce the touchscreen, so at most one of them can be active at a
 /// time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InputCompatMode {
     /// Grab touchscreens and emit synthesized pointer events via
@@ -222,6 +226,7 @@ impl InputCompatMode {
 /// marks them as future work and this enum is closed, so configuring one is a
 /// parse error rather than a silently-ignored value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InputDeviceType {
     /// A relative pointing device (mouse, trackball, trackpad).
@@ -259,6 +264,7 @@ impl std::fmt::Display for InputDeviceType {
 /// `shepherd-config`'s validated `BrowserPolicy` and `shepherd-host-api`'s
 /// `BrowserSpec` so there is a single source of truth for the mode vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserMode {
     /// Fullscreen, no browser chrome (`--kiosk`).
@@ -276,6 +282,7 @@ pub enum BrowserMode {
 /// alongside the mode list so future tunables for other modes can be added
 /// without another schema change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputCompatOptions {
     /// Gamepad analog-stick deadzone as a fraction of full deflection (0..1).
     /// Below this magnitude the stick is treated as centered.
@@ -310,23 +317,89 @@ impl EntryKind {
     }
 }
 
+/// A token gate's current state, for caregiver UIs (issue #8).
+///
+/// Banked time is a currency: source activities earn it and the gated activity
+/// spends it. Without this a management UI can only report that something is
+/// locked, never how close it is to unlocking, and a manual grant would be
+/// made blind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TokenStatus {
+    /// Time banked and not yet spent.
+    pub balance: Duration,
+    /// Balance needed to open the gate. Zero means any balance opens it.
+    pub minimum: Duration,
+    /// Whether the gate is open right now. Not simply `balance >= minimum`:
+    /// once opened it stays open until the balance is spent to zero.
+    pub unlocked: bool,
+    /// Ceiling on the balance. None means unlimited. A grant past this is
+    /// clawed back, so a UI should say so rather than let it vanish.
+    pub max_balance: Option<Duration>,
+    /// Whether the balance survives local midnight.
+    pub carry_over: bool,
+}
+
 /// View of an entry for UI display
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EntryView {
     pub entry_id: EntryId,
     pub label: String,
     pub icon_ref: Option<String>,
     pub kind_tag: EntryKindTag,
     pub enabled: bool,
+    /// The group this entry belongs to (issue #5), if any. Management UIs use
+    /// it to show that an activity's schedule and budget are shared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupId>,
     pub reasons: Vec<ReasonCode>,
+    /// The entry's own token gate (issue #8), if it has one. A member of a
+    /// token-gated group carries its own gate only; the category's is on the
+    /// `GroupView`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenStatus>,
     /// Maximum run duration if started now. None means:
     /// - If enabled=false: entry is not available
     /// - If enabled=true: entry has no time limit (unlimited)
     pub max_run_if_started_now: Option<Duration>,
 }
 
+/// View of a group for UI display (issue #5).
+///
+/// A group's limits are shared by its members, so a management UI needs to
+/// show the *category's* state — combined usage against the combined quota,
+/// and whatever is currently restricting it — separately from any one member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GroupView {
+    pub group_id: GroupId,
+    pub label: String,
+    /// Members, in policy order.
+    pub member_ids: Vec<EntryId>,
+    /// Whether the group's own restrictions currently permit its members.
+    /// Individual members may still be unavailable for their own reasons.
+    pub enabled: bool,
+    /// Why the group is restricting its members, if it is. These are the
+    /// unwrapped reasons — the same ones members carry inside
+    /// `ReasonCode::GroupRestricted`.
+    pub reasons: Vec<ReasonCode>,
+    /// Combined usage across all members today.
+    pub used_today: Duration,
+    /// Effective daily quota after any override delta. None means unlimited.
+    pub daily_quota: Option<Duration>,
+    /// Longest session the group's limits would currently allow a member.
+    /// None means the group imposes no cap of its own.
+    pub max_run_if_started_now: Option<Duration>,
+    /// The category's token gate (issue #8), if it has one. Shared by every
+    /// member, so it belongs here rather than on any one of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenStatus>,
+}
+
 /// Structured reason codes for why an entry is unavailable
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum ReasonCode {
     /// Outside allowed time window
@@ -359,10 +432,28 @@ pub enum ReasonCode {
     /// connected. `devices` lists the missing device types, sorted and
     /// deduplicated.
     RequiredInputUnavailable { devices: Vec<InputDeviceType> },
+    /// Not enough time banked on this entry's token gate (issue #8): the
+    /// activity has to be earned by spending time on its source activities.
+    TokensInsufficient {
+        /// Time currently banked toward this entry.
+        balance: Duration,
+        /// Balance needed before it unlocks. Zero means any balance above zero
+        /// unlocks it, i.e. the entry is simply out of banked time.
+        required: Duration,
+    },
+    /// The restriction comes from the entry's group rather than the entry
+    /// itself (issue #5) — e.g. the whole category's daily quota is spent.
+    /// `label` is the group's display name, for explaining it to a caregiver.
+    GroupRestricted {
+        group: GroupId,
+        label: String,
+        reason: Box<ReasonCode>,
+    },
 }
 
 /// Warning severity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WarningSeverity {
     Info,
@@ -372,6 +463,7 @@ pub enum WarningSeverity {
 
 /// Warning threshold configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WarningThreshold {
     /// Seconds before expiry to issue this warning
     pub seconds_before: u64,
@@ -381,6 +473,7 @@ pub struct WarningThreshold {
 
 /// Session end reason
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEndReason {
     /// Session expired (time limit reached)
@@ -401,6 +494,7 @@ pub enum SessionEndReason {
 
 /// Current session state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Launching,
@@ -412,6 +506,7 @@ pub enum SessionState {
 
 /// Active session information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionInfo {
     pub session_id: SessionId,
     pub entry_id: EntryId,
@@ -438,6 +533,7 @@ pub(crate) fn default_confirm_on_close() -> bool {
 
 /// Status of a single internet connectivity check target
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InternetStatusView {
     /// Original check string as configured (e.g. "https://example.com")
     pub target: String,
@@ -447,6 +543,7 @@ pub struct InternetStatusView {
 
 /// Full service state snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ServiceStateSnapshot {
     pub api_version: u32,
     pub policy_loaded: bool,
@@ -463,6 +560,7 @@ pub struct ServiceStateSnapshot {
 
 /// Role for authorization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ClientRole {
     /// UI/HUD - can view state, launch entries, stop current
@@ -493,6 +591,7 @@ impl ClientRole {
 
 /// Stop mode for session termination
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum StopMode {
     /// Try graceful termination first
@@ -503,6 +602,7 @@ pub enum StopMode {
 
 /// Health status
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HealthStatus {
     pub live: bool,
     pub ready: bool,
@@ -513,6 +613,7 @@ pub struct HealthStatus {
 
 /// Volume status information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VolumeInfo {
     /// Volume percentage (0-100)
     pub percent: u8,
@@ -528,6 +629,7 @@ pub struct VolumeInfo {
 
 /// Volume restrictions that are currently in effect
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VolumeRestrictions {
     /// Maximum volume percentage allowed
     pub max_volume: Option<u8>,
@@ -575,6 +677,7 @@ impl VolumeInfo {
 
 /// Screen brightness status information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BrightnessInfo {
     /// Brightness percentage (0-100)
     pub percent: u8,
@@ -597,6 +700,7 @@ pub struct BrightnessInfo {
 
 /// Brightness restrictions that are currently in effect
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BrightnessRestrictions {
     /// Maximum brightness percentage allowed
     pub max_brightness: Option<u8>,
@@ -642,6 +746,7 @@ impl BrightnessInfo {
 /// `60000`). Refresh participates in equality, but [`VideoMode::area`] ignores
 /// it so "highest resolution" comparisons are purely by pixel count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VideoMode {
     pub width: u32,
     pub height: u32,
@@ -661,6 +766,7 @@ impl VideoMode {
 /// Exactly one logical output is ever active in every variant, so the
 /// one-activity-at-a-time invariant always holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayMode {
     /// Only the internal/primary panel is active — the state when no external
@@ -690,6 +796,7 @@ impl DisplayMode {
 /// Snapshot of the compositor's display arrangement, broadcast to shells so the
 /// HUD can show/hide and label its mirror/external toggle (issue #87).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DisplayState {
     pub mode: DisplayMode,
     /// Connector name of the primary (internal, first-enumerated) output.
@@ -708,8 +815,12 @@ impl DisplayState {
 
 /// A parent-set daily override for a single entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DailyOverride {
-    pub entry_id: EntryId,
+    /// What the override applies to: an entry, or a whole group (issue #5).
+    /// Serializes as a bare entry ID, or `group:<id>` for a group, so overrides
+    /// written before groups existed round-trip unchanged.
+    pub subject: LimitSubject,
     pub date: NaiveDate,
     /// Override the entry's availability for this day.
     /// `Some(false)` blocks it entirely; `Some(true)` allows it outside its time window.
@@ -724,6 +835,7 @@ pub struct DailyOverride {
 
 /// Screen-time usage for a single entry on a single day
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UsageStat {
     pub entry_id: EntryId,
     pub label: String,
@@ -733,6 +845,7 @@ pub struct UsageStat {
 
 /// An action that can be performed on a window via the debug API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WindowAction {
     /// Ask the window to close (sway `kill`).
@@ -749,6 +862,7 @@ pub enum WindowAction {
 /// in particular, to see which windows have been moved to the scratchpad
 /// (e.g. the hidden Steam client) versus which are on-screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WindowInfo {
     /// Compositor-assigned window/container id.
     pub id: u64,

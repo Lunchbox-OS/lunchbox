@@ -33,6 +33,29 @@ object ReasonText {
 
         is ReasonCode.ManuallyDisabled ->
             "Blocked for the day (until ${reason.until})"
+
+        is ReasonCode.NotReady ->
+            "Still starting up"
+
+        is ReasonCode.RequiredInputUnavailable ->
+            // Generated as an enum, so render the wire spelling rather than
+            // Kotlin's SHOUTING constant names.
+            if (reason.devices.isEmpty()) "Needs an input device"
+            else "Needs: ${reason.devices.joinToString(", ") { it.name.lowercase() }}"
+
+        is ReasonCode.TokensInsufficient ->
+            if (reason.required.secs > 0)
+                "Needs ${Formatting.coarse(reason.required.secs)} earned " +
+                    "(${Formatting.coarse(reason.balance.secs)} banked)"
+            else "No earned time left"
+
+        // Name the category, so it's clear the limit is shared rather than
+        // specific to this activity.
+        is ReasonCode.GroupRestricted ->
+            "${reason.label}: ${describe(reason.reason)}"
+
+        is ReasonCode.Unknown ->
+            "Unavailable"
     }
 
     /** Maps an [RpcException] to user-facing copy, per the spec's error table. */

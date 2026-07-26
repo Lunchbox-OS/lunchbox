@@ -11,6 +11,8 @@ import type { RpcMethod } from "./rpc-methods.generated";
 import type {
   BrightnessInfo,
   DailyOverride,
+  GroupView,
+  TokenStatus,
   EntryView,
   ReasonCode,
   SessionInfo,
@@ -122,6 +124,15 @@ export const stopSession = () => call<null>("stop_current");
 
 export const extendSession = (seconds: number) =>
   call<{ new_deadline: string | null }>("extend_current", { seconds });
+
+export const listGroups = () => call<GroupView[]>("list_groups", {});
+
+/**
+ * Grant (positive) or revoke (negative) banked time on a token gate.
+ * `subject` is an entry ID, or `group:<id>` for a whole category.
+ */
+export const adjustTokens = (subject: string, delta_seconds: number) =>
+  call<TokenStatus>("adjust_tokens", { id: subject, delta_seconds });
 
 // Daily overrides
 export const listOverrides = (date?: string) =>

@@ -74,6 +74,15 @@ max_run_seconds = 1800       # 30 minutes per session
 daily_quota_seconds = 7200   # 2 hours per day
 cooldown_seconds = 600       # 10 minutes between sessions
 
+# Token gate (issue #8): this entry has to be earned by playing others first.
+# Their sessions bank time here; this entry's sessions spend it back down.
+[entries.tokens]
+from = ["educational-game", "typing-tutor"]
+earn_ratio = 0.5             # 2 minutes earned banks 1 minute here
+minimum_seconds = 600        # don't unlock for less than 10 minutes
+max_balance_seconds = 3600   # never bank more than an hour (0 = unlimited)
+carry_over = false           # unspent time expires at local midnight
+
 [[entries]]
 id = "educational-game"
 label = "GCompris"
@@ -159,6 +168,147 @@ max_run_seconds = 1800        # Max duration per session
 daily_quota_seconds = 7200    # Total daily limit
 cooldown_seconds = 600        # Wait time between sessions
 ```
+
+### Token Gates
+
+An entry with `[entries.tokens]` (issue #8) has to be *earned*: sessions on the
+activities listed in `from` bank a balance on it, and its own sessions spend that
+balance back down.
+
+```toml
+[entries.tokens]
+from = ["educational-game", "typing-tutor"]
+earn_ratio = 0.5             # 2 minutes earned banks 1 minute here
+minimum_seconds = 600        # don't unlock for less than 10 minutes
+max_balance_seconds = 3600   # never bank more than an hour (0 = unlimited)
+carry_over = false           # unspent time expires at local midnight
+```
+
+Balances move only at session end, the same moment usage is recorded — nothing
+updates mid-session.
+
+### Groups
+
+A group (issue #5) is a category of activities that share one schedule and one
+budget. Entries join with `group = "<id>"`.
+
+```toml
+[[groups]]
+id = "attention-heavy"
+label = "Games"
+
+[groups.availability]
+[[groups.availability.windows]]
+days = "weekends"
+start = "10:00"
+end = "18:00"
+
+[groups.limits]
+max_run_seconds = 900        # short bursts, per session, for any member
+daily_quota_seconds = 3600   # COMBINED across all members
+cooldown_seconds = 600       # any member's session cools down the whole group
+
+# A group can be token-gated too: earning unlocks every member at once.
+[groups.tokens]
+from = ["educational-game"]
+
+[[entries]]
+id = "some-game"
+group = "attention-heavy"
+```
+
+A token gate's `from` accepts group IDs prefixed with `group:`, so a whole
+category can be the *source* of earned time as well as its destination:
+
+```toml
+[entries.tokens]
+from = ["group:educational"]   # any member of that category banks time
+```
+
+Groups are also limit subjects for daily overrides, so a caregiver can enable or
+disable a whole category for the day with a single call by passing
+`group:attention-heavy` as the override id.
+
+### How the limits interact
+
+The restrictions compose on two independent axes. **Visibility** is a plain AND:
+an entry appears only if it passes every check, and each failure contributes its
+own `ReasonCode`. **Session length** is the minimum of every applicable cap.
+
+Every limit exists at both levels — on the entry, and on its group — and the
+strictest of each wins. A group-level failure is reported as `GroupRestricted`
+wrapping the underlying reason, so the UI can say "Games: daily limit reached".
+
+| | Hides the entry | Caps the session | `availability = true` override bypasses | Also at group level |
+| --- | --- | --- | --- | --- |
+| Availability window | yes | yes | yes | yes |
+| Daily quota | yes | yes | yes | yes (combined across members) |
+| Cooldown | yes | — | **no** | yes (any member starts it for all) |
+| Token gate | yes | yes | yes | yes (unlocks all members) |
+| `max_run` | — | yes | no (only the daily quota is lifted) | yes |
+
+A token-gated entry is therefore **never unlimited**, even with
+`max_run_seconds = 0` and no service default: the banked balance always caps it.
+The same is true of a member of a token-gated group.
+
+Things to watch for when combining a token gate with the other limits:
+
+- **A daily quota can strand earned tokens.** If the balance is healthy but the
+  entry's `daily_quota_seconds` is spent, the entry is hidden with
+  `QuotaExhausted` and the banked time cannot be spent — and with
+  `carry_over = false` it expires at midnight. The child did the work and the
+  reward disappeared. **Prefer not to set `daily_quota_seconds` on a token-gated
+  entry at all**: the gate is already the budget, and a quota on top is a second,
+  invisible one. If you want both, set `carry_over = true` so earned time
+  survives to the next day.
+- **Availability windows strand tokens the same way** — time earned after the
+  entry's window has closed can't be spent that day.
+- **A source's own quota caps how much can be earned.** Time on a source
+  activity still counts against that activity's `daily_quota_seconds`. That is a
+  reasonable implicit ceiling on daily earning, but it is easy to set by accident
+  and then wonder why earning stopped.
+- **Set `minimum_seconds`.** It defaults to 0, so any balance above zero unlocks
+  the entry — a 20-second balance buys a 20-second session. Warnings whose
+  `seconds_before` exceeds the session length are skipped, so such a session ends
+  with no countdown at all.
+- **A caregiver can grant time directly.** `adjust_tokens {"id": "<subject>",
+  "delta_seconds": 600}` banks time on an entry or a `group:<id>`, and a
+  negative delta takes it back. Granted time is indistinguishable from earned
+  time: capped by `max_balance_seconds`, spent by the gated activity's sessions,
+  and it opens the gate only once the balance reaches `minimum_seconds`. To
+  switch an activity on regardless of its balance, use an availability override.
+  Both management apps expose this as a ±5 min stepper beside the balance.
+- **`minimum_seconds` is a threshold to cross, not one to stay above.** Once the
+  balance reaches it the gate ratchets open and stays open until the balance is
+  spent to zero, so a short session doesn't re-lock the activity and strand the
+  rest. With `minimum_seconds = 600` and 700 s banked, a 5-minute session leaves
+  400 s that are still spendable. Spending the balance out closes the gate again,
+  and the threshold has to be crossed from zero.
+- **Cooldowns stack on both ends**: a gated entry still cools down after
+  spending, and a cooldown on a *source* throttles the rate of earning.
+
+Time is deducted for the wall-clock actually played, whichever cap ended the
+session — if a window closes early, the unspent balance stays banked.
+
+And when combining groups with the rest:
+
+- **Group quota is consumed by whichever member is played**, so one activity can
+  burn the whole category's budget and take its siblings down with it. That is
+  the point of the feature, but it surprises people the first time.
+- **A group cooldown is the reason to use groups for cooldowns at all** — a
+  per-entry cooldown is trivially dodged by starting a different game in the same
+  category.
+- **Entries with no `group` are completely unaffected** by any of this.
+- **Overrides work at both levels.** A group override enables or disables every
+  member with one call, and a force-enable on *either* the entry or its group
+  lifts the entry's own limits too: enabling a category for the day means its
+  activities are on today, whatever their individual schedules say.
+- **The token cautions above apply at group level, more sharply.** A group quota
+  can strand time earned toward a whole category.
+- **Avoid gating an entry and its group.** An entry that is token-gated *and*
+  sits in a token-gated group spends *both* balances for one session. It is
+  coherent — two budgets, both paid — but it is hard to explain to a child. Gate
+  at one level or the other.
 
 ### Internet Requirements
 

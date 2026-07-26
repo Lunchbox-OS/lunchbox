@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Category
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -44,8 +47,10 @@ import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
+import com.armeafamily.shepherd.companion.ui.components.ReasonLines
+import com.armeafamily.shepherd.companion.ui.components.TokenCard
+import com.armeafamily.shepherd.companion.ui.override.OverrideSection
 import com.armeafamily.shepherd.companion.util.Formatting
-import com.armeafamily.shepherd.companion.util.ReasonText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -56,10 +61,12 @@ fun EntryDetailScreen(
     vm: ShepherdViewModel,
     entryId: String,
     onBack: () -> Unit,
+    onOpenGroup: (String) -> Unit,
 ) {
     val state by vm.state.collectAsState()
     val entry = state.entries.firstOrNull { it.entryId == entryId }
     val session = state.currentSession?.takeIf { it.entryId == entryId }
+    val group = entry?.let { state.groupOf(it) }
 
     Scaffold(
         topBar = {
@@ -88,10 +95,31 @@ fun EntryDetailScreen(
                 color = MaterialTheme.colorScheme.outline,
             )
 
+            // The category is where a shared limit can actually be inspected or
+            // overridden, and it is often the thing blocking this activity, so
+            // offer the way there rather than only naming it (issue #5).
+            if (group != null) {
+                AssistChip(
+                    onClick = { onOpenGroup(group.groupId) },
+                    label = { Text(group.label) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Category,
+                            contentDescription = null,
+                            modifier = Modifier.size(AssistChipDefaults.IconSize),
+                        )
+                    },
+                )
+            }
+
             if (session != null) {
                 SessionSection(session, onExtend = vm::extendCurrent, onStop = vm::stopCurrent)
             } else {
                 LaunchSection(entry, onLaunch = { vm.launchEntry(entry.entryId) })
+            }
+
+            entry.tokens?.let { tokens ->
+                TokenCard(tokens) { delta -> vm.adjustTokens(entryId, delta) }
             }
 
             OverrideSection(vm, entryId)
@@ -113,9 +141,7 @@ private fun LaunchSection(entry: EntryView, onLaunch: () -> Unit) {
                 },
                 style = MaterialTheme.typography.bodyMedium,
             )
-            entry.reasons.firstOrNull()?.let {
-                Text(ReasonText.describe(it), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            }
+            ReasonLines(entry.reasons)
             Button(onClick = onLaunch, enabled = entry.enabled, modifier = Modifier.fillMaxWidth()) {
                 Text("Launch")
             }
@@ -153,90 +179,6 @@ private fun SessionSection(session: SessionInfo, onExtend: (Long) -> Unit, onSto
                 onClick = onStop,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Stop") }
-        }
-    }
-}
-
-/** Today's override editor: availability tri-state + quota delta stepper. */
-@Composable
-private fun OverrideSection(vm: ShepherdViewModel, entryId: String) {
-    val today = remember { LocalDate.now().toString() }
-    val scope = rememberCoroutineScope()
-    var loaded by remember(entryId) { mutableStateOf<DailyOverride?>(null) }
-    var availability by remember(entryId) { mutableStateOf<Boolean?>(null) }
-    var quotaDeltaMinutes by remember(entryId) { mutableStateOf(0) }
-
-    suspend fun reload() {
-        val ov = vm.loadOverride(entryId, today)
-        loaded = ov
-        availability = ov?.availability
-        quotaDeltaMinutes = ((ov?.quotaDeltaSeconds ?: 0) / 60).toInt()
-    }
-    LaunchedEffect(entryId) { reload() }
-
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Today's override", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-
-            Text("Availability", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = availability == true, onClick = { availability = true }, label = { Text("Allow") })
-                FilterChip(selected = availability == false, onClick = { availability = false }, label = { Text("Block") })
-                FilterChip(selected = availability == null, onClick = { availability = null }, label = { Text("No change") })
-            }
-
-            Text("Quota adjustment: ${quotaDeltaMinutes} min", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = { quotaDeltaMinutes -= 5 }) { Text("−5") }
-                OutlinedButton(onClick = { quotaDeltaMinutes += 5 }) { Text("+5") }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    modifier = Modifier.weight(1f),
-                    enabled = availability != null || quotaDeltaMinutes != 0,
-                    onClick = {
-                        // Re-read the persisted override after a save so
-                        // the Clear button reflects the freshly-created
-                        // record — otherwise a first-time save leaves
-                        // `loaded == null` and Clear stays disabled.
-                        vm.upsertOverride(
-                            id = entryId,
-                            date = today,
-                            availability = availability,
-                            quotaDeltaSeconds = if (quotaDeltaMinutes != 0) quotaDeltaMinutes * 60L else null,
-                            onDone = { scope.launch { reload() } },
-                        )
-                    },
-                ) { Text("Save") }
-                OutlinedButton(
-                    modifier = Modifier.weight(1f),
-                    // Enable Clear whenever there's *something* to
-                    // clear — either the persisted record (`loaded`)
-                    // or unsaved local edits. Users hit this when
-                    // they've dialed in an override and then decide
-                    // to back out without saving; the web version
-                    // handles the same case via a single "Clear
-                    // Override" button that resets both.
-                    enabled = loaded != null
-                        || availability != null
-                        || quotaDeltaMinutes != 0,
-                    onClick = {
-                        if (loaded != null) {
-                            vm.deleteOverride(entryId, today, onDone = {
-                                loaded = null
-                                availability = null
-                                quotaDeltaMinutes = 0
-                            })
-                        } else {
-                            // Nothing persisted yet — just discard
-                            // the local edits, no server round-trip.
-                            availability = null
-                            quotaDeltaMinutes = 0
-                        }
-                    },
-                ) { Text("Clear") }
-            }
         }
     }
 }

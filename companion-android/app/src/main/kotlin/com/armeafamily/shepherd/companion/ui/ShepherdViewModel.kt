@@ -13,6 +13,7 @@ import com.armeafamily.shepherd.companion.domain.ClaimStateTag
 import com.armeafamily.shepherd.companion.domain.DailyOverride
 import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.EventPayload
+import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.ManagementClient
 import com.armeafamily.shepherd.companion.domain.ServiceStateSnapshot
 import com.armeafamily.shepherd.companion.domain.SessionInfo
@@ -20,6 +21,7 @@ import com.armeafamily.shepherd.companion.domain.ShepherdRecord
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.domain.VolumeInfo
 import com.armeafamily.shepherd.companion.ble.Protocol
+import com.armeafamily.shepherd.companion.util.Formatting
 import com.armeafamily.shepherd.companion.util.ReasonText
 import com.juul.kable.State
 import kotlinx.coroutines.CancellationException
@@ -44,8 +46,17 @@ data class DeviceUiState(
     val currentSession: SessionInfo? = null,
     val volume: VolumeInfo? = null,
     val brightness: BrightnessInfo? = null,
+    /**
+     * Categories sharing a schedule and budget (issue #5). Fetched separately
+     * from the snapshot, which only carries entries.
+     */
+    val groups: List<GroupView> = emptyList(),
 ) {
     val entries: List<EntryView> get() = snapshot?.entries.orEmpty()
+
+    /** The category an activity belongs to, for labelling its row. */
+    fun groupOf(entry: EntryView): GroupView? =
+        entry.group?.let { id -> groups.firstOrNull { it.groupId == id } }
 }
 
 /** Phases of the pairing flow surfaced to the pairing screen. */
@@ -268,6 +279,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 _message.value = "Couldn't fetch device state: ${e.message ?: e::class.simpleName}"
             },
         )
+        runCatching { c.listGroups() }.onSuccess { g -> _state.update { it.copy(groups = g) } }
         runCatching { c.getVolume() }.onSuccess { v -> _state.update { it.copy(volume = v) } }
         runCatching { c.getBrightness() }.onSuccess { b -> _state.update { it.copy(brightness = b) } }
     }
@@ -277,12 +289,20 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
             is EventPayload.StateChanged -> {
                 val snap = payload.toSnapshot()
                 _state.update { it.copy(snapshot = snap, currentSession = snap.currentSession) }
+                // The pushed snapshot carries entries but not categories, and
+                // a member's session spends the category's shared budget.
+                refreshGroups()
             }
             is EventPayload.SessionStarted,
-            is EventPayload.SessionEnded,
             is EventPayload.SessionExpiring,
             is EventPayload.WarningIssued,
             -> refreshSession()
+            // A finished session has just spent shared budget and may have
+            // started a category-wide cooldown.
+            is EventPayload.SessionEnded -> {
+                refreshSession()
+                refreshGroups()
+            }
             is EventPayload.PolicyReloaded,
             is EventPayload.EntryAvailabilityChanged,
             is EventPayload.InternetStatusChanged,
@@ -299,6 +319,13 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshSnapshot() = viewModelScope.launch {
         client?.let { c -> runCatching { c.serviceState() }.onSuccess { s -> _state.update { it.copy(snapshot = s, currentSession = s.currentSession) } } }
+        // Group state moves with entry state — a member's session spends the
+        // category's shared budget — so refresh both together.
+        refreshGroups()
+    }
+
+    private fun refreshGroups() = viewModelScope.launch {
+        client?.let { c -> runCatching { c.listGroups() }.onSuccess { g -> _state.update { it.copy(groups = g) } } }
     }
 
     private fun refreshVolume() = viewModelScope.launch {
@@ -372,14 +399,40 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         onDone()
     }
 
+    /**
+     * Grant or revoke banked time on a token gate (issue #8).
+     *
+     * Refreshes entries and categories afterwards: the grant may have opened
+     * or closed the gate, which changes what every other screen shows.
+     */
+    fun adjustTokens(subject: String, deltaSeconds: Long) = action { c ->
+        val status = c.adjustTokens(subject, deltaSeconds)
+        val sign = if (deltaSeconds >= 0) "+" else "−"
+        val amount = Formatting.coarse(kotlin.math.abs(deltaSeconds))
+        _message.value =
+            "Earned time $sign$amount (now ${Formatting.coarse(status.balance.secs)})."
+        refreshSnapshot()
+    }
+
     fun deleteOverride(id: String, date: String?, onDone: () -> Unit) = action { c ->
         c.deleteOverride(id, date)
         _message.value = "Override cleared."
         onDone()
     }
 
-    suspend fun loadOverride(id: String, date: String?): DailyOverride? =
-        client?.let { runCatching { it.getOverride(id, date) }.getOrNull() }
+    /**
+     * Load today's override for a limit subject (an entry ID, or `group:<id>`).
+     *
+     * Returns `success(null)` when no override is set, and `failure` when the
+     * lookup itself failed. Those two cases must stay distinguishable: a
+     * failure previously collapsed to `null`, which rendered the editor as
+     * "no override set" and let a caregiver silently overwrite a real one.
+     */
+    suspend fun loadOverride(id: String, date: String?): Result<DailyOverride?> {
+        val c = client ?: return Result.failure(IllegalStateException("Not connected."))
+        return runCatching { c.getOverride(id, date) }
+            .onFailure { _message.value = "Couldn't load today's override: ${it.message ?: "unknown error"}" }
+    }
 
     suspend fun loadUsage(id: String, from: String, to: String): List<UsageStat> =
         client?.let { runCatching { it.usageEntry(id, from, to) }.getOrDefault(emptyList()) } ?: emptyList()
@@ -546,6 +599,6 @@ private fun AdminRecord.toShepherdRecord(androidIdentifier: String) = ShepherdRe
     deviceName = deviceName,
     bondedAt = bondedAt,
     httpToken = httpToken,
-    role = role,
+    role = role.name.lowercase(),
     androidIdentifier = androidIdentifier,
 )

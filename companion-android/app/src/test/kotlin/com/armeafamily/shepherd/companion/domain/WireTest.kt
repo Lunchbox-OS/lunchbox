@@ -56,6 +56,164 @@ class WireTest {
     }
 
     @Test
+    fun `group view decodes and derives its override subject`() {
+        val group = decode<GroupView>(
+            """
+            {
+              "group_id": "games",
+              "label": "Games",
+              "member_ids": ["game-a", "game-b"],
+              "enabled": false,
+              "reasons": [{"code":"quota_exhausted","used":{"secs":1800,"nanos":0},
+                           "quota":{"secs":1800,"nanos":0}}],
+              "used_today": {"secs": 1800, "nanos": 0},
+              "daily_quota": {"secs": 1800, "nanos": 0},
+              "max_run_if_started_now": {"secs": 900, "nanos": 0}
+            }
+            """.trimIndent(),
+        )
+        assertEquals("games", group.groupId)
+        assertEquals(listOf("game-a", "game-b"), group.memberIds)
+        assertEquals(1800, group.usedToday.secs)
+        assertEquals(900, group.maxRunIfStartedNow?.secs)
+        // The subject is what override calls address the category by.
+        assertEquals("group:games", group.subject)
+    }
+
+    @Test
+    fun `entry view carries its category`() {
+        val entry = decode<EntryView>(
+            """{"entry_id":"game-a","label":"Game A","kind_tag":"process",
+                "enabled":true,"group":"games","reasons":[]}""",
+        )
+        assertEquals("games", entry.group)
+
+        // Absent for an ungrouped activity, and for a device predating groups.
+        val ungrouped = decode<EntryView>(
+            """{"entry_id":"solo","label":"Solo","kind_tag":"process",
+                "enabled":true,"reasons":[]}""",
+        )
+        assertNull(ungrouped.group)
+    }
+
+    @Test
+    fun `token status rides along on the entry and group views`() {
+        val entry = decode<EntryView>(
+            """{"entry_id":"minecraft","label":"Minecraft","kind_tag":"process",
+                "enabled":false,"reasons":[],
+                "tokens":{"balance":{"secs":300,"nanos":0},
+                          "minimum":{"secs":600,"nanos":0},
+                          "unlocked":false,
+                          "max_balance":{"secs":3600,"nanos":0},
+                          "carry_over":false}}""",
+        )
+        val tokens = entry.tokens!!
+        assertEquals(300, tokens.balance.secs)
+        assertEquals(600, tokens.minimum.secs)
+        assertEquals(false, tokens.unlocked)
+        assertEquals(3600, tokens.maxBalance?.secs)
+
+        // Absent when the activity has no gate, and on a device predating the
+        // field — both must decode rather than throw.
+        val ungated = decode<EntryView>(
+            """{"entry_id":"solo","label":"Solo","kind_tag":"process",
+                "enabled":true,"reasons":[]}""",
+        )
+        assertNull(ungated.tokens)
+
+        // A category carries the gate its members share. `max_balance` is
+        // nullable on the wire (0 = unlimited becomes None).
+        val group = decode<GroupView>(
+            """{"group_id":"games","label":"Games","member_ids":["game-a"],
+                "enabled":true,"reasons":[],
+                "used_today":{"secs":0,"nanos":0},
+                "daily_quota":null,"max_run_if_started_now":null,
+                "tokens":{"balance":{"secs":900,"nanos":0},
+                          "minimum":{"secs":0,"nanos":0},
+                          "unlocked":true,"carry_over":true}}""",
+        )
+        assertEquals(900, group.tokens?.balance?.secs)
+        assertEquals(true, group.tokens?.carryOver)
+        assertNull(group.tokens?.maxBalance)
+    }
+
+    @Test
+    fun `every reason code the device can emit decodes`() {
+        // These four were added to shepherdd after the app shipped and were
+        // missing here, so any entry carrying one failed the decode of the
+        // whole `list_entries` response.
+        assertTrue(decode<ReasonCode>("""{"code":"not_ready","kind":"steam"}""") is ReasonCode.NotReady)
+
+        val inputs = decode<ReasonCode>(
+            """{"code":"required_input_unavailable","devices":["keyboard","mouse"]}""",
+        )
+        // Generated from the Rust enum, so these decode as typed values rather
+        // than bare strings.
+        assertEquals(
+            listOf(InputDeviceType.KEYBOARD, InputDeviceType.MOUSE),
+            (inputs as ReasonCode.RequiredInputUnavailable).devices,
+        )
+
+        val tokens = decode<ReasonCode>(
+            """{"code":"tokens_insufficient","balance":{"secs":300,"nanos":0},"required":{"secs":1800,"nanos":0}}""",
+        )
+        assertEquals(1800, (tokens as ReasonCode.TokensInsufficient).required.secs)
+    }
+
+    @Test
+    fun `group restricted wraps the underlying reason`() {
+        val reason = decode<ReasonCode>(
+            """{"code":"group_restricted","group":"games","label":"Games",
+                "reason":{"code":"quota_exhausted","used":{"secs":3600,"nanos":0},
+                          "quota":{"secs":3600,"nanos":0}}}""",
+        )
+        val group = reason as ReasonCode.GroupRestricted
+        assertEquals("games", group.group)
+        assertEquals("Games", group.label)
+        assertTrue(group.reason is ReasonCode.QuotaExhausted)
+    }
+
+    @Test
+    fun `unknown reason code degrades instead of failing the whole response`() {
+        // A newer device may send a reason this build has never heard of.
+        // It must not take the entry list down with it.
+        val entry = decode<EntryView>(
+            """
+            {
+              "entry_id": "steam-celeste",
+              "label": "Celeste",
+              "kind_tag": "steam",
+              "enabled": false,
+              "reasons": [
+                {"code": "from_the_future", "whatever": 1},
+                {"code": "quota_exhausted", "used":{"secs":60,"nanos":0}, "quota":{"secs":60,"nanos":0}}
+              ]
+            }
+            """.trimIndent(),
+        )
+        assertEquals(2, entry.reasons.size)
+        assertTrue(entry.reasons[0] is ReasonCode.Unknown)
+        assertTrue(entry.reasons[1] is ReasonCode.QuotaExhausted)
+    }
+
+    @Test
+    fun `daily override is keyed by subject`() {
+        val entry = decode<DailyOverride>(
+            """{"subject":"steam-celeste","date":"2026-07-19","availability":true,
+                "created_at":"2026-07-19T10:00:00-04:00","updated_at":"2026-07-19T10:00:00-04:00"}""",
+        )
+        assertEquals("steam-celeste", entry.subject)
+        assertEquals(true, entry.availability)
+
+        // A whole category can carry an override too (issue #5).
+        val group = decode<DailyOverride>(
+            """{"subject":"group:games","date":"2026-07-19","availability":false,
+                "created_at":"2026-07-19T10:00:00-04:00","updated_at":"2026-07-19T10:00:00-04:00"}""",
+        )
+        assertEquals("group:games", group.subject)
+    }
+
+    @Test
     fun `launch outcome approved`() {
         val outcome = decode<LaunchOutcome>(
             """{"Approved":{"session_id":"uuid-1","deadline":"2026-06-21T18:35:00-04:00"}}""",

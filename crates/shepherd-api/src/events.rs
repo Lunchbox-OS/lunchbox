@@ -10,6 +10,7 @@ use crate::{API_VERSION, ServiceStateSnapshot, SessionEndReason, WarningSeverity
 
 /// Event envelope
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Event {
     pub api_version: u32,
     pub timestamp: DateTime<Local>,
@@ -28,6 +29,7 @@ impl Event {
 
 /// All possible events from the service to clients
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventPayload {
     /// Full state snapshot (sent on subscribe and major changes)

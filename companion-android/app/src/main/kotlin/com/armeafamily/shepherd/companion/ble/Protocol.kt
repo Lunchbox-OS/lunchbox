@@ -19,7 +19,7 @@ object Protocol {
     val EVENTS_CHAR: Uuid = Uuid.parse("8c0c0005-3b21-4abc-9e3f-0a9c1f2e3d40")
 
     /** Protocol version the app speaks. The device rejects mismatches. */
-    const val PROTOCOL_VERSION: Int = 1
+    const val PROTOCOL_VERSION: Long = 1
 
     /**
      * Maximum logical-frame size the app will accept from a notification

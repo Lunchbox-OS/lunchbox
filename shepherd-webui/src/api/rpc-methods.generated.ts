@@ -1,6 +1,6 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Run `cargo run -p shepherd-management --bin rpc-codegen`
+// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 // after changing the `ManagementService` trait in
 // `crates/shepherd-management/src/service.rs`.
 
@@ -15,6 +15,7 @@ export type RpcMethod =
   | "service_state"
   | "list_entries"
   | "get_entry"
+  | "list_groups"
   | "current_session"
   | "launch"
   | "stop_current"
@@ -23,6 +24,7 @@ export type RpcMethod =
   | "get_override"
   | "upsert_override"
   | "delete_override"
+  | "adjust_tokens"
   | "usage_all"
   | "usage_entry"
   | "get_volume"
