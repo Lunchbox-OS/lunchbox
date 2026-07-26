@@ -94,7 +94,8 @@ A kernel without the extended-advertising regression. On the affected
 devices, pinning `7.0.0-27-generic` (see <docs/INSTALL.md>) restores
 advertising — confirmed by re-testing `bluetoothctl advertise
 peripheral` after booting `-27`. Unpin once Ubuntu ships a fixed kernel;
-track it via the Launchpad bug filed against `linux` (regression bracket
-`7.0.0-27.27` → `7.0.0-28.28`, cross-referencing raspberrypi/linux#7473
-and the `btmon` traces). A different Bluetooth adapter does **not**
-help: the BT5 controller fails too.
+track it via the Ubuntu bug
+[LP #2161852](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2161852)
+(regression bracket `7.0.0-27.27` → `7.0.0-28.28`, cross-referencing
+raspberrypi/linux#7473 and the `btmon` traces). A different Bluetooth
+adapter does **not** help: the BT5 controller fails too.

@@ -304,9 +304,11 @@ sudo update-grub
 ```
 
 Holding the kernel pauses kernel security updates, so unpin
-(`apt-mark unhold …`) once a fixed kernel is available. Swapping the
-Bluetooth adapter does **not** help — a BT 5 controller fails the same
-way. (LL Privacy, advertising name length, and instance limits were
+(`apt-mark unhold …`) once a fixed kernel is available — track that via
+the Ubuntu bug
+[LP #2161852](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2161852).
+Swapping the Bluetooth adapter does **not** help — a BT 5 controller
+fails the same way. (LL Privacy, advertising name length, and instance limits were
 investigated and are *not* the cause; see
 <docs/ai/history/2026-07-26 001 ble-advertisement-name-overflow.md>.)
 
