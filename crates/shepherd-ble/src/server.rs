@@ -36,6 +36,7 @@ use bluer::gatt::local::{
 use bluer::{AdapterEvent, Address, DeviceEvent, DeviceProperty};
 use futures_util::{FutureExt, StreamExt};
 use shepherd_management::ManagementService;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,6 +78,39 @@ const EVENTS_OUTBOX_BYTES: usize = 256 * 1024;
 /// outbox read chunk here so each ATT response fits inside what the
 /// client will actually receive.
 const GATT_MAX_ATTR_VALUE: usize = 512;
+
+/// Longest advertised device name, in bytes, that still leaves the
+/// 128-bit management service UUID room in a legacy 31-byte advertising
+/// PDU. The controller packs, in the same 31 bytes: the mandatory Flags
+/// AD (3 bytes), the 128-bit service-UUID AD (2 header + 16 = 18 bytes),
+/// and the local-name AD (2 header + the name). Overrun and BlueZ
+/// rejects the *whole* advertisement with "Invalid Parameters (0x0d)",
+/// so the service UUID never goes on air and the companion's
+/// UUID-filtered scan finds nothing — the failure looks like "the device
+/// won't pair" but is really "the device is undiscoverable". We advertise
+/// a name trimmed to this budget and still serve the full one over GATT.
+const MAX_ADV_NAME_BYTES: usize = 31 - 3 - 18 - 2; // = 8
+
+/// Appended to a name trimmed to fit the advertising PDU, so the scan
+/// list shows it was shortened. U+2026 is 3 bytes in UTF-8, and is
+/// reserved out of [`MAX_ADV_NAME_BYTES`] when truncating.
+const ADV_NAME_ELLIPSIS: &str = "…";
+
+/// Trim `name` so it fits the advertising PDU beside the service UUID:
+/// at most [`MAX_ADV_NAME_BYTES`] bytes, split on a UTF-8 code-point
+/// boundary, with a trailing ellipsis when anything was dropped. Returns
+/// the name unchanged (borrowed) when it already fits.
+fn advertised_name(name: &str) -> Cow<'_, str> {
+    if name.len() <= MAX_ADV_NAME_BYTES {
+        return Cow::Borrowed(name);
+    }
+    // Leave room for the ellipsis, then back the cut up to a char boundary.
+    let mut end = MAX_ADV_NAME_BYTES - ADV_NAME_ELLIPSIS.len();
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(format!("{}{ADV_NAME_ELLIPSIS}", &name[..end]))
+}
 
 #[derive(Debug, Clone)]
 pub struct BleServerConfig {
@@ -250,17 +284,34 @@ impl BleServer {
 
         let _app_handle: ApplicationHandle = adapter.serve_gatt_application(application).await?;
 
+        // The service UUID must share the 31-byte legacy PDU with the
+        // device name; a name that pushes the total over the limit makes
+        // BlueZ reject the advertisement outright (0x0d), taking the UUID
+        // off air with it. Trim the *advertised* name to fit — the full
+        // name still reaches the companion over GATT.
+        let adv_name = advertised_name(&self.config.device_name);
+        if adv_name.len() != self.config.device_name.len() {
+            warn!(
+                device = %self.config.device_name,
+                advertised = %adv_name,
+                max_bytes = MAX_ADV_NAME_BYTES,
+                "device name too long for the BLE advertising PDU; advertising a \
+                 truncated name so the management service UUID still fits",
+            );
+        }
+
         let _adv_handle: AdvertisementHandle = adapter
             .advertise(Advertisement {
                 advertisement_type: bluer::adv::Type::Peripheral,
                 service_uuids: [SHEPHERD_MANAGEMENT_SERVICE_UUID].into_iter().collect(),
-                local_name: Some(self.config.device_name.clone()),
+                local_name: Some(adv_name.to_string()),
                 discoverable: Some(true),
                 ..Default::default()
             })
             .await?;
         info!(
             device = %self.config.device_name,
+            advertised = %adv_name,
             service = %SHEPHERD_MANAGEMENT_SERVICE_UUID,
             "BLE management advertising started",
         );
@@ -1268,6 +1319,32 @@ mod tests {
 
     /// The factory-reset *sentinel* path captures the previously-bonded
     /// admin so `run` can remove the BlueZ bond, and clears the record.
+    #[test]
+    fn advertised_name_fits_the_31_byte_pdu() {
+        // The budget is what's left after Flags (3) + 128-bit UUID (18) +
+        // the local-name AD header (2) in a 31-byte legacy PDU.
+        assert_eq!(MAX_ADV_NAME_BYTES, 8);
+        // Every result must fit the budget in bytes.
+        let fits = |s: &str| advertised_name(s).len() <= MAX_ADV_NAME_BYTES;
+
+        // Fits already -> returned verbatim (8 bytes is the boundary).
+        assert_eq!(advertised_name("shepherd"), "shepherd");
+        assert_eq!(advertised_name("pi"), "pi");
+        // The hostname that triggered the field report: 10 bytes -> 5-byte
+        // prefix + "…" (3 bytes) = 8.
+        assert_eq!(advertised_name("copernicus"), "coper…");
+        assert!(fits("copernicus"));
+        // Never splits a multi-byte code point: reserving 3 bytes for the
+        // ellipsis lands the cut at byte 5, a boundary here.
+        assert_eq!(advertised_name("aaaaaaaé"), "aaaaa…");
+        // When the 5-byte cut would land inside 'é' (bytes 4..6), back off
+        // to byte 4, so 4-byte prefix + "…" = 7 bytes.
+        assert_eq!(advertised_name("aaaaébbbb"), "aaaa…");
+        assert!(fits("aaaaébbbb"));
+        // A multi-byte char ending exactly on the budget is kept (6 + 2 = 8).
+        assert_eq!(advertised_name("aaaaaaé"), "aaaaaaé");
+    }
+
     #[test]
     fn sentinel_reset_captures_bond_for_removal() {
         let dir = TempDir::new().unwrap();
