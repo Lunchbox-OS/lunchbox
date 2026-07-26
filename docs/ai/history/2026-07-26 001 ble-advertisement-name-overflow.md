@@ -1,4 +1,4 @@
-# BLE advertisement name overflow made the device undiscoverable
+# BLE management advertising fails to register (companion can't pair)
 
 ## Symptom
 
@@ -6,64 +6,82 @@ The companion Android app could not pair with a shepherd device. It
 "just never found it" — no error, the device simply never appeared in
 the pairing list.
 
-## Diagnosis
+## Root cause (the real one): kernel extended-advertising regression
 
-Filtering `adb logcat` by the app package hid the Bluetooth stack (it
-logs under the system bluetooth process, not the app PID). Widening the
-filter showed the companion's scan starting cleanly and receiving
-**zero** results on its own `scannerId` — the phone's radio worked
-(other scanners got hits), but nothing matched.
-
-The companion scans with a hardware-offloaded `ScanFilter` on the
-128-bit management service UUID (`ShepherdScanner.kt`). nRF Connect —
-which scans unfiltered and matches in software — *did* see the device,
-so the split was "radio sees it, UUID filter doesn't". nRF's raw
-advertising data decoded to just Tx Power + the local name, with **no
-Flags and no service UUID** — i.e. it was the adapter's own name-only
-discoverable broadcast, not a registered `LEAdvertisement1`.
-
-The device journal had the real failure:
+The device journal showed shepherd's advertisement being rejected:
 
 ```
 bluetoothd: src/advertising.c:add_client_complete() Failed to add advertisement: Invalid Parameters (0x0d)
 ```
 
-`device_name` defaults to the system hostname (here `copernicus`, 10
-bytes). The advertisement overran the 31-byte legacy PDU:
+`btmon` pinned it precisely. bluetoothd registers advertisements through
+the kernel's **extended** advertising MGMT API, and the kernel rejects
+the data:
 
 ```
-Flags:                    3
-128-bit service UUID:     2 + 16 = 18
-Local name "copernicus":  2 + 10 = 12
-                          --------------
-                          33  >  31  ->  0x0d
+@ MGMT Command: Add Extended Advertising Data (0x0055)
+      Advertising data length: 3        (just the flags AD, 02 01 06)
+@ MGMT Event: Command Status
+      Add Extended Advertising Data (0x0055)
+        Status: Invalid Parameters (0x0d)
 ```
 
-The controller rejected the *whole* advertisement, so the service UUID
-never went on air and the UUID-filtered scan had nothing to match. The
-bug was host-dependent: a shorter hostname would have squeaked under 31
-bytes and "worked", which is exactly what made it a latent trap.
+The advertising data is trivially valid (3 bytes, well under the
+"Available adv data len: 31" the controller reported one line earlier),
+yet the kernel refuses it. The **legacy** MGMT path works on the same
+controllers:
 
-## Fix
+```
+$ sudo btmgmt add-adv -c 1
+      Add Advertising (0x003e) … Status: Success (0x00)
+      Own address type: Public (0x00)
+```
 
-`crates/shepherd-ble/src/server.rs`: trim the *advertised* name to
-`MAX_ADV_NAME_BYTES` (= 31 − 3 − 18 − 2 = 8 bytes) on a UTF-8 char
-boundary before handing it to `advertise()`, with a trailing ellipsis
-(`…`, 3 bytes, reserved out of the budget) so a shortened name reads as
-shortened in the scan list (`copernicus` → `coper…`). `warn!` fires when
-a name is trimmed. The service UUID always fits now; the full device
-name still reaches the companion over GATT (the app already falls back
-to the GATT name). `bluer` 0.17 has no scan-response field, so we can't
-push the name into the scan response — trimming the primary PDU is the
-reliable lever.
+Reproduced identically on two devices with different controllers — an
+Intel 8265 (Bluetooth 4.2) and a Bluetooth 5 controller (20 advertising
+instances) — both on Ubuntu 26.04's `7.0.0-28-generic` kernel. Because
+it fails on a genuinely extended-advertising-capable controller too, it
+is **the kernel's MGMT `Add Extended Advertising Data` handler**, not a
+controller/firmware quirk. bluetoothd always prefers the extended MGMT
+commands when the kernel exposes them, and there is no BlueZ config to
+force the legacy path — so *all* D-Bus advertising is broken on this
+kernel, shepherd included. Nothing shepherd (or `bluer`) does can route
+around it.
 
-## If it recurs / follow-ups considered
+Verify on any device: `sudo btmgmt add-adv -c 1` (legacy) should
+succeed while `bluetoothctl advertise peripheral` (bluetoothd's extended
+path) fails with `0x0d`. See <docs/INSTALL.md> "BLE management doesn't
+advertise" for the operator-facing version and remediation.
 
-- The 8-byte budget is conservative: it assumes BlueZ packs the name
-  into the same 31 bytes as the UUID (which the 0x0d proved it does on
-  this controller). If a future controller relocates the name to the
-  scan response, an 8-byte name still fits — no regression.
-- Longer names would need **LE Extended Advertising**
-  (`secondary_channel`), but that also requires the Android side to scan
-  for extended advertisements — deferred as more moving parts than the
-  problem warranted.
+## Dead ends ruled out along the way
+
+- **LL Privacy** (`ll-privacy` in `btmgmt info` current settings): a red
+  herring. The working `btmgmt add-adv` path used a Public address and
+  succeeded with LL Privacy on; it cannot be disabled via bluetoothd
+  `Experimental`/`KernelExperimental` on this kernel anyway.
+- **Advertising-instance exhaustion**: ruled out — `SupportedInstances
+  20`, `ActiveInstances 0`.
+- **Advertisement payload > 31 bytes**: plausible but not the cause here
+  — a 3-byte advertisement fails too. See the name-trim below, which is
+  a real but *separate* hardening.
+
+## Separate hardening shipped: advertised-name trim
+
+While diagnosing, we found the advertised name could independently
+overflow the 31-byte legacy PDU: `device_name` defaults to the system
+hostname, and Flags (3) + 128-bit UUID (18) + local name (2 + len) can
+exceed 31, which *would* also yield `0x0d` — host-dependent on hostname
+length. `crates/shepherd-ble/src/server.rs` now trims the advertised
+name to `MAX_ADV_NAME_BYTES` (= 31 − 3 − 18 − 2 = 8) on a UTF-8 boundary
+with a trailing ellipsis (`copernicus` → `coper…`) and `warn!`s when it
+does. This is defensive hardening (the 8-byte `"shepherd"` default sits
+right at the edge); it is **not** what fixed the pairing failure above.
+
+## What actually unblocks pairing
+
+A kernel without the extended-advertising regression. Options: boot a
+different/older kernel and re-test with `bluetoothctl advertise
+peripheral`; pin that kernel once found; report upstream (the two
+`btmon` traces — legacy succeeds, extended fails on identical data — are
+a clean minimal repro). A different Bluetooth adapter does **not** help:
+the BT5 controller fails too.

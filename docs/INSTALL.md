@@ -251,6 +251,45 @@ To revert (all changes are reversible):
 sudo ./scripts/shepherd harden revert --user kiosk
 ```
 
+## Troubleshooting
+
+### BLE management doesn't advertise (companion can't find the device)
+
+If the companion app never sees the device in its pairing list and the
+journal shows:
+
+```
+bluetoothd: src/advertising.c:add_client_complete() Failed to add advertisement: Invalid Parameters (0x0d)
+```
+
+the host Bluetooth stack is failing to register *any* LE advertisement,
+so shepherd's management service never goes on air. Confirm whether the
+controller itself works by comparing the legacy vs. bluetoothd paths:
+
+```sh
+# In one terminal:
+sudo btmon
+# In another — legacy MGMT path (should succeed):
+sudo btmgmt add-adv -c 1
+# bluetoothd's path (the one shepherd uses):
+bluetoothctl advertise peripheral
+```
+
+If `btmgmt add-adv` succeeds but `bluetoothctl advertise peripheral`
+fails, and `btmon` shows `Add Extended Advertising Data (0x0055) →
+Invalid Parameters (0x0d)`, this is a **kernel extended-advertising
+bug**, not a shepherd or controller problem — observed on Ubuntu 26.04's
+`7.0.0-28-generic` across multiple Intel controllers (both BT 4.2 and
+BT 5). bluetoothd always uses the extended path when the kernel exposes
+it, and there is no config to force the legacy path.
+
+Remediation is kernel-level: boot a different kernel version, re-test
+with `bluetoothctl advertise peripheral`, and pin the kernel that
+advertises successfully. Swapping the Bluetooth adapter does **not**
+help — a BT 5 controller fails the same way. (LL Privacy, advertising
+name length, and instance limits were investigated and are *not* the
+cause; see <docs/ai/history/2026-07-26 001 ble-advertisement-name-overflow.md>.)
+
 ## Complete documentation
 
 See the scripts' [README](../scripts/README.md) for more.
