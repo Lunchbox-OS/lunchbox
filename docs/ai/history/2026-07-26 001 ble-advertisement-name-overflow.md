@@ -48,6 +48,17 @@ force the legacy path — so *all* D-Bus advertising is broken on this
 kernel, shepherd included. Nothing shepherd (or `bluer`) does can route
 around it.
 
+This is a known upstream regression, not shepherd-specific:
+[raspberrypi/linux#7473](https://github.com/raspberrypi/linux/issues/7473)
+reports the identical signature as a **mainline 6.18** regression (works
+on 6.12), a length-accounting bug in the `Add Extended Advertising Data`
+mgmt path. On Ubuntu 26.04 the `dpkg` install log brackets it precisely:
+`7.0.0-27.27` (installed 2026-06-27) advertises fine, `7.0.0-28.28`
+(2026-07-17) is broken — confirmed by booting back to `-27`. The fleet
+fix is to pin `7.0.0-27` until Ubuntu ships a corrected kernel; see
+<docs/INSTALL.md> "BLE management doesn't advertise" for the exact
+pin/hold/GRUB commands.
+
 Verify on any device: `sudo btmgmt add-adv -c 1` (legacy) should
 succeed while `bluetoothctl advertise peripheral` (bluetoothd's extended
 path) fails with `0x0d`. See <docs/INSTALL.md> "BLE management doesn't
@@ -79,9 +90,11 @@ right at the edge); it is **not** what fixed the pairing failure above.
 
 ## What actually unblocks pairing
 
-A kernel without the extended-advertising regression. Options: boot a
-different/older kernel and re-test with `bluetoothctl advertise
-peripheral`; pin that kernel once found; report upstream (the two
-`btmon` traces — legacy succeeds, extended fails on identical data — are
-a clean minimal repro). A different Bluetooth adapter does **not** help:
-the BT5 controller fails too.
+A kernel without the extended-advertising regression. On the affected
+devices, pinning `7.0.0-27-generic` (see <docs/INSTALL.md>) restores
+advertising — confirmed by re-testing `bluetoothctl advertise
+peripheral` after booting `-27`. Unpin once Ubuntu ships a fixed kernel;
+track it via the Launchpad bug filed against `linux` (regression bracket
+`7.0.0-27.27` → `7.0.0-28.28`, cross-referencing raspberrypi/linux#7473
+and the `btmon` traces). A different Bluetooth adapter does **not**
+help: the BT5 controller fails too.

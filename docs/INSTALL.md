@@ -281,14 +281,34 @@ Invalid Parameters (0x0d)`, this is a **kernel extended-advertising
 bug**, not a shepherd or controller problem — observed on Ubuntu 26.04's
 `7.0.0-28-generic` across multiple Intel controllers (both BT 4.2 and
 BT 5). bluetoothd always uses the extended path when the kernel exposes
-it, and there is no config to force the legacy path.
+it, and there is no config to force the legacy path. It matches the
+mainline 6.18 regression in
+[raspberrypi/linux#7473](https://github.com/raspberrypi/linux/issues/7473)
+(a length-accounting bug in the MGMT `Add Extended Advertising Data`
+handler).
 
-Remediation is kernel-level: boot a different kernel version, re-test
-with `bluetoothctl advertise peripheral`, and pin the kernel that
-advertises successfully. Swapping the Bluetooth adapter does **not**
-help — a BT 5 controller fails the same way. (LL Privacy, advertising
-name length, and instance limits were investigated and are *not* the
-cause; see <docs/ai/history/2026-07-26 001 ble-advertisement-name-overflow.md>.)
+Remediation is kernel-level. On Ubuntu 26.04 it regressed **between
+`7.0.0-27.27` (works) and `7.0.0-28.28` (broken)**, so pin the last-good
+kernel until a fixed one ships:
+
+```sh
+# reinstall 7.0.0-27 if it was autoremoved:
+sudo apt install linux-image-7.0.0-27-generic linux-modules-7.0.0-27-generic \
+                 linux-modules-extra-7.0.0-27-generic
+# keep it, and stop newer broken ABIs from becoming the default:
+sudo apt-mark hold linux-image-7.0.0-27-generic linux-modules-7.0.0-27-generic \
+                   linux-generic linux-image-generic
+# boot it by default:
+sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 7.0.0-27-generic"/' /etc/default/grub
+sudo update-grub
+```
+
+Holding the kernel pauses kernel security updates, so unpin
+(`apt-mark unhold …`) once a fixed kernel is available. Swapping the
+Bluetooth adapter does **not** help — a BT 5 controller fails the same
+way. (LL Privacy, advertising name length, and instance limits were
+investigated and are *not* the cause; see
+<docs/ai/history/2026-07-26 001 ble-advertisement-name-overflow.md>.)
 
 ## Complete documentation
 
