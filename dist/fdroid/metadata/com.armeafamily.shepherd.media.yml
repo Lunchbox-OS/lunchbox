@@ -1,0 +1,43 @@
+# F-Droid metadata for the shepherd-media Android app.
+#
+# Consumed by `fdroid update` — see dist/fdroid/README.md for who runs it and
+# when. Deliberately carries NO version fields: fdroidserver reads versionCode
+# and versionName out of the APK, so the repo-root VERSION file stays the single
+# source of truth.
+
+Categories:
+  - Multimedia
+
+License: GPL-3.0-only
+AuthorName: Albert Armea
+WebSite: https://git.armeafamily.com/albert/shepherd-launcher
+SourceCode: https://git.armeafamily.com/albert/shepherd-launcher
+IssueTracker: https://git.armeafamily.com/albert/shepherd-launcher/issues
+
+Name: Shepherd Media
+Summary: Curated media libraries for TVs and tablets
+
+Description: |-
+  The Android build of shepherd-media, the media player from shepherd-launcher —
+  a child-friendly, parent-guided desktop environment for Wayland.
+
+  Plays from libraries you define: a local directory, a YouTube channel or
+  playlist, or an RSS feed. Playback is mpv; YouTube sources are resolved with
+  yt-dlp. There is no recommendation feed, no autoplay into the unknown, and no
+  account.
+
+  Built for the couch: the library switcher, settings, and add-library form are
+  all navigable with a TV remote, and adding a library needs no typing. Runs on
+  phones, tablets, and Fire TV sticks (including 32-bit ones).
+
+  Unlike the desktop build there is no shepherd-launcher daemon on Android, so
+  this app owns its own library configuration and can be used standalone.
+
+# Pin the release signing certificate. `fdroid update` refuses to publish an APK
+# signed with anything else, and --delete-unknown removes it from the repo. This
+# is the control that makes automated republishing of release assets safe: it is
+# what stops an APK signed with a different key from reaching a family device as
+# an in-place upgrade. Obtain with:
+#     apksigner verify --print-certs FILE.apk | grep 'SHA-256 digest'
+AllowedAPKSigningKeys:
+  - b96abc13004bb75dd4caa412714035e9ce172bf4cb125ea1228163f68636041e

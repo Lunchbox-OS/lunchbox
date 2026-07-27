@@ -94,8 +94,48 @@ Then have `kiosk` log out and back in (so the new group memberships take
 effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is
 still optional — see [below](#kiosk-hardening-optional).
 
-> The companion `.apk` is attached to the same release; sideload it with
-> `adb install shepherd-companion_0.2.0.apk`.
+> The companion `.apk` is attached to the same release; see
+> [Installing the Android apps](#installing-the-android-apps) below.
+
+## Installing the Android apps
+
+Two Android apps ship alongside the launcher:
+
+- **Shepherd Companion** — the parent-facing admin app. Pairs with a device over
+  Bluetooth LE and drives the management RPCs. This is the one you want.
+- **Shepherd Media** — the media player, for phones, tablets, and Fire TV sticks.
+
+### From the F-Droid repository (recommended, gives updates)
+
+Install the [F-Droid](https://f-droid.org) client, then add this project's
+repository — open <https://git.armeafamily.com/fdroid/repo/> on the device and
+scan the QR code (or copy the repository URL and fingerprint from that page)
+and install the apps from the client.
+
+On Android 12 and newer, F-Droid updates apps **it installed** in the background
+with no prompting, so a phone with the companion app tracks new releases the way
+`apt upgrade` tracks the `.deb`. Two caveats worth knowing:
+
+- If you sideloaded the app previously, the signature matches, so F-Droid offers
+  the update rather than making you uninstall — but the *first* update through
+  F-Droid still prompts. After that F-Droid is the installer of record and later
+  updates are silent.
+- Fire TV sticks run Android 9–11, which has no unattended-update path, and the
+  F-Droid client has no remote-friendly TV interface. On the sticks, `adb` below
+  remains the practical route.
+
+### By sideloading
+
+Every release attaches both APKs. Download the one you want from the
+[releases page](https://git.armeafamily.com/albert/shepherd-launcher/releases)
+and install it:
+
+```sh
+adb install shepherd-companion_0.3.0.apk
+```
+
+Both APKs are signed with the same key across releases, so an `adb install` over
+an existing install upgrades it in place.
 
 ## Basic setup
 

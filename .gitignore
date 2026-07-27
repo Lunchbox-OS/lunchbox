@@ -1,2 +1,4 @@
 /target
 /dev-runtime
+# `shepherd package fdroid` output (throwaway signing key + a copy of the APKs)
+/dist/fdroid-repo

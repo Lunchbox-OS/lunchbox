@@ -144,6 +144,16 @@ The same deps set also provisions the NDK that
 [`crates/shepherd-media-android`](crates/shepherd-media-android/) cross-compiles
 its Rust cdylib against (via `cargo-ndk`); see that crate's README for its build.
 
+Both apps are published to an F-Droid repository, whose listings live in
+[`dist/fdroid/`](dist/fdroid/README.md). If you change them, validate against
+real APKs before pushing a tag — `release.yml` runs the same command, and the
+server that publishes the repository does not:
+
+```sh
+sudo apt install --no-install-recommends fdroidserver default-jdk-headless
+./scripts/shepherd package fdroid --debug-keys    # --debug-keys: local debug-signed APKs
+```
+
 ### Testing and linting
 
 Run the test suite:

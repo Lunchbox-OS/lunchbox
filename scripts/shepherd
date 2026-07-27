@@ -54,7 +54,7 @@ Commands:
     harden      User hardening for kiosk mode
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
     version     Show or bump the project version
-    package     Build distributable packages (.deb)
+    package     Build distributable packages (.deb, F-Droid repo)
     apps        Install activity backends (steam via snap, chrome via Flathub)
     power-key   Map the power button to suspend instead of shutdown
     setup-user  Deploy config + add a user to shepherd's groups
@@ -72,6 +72,7 @@ CI/Build:
     shepherd deps install build   Install build-only dependencies
     shepherd build --release      Build release binaries
     shepherd package deb          Build the Debian package (host architecture)
+    shepherd package fdroid       Validate dist/fdroid metadata against APKs
 
 Runtime:
     shepherd deps install run     Install runtime dependencies only

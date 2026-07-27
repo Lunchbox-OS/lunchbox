@@ -283,6 +283,32 @@ jobs:
           mkdir -p dist/pkg
           cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
 
+      # Validate dist/fdroid/metadata against the APK we just signed. The
+      # published F-Droid repository is generated on the server that hosts
+      # git.armeafamily.com, which downloads these release assets and this
+      # repo's metadata at the release tag and runs `fdroid update` with nobody
+      # watching — so this is the last place a bad metadata file or a
+      # wrongly-signed APK can surface. `package fdroid` fails if the APK does
+      # not reach the generated index, which is what a mismatched
+      # AllowedAPKSigningKeys looks like (fdroid update warns, drops the APK,
+      # and still exits 0). Runs on dry runs too — that is the point of them.
+      # See dist/fdroid/README.md and docs/ai/history/2026-07-26 003 …spec.md.
+      - name: Validate the F-Droid metadata
+        run: |
+          apt-get update
+          # --no-install-recommends keeps this to ~67 packages / ~78 MB rather
+          # than ~269 / ~300 MB: matplotlib and tk come in as Recommends of
+          # androguard and `fdroid update` does not need them. Installed per job
+          # rather than baked into the android CI image so that every Android CI
+          # run doesn't pay for a release-only check.
+          #
+          # default-jdk-headless because fdroidserver signs the index with
+          # /usr/lib/jvm/default-java/bin/jarsigner and unconditionally prefers
+          # that path over every other JDK present (including the image's
+          # openjdk-21-jdk-headless), so the default has to be a JDK.
+          apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
+          ./scripts/shepherd package fdroid --apks dist/pkg
+
       - name: Upload .apk to the release
         if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
         env:
