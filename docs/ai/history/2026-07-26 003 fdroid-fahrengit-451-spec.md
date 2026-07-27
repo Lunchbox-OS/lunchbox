@@ -280,7 +280,7 @@ Print the fingerprint for the URL with:
 
 ```sh
 keytool -list -keystore config/fdroid-keystore.jks -alias fdroid-index \
-  | grep SHA256 | tr -d ': ' | tail -c 65
+  | awk -F': ' '/SHA-?256/ { gsub(/:/, "", $2); print tolower($2); exit }'
 ```
 
 `fdroid update` also prints the full `?fingerprint=…` URL at the end of a run.
