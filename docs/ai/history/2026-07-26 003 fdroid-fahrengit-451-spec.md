@@ -13,6 +13,25 @@ This file is the *what*.
 **Tracking issue:** shepherd-launcher
 [#110](https://git.armeafamily.com/albert/shepherd-launcher/issues/110).
 
+> **Status: implemented** on the `feat/fdroid-repo` branch of fahrengit-451
+> (`fdroid/{Dockerfile,sync.py,test_sync.py}`, `bootstrap_fdroid_key.sh`,
+> `config/fdroid.yml.example`, plus the compose/nginx wiring). Three deviations
+> from this spec, each because building it turned something up:
+>
+> 1. **Metadata comes from the tag archive** (`/api/v1/repos/{repo}/archive/
+>    {tag}.tar.gz`), not `git clone --depth 1`. One request, no `git` in the
+>    image, same pinning to the exact tag.
+> 2. **Snapshots hardlink only the APKs.** `cp -al` for the whole tree looks
+>    right and is wrong: `fdroid update` rewrites the index files *in place*, so
+>    a hardlinked index lets the next run mutate the **live** snapshot before it
+>    has been verified. Index files are copied; only the APKs (immutable at a
+>    given filename) are hardlinked.
+> 3. **The service is config-driven** via `config/fdroid.yml`, so the stack stays
+>    generic — nothing in fahrengit-451 knows about shepherd.
+>
+> Both (2) and a wrong pinned key in shepherd-launcher's own metadata were caught
+> by `fdroid/test_sync.py`, which is why it is committed rather than thrown away.
+
 ## Goal
 
 Serve an [F-Droid](https://f-droid.org) repository at
