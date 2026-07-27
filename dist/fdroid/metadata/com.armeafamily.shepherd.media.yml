@@ -17,6 +17,18 @@ IssueTracker: https://git.armeafamily.com/albert/shepherd-launcher/issues
 Name: Shepherd Media
 Summary: Curated media libraries for TVs and tablets
 
+# YouTube sources are resolved with yt-dlp against YouTube itself: a proprietary
+# service that cannot be self-hosted or swapped out. The app does not require it
+# — local-directory and RSS libraries touch no such service — but it ships the
+# capability, which is what the tag is for. Not applicable to the companion app,
+# which speaks only Bluetooth LE to a device you own.
+AntiFeatures:
+  NonFreeNet:
+    en-US: >-
+      YouTube libraries stream from YouTube, a proprietary network service that
+      cannot be self-hosted or replaced. Local-directory and RSS libraries do
+      not use it.
+
 Description: |-
   The Android build of shepherd-media, the media player from shepherd-launcher —
   a child-friendly, parent-guided desktop environment for Wayland.
