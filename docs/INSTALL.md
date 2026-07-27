@@ -107,10 +107,19 @@ Two Android apps ship alongside the launcher:
 
 ### From the F-Droid repository (recommended, gives updates)
 
-Install the [F-Droid](https://f-droid.org) client, then add this project's
-repository — open <https://git.armeafamily.com/fdroid/repo/> on the device and
-scan the QR code (or copy the repository URL and fingerprint from that page)
-and install the apps from the client.
+Install the [F-Droid](https://f-droid.org) client, then add the "Armea Family
+Apps" repository:
+
+```
+https://git.armeafamily.com/fdroid/repo?fingerprint=b3dc6194dca2d059c0714202b1ad11ec712581061e2be66b74a0b14abe15b422
+```
+
+The quickest way to get that onto a phone is to open
+<https://git.armeafamily.com/fdroid/repo/> on the device and scan the QR code
+there, which encodes the same URL. The `fingerprint` pins the repository's
+signing key: a client that has it will reject an index signed by anything else,
+which is what makes an unattended background update safe. It is published here
+so you can check it against the page rather than taking the page's word for it.
 
 On Android 12 and newer, F-Droid updates apps **it installed** in the background
 with no prompting, so a phone with the companion app tracks new releases the way
