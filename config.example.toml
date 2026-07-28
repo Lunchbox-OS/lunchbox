@@ -22,6 +22,13 @@ config_version = 1
 # Set to 0 for unlimited (no time limit)
 default_max_run_seconds = 3600
 
+# How long a session has to last before it starts a cooldown (default 120).
+# A workaround for unstable activities: one that crashes seconds after launch
+# would otherwise start its cooldown and lock the child out of something they
+# never got to play. Set to 0 to always start the cooldown; override per entry
+# or per group with `limits.cooldown_min_session_seconds`.
+# cooldown_min_session_seconds = 120
+
 # Global volume restrictions (optional)
 # These apply when no entry-specific restrictions are defined
 [service.volume]
@@ -186,6 +193,9 @@ daily_quota_seconds = 3600
 # Any member's session starts this cooldown for the WHOLE category, so a child
 # can't hop between games in it to dodge the wait.
 cooldown_seconds = 600
+# A member that crashes inside this many seconds doesn't cool down the category
+# (defaults to service.cooldown_min_session_seconds).
+# cooldown_min_session_seconds = 120
 
 # A group can also be token-gated (issue #8): earning unlocks every member at
 # once. Uncomment to require educational time before any of these appear.
@@ -286,6 +296,10 @@ end = "20:00"
 max_run_seconds = 3600  # 1 hour max (0 = unlimited)
 daily_quota_seconds = 7200  # 2 hours per day (0 = unlimited)
 cooldown_seconds = 300  # 5 minute cooldown after each session
+# Sessions shorter than this don't start the cooldown, so a crash on launch
+# doesn't cost the child the activity. Defaults to
+# service.cooldown_min_session_seconds (120); 0 always cools down.
+# cooldown_min_session_seconds = 120
 
 ## === Snap-based applications ===
 # Snap entries use the "snap" type for proper process management.

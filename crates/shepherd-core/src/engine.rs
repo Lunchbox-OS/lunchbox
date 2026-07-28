@@ -890,6 +890,11 @@ impl CoreEngine {
     /// A group cooldown is started by *any* member's session and applies to
     /// every member, so a child can't hop between activities in a category to
     /// dodge it (issue #5).
+    ///
+    /// Sessions shorter than the subject's `cooldown_min_session` don't start
+    /// its cooldown at all — a workaround for unstable activities, which would
+    /// otherwise crash on launch and leave the child locked out of something
+    /// they never got to play.
     fn settle_session_end(
         &self,
         ended_entry_id: &EntryId,
@@ -904,16 +909,37 @@ impl CoreEngine {
         self.settle_tokens(entry, duration, today);
 
         let cooldowns = [
-            (entry.subject(), entry.limits.cooldown),
+            (
+                entry.subject(),
+                entry.limits.cooldown,
+                entry.limits.cooldown_min_session,
+            ),
             match self.policy.group_of(entry) {
-                Some(group) => (group.subject(), group.limits.cooldown),
-                None => (entry.subject(), None),
+                Some(group) => (
+                    group.subject(),
+                    group.limits.cooldown,
+                    group.limits.cooldown_min_session,
+                ),
+                None => (entry.subject(), None, Duration::ZERO),
             },
         ];
-        for (subject, cooldown) in cooldowns {
-            if let Some(cooldown) = cooldown
-                && let Ok(delta) = chrono::Duration::from_std(cooldown)
-            {
+        for (subject, cooldown, min_session) in cooldowns {
+            let Some(cooldown) = cooldown else {
+                continue;
+            };
+            // A session too short to count doesn't start the cooldown: an
+            // activity that crashes on launch would otherwise lock the child
+            // out of it without ever having run.
+            if duration < min_session {
+                info!(
+                    subject = %subject,
+                    duration_secs = duration.as_secs(),
+                    min_session_secs = min_session.as_secs(),
+                    "Session too short to start a cooldown"
+                );
+                continue;
+            }
+            if let Ok(delta) = chrono::Duration::from_std(cooldown) {
                 let _ = self.store.set_cooldown_until(&subject, now + delta);
             }
         }
@@ -1434,6 +1460,7 @@ mod tests {
                     max_run: Some(Duration::from_secs(300)),
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![],
                 volume: None,
@@ -1625,6 +1652,7 @@ mod tests {
                     max_run: Some(Duration::from_secs(120)), // 2 minutes
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![shepherd_api::WarningThreshold {
                     seconds_before: 60,
@@ -1723,6 +1751,7 @@ mod tests {
                     max_run: Some(Duration::from_secs(120)),
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![shepherd_api::WarningThreshold {
                     seconds_before: 60,
@@ -1833,6 +1862,7 @@ mod tests {
                     max_run: Some(Duration::from_secs(60)),
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![],
                 volume: None,
@@ -1915,6 +1945,7 @@ mod tests {
                     max_run: None,
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2019,6 +2050,7 @@ mod tests {
                     max_run: None,
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2106,6 +2138,7 @@ mod tests {
                     max_run: None,
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2204,6 +2237,7 @@ mod tests {
                     max_run: None,
                     daily_quota: Some(Duration::from_secs(3600)),
                     cooldown: None,
+                    cooldown_min_session: Duration::ZERO,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2307,6 +2341,7 @@ mod tests {
                 max_run: None,
                 daily_quota: None,
                 cooldown: None,
+                cooldown_min_session: Duration::ZERO,
             },
             tokens,
             warnings: vec![],
@@ -2611,6 +2646,7 @@ mod tests {
             max_run: None,
             daily_quota: None,
             cooldown: None,
+            cooldown_min_session: Duration::ZERO,
         }
     }
 
@@ -2715,6 +2751,7 @@ mod tests {
             "games",
             LimitsPolicy {
                 cooldown: Some(Duration::from_secs(600)),
+                cooldown_min_session: Duration::ZERO,
                 ..no_limits()
             },
             None,
@@ -2737,6 +2774,138 @@ mod tests {
             Some(ReasonCode::CooldownActive { .. })
         ));
         assert!(view(&entries, "ungrouped").enabled);
+    }
+
+    // --- Cooldown grace for unstable activities ---------------------------
+
+    /// One entry with a cooldown and a two-minute grace period, plus an
+    /// ungrouped control.
+    fn make_cooldown_grace_policy(cooldown_min_session: Duration) -> Policy {
+        let mut flaky = token_entry("flaky", None);
+        flaky.limits = LimitsPolicy {
+            cooldown: Some(Duration::from_secs(600)),
+            cooldown_min_session,
+            ..no_limits()
+        };
+
+        Policy {
+            service: Default::default(),
+            groups: vec![],
+            entries: vec![flaky, token_entry("ungrouped", None)],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+            brightness: Default::default(),
+            auto_brightness: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_short_session_does_not_start_the_cooldown() {
+        let policy = make_cooldown_grace_policy(Duration::from_secs(120));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        // An activity that crashes seconds after launch shouldn't lock the
+        // child out of something they never got to play.
+        run_session(&mut engine, "flaky", Duration::from_secs(20), now);
+        let entries = engine.list_entries(now);
+        assert!(
+            view(&entries, "flaky").enabled,
+            "a session below the grace period should leave the cooldown alone: {:?}",
+            view(&entries, "flaky").reasons
+        );
+
+        // Right at the threshold the cooldown starts as usual.
+        run_session(&mut engine, "flaky", Duration::from_secs(120), now);
+        let entries = engine.list_entries(now);
+        let flaky = view(&entries, "flaky");
+        assert!(!flaky.enabled, "a full session should start the cooldown");
+        assert!(
+            flaky
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::CooldownActive { .. })),
+            "expected CooldownActive, got: {:?}",
+            flaky.reasons
+        );
+    }
+
+    #[test]
+    fn test_cooldown_grace_of_zero_keeps_the_old_behaviour() {
+        let policy = make_cooldown_grace_policy(Duration::ZERO);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "flaky", Duration::from_secs(20), now);
+        let entries = engine.list_entries(now);
+        assert!(
+            !view(&entries, "flaky").enabled,
+            "with no grace period even a moment's session starts the cooldown"
+        );
+    }
+
+    #[test]
+    fn test_short_session_does_not_start_the_group_cooldown() {
+        let policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                cooldown: Some(Duration::from_secs(600)),
+                cooldown_min_session: Duration::from_secs(120),
+                ..no_limits()
+            },
+            None,
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "game-a", Duration::from_secs(20), now);
+        let entries = engine.list_entries(now);
+        for id in ["game-a", "game-b"] {
+            assert!(
+                view(&entries, id).enabled,
+                "a crashed member shouldn't cool down the whole category: {:?}",
+                view(&entries, id).reasons
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_cooldown_grace_is_independent_of_the_entry_grace() {
+        // The member has no grace of its own, the category has two minutes:
+        // a crash starts the entry's cooldown but leaves siblings playable.
+        let mut policy = make_group_policy(group(
+            "games",
+            LimitsPolicy {
+                cooldown: Some(Duration::from_secs(600)),
+                cooldown_min_session: Duration::from_secs(120),
+                ..no_limits()
+            },
+            None,
+        ));
+        policy.entries[0].limits = LimitsPolicy {
+            cooldown: Some(Duration::from_secs(600)),
+            cooldown_min_session: Duration::ZERO,
+            ..no_limits()
+        };
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "game-a", Duration::from_secs(20), now);
+        let entries = engine.list_entries(now);
+        assert!(
+            !view(&entries, "game-a").enabled,
+            "the entry's own cooldown has no grace period here"
+        );
+        assert!(
+            view(&entries, "game-b").enabled,
+            "the group's grace period should still spare its siblings: {:?}",
+            view(&entries, "game-b").reasons
+        );
     }
 
     #[test]

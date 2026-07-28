@@ -31,6 +31,7 @@ fn make_test_entry(id: &str) -> Entry {
             max_run: Some(Duration::from_secs(10)),
             daily_quota: None,
             cooldown: None,
+            cooldown_min_session: Duration::ZERO,
         },
         warnings: vec![],
         volume: None,
@@ -72,6 +73,7 @@ fn make_test_policy() -> Policy {
                 max_run: Some(Duration::from_secs(10)), // Short for testing
                 daily_quota: None,
                 cooldown: None,
+                cooldown_min_session: Duration::ZERO,
             },
             warnings: vec![
                 WarningThreshold {

@@ -22,6 +22,7 @@ config_version = 1
 socket_path = "/run/shepherdd/shepherdd.sock"
 data_dir = "/var/lib/shepherdd"
 default_max_run_seconds = 1800  # 30 minutes default
+cooldown_min_session_seconds = 120  # sessions shorter than this skip the cooldown
 
 # Internet connectivity check (optional)
 [service.internet]
@@ -167,7 +168,17 @@ Control session duration and frequency:
 max_run_seconds = 1800        # Max duration per session
 daily_quota_seconds = 7200    # Total daily limit
 cooldown_seconds = 600        # Wait time between sessions
+cooldown_min_session_seconds = 120  # sessions shorter than this skip the cooldown
 ```
+
+`cooldown_min_session_seconds` is a workaround for unstable activities: a
+session that ends before it elapses leaves the cooldown untouched, so an
+activity that crashes seconds after launch doesn't lock the child out of
+something they never got to play. It defaults to
+`service.cooldown_min_session_seconds` (itself 120 by default), and `0` restores
+the plain behaviour of cooling down after every session however short. Groups
+take the same key in `[groups.limits]` and apply it to the group cooldown
+independently of their members' own settings.
 
 ### Token Gates
 
@@ -207,6 +218,7 @@ end = "18:00"
 max_run_seconds = 900        # short bursts, per session, for any member
 daily_quota_seconds = 3600   # COMBINED across all members
 cooldown_seconds = 600       # any member's session cools down the whole group
+cooldown_min_session_seconds = 120  # unless that session was shorter than this
 
 # A group can be token-gated too: earning unlocks every member at once.
 [groups.tokens]
@@ -298,6 +310,10 @@ And when combining groups with the rest:
 - **A group cooldown is the reason to use groups for cooldowns at all** — a
   per-entry cooldown is trivially dodged by starting a different game in the same
   category.
+- **The short-session grace is dodgeable on purpose.** A child who quits every
+  activity just under `cooldown_min_session_seconds` never triggers a cooldown;
+  the daily quota is what still bounds them. Lower it (or set it to 0) on
+  activities that are stable enough not to need the workaround.
 - **Entries with no `group` are completely unaffected** by any of this.
 - **Overrides work at both levels.** A group override enables or disables every
   member with one call, and a force-enable on *either* the entry or its group

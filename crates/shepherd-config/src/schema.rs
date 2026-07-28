@@ -77,6 +77,13 @@ pub struct RawServiceConfig {
     /// Default max run duration
     pub default_max_run_seconds: Option<u64>,
 
+    /// Minimum session length before a cooldown is started, in seconds
+    /// (default 120). A session shorter than this leaves the cooldown alone,
+    /// so an activity that crashes seconds after launch doesn't lock the child
+    /// out. Set to 0 to always start the cooldown; overridable per entry and
+    /// per group via `limits.cooldown_min_session_seconds`.
+    pub cooldown_min_session_seconds: Option<u64>,
+
     /// Global volume restrictions
     #[serde(default)]
     pub volume: Option<RawVolumeConfig>,
@@ -506,6 +513,11 @@ pub struct RawLimits {
 
     /// Cooldown after session ends, in seconds
     pub cooldown_seconds: Option<u64>,
+
+    /// Minimum session length before this subject's cooldown is started, in
+    /// seconds. Overrides `service.cooldown_min_session_seconds` (default 120).
+    /// 0 means the cooldown always starts, however short the session was.
+    pub cooldown_min_session_seconds: Option<u64>,
 }
 
 /// Token gate (issue #8)

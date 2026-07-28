@@ -38,7 +38,8 @@ This example, shown at 9 PM, has limited activities as a result.
 Activities can have configurable time limits, including:
 * individual session length
 * total usage per day
-* cooldown periods before that particular activity can be restarted
+* cooldown periods before that particular activity can be restarted (skipped
+  when the activity only ran for a moment, so a crash on launch costs nothing)
 
 <video controls src="https://git.armeafamily.com/albert/shepherd-launcher/raw/branch/main/docs/readme/tuxmath-expiring.webm" alt="TuxMath session shown about to expire, including warnings and automatic termination"></video>
 

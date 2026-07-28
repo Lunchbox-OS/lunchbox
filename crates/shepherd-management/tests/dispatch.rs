@@ -195,6 +195,7 @@ fn test_policy() -> Policy {
                 max_run: Some(Duration::from_secs(300)),
                 daily_quota: None,
                 cooldown: None,
+                cooldown_min_session: Duration::ZERO,
             },
             warnings: vec![],
             volume: None,
