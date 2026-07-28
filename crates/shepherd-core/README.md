@@ -193,6 +193,12 @@ The group daily quota is the *combined* usage of its members, summed from
 budget. A group cooldown is started by any member's session and applies to all of
 them, which is what stops a child hopping between activities to dodge it.
 
+A session shorter than the subject's `cooldown_min_session` (default two minutes)
+does not start its cooldown at all — a workaround for unstable activities, which
+would otherwise crash on launch and leave the child locked out of something they
+never got to play. Entry and group thresholds are evaluated separately, so a
+category can forgive a crash that the activity itself still cools down for.
+
 Cooldowns, token balances, and daily overrides are keyed by `LimitSubject`, so a
 group holds the same state an entry does — including its own daily override,
 which enables or disables every member at once.

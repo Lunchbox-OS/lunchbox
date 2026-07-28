@@ -26,6 +26,15 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+/// Default minimum session length before a cooldown is started.
+///
+/// Activities that crash or bounce seconds after launch would otherwise start
+/// their cooldown and lock the child out of an activity they never got to use,
+/// so sessions shorter than this leave the cooldown alone. Configurable with
+/// `service.cooldown_min_session_seconds`, per subject with
+/// `limits.cooldown_min_session_seconds`.
+pub const DEFAULT_COOLDOWN_MIN_SESSION: Duration = Duration::from_secs(120);
+
 /// Validated policy ready for use by the core engine
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -71,6 +80,12 @@ impl Policy {
             .map(seconds_to_duration_or_unlimited)
             .unwrap_or(Some(Duration::from_secs(3600))); // 1 hour default
 
+        let default_cooldown_min_session = raw
+            .service
+            .cooldown_min_session_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_COOLDOWN_MIN_SESSION);
+
         let global_volume = raw
             .service
             .volume
@@ -93,7 +108,11 @@ impl Policy {
             .map(convert_auto_brightness_config)
             .unwrap_or_default();
 
-        let groups = raw.groups.iter().map(Group::from_raw).collect();
+        let groups = raw
+            .groups
+            .iter()
+            .map(|g| Group::from_raw(g, default_cooldown_min_session))
+            .collect();
 
         let entries = raw
             .entries
@@ -103,6 +122,7 @@ impl Policy {
                     e,
                     &default_warnings,
                     default_max_run,
+                    default_cooldown_min_session,
                     &global_volume,
                     &global_brightness,
                 )
@@ -169,7 +189,7 @@ pub struct Group {
 }
 
 impl Group {
-    fn from_raw(raw: &crate::schema::RawGroup) -> Self {
+    fn from_raw(raw: &crate::schema::RawGroup, default_cooldown_min_session: Duration) -> Self {
         Self {
             id: GroupId::new(raw.id.clone()),
             label: raw.label.clone(),
@@ -183,11 +203,12 @@ impl Group {
             limits: raw
                 .limits
                 .clone()
-                .map(|l| convert_limits(l, None))
+                .map(|l| convert_limits(l, None, default_cooldown_min_session))
                 .unwrap_or(LimitsPolicy {
                     max_run: None,
                     daily_quota: None,
                     cooldown: None,
+                    cooldown_min_session: default_cooldown_min_session,
                 }),
             tokens: raw.tokens.as_ref().map(convert_tokens),
         }
@@ -467,6 +488,7 @@ impl Entry {
         raw: RawEntry,
         default_warnings: &[WarningThreshold],
         default_max_run: Option<Duration>,
+        default_cooldown_min_session: Duration,
         _global_volume: &VolumePolicy,
         _global_brightness: &BrightnessPolicy,
     ) -> Self {
@@ -477,11 +499,12 @@ impl Entry {
             .unwrap_or_default();
         let limits = raw
             .limits
-            .map(|l| convert_limits(l, default_max_run))
+            .map(|l| convert_limits(l, default_max_run, default_cooldown_min_session))
             .unwrap_or_else(|| LimitsPolicy {
                 max_run: default_max_run,
                 daily_quota: None, // None means unlimited
                 cooldown: None,
+                cooldown_min_session: default_cooldown_min_session,
             });
         let tokens = raw.tokens.as_ref().map(convert_tokens);
         let group = raw.group.as_ref().map(GroupId::new);
@@ -611,6 +634,14 @@ pub struct LimitsPolicy {
     /// Daily quota. None means unlimited.
     pub daily_quota: Option<Duration>,
     pub cooldown: Option<Duration>,
+    /// How long a session has to last before it starts the cooldown. Sessions
+    /// shorter than this leave the cooldown untouched, so an activity that
+    /// crashes on launch doesn't lock the child out of it (a workaround for
+    /// unstable activities). `Duration::ZERO` means every session, however
+    /// short, starts the cooldown. Resolved at config load time from
+    /// `limits.cooldown_min_session_seconds`, falling back to
+    /// `service.cooldown_min_session_seconds`.
+    pub cooldown_min_session: Duration,
 }
 
 /// Network firewall policy applied to a session at spawn time.
@@ -995,6 +1026,7 @@ fn seconds_to_duration_or_unlimited(secs: u64) -> Option<Duration> {
 fn convert_limits(
     raw: crate::schema::RawLimits,
     default_max_run: Option<Duration>,
+    default_cooldown_min_session: Duration,
 ) -> LimitsPolicy {
     LimitsPolicy {
         max_run: raw
@@ -1005,6 +1037,10 @@ fn convert_limits(
             .daily_quota_seconds
             .and_then(seconds_to_duration_or_unlimited),
         cooldown: raw.cooldown_seconds.map(Duration::from_secs),
+        cooldown_min_session: raw
+            .cooldown_min_session_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(default_cooldown_min_session),
     }
 }
 

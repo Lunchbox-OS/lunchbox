@@ -192,7 +192,8 @@ Response + Events ──────▶ Broadcast to Subscribers
 3. Wait for grace period
 4. Force kill if needed (SIGKILL)
 5. Record usage in store
-6. Set cooldown if configured
+6. Set cooldown if configured, unless the session was shorter than
+   `cooldown_min_session` (default 2 minutes, for unstable activities)
 7. Clear session state
 
 ## Configuration Reload

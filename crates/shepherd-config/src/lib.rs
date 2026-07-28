@@ -69,6 +69,7 @@ pub const CURRENT_CONFIG_VERSION: u32 = 1;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn parse_minimal_config() {
@@ -99,5 +100,92 @@ mod tests {
 
         let result = parse_config(config);
         assert!(matches!(result, Err(ConfigError::UnsupportedVersion(99))));
+    }
+
+    #[test]
+    fn cooldown_grace_defaults_to_two_minutes() {
+        let config = r#"
+            config_version = 1
+
+            [[groups]]
+            id = "games"
+            label = "Games"
+
+            [[entries]]
+            id = "no-limits"
+            label = "No limits"
+            kind = { type = "process", command = "/usr/bin/game" }
+
+            [[entries]]
+            id = "with-limits"
+            label = "With limits"
+            kind = { type = "process", command = "/usr/bin/game" }
+            [entries.limits]
+            cooldown_seconds = 300
+        "#;
+
+        let policy = parse_config(config).unwrap();
+        for entry in &policy.entries {
+            assert_eq!(
+                entry.limits.cooldown_min_session,
+                Duration::from_secs(120),
+                "{} should get the default grace period",
+                entry.id
+            );
+        }
+        assert_eq!(
+            policy.groups[0].limits.cooldown_min_session,
+            Duration::from_secs(120),
+            "a group with no limits table should get it too"
+        );
+    }
+
+    #[test]
+    fn cooldown_grace_service_default_and_per_subject_overrides() {
+        let config = r#"
+            config_version = 1
+
+            [service]
+            cooldown_min_session_seconds = 60
+
+            [[groups]]
+            id = "games"
+            label = "Games"
+            [groups.limits]
+            cooldown_seconds = 600
+            cooldown_min_session_seconds = 300
+
+            [[entries]]
+            id = "inherits"
+            label = "Inherits the service default"
+            kind = { type = "process", command = "/usr/bin/game" }
+            group = "games"
+            [entries.limits]
+            cooldown_seconds = 300
+
+            [[entries]]
+            id = "no-grace"
+            label = "Always cools down"
+            kind = { type = "process", command = "/usr/bin/game" }
+            [entries.limits]
+            cooldown_seconds = 300
+            cooldown_min_session_seconds = 0
+        "#;
+
+        let policy = parse_config(config).unwrap();
+        let grace = |id: &str| {
+            policy
+                .get_entry(&shepherd_util::EntryId::new(id))
+                .unwrap()
+                .limits
+                .cooldown_min_session
+        };
+        assert_eq!(grace("inherits"), Duration::from_secs(60));
+        assert_eq!(grace("no-grace"), Duration::ZERO);
+        assert_eq!(
+            policy.groups[0].limits.cooldown_min_session,
+            Duration::from_secs(300),
+            "a group sets its own grace period independently of its members"
+        );
     }
 }
