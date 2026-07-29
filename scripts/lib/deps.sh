@@ -299,10 +299,13 @@ deps_install() {
         install_bpf_toolchain
     fi
 
-    # For run and dev sets, install yt-dlp into its virtualenv.
-    # This runs after apt so that python3-venv is already present.
+    # For run and dev sets, add shepherd-media's non-apt dependencies: yt-dlp in
+    # its virtualenv, and the VA-API drivers for this host's GPU. Neither can
+    # live in run.pkgs — that file is installed as one unconditional apt
+    # transaction, while the right VA driver depends on the hardware and yt-dlp
+    # deliberately comes from pip. Runs after apt so python3-venv is present.
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
-        install_ytdlp
+        install_media_deps
     fi
 
     # For the android set, fetch the SDK after the JDK + unzip apt

@@ -66,6 +66,45 @@ build goes stale — so it lives in a venv you can refresh independently:
 sudo shepherd-admin yt-dlp install   # re-run periodically to update
 ```
 
+`shepherd-admin media-deps install` does this together with the VA-API drivers
+below, which is usually what you want on a machine that plays video.
+
+### Hardware video decoding
+
+`shepherd-media` decodes video on the GPU through mpv's VA-API support, which
+needs a libva driver for your graphics hardware. Ubuntu's `mpv` package neither
+depends on nor recommends one, so a machine that has never had one installed
+decodes every frame on the CPU — several times the power draw, and not fast
+enough for 1080p on older hardware.
+
+`shepherd deps install run` installs the drivers for you. If you installed from
+the `.deb` instead:
+
+```sh
+sudo shepherd-admin media-deps install   # VA-API drivers + yt-dlp
+```
+
+Or, for the drivers alone — `detect` reports the graphics hardware it finds and
+the packages that match it, without changing anything:
+
+```sh
+shepherd-admin va-api detect
+sudo shepherd-admin va-api install
+```
+
+`shepherd-media` reports what it ended up doing at the start of every video, so
+its log tells you whether this worked:
+
+```
+INFO  mpv is decoding video with vaapi (zero-copy)
+WARN  mpv is decoding video in software; playback will be CPU-bound. …
+```
+
+A warning here does not always mean a missing driver: fixed-function decoders
+only cover certain codecs, so a GPU with no VP9 or AV1 block still decodes those
+on the CPU. `shepherd-media` asks YouTube for H.264 first for exactly that
+reason.
+
 To install an activity backend (Steam via Canonical's snap, Chrome via Flathub —
 matching what shepherd's `type = "steam"` and `kind = "flatpak"` adapters drive):
 

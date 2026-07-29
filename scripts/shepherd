@@ -60,8 +60,9 @@ Commands:
     setup-user  Deploy config + add a user to shepherd's groups
 
 Note: the post-install admin tasks (setup-user, apps, power-key, harden,
-bluetooth, yt-dlp) are also available on an installed system as
-'shepherd-admin', which the .deb ships without needing this source tree.
+bluetooth, media-deps, va-api, yt-dlp) are also available on an installed
+system as 'shepherd-admin', which the .deb ships without needing this source
+tree.
 
 Development:
     shepherd deps install dev     Install all development dependencies

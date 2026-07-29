@@ -12,8 +12,8 @@
 #
 # setup_user needs install_config / install_user_groups / add_user_to_groups
 # from install.sh and FIREWALL_GROUP; the entrypoints source install.sh, so
-# those are available at call time. (deps.sh sources this file only for the
-# yt-dlp helpers and never calls setup_user.)
+# those are available at call time. (deps.sh sources this file only for
+# install_media_deps and its yt-dlp/VA-API halves, and never calls setup_user.)
 
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -90,6 +90,308 @@ EOF
             ;;
         *)
             die "Unknown yt-dlp command: $subcmd (try: shepherd-admin yt-dlp help)"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# VA-API drivers (hardware video decoding)
+# ---------------------------------------------------------------------------
+#
+# libva dispatches to a per-vendor `<name>_drv_video.so`. With none installed,
+# mpv's `hwdec=auto-safe` finds nothing and shepherd-media decodes every frame
+# on the CPU — roughly 6x the CPU for 1080p30 on an Intel HD 4000 (issue #115).
+# Ubuntu's `mpv` package neither depends on nor recommends a driver, so a fresh
+# install usually has none.
+#
+# Which driver is the right one depends on the GPU, so the packages are chosen
+# from the hardware present rather than installed blanket-fashion. Whether the
+# chosen driver actually loads at playback time is reported by shepherd-media
+# itself, which observes mpv's `hwdec-current` and warns when video ends up on
+# the CPU.
+
+# Root of the sysfs tree the GPU inventory is read from. Overridable so the
+# detection can be exercised against a fixture tree without the matching
+# hardware — see `va-api detect`.
+SHEPHERD_SYSFS_ROOT="${SHEPHERD_SYSFS_ROOT:-/sys}"
+
+# Directories libva loads drivers from.
+VA_DRIVER_DIRS=(/usr/lib/*/dri /usr/lib/dri)
+
+# Inventory the display controllers on this host, one `<vendor> <detail>` line
+# each, where <vendor> is one of intel/amd/nvidia/nouveau/other.
+#
+# PCI is the primary source (a display controller has class 0x03xxxx). Machines
+# whose GPU is not on the PCI bus at all — most ARM boards — expose no such
+# device, so those fall back to the kernel DRM driver's name.
+va_detect_gpus() {
+    local dev vendor class driver found=0
+
+    for dev in "$SHEPHERD_SYSFS_ROOT"/bus/pci/devices/*; do
+        [[ -r "$dev/class" && -r "$dev/vendor" ]] || continue
+        class="$(<"$dev/class")"
+        # Display controllers only: PCI base class 0x03.
+        [[ "$class" == 0x03* ]] || continue
+        vendor="$(<"$dev/vendor")"
+        found=1
+        case "$vendor" in
+            # Intel.
+            0x8086) printf 'intel %s\n' "${dev##*/}" ;;
+            # AMD/ATI.
+            0x1002 | 0x1022) printf 'amd %s\n' "${dev##*/}" ;;
+            0x10de)
+                # NVIDIA's own driver needs a VDPAU bridge; nouveau is served by
+                # the VA driver inside Mesa. Tell them apart by what is bound.
+                # Read the link text rather than canonicalising it: the driver
+                # name is its last component either way, and `readlink -f` would
+                # yield nothing if the target is not reachable, which would
+                # silently misreport nouveau as the proprietary driver.
+                driver=""
+                [[ -L "$dev/driver" ]] && driver="$(basename "$(readlink "$dev/driver")")"
+                if [[ "$driver" == "nouveau" ]]; then
+                    printf 'nouveau %s\n' "${dev##*/}"
+                else
+                    printf 'nvidia %s\n' "${dev##*/}"
+                fi
+                ;;
+            *) printf 'other %s\n' "$vendor" ;;
+        esac
+    done
+
+    [[ "$found" -eq 1 ]] && return 0
+
+    # No PCI display controller: fall back to whatever DRM devices exist.
+    for dev in "$SHEPHERD_SYSFS_ROOT"/class/drm/card*; do
+        [[ -L "$dev/device/driver" ]] || continue
+        driver="$(basename "$(readlink "$dev/device/driver")")"
+        case "$driver" in
+            i915 | xe) printf 'intel %s\n' "$driver" ;;
+            amdgpu | radeon) printf 'amd %s\n' "$driver" ;;
+            nouveau) printf 'nouveau %s\n' "$driver" ;;
+            nvidia*) printf 'nvidia %s\n' "$driver" ;;
+            *) printf 'other %s\n' "$driver" ;;
+        esac
+    done
+}
+
+# Candidate driver packages for a vendor, most preferred first. Empty output
+# means the vendor needs no package beyond what Mesa already installs.
+va_packages_for_vendor() {
+    case "$1" in
+        intel)
+            # Two generations of Intel driver, with no reliable way to tell from
+            # sysfs which one a given chip needs: iHD covers Broadwell and newer,
+            # i965 the generations before it. Offering both is not laziness —
+            # libva probes them in turn at runtime and uses the one that
+            # initialises, which is exactly the fallback observed on an HD 4000
+            # (iHD fails, i965 loads).
+            echo intel-media-va-driver
+            echo i965-va-driver
+            ;;
+        amd | nouveau)
+            # Gallium's VA drivers (radeonsi, r600, nouveau) ship inside Mesa,
+            # which is already a runtime dependency. Some releases also split
+            # them into their own package.
+            echo mesa-va-drivers
+            ;;
+        nvidia)
+            # Bridges VA-API onto NVIDIA's VDPAU/NVDEC.
+            echo nvidia-vaapi-driver
+            ;;
+        *) ;;
+    esac
+}
+
+# The libva driver names that serve a vendor, so the report can say whether the
+# hardware actually has one rather than listing every driver on the system.
+va_drivers_for_vendor() {
+    case "$1" in
+        intel) echo iHD_drv_video.so; echo i965_drv_video.so ;;
+        amd) echo radeonsi_drv_video.so; echo r600_drv_video.so ;;
+        nouveau) echo nouveau_drv_video.so ;;
+        nvidia) echo nvidia_drv_video.so ;;
+        *) ;;
+    esac
+}
+
+# Filter a package list down to those this host's archive can actually install.
+# A package with no candidate is one this release or architecture does not
+# carry, which is normal rather than an error.
+va_available_packages() {
+    local pkg candidate
+    for pkg in "$@"; do
+        # Capture apt-cache's output instead of piping it into `grep -q`: grep
+        # exits at the first match, apt-cache takes SIGPIPE, and under
+        # `set -o pipefail` the pipeline then reports 141 — which would read as
+        # "no candidate" for every package that *is* available.
+        candidate="$(apt-cache policy "$pkg" 2>/dev/null | sed -n 's/^[[:space:]]*Candidate:[[:space:]]*//p')"
+        if [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
+            echo "$pkg"
+        fi
+    done
+}
+
+# Which of `$@` (driver .so basenames) are present on this system.
+va_present_drivers() {
+    local dir name
+    for name in "$@"; do
+        for dir in "${VA_DRIVER_DIRS[@]}"; do
+            if [[ -e "$dir/$name" ]]; then
+                echo "$name"
+                break
+            fi
+        done
+    done
+}
+
+# Resolve the set of packages to install for the detected hardware. Prints one
+# package per line; empty output means there is nothing to do.
+va_resolve_packages() {
+    local -a wanted=()
+    local vendor _detail
+    while read -r vendor _detail; do
+        [[ -n "$vendor" ]] || continue
+        mapfile -t -O "${#wanted[@]}" wanted < <(va_packages_for_vendor "$vendor")
+    done < <(va_detect_gpus)
+
+    if [[ ${#wanted[@]} -eq 0 ]]; then
+        return 0
+    fi
+    # Dedupe (hybrid graphics report the same vendor twice) while keeping the
+    # preference order, then drop what the archive does not offer.
+    local -a unique=()
+    local pkg
+    for pkg in "${wanted[@]}"; do
+        [[ " ${unique[*]-} " == *" $pkg "* ]] || unique+=("$pkg")
+    done
+    va_available_packages "${unique[@]}"
+}
+
+# Print what was detected and what would be installed, without changing
+# anything.
+va_api_detect() {
+    local -a gpus=() packages=()
+    mapfile -t gpus < <(va_detect_gpus)
+    mapfile -t packages < <(va_resolve_packages)
+
+    if [[ ${#gpus[@]} -eq 0 ]]; then
+        warn "No GPU found under $SHEPHERD_SYSFS_ROOT"
+        return 0
+    fi
+
+    local gpu vendor detail
+    local -a wanted=() present=()
+    for gpu in "${gpus[@]}"; do
+        read -r vendor detail <<<"$gpu"
+        mapfile -t wanted < <(va_drivers_for_vendor "$vendor")
+        present=()
+        [[ ${#wanted[@]} -gt 0 ]] && mapfile -t present < <(va_present_drivers "${wanted[@]}")
+        if [[ ${#present[@]} -gt 0 ]]; then
+            info "$vendor ($detail): driver present — ${present[*]}"
+        else
+            warn "$vendor ($detail): no VA-API driver installed; video will decode on the CPU"
+        fi
+    done
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        info "Nothing to install: this hardware is served by the drivers Mesa ships, or its drivers are not packaged for this architecture"
+    else
+        info "Packages for this hardware: ${packages[*]}"
+    fi
+}
+
+# Install the VA-API drivers this host's graphics hardware needs.
+#
+# Best-effort by design: hardware whose drivers are not packaged for this
+# architecture is not an error, so this never fails the surrounding install.
+install_va_api_drivers() {
+    local -a packages=()
+    mapfile -t packages < <(va_resolve_packages)
+
+    if [[ ${#packages[@]} -eq 0 ]]; then
+        info "No VA-API driver package applies to this host's graphics hardware; relying on the drivers Mesa ships"
+        return 0
+    fi
+
+    info "Installing VA-API drivers for hardware video decoding: ${packages[*]}"
+    if ! maybe_sudo apt-get install -y "${packages[@]}"; then
+        warn "VA-API driver install failed; shepherd-media will decode video on the CPU"
+        return 0
+    fi
+    success "VA-API drivers installed: ${packages[*]}"
+}
+
+# Dispatch for `shepherd-admin va-api <install|detect>`.
+va_api_main() {
+    local subcmd="${1:-install}"
+    shift || true
+    case "$subcmd" in
+        install | update | upgrade)
+            install_va_api_drivers
+            ;;
+        detect | status | show)
+            va_api_detect
+            ;;
+        "" | help | -h | --help)
+            cat <<'EOF'
+Usage: shepherd-admin va-api <install|detect>
+
+    install   Install the VA-API drivers this host's graphics hardware needs
+    detect    Show the detected hardware and the packages it would install
+
+shepherd-media decodes video on the GPU through mpv's VA-API support, which
+needs a libva driver for your graphics hardware. Ubuntu's mpv package does not
+pull one in, so without this every frame is decoded on the CPU.
+
+The driver in use is reported in shepherd-media's log at the start of each
+video ("mpv is decoding video with vaapi (zero-copy)", or a warning when it
+ends up on the CPU).
+EOF
+            ;;
+        *)
+            die "Unknown va-api command: $subcmd (try: shepherd-admin va-api help)"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Media dependencies
+# ---------------------------------------------------------------------------
+
+# Everything shepherd-media needs beyond the apt packages in run.pkgs: a VA-API
+# driver for its hardware decoding, and yt-dlp for YouTube libraries. Both are
+# kept out of run.pkgs — the drivers because the right ones depend on the
+# hardware, yt-dlp because the archived build goes stale — so this is the one
+# call that covers them.
+install_media_deps() {
+    install_va_api_drivers
+    install_ytdlp
+}
+
+# Dispatch for `shepherd-admin media-deps <install>`.
+media_deps_main() {
+    local subcmd="${1:-install}"
+    shift || true
+    case "$subcmd" in
+        install | update | upgrade)
+            install_media_deps
+            ;;
+        "" | help | -h | --help)
+            cat <<'EOF'
+Usage: shepherd-admin media-deps install
+
+Installs everything shepherd-media needs that apt cannot cover on its own:
+
+    va-api    VA-API drivers matched to this host's graphics hardware,
+              without which video is decoded on the CPU
+    yt-dlp    into a virtualenv, for YouTube media libraries
+
+Equivalent to running 'shepherd-admin va-api install' and
+'shepherd-admin yt-dlp install'. Re-run periodically to keep yt-dlp current.
+EOF
+            ;;
+        *)
+            die "Unknown media-deps command: $subcmd (try: shepherd-admin media-deps help)"
             ;;
     esac
 }
