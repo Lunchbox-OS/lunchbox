@@ -77,7 +77,11 @@ fn make_player() -> Option<Box<dyn PlayerHandle>> {
         // `fast_render`: this app targets TVs with weak GPUs (e.g. Fire TV
         // sticks), where mpv's default GL render path can't keep up with the
         // display; the `fast` profile restores full-rate playback.
-        match shepherd_media_core::LibmpvPlayer::new(Quality::default().ytdl_format(), true) {
+        match shepherd_media_core::LibmpvPlayer::new(
+            Quality::default().ytdl_format(),
+            true,
+            shepherd_media_core::VideoOutput::RenderApi,
+        ) {
             Ok(p) => Some(Box::new(p)),
             Err(e) => {
                 log::error!("libmpv init failed: {e}");
@@ -299,7 +303,9 @@ impl MediaApp {
         let mut player = make_player();
         if let Some(p) = player.as_mut() {
             if let Some(get_proc) = cc.get_proc_address.as_ref()
-                && let Err(e) = p.bind_gl(get_proc.as_ref())
+                // Android has no wl_display/X11 display; its hwdec interop is
+                // MediaCodec-based and needs no handle from us.
+                && let Err(e) = p.bind_gl(get_proc.as_ref(), None)
             {
                 log::error!("bind_gl failed: {e}");
             }

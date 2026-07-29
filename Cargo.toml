@@ -118,7 +118,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Logging
-tracing = "0.1"
+# The `log` feature makes `tracing` emit `log` records when no tracing
+# Subscriber is installed, so the Android binaries — which set up
+# `android_logger` rather than `tracing-subscriber` — still see events from
+# shared crates (e.g. shepherd-media-core reporting the chosen hwdec).
+tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error handling

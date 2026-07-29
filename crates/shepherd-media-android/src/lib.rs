@@ -11,6 +11,7 @@
 //! `desktop_preview` example for fast UI iteration.
 
 pub mod exit;
+pub mod ffmpeg;
 pub mod handoff;
 pub mod insets;
 pub mod playback;
@@ -32,6 +33,10 @@ fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+
+    // Give FFmpeg the JavaVM before any player exists — without it MediaCodec
+    // cannot be reached and every frame decodes on the CPU.
+    ffmpeg::register_java_vm();
 
     // Record the activity handle so the safe-area inset query can reach
     // getWindow()/getRootWindowInsets() and the file browser can reach a

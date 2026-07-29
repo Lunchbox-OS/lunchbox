@@ -20,6 +20,51 @@ use crate::library::Source;
 /// for documentation in signatures that already supply a lifetime.
 pub type GetProcAddress<'a> = dyn Fn(&CStr) -> *const c_void + 'a;
 
+/// The windowing-system display handle mpv's hardware-decode interop needs in
+/// order to open a VA-API device.
+///
+/// When mpv owns its own window it discovers this itself. Under the libmpv GL
+/// render API it cannot: `mpv_render_context_create` only learns about the
+/// display if the host passes `MPV_RENDER_PARAM_WL_DISPLAY` /
+/// `MPV_RENDER_PARAM_X11_DISPLAY`. Without it, mpv logs "Could not create a VA
+/// display", silently drops from zero-copy `vaapi` to `vaapi-copy` (every
+/// decoded frame is read back from GPU memory to system RAM and re-uploaded),
+/// and falls back to software decoding when no `-copy` path exists either.
+#[derive(Debug, Clone, Copy)]
+pub enum NativeDisplay {
+    /// A `wl_display *`.
+    Wayland(*const c_void),
+    /// An X11 `Display *`.
+    X11(*const c_void),
+}
+
+/// Where the player puts its decoded frames.
+///
+/// The two modes are not interchangeable — they decide which hardware-decode
+/// paths mpv can reach at all, so the choice belongs at construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoOutput {
+    /// Render into a framebuffer the host supplies, through the libmpv render
+    /// API (`vo=libmpv`). The host owns the surface and composites the frame
+    /// itself; see [`PlayerHandle::bind_gl`] and [`PlayerHandle::render`].
+    #[default]
+    RenderApi,
+
+    /// Decode straight into an `android.view.Surface`
+    /// (`vo=mediacodec_embed`, `hwdec=mediacodec`).
+    ///
+    /// Frames never leave the GPU and SurfaceFlinger can hand them to a
+    /// hardware overlay plane. The render-API path cannot do this: with no
+    /// Surface to render into, mpv falls back to `mediacodec-copy`, which reads
+    /// every decoded frame back into system RAM for the host to re-upload — the
+    /// dominant cost of playback on a Fire TV (issue #115).
+    ///
+    /// The Surface itself is attached separately via
+    /// [`PlayerHandle::set_video_surface`], because it does not exist yet when
+    /// the player is built and it comes and goes with the activity.
+    AndroidSurface,
+}
+
 /// Operations on a media player. Calls are non-blocking with respect to
 /// playback: `play` returns once mpv has accepted the command, not when
 /// playback ends.
@@ -77,6 +122,19 @@ pub trait PlayerHandle: Send {
     /// mux them at playback. Applies once and is consumed by the next `play`.
     fn set_external_audio(&mut self, _url: Option<String>) {}
 
+    /// Point the player's video output at a platform window handle.
+    ///
+    /// Only meaningful under [`VideoOutput::AndroidSurface`], where the handle
+    /// is an `android.view.Surface` jobject pointer cast to `i64` — mpv's
+    /// `--wid`. Must be set before each playback: the VO reads it when it is
+    /// created, and it aborts the process if no window is set.
+    ///
+    /// `None` maps to mpv's `-1`, "detach from the current window". **Only
+    /// pass it when the player is known to be idle.** `stop()` merely queues
+    /// the teardown, so detaching straight after one races the VO thread, which
+    /// re-reads the window while reconfiguring and aborts on `-1`.
+    fn set_video_surface(&mut self, _handle: Option<i64>) {}
+
     // -----------------------------------------------------------------
     // Embedded rendering hooks. The host calls `bind_gl` once after its
     // OpenGL context is current, registers a redraw callback so it
@@ -86,9 +144,15 @@ pub trait PlayerHandle: Send {
 
     /// Bind mpv's render context to the host's OpenGL context. Must be
     /// called from the GL thread, exactly once, before `render`.
+    ///
+    /// `native_display` is the host's windowing-system display handle; pass it
+    /// whenever one exists, or hardware decoding degrades (see
+    /// [`NativeDisplay`]). `None` is correct on platforms with no such handle
+    /// (e.g. Android, where the interop is MediaCodec-based).
     fn bind_gl(
         &mut self,
         _get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+        _native_display: Option<NativeDisplay>,
     ) -> Result<(), PlayerError> {
         Ok(())
     }
@@ -299,12 +363,30 @@ mod libmpv_backend {
         /// otherwise can't upscale to a 1080p output surface within a frame and
         /// present at a fraction of the display rate; the desktop binary leaves it
         /// off for full quality.
-        pub fn new(ytdl_format: &str, fast_render: bool) -> Result<Self, PlayerError> {
+        pub fn new(
+            ytdl_format: &str,
+            fast_render: bool,
+            output: super::VideoOutput,
+        ) -> Result<Self, PlayerError> {
             let mpv = Mpv::with_initializer(|init| {
-                // `vo=libmpv` disables mpv's own windowing — the host UI
-                // owns the surface and composites mpv's output via
-                // RenderContext.
-                init.set_property("vo", "libmpv")?;
+                match output {
+                    // `vo=libmpv` disables mpv's own windowing — the host UI
+                    // owns the surface and composites mpv's output via
+                    // RenderContext.
+                    super::VideoOutput::RenderApi => {
+                        init.set_property("vo", "libmpv")?;
+                        // Hardware-accelerated decode where available; fall
+                        // back to software automatically.
+                        init.set_property("hwdec", "auto-safe")?;
+                    }
+                    // Decode straight into the Surface attached later via
+                    // `set_video_surface`. `hwdec=mediacodec` (not
+                    // `-copy`) is the whole point: frames stay on the GPU.
+                    super::VideoOutput::AndroidSurface => {
+                        init.set_property("vo", "mediacodec_embed")?;
+                        init.set_property("hwdec", "mediacodec")?;
+                    }
+                }
                 if fast_render {
                     // Best-effort: keep default quality if the profile is missing.
                     let _ = init.set_property("profile", "fast");
@@ -324,9 +406,6 @@ mod libmpv_backend {
                 let clients = crate::youtube::YOUTUBE_EXTRACTOR_ARGS;
                 let raw_options = format!("extractor-args=%{}%{clients}", clients.len());
                 init.set_property("ytdl-raw-options", raw_options.as_str())?;
-                // Hardware-accelerated decode where available; fall back
-                // to software automatically.
-                init.set_property("hwdec", "auto-safe")?;
                 // Optional verbose mpv log to a file, for on-device debugging.
                 if let Ok(path) = std::env::var("SHEPHERD_MPV_LOG") {
                     let _ = init.set_property("msg-level", "all=v");
@@ -339,6 +418,15 @@ mod libmpv_backend {
             // Observe `idle-active` so we can detect mpv returning to idle
             // (stop issued from the UI) as a Closed event.
             mpv.observe_property("idle-active", libmpv2::Format::Flag, 0)
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+
+            // Observe which decoder mpv actually settled on. `hwdec=auto-safe`
+            // degrades quietly: a missing VA-API driver, a display handle we
+            // failed to hand over, or a codec the GPU has no block for all end
+            // in software decoding (or a `-copy` mode that reads every frame
+            // back into system RAM) with nothing said about it. That gap is
+            // what made issue #115 hard to see, so report it once per file.
+            mpv.observe_property("hwdec-current", libmpv2::Format::String, 0)
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
 
             Ok(Self {
@@ -360,6 +448,35 @@ mod libmpv_backend {
                 | ClassifiedUri::YouTube(url)
                 | ClassifiedUri::Unknown(url) => Ok(url.to_string()),
             }
+        }
+    }
+
+    /// Report the decode path mpv chose for the current file, at a level that
+    /// matches how much performance is on the table.
+    ///
+    /// mpv writes `"no"` when it is decoding on the CPU, the interop name
+    /// (`vaapi`, `mediacodec`, …) when frames stay on the GPU, and a `-copy`
+    /// suffix when it decodes on the GPU but reads every frame back into system
+    /// RAM. The middle case is the one worth shouting about: it looks like
+    /// hardware decoding from the outside while costing roughly twice the CPU
+    /// of the zero-copy path.
+    fn log_hwdec(mode: &str) {
+        if mode.is_empty() {
+            return;
+        }
+        if mode == "no" {
+            tracing::warn!(
+                "mpv is decoding video in software; playback will be CPU-bound. \
+                 Check that a VA-API driver is installed (e.g. `va-driver-all`) \
+                 and that the source codec is one this GPU can decode."
+            );
+        } else if let Some(interop) = mode.strip_suffix("-copy") {
+            tracing::warn!(
+                "mpv is decoding video with {interop} but copying every frame back \
+                 to system RAM ({mode}); the zero-copy path is unavailable."
+            );
+        } else {
+            tracing::info!("mpv is decoding video with {mode} (zero-copy)");
         }
     }
 
@@ -465,9 +582,19 @@ mod libmpv_backend {
             self.external_audio = url;
         }
 
+        fn set_video_surface(&mut self, handle: Option<i64>) {
+            // mpv documents -1 as "detach from the current window"; passing it
+            // on teardown is what stops the VO touching a dead Surface.
+            let wid = handle.unwrap_or(-1);
+            if let Err(e) = self.mpv.set_property("wid", wid) {
+                tracing::warn!("could not set mpv wid to {wid}: {e}");
+            }
+        }
+
         fn bind_gl(
             &mut self,
             get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+            native_display: Option<super::NativeDisplay>,
         ) -> Result<(), PlayerError> {
             // SAFETY: `OpenGLInitParams<C>` has no lifetime parameter, so the
             // compiler insists `C` be `'static`. In practice libmpv2 boxes the
@@ -479,17 +606,26 @@ mod libmpv_backend {
             // this stack frame even though the type system can't express that.
             let static_proc: &'static ProcAddrFn = unsafe { std::mem::transmute(get_proc_address) };
 
-            let ctx = RenderContext::new(
-                unsafe { self.mpv.ctx.as_mut() },
-                vec![
-                    RenderParam::ApiType(RenderParamApiType::OpenGl),
-                    RenderParam::InitParams(OpenGLInitParams {
-                        get_proc_address: proc_address_trampoline,
-                        ctx: static_proc,
-                    }),
-                ],
-            )
-            .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+            let mut params = vec![
+                RenderParam::ApiType(RenderParamApiType::OpenGl),
+                RenderParam::InitParams(OpenGLInitParams {
+                    get_proc_address: proc_address_trampoline,
+                    ctx: static_proc,
+                }),
+            ];
+            // Hand mpv the host's display so its VA-API interop can open a VA
+            // display. Skipping this is what makes hwdec silently fall back to
+            // `vaapi-copy` (a full frame readback per frame) or to software.
+            match native_display {
+                Some(super::NativeDisplay::Wayland(d)) => {
+                    params.push(RenderParam::WaylandDisplay(d));
+                }
+                Some(super::NativeDisplay::X11(d)) => params.push(RenderParam::X11Display(d)),
+                None => {}
+            }
+
+            let ctx = RenderContext::new(unsafe { self.mpv.ctx.as_mut() }, params)
+                .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
 
             self.render_ctx.lock().unwrap().0 = Some(ctx);
             Ok(())
@@ -542,6 +678,10 @@ mod libmpv_backend {
                             } else {
                                 None
                             }
+                        }
+                        ("hwdec-current", PropertyData::Str(mode)) => {
+                            log_hwdec(mode);
+                            None
                         }
                         _ => None,
                     },

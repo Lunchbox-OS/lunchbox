@@ -59,6 +59,9 @@ fn max_cache_bytes() -> u64 {
 pub struct VideoCache {
     cache_dir: PathBuf,
     download_tx: mpsc::Sender<DownloadRequest>,
+    /// The yt-dlp selector downloads use, kept so `enqueue` can tell a file
+    /// downloaded under the current selector from one that predates it.
+    ytdl_format: String,
 }
 
 struct DownloadRequest {
@@ -75,6 +78,17 @@ struct DownloadRequest {
 enum DownloadKind {
     YouTube,
     Http,
+}
+
+impl DownloadKind {
+    /// The format selector recorded in (and compared against) the done
+    /// sentinel. A direct HTTP download picks no format, so it records none.
+    fn selector<'a>(&self, ytdl_format: &'a str) -> &'a str {
+        match self {
+            DownloadKind::YouTube => ytdl_format,
+            DownloadKind::Http => "",
+        }
+    }
 }
 
 impl VideoCache {
@@ -103,6 +117,7 @@ impl VideoCache {
         Some(Arc::new(VideoCache {
             cache_dir,
             download_tx: tx,
+            ytdl_format: ytdl_format.to_string(),
         }))
     }
 
@@ -144,9 +159,15 @@ impl VideoCache {
             _ => return,
         };
 
-        if self.cached_path(item_id).is_some() {
-            debug!("video cache hit for {item_id}, skipping queue");
-            return;
+        match cache_state(&self.cache_dir, item_id, kind.selector(&self.ytdl_format)) {
+            CacheState::Fresh => {
+                debug!("video cache hit for {item_id}, skipping queue");
+                return;
+            }
+            CacheState::StaleSelector => {
+                debug!("cached {item_id} predates the current format selector, re-downloading");
+            }
+            CacheState::Absent => {}
         }
 
         let _ = self.download_tx.send(DownloadRequest {
@@ -274,8 +295,9 @@ impl PlayerHandle for CachingPlayer {
     fn bind_gl(
         &mut self,
         get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+        native_display: Option<shepherd_media_core::NativeDisplay>,
     ) -> Result<(), PlayerError> {
-        self.inner.bind_gl(get_proc_address)
+        self.inner.bind_gl(get_proc_address, native_display)
     }
 
     fn render(&self, fbo: i32, width: i32, height: i32) -> Result<(), PlayerError> {
@@ -328,9 +350,72 @@ fn find_cached_file(cache_dir: &Path, item_id: &str) -> Option<PathBuf> {
 
 /// Write the completion sentinel for `item_id`.  Called once the video file
 /// is fully on disk and ready to play.
-fn write_done_sentinel(cache_dir: &Path, item_id: &str) -> Result<(), String> {
+///
+/// The sentinel carries the yt-dlp format selector the file was downloaded
+/// with, so a later change to that selector can be detected — see
+/// [`cache_state`].  Direct-HTTP downloads involve no selector and record an
+/// empty one.
+fn write_done_sentinel(cache_dir: &Path, item_id: &str, selector: &str) -> Result<(), String> {
     let path = cache_dir.join(format!("{item_id}.done"));
-    std::fs::write(&path, b"").map_err(|e| format!("failed to write done sentinel: {e}"))
+    std::fs::write(&path, selector.as_bytes())
+        .map_err(|e| format!("failed to write done sentinel: {e}"))
+}
+
+/// What the cache holds for an item, relative to the selector we would download
+/// it with today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheState {
+    /// Nothing committed for this item.
+    Absent,
+    /// A committed file downloaded with the selector currently in force.
+    Fresh,
+    /// A committed file downloaded with a *different* selector.
+    ///
+    /// It still plays, so `cached_path` keeps handing it out — an offline device
+    /// must not lose content it already has.  But it is the wrong codec: when
+    /// the selector changed to prefer H.264 for hardware decoding (issue #115),
+    /// every already-cached VP9 file would otherwise keep costing ~5x the CPU
+    /// forever.  So a queue request replaces it.
+    StaleSelector,
+}
+
+/// Classify what the cache holds for `item_id` against `selector`.
+fn cache_state(cache_dir: &Path, item_id: &str, selector: &str) -> CacheState {
+    if find_cached_file(cache_dir, item_id).is_none() {
+        return CacheState::Absent;
+    }
+    // A sentinel written before this field existed reads as empty, which
+    // differs from any YouTube selector (so those refresh once) and matches the
+    // empty selector recorded for direct-HTTP files (so those don't).
+    let recorded = std::fs::read_to_string(cache_dir.join(format!("{item_id}.done")))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if recorded == selector {
+        CacheState::Fresh
+    } else {
+        CacheState::StaleSelector
+    }
+}
+
+/// Delete every committed file for `item_id` plus its sentinel.
+///
+/// Called before re-downloading a [`CacheState::StaleSelector`] item: the new
+/// download may land on a different extension (`.webm` → `.mp4`), and
+/// `find_cached_file` returns whichever of the two `read_dir` yields first, so
+/// leaving both behind would make playback pick a codec at random.
+fn remove_cached_item(cache_dir: &Path, item_id: &str) {
+    let prefix = format!("{item_id}.");
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix)
+            && let Err(e) = std::fs::remove_file(entry.path())
+        {
+            warn!("could not remove stale cache file {:?}: {e}", entry.path());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,9 +506,15 @@ fn download_worker(
     ytdl_format: String,
 ) {
     for req in rx {
-        if find_cached_file(&cache_dir, &req.item_id).is_some() {
-            debug!("video already cached, skipping: {}", req.item_id);
-            continue;
+        match cache_state(&cache_dir, &req.item_id, req.kind.selector(&ytdl_format)) {
+            CacheState::Fresh => {
+                debug!("video already cached, skipping: {}", req.item_id);
+                continue;
+            }
+            // Clear the old file first: the replacement may land on a different
+            // extension, and two files for one item make playback ambiguous.
+            CacheState::StaleSelector => remove_cached_item(&cache_dir, &req.item_id),
+            CacheState::Absent => {}
         }
 
         if !req.evict_after {
@@ -490,7 +581,7 @@ fn download_youtube(
     if !status.success() {
         return Err(format!("yt-dlp exited with {status} for {url}"));
     }
-    write_done_sentinel(cache_dir, item_id)
+    write_done_sentinel(cache_dir, item_id, ytdl_format)
 }
 
 fn download_http(cache_dir: &Path, item_id: &str, url: &str) -> Result<(), String> {
@@ -516,5 +607,116 @@ fn download_http(cache_dir: &Path, item_id: &str, url: &str) -> Result<(), Strin
     std::fs::rename(&part_path, &final_path)
         .map_err(|e| format!("failed to rename part file: {e}"))?;
 
-    write_done_sentinel(cache_dir, item_id)
+    // No format selector is involved in a direct download.
+    write_done_sentinel(cache_dir, item_id, "")
+}
+
+#[cfg(test)]
+mod cache_state_tests {
+    use super::*;
+
+    const H264: &str = "bv*[vcodec^=avc1][height<=?1080]+ba/b";
+    const ANY: &str = "bestvideo[height<=?1080]+bestaudio/best";
+
+    /// Commit `item_id` to the cache as if downloaded with `selector`.
+    fn commit(dir: &Path, item_id: &str, ext: &str, selector: &str) {
+        std::fs::write(dir.join(format!("{item_id}.{ext}")), b"video").unwrap();
+        write_done_sentinel(dir, item_id, selector).unwrap();
+    }
+
+    #[test]
+    fn absent_when_nothing_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cache_state(dir.path(), "clip", H264), CacheState::Absent);
+    }
+
+    #[test]
+    fn absent_while_a_download_is_still_in_flight() {
+        // A file with no sentinel is an unfinished download, not a stale one —
+        // treating it as stale would delete a partial file out from under the
+        // worker that is writing it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("clip.part"), b"partial").unwrap();
+        assert_eq!(cache_state(dir.path(), "clip", H264), CacheState::Absent);
+    }
+
+    #[test]
+    fn fresh_when_the_selector_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "mp4", H264);
+        assert_eq!(cache_state(dir.path(), "clip", H264), CacheState::Fresh);
+    }
+
+    #[test]
+    fn stale_when_the_selector_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "webm", ANY);
+        assert_eq!(
+            cache_state(dir.path(), "clip", H264),
+            CacheState::StaleSelector,
+            "a file downloaded under the old any-codec selector must be refreshed"
+        );
+    }
+
+    #[test]
+    fn sentinels_written_before_this_field_existed_refresh_once() {
+        // Upgrading from a build whose sentinel was an empty marker.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("clip.webm"), b"video").unwrap();
+        std::fs::write(dir.path().join("clip.done"), b"").unwrap();
+        assert_eq!(
+            cache_state(dir.path(), "clip", H264),
+            CacheState::StaleSelector
+        );
+    }
+
+    #[test]
+    fn direct_http_downloads_stay_fresh_across_selector_changes() {
+        // They never involved a selector, so changing it must not re-download
+        // every plain-HTTP video in the library.
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "mp4", DownloadKind::Http.selector(ANY));
+        assert_eq!(
+            cache_state(dir.path(), "clip", DownloadKind::Http.selector(H264)),
+            CacheState::Fresh
+        );
+    }
+
+    #[test]
+    fn stale_files_are_still_playable_until_replaced() {
+        // `cached_path` deliberately keeps serving a stale file so an offline
+        // device does not lose content it already has.
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "webm", ANY);
+        assert!(find_cached_file(dir.path(), "clip").is_some());
+    }
+
+    #[test]
+    fn removing_an_item_clears_every_extension_and_the_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "webm", ANY);
+        std::fs::write(dir.path().join("clip.part"), b"partial").unwrap();
+        // A different item must survive.
+        commit(dir.path(), "other", "mp4", H264);
+
+        remove_cached_item(dir.path(), "clip");
+
+        assert_eq!(cache_state(dir.path(), "clip", ANY), CacheState::Absent);
+        assert!(!dir.path().join("clip.part").exists());
+        assert_eq!(cache_state(dir.path(), "other", H264), CacheState::Fresh);
+    }
+
+    #[test]
+    fn a_replacement_download_does_not_leave_two_codecs_behind() {
+        // The regression this guards: .webm and .mp4 both present, with
+        // `find_cached_file` picking whichever the directory listing yields.
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "webm", ANY);
+        remove_cached_item(dir.path(), "clip");
+        commit(dir.path(), "clip", "mp4", H264);
+
+        let cached = find_cached_file(dir.path(), "clip").expect("replacement is cached");
+        assert_eq!(cached.extension().unwrap(), "mp4");
+        assert_eq!(cache_state(dir.path(), "clip", H264), CacheState::Fresh);
+    }
 }

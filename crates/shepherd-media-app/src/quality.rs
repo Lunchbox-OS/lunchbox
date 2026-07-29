@@ -51,12 +51,32 @@ impl Quality {
     ///
     /// This is the single definition for both front-ends (the Linux binary
     /// reuses it via the `clap` feature).
+    ///
+    /// Every preset asks for **H.264 first** (`vcodec^=avc1`). yt-dlp ranks
+    /// codecs `av01 > vp9 > avc1` at equal resolution, so a plain
+    /// `bestvideo[height<=?1080]` selects VP9 or AV1 for most YouTube uploads —
+    /// and the fixed-function decoders in the hardware this project targets
+    /// mostly don't cover those. On an Intel HD 4000 that difference is a
+    /// software VP9 decode at ~61% of a CPU core against a hardware H.264
+    /// decode at ~13% for the same video (issue #115). The `bv*+ba` and `b`
+    /// tails fall back to any codec, then to a muxed format, so an upload with
+    /// no H.264 rendition still plays.
+    ///
+    /// The same reasoning already governs the Android app's stream selector
+    /// (`shepherd_media_android::youtube::stream_format`), which resolves
+    /// streams itself instead of going through mpv's `ytdl_hook`.
     pub fn ytdl_format(self) -> &'static str {
         match self {
-            Quality::Best => "bestvideo+bestaudio/best",
-            Quality::Q1080 => "bestvideo[height<=?1080]+bestaudio/best[height<=?1080]/best",
-            Quality::Q720 => "bestvideo[height<=?720]+bestaudio/best[height<=?720]/best",
-            Quality::Q480 => "bestvideo[height<=?480]+bestaudio/best[height<=?480]/best",
+            Quality::Best => "bv*[vcodec^=avc1]+ba/bv*+ba/b",
+            Quality::Q1080 => {
+                "bv*[vcodec^=avc1][height<=?1080]+ba/bv*[height<=?1080]+ba/b[height<=?1080]/b"
+            }
+            Quality::Q720 => {
+                "bv*[vcodec^=avc1][height<=?720]+ba/bv*[height<=?720]+ba/b[height<=?720]/b"
+            }
+            Quality::Q480 => {
+                "bv*[vcodec^=avc1][height<=?480]+ba/bv*[height<=?480]+ba/b[height<=?480]/b"
+            }
         }
     }
 }
@@ -139,11 +159,57 @@ mod tests {
     fn quality_ytdl_format_strings() {
         // This crate is now the single source of these selectors for both the
         // Linux binary and the Android app; pin them so a change is deliberate.
-        assert_eq!(Quality::Best.ytdl_format(), "bestvideo+bestaudio/best");
+        assert_eq!(Quality::Best.ytdl_format(), "bv*[vcodec^=avc1]+ba/bv*+ba/b");
         assert_eq!(
             Quality::Q1080.ytdl_format(),
-            "bestvideo[height<=?1080]+bestaudio/best[height<=?1080]/best"
+            "bv*[vcodec^=avc1][height<=?1080]+ba/bv*[height<=?1080]+ba/b[height<=?1080]/b"
         );
+    }
+
+    #[test]
+    fn every_quality_prefers_h264_then_falls_back() {
+        // The H.264 preference is what keeps playback on the hardware decoder
+        // (issue #115), and the fallbacks are what keep an upload with no H.264
+        // rendition playable. Neither half is optional.
+        for q in [Quality::Best, Quality::Q1080, Quality::Q720, Quality::Q480] {
+            let fmt = q.ytdl_format();
+            assert!(
+                fmt.starts_with("bv*[vcodec^=avc1]"),
+                "{q:?} must ask for H.264 first, got {fmt}"
+            );
+            assert!(
+                fmt.split('/').count() >= 3,
+                "{q:?} must fall back to any codec and then to a muxed format, got {fmt}"
+            );
+            assert!(
+                fmt.ends_with("/b"),
+                "{q:?} must end with an unconstrained muxed fallback, got {fmt}"
+            );
+        }
+    }
+
+    #[test]
+    fn height_capped_qualities_constrain_every_selector_but_the_last_resort() {
+        // A cap that only lands on the first alternative would silently pull a
+        // 4K stream the moment an upload has no H.264 rendition.
+        for (q, cap) in [
+            (Quality::Q1080, "1080"),
+            (Quality::Q720, "720"),
+            (Quality::Q480, "480"),
+        ] {
+            let alternatives: Vec<&str> = q.ytdl_format().split('/').collect();
+            let (last, capped) = alternatives.split_last().expect("non-empty selector");
+            assert_eq!(
+                *last, "b",
+                "{q:?} should end with the last-resort muxed `b`"
+            );
+            for alt in capped {
+                assert!(
+                    alt.contains(&format!("height<=?{cap}")),
+                    "{q:?} selector `{alt}` is missing the {cap}p cap"
+                );
+            }
+        }
     }
 
     // Tiny round-trip helpers that exercise the real (TOML) format by wrapping

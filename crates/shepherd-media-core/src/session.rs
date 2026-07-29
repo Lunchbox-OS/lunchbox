@@ -144,8 +144,9 @@ impl Session {
     pub fn bind_gl(
         &mut self,
         get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+        native_display: Option<crate::NativeDisplay>,
     ) -> Result<(), PlayerError> {
-        self.player.bind_gl(get_proc_address)
+        self.player.bind_gl(get_proc_address, native_display)
     }
 
     pub fn render(&self, fbo: i32, width: i32, height: i32) -> Result<(), PlayerError> {

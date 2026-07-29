@@ -224,7 +224,13 @@ fn build_session(
     // Desktop GPUs render mpv's default (full-quality) path fine; only the
     // Android TV build needs the `fast` profile.
     let inner: Box<dyn shepherd_media_core::PlayerHandle> =
-        match LibmpvPlayer::new(ytdl_format, false) {
+        // The render API: this binary composites mpv's output into its own
+        // eframe surface (see `ui::playback`).
+        match LibmpvPlayer::new(
+            ytdl_format,
+            false,
+            shepherd_media_core::VideoOutput::RenderApi,
+        ) {
             Ok(p) => Box::new(p),
             Err(e) => {
                 error!("failed to construct libmpv player: {e}");
