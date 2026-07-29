@@ -19,6 +19,7 @@ pub mod player;
 pub mod posters;
 pub mod resolve;
 pub mod storage;
+pub mod surface;
 pub mod ui;
 pub mod video_cache;
 pub mod youtube;
@@ -45,6 +46,8 @@ fn android_main(app: android_activity::AndroidApp) {
     storage::set_activity(app.activity_as_ptr());
     // So BACK from the top-level screen can finish the activity and exit.
     exit::set_activity(app.activity_as_ptr());
+    // The video SurfaceView mpv decodes into lives on the activity too.
+    surface::set_activity(app.activity_as_ptr());
 
     // Keep the TV awake while the app is foreground. With `vo=libmpv` there is no
     // player window to inhibit the screensaver, so it would blank mid-video. Set
@@ -66,6 +69,11 @@ fn android_main(app: android_activity::AndroidApp) {
 
     let options = eframe::NativeOptions {
         android_app: Some(app),
+        // Ask glutin for an EGL config with an alpha channel. Without it the
+        // window has no alpha to be transparent *with*, and the video
+        // SurfaceView behind it never shows through — see `clear_color` in
+        // `ui.rs` and the translucent window declared in Theme.ShepherdMedia.
+        viewport: egui::ViewportBuilder::default().with_transparent(true),
         ..Default::default()
     };
 

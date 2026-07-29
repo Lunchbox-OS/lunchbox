@@ -29,10 +29,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ShepherdMedia">
 
-        <!-- Pure NativeActivity: it loads the Rust cdylib named below and calls
-             its android_main entry point. No Java/Kotlin code is shipped. -->
+        <!-- A NativeActivity subclass: it loads the Rust cdylib named below and
+             calls its android_main entry point exactly as NativeActivity does,
+             and additionally owns the SurfaceView that mpv decodes video into
+             (see ShepherdMediaActivity). -->
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".ShepherdMediaActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
             android:exported="true"
             android:launchMode="singleTask"

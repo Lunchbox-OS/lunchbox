@@ -10,8 +10,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -74,13 +72,17 @@ enum Prefetch {
 fn make_player() -> Option<Box<dyn PlayerHandle>> {
     #[cfg(target_os = "android")]
     {
-        // `fast_render`: this app targets TVs with weak GPUs (e.g. Fire TV
-        // sticks), where mpv's default GL render path can't keep up with the
-        // display; the `fast` profile restores full-rate playback.
+        // `fast_render` keeps mpv's scaling cheap on weak TV GPUs. It matters
+        // less now that frames go straight to a Surface — the display hardware
+        // does the scaling — but costs nothing to keep.
+        //
+        // `AndroidSurface` is what makes `hwdec=mediacodec` (not `-copy`)
+        // reachable. The Surface itself is attached per playback (see
+        // `play_with_surface`), since it does not exist yet at this point.
         match shepherd_media_core::LibmpvPlayer::new(
             Quality::default().ytdl_format(),
             true,
-            shepherd_media_core::VideoOutput::RenderApi,
+            shepherd_media_core::VideoOutput::AndroidSurface,
         ) {
             Ok(p) => Some(Box::new(p)),
             Err(e) => {
@@ -93,6 +95,18 @@ fn make_player() -> Option<Box<dyn PlayerHandle>> {
     {
         Some(Box::new(crate::player::StubPlayer::default()))
     }
+}
+
+/// Start playback of `source`, with the video Surface attached first.
+///
+/// Every play must go through here. `vo=mediacodec_embed` does not tolerate a
+/// missing window — it asserts and aborts the process — and playback starts
+/// from three places: a direct play, a resolved YouTube stream, and a retry
+/// after a transient error. Attaching in any one of them leaves the other two
+/// crashing.
+fn play_with_surface(player: &mut dyn PlayerHandle, source: &Source) -> Result<(), String> {
+    crate::surface::attach(player)?;
+    player.play(source).map_err(|e| e.to_string())
 }
 
 /// Encoded poster bytes delivered from a worker thread to the UI thread. The
@@ -237,7 +251,7 @@ pub struct MediaApp {
     /// The playback backend (libmpv on Android), GL-bound once at startup, plus
     /// the view that composites it and the currently-playing item.
     player: Option<Box<dyn PlayerHandle>>,
-    playback: Option<PlaybackView>,
+    playback: PlaybackView,
     playing: Option<PlayingItem>,
     /// A YouTube item whose stream URLs are being resolved on a worker thread
     /// before playback can start: (display title, watch URL, result receiver).
@@ -296,30 +310,11 @@ impl MediaApp {
         };
         let (poster_tx, poster_rx) = std::sync::mpsc::channel();
 
-        // Build the player and bind it to the host GL context. bind_gl must
-        // happen here because the proc-address loader is only exposed on the
-        // creation context.
-        let needs_render = Arc::new(AtomicBool::new(false));
-        let mut player = make_player();
-        if let Some(p) = player.as_mut() {
-            if let Some(get_proc) = cc.get_proc_address.as_ref()
-                // Android has no wl_display/X11 display; its hwdec interop is
-                // MediaCodec-based and needs no handle from us.
-                && let Err(e) = p.bind_gl(get_proc.as_ref(), None)
-            {
-                log::error!("bind_gl failed: {e}");
-            }
-            let flag = needs_render.clone();
-            let egui_ctx = cc.egui_ctx.clone();
-            p.set_redraw_callback(Box::new(move || {
-                flag.store(true, Ordering::Relaxed);
-                egui_ctx.request_repaint();
-            }));
-        }
-        let playback = cc
-            .gl
-            .as_ref()
-            .map(|gl| PlaybackView::new(gl.clone(), needs_render.clone()));
+        // No GL binding here any more: mpv decodes into the activity's video
+        // SurfaceView rather than into our framebuffer, so `bind_gl`,
+        // `render` and the redraw callback are all no-ops in this mode.
+        let player = make_player();
+        let playback = PlaybackView::new();
 
         Self {
             settings_path,
@@ -1227,11 +1222,9 @@ impl MediaApp {
             }
         }
         match self.player.as_mut() {
-            Some(p) => match p.play(&play_source) {
+            Some(p) => match play_with_surface(p.as_mut(), &play_source) {
                 Ok(()) => {
-                    if let Some(pv) = self.playback.as_mut() {
-                        pv.note_started();
-                    }
+                    self.playback.note_started();
                     self.playing = Some(PlayingItem {
                         title,
                         cache: playing_cache,
@@ -1246,10 +1239,23 @@ impl MediaApp {
         }
     }
 
+    /// Stop playback.
+    ///
+    /// Every path that ends playback goes through here. Note what it does *not*
+    /// do: it leaves mpv's window alone. See `surface.rs` for why detaching
+    /// here aborts the process.
+    fn end_playback(&mut self) {
+        if let Some(p) = self.player.as_mut() {
+            let _ = p.stop();
+        }
+        self.playing = None;
+    }
+
     /// Drive playback for a frame: drain player events (ending playback on
-    /// EOF/close/error) and composite the video + overlay. Returns to the grid
-    /// when playback ends or the user leaves.
-    fn run_playback(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    /// EOF/close/error) and draw the transport overlay. The video itself is not
+    /// ours to draw — mpv renders it into the SurfaceView behind this window.
+    /// Returns to the grid when playback ends or the user leaves.
+    fn run_playback(&mut self, ui: &mut egui::Ui) {
         // Drain events without holding a borrow across the mutation. A clean
         // end (EOF/close) leaves; an error is transient — retry it below.
         let mut ended = false;
@@ -1283,7 +1289,7 @@ impl MediaApp {
                 };
                 if let Some(p) = self.player.as_mut() {
                     p.set_external_audio(audio);
-                    if let Err(e) = p.play(&src) {
+                    if let Err(e) = play_with_surface(p.as_mut(), &src) {
                         self.status = Some(format!("Playback failed: {e}"));
                         ended = true;
                     }
@@ -1295,12 +1301,11 @@ impl MediaApp {
         }
 
         if ended {
-            if let Some(p) = self.player.as_mut() {
-                let _ = p.stop();
-            }
             // Download-after-play: cache the just-finished item so the next play
             // is local. Runs on a worker (download + LRU eviction are blocking).
-            if let Some(item) = self.playing.take()
+            let finished = self.playing.take();
+            self.end_playback();
+            if let Some(item) = finished
                 && let Some((url, cache)) = item.cache
             {
                 std::thread::spawn(move || {
@@ -1317,18 +1322,15 @@ impl MediaApp {
             .as_ref()
             .map(|x| x.title.clone())
             .unwrap_or_default();
-        let leave = match (self.playback.as_mut(), self.player.as_mut()) {
-            (Some(pv), Some(p)) => pv.draw(ui, frame, p.as_mut(), &title),
-            _ => {
+        let leave = match self.player.as_mut() {
+            Some(p) => self.playback.draw(ui, p.as_mut(), &title),
+            None => {
                 ui.label("No player available on this platform.");
                 ui.button("⬅ Back").clicked()
             }
         };
         if leave {
-            if let Some(p) = self.player.as_mut() {
-                let _ = p.stop();
-            }
-            self.playing = None;
+            self.end_playback();
         }
     }
 
@@ -1582,11 +1584,9 @@ impl MediaApp {
                 // external track so the video-only stream plays with sound.
                 let audio = streams.audio;
                 p.set_external_audio(audio.clone());
-                match p.play(&src) {
+                match play_with_surface(p.as_mut(), &src) {
                     Ok(()) => {
-                        if let Some(pv) = self.playback.as_mut() {
-                            pv.note_started();
-                        }
+                        self.playback.note_started();
                         self.playing = Some(PlayingItem {
                             title,
                             cache: None,
@@ -1618,7 +1618,18 @@ fn tv_visuals() -> egui::Visuals {
 }
 
 impl eframe::App for MediaApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    /// Clear to transparent while playing so the video SurfaceView behind this
+    /// window shows through; opaque everywhere else, where there is nothing
+    /// behind us and a see-through UI would look broken.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.playing.is_some() {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            visuals.panel_fill.to_normalized_gamma_f32()
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Diff settings across the frame so any mutation persists automatically.
         let before = self.settings.clone();
 
@@ -1633,7 +1644,7 @@ impl eframe::App for MediaApp {
         // inset, so navigation clears the camera cutout and rounded corners
         // while video still uses the entire display as it did before.
         if self.playing.is_some() {
-            self.run_playback(ui, frame);
+            self.run_playback(ui);
             if self.settings != before {
                 self.persist();
             }
