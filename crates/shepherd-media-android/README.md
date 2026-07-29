@@ -61,11 +61,22 @@ the full design and roadmap.
   Remote posters are cached on disk (6 h TTL, stale-as-offline-fallback) so they
   persist across launches.
 - libmpv playback: tapping an item resolves its platform source and plays it
-  through core's libmpv `PlayerHandle`, composited into the eframe GL surface
-  with a touch/keyboard control overlay (play/pause, ±10s, scrub, back). libmpv
-  + ffmpeg are vendored under [`vendor/libmpv/`](./vendor/libmpv) and packaged
-  into the APK. Verified on hardware (Pixel 10a): video renders (incl.
-  MediaCodec H.264 hardware decode) with audio, transport controls, and EOF.
+  through core's libmpv `PlayerHandle`, with a touch/keyboard control overlay
+  (play/pause, ±10s, scrub, back). libmpv + ffmpeg are vendored under
+  [`vendor/libmpv/`](./vendor/libmpv) and packaged into the APK. Verified on
+  hardware (Pixel 10a and a Fire TV): video renders with MediaCodec hardware
+  decode, audio, transport controls, and EOF.
+
+  Video does **not** go through egui. mpv decodes straight into a `SurfaceView`
+  that [`ShepherdMediaActivity`](./android/app/src/main/java/com/armeafamily/shepherd/media/ShepherdMediaActivity.java)
+  puts behind the (translucent) activity window — `vo=mediacodec_embed`,
+  `hwdec=mediacodec`, `--wid` — so frames stay on the GPU and SurfaceFlinger can
+  put them on a hardware overlay plane. egui paints only the overlay, over
+  transparency. Compositing video through egui, as the Linux binary does,
+  restricts mpv to `hwdec=mediacodec-copy`, which reads every decoded frame back
+  into system RAM to be re-uploaded; on a Fire TV that capped 60fps content at
+  ~20fps (issue #115). See `src/surface.rs` for the Surface plumbing and the
+  traps around it.
 - Video caching: with a non-`Off` cache mode, a finished direct-HTTP item is
   downloaded to the per-library cache so the next play is local, with LRU
   eviction to the per-library size cap. Playback prefers a cached local copy.

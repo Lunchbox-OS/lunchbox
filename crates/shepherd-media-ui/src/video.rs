@@ -1,11 +1,23 @@
 //! Shared video-playback UI building blocks.
 //!
-//! Both front-ends composite an mpv/`PlayerHandle` frame into the eframe surface
-//! and draw a transport overlay. The GL compositing — an off-screen FBO-backed
-//! texture the player renders into, exposed to egui as a texture — is identical,
-//! as are the time formatting and the touch scrubber, so they live here. Each
-//! binary keeps its own overlay layout, theme, input model, and Session- vs
-//! `PlayerHandle`-driven playback on top.
+//! Both front-ends draw a transport overlay over the video, and the time
+//! formatting, touch scrubber and key→intent mapping are identical, so they
+//! live here. Each binary keeps its own overlay layout, theme, input model, and
+//! Session- vs `PlayerHandle`-driven playback on top.
+//!
+//! How the video gets on screen is *not* shared any more:
+//!
+//! - the Linux binary composites it, and uses [`VideoCompositor`] — an
+//!   off-screen FBO-backed texture that mpv renders into and egui paints;
+//! - the Android app does not, because mpv decodes straight into a
+//!   `SurfaceView` behind the window (`vo=mediacodec_embed`) and egui only
+//!   paints the overlay over transparency. See issue #115: compositing through
+//!   egui limited it to `hwdec=mediacodec-copy`, which reads every decoded
+//!   frame back into system RAM.
+//!
+//! So [`VideoCompositor`] and [`paint_frame`] have a single caller today. They
+//! stay here because the overlay they sit beside is shared, and because a
+//! platform without a Surface-style output would need them again.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -26,5 +26,10 @@ fn main() {
         .join("vendor/libmpv")
         .join(abi);
     println!("cargo:rustc-link-search=native={}", dir.display());
+    // `av_jni_set_java_vm` (src/ffmpeg.rs) is called directly, so libavcodec has
+    // to be a link-time dependency as well as a runtime one. Its SONAME is a
+    // plain `libavcodec.so`, which is also the name it is packaged under in the
+    // APK's jniLibs, so the runtime lookup resolves to the same file.
+    println!("cargo:rustc-link-lib=dylib=avcodec");
     println!("cargo:rustc-link-arg=-Wl,--allow-shlib-undefined");
 }

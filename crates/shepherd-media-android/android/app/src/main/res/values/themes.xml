@@ -8,5 +8,17 @@
          ignored on API < 28. -->
     <style name="Theme.ShepherdMedia" parent="@android:style/Theme.NoTitleBar.Fullscreen">
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+
+        <!-- The window needs an alpha channel so the video SurfaceView behind
+             it (see ShepherdMediaActivity) shows through wherever the GL side
+             leaves pixels transparent.
+
+             This has to come from the theme rather than a runtime
+             Window.setFormat: NativeActivity.onCreate sets RGB_565 itself, so
+             setting it beforehand has no effect, and setting it afterwards
+             recreates the native window mid-startup. Declaring it here means
+             the window is created translucent once and never reconfigured. -->
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
     </style>
 </resources>

@@ -66,8 +66,14 @@ pub fn run(
             // Bind mpv's render context to the host GL context. This must
             // happen inside the eframe creation closure because that's
             // where `get_proc_address` is available.
+            let native_display = native_display(cc);
+            if native_display.is_none() {
+                tracing::warn!(
+                    "no native display handle available; mpv hardware decoding will fall back to a per-frame readback"
+                );
+            }
             if let Some(get_proc) = cc.get_proc_address.as_ref() {
-                if let Err(e) = session.bind_gl(get_proc.as_ref()) {
+                if let Err(e) = session.bind_gl(get_proc.as_ref(), native_display) {
                     tracing::error!("bind_gl failed: {e}");
                 }
             } else {
@@ -122,6 +128,23 @@ pub fn run(
     } else {
         ExitCause::User
     })
+}
+
+/// The windowing-system display handle behind the eframe window, which mpv
+/// needs in order to bring up its VA-API interop (see
+/// [`shepherd_media_core::NativeDisplay`]).
+fn native_display(cc: &eframe::CreationContext<'_>) -> Option<shepherd_media_core::NativeDisplay> {
+    use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+
+    match cc.display_handle().ok()?.as_raw() {
+        RawDisplayHandle::Wayland(h) => Some(shepherd_media_core::NativeDisplay::Wayland(
+            h.display.as_ptr(),
+        )),
+        RawDisplayHandle::Xlib(h) => {
+            Some(shepherd_media_core::NativeDisplay::X11(h.display?.as_ptr()))
+        }
+        _ => None,
+    }
 }
 
 struct App {

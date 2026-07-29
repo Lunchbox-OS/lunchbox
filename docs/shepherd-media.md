@@ -21,6 +21,25 @@ In addition to the standard `shepherd-launcher` build dependencies:
 - `mpv` and `yt-dlp` at runtime. `yt-dlp` is needed only if you reference
   YouTube URLs — `shepherd-media` will start without it, but YouTube playback
   will fail if `yt-dlp` isn't on `PATH`.
+- A **VA-API driver** at runtime, for hardware video decoding. `mpv` does not
+  pull one in, and without it every frame is decoded on the CPU. Which driver is
+  the right one depends on the GPU, so `shepherd-admin va-api install` picks it
+  from the detected hardware (`va-api detect` shows what it found).
+  `shepherd deps install run` and `shepherd-admin media-deps install` both
+  include it; see [INSTALL.md](./INSTALL.md#hardware-video-decoding) for how to
+  check it worked.
+
+### Codec selection
+
+YouTube's best rendition at a given resolution is usually VP9 or AV1, and the
+fixed-function decoders in older GPUs cover neither. `shepherd-media` therefore
+asks yt-dlp for H.264 first (`bv*[vcodec^=avc1]…`) and only falls back to other
+codecs when an upload has no H.264 rendition. On an Intel HD 4000 that is the
+difference between roughly 61% and 13% of a CPU core for 1080p30.
+
+Videos already in the local cache were downloaded under whichever selector was
+in force at the time; `shepherd-media` keeps playing them, and replaces them the
+next time it queues that item for download.
 
 ## Authoring a library file
 

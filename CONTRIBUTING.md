@@ -99,6 +99,26 @@ Connection state lives in `dev-runtime/headless/session.env`; the compositor log
 is `dev-runtime/headless/sway.log`. See the design notes in
 [`docs/ai/history`](./docs/ai/history/) for internals.
 
+**Not usable for GPU performance work.** The headless session exports
+`LIBGL_ALWAYS_SOFTWARE=1` for every client, so even `--gpu` (which only swaps
+wlroots' own renderer) leaves the launcher, HUD and `shepherd-media` on
+llvmpipe. To measure anything that touches the GPU — video decode, compositing,
+frame pacing — boot a real session on a spare VT instead:
+
+```sh
+sudo mkdir -p /run/shepherd-perf && sudo chmod 700 /run/shepherd-perf
+sudo setsid openvt -c 3 -s -- env XDG_RUNTIME_DIR=/run/shepherd-perf \
+    LIBSEAT_BACKEND=builtin XDG_SESSION_TYPE=wayland sway -c sway.conf
+# then, over SSH:
+#   sudo env XDG_RUNTIME_DIR=/run/shepherd-perf WAYLAND_DISPLAY=wayland-1 <client>
+sudo pkill -x sway && sudo chvt 1     # teardown
+```
+
+`LIBSEAT_BACKEND=builtin` under `openvt` is what lets the session take DRM
+master without a graphical login. See
+[`docs/ai/history/2026-07-28 001 shepherd-media performance investigation.md`](./docs/ai/history/)
+for a worked example.
+
 ### Web UI
 
 The management API HTTP server (`shepherd-http`) embeds the React SPA at compile

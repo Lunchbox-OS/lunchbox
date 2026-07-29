@@ -62,6 +62,8 @@ Usage: shepherd-admin <command> [options]
 Commands:
     setup-user USER   Deploy the example config and add USER to the groups
                       shepherd needs (input/video/bluetooth/shepherd-firewall)
+    media-deps <cmd>  Install everything shepherd-media needs: va-api + yt-dlp
+    va-api <cmd>      Install/detect VA-API drivers for hardware video decoding
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
     apps install APP  Install an activity backend (steam via snap, chrome via Flathub)
     power-key <cmd>   Map the power button to suspend instead of shutdown
@@ -76,6 +78,8 @@ Run 'shepherd-admin <command> help' for detailed command information.
 
 Examples:
     sudo shepherd-admin setup-user kiosk
+    sudo shepherd-admin media-deps install
+    shepherd-admin va-api detect
     sudo shepherd-admin yt-dlp install
     sudo shepherd-admin apps install steam
     sudo shepherd-admin harden apply --user kiosk
@@ -90,6 +94,12 @@ main() {
     case "$cmd" in
         setup-user)
             setup_user "$@"
+            ;;
+        media-deps|media)
+            media_deps_main "$@"
+            ;;
+        va-api|vaapi)
+            va_api_main "$@"
             ;;
         yt-dlp|ytdlp)
             ytdlp_main "$@"

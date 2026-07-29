@@ -23,7 +23,13 @@ libgtk4-layer-shell0
 libudev1
 
 # mpv runtime (libmpv2 is linked dynamically by shepherd-media; mpv brings in
-# both the binary and the .so)
+# both the binary and the .so).
+#
+# mpv also needs a libva driver to decode video on the GPU, and neither depends
+# on nor recommends one. Which driver is right depends on the GPU, so they are
+# not listed here — `shepherd deps install run` picks them from the detected
+# hardware via install_media_deps in scripts/lib/admin.sh (also reachable as
+# `shepherd-admin va-api install`).
 mpv
 
 # Python venv support — needed to create the yt-dlp virtualenv.

@@ -31,6 +31,10 @@ egui_extras = { version = "0.34", features = ["image"] }
 glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 gilrs = "0.11"
+raw-window-handle = "0.6"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 url = "2.5"
 filetime = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

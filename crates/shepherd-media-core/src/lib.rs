@@ -19,7 +19,10 @@ pub use library::{
     ClassifiedUri, Item, ItemKind, Library, LibraryError, Platform, PlayerHint, PosterRef, Source,
     load_library,
 };
-pub use player::{GetProcAddress, PlayerError, PlayerEvent, PlayerHandle, RetryBudget, Transport};
+pub use player::{
+    GetProcAddress, NativeDisplay, PlayerError, PlayerEvent, PlayerHandle, RetryBudget, Transport,
+    VideoOutput,
+};
 pub use protocol::{ProtocolEmitter, ProtocolEvent, UriClass};
 pub use resolver::{PlatformInfo, resolve_source};
 pub use session::{Session, SessionInput, SessionState};
