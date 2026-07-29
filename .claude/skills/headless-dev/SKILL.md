@@ -115,6 +115,19 @@ Example (bedtime restriction):
   maps, but async icon/tile loading can lag a beat (a tile may still say
   "Loading…"). For the fully-painted UI, poll `dev tree` for the specific entry,
   or take a second `dev shot` a moment later.
+- **Assert the state you meant to capture, in the pixels.** A `launch` that
+  races shepherdd's startup — or hits a daemon that is still running the previous
+  activity — is rejected, and the "No session" bar screenshots just as happily
+  (with the volume slider in its *disabled* styling, which measures differently
+  from the live one). Before keeping a shot, poll for something only the target
+  state paints, e.g. the warning banner's background colour.
+- **Output-scale changes settle asynchronously.** Useful when testing the
+  `xwayland_native_resolution` HiDPI hack, which needs a non-1x scale
+  (`swaymsg output HEADLESS-1 scale 1.5`, via `headless_run` in
+  `scripts/lib/headless.sh` — there is no `dev swaymsg` passthrough). `stop_current`
+  returns *before* shepherdd restores the pre-launch scale, so a scale you set
+  immediately afterwards gets clobbered a second later. Wait, then re-read
+  `swaymsg -t get_outputs`, and check it again at screenshot time.
 - **Black screenshot?** `swayidle` blanks the output (DPMS off) after ~120s idle
   with no session; `dev shot` already forces `dpms on` first, but if you script
   raw `grim`, do the same.

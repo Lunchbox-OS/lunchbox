@@ -1075,11 +1075,19 @@ const CSS_TEMPLATE: &str = r#"
             --hover-bg: rgba(255, 255, 255, 0.1);
         }
 
+        /* Base font size for the whole bar. Every size that should follow the
+           HUD scale factor has to be written *here*, in px, for
+           `scale_px_literals` to counter-scale it; anything left to the GTK
+           theme keeps its logical-pixel value and so shrinks on screen by
+           1/factor once sway drops to scale 1.0. Setting the size on the root
+           means a label that doesn't name its own font-size inherits a scaled
+           one instead of falling back to the theme's default (issue #114). */
         .hud-bar {
             background-color: var(--hud-bg);
             border: none;
             margin: 0;
             padding: 6px 12px;
+            font-size: 14px;
         }
 
         .app-name {
@@ -1236,9 +1244,20 @@ const CSS_TEMPLATE: &str = r#"
             background-color: var(--color-info);
         }
 
+        /* 16px and the -8px overhang are what the GTK theme gives the slider
+           node on its own, so at factor 1.0 these change nothing — but stating
+           them here is what lets the knob grow with the rest of the HUD under
+           the counter-scale. The old 12px was below the theme's own minimum, so
+           the theme won at factor 1.0 and the knob ended up *smaller* than
+           normal at 1.5, making it hard to hit on a touchscreen (issue #114).
+           The negative margin has to be restated for the same reason: it is
+           what keeps the knob overhanging the trough by a constant amount, and
+           it also decides how much of the knob the trough has to accommodate
+           (an unscaled -8px against a scaled knob thickens the bar). */
         .volume-slider slider {
-            min-width: 12px;
-            min-height: 12px;
+            min-width: 16px;
+            min-height: 16px;
+            margin: -8px;
             border-radius: 50%;
             background-color: var(--text-primary);
         }
@@ -1278,9 +1297,11 @@ const CSS_TEMPLATE: &str = r#"
             background-color: var(--color-warning);
         }
 
+        /* Matches `.volume-slider slider` — see the note there. */
         .brightness-slider slider {
-            min-width: 12px;
-            min-height: 12px;
+            min-width: 16px;
+            min-height: 16px;
+            margin: -8px;
             border-radius: 50%;
             background-color: var(--text-primary);
         }
@@ -1322,6 +1343,11 @@ const CSS_TEMPLATE: &str = r#"
             background-color: #1e1e1e;
             border-radius: 8px;
             padding: 14px;
+            /* The popover is its own surface, so state the base font size here
+               too rather than relying on inheriting the bar's (issue #114):
+               without it the Cancel / End labels keep the theme's unscaled
+               size while the box around them grows. */
+            font-size: 14px;
         }
 
         .confirm-close-popover > arrow {
@@ -1449,4 +1475,69 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scales_px_literals_and_leaves_other_numbers_alone() {
+        let css = scale_px_literals(
+            "a { padding: 4px 12px; opacity: 0.5; color: rgba(30, 30, 30, 0.95); }",
+            1.5,
+        );
+        assert_eq!(
+            css,
+            "a { padding: 6px 18px; opacity: 0.5; color: rgba(30, 30, 30, 0.95); }"
+        );
+    }
+
+    /// Issue #114: the bar and the confirm popover must each state a base
+    /// `font-size`. A label that inherits the *theme's* default instead keeps
+    /// its logical-pixel size and so renders 1/factor too small once shepherdd
+    /// drops the compositor scale for an XWayland activity — the bug the
+    /// warning banner text showed.
+    #[test]
+    fn text_roots_declare_a_scalable_font_size() {
+        for root in [".hud-bar {", ".confirm-close-popover > contents {"] {
+            let block = CSS_TEMPLATE
+                .split_once(root)
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(block, _)| block)
+                .unwrap_or_else(|| panic!("{root} rule missing from the stylesheet"));
+            assert!(
+                block.contains("font-size:"),
+                "{root} must set a font-size so labels don't fall back to the theme default"
+            );
+        }
+        // ...and that size has to follow the factor.
+        assert!(css_for_scale(2.0).contains("font-size: 28px"));
+    }
+
+    /// Issue #114: the slider knob has to be at least as big as the size the
+    /// GTK theme would pick on its own (16px), or the theme wins the cascade at
+    /// factor 1.0 and the counter-scaled value comes out smaller than the
+    /// un-scaled knob — a shrinking touch target.
+    #[test]
+    fn slider_knob_is_scaled_from_at_least_the_theme_size() {
+        for slider in [".volume-slider slider {", ".brightness-slider slider {"] {
+            let block = CSS_TEMPLATE
+                .split_once(slider)
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(block, _)| block)
+                .unwrap_or_else(|| panic!("{slider} rule missing from the stylesheet"));
+            for dim in ["min-width", "min-height"] {
+                let value: i32 = block
+                    .split_once(&format!("{dim}:"))
+                    .and_then(|(_, rest)| rest.split_once("px"))
+                    .and_then(|(value, _)| value.trim().parse().ok())
+                    .unwrap_or_else(|| panic!("{slider} must set {dim} in px"));
+                assert!(
+                    value >= 16,
+                    "{slider} {dim} is {value}px; below the theme's own 16px it does not scale"
+                );
+            }
+        }
+    }
 }
