@@ -2647,9 +2647,13 @@ impl LinuxHost {
             == WaydroidLockMode::Locktask;
 
         if locktask {
-            waydroid::unlock().await;
-            waydroid::force_stop(package_name).await;
-            // Park the full-UI `Waydroid` surface instead of destroying it.
+            // Park *first*. Unlocking and force-stopping drop Android back to its
+            // launcher, and the surface is still on screen while those two helper
+            // calls run — which is long enough for the child to see the Android
+            // home screen. Taking it off screen before anything disturbs the
+            // foreground means the last frame shown is still the app.
+            //
+            // Parking the full-UI `Waydroid` surface rather than destroying it.
             //
             // That surface is Android's display connection: sway-killing it (or
             // killing the `show-full-ui` child) takes surfaceflinger and zygote
@@ -2665,6 +2669,8 @@ impl LinuxHost {
             {
                 warn!(package = %package_name, error = %e, "failed to park the Waydroid full-UI window");
             }
+            waydroid::unlock().await;
+            waydroid::force_stop(package_name).await;
         } else {
             let app_id = waydroid::app_id_for_package(package_name);
             if let Some(window_id) = android_window_id(&app_id).await
