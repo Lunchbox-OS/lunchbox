@@ -112,6 +112,45 @@ const RECONCILE_CHANGES: &[&str] = &["new", "close", "move", "floating"];
 /// `boot-completed` check only while still booting) cheap.
 const WAYDROID_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Drop every active sway output to scale 1 and return the scales that were
+/// changed, for [`restore_output_scales`]. Empty when nothing needed changing
+/// (already native, or the query failed), which makes the restore a no-op.
+///
+/// Waydroid derives its Android display geometry from the output scale it
+/// observes at *session boot* and cannot be corrected on a warm session, so any
+/// session shepherd wants to launch into has to boot on the native pixel grid.
+async fn drop_output_scales_to_native() -> Vec<crate::sway::OutputScale> {
+    let outputs = match crate::sway::get_outputs().await {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "Failed to query sway outputs; booting Waydroid at the current scale");
+            return Vec::new();
+        }
+    };
+    let mut changed = Vec::new();
+    for output in outputs {
+        if (output.scale - 1.0).abs() < f64::EPSILON {
+            continue;
+        }
+        match crate::sway::set_output_scale(&output.name, 1.0).await {
+            Ok(()) => changed.push(output),
+            Err(e) => {
+                warn!(name = %output.name, error = %e, "Failed to drop output scale for the Waydroid boot")
+            }
+        }
+    }
+    changed
+}
+
+/// Put back the scales [`drop_output_scales_to_native`] changed.
+async fn restore_output_scales(saved: Vec<crate::sway::OutputScale>) {
+    for output in saved {
+        if let Err(e) = crate::sway::set_output_scale(&output.name, output.scale).await {
+            warn!(name = %output.name, scale = output.scale, error = %e, "Failed to restore output scale after the Waydroid boot");
+        }
+    }
+}
+
 /// How long graceful shutdown waits for `waydroid session stop`. It normally
 /// returns in a couple of seconds; the bound exists so a wedged session degrades
 /// to a leaked container rather than a shepherdd that never exits.
@@ -448,6 +487,13 @@ pub struct LinuxHost {
     /// True while a wedged-Waydroid session restart is in flight, so concurrent
     /// launch wedges don't kick off overlapping restarts.
     waydroid_recovering: Arc<AtomicBool>,
+    /// Last Android readiness the *engine* was told about, shared between the
+    /// readiness watcher and the paths that re-gate Android out of band (wedge
+    /// recovery, docking repin). Those paths emit `ready = false` directly, so
+    /// without sharing this the watcher's own cache would still read `true`, it
+    /// would short-circuit every later poll, and Android would stay hidden until
+    /// shepherdd restarted. `None` until the first poll resolves.
+    waydroid_ready_last: Arc<Mutex<Option<bool>>>,
     /// True once [`preboot_waydroid`](Self::preboot_waydroid) has run, meaning
     /// shepherd started the Waydroid session and so owns tearing it down. Stays
     /// false when `[service.waydroid] preboot` is off, leaving a session an
@@ -603,6 +649,7 @@ impl LinuxHost {
             waydroid_settings: Arc::new(Mutex::new(None)),
             waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
             waydroid_recovering: Arc::new(AtomicBool::new(false)),
+            waydroid_ready_last: Arc::new(Mutex::new(None)),
             waydroid_prebooted: Arc::new(AtomicBool::new(false)),
             waydroid_scale1_booted: Arc::new(AtomicBool::new(false)),
             waydroid_pinned_mode: Arc::new(Mutex::new(None)),
@@ -633,13 +680,14 @@ impl LinuxHost {
     /// [`preload_steam`] — all steps are best-effort and logged.
     pub fn preboot_waydroid(&self) {
         let settings = self.waydroid_settings.lock().unwrap().unwrap_or_default();
-        // Preboot happens at the grid's (possibly fractional) output scale, so this
-        // session is not the native-scale-1 boot a fractional Android launch needs.
+        // Not native-scale until the boot below proves it (it drops the output to
+        // scale 1 for the duration, then sets this).
         self.waydroid_scale1_booted.store(false, Ordering::SeqCst);
         // From here shepherd owns the session's lifetime, so shutdown stops it.
         // Set before the spawn so a shutdown racing the boot still tears it down.
         self.waydroid_prebooted.store(true, Ordering::SeqCst);
         let pinned_mode = self.waydroid_pinned_mode.clone();
+        let scale1_booted = self.waydroid_scale1_booted.clone();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -683,13 +731,36 @@ impl LinuxHost {
                 }
             }
 
+            // Boot on the panel's native pixel grid. Waydroid latches its display
+            // geometry from the output scale it sees at session boot and can't be
+            // corrected warm, so a session booted at a fractional scale forces the
+            // first Android launch to stop and re-boot it at scale 1 — measured at
+            // ~75 s of "Loading" on the child's first open. Paying it here, once,
+            // during startup means the warm session is already launch-ready.
+            //
+            // Costs a brief window where the launcher/HUD render at scale 1 (so,
+            // physically smaller) while Android boots. That is a startup cosmetic;
+            // the alternative was a mid-use stall.
+            let saved_scales = drop_output_scales_to_native().await;
+
             let was_running = waydroid::session_running().await;
             let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+            // Did *we* watch it boot inside the native-scale window above? Only
+            // then do we know what scale it latched. Adopting an already-running
+            // session tells us nothing, so that case leaves the flag alone and the
+            // first scaled launch re-verifies the old (slow) way.
+            let mut booted_native = started && !was_running;
             // A fresh session start already picked up the props; a warm session
             // with changed props needs one restart to apply them.
             if started && was_running && prop_changed {
                 waydroid::session_stop().await;
                 started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+                booted_native = started;
+            }
+
+            restore_output_scales(saved_scales).await;
+            if booted_native {
+                scale1_booted.store(true, Ordering::SeqCst);
             }
 
             // 3. Idle-suspend to keep the warm session cheap.
@@ -738,9 +809,14 @@ impl LinuxHost {
             ready: false,
         });
 
+        let ready_last = self.waydroid_ready_last.clone();
         tokio::spawn(async move {
-            let mut last: Option<bool> = None;
             loop {
+                // Re-read each pass: wedge recovery and the docking repin re-gate
+                // Android out of band, and this is how the watcher finds out. If
+                // it kept its own cache it would short-circuit forever on a stale
+                // `true` and never un-gate again.
+                let last = *ready_last.lock().unwrap();
                 let ready = if !waydroid::session_running().await {
                     false
                 } else if last == Some(true) {
@@ -758,7 +834,7 @@ impl LinuxHost {
                         kind: EntryKindTag::Android,
                         ready,
                     });
-                    last = Some(ready);
+                    *ready_last.lock().unwrap() = Some(ready);
                 }
                 tokio::time::sleep(WAYDROID_READY_POLL_INTERVAL).await;
             }
@@ -787,6 +863,8 @@ impl LinuxHost {
         // native scale 1, so the next scaled Android launch must re-verify.
         scale1_booted.store(false, Ordering::SeqCst);
         // Hide Android now; the readiness watcher re-confirms on the way back up.
+        // Record it so the watcher sees the re-gate (see `waydroid_ready_last`).
+        *self.waydroid_ready_last.lock().unwrap() = Some(false);
         let _ = event_tx.send(HostEvent::KindReadinessChanged {
             kind: EntryKindTag::Android,
             ready: false,
@@ -822,6 +900,7 @@ impl LinuxHost {
         let guard = self.waydroid_recovering.clone();
         let scale1_booted = self.waydroid_scale1_booted.clone();
         let pinned_mode = self.waydroid_pinned_mode.clone();
+        let ready_last = self.waydroid_ready_last.clone();
         let boot_timeout = settings.boot_ready_timeout;
         tokio::spawn(async move {
             let Some((w, h)) = primary_physical_mode().await else {
@@ -858,6 +937,9 @@ impl LinuxHost {
                     height = h,
                     "Display changed; restarting Waydroid at the new resolution"
                 );
+                // Record the re-gate so the watcher sees it and un-gates again
+                // once the session is back (see `waydroid_ready_last`).
+                *ready_last.lock().unwrap() = Some(false);
                 let _ = event_tx.send(HostEvent::KindReadinessChanged {
                     kind: EntryKindTag::Android,
                     ready: false,
