@@ -94,10 +94,16 @@ Two environment gotchas hit along the way:
   Kotlin's bundled compiler can't parse that version string. Build with
   `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64`, matching CI's JDK 21.
 
-## Known gap (pre-existing, not a merge regression)
+## Follow-up: the hand-written web UI kind union
 
-`shepherd-webui/src/api/types.ts` is hand-written and its `EntryKindTag` union
-still lacks `"android"` — it is missing on both `baff668` and `e88670d`, so the
-branch never added it. The web UI compiles and builds because nothing switches
-exhaustively on the tag, but an Android entry's kind will not type-check if the
-union is ever narrowed. Worth closing before the Android branch merges to main.
+`shepherd-webui/src/api/types.ts` is hand-written (unlike
+`rpc-methods.generated.ts` beside it) and its `EntryKindTag` union was missing
+`"android"` — absent on both `baff668` and `e88670d`, so the branch never added
+it rather than the merge dropping it. Nothing switched exhaustively on the tag,
+so the web UI still compiled; the union was simply wrong. Added in a follow-up
+commit, ordered after `"flatpak"` to match the Rust and generated-Kotlin
+orderings.
+
+Because this file is hand-written, it does **not** move when
+`rpc-codegen` runs and the drift test will not flag it. Any future entry kind
+has to be added here by hand.
