@@ -480,10 +480,12 @@ pub struct LinuxHost {
     lock_process: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
     /// Validated `[service.waydroid]` settings, set by `configure_waydroid`.
     waydroid_settings: Arc<Mutex<Option<WaydroidSettings>>>,
-    /// Active `locktask` full-UI (`waydroid show-full-ui`) children, keyed by
-    /// session, so stop can kill the surface (which the window-watch then
-    /// observes as gone → Exited).
-    waydroid_full_ui: Arc<Mutex<HashMap<SessionId, tokio::process::Child>>>,
+    /// The `locktask` full-UI (`waydroid show-full-ui`) client, if one has been
+    /// started. A singleton, not per-session: the surface is Android's display
+    /// connection, so it is parked between sessions and reused rather than
+    /// destroyed (see `stop_android`). Killed only when the Waydroid session
+    /// itself is torn down.
+    waydroid_full_ui: Arc<Mutex<Option<tokio::process::Child>>>,
     /// True while a wedged-Waydroid session restart is in flight, so concurrent
     /// launch wedges don't kick off overlapping restarts.
     waydroid_recovering: Arc<AtomicBool>,
@@ -654,7 +656,7 @@ impl LinuxHost {
             // stalls the subscription; a lagged watcher re-checks anyway.
             window_created_tx: broadcast::channel(64).0,
             waydroid_settings: Arc::new(Mutex::new(None)),
-            waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
+            waydroid_full_ui: Arc::new(Mutex::new(None)),
             waydroid_recovering: Arc::new(AtomicBool::new(false)),
             waydroid_ready_last: Arc::new(Mutex::new(None)),
             waydroid_preboot_done: Arc::new(AtomicBool::new(true)),
@@ -2428,14 +2430,32 @@ impl LinuxHost {
         waydroid::ensure_app_stopped(package_name).await;
 
         if locktask {
-            // Present the full UI (creates the `Waydroid` surface), wait for it,
-            // then pin the app in Lock Task Mode.
-            let full_ui = waydroid::show_full_ui().map_err(|e| {
-                HostError::SpawnFailed(format!("failed to start Waydroid full UI: {e}"))
-            })?;
+            // Reuse the full-UI surface if a previous session parked it. It is
+            // Android's display connection, so it outlives individual sessions —
+            // see `stop_android`. Only present a new one when there is none.
+            let parked = parked_full_ui_present().await;
+            if parked {
+                debug!("Reusing the parked Waydroid full-UI surface");
+                if let Err(e) = crate::sway::unpark_window(
+                    &format!("app_id=\"{}\"", waydroid::FULL_UI_APP_ID),
+                    ANDROID_ACTIVE_WORKSPACE,
+                )
+                .await
+                {
+                    warn!(error = %e, "Failed to unpark the Waydroid full-UI surface");
+                }
+            } else {
+                let full_ui = waydroid::show_full_ui().map_err(|e| {
+                    HostError::SpawnFailed(format!("failed to start Waydroid full UI: {e}"))
+                })?;
+                *self.waydroid_full_ui.lock().unwrap() = Some(full_ui);
+            }
             if !wait_for_android_window(&surface_app_id, ANDROID_WINDOW_TIMEOUT).await {
-                let mut full_ui = full_ui;
-                let _ = full_ui.start_kill();
+                // Leave the client alone on failure — killing it would take
+                // Android's display stack down. Park it so it can't sit on screen.
+                let _ =
+                    crate::sway::park_window(&format!("app_id=\"{}\"", waydroid::FULL_UI_APP_ID))
+                        .await;
                 return Err(HostError::SpawnFailed(format!(
                     "Waydroid full UI did not present within {}s",
                     ANDROID_WINDOW_TIMEOUT.as_secs()
@@ -2448,12 +2468,6 @@ impl LinuxHost {
             waydroid::pin(package_name).await;
             tokio::time::sleep(ANDROID_LOCKTASK_PIN_SETTLE).await;
             waydroid::pin(package_name).await;
-            // Keep the child so stop can kill the surface (which the window-watch
-            // then observes as gone → Exited).
-            self.waydroid_full_ui
-                .lock()
-                .unwrap()
-                .insert(session_id.clone(), full_ui);
         } else {
             match waydroid::launch_app(package_name).await {
                 Ok(()) => {}
@@ -2580,7 +2594,6 @@ impl LinuxHost {
     ) {
         let event_tx = self.event_tx.clone();
         let session_info = self.session_info.clone();
-        let full_ui = self.waydroid_full_ui.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(ANDROID_WATCH_INTERVAL).await;
@@ -2594,10 +2607,9 @@ impl LinuxHost {
                     .remove(&handle.session_id)
                     .is_some();
                 if was_tracked {
-                    // Kill any lingering locktask full-UI child for this session.
-                    if let Some(mut child) = full_ui.lock().unwrap().remove(&handle.session_id) {
-                        let _ = child.start_kill();
-                    }
+                    // Deliberately does NOT touch the locktask full-UI client:
+                    // killing it restarts Android's display stack. It is parked by
+                    // `stop_android` and reused by the next launch.
                     waydroid::force_stop(&package_name).await;
                     let _ = event_tx.send(HostEvent::Exited {
                         handle,
@@ -2614,7 +2626,7 @@ impl LinuxHost {
     /// (unlock), reclaim the app, and kill the full-UI child so its `Waydroid`
     /// surface disappears. Either way the window-watch observes the surface go
     /// away and emits [`HostEvent::Exited`], so this does not emit it itself.
-    async fn stop_android(&self, session_id: &SessionId, package_name: &str) -> HostResult<()> {
+    async fn stop_android(&self, package_name: &str) -> HostResult<()> {
         let locktask = self
             .waydroid_settings
             .lock()
@@ -2626,19 +2638,21 @@ impl LinuxHost {
         if locktask {
             waydroid::unlock().await;
             waydroid::force_stop(package_name).await;
-            // Kill the full-UI `Waydroid` surface. `act_on_window(Close)` runs
-            // sway `kill` (forced) — a graceful close is ignored by the Waydroid
-            // renderer, and killing the `show-full-ui` child doesn't destroy the
-            // surface (the renderer is detached). The window-watch then sees the
-            // surface go and emits Exited.
-            if let Some(window_id) = android_window_id(waydroid::FULL_UI_APP_ID).await
-                && let Err(e) = crate::sway::act_on_window(window_id, WindowAction::Close).await
+            // Park the full-UI `Waydroid` surface instead of destroying it.
+            //
+            // That surface is Android's display connection: sway-killing it (or
+            // killing the `show-full-ui` child) takes surfaceflinger and zygote
+            // down with it, so init restarts them and runs `bootanim` — the child
+            // then gets the LineageOS boot animation on the next launch instead of
+            // the app. Confirmed from the container's own init log. Parking keeps
+            // the client alive and off screen; the next launch unparks it.
+            //
+            // `android_window_id` treats parked as gone, so the window-watch still
+            // sees the surface disappear and emits Exited exactly as before.
+            if let Err(e) =
+                crate::sway::park_window(&format!("app_id=\"{}\"", waydroid::FULL_UI_APP_ID)).await
             {
-                warn!(package = %package_name, error = %e, "failed to kill Waydroid full-UI window via sway");
-            }
-            // Drop the tracked full-UI child handle (best-effort cleanup).
-            if let Some(mut child) = self.waydroid_full_ui.lock().unwrap().remove(session_id) {
-                let _ = child.start_kill();
+                warn!(package = %package_name, error = %e, "failed to park the Waydroid full-UI window");
             }
         } else {
             let app_id = waydroid::app_id_for_package(package_name);
@@ -2653,16 +2667,39 @@ impl LinuxHost {
     }
 }
 
-/// Compositor window id of the on-screen Android app with `app_id`, if present.
+/// Compositor window id of the **on-screen** Android app with `app_id`, if
+/// present. Deliberately ignores anything parked on
+/// [`HIDDEN_WORKSPACE`](crate::sway::HIDDEN_WORKSPACE): a parked full-UI surface
+/// is still in sway's tree, but for every caller here — the launch wait and the
+/// exit watch — parked means gone.
 async fn android_window_id(app_id: &str) -> Option<u64> {
     match crate::sway::list_windows().await {
         Ok(windows) => windows
             .into_iter()
-            .find(|w| w.app_id.as_deref() == Some(app_id))
+            .find(|w| {
+                w.app_id.as_deref() == Some(app_id)
+                    && w.workspace.as_deref() != Some(crate::sway::HIDDEN_WORKSPACE)
+            })
             .map(|w| w.id),
         Err(e) => {
             debug!(app_id, error = %e, "failed to list windows while tracking Android app");
             None
+        }
+    }
+}
+
+/// Whether a full-UI `Waydroid` surface is parked on
+/// [`HIDDEN_WORKSPACE`](crate::sway::HIDDEN_WORKSPACE) — alive from a previous
+/// locktask session and reusable, rather than needing a fresh `show-full-ui`.
+async fn parked_full_ui_present() -> bool {
+    match crate::sway::list_windows().await {
+        Ok(windows) => windows.iter().any(|w| {
+            w.app_id.as_deref() == Some(waydroid::FULL_UI_APP_ID)
+                && w.workspace.as_deref() == Some(crate::sway::HIDDEN_WORKSPACE)
+        }),
+        Err(e) => {
+            debug!(error = %e, "failed to list windows while looking for a parked full-UI surface");
+            false
         }
     }
 }
@@ -2698,6 +2735,9 @@ const ANDROID_MAXIMIZE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Delay between maximize attempts. Each attempt is a `pkexec` + `dumpsys`, so
 /// this is deliberately unhurried — the common case succeeds on the first try.
 const ANDROID_MAXIMIZE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
+/// Workspace shepherd's activities live on (`workspace 1 output *` in sway.conf).
+/// Where a parked locktask surface is brought back to.
+const ANDROID_ACTIVE_WORKSPACE: &str = "1";
 /// Wait before the confirming re-apply, long enough for a splash / launcher
 /// activity to have handed off to the app's real one.
 const ANDROID_MAXIMIZE_SETTLE: Duration = Duration::from_secs(4);
@@ -3275,7 +3315,7 @@ impl HostAdapter for LinuxHost {
         // Android (Waydroid) sessions have no host pid; stop by closing the
         // Wayland toplevel. Both stop modes map to the same action.
         if let HostHandlePayload::Android { package_name } = handle.payload() {
-            return self.stop_android(&handle.session_id, package_name).await;
+            return self.stop_android(package_name).await;
         }
         let (pid, pgid) = match handle.payload() {
             HostHandlePayload::Linux { pid, pgid } => (*pid, *pgid),

@@ -324,6 +324,34 @@ pub async fn move_to_output_fullscreen(criteria: &str, output: &str) -> HostResu
     .await
 }
 
+/// Workspace used to park windows that must stay *alive* but off screen.
+///
+/// The Waydroid full-UI surface (`lock_mode = "locktask"`) is the one case: it is
+/// Android's display connection, so destroying it kills surfaceflinger and zygote
+/// inside the container and Android restarts — the child then watches the boot
+/// animation on the next launch. Parking it here keeps the client alive between
+/// sessions. Named so it cannot collide with shepherd's numeric workspaces.
+pub const HIDDEN_WORKSPACE: &str = "__shepherd_parked";
+
+/// Park the window matching `criteria` on [`HIDDEN_WORKSPACE`], keeping its
+/// client alive. The inverse of [`unpark_window`].
+pub async fn park_window(criteria: &str) -> HostResult<()> {
+    run_command(&format!(
+        "[{criteria}] move container to workspace {HIDDEN_WORKSPACE}"
+    ))
+    .await
+}
+
+/// Bring a window parked by [`park_window`] back to `workspace` and fullscreen it
+/// again. Fullscreen is re-asserted explicitly because `for_window` rules only run
+/// at map time, and a parked window is never re-mapped.
+pub async fn unpark_window(criteria: &str, workspace: &str) -> HostResult<()> {
+    run_command(&format!(
+        "[{criteria}] move container to workspace {workspace}, fullscreen enable"
+    ))
+    .await
+}
+
 /// Select the primary output: the first-enumerated one (issue #87). Returns
 /// `None` only when no outputs are present.
 pub fn select_primary(displays: &[DisplayInfo]) -> Option<&DisplayInfo> {
