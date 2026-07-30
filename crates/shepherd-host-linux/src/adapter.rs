@@ -163,20 +163,38 @@ async fn restore_native_scale_when_settled(saved: Vec<crate::sway::OutputScale>,
         return;
     }
     let deadline = Instant::now() + cap;
+    let mut observed = false;
     while Instant::now() < deadline {
-        if waydroid::session_running().await {
+        // `waydroid.display_scale` is written by the in-container hwcomposer once
+        // it has read the output's scale. Waiting for it to report 1.0 is the
+        // actual condition we care about, rather than timing out a guess.
+        if waydroid::get_prop(WAYDROID_DISPLAY_SCALE_PROP)
+            .await
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .is_some_and(|scale| (scale - 1.0).abs() < 0.01)
+        {
+            observed = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    if !observed {
+        warn!("Waydroid never reported reading the native output scale; restoring anyway");
+    }
+    // Small grace after the read before the scale moves under it.
     tokio::time::sleep(WAYDROID_NATIVE_SCALE_SETTLE).await;
     restore_output_scales(saved).await;
 }
 
-/// How long to keep the output at native scale after the Waydroid session comes
-/// up. Measured: `wm size` lands on the physical mode with ~5s here, versus
-/// `logical x scale` when the session boots at a fractional scale.
-const WAYDROID_NATIVE_SCALE_SETTLE: Duration = Duration::from_secs(5);
+/// Grace period after the hwcomposer reports it has read the native scale, before
+/// the output scale is moved back. Short: the signal, not this, is what says the
+/// boot has taken its geometry.
+const WAYDROID_NATIVE_SCALE_SETTLE: Duration = Duration::from_secs(1);
+
+/// Runtime prop the in-container hwcomposer writes with the output scale it has
+/// observed. Readable as the session user (`waydroid prop get`) — measured to
+/// appear ~15s into a cold session boot.
+const WAYDROID_DISPLAY_SCALE_PROP: &str = "waydroid.display_scale";
 
 /// How long graceful shutdown waits for `waydroid session stop`. It normally
 /// returns in a couple of seconds; the bound exists so a wedged session degrades
