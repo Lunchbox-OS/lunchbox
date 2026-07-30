@@ -1373,6 +1373,17 @@ const CSS_TEMPLATE: &str = r#"
             background-image: none;
             color: #2e3440;
             background-color: #d8dee9;
+            /* State the font-size on the button node itself, not just on
+               `> contents`. #114 set the base size on the popover surface
+               expecting the Cancel / End labels to inherit it, but the GTK
+               theme sets an explicit `font-size` on `button`, which is more
+               specific than the inherited `> contents` value and wins the
+               cascade — so the labels kept the theme's logical-pixel size and
+               rendered 1/factor too small under the counter-scale, while the
+               button box around them (min-height/padding, stated here in px)
+               grew. Restating it here, at higher specificity than the theme's
+               bare `button`, is what lets the label follow the HUD factor. */
+            font-size: 14px;
         }
 
         .confirm-close-popover button:hover {
@@ -1513,6 +1524,28 @@ mod tests {
         }
         // ...and that size has to follow the factor.
         assert!(css_for_scale(2.0).contains("font-size: 28px"));
+    }
+
+    /// Issue #114 follow-up: the confirm popover's Cancel / End buttons must
+    /// state their own `font-size`, not rely on inheriting the popover surface's
+    /// (`> contents`). The GTK theme sets an explicit `font-size` on `button`,
+    /// which is more specific than the inherited value and wins the cascade — so
+    /// without a rule of its own the button label kept the theme's logical-pixel
+    /// size and rendered 1/factor too small under the counter-scale, even though
+    /// the box around it grew.
+    #[test]
+    fn confirm_popover_button_declares_its_own_font_size() {
+        let rule = ".confirm-close-popover button {";
+        let block = CSS_TEMPLATE
+            .split_once(rule)
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(block, _)| block)
+            .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
+        assert!(
+            block.contains("font-size:"),
+            "{rule} must set a font-size so the label scales instead of \
+             inheriting the theme's unscaled button font"
+        );
     }
 
     /// Issue #114: the slider knob has to be at least as big as the size the
