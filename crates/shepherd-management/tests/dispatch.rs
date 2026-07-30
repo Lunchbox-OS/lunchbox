@@ -12,8 +12,8 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use shepherd_api::{
-    AddressFamily, Connectivity, EntryKind, Event, NetworkAddressView, NetworkInterfaceKind,
-    NetworkInterfaceView, NetworkSource, WifiView,
+    AddressFamily, Connectivity, EntryKind, Event, EventPayload, NetworkAddressView,
+    NetworkInterfaceKind, NetworkInterfaceView, NetworkSource, WifiView,
 };
 use shepherd_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
@@ -316,6 +316,15 @@ fn test_policy() -> Policy {
 /// mock host/volume/brightness — the same wiring the daemon uses, minus
 /// the OS-facing bits. Includes a mock ambient light sensor (bright room).
 fn make_svc(policy: Policy, config_path: PathBuf) -> DefaultManagementService {
+    make_svc_opts(policy, config_path, Some(1000.0)).0
+}
+
+/// Like [`make_svc`], but also hands back the `MockHost` so a test can inject
+/// host failures (e.g. `fail_spawn`).
+fn make_svc_with_host(
+    policy: Policy,
+    config_path: PathBuf,
+) -> (DefaultManagementService, Arc<MockHost>) {
     make_svc_opts(policy, config_path, Some(1000.0))
 }
 
@@ -326,7 +335,7 @@ fn make_svc_opts(
     policy: Policy,
     config_path: PathBuf,
     sensor_lux: Option<f32>,
-) -> DefaultManagementService {
+) -> (DefaultManagementService, Arc<MockHost>) {
     make_svc_full(policy, config_path, sensor_lux, Arc::new(MockVolume::new()))
 }
 
@@ -337,7 +346,7 @@ fn make_svc_with_volume(
     config_path: PathBuf,
 ) -> (DefaultManagementService, Arc<MockVolume>) {
     let volume = Arc::new(MockVolume::new());
-    let svc = make_svc_full(policy, config_path, Some(1000.0), volume.clone());
+    let svc = make_svc_full(policy, config_path, Some(1000.0), volume.clone()).0;
     (svc, volume)
 }
 
@@ -346,7 +355,7 @@ fn make_svc_full(
     config_path: PathBuf,
     sensor_lux: Option<f32>,
     volume: Arc<MockVolume>,
-) -> DefaultManagementService {
+) -> (DefaultManagementService, Arc<MockHost>) {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
     let brightness = Arc::new(MockBrightness::new());
@@ -360,10 +369,10 @@ fn make_svc_full(
     let (tx, _) = broadcast::channel::<Event>(64);
     let tx_for_fn = tx.clone();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-    DefaultManagementService {
+    let svc = DefaultManagementService {
         engine,
         store,
-        host,
+        host: host.clone(),
         volume,
         brightness,
         light_sensor,
@@ -388,7 +397,8 @@ fn make_svc_full(
         web_listener: WebListenerHandle::default(),
         web_auth: None,
         admins: Default::default(),
-    }
+    };
+    (svc, host)
 }
 
 /// Write a minimal valid config to a temp file.
@@ -405,6 +415,16 @@ async fn rpc(
     params: Value,
 ) -> Result<Value, RpcDispatchError> {
     dispatch_json(svc, method, params).await
+}
+
+/// Await the next broadcast event's payload, failing the test rather than
+/// hanging if none arrives.
+async fn next_payload(rx: &mut broadcast::Receiver<Event>) -> EventPayload {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for an event")
+        .expect("event channel closed")
+        .payload
 }
 
 /// Convenience: dispatch and unwrap the successful value.
@@ -551,6 +571,77 @@ async fn launch_unknown_entry_is_denied() {
     let body = ok(&svc, "launch", json!({ "id": "no-such-entry" })).await;
     assert!(body["Denied"].is_object());
     assert!(body["Denied"]["reasons"].is_array());
+}
+
+/// A successful launch announces the session exactly once. The pre-spawn
+/// broadcast *replaced* the old post-spawn one rather than adding to it, so a
+/// regression here would show up as two `SessionStarted` for one launch.
+#[tokio::test]
+async fn successful_launch_announces_the_session_once() {
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    let mut events = svc.subscribe_events();
+
+    ok(&svc, "launch", json!({ "id": "test-game" })).await;
+
+    let first = next_payload(&mut events).await;
+    assert!(
+        matches!(first, EventPayload::SessionStarted { .. }),
+        "expected SessionStarted, got {first:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events.recv())
+            .await
+            .is_err(),
+        "a successful launch should broadcast SessionStarted once and nothing further"
+    );
+}
+
+/// `launch` announces the session *before* spawning, so the HUD can draw (and
+/// stop) a launch that takes a long time to present a window — an Android cold
+/// start can hold `host.spawn` for tens of seconds.
+///
+/// The observable consequence is this: even a spawn that ultimately *fails* is
+/// preceded by `SessionStarted`, which must then be retracted with a matching
+/// `SessionEnded`. Previously a failed spawn emitted neither, so this pins both
+/// halves of the new contract.
+#[tokio::test]
+async fn failed_spawn_retracts_the_announced_session() {
+    let cfg = temp_config();
+    let (svc, host) = make_svc_with_host(test_policy(), cfg.path().to_path_buf());
+    *host.fail_spawn.lock().unwrap() = true;
+    let mut events = svc.subscribe_events();
+
+    let err = rpc(&svc, "launch", json!({ "id": "test-game" }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::Internal(_))
+        ),
+        "{err:?}"
+    );
+
+    let started = next_payload(&mut events).await;
+    let EventPayload::SessionStarted { session_id, .. } = started else {
+        panic!("a failed spawn should still be preceded by SessionStarted, got {started:?}");
+    };
+    let ended = next_payload(&mut events).await;
+    let EventPayload::SessionEnded {
+        session_id: ended_id,
+        ..
+    } = ended
+    else {
+        panic!("expected SessionEnded to retract the announced session, got {ended:?}");
+    };
+    assert_eq!(
+        session_id, ended_id,
+        "the retraction must name the session that was announced"
+    );
+
+    // ...and the engine is left with nothing running.
+    assert!(ok(&svc, "current_session", json!({})).await.is_null());
 }
 
 #[tokio::test]
@@ -917,7 +1008,7 @@ async fn toggle_auto_brightness_flips_state() {
 #[tokio::test]
 async fn set_auto_brightness_without_sensor_is_rejected() {
     let cfg = temp_config();
-    let svc = make_svc_opts(test_policy(), cfg.path().to_path_buf(), None);
+    let (svc, _host) = make_svc_opts(test_policy(), cfg.path().to_path_buf(), None);
     // No sensor → get_brightness reports auto unavailable.
     let info = ok(&svc, "get_brightness", Value::Null).await;
     assert_eq!(info["auto_available"], false);

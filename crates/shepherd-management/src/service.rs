@@ -666,11 +666,34 @@ impl ManagementService for DefaultManagementService {
         let plan_can_reset = plan.can_reset;
         let plan_can_turn_pages = plan.can_turn_pages;
         let plan_hud_orientation = plan.hud_orientation;
+        let plan_kind_tag = plan.kind_tag;
 
-        {
+        let deadline = {
             let mut eng = self.engine.lock().await;
             eng.start_session(plan, now, now_mono);
-        }
+            eng.current_session().and_then(|s| s.deadline)
+        };
+
+        // Announce the session now, before the spawn, rather than after it.
+        // `host.spawn` can block for tens of seconds — an Android cold start may
+        // restart the Waydroid session and then wait for the app's toplevel to
+        // map — and until this event lands the HUD has no session to draw, so
+        // the child sits on a "Loading" spinner with no way to stop it. The
+        // engine already holds the session from `start_session` above, so this
+        // only publishes what is already true.
+        //
+        // Every path that returns before the spawn succeeds must therefore
+        // retract it via `abort_announced_session`.
+        (self.broadcast_fn)(Event::new(EventPayload::SessionStarted {
+            session_id: session_id.clone(),
+            entry_id: id.clone(),
+            label: plan_label,
+            deadline,
+            confirm_on_close: plan_confirm_on_close,
+            can_reset: plan_can_reset,
+            can_turn_pages: plan_can_turn_pages,
+            kind_tag: plan_kind_tag,
+        }));
 
         let (entry_kind, mut spawn_opts, needs_hidpi) = {
             let eng = self.engine.lock().await;
@@ -678,8 +701,8 @@ impl ManagementService for DefaultManagementService {
         };
 
         let Some(kind) = entry_kind else {
-            let mut eng = self.engine.lock().await;
-            eng.notify_launch_failed(None, "entry not found".into(), now_mono, now);
+            self.abort_announced_session("entry not found".into(), now_mono, now)
+                .await;
             return Err(ManagementError::NotFound("Entry not found".into()));
         };
 
@@ -700,22 +723,10 @@ impl ManagementService for DefaultManagementService {
 
         match self.host.spawn(session_id.clone(), &kind, spawn_opts).await {
             Ok(handle) => {
-                let deadline = {
-                    let mut eng = self.engine.lock().await;
-                    eng.attach_host_handle(handle);
-                    eng.current_session().and_then(|s| s.deadline)
-                };
-
-                (self.broadcast_fn)(Event::new(EventPayload::SessionStarted {
-                    session_id: session_id.clone(),
-                    entry_id: id.clone(),
-                    label: plan_label,
-                    deadline,
-                    confirm_on_close: plan_confirm_on_close,
-                    can_reset: plan_can_reset,
-                    can_turn_pages: plan_can_turn_pages,
-                    kind_tag: kind.tag(),
-                }));
+                // The session was already announced before the spawn; only the
+                // host handle is new. `attach_host_handle` doesn't touch the
+                // deadline, so the value broadcast above still holds.
+                self.engine.lock().await.attach_host_handle(handle);
 
                 Ok(LaunchOutcome::Approved {
                     session_id: session_id.to_string(),
@@ -728,12 +739,8 @@ impl ManagementService for DefaultManagementService {
                 // with a correctly-sized HUD, and its edge with it.
                 self.hidpi.restore().await;
                 self.hud_layout.restore().await;
-                let snap = {
-                    let mut eng = self.engine.lock().await;
-                    eng.notify_launch_failed(None, e.to_string(), now_mono, now);
-                    eng.get_state()
-                };
-                (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+                self.abort_announced_session(e.to_string(), now_mono, now)
+                    .await;
                 Err(ManagementError::Internal(format!("Spawn failed: {e}")))
             }
         }
@@ -2136,6 +2143,43 @@ impl DefaultManagementService {
         }
 
         let snap = self.engine.lock().await.get_state();
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+    }
+
+    /// Retract a session that was announced with `SessionStarted` but never
+    /// actually got a running activity — the spawn failed, or the entry
+    /// vanished between the launch decision and the spawn.
+    ///
+    /// [`launch`](ManagementService::launch) publishes `SessionStarted` before
+    /// spawning so the HUD can show (and stop) a slow launch, which means every
+    /// early return owes listeners the matching `SessionEnded`; without it the
+    /// HUD keeps drawing a session that never began. Emits the same
+    /// `SessionEnded` + `StateChanged` pair as a normal session end.
+    async fn abort_announced_session(
+        &self,
+        error: String,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) {
+        let (ended, snap) = {
+            let mut eng = self.engine.lock().await;
+            let ended = eng.notify_launch_failed(None, error, now_mono, now);
+            (ended, eng.get_state())
+        };
+        if let Some(CoreEvent::SessionEnded {
+            session_id,
+            entry_id,
+            reason,
+            duration,
+        }) = ended
+        {
+            (self.broadcast_fn)(Event::new(EventPayload::SessionEnded {
+                session_id,
+                entry_id,
+                reason,
+                duration,
+            }));
+        }
         (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
     }
 
