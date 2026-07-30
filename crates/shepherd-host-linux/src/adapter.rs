@@ -151,6 +151,33 @@ async fn restore_output_scales(saved: Vec<crate::sway::OutputScale>) {
     }
 }
 
+/// Restore the scales dropped for a Waydroid boot, once Android has had long
+/// enough to take its display geometry.
+///
+/// Android derives that geometry early in the session boot rather than at
+/// boot-complete, so the output only has to sit at native scale briefly. Waits
+/// for the session to report RUNNING (bounded by `cap`, so a session that never
+/// starts cannot strand the UI at scale 1), settles, then restores.
+async fn restore_native_scale_when_settled(saved: Vec<crate::sway::OutputScale>, cap: Duration) {
+    if saved.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + cap;
+    while Instant::now() < deadline {
+        if waydroid::session_running().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    tokio::time::sleep(WAYDROID_NATIVE_SCALE_SETTLE).await;
+    restore_output_scales(saved).await;
+}
+
+/// How long to keep the output at native scale after the Waydroid session comes
+/// up. Measured: `wm size` lands on the physical mode with ~5s here, versus
+/// `logical x scale` when the session boots at a fractional scale.
+const WAYDROID_NATIVE_SCALE_SETTLE: Duration = Duration::from_secs(5);
+
 /// How long graceful shutdown waits for `waydroid session stop`. It normally
 /// returns in a couple of seconds; the bound exists so a wedged session degrades
 /// to a leaked container rather than a shepherdd that never exits.
@@ -777,28 +804,35 @@ impl LinuxHost {
                 );
             }
 
-            let saved_scales = drop_output_scales_to_native().await;
-
-            // Was a fractional scale actually in play? If nothing needed dropping,
-            // the output is already native and *any* boot latches scale 1.
-            let was_fractional = !saved_scales.is_empty();
-
+            // Restart an adopted session *before* the timed boot below, so there is
+            // exactly one boot to hold native scale across.
             let was_running = waydroid::session_running().await;
-            let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-            // A session we started ourselves booted inside the native-scale window
-            // above, so we know its scale. An adopted one we know nothing about.
-            let mut booted_native = started && (!was_running || !was_fractional);
-            // Restart an adopted session when either its props changed or we can't
-            // vouch for its boot scale. Leaving it unproven just defers the restart
-            // to the child's first launch, where it costs a visible Android reboot
-            // mid-use; paying it here happens while Android is still gated.
-            if started && was_running && (prop_changed || was_fractional) {
+            let probe_scales = drop_output_scales_to_native().await;
+            let was_fractional = !probe_scales.is_empty();
+            restore_output_scales(probe_scales).await;
+            let restarted = was_running && (prop_changed || was_fractional);
+            if restarted {
                 waydroid::session_stop().await;
-                started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-                booted_native = started;
             }
 
-            restore_output_scales(saved_scales).await;
+            let saved_scales = drop_output_scales_to_native().await;
+            // Hold native scale only until Android has taken its display geometry
+            // — measured to happen early in the session boot, not at boot-complete.
+            // Holding for the whole boot left the launcher and HUD rendering small
+            // for ~60s on a cold start; ~8s is enough for `wm size` to land on the
+            // panel's physical mode. Restores concurrently while the boot finishes.
+            let restore_task = tokio::spawn(restore_native_scale_when_settled(
+                saved_scales,
+                settings.boot_ready_timeout,
+            ));
+
+            let started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
+            let _ = restore_task.await;
+            // We owned this boot unless we adopted a session that was already
+            // running and did not restart it — and even then, a non-fractional
+            // output means any boot latched scale 1 anyway.
+            let adopted = was_running && !restarted;
+            let booted_native = started && (!adopted || !was_fractional);
             // Only claim a native-scale boot if we actually owned the session for
             // its duration — otherwise something else may have restarted it at the
             // grid's scale and the next scaled launch must re-verify.
