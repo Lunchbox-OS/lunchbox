@@ -688,6 +688,7 @@ impl LinuxHost {
         self.waydroid_prebooted.store(true, Ordering::SeqCst);
         let pinned_mode = self.waydroid_pinned_mode.clone();
         let scale1_booted = self.waydroid_scale1_booted.clone();
+        let restart_guard = self.waydroid_recovering.clone();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -741,6 +742,26 @@ impl LinuxHost {
             // Costs a brief window where the launcher/HUD render at scale 1 (so,
             // physically smaller) while Android boots. That is a startup cosmetic;
             // the alternative was a mid-use stall.
+            // Hold the restart guard across the whole boot. `repin_waydroid_resolution`
+            // fires on the *first* display-change event, which at startup can beat
+            // preboot to pinning the mode — it then sees `pinned_mode == None`,
+            // reads that as a resolution change, and stops the session out from
+            // under this boot. Observed outcomes: Android wedged mid-boot, or the
+            // repin clearing `scale1_booted` so a later launch pays a visible
+            // Android reboot with the boot animation showing in place of the app.
+            // The scale flips below add two more display events inside exactly
+            // that window, so the guard matters more, not less.
+            //
+            // Both the repin and `spawn_android`'s native-scale restart bail when
+            // this is held, which is what we want here: preboot is already booting
+            // the session at native scale and pins the mode itself.
+            let took_guard = !restart_guard.swap(true, Ordering::SeqCst);
+            if !took_guard {
+                warn!(
+                    "A Waydroid restart was already in flight at preboot; not claiming a native-scale boot"
+                );
+            }
+
             let saved_scales = drop_output_scales_to_native().await;
 
             let was_running = waydroid::session_running().await;
@@ -759,8 +780,14 @@ impl LinuxHost {
             }
 
             restore_output_scales(saved_scales).await;
-            if booted_native {
+            // Only claim a native-scale boot if we actually owned the session for
+            // its duration — otherwise something else may have restarted it at the
+            // grid's scale and the next scaled launch must re-verify.
+            if booted_native && took_guard {
                 scale1_booted.store(true, Ordering::SeqCst);
+            }
+            if took_guard {
+                restart_guard.store(false, Ordering::SeqCst);
             }
 
             // 3. Idle-suspend to keep the warm session cheap.
