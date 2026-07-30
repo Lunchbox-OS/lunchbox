@@ -48,6 +48,7 @@ default-members = [
     "crates/shepherd-host-api",
     "crates/shepherd-config",
     "crates/shepherd-firewall-helper",
+    "crates/shepherd-waydroid-helper",
     "crates/shepherd-store",
     "crates/shepherd-core",
     "crates/shepherd-host-linux",
