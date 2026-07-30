@@ -834,6 +834,13 @@ impl LinuxHost {
             }
 
             let saved_scales = drop_output_scales_to_native().await;
+            // Clear the hwcomposer's scale report before booting, so the wait
+            // below can only be satisfied by a write from *this* boot. A cold
+            // container starts with it empty anyway; this matters for an adopted
+            // warm session, where a `1.0` left by an earlier session would
+            // otherwise satisfy the check before our drop has been observed.
+            // Best-effort: a no-op when no session is running.
+            let _ = waydroid::set_prop(WAYDROID_DISPLAY_SCALE_PROP, "").await;
             // Hold native scale only until Android has taken its display geometry
             // — measured to happen early in the session boot, not at boot-complete.
             // Holding for the whole boot left the launcher and HUD rendering small
