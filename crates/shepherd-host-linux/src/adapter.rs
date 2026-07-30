@@ -875,6 +875,39 @@ impl LinuxHost {
                 debug!(error = %e, "failed to set waydroid idle-suspend");
             }
 
+            // Confirm the boot actually took the panel's physical mode. Everything
+            // above — the native-scale hold and when to end it — is inference about
+            // when Android reads the output scale. This is the outcome we actually
+            // care about, so check it rather than trust the timing: a session that
+            // saw a fractional scale sizes its display to `logical x scale`
+            // instead, which renders wrong and is otherwise completely silent.
+            //
+            // On a mismatch, drop the native-scale claim. The first scaled launch
+            // then re-verifies the slow-but-correct way (a session restart at
+            // scale 1), so a too-early restore self-corrects instead of shipping
+            // a wrongly-sized Android.
+            if started && scale1_booted.load(Ordering::SeqCst) {
+                match (
+                    primary_physical_mode().await,
+                    waydroid::display_size().await,
+                ) {
+                    (Some((pw, ph)), Some((dw, dh))) if (pw, ph) != (dw, dh) => {
+                        warn!(
+                            panel = format!("{pw}x{ph}"),
+                            android = format!("{dw}x{dh}"),
+                            "Waydroid booted at the wrong display size; re-verifying on the next launch"
+                        );
+                        scale1_booted.store(false, Ordering::SeqCst);
+                    }
+                    (Some(_), None) => {
+                        debug!(
+                            "Could not read Android's display size; leaving the native-scale claim as is"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
             // Open the readiness gate last, on every path: the watcher can now
             // un-gate Android knowing a launch will land on a settled, native-scale
             // session. On the failure path it lets the watcher report the truth

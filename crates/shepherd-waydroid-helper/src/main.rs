@@ -116,6 +116,8 @@ enum Action {
     /// Pin Android's media stream to max so shepherd's host volume owns the full
     /// dynamic range instead of it being pre-attenuated inside Android.
     MaxVolume,
+    /// Read Android's display size (`wm size`). Read-only, no arguments.
+    DisplaySize,
     /// Scale Android's UI density to `permille`/1000 of the panel's base density,
     /// so a fractional-scale kiosk (e.g. `output * scale 1.5`) gets a proportionally
     /// larger Android UI (Waydroid renders at native scale 1; density carries the
@@ -220,6 +222,9 @@ impl Action {
             // index (no clamping) and the max is ROM-specific, so `main` parses it
             // from `--get`'s `[0..N]` and issues a second `--set N`. `shell --`
             // keeps waydroid from eating the forwarded `--stream`/`--get` flags.
+            // Read-only: prints `Physical size: WxH` (and `Override size:` when
+            // one is set) for shepherd to compare against the panel's real mode.
+            Action::DisplaySize => ("waydroid", vec!["shell".into(), "wm".into(), "size".into()]),
             Action::MaxVolume => (
                 "waydroid",
                 vec![
@@ -273,6 +278,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Action, String> 
         }
         Some("back") => no_extra_args(args, "back").map(|()| Action::Back),
         Some("max-volume") => no_extra_args(args, "max-volume").map(|()| Action::MaxVolume),
+        Some("display-size") => no_extra_args(args, "display-size").map(|()| Action::DisplaySize),
         Some("scale-density") => {
             parse_permille(args).map(|permille| Action::ScaleDensity { permille })
         }

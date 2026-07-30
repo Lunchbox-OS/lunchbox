@@ -522,6 +522,30 @@ pub async fn start_session_and_wait(timeout: Duration) -> bool {
     }
 }
 
+/// Android's current display size, via the privileged helper
+/// (`pkexec shepherd-waydroid-helper display-size`). `None` if the helper or the
+/// session is unavailable, or the output can't be parsed.
+///
+/// Used to confirm a boot actually took the panel's physical mode: a session that
+/// observed a fractional output scale sizes its display to `logical x scale`
+/// instead, which renders wrong and is otherwise silent.
+pub async fn display_size() -> Option<(u32, u32)> {
+    let out = Command::new("pkexec")
+        .arg(waydroid_helper_path())
+        .arg("display-size")
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pick = |prefix: &str| {
+        text.lines().find_map(|l| {
+            let (w, h) = l.trim().strip_prefix(prefix)?.trim().split_once('x')?;
+            Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+        })
+    };
+    pick("Override size:").or_else(|| pick("Physical size:"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
