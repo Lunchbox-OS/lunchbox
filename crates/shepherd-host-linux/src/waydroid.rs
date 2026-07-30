@@ -124,21 +124,34 @@ pub async fn boot_completed() -> bool {
 /// a scaled partial window; the helper `am task resize`s it to the full display
 /// (freeform, so the app fills in landscape rather than honoring a portrait
 /// lock). Only meaningful in the multi-window modes (statusbar/off), not
-/// locktask's single full-UI surface. Logs and returns on failure.
-pub async fn maximize(package: &str) {
+/// locktask's single full-UI surface.
+///
+/// Returns whether the resize was applied. The helper refuses to resize a task
+/// that is not the resumed one, which is a race a heavy app loses on a cold boot
+/// — see [`maximize_when_resumed`](crate::adapter::LinuxHost) for the retry.
+pub async fn maximize(package: &str) -> bool {
     let result = Command::new("pkexec")
         .arg(waydroid_helper_path())
         .args(["maximize", "--package", package])
         .status()
         .await;
     match result {
-        Ok(status) if status.success() => debug!(package, "maximized Android app window"),
-        Ok(status) => debug!(
-            package,
-            %status,
-            "maximize helper did not succeed (helper not installed, app not on top, or resize unsupported)"
-        ),
-        Err(e) => warn!(package, error = %e, "failed to invoke maximize helper"),
+        Ok(status) if status.success() => {
+            debug!(package, "maximized Android app window");
+            true
+        }
+        Ok(status) => {
+            debug!(
+                package,
+                %status,
+                "maximize helper did not succeed (helper not installed, app not on top, or resize unsupported)"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(package, error = %e, "failed to invoke maximize helper");
+            false
+        }
     }
 }
 

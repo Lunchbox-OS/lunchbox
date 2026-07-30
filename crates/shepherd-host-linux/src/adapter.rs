@@ -2420,9 +2420,16 @@ impl LinuxHost {
             }
             // Waydroid opens multi-window apps in a small default freeform window
             // and doesn't grow the Android task to fill the host window, so
-            // expand it to fill the display (best-effort). The window is mapped
-            // (and thus the task is on top) by here.
-            waydroid::maximize(package_name).await;
+            // expand it to fill the display (best-effort).
+            //
+            // The Wayland toplevel maps as soon as the app has a surface, which
+            // is *earlier* than its activity reaching RESUMED — and the helper
+            // refuses to resize a task that isn't the resumed one. A heavy app on
+            // a cold boot (Khan Academy) loses that race, so a single attempt
+            // silently no-ops and the app is left at Waydroid's default freeform
+            // size: padded at the top, clipped at the bottom, until someone
+            // maximizes it by hand. Retry until it takes.
+            self.maximize_when_resumed(package_name.to_string());
         }
 
         // Track the session so the window-watch task can dedup its single
@@ -2465,6 +2472,41 @@ impl LinuxHost {
 
         info!(session_id = %session_id, package = %package_name, "Spawned Android (Waydroid) session");
         Ok(handle)
+    }
+
+    /// Grow a just-launched Android app to fill the display, retrying until its
+    /// activity is actually the resumed one.
+    ///
+    /// The privileged helper only resizes the task it finds on top, and a heavy
+    /// app maps its Wayland surface well before it reaches RESUMED, so the first
+    /// attempt can lose the race. Runs in the background: the app is already
+    /// on-screen either way, and blocking the launch on a slow starter would just
+    /// stall the session bookkeeping behind it.
+    fn maximize_when_resumed(&self, package: String) {
+        tokio::spawn(async move {
+            let deadline = Instant::now() + ANDROID_MAXIMIZE_TIMEOUT;
+            loop {
+                if waydroid::maximize(&package).await {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    warn!(
+                        package,
+                        timeout_s = ANDROID_MAXIMIZE_TIMEOUT.as_secs(),
+                        "Android app never became the resumed task; leaving its window unmaximized"
+                    );
+                    return;
+                }
+                tokio::time::sleep(ANDROID_MAXIMIZE_RETRY_INTERVAL).await;
+            }
+            // One more pass once the app has settled. A resize that lands while
+            // the app is still coming up (splash, or a launcher activity that
+            // hands off to the real one) can be undone by the next activity
+            // taking the task back to Waydroid's freeform bounds. Re-applying the
+            // same bounds is a no-op when it already took.
+            tokio::time::sleep(ANDROID_MAXIMIZE_SETTLE).await;
+            waydroid::maximize(&package).await;
+        });
     }
 
     /// Watch the Android session's tracked surface (the per-app `waydroid.<pkg>`
@@ -2591,6 +2633,16 @@ const ANDROID_WINDOW_TIMEOUT: Duration = Duration::from_secs(45);
 const ANDROID_WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Poll cadence for the window-watch exit task.
 const ANDROID_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+/// How long to keep retrying the post-launch maximize. Bounds the case where the
+/// app never becomes the resumed task (it crashed on launch, or something else
+/// took the foreground) so the retry loop can't run forever.
+const ANDROID_MAXIMIZE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Delay between maximize attempts. Each attempt is a `pkexec` + `dumpsys`, so
+/// this is deliberately unhurried — the common case succeeds on the first try.
+const ANDROID_MAXIMIZE_RETRY_INTERVAL: Duration = Duration::from_millis(750);
+/// Wait before the confirming re-apply, long enough for a splash / launcher
+/// activity to have handed off to the app's real one.
+const ANDROID_MAXIMIZE_SETTLE: Duration = Duration::from_secs(4);
 /// Settle between the two locktask pin attempts — long enough for the DPC's
 /// activities to register after the session comes up (see the re-pin comment).
 const ANDROID_LOCKTASK_PIN_SETTLE: Duration = Duration::from_secs(2);
