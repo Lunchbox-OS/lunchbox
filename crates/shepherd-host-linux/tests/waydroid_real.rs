@@ -376,3 +376,69 @@ async fn waydroid_locktask_launch_and_stop() {
     );
     println!("[OK] locktask: stopped, surface gone, Exited emitted");
 }
+
+/// Exercises `LinuxHost::stop_waydroid`, the graceful-shutdown teardown.
+///
+/// Two properties, in order (the no-op case first, so it runs against a session
+/// that is still up):
+///
+/// 1. A host that never prebooted must leave the session alone — that is what
+///    keeps `[service.waydroid] preboot = false` plus a hand-started session
+///    working.
+/// 2. A host that did preboot must stop it, so a booted Android container does
+///    not outlive shepherdd.
+///
+/// Destructive: leaves the session STOPPED, so it runs after the launch tests.
+#[tokio::test]
+#[ignore = "requires Waydroid + Sway; run via test-waydroid.sh"]
+async fn waydroid_stop_on_shutdown() {
+    if !cmd_ok("waydroid", &["--version"]) {
+        skip("waydroid CLI not available");
+        return;
+    }
+
+    let session_running = || cmd_stdout("waydroid", &["status"]).contains("RUNNING");
+
+    if !session_running() {
+        skip("no running Waydroid session to stop");
+        return;
+    }
+
+    // 1. Never prebooted → must not touch a session someone else started.
+    let bystander = LinuxHost::new();
+    bystander.stop_waydroid().await;
+    assert!(
+        session_running(),
+        "stop_waydroid() must leave a session it did not start running"
+    );
+    println!("[OK] shutdown: a non-prebooting host left the session alone");
+
+    // 2. Prebooted → owns the session, so shutdown stops it.
+    let host = LinuxHost::new();
+    host.configure_waydroid(
+        true,
+        true,
+        Duration::from_secs(90),
+        WaydroidLockMode::Statusbar,
+    );
+    host.preboot_waydroid();
+
+    // Let preboot reach a ready session before tearing it down, so we are not
+    // just racing it (preboot may restart the session to apply props).
+    let mut up = false;
+    for _ in 0..120 {
+        if session_running() {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(up, "preboot should leave a running session to stop");
+
+    host.stop_waydroid().await;
+    assert!(
+        !session_running(),
+        "stop_waydroid() should stop the session it prebooted"
+    );
+    println!("[OK] shutdown: the prebooted session was stopped");
+}

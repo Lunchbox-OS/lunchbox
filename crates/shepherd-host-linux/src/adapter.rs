@@ -112,6 +112,11 @@ const RECONCILE_CHANGES: &[&str] = &["new", "close", "move", "floating"];
 /// `boot-completed` check only while still booting) cheap.
 const WAYDROID_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long graceful shutdown waits for `waydroid session stop`. It normally
+/// returns in a couple of seconds; the bound exists so a wedged session degrades
+/// to a leaked container rather than a shepherdd that never exits.
+const WAYDROID_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Expand `~` at the beginning of a path to the user's home directory
 pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
@@ -443,6 +448,11 @@ pub struct LinuxHost {
     /// True while a wedged-Waydroid session restart is in flight, so concurrent
     /// launch wedges don't kick off overlapping restarts.
     waydroid_recovering: Arc<AtomicBool>,
+    /// True once [`preboot_waydroid`](Self::preboot_waydroid) has run, meaning
+    /// shepherd started the Waydroid session and so owns tearing it down. Stays
+    /// false when `[service.waydroid] preboot` is off, leaving a session an
+    /// admin started by hand alone. Read by [`stop_waydroid`](Self::stop_waydroid).
+    waydroid_prebooted: Arc<AtomicBool>,
     /// True once the current Waydroid session is known to have booted at output
     /// scale 1 (so its buffer matches the panel's native pixel grid). Every session
     /// (re)start that isn't guaranteed scale-1 clears it (preboot/recovery/repin);
@@ -593,6 +603,7 @@ impl LinuxHost {
             waydroid_settings: Arc::new(Mutex::new(None)),
             waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
             waydroid_recovering: Arc::new(AtomicBool::new(false)),
+            waydroid_prebooted: Arc::new(AtomicBool::new(false)),
             waydroid_scale1_booted: Arc::new(AtomicBool::new(false)),
             waydroid_pinned_mode: Arc::new(Mutex::new(None)),
         }
@@ -625,6 +636,9 @@ impl LinuxHost {
         // Preboot happens at the grid's (possibly fractional) output scale, so this
         // session is not the native-scale-1 boot a fractional Android launch needs.
         self.waydroid_scale1_booted.store(false, Ordering::SeqCst);
+        // From here shepherd owns the session's lifetime, so shutdown stops it.
+        // Set before the spawn so a shutdown racing the boot still tears it down.
+        self.waydroid_prebooted.store(true, Ordering::SeqCst);
         let pinned_mode = self.waydroid_pinned_mode.clone();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
@@ -1983,6 +1997,37 @@ impl LinuxHost {
         let handle =
             HostSessionHandle::new(SessionId::new(), HostHandlePayload::Linux { pid, pgid });
         let _ = event_tx.send(HostEvent::Exited { handle, status });
+    }
+
+    /// Stop the Waydroid session shepherd prebooted. Called during graceful
+    /// shutdown, mirroring [`stop_steam_preload`](Self::stop_steam_preload):
+    /// nothing else ends the session, so without this a booted Android container
+    /// outlives shepherdd and survives logout, holding its memory.
+    ///
+    /// Only touches a session shepherd started — with `[service.waydroid] preboot`
+    /// off, a session an admin started by hand is left running. Best-effort and
+    /// bounded, so a wedged session can't stall shutdown; the root
+    /// `waydroid-container` service is left alone (it is system-managed, and
+    /// preboot only ever ensures it is up).
+    pub async fn stop_waydroid(&self) {
+        if !self.waydroid_prebooted.load(Ordering::SeqCst) {
+            return;
+        }
+        // Also covers "Waydroid isn't installed": `waydroid status` fails to
+        // spawn and reports not-running, so shutdown stays quiet.
+        if !waydroid::session_running().await {
+            return;
+        }
+        info!("Stopping the Waydroid (Android) session");
+        if tokio::time::timeout(WAYDROID_STOP_TIMEOUT, waydroid::session_stop())
+            .await
+            .is_err()
+        {
+            warn!(
+                timeout_s = WAYDROID_STOP_TIMEOUT.as_secs(),
+                "Waydroid session did not stop within the timeout; abandoning it to continue shutdown"
+            );
+        }
     }
 
     /// Start the background process monitor

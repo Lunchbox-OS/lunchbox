@@ -150,3 +150,9 @@ WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" SWAYSOCK="$SWA
     waydroid session start >"$SESSION_LOG" 2>&1 &
 wait_session_ready || skip "Waydroid session did not become ready"
 run_test waydroid_locktask_launch_and_stop
+
+# 4. shutdown test: stop_waydroid() must leave a session it didn't start alone,
+#    and stop one it prebooted. Runs last — it deliberately ends with the
+#    session STOPPED, which is also what cleanup would do anyway. Reuses the
+#    locktask session above as the "started by someone else" case.
+run_test waydroid_stop_on_shutdown

@@ -2244,6 +2244,12 @@ impl Service {
         // Stop preloaded Steam (if any) after active sessions are terminated
         host.stop_steam_preload();
 
+        // Same for the Android container: nothing else stops the Waydroid
+        // session, so without this it outlives shepherdd and survives logout.
+        // Before `logout()` below, while sway (and so the session's surfaces)
+        // are still up.
+        host.stop_waydroid().await;
+
         // Exit the desktop session (e.g. `swaymsg exit`). Doing this here, after
         // sessions are stopped and after the HTTP server has begun graceful
         // shutdown, ensures the in-flight logout response is flushed before the
