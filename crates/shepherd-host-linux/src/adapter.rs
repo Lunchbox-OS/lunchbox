@@ -2430,44 +2430,55 @@ impl LinuxHost {
         waydroid::ensure_app_stopped(package_name).await;
 
         if locktask {
-            // Reuse the full-UI surface if a previous session parked it. It is
-            // Android's display connection, so it outlives individual sessions —
-            // see `stop_android`. Only present a new one when there is none.
-            let parked = parked_full_ui_present().await;
-            if parked {
+            // Bring up (or reuse) the full-UI client, and pin the app *before*
+            // revealing it. The surface renders the whole Android display, so
+            // presenting it first showed the child Android's home screen for the
+            // pin-settle window. It maps onto the parked workspace (sway.conf) and
+            // a reused one is already parked, so it stays off screen until the pin
+            // has landed. The client itself is Android's display connection and
+            // outlives sessions — see `stop_android`.
+            let criteria = format!("app_id=\"{}\"", waydroid::FULL_UI_APP_ID);
+            if parked_full_ui_present().await {
                 debug!("Reusing the parked Waydroid full-UI surface");
-                if let Err(e) = crate::sway::unpark_window(
-                    &format!("app_id=\"{}\"", waydroid::FULL_UI_APP_ID),
-                    ANDROID_ACTIVE_WORKSPACE,
-                )
-                .await
-                {
-                    warn!(error = %e, "Failed to unpark the Waydroid full-UI surface");
-                }
             } else {
                 let full_ui = waydroid::show_full_ui().map_err(|e| {
                     HostError::SpawnFailed(format!("failed to start Waydroid full UI: {e}"))
                 })?;
                 *self.waydroid_full_ui.lock().unwrap() = Some(full_ui);
             }
+            // Wait for the surface to exist at all — it is parked, so the
+            // on-screen check would never see it.
+            if !wait_for_parked_full_ui(ANDROID_WINDOW_TIMEOUT).await {
+                return Err(HostError::SpawnFailed(format!(
+                    "Waydroid full UI did not appear within {}s",
+                    ANDROID_WINDOW_TIMEOUT.as_secs()
+                )));
+            }
+            // Defensive: if anything left it on screen (a previous crash), park it
+            // before pinning so the reveal below is still the first frame shown.
+            let _ = crate::sway::park_window(&criteria).await;
+
+            // Pin in Lock Task Mode while still off screen. Right after the
+            // session comes up the DPC's LaunchActivity can briefly be
+            // unresolvable ("Activity class does not exist"), so pin, settle, and
+            // pin once more — re-pinning an already-locked app is a harmless no-op.
+            waydroid::pin(package_name).await;
+            tokio::time::sleep(ANDROID_LOCKTASK_PIN_SETTLE).await;
+            waydroid::pin(package_name).await;
+
+            // Reveal it: the first frame the child sees is the pinned app.
+            if let Err(e) = crate::sway::unpark_window(&criteria, ANDROID_ACTIVE_WORKSPACE).await {
+                warn!(error = %e, "Failed to unpark the Waydroid full-UI surface");
+            }
             if !wait_for_android_window(&surface_app_id, ANDROID_WINDOW_TIMEOUT).await {
-                // Leave the client alone on failure — killing it would take
-                // Android's display stack down. Park it so it can't sit on screen.
-                let _ =
-                    crate::sway::park_window(&format!("app_id=\"{}\"", waydroid::FULL_UI_APP_ID))
-                        .await;
+                // Leave the client alone — killing it would take Android's display
+                // stack down. Park it so it can't sit half-presented.
+                let _ = crate::sway::park_window(&criteria).await;
                 return Err(HostError::SpawnFailed(format!(
                     "Waydroid full UI did not present within {}s",
                     ANDROID_WINDOW_TIMEOUT.as_secs()
                 )));
             }
-            // Pin in Lock Task Mode. Right after the session comes up the DPC's
-            // LaunchActivity can briefly be unresolvable ("Activity class does
-            // not exist"), so pin, settle, and pin once more — re-pinning an
-            // already-locked app is a harmless no-op.
-            waydroid::pin(package_name).await;
-            tokio::time::sleep(ANDROID_LOCKTASK_PIN_SETTLE).await;
-            waydroid::pin(package_name).await;
         } else {
             match waydroid::launch_app(package_name).await {
                 Ok(()) => {}
@@ -2701,6 +2712,22 @@ async fn parked_full_ui_present() -> bool {
             debug!(error = %e, "failed to list windows while looking for a parked full-UI surface");
             false
         }
+    }
+}
+
+/// Poll until the full-UI `Waydroid` surface exists while parked, or `timeout`
+/// elapses. Used before the Lock Task pin, when the surface is deliberately off
+/// screen and so invisible to [`wait_for_android_window`].
+async fn wait_for_parked_full_ui(timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if parked_full_ui_present().await {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(ANDROID_WINDOW_POLL_INTERVAL).await;
     }
 }
 
