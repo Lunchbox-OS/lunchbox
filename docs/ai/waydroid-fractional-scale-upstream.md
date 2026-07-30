@@ -196,3 +196,18 @@ Reboot the Waydroid session while the output is at scale 1 before every launch
 that follows a scale exposure, and express the UI zoom as Android density
 (`wm density = base x scale`). Pixel-perfect but costs a session boot (~10–40 s)
 per activity open — which is why this upstream fix is worth doing.
+
+**Update (2026-07-29): the per-open cost is gone, the constraint is not.**
+shepherd now boots the *preboot* session with the outputs held at scale 1 and
+restores the fractional scale afterwards, so the warm session is already on the
+native pixel grid and no launch has to reboot it. Measured on the faithful rig:
+first open **81.2 s -> 6.9 s**, reopen 5.9 s -> 2.2 s, and the Android display
+finally sizes to the panel (`wm size` 1920x999 -> 1920x1080). See
+[`2026-07-29 003`](history/2026-07-29%20003%20android-first-open-native-scale-preboot.md).
+
+This does not reduce the need for the upstream fix — it just moves the one
+unavoidable boot to startup. The steady-state double-scale above is still what
+blocks running Waydroid at a fractional scale at all, and shepherd still pays a
+window at boot where the whole UI sits at scale 1 while Android comes up. A
+hwcomposer that derived its geometry from the physical mode, and reconfigured on
+warm scale changes, would let shepherd drop the scale dance entirely.
