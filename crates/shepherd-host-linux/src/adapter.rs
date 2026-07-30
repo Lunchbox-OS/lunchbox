@@ -494,6 +494,13 @@ pub struct LinuxHost {
     /// would short-circuit every later poll, and Android would stay hidden until
     /// shepherdd restarted. `None` until the first poll resolves.
     waydroid_ready_last: Arc<Mutex<Option<bool>>>,
+    /// False while a preboot is in flight. Android readiness is gated on this as
+    /// well as the session being up: `boot_completed` goes true tens of seconds
+    /// before preboot finishes settling the session (and setting
+    /// `waydroid_scale1_booted`), and a launch in that gap pays a native-scale
+    /// session restart — a visible Android reboot mid-use. Starts `true` so a
+    /// build that never preboots is not gated forever.
+    waydroid_preboot_done: Arc<AtomicBool>,
     /// True once [`preboot_waydroid`](Self::preboot_waydroid) has run, meaning
     /// shepherd started the Waydroid session and so owns tearing it down. Stays
     /// false when `[service.waydroid] preboot` is off, leaving a session an
@@ -650,6 +657,7 @@ impl LinuxHost {
             waydroid_full_ui: Arc::new(Mutex::new(HashMap::new())),
             waydroid_recovering: Arc::new(AtomicBool::new(false)),
             waydroid_ready_last: Arc::new(Mutex::new(None)),
+            waydroid_preboot_done: Arc::new(AtomicBool::new(true)),
             waydroid_prebooted: Arc::new(AtomicBool::new(false)),
             waydroid_scale1_booted: Arc::new(AtomicBool::new(false)),
             waydroid_pinned_mode: Arc::new(Mutex::new(None)),
@@ -686,9 +694,14 @@ impl LinuxHost {
         // From here shepherd owns the session's lifetime, so shutdown stops it.
         // Set before the spawn so a shutdown racing the boot still tears it down.
         self.waydroid_prebooted.store(true, Ordering::SeqCst);
+        // Keep Android gated until this finishes — see `waydroid_preboot_done`.
+        // Set before the spawn so the readiness watcher can never observe the
+        // window between "session up" and "preboot started".
+        self.waydroid_preboot_done.store(false, Ordering::SeqCst);
         let pinned_mode = self.waydroid_pinned_mode.clone();
         let scale1_booted = self.waydroid_scale1_booted.clone();
         let restart_guard = self.waydroid_recovering.clone();
+        let preboot_done = self.waydroid_preboot_done.clone();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -764,16 +777,20 @@ impl LinuxHost {
 
             let saved_scales = drop_output_scales_to_native().await;
 
+            // Was a fractional scale actually in play? If nothing needed dropping,
+            // the output is already native and *any* boot latches scale 1.
+            let was_fractional = !saved_scales.is_empty();
+
             let was_running = waydroid::session_running().await;
             let mut started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-            // Did *we* watch it boot inside the native-scale window above? Only
-            // then do we know what scale it latched. Adopting an already-running
-            // session tells us nothing, so that case leaves the flag alone and the
-            // first scaled launch re-verifies the old (slow) way.
-            let mut booted_native = started && !was_running;
-            // A fresh session start already picked up the props; a warm session
-            // with changed props needs one restart to apply them.
-            if started && was_running && prop_changed {
+            // A session we started ourselves booted inside the native-scale window
+            // above, so we know its scale. An adopted one we know nothing about.
+            let mut booted_native = started && (!was_running || !was_fractional);
+            // Restart an adopted session when either its props changed or we can't
+            // vouch for its boot scale. Leaving it unproven just defers the restart
+            // to the child's first launch, where it costs a visible Android reboot
+            // mid-use; paying it here happens while Android is still gated.
+            if started && was_running && (prop_changed || was_fractional) {
                 waydroid::session_stop().await;
                 started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
                 booted_native = started;
@@ -796,6 +813,12 @@ impl LinuxHost {
             {
                 debug!(error = %e, "failed to set waydroid idle-suspend");
             }
+
+            // Open the readiness gate last, on every path: the watcher can now
+            // un-gate Android knowing a launch will land on a settled, native-scale
+            // session. On the failure path it lets the watcher report the truth
+            // (session down -> still gated) rather than pinning Android hidden.
+            preboot_done.store(true, Ordering::SeqCst);
 
             if started {
                 info!("Waydroid pre-boot complete; session warm");
@@ -837,6 +860,7 @@ impl LinuxHost {
         });
 
         let ready_last = self.waydroid_ready_last.clone();
+        let preboot_done = self.waydroid_preboot_done.clone();
         tokio::spawn(async move {
             loop {
                 // Re-read each pass: wedge recovery and the docking repin re-gate
@@ -844,7 +868,14 @@ impl LinuxHost {
                 // it kept its own cache it would short-circuit forever on a stale
                 // `true` and never un-gate again.
                 let last = *ready_last.lock().unwrap();
-                let ready = if !waydroid::session_running().await {
+                let ready = if !preboot_done.load(Ordering::SeqCst) {
+                    // Android boots (and `boot_completed` flips) well before
+                    // preboot finishes settling the session. Un-gating there lets
+                    // a launch land while `waydroid_scale1_booted` is still unset,
+                    // which costs a native-scale restart — a visible Android
+                    // reboot. Stay gated until preboot is done.
+                    false
+                } else if !waydroid::session_running().await {
                     false
                 } else if last == Some(true) {
                     true // still up + already booted; skip the privileged check
