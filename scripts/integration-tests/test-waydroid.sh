@@ -123,6 +123,12 @@ run_test() {
 #    child of this short-lived test process, so it dies when the test exits —
 #    fine here (in production shepherdd is long-lived and the session persists).
 run_test waydroid_preboot_enables_multi_window
+
+# 1b. cold-container prop correction. Runs here because it needs the running
+#     session test 1 just left (to poison the prop through) and then goes cold
+#     itself. Leaves multi_windows=true and a running session again.
+run_test waydroid_preboot_fixes_stale_props_on_a_cold_container
+
 waydroid session stop >/dev/null 2>&1 || true
 sleep 2
 

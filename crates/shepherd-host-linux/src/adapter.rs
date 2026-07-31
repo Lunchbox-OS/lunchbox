@@ -186,6 +186,38 @@ async fn restore_output_scales(saved: Vec<crate::sway::OutputScale>) {
     }
 }
 
+/// Start a Waydroid session with every output held at scale 1 for the part of
+/// the boot where Android takes its display geometry, and return whether it came
+/// up ready. Called once per preboot normally, twice when the prop pins had to be
+/// corrected after the first boot (see [`LinuxHost::preboot_waydroid`]).
+///
+/// Waydroid latches its display geometry from the output scale it observes at
+/// *session boot* and cannot be corrected warm, so a session booted at a
+/// fractional scale forces the first Android launch to stop and re-boot it at
+/// scale 1 — measured at ~75 s of "Loading" on the child's first open. Paying it
+/// here means the warm session is already launch-ready.
+///
+/// Costs a window where the launcher and HUD render at scale 1 (physically
+/// smaller). [`restore_native_scale_when_settled`] ends it as early as the
+/// hwcomposer allows, and the shells cover it with their loading page.
+async fn boot_session_at_native_scale(boot_ready_timeout: Duration) -> bool {
+    let saved_scales = drop_output_scales_to_native().await;
+    // Clear the hwcomposer's scale report before booting, so the wait below can
+    // only be satisfied by a write from *this* boot. A cold container starts with
+    // it empty anyway; this matters for an adopted warm session, where a `1.0`
+    // left by an earlier session would otherwise satisfy the check before our
+    // drop has been observed. Best-effort: a no-op when no session is running.
+    let _ = waydroid::set_prop(WAYDROID_DISPLAY_SCALE_PROP, "").await;
+    // Restores concurrently while the rest of the boot finishes.
+    let restore_task = tokio::spawn(restore_native_scale_when_settled(
+        saved_scales,
+        boot_ready_timeout,
+    ));
+    let started = waydroid::start_session_and_wait(boot_ready_timeout).await;
+    let _ = restore_task.await;
+    started
+}
+
 /// Restore the scales dropped for a Waydroid boot, once Android has had long
 /// enough to take its display geometry.
 ///
@@ -837,16 +869,9 @@ impl LinuxHost {
                 }
             }
 
-            // Boot on the panel's native pixel grid. Waydroid latches its display
-            // geometry from the output scale it sees at session boot and can't be
-            // corrected warm, so a session booted at a fractional scale forces the
-            // first Android launch to stop and re-boot it at scale 1 — measured at
-            // ~75 s of "Loading" on the child's first open. Paying it here, once,
-            // during startup means the warm session is already launch-ready.
+            // Boot on the panel's native pixel grid — see
+            // [`boot_session_at_native_scale`] for why and what it costs.
             //
-            // Costs a brief window where the launcher/HUD render at scale 1 (so,
-            // physically smaller) while Android boots. That is a startup cosmetic;
-            // the alternative was a mid-use stall.
             // Hold the restart guard across the whole boot. `repin_waydroid_resolution`
             // fires on the *first* display-change event, which at startup can beat
             // preboot to pinning the mode — it then sees `pinned_mode == None`,
@@ -878,30 +903,60 @@ impl LinuxHost {
                 waydroid::session_stop().await;
             }
 
-            let saved_scales = drop_output_scales_to_native().await;
-            // Clear the hwcomposer's scale report before booting, so the wait
-            // below can only be satisfied by a write from *this* boot. A cold
-            // container starts with it empty anyway; this matters for an adopted
-            // warm session, where a `1.0` left by an earlier session would
-            // otherwise satisfy the check before our drop has been observed.
-            // Best-effort: a no-op when no session is running.
-            let _ = waydroid::set_prop(WAYDROID_DISPLAY_SCALE_PROP, "").await;
-            // Hold native scale only until Android has taken its display geometry
-            // — measured to happen early in the session boot, not at boot-complete.
-            // Holding for the whole boot left the launcher and HUD rendering small
-            // for ~60s on a cold start; ~8s is enough for `wm size` to land on the
-            // panel's physical mode. Restores concurrently while the boot finishes.
-            let restore_task = tokio::spawn(restore_native_scale_when_settled(
-                saved_scales,
-                settings.boot_ready_timeout,
-            ));
+            let mut started = boot_session_at_native_scale(settings.boot_ready_timeout).await;
 
-            let started = waydroid::start_session_and_wait(settings.boot_ready_timeout).await;
-            let _ = restore_task.await;
+            // The prop pins above cannot land when no session is running:
+            // `waydroid prop set` reaches the property service *through* the
+            // session and, without one, prints "WayDroid session is stopped" and
+            // exits 0 — so shepherd is told it succeeded. Shutdown stops the
+            // prebooted session, which makes that every cold start.
+            //
+            // Now that a session exists, re-apply. Anything that actually
+            // changes needs one more boot to take effect, because these props
+            // are read at session start; the running session still has the old
+            // values. That is rare in steady state — the values persist, so this
+            // only fires when the *desired* set changes (a fresh container, a
+            // `lock_mode` / `multi_window` config change, or the locktask path
+            // having flipped `multi_windows` for its own session).
+            let mut corrected = false;
+            if started {
+                for (key, value) in &desired {
+                    if waydroid::get_prop(key).await.as_deref() != Some(value.as_str()) {
+                        match waydroid::set_prop(key, value).await {
+                            Ok(()) => corrected = true,
+                            Err(e) => {
+                                warn!(error = %e, key, value, "failed to set waydroid prop after the boot")
+                            }
+                        }
+                    }
+                }
+                if corrected {
+                    info!(
+                        "Waydroid props could not be set before a session existed; restarting once to apply them"
+                    );
+                    waydroid::session_stop().await;
+                    started = boot_session_at_native_scale(settings.boot_ready_timeout).await;
+                    // A prop that still disagrees after its own restart is not
+                    // something another boot would fix — say so and carry on.
+                    if started {
+                        for (key, value) in &desired {
+                            if waydroid::get_prop(key).await.as_deref() != Some(value.as_str()) {
+                                warn!(
+                                    key,
+                                    want = value,
+                                    "waydroid prop did not take even with a session running"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // We owned this boot unless we adopted a session that was already
             // running and did not restart it — and even then, a non-fractional
-            // output means any boot latched scale 1 anyway.
-            let adopted = was_running && !restarted;
+            // output means any boot latched scale 1 anyway. A corrective restart
+            // means we owned the final boot outright.
+            let adopted = was_running && !restarted && !corrected;
             let booted_native = started && (!adopted || !was_fractional);
             // Only claim a native-scale boot if we actually owned the session for
             // its duration — otherwise something else may have restarted it at the

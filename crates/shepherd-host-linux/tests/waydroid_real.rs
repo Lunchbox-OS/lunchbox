@@ -155,6 +155,94 @@ async fn waydroid_preboot_enables_multi_window() {
     println!("[OK] preboot: session running, multi_windows enabled");
 }
 
+/// Preboot must fix a stale prop on a **cold container** — the case that used to
+/// fail silently.
+///
+/// `waydroid prop set` reaches the property service through the *session* and
+/// exits 0 without one, so the pins preboot writes before starting the session
+/// never landed. shepherdd stops the prebooted session at shutdown, making that
+/// every cold start: a device whose persisted `multi_windows` disagreed with the
+/// config (a fresh container, a `lock_mode` change, or the locktask path having
+/// flipped it) stayed wrong forever, and the statusbar launch path then had no
+/// per-app toplevel to track.
+///
+/// Sets the prop to the wrong value while a session is up, stops the session,
+/// and asserts preboot still reaches the right end state — which it can only do
+/// by re-applying after its boot and restarting once.
+///
+/// Also reports how long that correction took, since the whole cost of the fix
+/// is that one extra session boot.
+#[tokio::test]
+#[ignore = "requires Waydroid + Sway; run via test-waydroid.sh"]
+async fn waydroid_preboot_fixes_stale_props_on_a_cold_container() {
+    if !cmd_ok("waydroid", &["--version"]) {
+        skip("waydroid CLI not available");
+        return;
+    }
+    if std::env::var_os("SWAYSOCK").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        skip("no SWAYSOCK/WAYLAND_DISPLAY (need a running sway)");
+        return;
+    }
+    // Poisoning the prop needs a live session — that is the bug in miniature.
+    if !cmd_stdout("waydroid", &["status"]).contains("RUNNING") {
+        skip("no running session to set the stale prop through");
+        return;
+    }
+
+    // Poison it, confirm it took, then go cold.
+    let _ = cmd_stdout(
+        "waydroid",
+        &["prop", "set", "persist.waydroid.multi_windows", "false"],
+    );
+    let poisoned = cmd_stdout(
+        "waydroid",
+        &["prop", "get", "persist.waydroid.multi_windows"],
+    )
+    .trim()
+        == "false";
+    if !poisoned {
+        skip("could not set multi_windows=false (no session?)");
+        return;
+    }
+    let _ = cmd_stdout("waydroid", &["session", "stop"]);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let started_at = std::time::Instant::now();
+    let host = LinuxHost::new();
+    // Wants multi_windows=true, i.e. the opposite of what is persisted.
+    host.configure_waydroid(
+        true,
+        true,
+        Duration::from_secs(90),
+        WaydroidLockMode::Statusbar,
+    );
+    host.preboot_waydroid();
+
+    let mut ok = false;
+    for _ in 0..150 {
+        let running = cmd_stdout("waydroid", &["status"]).contains("RUNNING");
+        let multi = cmd_stdout(
+            "waydroid",
+            &["prop", "get", "persist.waydroid.multi_windows"],
+        )
+        .trim()
+            == "true";
+        if running && multi {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(
+        ok,
+        "preboot must correct a stale multi_windows on a cold container (it cannot set props until a session exists)"
+    );
+    println!(
+        "[OK] preboot: corrected a stale prop from cold in {:?} (two session boots)",
+        started_at.elapsed()
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Waydroid + a booted session + Sway; run via test-waydroid.sh"]
 async fn waydroid_launch_and_stop() {
