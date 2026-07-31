@@ -83,6 +83,22 @@ get_repo_root() {
     (cd "$script_dir/../.." && pwd)
 }
 
+# Where an installed (non-checkout) shepherd keeps its data files: the example
+# configs, VERSION, and the DPC apk. Fixed, NOT under --prefix, because
+# scripts/shepherd-admin hard-codes the same path when it can't find a repo
+# checkout (it resolves SHEPHERD_DATA_DIR before this file is sourced, so it
+# can't use the constant — keep the two in sync). Both the .deb and
+# `shepherd install` must place data files here for `shepherd-admin` to find
+# them.
+# shellcheck disable=SC2034  # read by install.sh (the sourcing libs, not here)
+SHEPHERD_DATA_INSTALL_DIR="/usr/share/shepherd"
+
+# The Device Policy Controller apk built by dpc-waydroid/build.sh. Named here
+# because both ends need it: install.sh puts it in $SHEPHERD_DATA_INSTALL_DIR,
+# waydroid.sh's install_dpc reads it back out via get_data_dir.
+# shellcheck disable=SC2034  # read by install.sh + waydroid.sh
+DPC_APK_NAME="shepherd-dpc.apk"
+
 # Directory holding shepherd's data files (the example configs). A source
 # checkout keeps them at the repo root; a packaged install (the .deb, driving
 # shepherd-admin) exports SHEPHERD_DATA_DIR=/usr/share/shepherd. Admin tasks that

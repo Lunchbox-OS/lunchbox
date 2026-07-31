@@ -990,6 +990,22 @@ sudo shepherd-admin apps install android kiosk
 - installs the DPC apk and sets it as **device owner**. This must happen
   **before any Google sign-in** (the only gate is that no account exists yet).
 
+The DPC apk ships **inside the `.deb`** (at `/usr/share/shepherd/`), so a
+packaged install needs nothing extra. **From source** it is not built for you:
+the apk is signed with a persistent key — a device that already has the DPC as
+owner only accepts updates signed with the same key — so building it is a
+deliberate, separate step. Build it once before installing:
+
+```sh
+shepherd deps install android                                   # Android SDK
+(cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)
+sudo ./scripts/shepherd install dpc     # or 'install all', which includes it
+```
+
+If it's missing, `apps install android` says so and stops rather than
+provisioning half a device owner; everything except `lock_mode = "locktask"`
+works without it.
+
 The device-owner step needs a running Waydroid session; if one isn't up the
 command provisions GApps + libndk and tells you to start a session and re-run to
 finish the DPC.

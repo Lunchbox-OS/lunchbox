@@ -39,10 +39,10 @@ LIBNDK_PROPS=(
     "ro.vendor.enable.native.bridge.exec64=1"
 )
 
-# The Device Policy Controller app shipped in dpc-waydroid/.
+# The Device Policy Controller app shipped in dpc-waydroid/. The apk's file name
+# (DPC_APK_NAME) lives in common.sh — the installer names the same file.
 DPC_PACKAGE="com.armeafamily.shepherd.dpc"
 DPC_ADMIN="$DPC_PACKAGE/.AdminReceiver"
-DPC_APK_NAME="shepherd-dpc.apk"
 
 # --- helpers -----------------------------------------------------------------
 
@@ -263,18 +263,53 @@ install_dpc() {
     # reinstalling a device-owner app. A different (newer) version still installs;
     # an apk whose version we can't read (an old build with no sidecar) never
     # clobbers an already-installed DPC.
-    local data_dir apk apk_ver installed_ver
+    #
+    # Where the apk comes from, in order: the data dir an install put it in
+    # ($SHEPHERD_DATA_INSTALL_DIR from the .deb or `shepherd install dpc`), then
+    # the build output in a source checkout being run in place. This never
+    # builds — the apk is signed with a persistent key that a provisioned device
+    # owner can only be updated from, so building is deliberately an explicit
+    # step (see the die below).
+    #
+    # Both reads below are "absent is an answer, not an error", and both run under
+    # `set -euo pipefail`: an `[[ … ]] && assign` whose test fails, or a pipeline
+    # whose grep matches nothing, aborts the whole script — silently, before any
+    # of the guidance below can print. Hence the `if` and the `|| true`.
+    local data_dir apk apk_ver="" installed_ver=""
     data_dir="$(get_data_dir)"
     apk="$data_dir/$DPC_APK_NAME"
     [[ -f "$apk" ]] || apk="$data_dir/dpc-waydroid/$DPC_APK_NAME"
-    [[ -f "$apk" ]] && apk_ver="$(head -n1 "$apk.version" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -f "$apk" ]]; then
+        apk_ver="$(head -n1 "$apk.version" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    # Empty when the DPC isn't installed yet — the first-provision case, where
+    # `grep versionName` matches nothing.
     installed_ver="$(waydroid_shell dumpsys package "$DPC_PACKAGE" 2>/dev/null \
-        | grep -oE 'versionName=[^[:space:]]+' | head -n1 | cut -d= -f2)"
+        | grep -oE 'versionName=[^[:space:]]+' | head -n1 | cut -d= -f2 || true)"
 
     if [[ -n "$installed_ver" && ( -z "${apk_ver:-}" || "$apk_ver" == "$installed_ver" ) ]]; then
         info "DPC $installed_ver is already installed; skipping the reinstall."
     else
-        [[ -f "$apk" ]] || die "DPC apk not found (looked in $data_dir). From source, build it first: (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
+        if [[ ! -f "$apk" ]]; then
+            warn "DPC apk not found (looked in $data_dir)."
+            if [[ -f "$data_dir/Cargo.toml" ]]; then
+                # Source checkout: the apk is built out-of-band, by hand.
+                info "Build it, then re-run this command:"
+                info "  (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
+                info "The Android SDK comes from: shepherd deps install android"
+            else
+                # Installed shepherd. Either the .deb was built without the apk,
+                # or a from-source install ran before the apk existed. The `shepherd`
+                # CLI is source-only (the package ships shepherd-admin), so the
+                # remedy runs from a checkout — `install dpc` writes to this fixed
+                # path regardless of how the rest was installed.
+                info "This install shipped without it. Either install a release .deb that"
+                info "includes the DPC, or from a source checkout build and stage it:"
+                info "  (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
+                info "  sudo ./scripts/shepherd install dpc"
+            fi
+            die "Cannot provision the DPC without its apk (Android's lock_mode = \"locktask\" needs it)."
+        fi
 
         # Push into the session user's /data and pm install (waydroid app install
         # is unreliable headless).

@@ -137,21 +137,11 @@ package_deb() {
     # VERSION so `shepherd-admin --version` works off get_data_dir when packaged.
     install -m 0644 "$repo_root/VERSION" "$ex_stage/VERSION"
 
-    # Ship the prebuilt DPC apk (if present) so a packaged `apps install android`
-    # can set it as device owner without an Android SDK. Built out-of-band by
-    # dpc-waydroid/build.sh — the release .deb job builds it with the persistent
-    # signing key first; a dev `package deb` without the SDK simply omits it (the
-    # Lock Task backend is then unavailable from that .deb).
-    local dpc_apk="$repo_root/dpc-waydroid/shepherd-dpc.apk"
-    if [[ -f "$dpc_apk" ]]; then
-        install -m 0644 "$dpc_apk" "$ex_stage/shepherd-dpc.apk"
-        # The .version sidecar lets install_dpc compare an installed DPC against
-        # this apk without an Android SDK on the target (see waydroid.sh).
-        [[ -f "$dpc_apk.version" ]] && install -m 0644 "$dpc_apk.version" "$ex_stage/shepherd-dpc.apk.version"
-        info "Staged the DPC apk ($dpc_apk)"
-    else
-        warn "DPC apk not found ($dpc_apk); the Android Lock Task backend won't be installable from this .deb. Build it via dpc-waydroid/build.sh."
-    fi
+    # The prebuilt DPC apk is staged by install_system above (install_dpc_apk),
+    # so the .deb and a from-source install place it identically. It has to be
+    # built first — the release .deb job runs dpc-waydroid/build.sh with the
+    # persistent signing key; a dev `package deb` without it just warns, and that
+    # .deb can't offer the Lock Task backend.
 
     _package_stage_admin_cli "$stage" "$repo_root"
 

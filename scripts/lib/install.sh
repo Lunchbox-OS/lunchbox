@@ -905,6 +905,46 @@ install_waydroid() {
     success "Waydroid helper installed"
 }
 
+# Stage the prebuilt Device Policy Controller apk into the data dir, where
+# `shepherd-admin apps install android` (waydroid.sh:install_dpc) looks for it.
+# Placed by both paths through install_system: inside the .deb for a packaged
+# install, and on the host for a from-source one.
+#
+# Never builds. The apk is signed with a persistent key -- once a device has the
+# DPC as owner it only updates from that same key -- so building it is an
+# explicit, out-of-band step (dpc-waydroid/build.sh; the release .deb job runs it
+# with the org key). A missing apk is a warning, not an error: the Lock Task
+# backend is opt-in (`lock_mode = "locktask"`) and everything else installs fine
+# without it.
+install_dpc_apk() {
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    local src="$repo_root/dpc-waydroid/$DPC_APK_NAME"
+    local dst_dir="$destdir$SHEPHERD_DATA_INSTALL_DIR"
+
+    if [[ ! -f "$src" ]]; then
+        warn "DPC apk not built ($src); Android's lock_mode = \"locktask\" will be unavailable."
+        info "  Build it, then re-run this step:"
+        info "    (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
+        info "    sudo ./scripts/shepherd install dpc"
+        return 0
+    fi
+
+    require_root
+
+    info "Installing the DPC apk to $dst_dir/$DPC_APK_NAME..."
+    ensure_dir "$dst_dir" 0755
+    install -m 0644 "$src" "$dst_dir/$DPC_APK_NAME"
+    # The version sidecar build.sh writes next to the apk: install_dpc compares it
+    # against the installed DPC's versionName, since a kiosk has no aapt to read
+    # the apk itself.
+    if [[ -f "$src.version" ]]; then
+        install -m 0644 "$src.version" "$dst_dir/$DPC_APK_NAME.version"
+    fi
+}
+
 # Give one user a custodian: the directory, their migrated state, and the socket.
 #
 # Split out of `install_state` because a packaged device cannot reach that.
@@ -1345,6 +1385,7 @@ install_system() {
     # opt-in via `shepherd-admin apps install android`, so nothing here mutates
     # the host or forces Waydroid onto installs that never use it.
     install_waydroid_assets "true"
+    install_dpc_apk
     install_state "$firewall_user" "true"
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"
@@ -1535,6 +1576,24 @@ uninstall_desktop_entry() {
     remove_path "$dst_entry"
 
     success "Removed desktop entry"
+}
+
+# Remove the staged DPC apk. Mirrors install_dpc_apk. Leaves an already-
+# provisioned Android alone: the device owner lives inside the Waydroid
+# container, not on the host, and is removed with `dpm remove-active-admin` (see
+# dpc-waydroid/README.md), not by deleting this file.
+uninstall_dpc_apk() {
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local dst_dir="$destdir$SHEPHERD_DATA_INSTALL_DIR"
+
+    info "Removing the DPC apk..."
+    remove_path "$dst_dir/$DPC_APK_NAME"
+    remove_path "$dst_dir/$DPC_APK_NAME.version"
+
+    success "Removed the DPC apk"
 }
 
 # Remove the bluetoothd drop-in. Mirrors install_bluetooth_dropin.
@@ -1859,6 +1918,7 @@ uninstall_system() {
 
     uninstall_bins "$prefix"
     uninstall_firewall
+    uninstall_dpc_apk
     uninstall_state "$restore"
     uninstall_sway_config
     uninstall_desktop_entry "$prefix"
@@ -1924,6 +1984,9 @@ uninstall_main() {
         firewall)
             uninstall_firewall
             ;;
+        dpc)
+            uninstall_dpc_apk
+            ;;
         state)
             uninstall_state "$restore"
             ;;
@@ -1949,6 +2012,8 @@ Removes files that 'shepherd install' placed system-wide. Per-user config
 Commands:
     bins              Remove the installed binaries
     firewall          Remove the firewall helper + polkit assets
+    dpc               Remove the staged Device Policy Controller apk (does not
+                      touch a device owner already provisioned inside Android)
     state             Remove the state custodian's binary and units (the state
                       itself, and the system user that owns it, are kept)
     sway-config       Remove the sway configuration
@@ -2032,6 +2097,9 @@ install_main() {
         waydroid)
             install_waydroid "$user" "$release"
             ;;
+        dpc)
+            install_dpc_apk
+            ;;
         state)
             install_state "$user" "$release"
             ;;
@@ -2065,6 +2133,10 @@ Commands:
     firewall          Install the privileged firewall helper + polkit rule
     waydroid          Install the privileged Waydroid helper + polkit rule
                       (for Android activities; requires Waydroid on the host)
+    dpc               Stage the prebuilt Device Policy Controller apk
+                      (dpc-waydroid/$DPC_APK_NAME, built out-of-band by
+                      dpc-waydroid/build.sh) where 'shepherd-admin apps
+                      install android' can find it. Included in 'all'.
     state             Install the state custodian: its binary, systemd units
                       and system user (issue #157)
     policy            Push a policy to the custodian, making it the one

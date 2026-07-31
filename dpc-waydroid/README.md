@@ -27,6 +27,22 @@ The signing keystore (`dpc.keystore`, gitignored) is generated on first build
 and **kept** — once the app is device owner it can only be updated with the same
 key. Build artifacts and the APK are gitignored.
 
+### How the apk reaches a device
+
+Nothing builds this for you — that key rule is why. The apk is *staged*, then
+*provisioned*:
+
+| | staged by | from |
+|---|---|---|
+| `.deb` | the release job builds + signs it with the org key, then `install_system` stages it | `/usr/share/shepherd/shepherd-dpc.apk` |
+| source | `./scripts/shepherd install dpc` (also part of `install all`) — build it first, or it warns and skips | same path |
+| checkout, run in place | nothing; `shepherd-admin` reads it out of the tree | `dpc-waydroid/shepherd-dpc.apk` |
+
+`shepherd-admin apps install android` then `pm install`s whichever it finds and
+sets the device owner. Missing apk = it tells you to build it and stops. The
+`shepherd-dpc.apk.version` sidecar `build.sh` writes is how a kiosk (with no
+`aapt`) knows whether the staged apk is newer than the installed DPC.
+
 ## Components
 
 - `AdminReceiver` — the `DeviceAdminReceiver`; its existence is what lets the app
