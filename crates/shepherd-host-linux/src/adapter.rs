@@ -112,6 +112,41 @@ const RECONCILE_CHANGES: &[&str] = &["new", "close", "move", "floating"];
 /// `boot-completed` check only while still booting) cheap.
 const WAYDROID_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Holds the two things a Waydroid pre-boot has to un-hold when it ends: the
+/// Android readiness gate (`waydroid_preboot_done`) and the shells' "cover the
+/// screen" flag (`HostEvent::StartupBusy`). They answer the same question, so
+/// pairing them in one guard is what keeps them in lockstep.
+///
+/// Closing happens in [`LinuxHost::preboot_waydroid`] *before* the pre-boot task
+/// is spawned, so no observer can see the gap between "session up" and "pre-boot
+/// started". Opening is idempotent and also runs on `Drop`, so a pre-boot that
+/// returns early — or whose task panics — still un-gates Android and clears the
+/// loading screen rather than leaving the kiosk stuck on it forever.
+struct PrebootGate {
+    done: Arc<AtomicBool>,
+    event_tx: mpsc::UnboundedSender<HostEvent>,
+}
+
+impl PrebootGate {
+    fn close(done: Arc<AtomicBool>, event_tx: mpsc::UnboundedSender<HostEvent>) -> Self {
+        done.store(false, Ordering::SeqCst);
+        let _ = event_tx.send(HostEvent::StartupBusy { busy: true });
+        Self { done, event_tx }
+    }
+
+    fn open(&self) {
+        if !self.done.swap(true, Ordering::SeqCst) {
+            let _ = self.event_tx.send(HostEvent::StartupBusy { busy: false });
+        }
+    }
+}
+
+impl Drop for PrebootGate {
+    fn drop(&mut self) {
+        self.open();
+    }
+}
+
 /// Drop every active sway output to scale 1 and return the scales that were
 /// changed, for [`restore_output_scales`]. Empty when nothing needed changing
 /// (already native, or the query failed), which makes the restore a no-op.
@@ -546,7 +581,8 @@ pub struct LinuxHost {
     /// before preboot finishes settling the session (and setting
     /// `waydroid_scale1_booted`), and a launch in that gap pays a native-scale
     /// session restart — a visible Android reboot mid-use. Starts `true` so a
-    /// build that never preboots is not gated forever.
+    /// build that never preboots is not gated forever. Flipped only through
+    /// [`PrebootGate`], which keeps it in lockstep with `HostEvent::StartupBusy`.
     waydroid_preboot_done: Arc<AtomicBool>,
     /// True once [`preboot_waydroid`](Self::preboot_waydroid) has run, meaning
     /// shepherd started the Waydroid session and so owns tearing it down. Stays
@@ -741,14 +777,13 @@ impl LinuxHost {
         // From here shepherd owns the session's lifetime, so shutdown stops it.
         // Set before the spawn so a shutdown racing the boot still tears it down.
         self.waydroid_prebooted.store(true, Ordering::SeqCst);
-        // Keep Android gated until this finishes — see `waydroid_preboot_done`.
-        // Set before the spawn so the readiness watcher can never observe the
-        // window between "session up" and "preboot started".
-        self.waydroid_preboot_done.store(false, Ordering::SeqCst);
+        // Keep Android gated (and the shells' loading screen up) until this
+        // finishes — see `PrebootGate`. Closed before the spawn so no observer
+        // can catch the window between "session up" and "preboot started".
+        let gate = PrebootGate::close(self.waydroid_preboot_done.clone(), self.event_tx.clone());
         let pinned_mode = self.waydroid_pinned_mode.clone();
         let scale1_booted = self.waydroid_scale1_booted.clone();
         let restart_guard = self.waydroid_recovering.clone();
-        let preboot_done = self.waydroid_preboot_done.clone();
         tokio::spawn(async move {
             info!("Pre-booting Waydroid (Android) in the background");
             // 1. Ensure the root container service is up (no-op if already enabled).
@@ -908,11 +943,13 @@ impl LinuxHost {
                 }
             }
 
-            // Open the readiness gate last, on every path: the watcher can now
-            // un-gate Android knowing a launch will land on a settled, native-scale
-            // session. On the failure path it lets the watcher report the truth
-            // (session down -> still gated) rather than pinning Android hidden.
-            preboot_done.store(true, Ordering::SeqCst);
+            // Open the gate last, on every path: the watcher can now un-gate
+            // Android knowing a launch will land on a settled, native-scale
+            // session, and the shells can drop the loading screen now that the
+            // outputs are back at their configured scale. On the failure path it
+            // lets the watcher report the truth (session down -> still gated)
+            // rather than pinning Android hidden behind a permanent cover.
+            gate.open();
 
             if started {
                 info!("Waydroid pre-boot complete; session warm");
@@ -5145,5 +5182,51 @@ mod tests {
             stop_started.elapsed() < Duration::from_secs(4),
             "stop should have returned when the activity exited, not at the deadline"
         );
+    }
+
+    /// The gate is what makes "cover the screen" reversible, so the two things
+    /// that would strand a kiosk on a loading page get their own tests: an open
+    /// that never emits, and an emit that fires twice.
+    #[test]
+    fn preboot_gate_opens_once_and_pairs_with_the_flag() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let done = Arc::new(AtomicBool::new(true));
+
+        let gate = PrebootGate::close(done.clone(), tx);
+        assert!(!done.load(Ordering::SeqCst));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HostEvent::StartupBusy { busy: true })
+        ));
+
+        gate.open();
+        assert!(done.load(Ordering::SeqCst));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HostEvent::StartupBusy { busy: false })
+        ));
+
+        // Dropping after an explicit open must not emit a second clear.
+        drop(gate);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A pre-boot that panics (or returns early) still has to clear the cover.
+    #[test]
+    fn dropping_the_preboot_gate_clears_the_cover() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let done = Arc::new(AtomicBool::new(true));
+
+        drop(PrebootGate::close(done.clone(), tx));
+
+        assert!(done.load(Ordering::SeqCst));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HostEvent::StartupBusy { busy: true })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HostEvent::StartupBusy { busy: false })
+        ));
     }
 }

@@ -285,13 +285,10 @@ impl LauncherApp {
                         error!(error = %e, "Launch failed on server");
                         match client.get_state().await {
                             Ok(snapshot) => {
-                                if snapshot.current_session.is_some() {
-                                    debug!("Session still active after spawn failure");
-                                } else {
-                                    state.set(LauncherState::Idle {
-                                        entries: snapshot.entries,
-                                    });
-                                }
+                                // Whatever the daemon says now — a session that
+                                // survived, a startup step in flight, or just
+                                // the grid.
+                                state.apply_snapshot(snapshot);
                             }
                             Err(re) => {
                                 error!(error = %re, "Failed to get state after launch failure");
@@ -417,6 +414,19 @@ impl LauncherApp {
                             win.set_visible(true);
                         }
                         stack.set_visible_child_name("session");
+                    }
+                    LauncherState::StartingUp => {
+                        // Cover the grid while a startup step disrupts the
+                        // screen (the Waydroid pre-boot's scale-1 hold, issue
+                        // #2). Same page as Connecting: from the child's side
+                        // this is still "not ready yet".
+                        if let Some(grid) = grid {
+                            grid.set_tiles_sensitive(false);
+                        }
+                        if let Some(ref win) = window {
+                            win.set_visible(true);
+                        }
+                        stack.set_visible_child_name("loading");
                     }
                     LauncherState::Error { message } => {
                         if let Some(ref win) = window {

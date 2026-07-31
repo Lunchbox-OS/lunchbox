@@ -2275,6 +2275,18 @@ data class ServiceStateSnapshot(
      */
     val locked: Boolean = false,
     val policyLoaded: Boolean,
+    /**
+     * True while a startup step that visibly disrupts the screen is running,
+     * so a shell should cover the grid with its loading page until it clears
+     * (issue #2). Today that is only the Waydroid pre-boot, which holds every
+     * output at scale 1 while Android latches its display geometry — during
+     * which the launcher and HUD render physically smaller than normal.
+     *
+     * Lives in the snapshot rather than in a one-shot event so a shell that
+     * connects (or reconnects) mid-startup still learns it; shepherdd
+     * re-broadcasts the snapshot on every transition.
+     */
+    val startupBusy: Boolean = false,
 )
 
 /**

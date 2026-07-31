@@ -226,6 +226,18 @@ pub enum HostEvent {
     /// emit this are treated as always ready.
     KindReadinessChanged { kind: EntryKindTag, ready: bool },
 
+    /// A startup step that visibly disrupts the screen started (`busy = true`)
+    /// or finished (`busy = false`), so shells should cover the screen with
+    /// their loading page for its duration (issue #2). Today only the Waydroid
+    /// pre-boot emits it: it holds every output at scale 1 while Android
+    /// latches its display geometry, which renders the launcher and HUD
+    /// physically smaller than normal.
+    ///
+    /// This is *not* a readiness gate — it hides nothing and blocks no launch.
+    /// Emitters must send `false` on **every** exit path, including failures:
+    /// a missed one leaves the kiosk showing a loading page forever.
+    StartupBusy { busy: bool },
+
     /// Spawn failed after handle was created
     SpawnFailed {
         session_id: SessionId,

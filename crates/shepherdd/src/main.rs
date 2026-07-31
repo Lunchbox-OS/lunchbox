@@ -1525,6 +1525,12 @@ impl Service {
             should_preboot_waydroid(self.engine.policy().service.waydroid.preboot, has_android);
         if should_preboot {
             info!("Pre-booting Android (Waydroid) in background");
+            // Cover the shells' screens for the pre-boot, which holds the
+            // outputs at scale 1 while Android takes its display geometry
+            // (issue #2). Seeded here so the very first served snapshot already
+            // says busy; the host clears it on every pre-boot exit path (see
+            // HostEvent::StartupBusy).
+            self.engine.set_startup_busy(true);
             self.host.preboot_waydroid();
         }
 
@@ -2699,6 +2705,24 @@ impl Service {
                     info!(?kind, ready, "Activity kind readiness changed");
                     // Re-broadcast state so the launcher shows/hides the now
                     // (un)gated entries of this kind.
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                }
+            }
+
+            HostEvent::StartupBusy { busy } => {
+                let changed = {
+                    let mut engine = engine.lock().await;
+                    engine.set_startup_busy(busy)
+                };
+                if changed {
+                    info!(busy, "Screen-disrupting startup step changed");
+                    // Re-broadcast state so shells raise (or drop) their loading
+                    // page. Carried in the snapshot rather than as its own event
+                    // so a shell that connects mid-startup still sees it.
                     let state = {
                         let engine = engine.lock().await;
                         engine.get_state()

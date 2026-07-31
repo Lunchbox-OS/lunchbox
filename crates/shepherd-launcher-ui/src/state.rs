@@ -42,6 +42,12 @@ pub enum LauncherState {
     /// caregiver that the kiosk is still unlocked.
     AdminMode,
 
+    /// A startup step that visibly disrupts the screen is running (issue #2):
+    /// show the loading page over the grid until shepherdd reports it done.
+    /// Today that is the Waydroid pre-boot, which holds the outputs at scale 1
+    /// — the grid would otherwise sit there rendering physically smaller than
+    /// normal for the duration.
+    StartingUp,
     /// Error state
     Error { message: String },
     /// System is suspending: show a static cover so the frozen frame across
@@ -197,7 +203,20 @@ impl SharedState {
         }
     }
 
-    fn apply_snapshot(&self, snapshot: ServiceStateSnapshot) {
+    /// Translate a `ServiceStateSnapshot` into the launcher's higher-level
+    /// state. Every path that receives a snapshot — the initial `service_state`
+    /// fetch, `StateChanged`, post-failure refreshes — goes through here, so a
+    /// new snapshot field can't be honoured on one route and ignored on another
+    /// (which is exactly how `startup_busy` first failed to show up).
+    pub fn apply_snapshot(&self, snapshot: ServiceStateSnapshot) {
+        // A live session wins: it is already covering the screen with the
+        // activity, and a pre-boot overlapping one shouldn't pull the child back
+        // to a loading page.
+        if snapshot.current_session.is_none() && snapshot.startup_busy {
+            tracing::info!("Startup step in progress; showing the loading page");
+            self.set(LauncherState::StartingUp);
+            return;
+        }
         if let Some(session) = snapshot.current_session {
             if session.state == shepherd_api::SessionState::Stopping {
                 self.set(LauncherState::Closing {

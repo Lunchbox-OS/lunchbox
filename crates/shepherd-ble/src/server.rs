@@ -2706,6 +2706,7 @@ mod tests {
             diagnostics: Default::default(),
             admin_mode: false,
             locked: false,
+            startup_busy: false,
         };
         assert_eq!(
             coalesce_key_for(&EventPayload::StateChanged(snapshot)),

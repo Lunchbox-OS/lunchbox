@@ -120,6 +120,10 @@ pub struct CoreEngine {
     /// so the two cannot disagree — a locked device with no administrator mode
     /// behind it would have no button anywhere that could unlock it.
     locked: bool,
+    /// True while a startup step that visibly disrupts the screen is running
+    /// (issue #2) — today only the Waydroid pre-boot. Surfaced to shells in
+    /// [`ServiceStateSnapshot::startup_busy`] so they can cover the screen.
+    startup_busy: bool,
 }
 
 impl CoreEngine {
@@ -149,6 +153,7 @@ impl CoreEngine {
             diagnostics: DiagnosticSet::default(),
             firewall_enforceable: None,
             restarting: false,
+            startup_busy: false,
         }
     }
 
@@ -188,6 +193,17 @@ impl CoreEngine {
     /// stored value changed (so callers can broadcast a fresh state snapshot).
     pub fn set_kind_readiness(&mut self, kind: EntryKindTag, ready: bool) -> bool {
         self.kind_readiness.insert(kind, ready) != Some(ready)
+    }
+
+    /// Update whether a screen-disrupting startup step is in flight (issue #2).
+    /// Returns true if the stored value changed, so callers can broadcast a
+    /// fresh state snapshot. Unlike kind readiness this gates nothing — it only
+    /// tells shells to cover the screen — so a stuck `true` costs a loading
+    /// page, not a hidden activity.
+    pub fn set_startup_busy(&mut self, busy: bool) -> bool {
+        let changed = self.startup_busy != busy;
+        self.startup_busy = busy;
+        changed
     }
 
     /// Whether entries of this kind may currently be shown or launched. A kind
@@ -1933,6 +1949,7 @@ impl CoreEngine {
             diagnostics: self.diagnostics.clone(),
             admin_mode: self.admin_mode,
             locked: self.locked,
+            startup_busy: self.startup_busy,
         }
     }
 
@@ -2298,6 +2315,28 @@ mod tests {
                 .any(|r| matches!(r, shepherd_api::ReasonCode::ProtectionUnavailable)),
             "a Steam entry must not be gated by firewall enforceability"
         );
+    }
+
+    #[test]
+    fn test_startup_busy_reaches_the_snapshot_and_reports_transitions() {
+        let policy = make_test_policy();
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let caps = HostCapabilities::minimal();
+        let mut engine = CoreEngine::new(policy, store, caps);
+
+        assert!(!engine.get_state().startup_busy);
+
+        assert!(engine.set_startup_busy(true));
+        assert!(engine.get_state().startup_busy);
+        // Only transitions are worth a broadcast.
+        assert!(!engine.set_startup_busy(true));
+
+        assert!(engine.set_startup_busy(false));
+        assert!(!engine.get_state().startup_busy);
+
+        // A busy startup gates nothing: entries stay listable and launchable.
+        engine.set_startup_busy(true);
+        assert_eq!(engine.list_entries(shepherd_util::now()).len(), 1);
     }
 
     #[test]

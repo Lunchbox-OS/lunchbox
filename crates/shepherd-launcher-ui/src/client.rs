@@ -79,7 +79,7 @@ impl ServiceClient {
         // Get initial state (includes entries)
         info!("Fetching initial service_state");
         let snapshot = client.service_state().await?;
-        self.apply_snapshot(snapshot);
+        self.state.apply_snapshot(snapshot);
 
         // Now consume client for event stream (this sends subscribe_events internally)
         info!("Subscribing to events");
@@ -128,30 +128,6 @@ impl ServiceClient {
                     }
                 }
             }
-        }
-    }
-
-    /// Translate a `ServiceStateSnapshot` (result of `service_state`)
-    /// into the launcher's higher-level `LauncherState`.
-    fn apply_snapshot(&self, snapshot: ServiceStateSnapshot) {
-        if let Some(session) = snapshot.current_session {
-            let now = shepherd_util::now();
-            let time_remaining = session.deadline.and_then(|d| {
-                if d > now {
-                    (d - now).to_std().ok()
-                } else {
-                    Some(Duration::ZERO)
-                }
-            });
-            self.state.set(LauncherState::SessionActive {
-                session_id: session.session_id,
-                entry_label: session.label,
-                time_remaining,
-            });
-        } else {
-            self.state.set(LauncherState::Idle {
-                entries: snapshot.entries,
-            });
         }
     }
 }
