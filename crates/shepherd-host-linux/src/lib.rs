@@ -42,8 +42,8 @@ pub use network::LinuxNetworkInfo;
 pub use process::*;
 pub use retroarch::{MissingCore, missing_content, missing_core};
 pub use sway::{
-    DisplayInfo, OutputBackend, OutputScale, SwayIpcBackend, disable_output, enable_output,
-    get_displays, get_outputs, map_pointer_to_output, move_to_output_fullscreen, pick_mirror_mode,
-    select_primary, set_output_mode, set_output_scale,
+    DisplayInfo, HIDDEN_WORKSPACE, OutputBackend, OutputScale, SwayIpcBackend, disable_output,
+    enable_output, get_displays, get_outputs, list_windows, map_pointer_to_output,
+    move_to_output_fullscreen, pick_mirror_mode, select_primary, set_output_mode, set_output_scale,
 };
 pub use volume::*;

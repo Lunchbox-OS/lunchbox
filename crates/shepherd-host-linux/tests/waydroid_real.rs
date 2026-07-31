@@ -58,10 +58,25 @@ fn android_window_present(package: &str) -> bool {
     cmd_stdout("swaymsg", &["-t", "get_tree", "--raw"]).contains(&needle)
 }
 
-/// Whether the single full-UI `Waydroid` surface (locktask presentation) is on
-/// screen.
+/// Whether the single full-UI `Waydroid` surface (locktask presentation) exists
+/// at all — parked or on screen.
 fn full_ui_present() -> bool {
     cmd_stdout("swaymsg", &["-t", "get_tree", "--raw"]).contains("\"app_id\": \"Waydroid\"")
+}
+
+/// Whether that surface exists but sits on shepherd's parked workspace, i.e. is
+/// alive and off screen. This is the post-`stop` contract for locktask: the
+/// surface is Android's display connection, so destroying it takes
+/// surfaceflinger and zygote down with it and the next launch shows the boot
+/// animation instead of the app.
+async fn full_ui_parked() -> bool {
+    match shepherd_host_linux::list_windows().await {
+        Ok(windows) => windows.iter().any(|w| {
+            w.app_id.as_deref() == Some("Waydroid")
+                && w.workspace.as_deref() == Some(shepherd_host_linux::HIDDEN_WORKSPACE)
+        }),
+        Err(_) => false,
+    }
 }
 
 /// Await a host event matching `pred`, up to `timeout`.
@@ -362,19 +377,25 @@ async fn waydroid_locktask_launch_and_stop() {
         exited.is_some(),
         "expected HostEvent::Exited after stopping the locktask session"
     );
-    let mut gone = false;
+    // Parked, NOT destroyed. This assertion used to require the surface to be
+    // gone, which is what the code did until it turned out that killing it takes
+    // surfaceflinger + zygote down with it — so the next launch showed the
+    // LineageOS boot animation instead of the app. `stop_android` now parks it
+    // off screen and keeps the client alive; the child sees it disappear either
+    // way, but Android stays up for the next open.
+    let mut parked = false;
     for _ in 0..12 {
-        if !full_ui_present() {
-            gone = true;
+        if full_ui_parked().await {
+            parked = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(
-        gone,
-        "the full-UI Waydroid surface should be gone after stop()"
+        parked,
+        "the full-UI Waydroid surface should be parked off screen after stop() (alive, not destroyed)"
     );
-    println!("[OK] locktask: stopped, surface gone, Exited emitted");
+    println!("[OK] locktask: stopped, surface parked off screen, Exited emitted");
 }
 
 /// Exercises `LinuxHost::stop_waydroid`, the graceful-shutdown teardown.

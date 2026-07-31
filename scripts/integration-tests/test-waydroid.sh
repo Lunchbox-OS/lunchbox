@@ -56,15 +56,24 @@ else
     sudo systemctl start waydroid-container || true
 fi
 
-# Nested headless sway with the production fullscreen-match rules (per-app
-# `waydroid.<pkg>` toplevels for windowed mode, plus the single `Waydroid`
-# full-UI surface for the locktask path).
-cat >"$SWAY_CONF" <<'EOF'
-default_border none
-for_window [app_id="^waydroid\..*"] fullscreen enable
-for_window [app_id="Waydroid"] fullscreen enable
-output HEADLESS-1 resolution 1280x800
-EOF
+# Nested headless sway with the production window rules for Waydroid surfaces
+# (per-app `waydroid.<pkg>` toplevels for windowed mode, plus the single
+# `Waydroid` full-UI surface for the locktask path).
+#
+# The rules are LIFTED FROM sway.conf rather than restated here. They were a
+# hand-written copy once, and it silently drifted: when the locktask path started
+# parking the full-UI surface on `__shepherd_parked` before pinning, production
+# gained `move container to workspace __shepherd_parked` and this copy did not —
+# so `wait_for_parked_full_ui` never saw the surface and the locktask test failed
+# with "Waydroid full UI did not appear within 45s", looking exactly like a
+# product regression. Extracting them keeps the harness honest for free.
+{
+    echo "default_border none"
+    grep -E '^for_window \[app_id="(\^waydroid|Waydroid)' "$REPO_ROOT/sway.conf"
+    echo "output HEADLESS-1 resolution 1280x800"
+} >"$SWAY_CONF"
+info "Waydroid window rules under test:"
+grep '^for_window' "$SWAY_CONF" | sed 's/^/  /'
 info "Starting nested headless sway..."
 WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     sway -c "$SWAY_CONF" >/dev/null 2>&1 &
@@ -142,9 +151,19 @@ fi
 #    the session with multi_windows OFF first. The test skips if the DPC isn't
 #    set as device owner (`shepherd-admin apps install android`).
 info "Starting a full-UI session for the locktask test (multi_windows off)..."
+# Set the prop BEFORE stopping the session. `waydroid prop set` reaches the
+# property service *through the session* and silently exits 0 when none is
+# running, so setting it after the stop below did nothing: multi_windows stayed
+# true, the test's own preboot then had to restart the session to turn it off,
+# and a session started from the test binary's minimal environment can't resolve
+# the third-party DPC activity ("Activity class does not exist"). The pin never
+# landed and the failure surfaced three layers away as "Lock Task never LOCKED".
+waydroid prop set persist.waydroid.multi_windows false
+if [[ "$(waydroid prop get persist.waydroid.multi_windows | tr -d '[:space:]\r')" != "false" ]]; then
+    skip "could not set multi_windows=false — is a session running? (prop set is a silent no-op without one)"
+fi
 waydroid session stop >/dev/null 2>&1 || true
 sleep 2
-waydroid prop set persist.waydroid.multi_windows false
 : >"$SESSION_LOG"  # truncate so wait_session_ready sees the NEW ready line
 WAYLAND_DISPLAY="$WAYLAND_DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" SWAYSOCK="$SWAYSOCK" \
     waydroid session start >"$SESSION_LOG" 2>&1 &
@@ -156,3 +175,14 @@ run_test waydroid_locktask_launch_and_stop
 #    session STOPPED, which is also what cleanup would do anyway. Reuses the
 #    locktask session above as the "started by someone else" case.
 run_test waydroid_stop_on_shutdown
+
+# The suite ends with the session stopped and `persist.waydroid.multi_windows`
+# left FALSE (the locktask step set it). Nothing here can put it back: the prop
+# service needs a running session. Say so, because the next run starts with
+# test 1 asserting preboot leaves multi_windows TRUE — and preboot can't set it
+# either on a cold container, so that run fails after a 4-minute poll for
+# reasons that have nothing to do with the code under test.
+warn "Leaving persist.waydroid.multi_windows=false (no session left to set it through)."
+info "Before the next cold run, restore it with a session up:"
+info "  waydroid session start &   # in a Wayland session"
+info "  waydroid prop set persist.waydroid.multi_windows true"
