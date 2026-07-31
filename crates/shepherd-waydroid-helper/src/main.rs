@@ -89,7 +89,8 @@ const DPC_LAUNCH_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.LaunchActivity
 const DPC_CONTROL_COMPONENT: &str = "com.armeafamily.shepherd.dpc/.ControlReceiver";
 
 const USAGE: &str = "expected 'force-stop', 'preboot', 'lock-down', 'pin', 'unlock', \
-     'boot-completed', 'maximize', 'back', 'max-volume', 'scale-density', or 'is-running'";
+     'boot-completed', 'maximize', 'back', 'max-volume', 'scale-density', \
+     'display-size', or 'is-running'";
 
 /// A validated, ready-to-exec privileged action.
 #[derive(Debug, PartialEq, Eq)]
