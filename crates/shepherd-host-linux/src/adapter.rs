@@ -594,6 +594,16 @@ pub struct LinuxHost {
     /// (re)start that isn't guaranteed scale-1 clears it (preboot/recovery/repin);
     /// the first scaled Android launch then restarts the session at scale 1 and
     /// sets it. Lets subsequent launches skip the restart. See [`spawn_android`].
+    ///
+    /// Skipping that restart assumes a **patched hwcomposer** on the host: the
+    /// stock one latches the output scale it sees while warm, so the scale
+    /// restore on activity exit permanently halves everything it presents
+    /// afterwards, and only a session reboot clears it. Unpatched, a reopen
+    /// renders at half size in the top-left — and Android-side state stays
+    /// correct, so nothing here can detect it. Operators are told about the patch
+    /// by `shepherd-admin apps install android` and `docs/INSTALL.md`; the bug is
+    /// characterized in `docs/ai/waydroid-fractional-scale-upstream.md`, and the
+    /// installable patch is issue #119.
     waydroid_scale1_booted: Arc<AtomicBool>,
     /// The primary output's *physical* mode last pinned into
     /// `persist.waydroid.{width,height}`. [`repin_waydroid_resolution`] compares the

@@ -1130,6 +1130,11 @@ apps_install() {
                 info "  shepherd-admin apps install android ${user:-USER}"
                 info "Then sign into Google / self-certify the device, and set lock_mode in [service.waydroid]."
             fi
+
+            # Last, so it doesn't scroll away: the one prerequisite shepherd
+            # can't install for you, and whose absence is otherwise silent (a
+            # half-size app on the second open, HiDPI panels only). See #119.
+            waydroid_report_hwcomposer_patch
             ;;
 
         companion|media)

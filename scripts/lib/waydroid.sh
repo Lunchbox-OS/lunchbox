@@ -17,6 +17,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 WAYDROID_CFG="/var/lib/waydroid/waydroid.cfg"
 WAYDROID_OVERLAY="/var/lib/waydroid/overlay"
+# A patched in-container hwcomposer, overlaid over the vendor image. Stock
+# Waydroid ships none here, and nothing else shepherd installs writes to
+# vendor/lib64/hw, so this file existing means someone deliberately installed the
+# fractional-scale patch (issue #119). See waydroid_report_hwcomposer_patch.
+WAYDROID_HWCOMPOSER_OVERLAY="$WAYDROID_OVERLAY/vendor/lib64/hw/hwcomposer.waydroid.so"
+# Where the installable patch lives until it is upstreamed into Waydroid.
+WAYDROID_HWCOMPOSER_PATCH_URL="https://git.armeafamily.com/albert/shepherd-launcher/issues/119"
 # Generated from waydroid.cfg's [properties] by `waydroid init`/`upgrade`, read at
 # each container start to build the Android prop set. The apply-cfg-props trigger.
 WAYDROID_BASE_PROP="/var/lib/waydroid/waydroid_base.prop"
@@ -239,6 +246,37 @@ waydroid_report_certification() {
         info "     register it at https://www.google.com/android/uncertified"
     fi
     info "  2. Wait a few minutes, then restart the Waydroid session."
+}
+
+# Report whether the patched hwcomposer is installed (issue #119). Needs no
+# session — it inspects the overlay on the host.
+#
+# Waydroid's stock hwcomposer reads the compositor's output scale once, at
+# session boot, and latches it. shepherd drops the output to scale 1 around every
+# Android launch (Waydroid can only size its display correctly at an integer
+# scale) and restores it on exit — and on a fractional-scale panel that restore
+# is a scale change a warm container sees, which permanently halves the size of
+# every surface it presents afterwards. Android-side state stays correct, so
+# nothing shepherd can query detects it; the child just gets a half-size app in
+# the top-left corner on the second open until the session restarts.
+#
+# shepherd's fast-reopen path therefore assumes the patch. Only fractional
+# `output * scale` is affected, but the kiosk's scale is set per-display in sway
+# config and can change after this runs, so report it unconditionally rather than
+# guessing that an integer-scale host is safe forever.
+waydroid_report_hwcomposer_patch() {
+    if [[ -f "$WAYDROID_HWCOMPOSER_OVERLAY" ]]; then
+        info "Patched Waydroid hwcomposer present (fractional-scale fix, #119)."
+        return 0
+    fi
+    warn "Waydroid's stock hwcomposer mishandles a fractional display scale (HiDPI)."
+    info "  Symptom: on a panel configured with a non-integer 'output * scale' (e.g."
+    info "  1.5), the first Android launch is correct but later opens render at half"
+    info "  size in the top-left corner until the Waydroid session is restarted."
+    info "  Install the patched hwcomposer (installer + uninstaller included):"
+    info "    $WAYDROID_HWCOMPOSER_PATCH_URL"
+    info "  An upstream Waydroid PR is pending; this step goes away if it lands."
+    info "  Installed = $WAYDROID_HWCOMPOSER_OVERLAY exists."
 }
 
 # Install the DPC apk and set it as device owner. Needs a RUNNING session

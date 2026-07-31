@@ -955,12 +955,46 @@ the package; the rest is an opt-in, partly-interactive setup.
 
 **Requirements:** amd64 (arm64 hosts skip libndk — ARM apps run natively), a
 Waydroid-supported GPU (**Nvidia is unsupported**), and a kernel with `binder`
-(Ubuntu's generic kernel has it). GApps/ARM performance must be judged on real
-kiosk hardware, not a software-rendered VM.
+(Ubuntu's generic kernel has it). On a **fractionally-scaled display** you also
+need a patched Waydroid hwcomposer — see below. GApps/ARM performance must be
+judged on real kiosk hardware, not a software-rendered VM.
 
 The whole flow is `shepherd-admin apps install android <user>`, run in stages.
 (From source, `sudo ./scripts/shepherd install waydroid --user kiosk` installs
 the helper in place of the packaged one; the rest is the same.)
+
+### 0. Patch the hwcomposer (HiDPI panels only)
+
+**Applies if any output uses a non-integer scale** — e.g. `output * scale 1.5`
+in `/etc/sway/shepherd.conf.d/`. Integer scales (1, 2) are unaffected and need
+nothing here.
+
+Waydroid derives its Android display geometry from the compositor's output scale
+and can only get it right at scale 1, so shepherd drops the output to scale 1
+around every Android launch and restores it on exit. Waydroid's **stock**
+hwcomposer reads that scale once, at session boot, and latches it: the restore is
+a scale change a warm container observes, and from then on it presents every
+surface at **half size, anchored top-left**, until the session is restarted.
+
+The symptom is easy to misread — the first Android launch looks perfect, and the
+*second* one is small in the corner. Android's own state (display size, density,
+window bounds) stays correct throughout, so nothing shepherd can query detects
+it; shepherd's fast-reopen path assumes the patch is installed.
+
+Install the patched hwcomposer (a tarball with install/uninstall scripts) from:
+
+> <https://git.armeafamily.com/albert/shepherd-launcher/issues/119>
+
+An upstream Waydroid PR is pending; once it lands this step goes away. The patch
+installs as an overlay file, so it is present iff:
+
+```sh
+ls /var/lib/waydroid/overlay/vendor/lib64/hw/hwcomposer.waydroid.so
+```
+
+`shepherd-admin apps install android` reports which state it found on every run —
+worth re-checking after a Waydroid upgrade. The underlying bug is characterized
+in [`docs/ai/waydroid-fractional-scale-upstream.md`](./ai/waydroid-fractional-scale-upstream.md).
 
 ### 1. Install the Waydroid engine (guided)
 

@@ -6,6 +6,13 @@ on fractional-scale (HiDPI) kiosks. No shepherd knowledge is required to work on
 this; shepherd-specific history is in
 `docs/ai/history/2026-07-17 001 waydroid-fractional-scale-diagnosis.md`.
 
+**Status: a patched hwcomposer is installable today**, as a tarball with
+install/uninstall scripts, from
+[issue #119](https://git.armeafamily.com/albert/shepherd-launcher/issues/119);
+an upstream Waydroid PR is pending. Operators need it on any kiosk with a
+non-integer `output * scale` — see the "Patch the hwcomposer" step in
+[`docs/INSTALL.md`](../INSTALL.md#0-patch-the-hwcomposer-hidpi-panels-only).
+
 ## TL;DR
 
 Waydroid's in-container hwcomposer reads the compositor's (fractional) output
