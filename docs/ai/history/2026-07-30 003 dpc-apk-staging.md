@@ -86,9 +86,33 @@ answer, not an error".
   `.version` short-circuits to "already installed / already device owner".
 - CI's shellcheck invocation is clean.
 
-## Not done
+## Follow-up: packaging without the apk is now fatal
 
-The release `.deb` job still only *warns* when built without the keystore
-secret, so a release could ship without the Lock Task backend and nothing fails
-loudly. Left alone: local `package deb` on a box with no Android SDK is a
-legitimate, common case, and the release job already logs it.
+> make the release deb fail by default (overrideable with a flag) if the DPC apk
+> is missing
+
+Previously a missing apk was only a warning at package time, so a release could
+ship without the Lock Task backend and nothing would say so until an operator
+ran `apps install android` on a device — the worst place to find out.
+
+- **`shepherd package deb` dies** when `dpc-waydroid/shepherd-dpc.apk` is
+  absent, with the build command and the override in the message.
+  `--allow-missing-dpc` downgrades it to a warning. Checked *before* the release
+  build, so a local run fails in a second rather than after a full compile — and
+  forwarded through the unprivileged fakeroot re-exec, which would otherwise
+  re-check without the flag and fail an explicitly-allowed build.
+- **CI's `package` smoke job** passes `--allow-missing-dpc`: it runs in the base
+  image (no Android SDK), publishes nothing, and the apk's own build is covered
+  by the `dpc` job.
+- **The release job keeps the default and fails.** Its "Build + sign the DPC
+  apk" step now errors when `SHEPHERD_KEYSTORE_B64` is unset instead of
+  continuing, so the diagnosis lands on the real cause (missing secret) rather
+  than on packaging. A deliberate DPC-less release is the new
+  `allow_missing_dpc` `workflow_dispatch` input, which gates both that step and
+  the `--allow-missing-dpc` flag. A tag push has no inputs, so it always takes
+  the strict path.
+
+Verified all three: default + apk present → `.deb` contains the apk; default +
+apk moved aside → refuses, rc=1; `--allow-missing-dpc` + apk moved aside →
+builds a `.deb` with zero `shepherd-dpc.apk` entries (and the flag survives the
+fakeroot re-exec). Both workflow files still parse; shellcheck clean.

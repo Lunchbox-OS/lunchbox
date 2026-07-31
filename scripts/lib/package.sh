@@ -50,6 +50,7 @@ PACKAGE_LAST_CONFFILE_VERSION="0.4.1"
 package_deb() {
     local out_dir="dist/pkg"
     local do_build="true"
+    local allow_missing_dpc="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -59,6 +60,10 @@ package_deb() {
                 ;;
             --no-build)
                 do_build="false"
+                shift
+                ;;
+            --allow-missing-dpc)
+                allow_missing_dpc="true"
                 shift
                 ;;
             -h|--help)
@@ -78,6 +83,25 @@ package_deb() {
     local version
     version="$(version_read)"
 
+    # A .deb without the DPC apk silently loses `lock_mode = "locktask"` on every
+    # device it installs — and the failure only shows up much later, when an
+    # operator runs `apps install android` and it can't find the apk. Fail here
+    # instead, before the expensive build. Checked *before* the fakeroot re-exec
+    # so a local build hears about it immediately rather than after a full
+    # release compile.
+    if [[ ! -f "$repo_root/dpc-waydroid/$DPC_APK_NAME" ]]; then
+        if [[ "$allow_missing_dpc" != "true" ]]; then
+            warn "DPC apk not built: $repo_root/dpc-waydroid/$DPC_APK_NAME"
+            info "Build it first (it is signed with a persistent key, so packaging"
+            info "deliberately won't build it for you):"
+            info "  (cd dpc-waydroid && ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh)"
+            info "Or, for a package that intentionally ships without Lock Task support:"
+            info "  shepherd package deb --allow-missing-dpc"
+            die "Refusing to build a .deb without the DPC apk."
+        fi
+        warn "Building without the DPC apk (--allow-missing-dpc); this package cannot offer Android's lock_mode = \"locktask\"."
+    fi
+
     # Build the release binaries as the invoking user — cargo/npm need no
     # privileges. Do this *before* any fakeroot re-exec so the heavy build
     # runs unprivileged and only the staging + dpkg-deb run faked-root.
@@ -92,8 +116,16 @@ package_deb() {
     if ! is_root; then
         require_command fakeroot
         info "Re-executing staging under fakeroot..."
+        # Forward --allow-missing-dpc: the re-exec runs the same check again, so
+        # dropping it here would turn an explicitly-allowed build into a failure.
+        # (an `[[ … ]] && assign` would abort the script under `set -e` when the
+        # test is false — see waydroid.sh:install_dpc for the same trap)
+        local dpc_arg=()
+        if [[ "$allow_missing_dpc" == "true" ]]; then
+            dpc_arg=(--allow-missing-dpc)
+        fi
         exec fakeroot "$repo_root/scripts/shepherd" package deb \
-            --out "$out_dir" --no-build
+            --out "$out_dir" --no-build "${dpc_arg[@]}"
     fi
 
     require_command dpkg-deb dpkg
@@ -653,15 +685,27 @@ Builds a Debian package for the host architecture by staging the install tree
 Options:
     --out DIR      Output directory for the .deb (default: dist/pkg)
     --no-build     Skip the release build; reuse existing target/release
+    --allow-missing-dpc
+                   Package without the Device Policy Controller apk. By
+                   default a missing dpc-waydroid/$DPC_APK_NAME is a hard
+                   error, because the resulting package silently cannot
+                   offer Android's lock_mode = "locktask". Use this for a
+                   smoke build on a host with no Android SDK.
     -h, --help     Show this help
 
 Notes:
     Requires root or fakeroot (staging writes root-owned files). When run
     unprivileged, re-execs the staging step under fakeroot automatically.
 
+    The DPC apk is never built here — it is signed with a persistent key that
+    a provisioned device owner can only be updated from, so it is built
+    out-of-band by dpc-waydroid/build.sh (the release job does it with the
+    org key).
+
 Examples:
     shepherd package deb
     shepherd package deb --out /tmp/out
+    shepherd package deb --allow-missing-dpc
 EOF
 }
 

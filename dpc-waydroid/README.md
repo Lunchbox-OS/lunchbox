@@ -43,6 +43,13 @@ sets the device owner. Missing apk = it tells you to build it and stops. The
 `shepherd-dpc.apk.version` sidecar `build.sh` writes is how a kiosk (with no
 `aapt`) knows whether the staged apk is newer than the installed DPC.
 
+`shepherd package deb` **refuses to build without the apk**, since the resulting
+package would silently lose `lock_mode = "locktask"` on every device it installs
+and nothing would say so until an operator ran `apps install android`. Pass
+`--allow-missing-dpc` for a deliberate DPC-less package (CI's packaging smoke
+build does; the release job fails instead, unless its `allow_missing_dpc` input
+is set).
+
 ## Components
 
 - `AdminReceiver` — the `DeviceAdminReceiver`; its existence is what lets the app

@@ -355,7 +355,12 @@ jobs:
             ${{ runner.os }}-cargo-target-package-v1-
 
       - name: Build .deb
-        run: ./scripts/shepherd package deb --out dist/pkg
+        # --allow-missing-dpc: this runs in the base image, which has no Android
+        # SDK, so the DPC apk can't be built here. That is fatal by default (a
+        # .deb without it silently loses lock_mode = "locktask"); this job only
+        # smoke-tests packaging and publishes nothing, and the apk's own build is
+        # covered by the dpc job. The release .deb keeps the default and fails.
+        run: ./scripts/shepherd package deb --out dist/pkg --allow-missing-dpc
 
       - name: Inspect package metadata
         run: dpkg-deb -I dist/pkg/*.deb

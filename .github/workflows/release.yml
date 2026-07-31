@@ -50,6 +50,10 @@ on:
         description: "Create the Forgejo release + upload assets (off = dry run)"
         type: boolean
         default: false
+      allow_missing_dpc:
+        description: "Build the .deb without the DPC (Android lock_mode = locktask unavailable)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -164,17 +168,27 @@ jobs:
         # Signed with the shared org release key (same as the companion + media
         # apks). NOTE: the DPC is a device owner, updatable only with the SAME
         # key, so once any device is provisioned this key is effectively
-        # un-rotatable. Skipped when the keystore secret is unset — the .deb then
-        # ships without the Lock Task backend rather than with an unusable key.
+        # un-rotatable.
+        #
+        # Without the keystore secret there is no apk to bundle, and a released
+        # .deb missing it silently loses `lock_mode = "locktask"` on every device
+        # it installs. That fails the release here rather than shipping the
+        # shortfall; a deliberate DPC-less release is the `allow_missing_dpc`
+        # dispatch input, which also passes --allow-missing-dpc below.
         env:
           KEYSTORE_B64: ${{ secrets.SHEPHERD_KEYSTORE_B64 }}
           DPC_KEYSTORE_PASS: ${{ secrets.SHEPHERD_KEYSTORE_PASSWORD }}
           DPC_KEY_PASS: ${{ secrets.SHEPHERD_KEY_PASSWORD }}
           DPC_KEY_ALIAS: ${{ secrets.SHEPHERD_KEY_ALIAS }}
+          ALLOW_MISSING_DPC: ${{ github.event.inputs.allow_missing_dpc }}
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "SHEPHERD_KEYSTORE_B64 not set; building the .deb without the DPC Lock Task backend."
-            exit 0
+            if [ "$ALLOW_MISSING_DPC" = "true" ]; then
+              echo "SHEPHERD_KEYSTORE_B64 not set; building the .deb without the DPC Lock Task backend (allow_missing_dpc)."
+              exit 0
+            fi
+            echo "::error::SHEPHERD_KEYSTORE_B64 is not set, so the DPC apk cannot be built or signed. The .deb would ship without Android's lock_mode = \"locktask\". Set the secret, or re-run this workflow with allow_missing_dpc = true."
+            exit 1
           fi
           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-dpc.jks"
           DPC_KEYSTORE="$RUNNER_TEMP/shepherd-dpc.jks" ANDROID_SDK_ROOT=/opt/android-sdk \
@@ -194,7 +208,16 @@ jobs:
       - name: Build .deb
         # Builds --release, stages via `DESTDIR=… shepherd install …`, runs
         # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
-        run: ./scripts/shepherd package deb --out dist/pkg
+        # Refuses to package without the DPC apk unless explicitly allowed — the
+        # step above has already failed in that case for a normal release.
+        env:
+          ALLOW_MISSING_DPC: ${{ github.event.inputs.allow_missing_dpc }}
+        run: |
+          if [ "$ALLOW_MISSING_DPC" = "true" ]; then
+            ./scripts/shepherd package deb --out dist/pkg --allow-missing-dpc
+          else
+            ./scripts/shepherd package deb --out dist/pkg
+          fi
 
       - name: Upload .deb to the release
         if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
