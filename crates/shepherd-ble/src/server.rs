@@ -20,9 +20,17 @@
 //! [`shepherd_api::Event`] from [`ManagementService::subscribe_events`]
 //! into the events outbox throughout the server's lifetime. There's no
 //! per-client subscriber, so events that fire while no companion is
-//! polling simply accumulate (bounded by the outbox capacity); the
-//! companion re-syncs current state by calling `service_state` on
-//! every reconnect.
+//! polling accumulate in the outbox; the companion re-syncs current
+//! state by calling `service_state` on every reconnect.
+//!
+//! Keeping that accumulation *small* is load-bearing, not housekeeping.
+//! The companion drains both outboxes to empty inside `connect()` before
+//! it sends its first RPC, at 512 bytes per GATT round trip — so backlog
+//! is connect latency, and unbounded backlog is a connect that never
+//! finishes. `StateChanged` is therefore pushed coalesced (a newer
+//! snapshot supersedes the queued one) and the capacity is deliberately
+//! tight. See `docs/ai/history/2026-08-01 001
+//! ble-connect-drain-unbounded.md`.
 //!
 //! v1 still assumes a single bonded admin peer at a time (TOFU
 //! single-admin model from the design doc).
@@ -35,6 +43,7 @@ use bluer::gatt::local::{
 };
 use bluer::{AdapterEvent, Address, DeviceEvent, DeviceProperty};
 use futures_util::{FutureExt, StreamExt};
+use shepherd_api::EventPayload;
 use shepherd_management::ManagementService;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -47,7 +56,7 @@ use crate::admin::{AdminRecord, AdminStore, check_reset_sentinel};
 use crate::agent::{PairingDisplay, build_agent};
 use crate::claim::{AuthDecision, ClaimMachine, PeerIdentity};
 use crate::framing::{FrameReader, encode_frame};
-use crate::outbox::Outbox;
+use crate::outbox::{COALESCE_STATE_CHANGED, CoalesceKey, Outbox};
 use crate::protocol::{
     ClaimStateTag, DeviceInfo, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, RpcRequest,
     RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID, SHEPHERD_EVENTS_CHAR_UUID,
@@ -62,13 +71,25 @@ use crate::rpc::dispatch_management;
 /// are emitted at the rate the companion sends requests.
 const RESPONSE_OUTBOX_BYTES: usize = 256 * 1024;
 
-/// Cap on the Events outbox. Sized to comfortably hold ~10 full
-/// `StateChanged` snapshots (each up to ~20 KiB once a few entries are
-/// configured) plus the smaller session/policy events that fire around
-/// them. Stale events that overrun this when no companion is polling
-/// are dropped from the front; the companion re-fetches current state
-/// via `service_state` on every reconnect.
-const EVENTS_OUTBOX_BYTES: usize = 256 * 1024;
+/// Cap on the Events outbox.
+///
+/// This is a *latency* budget, not a storage budget. Reads are capped at
+/// [`GATT_MAX_ATTR_VALUE`] and cost a GATT round trip each, so the
+/// companion drains at only ~10–20 KiB/s — and it drains the whole queue
+/// during `connect()` before it will talk to us. At 256 KiB (the previous
+/// value) that alone was 15–25 seconds of dead time on every reconnect,
+/// and under a steady event rate the drain never converged at all: the
+/// companion hung in `connect()` indefinitely with nothing logged
+/// server-side. See `docs/ai/history/2026-08-01 001
+/// ble-connect-drain-unbounded.md`.
+///
+/// 64 KiB holds one full `StateChanged` snapshot (up to ~20 KiB once a
+/// few entries are configured) plus ample room for the smaller
+/// session/policy events, and bounds a worst-case cold drain to a few
+/// seconds. The real backlog control is
+/// [`Outbox::push_coalesced`] — snapshots supersede one another rather
+/// than queueing up — so this ceiling is rarely approached.
+const EVENTS_OUTBOX_BYTES: usize = 64 * 1024;
 
 /// Bluetooth Core spec ceiling on a single GATT attribute value.
 /// Android's stack enforces this strictly: even with an ATT MTU of
@@ -360,6 +381,14 @@ impl BleServer {
 /// events are logged and skipped — the companion re-syncs current
 /// state via `service_state` on reconnect, so a missed event is
 /// recoverable.
+///
+/// `StateChanged` is pushed *coalesced*: it carries a full snapshot, so
+/// a newer one makes every queued older one redundant. This runs whether
+/// or not a companion is connected, and without coalescing an idle
+/// daemon under activity churn pins the outbox at capacity with hundreds
+/// of superseded snapshots — which the next companion to connect then
+/// has to drain at 512 bytes per round trip before it can send its first
+/// RPC.
 async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) {
     // The outer `run` aborts this task on shutdown via JoinHandle::abort,
     // so we don't need an explicit shutdown signal here — keeping the
@@ -368,10 +397,19 @@ async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) 
     let mut rx = svc.subscribe_events();
     loop {
         match rx.recv().await {
-            Ok(event) => match serde_json::to_vec(&event) {
-                Ok(payload) => outbox.push(encode_frame(&payload)).await,
-                Err(e) => warn!(error = %e, "Failed to serialize Event"),
-            },
+            Ok(event) => {
+                let coalesce_key = coalesce_key_for(&event.payload);
+                match serde_json::to_vec(&event) {
+                    Ok(payload) => {
+                        let framed = encode_frame(&payload);
+                        match coalesce_key {
+                            Some(key) => outbox.push_coalesced(framed, key).await,
+                            None => outbox.push(framed).await,
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "Failed to serialize Event"),
+                }
+            }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 warn!(skipped = n, "BLE events forwarder lagged");
             }
@@ -380,6 +418,21 @@ async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) 
                 return;
             }
         }
+    }
+}
+
+/// The outbox key an event supersedes its predecessors under, if any.
+///
+/// Only whole-state snapshots qualify: a newer `StateChanged` makes every
+/// queued older one redundant, so collapsing them costs nothing and keeps
+/// the events outbox — and therefore the companion's connect-time drain —
+/// small. Everything else is an incremental fact (a warning fired, a
+/// session ended) that the companion needs in order, so it queues
+/// normally.
+fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
+    match payload {
+        EventPayload::StateChanged(_) => Some(COALESCE_STATE_CHANGED),
+        _ => None,
     }
 }
 
@@ -496,10 +549,33 @@ fn spawn_device_watcher(
             }
         };
         while let Some(DeviceEvent::PropertyChanged(prop)) = events.next().await {
-            if matches!(prop, DeviceProperty::Connected(false)) {
-                info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
-                reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox)
-                    .await;
+            match prop {
+                // A companion drains both outboxes before it will send
+                // its first RPC, so the depth logged here *is* the
+                // connect latency it's about to pay. Without this line a
+                // stalled drain is entirely invisible: the peer connects
+                // (no log), reads thousands of times (debug only), and
+                // never writes, so the journal shows nothing at all
+                // between "advertising started" and an RPC that may
+                // arrive minutes later or not at all.
+                DeviceProperty::Connected(true) => {
+                    let (response_frames, response_bytes) = response_outbox.depth().await;
+                    let (events_frames, events_bytes) = events_outbox.depth().await;
+                    info!(
+                        peer = %addr,
+                        response_frames,
+                        response_bytes,
+                        events_frames,
+                        events_bytes,
+                        "BLE peer connected; companion will drain these before its first RPC",
+                    );
+                }
+                DeviceProperty::Connected(false) => {
+                    info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
+                    reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox)
+                        .await;
+                }
+                _ => {}
             }
         }
     });
@@ -1245,6 +1321,36 @@ mod tests {
             .expect("a complete frame is present");
         let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
         assert_eq!(parsed.id, 8);
+    }
+
+    /// Snapshots coalesce; incremental facts don't.
+    ///
+    /// The events forwarder runs whether or not a companion is connected,
+    /// so without this split an idle daemon under activity churn pins the
+    /// events outbox at capacity — and the next companion to connect has
+    /// to drain all of it at 512 bytes per GATT round trip before it can
+    /// send its first RPC. That's what stalled `connect()` indefinitely
+    /// in the first place.
+    #[test]
+    fn only_whole_state_snapshots_coalesce() {
+        let snapshot = shepherd_api::ServiceStateSnapshot {
+            api_version: 1,
+            policy_loaded: true,
+            current_session: None,
+            entry_count: 0,
+            entries: vec![],
+            internet_status: vec![],
+        };
+        assert_eq!(
+            coalesce_key_for(&EventPayload::StateChanged(snapshot)),
+            Some(COALESCE_STATE_CHANGED),
+        );
+
+        // An incremental event the companion needs in order, not merged.
+        assert_eq!(
+            coalesce_key_for(&EventPayload::PolicyReloaded { entry_count: 3 }),
+            None,
+        );
     }
 
     /// A successful `factory_reset` RPC clears the admin record *and*
