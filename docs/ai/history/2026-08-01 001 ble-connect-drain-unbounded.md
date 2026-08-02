@@ -159,6 +159,64 @@ reached when the user taps Re-pair. `LinkStatus.NeedsRepair` is unchanged
 and still automatic — there the OS bond is provably gone, so there's no
 choice to offer.
 
+## Follow-up: the drain budget broke reconnect-after-restart
+
+> this version is now failing to reconnect after the app is restarted
+> after the initial pair, regardless of load
+
+Self-inflicted, and the "regardless of load" is the tell: the fault is on
+the path that has nothing to do with backlog.
+
+**Reconnecting to a bonded peer produces a GATT link that is not yet
+encrypted.** Android establishes encryption from the stored LTK *lazily*,
+triggered by the first ATT request that needs it — which is
+`drainAndDiscard`'s very first read. That read therefore behaves nothing
+like the ones after it: it can take seconds while the handshake runs, and
+it can fail outright with insufficient authentication/encryption and
+succeed on the immediate retry, all with a perfectly healthy bond.
+
+The initial `DRAIN_BUDGET_MS = 3_000` started its clock on that read. So
+a first read that was merely slow tripped the budget and raised
+`DrainStalledException` → disconnect → retry → same thing, forever; and
+one that failed raised `LinkUnauthenticatedException`, pointing recovery
+at the bond. The old unbounded loop simply waited however long encryption
+took and carried on, which is why this only appeared now.
+
+Why it showed up specifically after the initial pair: during pairing the
+link is established pre-bond and bonded *in place*, then `adopt()` reuses
+that already-encrypted connection. The first app restart is the first
+time the app ever makes a *fresh* connection to an already-bonded peer —
+the only situation that exercises lazy encryption setup.
+
+The fix separates the two concerns. `readAfterSettle` performs the
+session's first read on each characteristic under its own
+`LINK_SETTLE_TIMEOUT_MS` (5 s) with `LINK_SETTLE_ATTEMPTS` (3) retries;
+`DRAIN_BUDGET_MS` (raised to 5 s) is measured from after that read lands,
+so it only ever bounds steady-state draining. `CONNECT_TIMEOUT_MS` goes
+to 30 s — above the sum of connect()'s internal budgets, so a stall
+surfaces as the specific failure that caused it instead of being masked
+by the outer cap.
+
+Two general lessons worth keeping:
+
+- **A timeout is only correct over a homogeneous operation.** "Read the
+  characteristic" is two different operations here — warm the link, then
+  drain the queue — with budgets that differ by an order of magnitude.
+  One clock over both was always going to misfire.
+- **Removing an automatic recovery exposes everything it was hiding.**
+  The old give-up path removed the bond and forced a re-pair, which would
+  have papered over exactly this failure (re-pair → pairing path → link
+  encrypted in place → works). Making re-pair optional was right, but it
+  means genuine link faults now have to be *fixed* rather than
+  unbonded-around. The `LinkStatus.Disconnected` banner grew a Re-pair
+  button for the same reason: with nothing auto-unbonding, the user needs
+  a way out of a one-sided bond even when the scan probe can't run.
+
+`BondManager.ensureBonded` still short-circuits on `BOND_BONDED` without
+verifying the bond is *usable*, which remains the underlying reason a
+one-sided bond is sticky. Unchanged here, and still the right next thing
+to look at if stale bonds keep showing up.
+
 ## Tests / checks
 
 - New `outbox` unit tests: coalescing supersedes same-key messages

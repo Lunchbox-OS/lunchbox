@@ -663,13 +663,17 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
         /**
          * Ceiling on one [ShepherdConnection.connect] attempt: GATT
-         * connect + discovery + MTU + the bounded post-connect drain.
-         * A healthy reconnect is well under two seconds; this is a
-         * backstop that converts a stall into a retry rather than a hang,
-         * and is deliberately looser than the drain's own budget so a
-         * merely-slow link still gets to finish.
+         * connect + discovery + MTU + link-encryption settle + the
+         * bounded post-connect drain.
+         *
+         * A healthy reconnect is well under two seconds. This is sized
+         * to sit *above* the sum of connect()'s own internal budgets, so
+         * a stall surfaces as the specific failure that caused it
+         * (settle exhausted, drain stalled) rather than being masked by
+         * a generic timeout here. It's the backstop of last resort for
+         * something connect() doesn't bound at all.
          */
-        const val CONNECT_TIMEOUT_MS = 20_000L
+        const val CONNECT_TIMEOUT_MS = 30_000L
     }
 }
 
