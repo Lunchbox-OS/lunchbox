@@ -126,6 +126,102 @@ struct AdminFile {
     admin: AdminRecord,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct PendingUnbondFile {
+    #[serde(default)]
+    addresses: Vec<String>,
+}
+
+/// Peers whose BlueZ bond still needs forgetting, held on disk until the
+/// removal actually succeeds.
+///
+/// Un-claiming a device is two steps — clear the admin record, then tell
+/// BlueZ to forget the bond — and only the first is atomic. If the second
+/// fails (adapter not ready yet, BlueZ hiccup, daemon killed in between),
+/// the peer stays bonded to a device that has no admin: every reconnect
+/// is accepted at the link layer and then rejected with `not_claimed`,
+/// and re-pairing can't clear it because the bond already exists. That's
+/// the "asymmetric bond" lockout.
+///
+/// The removal used to be best-effort with a comment claiming the next
+/// restart would retry. It wouldn't: the admin record was already gone
+/// and the sentinel already consumed, so nothing on the next boot knew
+/// which address to forget. This file is that missing memory — an entry
+/// is written *before* the removal is attempted and deleted only once it
+/// succeeds, so a failure at any point just means the next startup tries
+/// again.
+#[derive(Debug, Clone)]
+pub struct PendingUnbondStore {
+    path: PathBuf,
+}
+
+impl PendingUnbondStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn list(&self) -> Result<Vec<String>, AdminStoreError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let text = String::from_utf8(bytes)
+            .map_err(|e| AdminStoreError::Toml(format!("non-UTF-8 pending-unbond file: {e}")))?;
+        let parsed: PendingUnbondFile = toml::from_str(&text)?;
+        Ok(parsed.addresses)
+    }
+
+    /// Record `address` as needing a bond removal. Idempotent.
+    pub fn add(&self, address: &str) -> Result<(), AdminStoreError> {
+        let mut addresses = self.list()?;
+        if addresses.iter().any(|a| a == address) {
+            return Ok(());
+        }
+        addresses.push(address.to_string());
+        self.write(&addresses)
+    }
+
+    /// Drop `address` from the list — the bond is provably gone. Removes
+    /// the file entirely once nothing is left, so the common case leaves
+    /// no stray state behind.
+    pub fn remove(&self, address: &str) -> Result<(), AdminStoreError> {
+        let mut addresses = self.list()?;
+        let before = addresses.len();
+        addresses.retain(|a| a != address);
+        if addresses.len() == before {
+            return Ok(());
+        }
+        if addresses.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            };
+        }
+        self.write(&addresses)
+    }
+
+    fn write(&self, addresses: &[String]) -> Result<(), AdminStoreError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = toml::to_string_pretty(&PendingUnbondFile {
+            addresses: addresses.to_vec(),
+        })?;
+        // Same temp-then-rename as the admin record: a torn write here
+        // would strand a bond with no record of it.
+        let tmp = self.path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
 /// Check for the factory-reset sentinel at daemon startup. If the file
 /// exists, delete it and return `true` — the caller is then responsible
 /// for clearing the admin record and removing the BlueZ bond before the
@@ -210,6 +306,42 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         // Calling clear again on a missing file is a no-op.
         store.clear().unwrap();
+    }
+
+    #[test]
+    fn pending_unbond_survives_until_removal_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let store = PendingUnbondStore::new(dir.path().join("pending-unbond.toml"));
+        assert!(store.list().unwrap().is_empty());
+
+        store.add("AA:BB:CC:DD:EE:FF").unwrap();
+        store.add("AA:BB:CC:DD:EE:FF").unwrap(); // idempotent
+        store.add("11:22:33:44:55:66").unwrap();
+        assert_eq!(store.list().unwrap().len(), 2);
+
+        // A fresh handle on the same path sees the list — this is the
+        // whole point: the retry has to survive a daemon restart.
+        let reopened = PendingUnbondStore::new(store.path().to_path_buf());
+        assert_eq!(reopened.list().unwrap().len(), 2);
+
+        reopened.remove("AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(store.list().unwrap(), vec!["11:22:33:44:55:66".to_string()]);
+
+        // Draining the last entry cleans the file up rather than leaving
+        // an empty list behind.
+        reopened.remove("11:22:33:44:55:66").unwrap();
+        assert!(store.list().unwrap().is_empty());
+        assert!(!store.path().exists());
+        // Removing something absent is a no-op, not an error.
+        reopened.remove("11:22:33:44:55:66").unwrap();
+    }
+
+    #[test]
+    fn pending_unbond_creates_missing_parent() {
+        let dir = TempDir::new().unwrap();
+        let store = PendingUnbondStore::new(dir.path().join("nested/sub/pending.toml"));
+        store.add("AA:BB:CC:DD:EE:FF").unwrap();
+        assert!(store.path().exists());
     }
 
     #[test]

@@ -595,7 +595,11 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 _pairing.value = PairingPhase.Comparing(info.deviceName, identifier)
-                val bonded = container.bondManager.ensureBonded(identifier)
+                // ensureFreshBond, not ensureBonded: the device just told
+                // us it's Unclaimed, so any bond this phone is still
+                // holding is stale — trusting it skips straight to claim
+                // over a link that can never encrypt.
+                val bonded = container.bondManager.ensureFreshBond(identifier)
                 if (!bonded) {
                     fail(conn, "Pairing was cancelled or failed. Try again.")
                     return@launch

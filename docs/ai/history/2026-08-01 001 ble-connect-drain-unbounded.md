@@ -212,10 +212,63 @@ Two general lessons worth keeping:
   button for the same reason: with nothing auto-unbonding, the user needs
   a way out of a one-sided bond even when the scan probe can't run.
 
-`BondManager.ensureBonded` still short-circuits on `BOND_BONDED` without
-verifying the bond is *usable*, which remains the underlying reason a
-one-sided bond is sticky. Unchanged here, and still the right next thing
-to look at if stale bonds keep showing up.
+## Follow-up: the two stale-bond gaps behind all of this
+
+Both are the same shape — one side forgets a bond and the other doesn't —
+and both were previously survivable only because the give-up path
+auto-unbonded.
+
+### Bond removals were promised, not kept
+
+`BleServer::new` loads the admin record before clearing it and hands the
+address to `run`, which calls `adapter.remove_device`. That part works.
+What didn't: the removal was best-effort in memory, under a comment
+saying "we tolerate failures: the next restart will retry". **It
+wouldn't.** By then the admin record was already cleared and the sentinel
+already consumed, so nothing on the next boot knew which address to
+forget. A failed removal — adapter not ready, BlueZ hiccup, daemon killed
+between the two steps — stranded the peer bonded to a device with no
+admin: every reconnect accepted at the link layer, rejected with
+`not_claimed`, and unfixable by re-pairing because the bond already
+exists.
+
+(An earlier note in `2026-07-18 001` described this as
+`persisted_admin_for_unbond` "still a stub returning `None`". No such
+function exists in the tree; the load-before-clear has been there for a
+while. The durability of the *removal*, not the capture, was the actual
+hole.)
+
+New `PendingUnbondStore` in `admin.rs` is a TOML list of addresses beside
+the admin record. An entry is written *before* the removal is attempted
+and deleted only once BlueZ confirms the peer is gone, so any failure is
+retried at the next startup. `drain_pending_unbonds` runs once in `run`
+and covers both producers — the sentinel reset and the `factory_reset`
+RPC. A peer BlueZ no longer knows counts as settled, since
+`remove_device` errors on an unknown address and treating that as failure
+would keep the entry and its warning forever.
+
+### `ensureBonded` trusted a bond it hadn't verified
+
+`BOND_BONDED` on the phone says nothing about whether the *device* still
+has its half. After a factory reset the device calls BlueZ
+`remove_device` while Android keeps listing the peer as bonded — and
+because `ensureBonded` short-circuits on that, re-pairing never started a
+fresh bond. The user would re-pair, the app would skip straight to
+`claim` over a link that couldn't encrypt, and pairing failed citing
+something unrelated. `BondManager.removeBond`'s own doc comment described
+this exact trap; nothing acted on it.
+
+The pairing flow now calls `ensureFreshBond`, which drops any existing
+bond (waiting for `BOND_NONE` via `awaitUnbonded`, since `createBond` is
+rejected while the old one tears down) before bonding. Safe because we
+only reach it when the user is deliberately pairing *and* the device has
+already reported itself Unclaimed — an Unclaimed device has no admin, so
+any bond we're holding is stale or about to be superseded. If the
+platform blocks the reflection-based `removeBond` we proceed with the
+existing bond rather than dead-ending.
+
+`ensureBonded` stays for callers that genuinely just want "bonded, don't
+care how", with a doc note pointing at the distinction.
 
 ## Tests / checks
 

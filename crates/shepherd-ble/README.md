@@ -25,8 +25,12 @@ unified HTTP+BLE bearer-token identity, filesystem reset sentinel.
   coalesced and the capacity is kept tight.
 - `rpc` — request dispatcher that maps RPC method names onto
   `ManagementService` trait calls.
-- `admin` — TOML-persisted `AdminRecord` plus the factory-reset sentinel
-  check that runs at startup.
+- `admin` — TOML-persisted `AdminRecord`, the factory-reset sentinel
+  check that runs at startup, and `PendingUnbondStore`: the on-disk
+  retry list of BlueZ bonds still owed a removal. Un-claiming is two
+  steps (clear the record, forget the bond) and only the first is
+  atomic, so the second is recorded before it's attempted and cleared
+  only once it succeeds.
 - `claim` — `Unclaimed → Claimed` state machine and the per-request
   authorization gate.
 - `agent` — `bluer` pairing agent for Numeric Comparison. Exposes a
