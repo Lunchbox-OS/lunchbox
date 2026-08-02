@@ -595,7 +595,11 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 _pairing.value = PairingPhase.Comparing(info.deviceName, identifier)
-                val bonded = container.bondManager.ensureBonded(identifier)
+                // ensureFreshBond, not ensureBonded: the device just told
+                // us it's Unclaimed, so any bond this phone is still
+                // holding is stale — trusting it skips straight to claim
+                // over a link that can never encrypt.
+                val bonded = container.bondManager.ensureFreshBond(identifier)
                 if (!bonded) {
                     fail(conn, "Pairing was cancelled or failed. Try again.")
                     return@launch
@@ -663,13 +667,17 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
         /**
          * Ceiling on one [ShepherdConnection.connect] attempt: GATT
-         * connect + discovery + MTU + the bounded post-connect drain.
-         * A healthy reconnect is well under two seconds; this is a
-         * backstop that converts a stall into a retry rather than a hang,
-         * and is deliberately looser than the drain's own budget so a
-         * merely-slow link still gets to finish.
+         * connect + discovery + MTU + link-encryption settle + the
+         * bounded post-connect drain.
+         *
+         * A healthy reconnect is well under two seconds. This is sized
+         * to sit *above* the sum of connect()'s own internal budgets, so
+         * a stall surfaces as the specific failure that caused it
+         * (settle exhausted, drain stalled) rather than being masked by
+         * a generic timeout here. It's the backstop of last resort for
+         * something connect() doesn't bound at all.
          */
-        const val CONNECT_TIMEOUT_MS = 20_000L
+        const val CONNECT_TIMEOUT_MS = 30_000L
     }
 }
 

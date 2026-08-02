@@ -324,6 +324,16 @@ class ShepherdConnection private constructor(
         var consecutiveEmpty = 0
         var totalDropped = 0
         var reads = 0
+
+        // The first read gets its own, much longer budget — see
+        // [readAfterSettle]. Timing it against DRAIN_BUDGET_MS conflates
+        // "the device won't stop talking" with "the link isn't encrypted
+        // yet", and the latter is the normal state of affairs one read
+        // into a fresh session with a bonded peer.
+        val firstBytes = readAfterSettle(label, char)
+        reads++
+        if (firstBytes.isEmpty()) consecutiveEmpty++ else totalDropped += firstBytes.size
+
         val wentQuiet = withTimeoutOrNull(DRAIN_BUDGET_MS) {
             while (consecutiveEmpty < 2 && reads < MAX_DRAIN_READS) {
                 // Read failures propagate to connect(): the Response/Events
@@ -347,6 +357,53 @@ class ShepherdConnection private constructor(
             Log.i(TAG, "$label drained $totalDropped stale bytes over $reads reads on (re)connect")
         }
         if (wentQuiet != true) throw DrainStalledException(label, totalDropped, reads)
+    }
+
+    /**
+     * The session's first read on an encrypted characteristic, given room
+     * to warm the link up.
+     *
+     * Reconnecting to a bonded peer produces a GATT link that is *not yet
+     * encrypted*. Android establishes encryption from the stored LTK
+     * lazily — triggered by the first ATT request that needs it, which is
+     * precisely this read. So this one read can take seconds, and can
+     * fail outright (insufficient authentication/encryption) while the
+     * handshake is still in flight, even though the bond is perfectly
+     * healthy and the very next attempt will succeed.
+     *
+     * Retrying here is what makes reconnect-after-restart work. Without
+     * it, a first read that's merely slow reads as a stalled drain, and
+     * one that fails reads as a broken bond — and the caller's recovery
+     * for those two is disconnect-and-retry and "your bond is dead",
+     * neither of which is what a warming link needs.
+     */
+    private suspend fun readAfterSettle(label: String, char: Characteristic): ByteArray {
+        var lastError: Throwable? = null
+        repeat(LINK_SETTLE_ATTEMPTS) { attempt ->
+            val bytes = try {
+                withTimeoutOrNull(LINK_SETTLE_TIMEOUT_MS) { peripheral.read(char) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                lastError = e
+                null
+            }
+            if (bytes != null) {
+                if (attempt > 0) Log.i(TAG, "$label: link settled after ${attempt + 1} attempts")
+                return bytes
+            }
+            Log.i(
+                TAG,
+                "$label: first read did not land while the link warms up " +
+                    "(attempt ${attempt + 1}/$LINK_SETTLE_ATTEMPTS): ${lastError?.message ?: "timed out"}",
+            )
+            delay(LINK_SETTLE_RETRY_MS)
+        }
+        // Out of attempts. A recorded throwable is the honest signal —
+        // connect() maps it to LinkUnauthenticatedException, which is the
+        // right reading once retries are exhausted. Pure timeouts with no
+        // error surface as a stall instead.
+        throw lastError ?: DrainStalledException(label, 0, LINK_SETTLE_ATTEMPTS)
     }
 
     /**
@@ -543,13 +600,33 @@ class ShepherdConnection private constructor(
 
         /**
          * Wall-clock budget for draining one characteristic in
-         * [connect]. Reads cost a GATT round trip and return at most 512
-         * bytes, so this is ~10–20 KiB of drain — comfortably more than
-         * the device's whole events outbox now that snapshots coalesce,
-         * and short enough that a stall surfaces as a retry instead of a
-         * hang.
+         * [connect], measured from *after* the first read lands (see
+         * [readAfterSettle]) so link setup isn't charged against it.
+         * Reads cost a GATT round trip and return at most 512 bytes, so
+         * this covers tens of KiB of steady-state drain — comfortably
+         * more than the device's whole events outbox now that snapshots
+         * coalesce, and short enough that a stall surfaces as a retry
+         * instead of a hang.
          */
-        private const val DRAIN_BUDGET_MS: Long = 3_000
+        private const val DRAIN_BUDGET_MS: Long = 5_000
+
+        /**
+         * Budget for a single attempt at the session's first read, which
+         * is what drives Android to encrypt a freshly reconnected link
+         * from the stored LTK. Generous on purpose: this is a handshake,
+         * not a queue drain.
+         */
+        private const val LINK_SETTLE_TIMEOUT_MS: Long = 5_000
+
+        /**
+         * Attempts at that first read before concluding the link really
+         * is unusable. Encryption setup routinely fails the request
+         * that triggered it and succeeds on the retry.
+         */
+        private const val LINK_SETTLE_ATTEMPTS: Int = 3
+
+        /** Pause between link-settle attempts. */
+        private const val LINK_SETTLE_RETRY_MS: Long = 250
 
         /**
          * Hard read cap for one drain, in case reads return fast enough

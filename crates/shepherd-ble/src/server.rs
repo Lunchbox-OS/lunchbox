@@ -52,7 +52,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
-use crate::admin::{AdminRecord, AdminStore, check_reset_sentinel};
+use crate::admin::{AdminStore, PendingUnbondStore, check_reset_sentinel};
 use crate::agent::{PairingDisplay, build_agent};
 use crate::claim::{AuthDecision, ClaimMachine, PeerIdentity};
 use crate::framing::{FrameReader, encode_frame};
@@ -149,15 +149,28 @@ pub struct BleServerConfig {
     pub reset_sentinel_path: PathBuf,
 }
 
+impl BleServerConfig {
+    /// Retry list for BlueZ bonds we still owe a removal, kept beside the
+    /// admin record. Derived rather than configured: it belongs in the
+    /// same state directory by definition and has no meaning apart from
+    /// the record it shadows.
+    fn pending_unbond_path(&self) -> PathBuf {
+        self.admin_record_path
+            .with_file_name("ble-pending-unbond.toml")
+    }
+}
+
 pub struct BleServer {
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
     display: Arc<dyn PairingDisplay>,
-    /// Admin record captured when the reset sentinel fired in `new`, so
-    /// `run` can ask BlueZ to forget the previously-bonded peer once an
-    /// adapter is available. `None` when no sentinel reset happened.
-    pending_unbond: Option<AdminRecord>,
+    /// Bonds BlueZ still owes us a removal for. Written to disk before
+    /// any removal is attempted and drained in `run` once an adapter
+    /// exists, so a failure — or a kill between clearing the record and
+    /// removing the bond — is retried on the next startup instead of
+    /// stranding the peer bonded to an unclaimed device.
+    pending_unbond: PendingUnbondStore,
 }
 
 impl BleServer {
@@ -171,23 +184,38 @@ impl BleServer {
         display: Arc<dyn PairingDisplay>,
     ) -> anyhow::Result<Self> {
         let store = AdminStore::new(config.admin_record_path.clone());
+        let pending_unbond = PendingUnbondStore::new(config.pending_unbond_path());
 
-        let mut pending_unbond = None;
         if check_reset_sentinel(&config.reset_sentinel_path) {
             warn!(
                 sentinel = %config.reset_sentinel_path.display(),
                 "Factory-reset sentinel present at startup; clearing admin record",
             );
-            // Capture the record *before* clearing it so `run` can remove
-            // the matching BlueZ bond. Without this the phone stays bonded
-            // while the device goes Unclaimed, so every reconnect is
-            // accepted at the link layer and then rejected with
-            // `not_claimed` — a lockout that re-pairing can't clear because
-            // the bond already exists.
-            pending_unbond = store.load().unwrap_or_else(|e| {
-                warn!(error = %e, "Could not read admin record before reset; BlueZ bond will not be removed");
-                None
-            });
+            // Record the bond for removal *before* clearing the admin
+            // record, and durably. Without the removal the phone stays
+            // bonded while the device goes Unclaimed, so every reconnect
+            // is accepted at the link layer and then rejected with
+            // `not_claimed` — a lockout re-pairing can't clear, because
+            // the bond already exists. Doing it in this order means a
+            // crash between the two steps leaves a bond queued for
+            // removal that never happened, which the next startup fixes;
+            // the reverse order would lose the address entirely.
+            match store.load() {
+                Ok(Some(record)) => {
+                    if let Err(e) = pending_unbond.add(&record.identity_address) {
+                        warn!(
+                            peer = %record.identity_address,
+                            error = %e,
+                            "Could not queue BlueZ bond removal after reset; the peer may stay bonded",
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!(
+                    error = %e,
+                    "Could not read admin record before reset; BlueZ bond will not be removed",
+                ),
+            }
             store.clear()?;
         }
 
@@ -221,7 +249,7 @@ impl BleServer {
     /// 5. Start LE advertising under the configured device name.
     /// 6. Spawn the events forwarder task.
     /// 7. Wait for shutdown.
-    pub async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
+    pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let session = bluer::Session::new().await.map_err(|e| {
             anyhow::anyhow!(
                 "BlueZ D-Bus session unavailable ({e}); is bluetoothd running and reachable on the system bus?"
@@ -246,25 +274,10 @@ impl BleServer {
         })?;
         info!(adapter = %adapter.name(), "BLE management server starting");
 
-        // Best-effort bond removal after a sentinel-triggered reset.
-        // We tolerate failures: the next restart will retry, and the
-        // admin record itself is already gone.
-        if let Some(prev) = self.pending_unbond.take() {
-            match prev.identity_address.parse::<Address>() {
-                Ok(addr) => {
-                    if let Err(e) = adapter.remove_device(addr).await {
-                        warn!(error = %e, "BlueZ bond removal after reset failed (best-effort)");
-                    } else {
-                        info!(peer = %addr, "Removed BlueZ bond after factory-reset sentinel");
-                    }
-                }
-                Err(e) => warn!(
-                    address = %prev.identity_address,
-                    error = %e,
-                    "Could not parse admin identity address; BlueZ bond not removed after reset",
-                ),
-            }
-        }
+        // Settle any bond removals we still owe — from this boot's
+        // sentinel reset, or from an earlier one whose removal didn't
+        // stick. Entries survive until BlueZ confirms the peer is gone.
+        drain_pending_unbonds(&adapter, &self.pending_unbond).await;
 
         let _agent_handle = register_agent(&session, self.display.clone())
             .await
@@ -352,14 +365,30 @@ impl BleServer {
         ));
 
         // Drain factory-reset unbond requests for the server's lifetime.
+        // Same durability contract as the startup path: record the debt
+        // before attempting it, clear it only on success, so a failure
+        // here is retried at next startup rather than stranding the peer
+        // bonded to a device that has already forgotten it.
         let unbond_adapter = adapter.clone();
+        let unbond_store = self.pending_unbond.clone();
         let unbond_task = tokio::spawn(async move {
             while let Some(addr) = unbond_rx.recv().await {
+                let text = addr.to_string();
+                if let Err(e) = unbond_store.add(&text) {
+                    warn!(peer = %addr, error = %e, "Could not persist the pending unbond");
+                }
                 match unbond_adapter.remove_device(addr).await {
-                    Ok(()) => info!(peer = %addr, "Removed BlueZ bond after factory_reset"),
-                    Err(e) => {
-                        warn!(peer = %addr, error = %e, "BlueZ bond removal after factory_reset failed")
+                    Ok(()) => {
+                        info!(peer = %addr, "Removed BlueZ bond after factory_reset");
+                        if let Err(e) = unbond_store.remove(&text) {
+                            warn!(peer = %addr, error = %e, "Bond removed but the retry entry stayed");
+                        }
                     }
+                    Err(e) => warn!(
+                        peer = %addr,
+                        error = %e,
+                        "BlueZ bond removal after factory_reset failed; queued for retry at next startup",
+                    ),
                 }
             }
         });
@@ -417,6 +446,62 @@ async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) 
                 debug!("Event broadcast channel closed");
                 return;
             }
+        }
+    }
+}
+
+/// Work through the pending-unbond list, dropping entries only once the
+/// peer is provably gone from BlueZ.
+///
+/// A peer BlueZ has already forgotten counts as done — `remove_device`
+/// errors on an unknown address, and treating that as a failure would
+/// keep the entry (and the warning) forever.
+async fn drain_pending_unbonds(adapter: &bluer::Adapter, store: &PendingUnbondStore) {
+    let queued = match store.list() {
+        Ok(q) if q.is_empty() => return,
+        Ok(q) => q,
+        Err(e) => {
+            warn!(error = %e, "Could not read the pending-unbond list; bonds may linger");
+            return;
+        }
+    };
+
+    let known: HashSet<Address> = match adapter.device_addresses().await {
+        Ok(addrs) => addrs.into_iter().collect(),
+        Err(e) => {
+            warn!(error = %e, "Could not enumerate BlueZ devices; deferring pending unbonds");
+            return;
+        }
+    };
+
+    for text in queued {
+        let addr = match text.parse::<Address>() {
+            Ok(a) => a,
+            Err(e) => {
+                // Unparseable entries can never succeed; drop them rather
+                // than warn on every boot forever.
+                warn!(address = %text, error = %e, "Discarding unparseable pending-unbond entry");
+                let _ = store.remove(&text);
+                continue;
+            }
+        };
+        if !known.contains(&addr) {
+            info!(peer = %addr, "Pending unbond already settled; BlueZ does not know this peer");
+            let _ = store.remove(&text);
+            continue;
+        }
+        match adapter.remove_device(addr).await {
+            Ok(()) => {
+                info!(peer = %addr, "Removed BlueZ bond");
+                if let Err(e) = store.remove(&text) {
+                    warn!(peer = %addr, error = %e, "Bond removed but the retry entry stayed");
+                }
+            }
+            Err(e) => warn!(
+                peer = %addr,
+                error = %e,
+                "BlueZ bond removal failed; queued for retry at next startup",
+            ),
         }
     }
 }
@@ -1482,7 +1567,14 @@ mod tests {
             "device is Unclaimed after reset"
         );
         assert!(!admin_path.exists(), "admin record file was removed");
-        let pending = server.pending_unbond.expect("bond queued for removal");
-        assert_eq!(pending.identity_address, "AA:BB:CC:DD:EE:FF");
+
+        // The address is queued *on disk*, not just in memory: the
+        // removal happens later in `run`, and if it fails (or the daemon
+        // is killed first) the next startup has to be able to retry. A
+        // fresh store on the same path stands in for that next startup.
+        let queued = server.pending_unbond.list().unwrap();
+        assert_eq!(queued, vec!["AA:BB:CC:DD:EE:FF".to_string()]);
+        let next_boot = PendingUnbondStore::new(server.pending_unbond.path().to_path_buf());
+        assert_eq!(next_boot.list().unwrap(), queued);
     }
 }

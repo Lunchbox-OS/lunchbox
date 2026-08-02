@@ -49,6 +49,12 @@ fun LinkBanner(link: LinkStatus, onRetry: () -> Unit, onRepair: () -> Unit) {
                 }
             }
         }
+        // Re-pair is offered here too, not just on the repair states.
+        // Nothing removes a stale bond automatically any more, so if the
+        // scan probe can't run (BT off, permission revoked) this is the
+        // only banner the user ever sees — and without the affordance
+        // they'd have no way out of a one-sided bond short of forgetting
+        // the device entirely.
         LinkStatus.Disconnected -> {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -59,8 +65,15 @@ fun LinkBanner(link: LinkStatus, onRetry: () -> Unit, onRepair: () -> Unit) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Disconnected", style = MaterialTheme.typography.bodyMedium)
-                    TextButton(onClick = onRetry) { Text("Retry") }
+                    Text(
+                        "Disconnected",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onRetry) { Text("Retry") }
+                        TextButton(onClick = onRepair) { Text("Re-pair") }
+                    }
                 }
             }
         }
