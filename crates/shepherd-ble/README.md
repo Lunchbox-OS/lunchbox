@@ -18,6 +18,11 @@ unified HTTP+BLE bearer-token identity, filesystem reset sentinel.
   error-code schema. Pure data, no I/O.
 - `framing` — length-prefix encoding + chunked reassembly for ATT
   writes/notifies larger than the negotiated MTU.
+- `outbox` — the byte queue behind the read-poll Response and Events
+  characteristics. Its depth is connect latency, not just memory: the
+  companion drains both outboxes to empty inside `connect()` at 512
+  bytes per GATT round trip, so `StateChanged` snapshots are pushed
+  coalesced and the capacity is kept tight.
 - `rpc` — request dispatcher that maps RPC method names onto
   `ManagementService` trait calls.
 - `admin` — TOML-persisted `AdminRecord` plus the factory-reset sentinel

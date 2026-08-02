@@ -64,6 +64,33 @@ fun LinkBanner(link: LinkStatus, onRetry: () -> Unit, onRepair: () -> Unit) {
                 }
             }
         }
+        // Re-pairing is a trip to the TV, so it's offered rather than
+        // imposed: the bond stays intact until the user taps Re-pair.
+        // Retry comes first because the faults that land here (radio
+        // congestion, a daemon restart, an event backlog) usually clear
+        // on their own.
+        LinkStatus.RepairSuggested -> {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Can't reach this device securely",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onRetry) { Text("Retry") }
+                        TextButton(onClick = onRepair) { Text("Re-pair") }
+                    }
+                }
+            }
+        }
         LinkStatus.NeedsRepair -> {
             Card(
                 modifier = Modifier.fillMaxWidth(),

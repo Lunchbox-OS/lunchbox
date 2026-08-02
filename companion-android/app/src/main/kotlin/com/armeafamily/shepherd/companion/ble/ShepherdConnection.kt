@@ -75,6 +75,41 @@ class LinkUnauthenticatedException(cause: Throwable) :
 /** An in-flight [ShepherdConnection.call] failed because the link dropped. */
 class ConnectionDroppedException : Exception("BLE link dropped before the response arrived")
 
+/**
+ * [ShepherdConnection.connect]'s post-connect drain ran out of budget
+ * before the device's outbox went quiet.
+ *
+ * The drain used to be unbounded — read until two consecutive empties,
+ * no timeout, no read cap, no delay. Because the daemon queues events
+ * whether or not anyone is connected, a reconnect after a long
+ * heavy-activity session had to chew through a full outbox at 512 bytes
+ * per GATT round trip; and once events arrived faster than the drain
+ * consumed them, "two consecutive empties" never happened and `connect()`
+ * never returned. The UI sat on `Connecting` forever with nothing logged
+ * on either side. See
+ * `docs/ai/history/2026-08-01 001 ble-connect-drain-unbounded.md`.
+ *
+ * Recovery is to drop the link rather than press on: the daemon clears
+ * both outboxes on peer disconnect, so the caller's next attempt starts
+ * from an empty queue.
+ */
+class DrainStalledException(label: String, bytes: Int, reads: Int) : Exception(
+    "$label outbox did not go quiet within the connect budget " +
+        "($bytes stale bytes over $reads reads)",
+)
+
+/**
+ * [ShepherdConnection.connect] exceeded its caller's wall-clock budget.
+ *
+ * `connect()` has several unbounded-by-nature steps (GATT connect,
+ * discovery, MTU negotiation, the post-connect drain), and the 15 s
+ * per-RPC timeout covers none of them — so a stall here used to be
+ * *unbounded*, not merely slow. Callers wrap it and surface this instead,
+ * which routes into the ordinary connect-retry backoff.
+ */
+class ConnectTimeoutException(budgetMs: Long) :
+    Exception("connect did not complete within ${budgetMs}ms")
+
 class ShepherdConnection private constructor(
     private val peripheral: Peripheral,
     private val scope: CoroutineScope,
@@ -274,26 +309,44 @@ class ShepherdConnection private constructor(
         }
     }
 
+    /**
+     * Read the characteristic to quiescence, discarding whatever comes
+     * back, so the pollers start on a frame boundary.
+     *
+     * Bounded on two axes — [DRAIN_BUDGET_MS] and [MAX_DRAIN_READS] —
+     * because "read until two consecutive empties" is not a terminating
+     * condition when the device is queueing events faster than a
+     * 512-byte-per-round-trip drain consumes them. Exceeding either
+     * budget throws [DrainStalledException]; see that class for why
+     * failing is better than proceeding.
+     */
     private suspend fun drainAndDiscard(label: String, char: Characteristic) {
         var consecutiveEmpty = 0
         var totalDropped = 0
-        while (consecutiveEmpty < 2) {
-            // Read failures propagate to connect(): the Response/Events
-            // characteristics require an authenticated-encrypted link, so
-            // a *throw* here (as opposed to an empty read) is the signal
-            // that the bonded link isn't actually usable. connect() turns
-            // it into a LinkUnauthenticatedException.
-            val bytes = peripheral.read(char)
-            if (bytes.isEmpty()) {
-                consecutiveEmpty++
-            } else {
-                consecutiveEmpty = 0
-                totalDropped += bytes.size
+        var reads = 0
+        val wentQuiet = withTimeoutOrNull(DRAIN_BUDGET_MS) {
+            while (consecutiveEmpty < 2 && reads < MAX_DRAIN_READS) {
+                // Read failures propagate to connect(): the Response/Events
+                // characteristics require an authenticated-encrypted link, so
+                // a *throw* here (as opposed to an empty read) is the signal
+                // that the bonded link isn't actually usable. connect() turns
+                // it into a LinkUnauthenticatedException. withTimeoutOrNull
+                // only swallows its own timeout, so that path is unchanged.
+                val bytes = peripheral.read(char)
+                reads++
+                if (bytes.isEmpty()) {
+                    consecutiveEmpty++
+                } else {
+                    consecutiveEmpty = 0
+                    totalDropped += bytes.size
+                }
             }
+            consecutiveEmpty >= 2
         }
         if (totalDropped > 0) {
-            Log.i(TAG, "$label drained $totalDropped stale bytes on (re)connect")
+            Log.i(TAG, "$label drained $totalDropped stale bytes over $reads reads on (re)connect")
         }
+        if (wentQuiet != true) throw DrainStalledException(label, totalDropped, reads)
     }
 
     /**
@@ -347,6 +400,19 @@ class ShepherdConnection private constructor(
             drainAndDiscard("response", responseChar)
             drainAndDiscard("events", eventsChar)
         } catch (e: CancellationException) {
+            throw e
+        } catch (e: DrainStalledException) {
+            // Don't flip `ready` on a stream we're stranded mid-frame in:
+            // the pollers would hand the assembler a desynced byte stream
+            // and we'd trade a bounded retry for a framing-error loop.
+            // Dropping the link makes the daemon clear both outboxes
+            // (see `disconnect_monitor` in shepherd-ble), so the caller's
+            // retry starts clean. Deliberately NOT wrapped as
+            // LinkUnauthenticatedException: the link is fine, it's the
+            // backlog that isn't, and conflating the two would point
+            // recovery at the bond.
+            Log.w(TAG, "connect: ${e.message}; dropping the link so the device clears its outboxes")
+            runCatching { peripheral.disconnect() }
             throw e
         } catch (e: Throwable) {
             if (probeEncryptedLink) throw LinkUnauthenticatedException(e)
@@ -474,6 +540,23 @@ class ShepherdConnection private constructor(
          * mid-read hiccup (an MTU renegotiation, a single dropped PDU).
          */
         private const val MAX_CONSECUTIVE_READ_FAILURES: Int = 5
+
+        /**
+         * Wall-clock budget for draining one characteristic in
+         * [connect]. Reads cost a GATT round trip and return at most 512
+         * bytes, so this is ~10–20 KiB of drain — comfortably more than
+         * the device's whole events outbox now that snapshots coalesce,
+         * and short enough that a stall surfaces as a retry instead of a
+         * hang.
+         */
+        private const val DRAIN_BUDGET_MS: Long = 3_000
+
+        /**
+         * Hard read cap for one drain, in case reads return fast enough
+         * to keep the time budget alive indefinitely. 192 × 512 B = 96
+         * KiB, comfortably above the device's 64 KiB events outbox cap.
+         */
+        private const val MAX_DRAIN_READS: Int = 192
 
         fun fromAdvertisement(advertisement: Advertisement, scope: CoroutineScope): ShepherdConnection =
             ShepherdConnection(

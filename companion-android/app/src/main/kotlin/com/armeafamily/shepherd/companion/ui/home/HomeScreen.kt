@@ -94,7 +94,14 @@ fun HomeScreen(
                 }
             }
 
-            LinkBanner(link = state.link, onRetry = vm::retryConnection, onRepair = onAddDevice)
+            // Accepting the re-pair offer is what drops the bond — the
+            // connect loop no longer does it unprompted. Harmless on
+            // NeedsRepair, where the OS bond is already gone.
+            LinkBanner(
+                link = state.link,
+                onRetry = vm::retryConnection,
+                onRepair = { vm.dropBondAndRepair(); onAddDevice() },
+            )
 
             val session = state.currentSession
             if (session != null) {

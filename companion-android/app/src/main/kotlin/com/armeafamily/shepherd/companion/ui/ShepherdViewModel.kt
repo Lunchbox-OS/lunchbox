@@ -5,6 +5,7 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.armeafamily.shepherd.companion.appContainer
+import com.armeafamily.shepherd.companion.ble.ConnectTimeoutException
 import com.armeafamily.shepherd.companion.ble.RpcException
 import com.armeafamily.shepherd.companion.ble.ShepherdConnection
 import com.armeafamily.shepherd.companion.domain.AdminRecord
@@ -36,7 +37,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Coarse state of the BLE link to the active device. */
-enum class LinkStatus { Idle, Connecting, Connected, Reconnecting, Disconnected, NeedsRepair }
+enum class LinkStatus {
+    Idle,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Disconnected,
+
+    /**
+     * Retries are exhausted and the device is still advertising, so the
+     * bond *may* be one-sided — but the same symptoms come from a
+     * congested radio or a daemon restart. The bond is left intact and
+     * re-pairing is offered, not forced; see [ShepherdViewModel.dropBondAndRepair].
+     */
+    RepairSuggested,
+
+    /** The OS bond is provably gone. Re-pairing is the only way forward. */
+    NeedsRepair,
+}
 
 /** Everything the device screens render. */
 data class DeviceUiState(
@@ -165,7 +183,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(link = if (failures == 0) LinkStatus.Connecting else LinkStatus.Reconnecting)
             }
             try {
-                conn.connect()
+                connectWithin(conn)
                 failures = 0
                 _state.update { it.copy(link = LinkStatus.Connected) }
                 refreshAll()
@@ -197,16 +215,22 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                     // Exhausted retries while still OS-bonded. Distinguish a
                     // stale one-sided bond from a device that's simply
                     // unreachable (off, out of range, or shepherd not
-                    // running) by scanning for the *shepherd service*: only if
-                    // the device is still advertising it — i.e. shepherd is up
-                    // and in range — yet we still can't hold an encrypted
-                    // link is the bond provably stale. Then drop it and prompt
-                    // re-pair; otherwise surface a retryable Disconnected and
-                    // leave the bond intact.
+                    // running) by scanning for the *shepherd service*: if the
+                    // device is still advertising it — i.e. shepherd is up and
+                    // in range — yet we can't hold an encrypted link, a stale
+                    // bond is the leading explanation.
+                    //
+                    // Leading, but not proven. A congested 2.4 GHz band, a
+                    // daemon restart mid-connect, and an outbox backlog that
+                    // outruns the connect drain all present identically here,
+                    // and all of them clear up on their own. Removing the bond
+                    // automatically turned each of those into a mandatory trip
+                    // to the TV to re-pair. So we surface the suggestion and
+                    // leave the bond alone — `dropBondAndRepair` removes it
+                    // only when the user takes us up on it.
                     releaseConnection(conn)
                     val link = if (deviceIsReachable(record)) {
-                        runCatching { container.bondManager.removeBond(record.androidIdentifier) }
-                        LinkStatus.NeedsRepair
+                        LinkStatus.RepairSuggested
                     } else {
                         LinkStatus.Disconnected
                     }
@@ -216,6 +240,50 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 delay(backoffs[failures - 1])
             }
         }
+    }
+
+    /**
+     * Run [ShepherdConnection.connect] under a wall-clock budget.
+     *
+     * `connect()` is the one phase of the session no timeout used to
+     * cover: [ShepherdConnection.REQUEST_TIMEOUT_MS] applies to `call()`
+     * only, so a connect that stalled — most often in the post-connect
+     * outbox drain — parked [runConnectionLoop] indefinitely on
+     * `Connecting`, never reaching the backoff ladder below it. A symptom
+     * that outlives the 15 s RPC timeout by minutes is the signature of
+     * this path, not of a slow RPC.
+     */
+    private suspend fun connectWithin(
+        conn: ShepherdConnection,
+        probeEncryptedLink: Boolean = true,
+    ) {
+        val connected = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+            conn.connect(probeEncryptedLink)
+            true
+        }
+        if (connected == null) {
+            // Don't leave a half-open link behind. The disconnect also
+            // makes the daemon clear its outboxes, which is exactly the
+            // state the next attempt wants to find.
+            runCatching { conn.disconnect() }
+            throw ConnectTimeoutException(CONNECT_TIMEOUT_MS)
+        }
+    }
+
+    /**
+     * Forget the OS bond and hand off to the pairing flow.
+     *
+     * Only ever reached by the user accepting the re-pair offer on a
+     * [LinkStatus.RepairSuggested] or [LinkStatus.NeedsRepair] banner —
+     * the connect loop no longer does this on its own, because the
+     * evidence it has (device advertising, link unusable) is consistent
+     * with several transient faults that fix themselves.
+     */
+    fun dropBondAndRepair() {
+        val record = _state.value.record ?: return
+        teardown()
+        runCatching { container.bondManager.removeBond(record.androidIdentifier) }
+        _state.update { it.copy(link = LinkStatus.NeedsRepair) }
     }
 
     /**
@@ -507,7 +575,10 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 // Pre-bond: the encrypted chars aren't reachable until
                 // ensureBonded() below, so don't treat the drain failure as
                 // a one-sided bond.
-                conn.connect(probeEncryptedLink = false)
+                // Same wall-clock cap as a session connect: an unbounded
+                // stall here parks the pairing screen on its spinner with
+                // no way out but backing out of the flow.
+                connectWithin(conn, probeEncryptedLink = false)
                 val info = conn.readDeviceInfo()
 
                 if (info.protocolVersion != Protocol.PROTOCOL_VERSION) {
@@ -589,6 +660,16 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         /** How long to scan for the device before concluding it's unreachable. */
         const val SCAN_PROBE_MS = 5_000L
+
+        /**
+         * Ceiling on one [ShepherdConnection.connect] attempt: GATT
+         * connect + discovery + MTU + the bounded post-connect drain.
+         * A healthy reconnect is well under two seconds; this is a
+         * backstop that converts a stall into a retry rather than a hang,
+         * and is deliberately looser than the drain's own budget so a
+         * merely-slow link still gets to finish.
+         */
+        const val CONNECT_TIMEOUT_MS = 20_000L
     }
 }
 

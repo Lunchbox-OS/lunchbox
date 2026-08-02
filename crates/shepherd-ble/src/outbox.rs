@@ -15,10 +15,37 @@
 //! popped. Reads therefore never tear a frame across calls — bytes are
 //! delivered in order, byte-for-byte, with no synchronisation needed on
 //! the client beyond its existing length-prefix reassembler.
+//!
+//! # Backlog is the enemy
+//!
+//! Reads are capped at 512 bytes (Android's per-read ceiling) and cost a
+//! GATT round trip each, so the drain rate is only ~10–20 KiB/s. Every
+//! byte sitting here when a companion connects is time the companion
+//! spends draining before it can talk — see
+//! `docs/ai/history/2026-08-01 001 ble-connect-drain-unbounded.md`, where
+//! an uncapped backlog of superseded snapshots stalled `connect()`
+//! indefinitely. Two mechanisms keep it small: [`Outbox::push_coalesced`]
+//! (a fresh `StateChanged` supersedes the queued one instead of queueing
+//! behind it) and a deliberately tight capacity.
 
 use std::collections::VecDeque;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, info, warn};
+
+/// Bytes drained in one continuous backlog before we log it at info.
+/// Sized so an ordinary request/response never trips it but a genuine
+/// reconnect backlog always does — that log line is the only server-side
+/// evidence that a companion spent its connect budget draining.
+const BACKLOG_LOG_THRESHOLD: usize = 8 * 1024;
+
+/// Marks messages that supersede one another in the queue. Pushing under
+/// a key discards any *queued* message with the same key, so a slow
+/// reader sees the latest value rather than every intermediate one.
+pub type CoalesceKey = &'static str;
+
+/// Coalescing key for `StateChanged`: a full snapshot of service state,
+/// which is idempotent — the newest one makes every older one redundant.
+pub const COALESCE_STATE_CHANGED: CoalesceKey = "state_changed";
 
 pub struct Outbox {
     name: &'static str,
@@ -26,11 +53,21 @@ pub struct Outbox {
     state: Mutex<OutboxState>,
 }
 
+struct QueuedFrame {
+    bytes: Vec<u8>,
+    key: Option<CoalesceKey>,
+}
+
 #[derive(Default)]
 struct OutboxState {
-    queue: VecDeque<Vec<u8>>,
+    queue: VecDeque<QueuedFrame>,
     head_offset: usize,
     total_bytes: usize,
+    /// Bytes and reads spent on the current continuous backlog. Reset
+    /// each time a read leaves the queue empty, so the backlog log below
+    /// fires once per drain rather than once per read.
+    drained_bytes: usize,
+    drained_reads: usize,
 }
 
 impl Outbox {
@@ -46,7 +83,31 @@ impl Outbox {
     /// from the front to make room — never the in-progress head, since
     /// that would leave the client mid-frame with no way to resync.
     pub async fn push(&self, framed: Vec<u8>) {
+        self.push_inner(framed, None).await;
+    }
+
+    /// Append one framed message, first discarding every *queued*
+    /// message previously pushed under the same `key`.
+    ///
+    /// This is the backlog control for idempotent messages: a
+    /// `StateChanged` snapshot supersedes the one before it, so a
+    /// companion that reconnects after an hour of churn drains one
+    /// current snapshot instead of hundreds of stale ones. Without it the
+    /// events outbox sits pinned at capacity and the companion's
+    /// post-connect drain can outlast any sane timeout.
+    ///
+    /// A mid-delivery head is never coalesced away — the client is
+    /// already partway through those bytes, and dropping them would jump
+    /// its byte stream forward and desync the reassembler.
+    pub async fn push_coalesced(&self, framed: Vec<u8>, key: CoalesceKey) {
+        self.push_inner(framed, Some(key)).await;
+    }
+
+    async fn push_inner(&self, framed: Vec<u8>, key: Option<CoalesceKey>) {
         let mut s = self.state.lock().await;
+        // Reject an oversize frame *before* coalescing: superseding the
+        // queued snapshot and then dropping its replacement would leave
+        // the client with neither.
         if framed.len() > self.max_bytes {
             warn!(
                 outbox = self.name,
@@ -55,6 +116,31 @@ impl Outbox {
                 "frame exceeds outbox capacity; dropping",
             );
             return;
+        }
+        if let Some(k) = key {
+            let first_evictable = usize::from(s.head_offset > 0);
+            let mut superseded = 0usize;
+            let mut freed = 0usize;
+            let mut i = first_evictable;
+            while i < s.queue.len() {
+                if s.queue[i].key == Some(k) {
+                    let dropped = s.queue.remove(i).expect("index is in range");
+                    s.total_bytes -= dropped.bytes.len();
+                    freed += dropped.bytes.len();
+                    superseded += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            if superseded > 0 {
+                debug!(
+                    outbox = self.name,
+                    key = k,
+                    superseded,
+                    freed_bytes = freed,
+                    "outbox coalesced superseded messages",
+                );
+            }
         }
         while s.total_bytes + framed.len() > self.max_bytes {
             // Don't drop the head if it's already mid-delivery — popping
@@ -73,15 +159,23 @@ impl Outbox {
                 .queue
                 .pop_front()
                 .expect("queue must be nonempty when over capacity");
-            s.total_bytes -= dropped.len();
+            s.total_bytes -= dropped.bytes.len();
             warn!(
                 outbox = self.name,
-                dropped_len = dropped.len(),
+                dropped_len = dropped.bytes.len(),
                 "outbox full; dropped oldest message",
             );
         }
         s.total_bytes += framed.len();
-        s.queue.push_back(framed);
+        s.queue.push_back(QueuedFrame { bytes: framed, key });
+    }
+
+    /// Queued messages and undelivered bytes, for logging. Cheap enough
+    /// to call on connect, which is the moment the depth actually
+    /// predicts something: how long the companion's drain will take.
+    pub async fn depth(&self) -> (usize, usize) {
+        let s = self.state.lock().await;
+        (s.queue.len(), s.total_bytes)
     }
 
     /// Drain up to `max_chunk` bytes from the head of the queue.
@@ -92,17 +186,36 @@ impl Outbox {
         }
         let mut s = self.state.lock().await;
         let head_len = match s.queue.front() {
-            Some(h) => h.len(),
+            Some(h) => h.bytes.len(),
             None => return Vec::new(),
         };
         let available = head_len - s.head_offset;
         let n = max_chunk.min(available);
-        let chunk = s.queue.front().unwrap()[s.head_offset..s.head_offset + n].to_vec();
+        let chunk = s.queue.front().unwrap().bytes[s.head_offset..s.head_offset + n].to_vec();
         s.head_offset += n;
         s.total_bytes -= n;
+        s.drained_bytes += n;
+        s.drained_reads += 1;
         if s.head_offset >= head_len {
             s.queue.pop_front();
             s.head_offset = 0;
+        }
+        // A backlog just finished draining. This is the one server-side
+        // signal that a companion spent real time here rather than
+        // connecting instantly, so it's worth an info line — the failure
+        // it diagnoses (connect stalling on the drain) is otherwise
+        // completely silent in the journal.
+        if s.queue.is_empty() {
+            if s.drained_bytes >= BACKLOG_LOG_THRESHOLD {
+                info!(
+                    outbox = self.name,
+                    bytes = s.drained_bytes,
+                    reads = s.drained_reads,
+                    "BLE outbox backlog drained",
+                );
+            }
+            s.drained_bytes = 0;
+            s.drained_reads = 0;
         }
         chunk
     }
@@ -115,6 +228,8 @@ impl Outbox {
         s.queue.clear();
         s.head_offset = 0;
         s.total_bytes = 0;
+        s.drained_bytes = 0;
+        s.drained_reads = 0;
     }
 
     #[cfg(test)]
@@ -189,5 +304,57 @@ mod tests {
         let rest = ob.read(10).await;
         assert_eq!(rest, vec![3, 4]);
         assert!(ob.read(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_coalesced_supersedes_queued_messages_with_the_same_key() {
+        let ob = Outbox::new("test", 1024);
+        ob.push_coalesced(vec![1, 1], COALESCE_STATE_CHANGED).await;
+        ob.push(vec![9, 9]).await; // unkeyed: must survive
+        ob.push_coalesced(vec![2, 2], COALESCE_STATE_CHANGED).await;
+        ob.push_coalesced(vec![3, 3], COALESCE_STATE_CHANGED).await;
+
+        // Only the unkeyed message and the newest snapshot remain, and
+        // the newest is at the back — coalescing supersedes in place but
+        // does not reorder what's left.
+        assert_eq!(ob.pending_bytes().await, 4);
+        let mut drained = Vec::new();
+        loop {
+            let chunk = ob.read(10).await;
+            if chunk.is_empty() {
+                break;
+            }
+            drained.extend(chunk);
+        }
+        assert_eq!(drained, vec![9, 9, 3, 3]);
+    }
+
+    #[tokio::test]
+    async fn push_coalesced_spares_a_mid_delivery_head() {
+        let ob = Outbox::new("test", 1024);
+        ob.push_coalesced(vec![1, 2, 3, 4], COALESCE_STATE_CHANGED)
+            .await;
+        let _ = ob.read(2).await; // head is now mid-delivery
+
+        // The client is partway through the head's bytes; superseding it
+        // would jump their stream forward mid-frame. It stays, and the
+        // newer snapshot queues behind it.
+        ob.push_coalesced(vec![5, 6], COALESCE_STATE_CHANGED).await;
+        assert_eq!(ob.read(10).await, vec![3, 4]);
+        assert_eq!(ob.read(10).await, vec![5, 6]);
+        assert!(ob.read(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_coalesced_keeps_the_queue_bounded_under_churn() {
+        // The regression this whole mechanism exists for: snapshots
+        // arriving while nobody is polling must not accumulate.
+        let ob = Outbox::new("test", 64 * 1024);
+        for i in 0..500u16 {
+            ob.push_coalesced(i.to_le_bytes().to_vec(), COALESCE_STATE_CHANGED)
+                .await;
+        }
+        assert_eq!(ob.pending_bytes().await, 2);
+        assert_eq!(ob.read(10).await, 499u16.to_le_bytes().to_vec());
     }
 }
