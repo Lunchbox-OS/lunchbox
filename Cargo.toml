@@ -124,6 +124,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # shared crates (e.g. shepherd-media-core reporting the chosen hwdec).
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# The bare `log` facade, for crates shared with the Android build that only need
+# to emit a record: `tracing-subscriber`'s `tracing-log` bridge picks these up on
+# Linux, `android_logger` does on Android.
+log = "0.4"
 
 # Error handling
 thiserror = "1.0"

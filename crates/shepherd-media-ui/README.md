@@ -1,7 +1,8 @@
 # shepherd-media-ui
 
 Shared egui UI for browsing a `shepherd-media` library — the poster grid used
-for "view the contents of a library" — plus its theme.
+for "view the contents of a library", the "Continue watching" card drawn over
+it — plus its theme.
 
 Both front-ends render the same view from it:
 
@@ -19,6 +20,10 @@ instead of drifting apart.
   drag-to-scroll with kinetic flick, and `scroll_to_me` follow on focus change.
   `draw(...)` returns the id of an item the user activated; it does not own
   selection, input, poster fetching, or playback.
+- `prompt` — the "Continue watching" card the opt-in resume feature shows over
+  the grid: a modal two-button dialog (Resume / Library) that owns its focus by
+  index, handles pointer and keyboard itself, and leaves gamepad translation to
+  the caller. Themed like `grid`, via a caller-supplied `PromptTheme`.
 - `theme` — the dark browse palette and a `theme::install` helper.
 
 ## Platform-agnostic by construction

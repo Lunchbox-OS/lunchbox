@@ -4526,6 +4526,7 @@ name = "shepherd-media-app"
 version = "0.3.3"
 dependencies = [
  "clap",
+ "log",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

@@ -16,11 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
+use shepherd_media_app::{ResumeStore, ResumeTracker};
 use shepherd_media_core::{
     LibmpvPlayer, Library, ProtocolEmitter, Session, build_library_from_entries,
     is_youtube_playlist_url, load_library, resolve_source,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command, SortBy};
@@ -58,6 +59,7 @@ fn main() -> ExitCode {
             ytdl_format,
             sort_by,
             reverse,
+            cli.resume,
         ),
         Command::Browse { library } => run_browse(
             library,
@@ -66,6 +68,7 @@ fn main() -> ExitCode {
             ytdl_format,
             sort_by,
             reverse,
+            cli.resume,
         ),
     };
 
@@ -111,6 +114,33 @@ fn run_validate(library_source: &str, sort_by: SortBy, reverse: bool) -> u8 {
     }
 }
 
+/// Open the resume state for `library` when `--resume` was passed.
+///
+/// `None` (option off, or no state directory to write to) is what turns the
+/// whole feature off downstream: the UI records nothing and never offers to
+/// continue an item. A state file that can't be read is not fatal — resume is a
+/// convenience, so we log and carry on with an empty one.
+fn open_resume(enabled: bool, library: &Library) -> Option<ResumeTracker> {
+    if !enabled {
+        return None;
+    }
+    let Some(dir) = paths::media_state_dir("resume") else {
+        warn!("neither XDG_STATE_HOME nor HOME is set; --resume has nowhere to save positions");
+        return None;
+    };
+    let path = dir.join(format!("{}.toml", library.library_id));
+    let (store, err) = ResumeStore::load_or_empty(path);
+    if let Some(e) = err {
+        warn!("ignoring unreadable resume state: {e}");
+    }
+    let mut tracker = ResumeTracker::new(store);
+    // A library's contents change (a playlist drops a video); don't keep
+    // positions for items that are no longer in it.
+    tracker.retain_known(library.items.iter().map(|i| i.id.as_str()));
+    Some(tracker)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_play(
     library_source: &str,
     item_id: &str,
@@ -118,6 +148,7 @@ fn run_play(
     ytdl_format: &str,
     sort_by: SortBy,
     reverse: bool,
+    resume: bool,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -143,6 +174,7 @@ fn run_play(
     // Direct-play mode shares the eframe shell with browse mode; the UI
     // opens straight into the playback view instead of the grid.
     let cache = VideoCache::new(ytdl_format);
+    let resume = open_resume(resume, &library);
     let session = build_session(library, no_protocol, ytdl_format, cache.clone());
     let session = match session {
         Ok(s) => s,
@@ -159,6 +191,7 @@ fn run_play(
         online,
         cache,
         StartMode::Playing(item_id.to_string()),
+        resume,
     ) {
         Ok(ui::ExitCause::User) => EXIT_OK,
         Ok(ui::ExitCause::Signal) => EXIT_SIGNAL,
@@ -169,6 +202,7 @@ fn run_play(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_browse(
     library_source: &str,
     no_protocol: bool,
@@ -176,6 +210,7 @@ fn run_browse(
     ytdl_format: &str,
     sort_by: SortBy,
     reverse: bool,
+    resume: bool,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -189,6 +224,7 @@ fn run_browse(
     if let Some(ref c) = cache {
         c.queue_all(&library);
     }
+    let resume = open_resume(resume, &library);
     let session = build_session(library, no_protocol, ytdl_format, cache.clone());
     let session = match session {
         Ok(s) => s,
@@ -205,7 +241,7 @@ fn run_browse(
 
     info!("starting browse UI");
     let term = install_signal_handler();
-    match ui::run(session, term, online, cache, StartMode::Browsing) {
+    match ui::run(session, term, online, cache, StartMode::Browsing, resume) {
         Ok(ui::ExitCause::User) => EXIT_OK,
         Ok(ui::ExitCause::Signal) => EXIT_SIGNAL,
         Err(e) => {

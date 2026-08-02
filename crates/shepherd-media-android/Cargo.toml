@@ -18,7 +18,7 @@ shepherd-media-app = { path = "../shepherd-media-app" }
 # Shared egui browse UI (poster grid), used by both the Linux binary and here.
 shepherd-media-ui = { path = "../shepherd-media-ui" }
 
-log = "0.4"
+log = { workspace = true }
 thiserror = { workspace = true }
 
 # Synchronous HTTP with rustls (no OpenSSL), matching the Linux binary's choice

@@ -9,6 +9,11 @@ description = "Platform-agnostic application layer for shepherd-media: persisten
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+# The `log` facade, not a subscriber: this crate only needs to report a failed
+# resume-state write. The Linux binary's `tracing-subscriber` picks those
+# records up through its `tracing-log` bridge, and the Android app's
+# `android_logger` consumes them directly.
+log = { workspace = true }
 # Optional: lets the Linux binary reuse `Quality` directly as a
 # `--quality` clap value. Kept optional so the Android cdylib, which does no
 # CLI parsing, isn't forced to build clap.
