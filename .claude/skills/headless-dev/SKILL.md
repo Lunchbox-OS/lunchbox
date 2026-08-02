@@ -111,6 +111,17 @@ Example (bedtime restriction):
     the hook. `dev key` (keyboard) *does* reach the focused surface, but the
     always-on HUD bar uses `KeyboardMode::None`, so keys won't reach it unless a
     popover raises it to `OnDemand`.
+- **`dev key` needs a longer-lived keyboard for egui/winit apps.** `shepherd-media`
+  is an eframe (winit) client, and a single `dev key <keysym>` lands nowhere: the
+  headless seat has *no* input devices (`swaymsg -t get_seats` shows an empty
+  `devices` list), so winit never binds `wl_keyboard`. `wtype` creates a virtual
+  keyboard, sends its key and exits immediately — the client loses the race
+  between the capability appearing and the key arriving. Keep the device alive
+  across several presses instead, and the later ones land:
+  `wtype -s 700 -k Return -k Return` (env: the session's `WAYLAND_DISPLAY` /
+  `XDG_RUNTIME_DIR` / `SWAYSOCK`, see `dev-runtime/headless/session.env`). GTK
+  clients rebind on the capability change, which is why `dev key` works there.
+  Synthetic pointer clicks never reached the egui surface under any timing.
 - **Settle after "ready".** `dev headless` returns once the launcher *surface*
   maps, but async icon/tile loading can lag a beat (a tile may still say
   "Loading…"). For the fully-painted UI, poll `dev tree` for the specific entry,

@@ -41,6 +41,9 @@ pub struct Session {
     /// Bounded restart budget for the current item after a transient player
     /// `Error`, refilled when a new item starts.
     retries: RetryBudget,
+    /// Where the next (or current) item should start from — see
+    /// [`Session::set_start_position`]. `None` means the beginning.
+    start_position: Option<f64>,
 }
 
 impl Session {
@@ -61,6 +64,7 @@ impl Session {
             platform: PlatformInfo::current(),
             ready_emitted: false,
             retries: RetryBudget::new(),
+            start_position: None,
         }
     }
 
@@ -134,6 +138,19 @@ impl Session {
 
     pub fn volume(&self) -> Option<f64> {
         self.player.volume()
+    }
+
+    /// Where playback should begin, in seconds — the seam the UI's opt-in resume
+    /// feature drives.
+    ///
+    /// Unlike [`PlayerHandle::set_start_position`], this is *not* consumed by
+    /// one play: it is re-applied to every load of the current item, so an
+    /// automatic restart after a transient stream error picks up where the item
+    /// was rather than at its beginning. The UI sets it before each
+    /// [`SessionInput::SelectItem`] (to the saved position, or `None` to start
+    /// from the beginning) and may keep it current while the item plays.
+    pub fn set_start_position(&mut self, seconds: Option<f64>) {
+        self.start_position = seconds;
     }
 
     // -----------------------------------------------------------------
@@ -225,6 +242,8 @@ impl Session {
 
         let kind = item.kind;
         let class = UriClass::from_classified(&source.uri);
+        let start = self.start_position;
+        self.player.set_start_position(start);
         match self.player.play(source) {
             Ok(()) => {
                 self.protocol.emit(ProtocolEvent::StartedPlayback {
@@ -247,6 +266,10 @@ impl Session {
     /// without re-emitting `STARTED_PLAYBACK` (the state stays `Playing`).
     /// Returns whether the player accepted the restart.
     fn retry_play(&mut self, item_id: &str) -> bool {
+        // Re-apply the start position: a restart that dropped the viewer back at
+        // the beginning of a film would be worse than the error it recovers from.
+        let start = self.start_position;
+        self.player.set_start_position(start);
         let source: &Source = match self.library.items.iter().find(|i| i.id == item_id) {
             Some(item) => match resolve_source(item, &self.platform) {
                 Some(s) => s,
@@ -359,5 +382,106 @@ impl Transport for Session {
     }
     fn duration(&self) -> Option<f64> {
         Session::duration(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::library::{ClassifiedUri, Item, ItemKind, Platform};
+
+    /// Records what each `play` was told to start at, and can be scripted to
+    /// fail so the retry path is reachable.
+    #[derive(Default)]
+    struct RecordingPlayer {
+        /// The start position in effect at each `play`, oldest first.
+        starts: Arc<Mutex<Vec<Option<f64>>>>,
+        pending: Option<f64>,
+    }
+
+    impl PlayerHandle for RecordingPlayer {
+        fn play(&mut self, _source: &Source) -> Result<(), PlayerError> {
+            self.starts.lock().unwrap().push(self.pending.take());
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        fn is_playing(&self) -> bool {
+            true
+        }
+        fn poll_event(&mut self) -> Option<PlayerEvent> {
+            None
+        }
+        fn set_start_position(&mut self, seconds: Option<f64>) {
+            self.pending = seconds;
+        }
+    }
+
+    fn library() -> Library {
+        Library {
+            schema_version: crate::schema::SCHEMA_VERSION,
+            library_id: "movies".into(),
+            title: "Movies".into(),
+            source_path: std::path::PathBuf::from("movies.toml"),
+            items: vec![Item {
+                id: "sintel".into(),
+                title: "Sintel".into(),
+                kind: ItemKind::Video,
+                category: None,
+                poster: None,
+                duration_seconds: None,
+                sources: vec![Source {
+                    platforms: vec![Platform::Any],
+                    uri: ClassifiedUri::Local(std::path::PathBuf::from("/media/sintel.mkv")),
+                    player_hint: None,
+                }],
+            }],
+        }
+    }
+
+    fn session() -> (Session, Arc<Mutex<Vec<Option<f64>>>>) {
+        let player = RecordingPlayer::default();
+        let starts = player.starts.clone();
+        let session =
+            Session::with_emitter(library(), Box::new(player), ProtocolEmitter::disabled());
+        (session, starts)
+    }
+
+    #[test]
+    fn plays_from_the_start_by_default() {
+        let (mut session, starts) = session();
+        session.handle_input(SessionInput::SelectItem("sintel".into()));
+        assert_eq!(starts.lock().unwrap().as_slice(), [None]);
+    }
+
+    #[test]
+    fn applies_the_start_position_to_the_selected_item() {
+        let (mut session, starts) = session();
+        session.set_start_position(Some(612.5));
+        session.handle_input(SessionInput::SelectItem("sintel".into()));
+        assert_eq!(starts.lock().unwrap().as_slice(), [Some(612.5)]);
+    }
+
+    #[test]
+    fn a_retry_restarts_at_the_start_position_not_the_beginning() {
+        let (mut session, starts) = session();
+        session.set_start_position(Some(612.5));
+        session.handle_input(SessionInput::SelectItem("sintel".into()));
+        // A transient stream error restarts the same item in place.
+        session.apply_player_event(PlayerEvent::Error("stream dropped".into()));
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [Some(612.5), Some(612.5)],
+            "the restart should resume where the item was, not at 0"
+        );
+        assert_eq!(
+            session.state(),
+            &SessionState::Playing {
+                item_id: "sintel".into()
+            }
+        );
     }
 }

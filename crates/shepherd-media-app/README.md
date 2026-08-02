@@ -2,11 +2,12 @@
 
 Platform-agnostic **application layer** for `shepherd-media`.
 
-On Linux, `shepherd-media` is stateless: `shepherdd` spawns it per activity with
-a `--library` argument plus flags, so there is nothing to persist. The Android
-build has no `shepherdd` and only one install per device, so it must keep its own
-state: the set of configured libraries, each library's caching options, and which
-one is currently selected.
+On Linux, `shepherd-media` is (almost) stateless: `shepherdd` spawns it per
+activity with a `--library` argument plus flags, so there is nothing to persist —
+the one exception being the opt-in resume positions below. The Android build has
+no `shepherdd` and only one install per device, so it must keep its own state:
+the set of configured libraries, each library's caching options, and which one is
+currently selected.
 
 This crate is the home for that state. It is pure Rust with no UI, no network, no
 process-spawning, and no Android dependency, so it can be unit-tested on the
@@ -26,6 +27,13 @@ desktop and reused by any platform binary.
   and [`Quality`] (mirrors the `--quality` presets, including `ytdl_format`).
 - **Persistence** — load/save the settings as TOML to app-private storage
   (e.g. Android `Context.filesDir`). Writes are atomic (temp file + rename).
+- **Resume state** (`resume.rs`) — [`ResumeState`] (a position per item plus the
+  last item watched, per library), its forget-it policy, TOML persistence, and
+  [`ResumeTracker`], which turns a per-frame stream of player positions into
+  batched writes. Used by *both* front-ends for the opt-in resume feature
+  (`--resume` on Linux, the per-library toggle on Android), which is why it is
+  here even though the Linux binary is otherwise stateless. Where the file lives
+  stays with each binary (`$XDG_STATE_HOME` vs app-private storage).
 
 ## What lives elsewhere
 

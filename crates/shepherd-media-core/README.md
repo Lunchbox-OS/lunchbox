@@ -7,7 +7,9 @@ Platform-agnostic core for `shepherd-media`. Contains:
 - **Source resolution** for the running platform (`resolver.rs`).
 - The **`PlayerHandle` trait** that abstracts the playback backend, plus a
   `LibmpvPlayer` implementation gated behind the `libmpv` feature
-  (`player.rs`).
+  (`player.rs`). Playback can be started at an offset
+  (`set_start_position`) — a per-file option on the load rather than a seek
+  afterwards — which is what the front-ends' opt-in resume feature rides on.
 - A **session state machine** that drives `Browsing` ↔ `Playing` transitions
   (`session.rs`).
 - The **stdout line protocol** that the platform binary uses to report
