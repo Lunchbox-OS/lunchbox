@@ -59,6 +59,11 @@ pub struct LibraryEntry {
     /// `--reverse` flag). Applied after the source is resolved.
     #[serde(default)]
     pub reverse: bool,
+    /// Remember where each item was left off, and which was watched last
+    /// (mirrors the Linux binary's `--resume` flag). Off by default; see
+    /// [`crate::resume`]. Positions are stored per library, outside this file.
+    #[serde(default)]
+    pub resume: bool,
 }
 
 /// Where a library's content comes from. The variants mirror the dispatch the
@@ -529,6 +534,7 @@ mod tests {
             },
             caching: CachingSettings::default(),
             reverse: false,
+            resume: false,
         }
     }
 
@@ -670,6 +676,7 @@ mod tests {
             },
             caching: CachingSettings::default(),
             reverse: false,
+            resume: false,
         })
         .unwrap();
 
@@ -774,6 +781,10 @@ mod tests {
         assert_eq!(c.max_bytes, DEFAULT_MAX_CACHE_BYTES);
         assert_eq!(c.posters, PosterPolicy::Always);
         assert_eq!(c.quality, Quality::Q1080);
+        // Per-library display/behaviour flags default off, so a file written by
+        // an older build keeps behaving exactly as it did.
+        assert!(!s.libraries[0].reverse);
+        assert!(!s.libraries[0].resume);
     }
 
     #[test]
@@ -929,6 +940,7 @@ mod tests {
             source,
             caching: CachingSettings::default(),
             reverse: false,
+            resume: false,
         })
         .unwrap();
         assert_eq!(id, "weekend-movies");

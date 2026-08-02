@@ -37,6 +37,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub reverse: bool,
 
+    /// Remember playback positions for this library, so an item re-opened
+    /// later picks up where it stopped and `browse` offers to continue the
+    /// item watched most recently. Off by default; with the flag absent
+    /// nothing is recorded and no state file is written.
+    ///
+    /// Positions live in `$XDG_STATE_HOME/shepherd/media/resume/<library_id>.toml`
+    /// (falling back to `~/.local/state`). An item watched to its end is
+    /// forgotten, so the next play starts from the beginning.
+    #[arg(long, global = true)]
+    pub resume: bool,
+
     /// URL used to probe internet connectivity (e.g. `https://example.com`
     /// or `tcp://8.8.8.8:53`). When provided, browse mode polls
     /// reachability every 10 seconds and hides library items that are only

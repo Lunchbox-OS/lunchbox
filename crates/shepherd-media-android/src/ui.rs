@@ -15,17 +15,28 @@ use std::time::{Duration, Instant};
 
 use shepherd_media_app::{
     AppSettings, CacheMode, CachingSettings, LibraryEntry, LibrarySource, PosterPolicy, Quality,
+    ResumeStore, ResumeTracker,
 };
 use shepherd_media_core::{
     ClassifiedUri, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef,
     RetryBudget, Source, resolve_source,
 };
-use shepherd_media_ui::grid;
+use shepherd_media_ui::{grid, prompt};
 use url::Url;
 
 use crate::playback::PlaybackView;
 use crate::resolve::{ResolveError, resolve};
 use crate::video_cache::VideoCache;
+
+/// The "continue watching" card in the app's TV theme (see [`tv_visuals`]).
+const PROMPT_THEME: prompt::PromptTheme = prompt::PromptTheme {
+    panel: egui::Color32::from_rgb(0x1c, 0x20, 0x2c),
+    text: egui::Color32::WHITE,
+    dim_text: egui::Color32::from_rgb(0xa0, 0xa4, 0xb0),
+    button: egui::Color32::from_rgb(0x2a, 0x33, 0x4a),
+    button_focused: egui::Color32::from_rgb(0x46, 0x8c, 0xf0),
+    focus_border: egui::Color32::WHITE,
+};
 
 /// The item currently playing.
 struct PlayingItem {
@@ -39,6 +50,17 @@ struct PlayingItem {
     external_audio: Option<String>,
     /// Bounded restart budget for this item after a transient playback error.
     retries: RetryBudget,
+}
+
+/// A YouTube item whose stream URLs are being resolved on a worker thread
+/// before playback can start.
+struct PendingPlayback {
+    /// Library item id, carried through so the resume bookkeeping can key on it
+    /// once playback actually starts.
+    item_id: String,
+    title: String,
+    watch: String,
+    rx: Receiver<StreamResult>,
 }
 
 /// How long a focused grid item must stay focused before its stream is
@@ -207,6 +229,18 @@ struct GridView {
     /// focus by a row.
     columns: usize,
     scroll: grid::ScrollState,
+    /// Saved playback positions for this library, attached once its contents
+    /// resolve. `None` when its "Resume playback" option is off — which is what
+    /// turns the whole feature off: nothing is recorded and nothing offered.
+    resume: Option<ResumeTracker>,
+    /// Whether the resume state has been attached yet (the library has to
+    /// resolve first, so this can't be done when the view is created).
+    resume_attached: bool,
+    /// The item the "continue watching" card is offering, until the viewer
+    /// answers it.
+    resume_offer: Option<String>,
+    /// Focus state of that card.
+    prompt: prompt::ResumePrompt,
 }
 
 /// Mutable buffer behind the add-library form.
@@ -232,6 +266,11 @@ pub struct MediaApp {
     settings_path: PathBuf,
     /// Base directory for on-disk caches (posters today, videos later).
     cache_dir: PathBuf,
+    /// Directory holding one resume file per library. Beside the settings
+    /// rather than under `cache_dir`: a cache can be cleared at any time and
+    /// re-downloaded, whereas playback positions can only be re-earned by
+    /// watching everything again.
+    resume_dir: PathBuf,
     settings: AppSettings,
     screen: Screen,
     form: NewLibraryForm,
@@ -254,8 +293,8 @@ pub struct MediaApp {
     playback: PlaybackView,
     playing: Option<PlayingItem>,
     /// A YouTube item whose stream URLs are being resolved on a worker thread
-    /// before playback can start: (display title, watch URL, result receiver).
-    playback_pending: Option<(String, String, Receiver<StreamResult>)>,
+    /// before playback can start.
+    playback_pending: Option<PendingPlayback>,
     /// Resolved YouTube streams cached by watch URL, so a play that was
     /// prefetched (or recently played) skips the ~3s yt-dlp resolve. Entries
     /// carry the time they were resolved and expire via `STREAM_CACHE_TTL`
@@ -316,9 +355,15 @@ impl MediaApp {
         let player = make_player();
         let playback = PlaybackView::new();
 
+        let resume_dir = settings_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("resume");
+
         Self {
             settings_path,
             cache_dir,
+            resume_dir,
             settings,
             screen: Screen::Switcher,
             form: NewLibraryForm::default(),
@@ -500,6 +545,9 @@ impl MediaApp {
         // A library whose "Reverse" toggle flipped this frame, applied to its
         // already-loaded grid below (so it takes effect without re-resolving).
         let mut reverse_toggled: Option<String> = None;
+        // Likewise for "Resume playback": the grid's resume state is attached
+        // per library, so a flip has to re-attach it.
+        let mut resume_toggled: Option<String> = None;
         let active = self.settings.active_library.clone();
         let count = ids.len();
 
@@ -529,12 +577,25 @@ impl MediaApp {
                     // Caching editors operate on a fresh mutable borrow.
                     if let Some(entry) = self.settings.get_mut(id) {
                         controls.extend(caching_editors(ui, id, &mut entry.caching));
-                        // Reverse the item order (mirrors the Linux `--reverse`).
-                        let rev = ui.checkbox(&mut entry.reverse, "Reverse order");
-                        if rev.changed() {
-                            reverse_toggled = Some(id.clone());
-                        }
-                        controls.push(rev);
+                        ui.horizontal(|ui| {
+                            // Reverse the item order (mirrors the Linux `--reverse`).
+                            let rev = ui.checkbox(&mut entry.reverse, "Reverse order");
+                            if rev.changed() {
+                                reverse_toggled = Some(id.clone());
+                            }
+                            controls.push(rev);
+                            // Remember playback positions (mirrors `--resume`).
+                            let res = ui
+                                .checkbox(&mut entry.resume, "Resume playback")
+                                .on_hover_text(
+                                    "Remember where each item was left off, and offer to \
+                                     continue the last one watched.",
+                                );
+                            if res.changed() {
+                                resume_toggled = Some(id.clone());
+                            }
+                            controls.push(res);
+                        });
                     }
 
                     ui.horizontal(|ui| {
@@ -573,6 +634,15 @@ impl MediaApp {
         {
             lib.items.reverse();
             g.focused = 0;
+        }
+
+        // Same for "Resume playback": turning it on loads that library's saved
+        // positions (and may offer to continue an item); turning it off drops
+        // them, so the next play starts from the beginning.
+        if let Some(id) = resume_toggled
+            && self.grid.as_ref().is_some_and(|g| g.library_id == id)
+        {
+            self.attach_resume(&id);
         }
 
         // Drive D-pad Up/Down through every control (the Limit drag value is left
@@ -742,6 +812,7 @@ impl MediaApp {
                 source,
                 caching: CachingSettings::default(),
                 reverse: false,
+                resume: false,
             };
             match self.settings.add_library(entry) {
                 Ok(()) => {
@@ -943,7 +1014,49 @@ impl MediaApp {
             focused: 0,
             columns: 4,
             scroll: grid::ScrollState::default(),
+            resume: None,
+            resume_attached: false,
+            resume_offer: None,
+            prompt: prompt::ResumePrompt::new(),
         });
+    }
+
+    /// Attach the library's saved playback positions once its contents are
+    /// known, and work out whether to offer to continue the last item watched.
+    ///
+    /// Deferred until the library resolves because both halves need its item
+    /// ids: positions for departed items are dropped, and an offer is only made
+    /// for an item the library still has.
+    fn attach_resume(&mut self, library_id: &str) {
+        let enabled = self
+            .settings
+            .get(library_id)
+            .map(|e| e.resume)
+            .unwrap_or(false);
+        let path = self.resume_dir.join(format!("{library_id}.toml"));
+        let Some(g) = self.grid.as_mut() else {
+            return;
+        };
+        let GridState::Loaded(lib) = &g.state else {
+            return;
+        };
+        g.resume_attached = true;
+        if !enabled {
+            g.resume = None;
+            g.resume_offer = None;
+            return;
+        }
+        let (store, err) = ResumeStore::load_or_empty(path);
+        if let Some(e) = err {
+            log::warn!("ignoring unreadable resume state: {e}");
+        }
+        let mut tracker = ResumeTracker::new(store);
+        let ids: Vec<&str> = lib.items.iter().map(|i| i.id.as_str()).collect();
+        tracker.retain_known(ids.iter().copied());
+        g.resume_offer = tracker
+            .last_item_in(ids.iter().copied())
+            .map(str::to_string);
+        g.resume = Some(tracker);
     }
 
     /// Advance a loading grid if its worker has produced a result.
@@ -1075,9 +1188,17 @@ impl MediaApp {
             return None;
         }
 
+        // The library has resolved: its saved positions can be attached now.
+        if !self.grid.as_ref().is_some_and(|g| g.resume_attached) {
+            self.attach_resume(library_id);
+        }
+
         // Move the focus index with the D-pad / arrow keys (the grid tiles are
         // custom-painted, so they don't use egui's own focus), then draw. The
         // center button (Enter) and a tap both select the focused/clicked item.
+        // While the "continue watching" card is up it is modal: the grid still
+        // paints as its backdrop but takes no input.
+        let offering = self.grid.as_ref().is_some_and(|g| g.resume_offer.is_some());
         let mut selected: Option<String> = None;
         {
             let posters = &self.posters;
@@ -1087,22 +1208,25 @@ impl MediaApp {
                 let n = lib.items.len();
                 if n > 0 {
                     let cols = g.columns.max(1);
-                    ui.input(|i| {
-                        if i.key_pressed(egui::Key::ArrowRight) {
-                            g.focused = (g.focused + 1).min(n - 1);
-                        }
-                        if i.key_pressed(egui::Key::ArrowLeft) {
-                            g.focused = g.focused.saturating_sub(1);
-                        }
-                        if i.key_pressed(egui::Key::ArrowDown) {
-                            g.focused = (g.focused + cols).min(n - 1);
-                        }
-                        if i.key_pressed(egui::Key::ArrowUp) {
-                            g.focused = g.focused.saturating_sub(cols);
-                        }
-                    });
+                    if !offering {
+                        ui.input(|i| {
+                            if i.key_pressed(egui::Key::ArrowRight) {
+                                g.focused = (g.focused + 1).min(n - 1);
+                            }
+                            if i.key_pressed(egui::Key::ArrowLeft) {
+                                g.focused = g.focused.saturating_sub(1);
+                            }
+                            if i.key_pressed(egui::Key::ArrowDown) {
+                                g.focused = (g.focused + cols).min(n - 1);
+                            }
+                            if i.key_pressed(egui::Key::ArrowUp) {
+                                g.focused = g.focused.saturating_sub(cols);
+                            }
+                        });
+                    }
                     g.focused = g.focused.min(n - 1);
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    if !offering
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
                         && let Some(item) = lib.items.get(g.focused)
                         && resolve_source(item, &PlatformInfo::current()).is_some()
                     {
@@ -1120,11 +1244,14 @@ impl MediaApp {
                             _ => None,
                         },
                     );
-                    if clicked.is_some() {
+                    if !offering && clicked.is_some() {
                         selected = clicked;
                     }
                 }
             }
+        }
+        if offering && let Some(id) = self.draw_resume_prompt(ui) {
+            selected = Some(id);
         }
         if let Some(id) = selected {
             self.start_playback(ui.ctx(), &id);
@@ -1132,6 +1259,48 @@ impl MediaApp {
             self.maybe_prefetch_focused(ui.ctx());
         }
         None
+    }
+
+    /// Draw the "continue watching" card over the grid. Returns the item to
+    /// play when the viewer accepts the offer.
+    ///
+    /// The card handles its own pointer and keyboard input — and on a TV the
+    /// remote's D-pad and centre button arrive as arrow keys and Enter — so
+    /// there is nothing extra to wire up here.
+    fn draw_resume_prompt(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        let rect = ui.max_rect();
+        let g = self.grid.as_mut()?;
+        let item_id = g.resume_offer.clone()?;
+        let GridState::Loaded(lib) = &g.state else {
+            return None;
+        };
+        let item = lib.items.iter().find(|i| i.id == item_id)?;
+        let title = item.title.clone();
+        let duration = item.duration_seconds.map(|d| d as f64);
+        let position = g
+            .resume
+            .as_ref()
+            .and_then(|tracker| tracker.start_position(&item_id));
+
+        match g
+            .prompt
+            .draw(ui, rect, &title, position, duration, &PROMPT_THEME)
+        {
+            prompt::PromptAction::None => None,
+            prompt::PromptAction::Resume => {
+                g.resume_offer = None;
+                Some(item_id)
+            }
+            prompt::PromptAction::Dismiss => {
+                g.resume_offer = None;
+                // Leave the grid focus on the item that was offered: it is
+                // still the most likely thing the viewer wants.
+                if let Some(idx) = lib.items.iter().position(|i| i.id == item_id) {
+                    g.focused = idx;
+                }
+                None
+            }
+        }
     }
 
     /// Resolve the platform source for `item_id` in the loaded library, prefer a
@@ -1197,7 +1366,12 @@ impl MediaApp {
                     }
                 },
             };
-            self.playback_pending = Some((title, watch, rx));
+            self.playback_pending = Some(PendingPlayback {
+                item_id: item_id.to_string(),
+                title,
+                watch,
+                rx,
+            });
             return;
         }
 
@@ -1221,21 +1395,43 @@ impl MediaApp {
                 playing_cache = Some((url, cache));
             }
         }
+        // Resume: hand the saved position to the player with the file, so
+        // nothing before it is decoded (a seek afterwards would show the
+        // opening seconds first).
+        let start = self.resume_position(item_id);
         match self.player.as_mut() {
-            Some(p) => match play_with_surface(p.as_mut(), &play_source) {
-                Ok(()) => {
-                    self.playback.note_started();
-                    self.playing = Some(PlayingItem {
-                        title,
-                        cache: playing_cache,
-                        source: play_source,
-                        external_audio: None,
-                        retries: RetryBudget::new(),
-                    });
+            Some(p) => {
+                p.set_start_position(start);
+                match play_with_surface(p.as_mut(), &play_source) {
+                    Ok(()) => {
+                        self.playback.note_started();
+                        self.playing = Some(PlayingItem {
+                            title,
+                            cache: playing_cache,
+                            source: play_source,
+                            external_audio: None,
+                            retries: RetryBudget::new(),
+                        });
+                        self.note_resume_started(item_id);
+                    }
+                    Err(e) => self.status = Some(format!("Playback failed: {e}")),
                 }
-                Err(e) => self.status = Some(format!("Playback failed: {e}")),
-            },
+            }
             None => self.status = Some("No player available on this platform.".to_string()),
+        }
+    }
+
+    /// The saved position for `item_id`, or `None` when the library's resume
+    /// option is off (or it has no saved position).
+    fn resume_position(&self, item_id: &str) -> Option<f64> {
+        self.grid.as_ref()?.resume.as_ref()?.start_position(item_id)
+    }
+
+    /// Mark `item_id` as the library's most recently watched item and start
+    /// tracking its position. No-op when the library's resume option is off.
+    fn note_resume_started(&mut self, item_id: &str) {
+        if let Some(tracker) = self.grid.as_mut().and_then(|g| g.resume.as_mut()) {
+            tracker.note_started(item_id, Instant::now());
         }
     }
 
@@ -1287,8 +1483,16 @@ impl MediaApp {
                     log::warn!("playback error, restarting playback: {err}");
                     (it.source.clone(), it.external_audio.clone())
                 };
+                // Restart where the failure hit rather than at the beginning
+                // (only known when the library's resume option is on).
+                let start = self
+                    .grid
+                    .as_ref()
+                    .and_then(|g| g.resume.as_ref())
+                    .and_then(|tracker| tracker.live_position());
                 if let Some(p) = self.player.as_mut() {
                     p.set_external_audio(audio);
+                    p.set_start_position(start);
                     if let Err(e) = play_with_surface(p.as_mut(), &src) {
                         self.status = Some(format!("Playback failed: {e}"));
                         ended = true;
@@ -1301,6 +1505,8 @@ impl MediaApp {
         }
 
         if ended {
+            // Write out where the item got to before the player forgets it.
+            self.finish_resume_tracking();
             // Download-after-play: cache the just-finished item so the next play
             // is local. Runs on a worker (download + LRU eviction are blocking).
             let finished = self.playing.take();
@@ -1317,6 +1523,10 @@ impl MediaApp {
             return;
         }
 
+        // Still playing: feed the player's position into the resume state
+        // (batched — this runs every frame).
+        self.track_resume_progress();
+
         let title = self
             .playing
             .as_ref()
@@ -1330,7 +1540,32 @@ impl MediaApp {
             }
         };
         if leave {
+            self.finish_resume_tracking();
             self.end_playback();
+        }
+    }
+
+    /// Feed the player's current position into the library's resume state.
+    /// No-op when its resume option is off or nothing is playing.
+    fn track_resume_progress(&mut self) {
+        if self.playing.is_none() {
+            return;
+        }
+        let (position, duration) = match self.player.as_ref() {
+            Some(p) => (p.position(), p.duration()),
+            None => return,
+        };
+        if let Some(tracker) = self.grid.as_mut().and_then(|g| g.resume.as_mut()) {
+            tracker.progress(position, duration, Instant::now());
+        }
+    }
+
+    /// Playback is over (EOF, error, or the viewer left): record the final
+    /// position and write it out. An item that reached its end is forgotten, so
+    /// the next play starts over.
+    fn finish_resume_tracking(&mut self) {
+        if let Some(tracker) = self.grid.as_mut().and_then(|g| g.resume.as_mut()) {
+            tracker.finished();
         }
     }
 
@@ -1546,15 +1781,20 @@ impl MediaApp {
     /// If a pending YouTube stream resolution has completed, start (or fail)
     /// playback with the resolved direct URL.
     fn poll_playback_pending(&mut self) {
-        let Some((_, _, rx)) = self.playback_pending.as_ref() else {
+        let Some(pending) = self.playback_pending.as_ref() else {
             return;
         };
-        let result = match rx.try_recv() {
+        let result = match pending.rx.try_recv() {
             Ok(r) => r,
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err("YouTube resolver thread died.".to_string()),
         };
-        let (title, watch, _) = self.playback_pending.take().unwrap();
+        let PendingPlayback {
+            item_id,
+            title,
+            watch,
+            ..
+        } = self.playback_pending.take().unwrap();
         let streams = match result {
             Ok(u) => u,
             Err(e) => {
@@ -1578,12 +1818,14 @@ impl MediaApp {
             uri: ClassifiedUri::DirectHttp(url),
             player_hint: None,
         };
+        let start = self.resume_position(&item_id);
         match self.player.as_mut() {
             Some(p) => {
                 // YouTube DASH gives separate tracks: attach the audio URL as an
                 // external track so the video-only stream plays with sound.
                 let audio = streams.audio;
                 p.set_external_audio(audio.clone());
+                p.set_start_position(start);
                 match play_with_surface(p.as_mut(), &src) {
                     Ok(()) => {
                         self.playback.note_started();
@@ -1594,6 +1836,7 @@ impl MediaApp {
                             external_audio: audio,
                             retries: RetryBudget::new(),
                         });
+                        self.note_resume_started(&item_id);
                     }
                     Err(e) => self.status = Some(format!("Playback failed: {e}")),
                 }
@@ -1713,6 +1956,11 @@ impl eframe::App for MediaApp {
             // dismiss it ourselves below.
             let popup_was_open = egui::Popup::is_any_open(ui.ctx());
 
+            // Same idea for the "continue watching" card: it consumes BACK to
+            // dismiss itself, so BACK must not also leave the library behind it.
+            let prompt_was_open = matches!(self.screen, Screen::Grid(_))
+                && self.grid.as_ref().is_some_and(|g| g.resume_offer.is_some());
+
             // Only the add-library form has text fields; clear the flag so it
             // never lingers true on a screen that can't have a focused field.
             self.text_field_focused = false;
@@ -1738,6 +1986,8 @@ impl eframe::App for MediaApp {
                 // BACK first dismisses an open popup (the Source dropdown) rather
                 // than leaving the screen behind it.
                 egui::Popup::close_all(ui.ctx());
+            } else if next.is_none() && back && prompt_was_open {
+                // Already dismissed by the card itself; swallow the press.
             } else if next.is_none() && back && self.text_field_focused {
                 // BACK from inside a text field leaves the field, not the screen;
                 // a second BACK then navigates up as usual. Focus falls back to

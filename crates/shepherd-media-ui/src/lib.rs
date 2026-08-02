@@ -13,5 +13,6 @@
 //! installed by the binary that owns the `egui::Context`.
 
 pub mod grid;
+pub mod prompt;
 pub mod theme;
 pub mod video;

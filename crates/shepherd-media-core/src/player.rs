@@ -122,6 +122,15 @@ pub trait PlayerHandle: Send {
     /// mux them at playback. Applies once and is consumed by the next `play`.
     fn set_external_audio(&mut self, _url: Option<String>) {}
 
+    /// Start the *next* [`play`](Self::play) call this many seconds in, or
+    /// clear with `None`. Applies once and is consumed by the next `play`.
+    ///
+    /// This is how the opt-in resume feature restores a saved position. Seeking
+    /// after playback starts would do the same thing, but only after the opening
+    /// seconds have already played and been shown; a start offset hands the
+    /// position to the backend with the file, so nothing before it is decoded.
+    fn set_start_position(&mut self, _seconds: Option<f64>) {}
+
     /// Point the player's video output at a platform window handle.
     ///
     /// Only meaningful under [`VideoOutput::AndroidSurface`], where the handle
@@ -355,6 +364,9 @@ mod libmpv_backend {
         // An external audio URL to attach to the next `play`, consumed there.
         // Used for separate video/audio streams (e.g. YouTube DASH).
         external_audio: Option<String>,
+        // Seconds to start the next `play` at, consumed there. Set by the
+        // front-ends' opt-in resume feature.
+        start_position: Option<f64>,
     }
 
     impl LibmpvPlayer {
@@ -434,6 +446,7 @@ mod libmpv_backend {
                 playing: AtomicBool::new(false),
                 render_ctx: Mutex::new(RenderCtxHolder(None)),
                 external_audio: None,
+                start_position: None,
             })
         }
 
@@ -503,22 +516,31 @@ mod libmpv_backend {
             // `stop`, so playback stays stuck. (Reliably triggered by seeking and
             // then closing right away.)
             while self.mpv.wait_event(0.0).is_some() {}
-            // An external audio track (separate video/audio streams) is attached
-            // via the loadfile per-file options. The value is length-prefix
-            // quoted (`%<len>%<str>`) so commas/colons in the URL don't get
-            // parsed as option separators.
-            match self.external_audio.take() {
-                Some(audio) => {
-                    let opts = format!("audio-file=%{}%{}", audio.len(), audio);
-                    self.mpv
-                        .command("loadfile", &[&uri, "replace", "0", &opts])
-                        .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
-                }
-                None => {
-                    self.mpv
-                        .command("loadfile", &[&uri, "replace"])
-                        .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
-                }
+            // Per-file options for this load: an external audio track (separate
+            // video/audio streams) and a start offset (the front-ends' resume
+            // feature). Each value is length-prefix quoted (`%<len>%<str>`) so
+            // commas/colons inside it don't get parsed as option separators.
+            let mut opts: Vec<String> = Vec::new();
+            if let Some(audio) = self.external_audio.take() {
+                opts.push(format!("audio-file=%{}%{}", audio.len(), audio));
+            }
+            if let Some(start) = self
+                .start_position
+                .take()
+                .filter(|s| s.is_finite() && *s > 0.0)
+            {
+                let seconds = format!("{start:.3}");
+                opts.push(format!("start=%{}%{}", seconds.len(), seconds));
+            }
+            if opts.is_empty() {
+                self.mpv
+                    .command("loadfile", &[&uri, "replace"])
+                    .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
+            } else {
+                let opts = opts.join(",");
+                self.mpv
+                    .command("loadfile", &[&uri, "replace", "0", &opts])
+                    .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
             }
             // Reset pause state on every new playback.
             let _ = self.mpv.set_property("pause", false);
@@ -580,6 +602,10 @@ mod libmpv_backend {
 
         fn set_external_audio(&mut self, url: Option<String>) {
             self.external_audio = url;
+        }
+
+        fn set_start_position(&mut self, seconds: Option<f64>) {
+            self.start_position = seconds;
         }
 
         fn set_video_surface(&mut self, handle: Option<i64>) {

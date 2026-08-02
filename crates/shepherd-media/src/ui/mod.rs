@@ -3,13 +3,14 @@
 
 mod playback;
 
-use shepherd_media_ui::{grid, theme};
+use shepherd_media_ui::{grid, prompt, theme};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use shepherd_media_app::ResumeTracker;
 use shepherd_media_core::{
     ClassifiedUri, Item, Session, SessionInput, SessionState, resolve_source,
 };
@@ -17,6 +18,27 @@ use shepherd_util::gamepad_nav::{NavDir, StickNav};
 
 use crate::posters::{self, PosterCache};
 use crate::video_cache::VideoCache;
+
+/// How long the "continue watching" offer waits for its item to show up in the
+/// grid before lapsing.
+///
+/// With `--connectivity-check` the grid starts pessimistically empty of remote
+/// items and fills in once the first probe lands (a few seconds). Waiting covers
+/// that; lapsing afterwards keeps a card from appearing over a grid the viewer
+/// has already started using.
+const OFFER_WINDOW: Duration = Duration::from_secs(10);
+
+/// The "continue watching" card in this binary's browse theme.
+const PROMPT_THEME: prompt::PromptTheme = prompt::PromptTheme {
+    // One step darker than the tiles so the card reads as its own surface and
+    // its buttons stay distinguishable from it.
+    panel: theme::BG,
+    text: theme::TEXT,
+    dim_text: theme::TEXT_DIM,
+    button: theme::TILE,
+    button_focused: theme::TILE_FOCUSED,
+    focus_border: theme::FOCUS_BORDER,
+};
 
 /// Why the UI loop returned.
 #[derive(Debug, Clone, Copy)]
@@ -39,8 +61,18 @@ pub fn run(
     online: Arc<AtomicBool>,
     cache: Option<Arc<VideoCache>>,
     start_mode: StartMode,
+    resume: Option<ResumeTracker>,
 ) -> Result<ExitCause, eframe::Error> {
     let posters = posters::prefetch(session.library());
+
+    // With `--resume` on, browse mode opens offering the item watched most
+    // recently — provided it is still in the library.
+    let resume_offer = match (&start_mode, &resume) {
+        (StartMode::Browsing, Some(tracker)) => tracker
+            .last_item_in(session.library().items.iter().map(|i| i.id.as_str()))
+            .map(|id| id.to_string()),
+        _ => None,
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -101,6 +133,8 @@ pub fn run(
             // before the first frame so the UI opens in the playback
             // view rather than flashing the grid.
             if let StartMode::Playing(ref item_id) = start_mode {
+                let start = resume.as_ref().and_then(|t| t.start_position(item_id));
+                session.set_start_position(start);
                 session.handle_input(SessionInput::SelectItem(item_id.clone()));
             }
 
@@ -119,6 +153,10 @@ pub fn run(
                 exit_after_playback: matches!(start_mode, StartMode::Playing(_)),
                 playing_item: None,
                 stick_nav: StickNav::default(),
+                resume,
+                resume_offer,
+                resume_offer_until: Instant::now() + OFFER_WINDOW,
+                prompt: prompt::ResumePrompt::new(),
             }))
         }),
     )?;
@@ -173,6 +211,17 @@ struct App {
     playing_item: Option<String>,
     /// Analog left-stick navigation state for the browse grid.
     stick_nav: StickNav,
+    /// Saved playback positions, when `--resume` was passed. `None` turns the
+    /// whole feature off: nothing is recorded and nothing is offered.
+    resume: Option<ResumeTracker>,
+    /// The item the "continue watching" card is offering, until the viewer
+    /// answers it. `None` once answered (or when there was nothing to offer).
+    resume_offer: Option<String>,
+    /// How long to wait for that item to appear in the grid before letting the
+    /// offer lapse — see [`OFFER_WINDOW`].
+    resume_offer_until: Instant,
+    /// Focus state of that card.
+    prompt: prompt::ResumePrompt,
 }
 
 impl App {
@@ -221,6 +270,12 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         if self.term.swap(false, Ordering::SeqCst) {
+            // shepherdd ends the activity mid-film routinely (a time limit, a
+            // bedtime window closing), so this is a normal way to stop watching
+            // — save the position before the player is torn down.
+            if let Some(tracker) = self.resume.as_mut() {
+                tracker.flush();
+            }
             self.session.handle_input(SessionInput::SignalTerminate);
             self.signaled.store(true, Ordering::SeqCst);
         }
@@ -228,6 +283,9 @@ impl eframe::App for App {
         self.session.tick();
 
         if self.session.is_exiting() {
+            if let Some(tracker) = self.resume.as_mut() {
+                tracker.flush();
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -249,6 +307,15 @@ impl eframe::App for App {
             {
                 self.playback.note_item_started(&item.title);
             }
+            // Resume bookkeeping rides the same transition: a new item becomes
+            // the one being tracked, and leaving `Playing` (EOF, stop, error)
+            // writes out where it got to.
+            if let Some(tracker) = self.resume.as_mut() {
+                match now_playing {
+                    Some(ref id) => tracker.note_started(id, Instant::now()),
+                    None => tracker.finished(),
+                }
+            }
             self.playing_item = now_playing;
         }
 
@@ -256,6 +323,19 @@ impl eframe::App for App {
             self.session.state(),
             SessionState::Playing { .. } | SessionState::Stopping { .. }
         ) {
+            if let Some(tracker) = self.resume.as_mut() {
+                tracker.progress(
+                    self.session.position(),
+                    self.session.duration(),
+                    Instant::now(),
+                );
+                // Keep the session's restart point on the live position, so an
+                // automatic retry after a transient stream error comes back
+                // here rather than to the opening titles.
+                if let Some(position) = tracker.live_position() {
+                    self.session.set_start_position(Some(position));
+                }
+            }
             self.playback
                 .handle_input(ctx, &mut self.session, &gamepad_events);
             self.playback.draw(ui, frame, &mut self.session);
@@ -274,7 +354,21 @@ impl eframe::App for App {
             self.focused = self.focused.min(visible.len() - 1);
         }
 
-        self.handle_browse_input(ctx, &visible, &gamepad_events);
+        // The "continue watching" card is modal: while it is up the grid still
+        // paints (as its backdrop) but takes no input. It only goes up once its
+        // item is actually listed (see `OFFER_WINDOW`).
+        let offering = match self.resume_offer.as_deref() {
+            Some(id) if visible.iter().any(|item| item.id == id) => true,
+            Some(_) if Instant::now() < self.resume_offer_until => false,
+            Some(_) => {
+                self.resume_offer = None;
+                false
+            }
+            None => false,
+        };
+        if !offering {
+            self.handle_browse_input(ctx, &visible, &gamepad_events);
+        }
         let title = self.session.library().title.clone();
         let posters = &self.posters;
         let selected = grid::draw(
@@ -286,8 +380,10 @@ impl eframe::App for App {
             &mut self.columns,
             &|id| posters.get(id).cloned(),
         );
-        if let Some(id) = selected {
-            self.session.handle_input(SessionInput::SelectItem(id));
+        if offering {
+            self.draw_resume_prompt(ui, &visible, &gamepad_events);
+        } else if let Some(id) = selected {
+            self.start_item(&id);
         }
 
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -391,7 +487,86 @@ impl App {
         if resolve_source(item, &info).is_none() {
             return;
         }
+        let id = item.id.clone();
+        self.start_item(&id);
+    }
+
+    /// Start `item_id`, from its saved position when `--resume` is on. Every
+    /// path into playback goes through here so resuming isn't tied to one of
+    /// them (tap, Enter, gamepad, or the "continue watching" card).
+    fn start_item(&mut self, item_id: &str) {
+        let start = self
+            .resume
+            .as_ref()
+            .and_then(|tracker| tracker.start_position(item_id));
+        self.session.set_start_position(start);
         self.session
-            .handle_input(SessionInput::SelectItem(item.id.clone()));
+            .handle_input(SessionInput::SelectItem(item_id.to_string()));
+    }
+
+    /// Draw the "continue watching" card over the grid and act on the answer.
+    fn draw_resume_prompt(
+        &mut self,
+        ui: &mut egui::Ui,
+        visible: &[Item],
+        gamepad_events: &[gilrs::EventType],
+    ) {
+        let Some(item_id) = self.resume_offer.clone() else {
+            return;
+        };
+        // The caller only draws while the item is listed; this is belt and
+        // braces so the borrow below can't fail.
+        let Some(item) = visible.iter().find(|i| i.id == item_id) else {
+            return;
+        };
+
+        // Gamepad: the card's own handling covers pointer and keyboard (which
+        // is what a remote's D-pad arrives as), so only the pad maps here.
+        let mut action = prompt::PromptAction::None;
+        for ev in gamepad_events {
+            use gilrs::{Button, EventType};
+            if let EventType::ButtonPressed(btn, _) = ev {
+                match btn {
+                    Button::DPadLeft => self.prompt.move_focus(-1),
+                    Button::DPadRight => self.prompt.move_focus(1),
+                    Button::South => action = self.prompt.focused_action(),
+                    Button::East => action = prompt::PromptAction::Dismiss,
+                    _ => {}
+                }
+            }
+        }
+
+        let position = self
+            .resume
+            .as_ref()
+            .and_then(|tracker| tracker.start_position(&item_id));
+        let duration = item.duration_seconds.map(|d| d as f64);
+        let drawn = self.prompt.draw(
+            ui,
+            ui.max_rect(),
+            &item.title,
+            position,
+            duration,
+            &PROMPT_THEME,
+        );
+        if action == prompt::PromptAction::None {
+            action = drawn;
+        }
+
+        match action {
+            prompt::PromptAction::None => {}
+            prompt::PromptAction::Resume => {
+                self.resume_offer = None;
+                self.start_item(&item_id);
+            }
+            prompt::PromptAction::Dismiss => {
+                self.resume_offer = None;
+                // Leave the grid focus on the item that was offered: it is
+                // still the most likely thing the viewer wants.
+                if let Some(idx) = visible.iter().position(|i| i.id == item_id) {
+                    self.focused = idx;
+                }
+            }
+        }
     }
 }

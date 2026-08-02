@@ -243,6 +243,7 @@ Global flags:
 --quality <best|1080p|720p|480p>                         default: 1080p
 --sort-by <library|title|id|kind|category|duration>      default: library
 --reverse                                                reverse item order
+--resume                                                 remember playback positions
 --connectivity-check <url>                               browse-mode online probe
 ```
 
@@ -251,6 +252,9 @@ The sort is stable, so library order breaks ties for any other key. Items
 missing the chosen field (no `category` or `duration_seconds`) sort to the
 end in ascending order. `--reverse` is applied after sorting; with the
 default `--sort-by library` it just flips the file order.
+
+`--resume` is off by default and described in
+[Resuming playback](#resuming-playback).
 
 `--connectivity-check <url>` is honored only by `browse`: the URL is
 probed every 10 seconds and items without a local source are hidden when
@@ -377,11 +381,50 @@ already exposes global volume controls that work the same everywhere.
 In direct-play mode the same UI opens straight into playback and the
 process exits once the item finishes; the grid is never shown.
 
+## Resuming playback
+
+Off by default. Pass `--resume` (Linux) or turn on **Resume playback** for a
+library in the Android app's settings, and `shepherd-media` remembers, per
+library:
+
+- where each item was left off, and
+- which item was watched most recently.
+
+With it on:
+
+- **Re-opening an item resumes it.** The position is handed to mpv with the
+  file, so nothing before it is decoded or shown. This applies wherever
+  playback starts — a tile in the grid, the card below, or `play --item`.
+- **Re-opening the library offers to continue.** Browse mode opens with a
+  "Continue watching" card naming the last item and where it stopped; the
+  choices are **Resume** and **Library** (dismiss and browse as usual). Enter /
+  A resumes, Escape / B / BACK dismisses. The card is skipped when the library
+  has never been watched, or when that item is no longer in it.
+- **A finished item is forgotten.** A stop within 30 seconds of the end (and a
+  stop within the first 20 seconds) clears the position, so the next play starts
+  from the beginning rather than at the credits.
+- **A restart after a stream error comes back to where it dropped**, instead of
+  to the opening titles.
+
+Positions are written while an item plays (at most every 10 s) and when playback
+ends, including when shepherdd stops the activity with SIGTERM — a time limit
+expiring mid-film does not lose the place.
+
+State lives outside the caches, one file per library, at
+`$XDG_STATE_HOME/shepherd/media/resume/<library_id>.toml` (falling back to
+`~/.local/state`) on Linux and in app-private storage on Android. Deleting a
+file just forgets that library's positions. Only item ids, second offsets, and
+durations are stored — no timestamps, no history of what was watched when. With
+the option off nothing is recorded and no file is written.
+
 ## Non-features
 
 These are deliberately not implemented:
 
-- Playlists, queues, autoplay, "watch next", recommendations, history.
+- Playlists, queues, autoplay, "watch next", recommendations, viewing history.
+  (Opt-in resume keeps a position per item and the id of the last item watched —
+  see [Resuming playback](#resuming-playback) — and nothing else. It is not a
+  log of what was watched when, and there is no UI that lists it.)
 - Library-file hot-reload. Edit the file, restart the activity.
 - Subscription-service DRM playback.
 - Any animated/celebratory UI affordances (the touch overlay is plain;

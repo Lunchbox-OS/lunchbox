@@ -51,6 +51,12 @@ the full design and roadmap.
   (`BrowserBack`) as "navigate up". In playback the remote seeks (◄/►), toggles
   play/pause (center), and leaves (BACK). Verified on hardware.
 - Settings persisted as TOML to the app's private storage.
+- Per-library **Resume playback** (default off, mirroring the Linux `--resume`):
+  with it on, each item re-opens where it stopped and opening the library shows
+  the shared "Continue watching" card for the last item watched. Positions live
+  in `<filesDir>/resume/<library-id>.toml`; the state model and its policy are
+  shared with the Linux binary (`shepherd-media-app`'s `resume` module). Not yet
+  exercised on hardware.
 - Source resolution (`resolve` module): local/`file://` TOML, HTTP(S) TOML, and
   `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
   and the grid lists the real items. `content://` SAF and YouTube sources report

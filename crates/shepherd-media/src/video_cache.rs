@@ -292,6 +292,10 @@ impl PlayerHandle for CachingPlayer {
         self.inner.volume()
     }
 
+    fn set_start_position(&mut self, seconds: Option<f64>) {
+        self.inner.set_start_position(seconds);
+    }
+
     fn bind_gl(
         &mut self,
         get_proc_address: &dyn Fn(&CStr) -> *const c_void,
