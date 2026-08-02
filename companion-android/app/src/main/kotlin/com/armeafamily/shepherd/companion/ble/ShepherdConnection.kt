@@ -449,6 +449,22 @@ class ShepherdConnection private constructor(
         chunkSize = runCatching {
             peripheral.maximumWriteValueLengthForType(WriteType.WithoutResponse)
         }.getOrDefault(20).coerceAtLeast(20)
+        if (!probeEncryptedLink) {
+            // Pre-bond (pairing). Don't touch the encrypted characteristics
+            // at all: there is nothing queued to drain on a link that has
+            // never carried a session, and reading them here is actively
+            // harmful. On Android an ATT read of an encrypt-authenticated
+            // characteristic *initiates bonding*, so draining here starts
+            // the OS numeric-comparison flow before the pairing screen has
+            // shown the user what to compare — and with the settle retries
+            // it can sit through the entire handshake, spending most of
+            // the caller's connect budget. Anything stale that somehow
+            // survives is cleared server-side by the `id == 1` sentinel on
+            // the claim RPC, which is the first thing pairing sends.
+            ready.value = true
+            Log.i(TAG, "connect: ready (pre-bond; skipped the encrypted drain)")
+            return
+        }
         // A successful GATT connect does NOT prove the encrypted service is
         // usable (bond intact + serving). On reconnect a throw here fails
         // the connect so the loop retries / gives up cleanly, instead of

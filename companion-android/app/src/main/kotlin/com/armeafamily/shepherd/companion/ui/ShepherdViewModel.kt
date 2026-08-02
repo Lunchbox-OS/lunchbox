@@ -568,15 +568,22 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // cancel it — otherwise backgrounding mid-pairing leaks a live BLE
         // connection and keeps doing BLE work in the background. The
         // cancellation handler below closes `conn`.
+        // Sample the bond *before* the peripheral is touched. Bonding is
+        // also triggered implicitly by any encrypt-authenticated read, so
+        // a bond seen later in this flow may be the one this flow just
+        // created — and dropping that discards the pairing the user has
+        // already confirmed on both screens. Only a bond that predates
+        // the attempt can be assumed stale.
+        val hadPriorBond = runCatching { container.bondManager.isBonded(identifier) }
+            .getOrDefault(false)
         pairingJob = viewModelScope.launch {
             val conn = ShepherdConnection.fromIdentifier(identifier, viewModelScope)
             try {
                 conn.start()
-                // Pre-bond: the encrypted chars aren't reachable until
-                // ensureBonded() below, so don't treat the drain failure as
-                // a one-sided bond.
-                // Same wall-clock cap as a session connect: an unbounded
-                // stall here parks the pairing screen on its spinner with
+                // Pre-bond: connect() skips the encrypted drain entirely
+                // here, so nothing in this step can start bonding behind
+                // the pairing screen's back. Same wall-clock cap as a
+                // session connect, so a stall can't park the spinner with
                 // no way out but backing out of the flow.
                 connectWithin(conn, probeEncryptedLink = false)
                 val info = conn.readDeviceInfo()
@@ -595,11 +602,16 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 _pairing.value = PairingPhase.Comparing(info.deviceName, identifier)
-                // ensureFreshBond, not ensureBonded: the device just told
-                // us it's Unclaimed, so any bond this phone is still
-                // holding is stale — trusting it skips straight to claim
-                // over a link that can never encrypt.
-                val bonded = container.bondManager.ensureFreshBond(identifier)
+                // Drop the bond only if this phone already had one when
+                // the flow started: the device has just reported itself
+                // Unclaimed, so a bond that old is provably stale and
+                // trusting it would skip straight to claim over a link
+                // that can never encrypt. A bond that appeared *during*
+                // the flow is this pairing's own and must be kept.
+                val bonded = container.bondManager.ensureBonded(
+                    identifier,
+                    dropStaleBond = hadPriorBond,
+                )
                 if (!bonded) {
                     fail(conn, "Pairing was cancelled or failed. Try again.")
                     return@launch

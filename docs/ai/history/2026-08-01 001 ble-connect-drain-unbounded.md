@@ -270,6 +270,68 @@ existing bond rather than dead-ending.
 `ensureBonded` stays for callers that genuinely just want "bonded, don't
 care how", with a doc note pointing at the distinction.
 
+## Follow-up: `ensureFreshBond` destroyed the bond it had just made
+
+> failing to pair entirely. It shows the numeric comparison PIN, which
+> matches what's shown on the phone, and then the device creates a BLE
+> bond but claiming never actually completes. On the phone, there is no
+> bond at all.
+
+Also self-inflicted, from the stale-bond fix above.
+
+**Bonding on Android is triggered implicitly.** Any ATT read of an
+encrypt-authenticated characteristic starts the pairing handshake — the
+app never has to call `createBond` for the numeric-comparison dialog to
+appear. The pairing flow reads those characteristics twice before it ever
+reaches `ensureBonded`: the pre-bond drain inside `connect()`, and then
+the Response/Events pollers once `ready` flips.
+
+So by the time `pair()` called `ensureFreshBond`, the bond the user had
+just confirmed on both screens already existed — and `ensureFreshBond`'s
+whole job was to tear down "any bond Android is currently holding". It
+removed the live one, leaving the device bonded and the phone not, which
+is exactly the reported asymmetry. `claim` then had no encrypted link to
+travel over and never completed.
+
+`readAfterSettle` made it deterministic rather than occasional: pre-bond
+it retries the encrypted read three times over ~15 s instead of failing
+fast, which is more than enough for the whole OS handshake to finish
+inside the drain.
+
+Two changes:
+
+- **`connect(probeEncryptedLink = false)` skips the encrypted drain
+  entirely.** Pre-bond there is nothing queued to drain — no session has
+  ever run on this link — and reading those characteristics has only
+  harmful effects: it starts bonding before the pairing screen has told
+  the user what to compare, and across two characteristics the settle
+  retries can consume more than the caller's entire connect budget
+  (2 × ~15.75 s against a 30 s cap), failing pairing on timing alone.
+  Anything stale that somehow survives is cleared server-side by the
+  `id == 1` sentinel on the claim RPC, which is the first thing pairing
+  sends.
+- **`ensureFreshBond` is gone**; `ensureBonded` takes `dropStaleBond`
+  instead, and `pair()` samples `isBonded` *before* touching the
+  peripheral and passes that. Only a bond that predates the attempt can
+  be assumed stale. The doc comment now says so explicitly, because the
+  API shape was the trap: "drop any bond you're holding" reads as safe
+  right up until you notice bonding has a second, invisible trigger.
+
+The stale-bond recovery this was added for still works: a phone holding a
+one-sided bond has it at flow start, so `hadPriorBond` is true and it
+still gets dropped.
+
+### Note on process
+
+This is the third regression in this document introduced by a change to
+code that has no automated coverage and was never run against hardware
+before shipping. All three were mechanism errors in the BLE/Android
+lifecycle — lazy encryption, implicit bonding, a queue that outruns its
+reader — none of which are visible from reading the Kotlin. The
+pattern is clear enough to state plainly: changes to `ShepherdConnection`
+and `BondManager` need an on-device pass before they land, because unit
+tests cannot reach any of the behaviour that keeps breaking.
+
 ## Tests / checks
 
 - New `outbox` unit tests: coalescing supersedes same-key messages
