@@ -111,6 +111,15 @@ With findings 3 and 4 together, a user who re-pairs twice sees a device
 switcher full of identically-named entries with no way to tell them
 apart.
 
+**Both fixed and verified on hardware.** Paired, factory-reset the
+device, re-paired: the two claims recorded different identity addresses
+(`53:18:26:63:E4:C4` then `67:8A:78:DC:2C:2C` — the RPA rotating, which
+is exactly what used to append a second record), and the app finished
+with **one** device, named `shepherd`. The pairing confirmation now reads
+"shepherd is now paired with this phone" where it used to name the phone.
+The migration was verified separately by upgrading over an install that
+already held four duplicates: they collapsed to one on first launch.
+
 ## What did not break
 
 Worth recording, because these were the suspicions going in: sustained

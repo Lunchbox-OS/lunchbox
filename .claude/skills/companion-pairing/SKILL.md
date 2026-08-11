@@ -129,6 +129,17 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   failed (0x0b)` on otherwise-valid attempts, cleared by
   `sudo systemctl restart bluetooth`. Rule that out before believing a
   pairing bug reproduces.
+- **The phone's stack can wedge too, and only a settings reset clears
+  it.** After `pm clear com.google.android.bluetooth`, the phone stopped
+  answering the device's `SMP: Security Request` — its framework reported
+  `BOND_BONDING` while nothing went on the wire, and logcat showed
+  `smp_act: smp_send_app_cback: Unexpected event:2` followed 30 s later
+  by `SMP_RSP_TIMEOUT`. A reboot, a Bluetooth toggle and a second storage
+  wipe all failed to fix it; **Settings → System → Reset options → Reset
+  Bluetooth & Wi‑Fi** fixed it immediately (it erases saved Wi‑Fi
+  networks but leaves cellular alone). Clearing the Bluetooth package's
+  storage is *not* a safe reset — prefer the settings reset if you need
+  to clear phone-side Bluetooth state at all.
 - **`default_adapter()` takes the lowest-indexed adapter**, so with two
   radios present shepherdd binds whichever sorts first regardless of
   which one you meant, and there is no config knob. Downing the other one
