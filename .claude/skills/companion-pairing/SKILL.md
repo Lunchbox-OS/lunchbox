@@ -130,10 +130,26 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   `sudo systemctl restart bluetooth`. Rule that out before believing a
   pairing bug reproduces.
 - **`default_adapter()` takes the lowest-indexed adapter**, so with two
-  radios present shepherdd binds `hci1` regardless of which one you
-  meant, and there is no config knob. Downing the other one does not
-  redirect it — BlueZ still exposes a downed adapter and registration
-  just fails.
+  radios present shepherdd binds whichever sorts first regardless of
+  which one you meant, and there is no config knob. Downing the other one
+  does not redirect it — BlueZ still exposes a downed adapter and
+  registration just fails. To actually change adapters, unbind the one
+  you don't want from `btusb` so BlueZ stops seeing it:
+  `ls -l /sys/class/bluetooth/hci*` gives the USB id, then
+  `echo -n 3-6:1.0 | sudo tee /sys/bus/usb/drivers/btusb/unbind`
+  (`…/bind` to restore — note it may come back under a *different* hci
+  index, which changes which adapter is "first").
+- **A controller can be individually broken, and it looks like a code
+  bug.** On the dev box the Qualcomm radio (`DC:56:7B:1F:7D:EA`,
+  Foxconn `0489:e10a`) reached ACL connect and then never completed
+  service discovery: `discoverServices()` fired, `onSearchComplete`
+  arrived only when the 30 s connect budget tore the link down, and every
+  pairing failed. It reproduced on an unmodified build, survived a phone
+  reboot, `hciconfig reset`, a `bluetoothd` restart and a full wipe of
+  the phone's Bluetooth storage — and vanished the moment the daemon was
+  moved to the Realtek dongle, where Numeric Comparison completed first
+  try. If discovery hangs for the whole connect budget, **swap adapters
+  before you debug the app**.
 
 ## When it fails, get the wire
 
