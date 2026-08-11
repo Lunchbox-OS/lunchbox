@@ -59,6 +59,18 @@ fix is to pin `7.0.0-27` until Ubuntu ships a corrected kernel; see
 <docs/INSTALL.md> "BLE management doesn't advertise" for the exact
 pin/hold/GRUB commands.
 
+**Still broken on `7.0.0-29-generic`** (re-confirmed 2026-08-10 while
+trying to drive an on-device pairing repro). Same signature on a Realtek
+BT 5.4 dongle and a Qualcomm 5.3 controller: every D-Bus registration
+fails, down to a bare service-UUID-only advertisement with no local name,
+while `btmgmt add-adv` on the legacy path succeeds (`ActiveInstances`
+climbs). So the known-good set is still just `-27`; `-28` and `-29` are
+both affected, and `-27` is not installed by default on a 26.04 box but
+is available in `resolute-updates` (`7.0.0-27.27`).
+
+Note the legacy instances added by `btmgmt add-adv` while testing
+outlive the tool and survive `hciconfig down/up` — they clear on reboot.
+
 Verify on any device: `sudo btmgmt add-adv -c 1` (legacy) should
 succeed while `bluetoothctl advertise peripheral` (bluetoothd's extended
 path) fails with `0x0d`. See <docs/INSTALL.md> "BLE management doesn't

@@ -321,6 +321,62 @@ The stale-bond recovery this was added for still works: a phone holding a
 one-sided bond has it at flow start, so `hadPriorBond` is true and it
 still gets dropped.
 
+## On-device validation (2026-08-10)
+
+Finally exercised against real hardware — Pixel 10a (Android 17) driven over
+adb, shepherdd headless on a Qualcomm 5.3 controller (`hci1`), kernel
+pinned to `7.0.0-27-generic` (see the advertising regression note in
+<docs/ai/history/2026-07-26 001 ble-advertisement-name-overflow.md>;
+nothing here is testable without that pin).
+
+All three fixes on the branch hold up:
+
+- **First pairing** — numeric comparison matched on both screens
+  (`816563`), bond established, `claim` (id=1) accepted, admin record
+  written. This is the flow the `ensureFreshBond` regression broke
+  outright.
+- **Bounded connect drain** — the branch's original bug. On reconnect
+  after a daemon restart: `events drained 4109 stale bytes over 11 reads
+  on (re)connect`, then RPCs 1–4 dispatched normally. Bounded, and it
+  terminates.
+- **Re-pair after factory reset** — sentinel → daemon restart → device
+  Unclaimed with its BlueZ bond removed; app detects "Bond lost —
+  re-pair needed", re-pairs, claims, reconnects in 7s.
+
+Two things worth knowing for the next person:
+
+**`dropStaleBond` never fires in the scenario it was written for.** By the
+time the user reaches Re-pair, Android has already dropped its own half of
+the bond — the phone arrives at `pair()` with `BOND_NONE`, so
+`hadPriorBond` is false. The guard is still correct and still cheap, but
+it is unexercised here; the "phone keeps a bond the device has forgotten"
+state could not be reproduced on this handset. Don't assume it's covered.
+
+**A DHKey-check failure can wedge pairing until `bluetoothd` restarts.**
+After a long run of aborted/timed-out pairing attempts, five consecutive
+attempts failed with the phone's DHKey Check rejected device-side
+(`MGMT Event: Authentication Failed` → `SMP: Pairing Failed, Reason:
+DHKey check failed (0x0b)`) even though the compared digits matched.
+`systemctl restart bluetooth` cleared it immediately. A later clean
+factory-reset cycle paired first time with no restart, so this is *not*
+the reset path — it is stale stack state, and it is worth ruling out with
+a bluetoothd restart before believing a pairing bug reproduces.
+
+Driving this headlessly has one sharp edge: the OS pairing prompt is a
+heads-up notification that auto-dismisses, and the confirmation that
+actually matters is the **numeric-comparison dialog's** "Pair" button, not
+the notification action. Confirm with the shade *collapsed* — expanded, a
+"Pair" label in the shade shadows the dialog button, the tap lands on the
+notification, and the phone sits out the full 30s SMP timeout and
+terminates the link. That failure looks exactly like a product bug and
+isn't one. (`btmon -i hci1` is what settles the question: no SMP
+`Pairing Failed`, just `Remote User Terminated Connection` 30.0s after
+`User Confirmation Request`.)
+
+Also cosmetic: the daemon logs the passkey without its leading zero
+(`passkey=90481` for a code the phone renders as `090481`), which makes a
+matching pair look like a mismatch when comparing logs to screenshots.
+
 ### Note on process
 
 This is the third regression in this document introduced by a change to
