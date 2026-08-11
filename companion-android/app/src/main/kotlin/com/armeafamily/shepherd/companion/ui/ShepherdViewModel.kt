@@ -598,7 +598,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         val hadPriorBond = runCatching { container.bondManager.isBonded(identifier) }
             .getOrDefault(false)
         pairingJob = viewModelScope.launch {
-            val conn = ShepherdConnection.fromIdentifier(identifier, viewModelScope)
+            var conn = ShepherdConnection.fromIdentifier(identifier, viewModelScope)
             try {
                 conn.start()
                 // Pre-bond: connect() skips the encrypted drain entirely
@@ -623,16 +623,30 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 _pairing.value = PairingPhase.Comparing(info.deviceName, identifier)
-                // Drop the bond only if this phone already had one when
-                // the flow started: the device has just reported itself
-                // Unclaimed, so a bond that old is provably stale and
-                // trusting it would skip straight to claim over a link
-                // that can never encrypt. A bond that appeared *during*
-                // the flow is this pairing's own and must be kept.
-                val bonded = container.bondManager.ensureBonded(
-                    identifier,
-                    dropStaleBond = hadPriorBond,
-                )
+                // Drop the bond only if this phone already had one when the
+                // flow started. The device has just reported itself
+                // Unclaimed, so a bond that old is provably stale, and
+                // trusting it would skip straight to claim over a link that
+                // can never encrypt. A bond that appeared *during* the flow
+                // is this pairing's own and must be kept — which is why the
+                // decision uses the sample taken before we touched the
+                // peripheral.
+                //
+                // Removing a bond also drops the GATT link it belongs to, so
+                // this cannot happen underneath a connection we still need:
+                // doing it inline killed the very link the bond and claim
+                // were about to run over, and pairing failed with a
+                // "cancelled or failed" that had nothing to do with the
+                // user. Retire this connection first, then build a fresh one
+                // on the other side of the removal.
+                if (hadPriorBond) {
+                    conn.close()
+                    container.bondManager.dropBond(identifier)
+                    conn = ShepherdConnection.fromIdentifier(identifier, viewModelScope)
+                    conn.start()
+                    connectWithin(conn, probeEncryptedLink = false)
+                }
+                val bonded = container.bondManager.ensureBonded(identifier)
                 if (!bonded) {
                     fail(conn, "Pairing was cancelled or failed. Try again.")
                     return@launch

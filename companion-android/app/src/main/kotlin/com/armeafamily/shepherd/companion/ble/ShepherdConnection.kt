@@ -296,9 +296,20 @@ class ShepherdConnection private constructor(
                 // indefinitely. A read that outlives this budget is dead,
                 // not slow; treat it as a failure and let the consecutive
                 // -failure rule below force the reconnect.
+                // The *first* read of a connection is allowed far longer.
+                // Pre-bond, reading an encrypt-authenticated characteristic
+                // is what starts bonding, and it does not return until the
+                // user has compared the digits — so a tight budget here
+                // cancels the handshake mid-flight, after which ensureBonded
+                // falls through to createBond(), which on a dual-mode peer
+                // negotiates BR/EDR and shows a "pair and share contacts"
+                // dialog instead of Numeric Comparison. Once any bytes have
+                // flowed the session is established and a read this slow is
+                // dead rather than busy.
+                val budget = if (totalReads > 0) POLL_READ_TIMEOUT_MS else FIRST_READ_TIMEOUT_MS
                 var failure: Throwable? = null
                 val bytes = try {
-                    withTimeoutOrNull(POLL_READ_TIMEOUT_MS) { peripheral.read(char) }
+                    withTimeoutOrNull(budget) { peripheral.read(char) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -307,7 +318,7 @@ class ShepherdConnection private constructor(
                 }
                 // null == the read threw (failure set) or outran its budget.
                 if (bytes == null) {
-                    val e = failure ?: ReadTimeoutException(POLL_READ_TIMEOUT_MS)
+                    val e = failure ?: ReadTimeoutException(budget)
                     // Disconnect, MTU change mid-read, etc. A bare `break`
                     // here used to fall straight back to the outer
                     // `ready.first { it }`, which returns *instantly* while
@@ -671,6 +682,14 @@ class ShepherdConnection private constructor(
          * dead session can masquerade as live at roughly 25 s.
          */
         private const val POLL_READ_TIMEOUT_MS: Long = 5_000
+
+        /**
+         * Budget for the first read of a connection, before any bytes
+         * have arrived. Must exceed the OS pairing window (~30 s of
+         * Numeric Comparison), because pre-bond that read *is* the
+         * bonding trigger and blocks until the user confirms.
+         */
+        private const val FIRST_READ_TIMEOUT_MS: Long = 45_000
 
         /**
          * Consecutive failed reads before the poll loop stops retrying

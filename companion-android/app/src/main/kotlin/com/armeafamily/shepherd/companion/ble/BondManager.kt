@@ -63,6 +63,31 @@ class BondManager(private val context: Context) {
         }
     }
 
+    /**
+     * Remove the bond for [identifier] and wait for it to clear.
+     *
+     * **Drops any GATT connection to that peer as a side effect**, so the
+     * caller must not be holding a link it still needs — close it first
+     * and reconnect afterwards. Doing this underneath a live pairing
+     * connection killed the link that the subsequent bond and claim ran
+     * over, surfacing as "pairing was cancelled or failed" with nothing
+     * having been cancelled.
+     *
+     * Best-effort, like [removeBond]: a platform that blocks the hidden
+     * call, or a removal that doesn't settle in time, is logged and the
+     * caller carries on with the bond in place — it might still work, and
+     * failing outright would leave no path forward.
+     */
+    @SuppressLint("MissingPermission")
+    suspend fun dropBond(identifier: String) {
+        val device = adapter.getRemoteDevice(identifier)
+        if (device.bondState == BluetoothDevice.BOND_NONE) return
+        Log.i(TAG, "Dropping the pre-existing bond for $identifier before re-pairing")
+        if (removeBond(identifier) && !awaitUnbonded(device)) {
+            Log.w(TAG, "Bond for $identifier did not clear in time; pairing with it in place")
+        }
+    }
+
     private companion object {
         const val TAG = "ShepherdBle"
 
@@ -125,31 +150,14 @@ class BondManager(private val context: Context) {
      * (`BOND_NONE`). Cancelling the coroutine unregisters the receiver
      * but does not abort an in-flight OS pairing.
      *
-     * @param dropStaleBond discard any bond Android is currently holding
-     *   before pairing. `BOND_BONDED` on this side says nothing about
-     *   whether the *peer* still has its half: after the device is
-     *   factory-reset it calls BlueZ `remove_device` while Android
-     *   happily keeps listing the peer as bonded. Such a bond comes up at
-     *   GATT level and then fails to encrypt, and the `BOND_BONDED`
-     *   short-circuit below means a fresh pairing never starts.
-     *
-     *   **The caller must be certain the current bond predates this
-     *   pairing attempt.** Bonding is also triggered implicitly — any ATT
-     *   read of an encrypt-authenticated characteristic starts it — so a
-     *   bond observed partway through a pairing flow may be the one that
-     *   flow just created, and tearing it down there loses the pairing
-     *   the user just confirmed. Sample the bond state before touching
-     *   the peripheral and pass the result here.
+     * Trusts an existing `BOND_BONDED` and returns immediately. That is
+     * only correct when the peer is known to still hold its half; when it
+     * may not — a device that was factory-reset keeps Android listing a
+     * bond it has itself forgotten — the caller must [dropBond] first.
      */
     @SuppressLint("MissingPermission")
-    suspend fun ensureBonded(identifier: String, dropStaleBond: Boolean = false): Boolean {
+    suspend fun ensureBonded(identifier: String): Boolean {
         val device = adapter.getRemoteDevice(identifier)
-        if (dropStaleBond && device.bondState != BluetoothDevice.BOND_NONE) {
-            Log.i(TAG, "Dropping the pre-existing bond for $identifier before re-pairing")
-            if (removeBond(identifier) && !awaitUnbonded(device)) {
-                Log.w(TAG, "Bond for $identifier did not clear in time; pairing with it in place")
-            }
-        }
         if (device.bondState == BluetoothDevice.BOND_BONDED) return true
 
         return suspendCancellableCoroutine { continuation ->
