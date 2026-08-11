@@ -52,7 +52,7 @@ fun SettingsScreen(
 
     var confirmReset by remember { mutableStateOf(false) }
     var confirmForgetAll by remember { mutableStateOf(false) }
-    var nickname by remember(record?.identityAddress) { mutableStateOf(record?.nickname ?: "") }
+    var nickname by remember(record?.androidIdentifier) { mutableStateOf(record?.nickname ?: "") }
 
     val version = remember {
         runCatching {
@@ -90,7 +90,7 @@ fun SettingsScreen(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         OutlinedButton(
-                            onClick = { vm.updateNickname(record.identityAddress, nickname) },
+                            onClick = { vm.updateNickname(record.androidIdentifier, nickname) },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Save nickname") }
                         Button(

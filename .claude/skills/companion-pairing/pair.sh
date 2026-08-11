@@ -75,7 +75,7 @@ cmd_tap() {
 
 cmd_run() {
   [ -r "$SWAYLOG" ] || { log "daemon log not readable at $SWAYLOG — is the headless session up?"; exit 1; }
-  local baseline; baseline=$(grep -ac "Numeric Comparison pairing requested" "$SWAYLOG" 2>/dev/null || echo 0)
+  local baseline; baseline=$(grep -ac "Numeric Comparison pairing requested" "$SWAYLOG" 2>/dev/null)
 
   log "waiting for the scan to list the device"
   local hit=""
@@ -94,7 +94,7 @@ cmd_run() {
   local devcode=""
   for _ in $(seq 1 20); do
     sleep 1
-    local count; count=$(grep -ac "Numeric Comparison pairing requested" "$SWAYLOG" 2>/dev/null || echo 0)
+    local count; count=$(grep -ac "Numeric Comparison pairing requested" "$SWAYLOG" 2>/dev/null)
     if [ "$count" -gt "$baseline" ]; then
       devcode=$(sed -r 's/\x1b\[[0-9;]*m//g' "$SWAYLOG" | grep -a "Numeric Comparison pairing requested" \
                 | tail -1 | grep -oP 'passkey=\K[0-9]+')

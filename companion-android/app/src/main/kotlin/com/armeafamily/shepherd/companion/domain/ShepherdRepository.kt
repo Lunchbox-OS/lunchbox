@@ -12,7 +12,7 @@ import kotlinx.coroutines.sync.withLock
  *
  * Switching the active device only changes which BLE peer the app talks
  * to; there is no shared state across devices. Mutations persist through
- * [AdminRecordStore] and publish to [records] / [activeAddress].
+ * [AdminRecordStore] and publish to [records] / [activeId].
  */
 class ShepherdRepository(private val store: AdminRecordStore) {
 
@@ -21,46 +21,63 @@ class ShepherdRepository(private val store: AdminRecordStore) {
     private val _records = MutableStateFlow<List<ShepherdRecord>>(emptyList())
     val records: StateFlow<List<ShepherdRecord>> = _records.asStateFlow()
 
-    private val _activeAddress = MutableStateFlow<String?>(null)
-    val activeAddress: StateFlow<String?> = _activeAddress.asStateFlow()
+    private val _activeId = MutableStateFlow<String?>(null)
+
+    /**
+     * The [ShepherdRecord.androidIdentifier] of the selected device.
+     *
+     * Devices are keyed by that — the peer's BLE MAC — and *not* by
+     * `identityAddress`. The latter is whatever address the daemon
+     * recorded at claim time, which mid-pairing is the phone's
+     * resolvable private address: it differs on every re-pair, so keying
+     * on it made [upsert] append a second record for a device already in
+     * the list. Re-pairing one device three times left three entries, all
+     * for the same box, each with a token only one of them could use.
+     */
+    val activeId: StateFlow<String?> = _activeId.asStateFlow()
 
     val active: ShepherdRecord?
-        get() = _records.value.firstOrNull { it.identityAddress == _activeAddress.value }
+        get() = _records.value.firstOrNull { it.androidIdentifier == _activeId.value }
 
     suspend fun load() = mutex.withLock {
+        // Collapse any duplicates an older build already persisted,
+        // keeping the newest record per device (the last one written has
+        // the token that matches the live bond).
         val loaded = store.load()
-        _records.value = loaded
-        if (_activeAddress.value == null || loaded.none { it.identityAddress == _activeAddress.value }) {
-            _activeAddress.value = loaded.firstOrNull()?.identityAddress
+        val deduped = loaded.associateBy { it.androidIdentifier }.values.toList()
+        if (deduped.size != loaded.size) store.save(deduped)
+        _records.value = deduped
+        if (_activeId.value == null || deduped.none { it.androidIdentifier == _activeId.value }) {
+            _activeId.value = deduped.firstOrNull()?.androidIdentifier
         }
     }
 
-    fun setActive(identityAddress: String) {
-        _activeAddress.value = identityAddress
+    fun setActive(androidIdentifier: String) {
+        _activeId.value = androidIdentifier
     }
 
     /** Insert or replace the record for a device, then select it. */
     suspend fun upsert(record: ShepherdRecord) = mutex.withLock {
-        val next = _records.value.filter { it.identityAddress != record.identityAddress } + record
+        val next = _records.value.filter { it.androidIdentifier != record.androidIdentifier } + record
         _records.value = next
-        _activeAddress.value = record.identityAddress
+        _activeId.value = record.androidIdentifier
         store.save(next)
     }
 
-    suspend fun updateNickname(identityAddress: String, nickname: String?) = mutex.withLock {
+    suspend fun updateNickname(androidIdentifier: String, nickname: String?) = mutex.withLock {
         val next = _records.value.map {
-            if (it.identityAddress == identityAddress) it.copy(nickname = nickname) else it
+            if (it.androidIdentifier == androidIdentifier) it.copy(nickname = nickname) else it
         }
         _records.value = next
         store.save(next)
     }
 
     /** Forget one device locally. Does not call `factory_reset` on it. */
-    suspend fun remove(identityAddress: String) = mutex.withLock {
-        val next = _records.value.filter { it.identityAddress != identityAddress }
+    suspend fun remove(androidIdentifier: String) = mutex.withLock {
+        val next = _records.value.filter { it.androidIdentifier != androidIdentifier }
         _records.value = next
-        if (_activeAddress.value == identityAddress) {
-            _activeAddress.value = next.firstOrNull()?.identityAddress
+        if (_activeId.value == androidIdentifier) {
+            _activeId.value = next.firstOrNull()?.androidIdentifier
         }
         store.save(next)
     }
@@ -68,7 +85,7 @@ class ShepherdRepository(private val store: AdminRecordStore) {
     /** Forget every device locally (the "I lost my devices" recovery). */
     suspend fun clearAll() = mutex.withLock {
         _records.value = emptyList()
-        _activeAddress.value = null
+        _activeId.value = null
         store.save(emptyList())
     }
 }

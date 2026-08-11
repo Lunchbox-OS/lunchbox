@@ -149,9 +149,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(link = LinkStatus.Idle) }
     }
 
-    fun selectDevice(identityAddress: String) {
-        if (identityAddress == repository.activeAddress.value && connection != null) return
-        repository.setActive(identityAddress)
+    fun selectDevice(androidIdentifier: String) {
+        if (androidIdentifier == repository.activeId.value && connection != null) return
+        repository.setActive(androidIdentifier)
         val record = repository.active ?: return
         if (bound) connectTo(record)
     }
@@ -176,7 +176,14 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun runConnectionLoop(record: ShepherdRecord, conn: ShepherdConnection) {
-        val backoffs = longArrayOf(1_000, 2_000, 5_000)
+        // Long enough to ride out a daemon restart (~38s of retries).
+        // The old 1+2+5s ladder gave up in 8s — less than a session
+        // restart takes — so a routine shepherdd restart exhausted the
+        // retries while the device was still coming back up, and the
+        // reachability probe below then read "advertising but unusable"
+        // and offered to re-pair. Suggesting a trip to the TV for what
+        // is a self-healing event is worse than waiting.
+        val backoffs = longArrayOf(1_000, 2_000, 5_000, 10_000, 20_000)
         var failures = 0
         while (viewModelScope.isActive) {
             _state.update {
@@ -187,11 +194,25 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 failures = 0
                 _state.update { it.copy(link = LinkStatus.Connected) }
                 refreshAll()
-                // Suspend here until the link drops, then loop to reconnect.
-                conn.state.first { it is State.Disconnected }
+                // Suspend until the session ends, then loop to reconnect.
+                // Not `state.first { it is Disconnected }`: a daemon
+                // restart leaves the ACL link up and only removes the
+                // GATT service, so that never fires and the loop parks
+                // here forever behind a screen of stale data. See
+                // ShepherdConnection.awaitSessionEnd.
+                conn.awaitSessionEnd()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
+                // Force the link down before retrying. When the peer's GATT
+                // server restarts, the ACL link survives it and Android goes
+                // on serving the service list it discovered before — which no
+                // longer contains ours. `peripheral.connect()` on an already
+                // -connected peripheral is a no-op, so it never re-discovers
+                // and every retry fails "Service … not found" in perpetuity,
+                // even long after the daemon is back. Only a real disconnect
+                // makes the next attempt rediscover.
+                runCatching { conn.disconnect() }
                 // Any connect/drain failure lands here — out of range, the
                 // box powered off, shepherd not running (bond fine but the
                 // GATT service is absent), a genuinely one-sided bond, or a
@@ -520,16 +541,16 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
             // a fresh pairing instead of short-circuiting on a stale bond.
             container.bondManager.removeBond(record.androidIdentifier)
             teardown()
-            repository.remove(record.identityAddress)
+            repository.remove(record.androidIdentifier)
             _message.value = "Device unpaired."
             onDone()
         }
     }
 
-    fun forgetDevice(identityAddress: String) {
+    fun forgetDevice(androidIdentifier: String) {
         viewModelScope.launch {
-            if (identityAddress == _state.value.record?.identityAddress) teardown()
-            repository.remove(identityAddress)
+            if (androidIdentifier == _state.value.record?.androidIdentifier) teardown()
+            repository.remove(androidIdentifier)
         }
     }
 
@@ -542,8 +563,8 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun updateNickname(identityAddress: String, nickname: String?) {
-        viewModelScope.launch { repository.updateNickname(identityAddress, nickname?.trim()?.ifBlank { null }) }
+    fun updateNickname(androidIdentifier: String, nickname: String?) {
+        viewModelScope.launch { repository.updateNickname(androidIdentifier, nickname?.trim()?.ifBlank { null }) }
     }
 
     // --- pairing -------------------------------------------------------
@@ -619,7 +640,10 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
                 _pairing.value = PairingPhase.Claiming(info.deviceName)
                 val admin: AdminRecord = ManagementClient(conn).claim(phoneName)
-                val record = admin.toShepherdRecord(androidIdentifier = identifier)
+                val record = admin.toShepherdRecord(
+                    androidIdentifier = identifier,
+                    deviceName = info.deviceName,
+                )
                 repository.upsert(record)
 
                 // Adopt this connection as the active session.
@@ -693,8 +717,20 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
-/** Build a persisted record from the claim result. */
-private fun AdminRecord.toShepherdRecord(androidIdentifier: String) = ShepherdRecord(
+/**
+ * Build a persisted record from the claim result.
+ *
+ * [deviceName] comes from `DeviceInfo` — the shepherd device's own name —
+ * and deliberately *not* from [AdminRecord.deviceName], which is the
+ * admin phone's name (`claim(phoneName)` sets it, correctly, to identify
+ * who claimed the device). Using the claim record's value labelled every
+ * device in the picker with the phone's name, so a user with two boxes
+ * saw two identical entries.
+ */
+private fun AdminRecord.toShepherdRecord(
+    androidIdentifier: String,
+    deviceName: String,
+) = ShepherdRecord(
     identityAddress = identityAddress,
     addressType = addressType,
     deviceName = deviceName,

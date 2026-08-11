@@ -26,6 +26,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.SessionInfo
+import com.armeafamily.shepherd.companion.ui.LinkStatus
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 import com.armeafamily.shepherd.companion.ui.components.LinkBanner
 import com.armeafamily.shepherd.companion.ui.components.ReasonLines
@@ -51,7 +53,7 @@ fun HomeScreen(
 ) {
     val state by vm.state.collectAsState()
     val records by vm.repository.records.collectAsState()
-    val activeAddress by vm.repository.activeAddress.collectAsState()
+    val activeId by vm.repository.activeId.collectAsState()
 
     Scaffold(
         topBar = {
@@ -86,8 +88,8 @@ fun HomeScreen(
                 ) {
                     records.forEach { record ->
                         FilterChip(
-                            selected = record.identityAddress == activeAddress,
-                            onClick = { vm.selectDevice(record.identityAddress) },
+                            selected = record.androidIdentifier == activeId,
+                            onClick = { vm.selectDevice(record.androidIdentifier) },
                             label = { Text(record.displayName) },
                         )
                     }
@@ -103,50 +105,64 @@ fun HomeScreen(
                 onRepair = { vm.dropBondAndRepair(); onAddDevice() },
             )
 
-            val session = state.currentSession
-            if (session != null) {
-                CurrentSessionCard(session, onClick = { onOpenEntry(session.entryId) })
-            }
+            // Everything below is the last snapshot the device sent. While
+            // the link is down that is history, not status, and this screen
+            // exists to answer "what is happening right now" — so fade it
+            // rather than letting a minutes-old "Blocked / Outside allowed
+            // hours" render identically to a live one. The banner above
+            // says why; this makes the staleness visible at a glance even
+            // once the banner has been scrolled past.
+            val stale = state.snapshot != null && state.link != LinkStatus.Connected &&
+                state.link != LinkStatus.Idle
+            Column(
+                modifier = if (stale) Modifier.alpha(0.45f) else Modifier,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val session = state.currentSession
+                if (session != null) {
+                    CurrentSessionCard(session, onClick = { onOpenEntry(session.entryId) })
+                }
 
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Categories first: their limits are shared, so a member can
-                // become unavailable because a sibling was played (issue #5).
-                if (state.groups.isNotEmpty()) {
-                    item {
-                        Text(
-                            "Categories",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(top = 8.dp),
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Categories first: their limits are shared, so a member can
+                    // become unavailable because a sibling was played (issue #5).
+                    if (state.groups.isNotEmpty()) {
+                        item {
+                            Text(
+                                "Categories",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                        }
+                        items(state.groups, key = { "group:" + it.groupId }) { group ->
+                            GroupRow(group = group, onClick = { onOpenGroup(group.groupId) })
+                        }
+                        item {
+                            Text(
+                                "Activities",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                        }
+                    }
+                    items(state.entries, key = { it.entryId }) { entry ->
+                        EntryRow(
+                            entry = entry,
+                            session = session,
+                            groupLabel = state.groupOf(entry)?.label,
+                            onClick = { onOpenEntry(entry.entryId) },
                         )
                     }
-                    items(state.groups, key = { "group:" + it.groupId }) { group ->
-                        GroupRow(group = group, onClick = { onOpenGroup(group.groupId) })
-                    }
-                    item {
-                        Text(
-                            "Activities",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
-                    }
-                }
-                items(state.entries, key = { it.entryId }) { entry ->
-                    EntryRow(
-                        entry = entry,
-                        session = session,
-                        groupLabel = state.groupOf(entry)?.label,
-                        onClick = { onOpenEntry(entry.entryId) },
-                    )
-                }
-                if (state.entries.isEmpty()) {
-                    item {
-                        Text(
-                            "No activities yet.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(16.dp),
-                        )
+                    if (state.entries.isEmpty()) {
+                        item {
+                            Text(
+                                "No activities yet.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                        }
                     }
                 }
             }

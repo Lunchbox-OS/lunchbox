@@ -23,7 +23,9 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -110,6 +112,18 @@ class DrainStalledException(label: String, bytes: Int, reads: Int) : Exception(
 class ConnectTimeoutException(budgetMs: Long) :
     Exception("connect did not complete within ${budgetMs}ms")
 
+/**
+ * A poll read that never came back.
+ *
+ * Distinct from a read that *failed*: `BluetoothGatt.readCharacteristic`
+ * returning false (the characteristic is gone after the peer's GATT
+ * server restarted) delivers no callback at all, so kable's `read()`
+ * suspends forever rather than throwing. Nothing above notices, because
+ * a coroutine parked mid-read raises no error and changes no state.
+ */
+class ReadTimeoutException(budgetMs: Long) :
+    Exception("characteristic read did not complete within ${budgetMs}ms")
+
 class ShepherdConnection private constructor(
     private val peripheral: Peripheral,
     private val scope: CoroutineScope,
@@ -153,6 +167,31 @@ class ShepherdConnection private constructor(
     val events: SharedFlow<Event> = _events
 
     val state: StateFlow<State> get() = peripheral.state
+
+    /**
+     * Suspend until this session stops being usable, however that happens.
+     *
+     * A full [State.Disconnected] is *not* the only way a session ends,
+     * and on the failure that matters most it never arrives. When the
+     * daemon restarts, BlueZ keeps the ACL link up and only the GATT
+     * application goes away: the peripheral stays `Connected`, service
+     * re-discovery finds the characteristics gone ("failed to find
+     * characteristic"), and the state mirror above clears [ready] on the
+     * transient blip. Nothing sets `ready` true again except [connect],
+     * so the pollers park, no read is ever attempted, and a caller
+     * waiting on `Disconnected` waits forever — the app sits on stale
+     * data indefinitely with no error and no retry.
+     *
+     * A cleared `ready` under a live link therefore *is* the end of the
+     * session: it means the pollers have stopped and only a fresh
+     * `connect()` can restart them.
+     */
+    suspend fun awaitSessionEnd() {
+        merge(
+            peripheral.state.filter { it is State.Disconnected },
+            ready.filter { !it },
+        ).first()
+    }
 
     /** The peripheral's platform identifier (MAC address on Android). */
     val identifier: String get() = peripheral.identifier.toString()
@@ -245,11 +284,30 @@ class ShepherdConnection private constructor(
             var emptyReads = 0
             var consecutiveFailures = 0
             while (currentCoroutineContext().isActive && ready.value) {
+                // Bound the read. `peripheral.read` can never return: when
+                // the daemon restarts, BlueZ keeps the ACL link up and only
+                // unregisters the GATT application, so Android re-discovers,
+                // finds the characteristic gone, and `readCharacteristic()`
+                // returns false — no callback is ever delivered and kable
+                // awaits it forever. The poller then blocks mid-read with
+                // `ready` still true, so nothing throws, nothing logs,
+                // no state changes, and the session loop's wait for the
+                // link to end never fires. The app sits on stale data
+                // indefinitely. A read that outlives this budget is dead,
+                // not slow; treat it as a failure and let the consecutive
+                // -failure rule below force the reconnect.
+                var failure: Throwable? = null
                 val bytes = try {
-                    peripheral.read(char)
+                    withTimeoutOrNull(POLL_READ_TIMEOUT_MS) { peripheral.read(char) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
+                    failure = e
+                    null
+                }
+                // null == the read threw (failure set) or outran its budget.
+                if (bytes == null) {
+                    val e = failure ?: ReadTimeoutException(POLL_READ_TIMEOUT_MS)
                     // Disconnect, MTU change mid-read, etc. A bare `break`
                     // here used to fall straight back to the outer
                     // `ready.first { it }`, which returns *instantly* while
@@ -601,6 +659,18 @@ class ShepherdConnection private constructor(
          * the screen and nothing is happening server-side.
          */
         private const val MAX_POLL_DELAY_MS: Int = 300
+
+        /**
+         * Budget for a single poll read. A healthy read is a few tens of
+         * ms, so this is generous by two orders of magnitude — it exists
+         * to catch reads that will *never* complete (see
+         * [ReadTimeoutException]), not slow ones, and is deliberately far
+         * above any plausible congested-radio latency so a busy link is
+         * never mistaken for a dead one. With
+         * [MAX_CONSECUTIVE_READ_FAILURES] this bounds how long a silently
+         * dead session can masquerade as live at roughly 25 s.
+         */
+        private const val POLL_READ_TIMEOUT_MS: Long = 5_000
 
         /**
          * Consecutive failed reads before the poll loop stops retrying
