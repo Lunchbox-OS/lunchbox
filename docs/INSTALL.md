@@ -185,6 +185,69 @@ adb install shepherd-companion_0.3.0.apk
 Both APKs are signed with the same key across releases, so an `adb install` over
 an existing install upgrades it in place.
 
+## Pairing your phone with a device
+
+Pairing is how a phone becomes the device's admin. The first phone to pair
+claims the device (trust-on-first-use); after that the device refuses to pair
+with anyone else until it is factory-reset, so there is no race to win and
+nothing to configure.
+
+You need the device's TV on and visible — pairing shows a six-digit code there
+that you compare against your phone. Bluetooth must be on, and the device must
+have `[service.ble_management] enabled = true` (the default).
+
+1. Open **Shepherd Companion** and tap **Pair a device**.
+2. Give the phone a name you will recognise later — it is what the device
+   records as its admin, and what you will see if you ever need to check who
+   claimed it.
+3. Pick your device from the list. Devices advertise as `shepherd` unless
+   `device_name` says otherwise. If several are in range, set a distinct
+   `device_name` per device so you can tell them apart.
+4. **Compare the six-digit code.** The TV shows one, the phone shows one, and
+   they must be identical. If they match, confirm on the phone — Android asks
+   twice: a "Pairing request" notification, then a dialog with the digits and a
+   **Pair** button. It is the dialog that completes pairing.
+5. If the codes do **not** match, cancel. A mismatch means the phone is talking
+   to something other than the device in front of you, which is exactly what
+   the comparison exists to catch.
+
+Confirm within about half a minute — Bluetooth abandons the attempt after that
+and you will have to start again.
+
+The phone then claims the device and shows its activities. That phone is now
+the admin, over Bluetooth and (once configured) over the network with the same
+identity.
+
+### Re-pairing
+
+If the app says **Bond lost — re-pair needed**, the device no longer recognises
+the phone — normally because it was factory-reset or its Bluetooth pairing was
+removed. Tap **Re-pair** and repeat the steps above.
+
+To hand a device to a different phone, or to recover when no phone can
+administer it, factory-reset the management state on the device itself:
+
+```sh
+sudo touch /var/lib/shepherdd/.factory-reset-ble
+sudo reboot
+```
+
+The reset is applied at startup, and `shepherdd` runs as part of the kiosk
+session rather than as a system service — so a reboot (or signing out of the
+kiosk session and back in) is what applies it. The file is consumed in the
+process, so this happens once rather than on every boot.
+
+That clears the admin record and the Bluetooth bond and returns the device to
+unclaimed, so the next phone to pair claims it. The old phone's stored
+credentials stop working; remove the stale pairing on that phone from Android's
+Bluetooth settings.
+
+Adjust the path if you set `admin_record_path`/`reset_sentinel_path` — the
+sentinel lives in the configured `data_dir`.
+
+If the device never appears in the pairing list at all, it is not advertising —
+see "BLE management doesn't advertise" under Troubleshooting below.
+
 ## Basic setup
 
 The following builds and installs a fully functional local kiosk from source.
