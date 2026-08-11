@@ -392,6 +392,8 @@ pub struct BleManagementConfig {
     pub device_name: String,
     pub admin_record_path: PathBuf,
     pub reset_sentinel_path: PathBuf,
+    /// Controller address or `hciN` name; `None` means "first listed".
+    pub adapter: Option<String>,
 }
 
 impl BleManagementConfig {
@@ -409,6 +411,11 @@ impl BleManagementConfig {
                 .reset_sentinel_path
                 .clone()
                 .unwrap_or_else(|| data_dir.join(".factory-reset-ble")),
+            adapter: raw
+                .adapter
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         }
     }
 }

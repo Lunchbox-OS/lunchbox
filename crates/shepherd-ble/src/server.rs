@@ -117,6 +117,87 @@ const MAX_ADV_NAME_BYTES: usize = 31 - 3 - 18 - 2; // = 8
 /// reserved out of [`MAX_ADV_NAME_BYTES`] when truncating.
 const ADV_NAME_ELLIPSIS: &str = "…";
 
+/// Pick the controller to serve on.
+///
+/// `selector` is either a controller address (`"DC:56:7B:1F:7D:EA"`) or
+/// an interface name (`"hci1"`); `None` keeps the historical behaviour of
+/// taking whichever adapter BlueZ lists first.
+///
+/// Prefer the address. `hciN` is an enumeration index, not an identity:
+/// it tracks probe order, so unplugging a dongle, rebinding the driver,
+/// or a boot that walks USB differently renumbers the adapters, and a
+/// config pinned to `hci1` silently follows the number onto whichever
+/// radio now holds it. BlueZ's `Alias` is no better — it defaults to the
+/// hostname plus an order-derived suffix (`shepherd-26.04 #1`) and is
+/// user-mutable — and `Modalias` on this hardware reports the same
+/// generic `usb:v1D6Bp0246d0555` for every controller, so it can neither
+/// identify nor distinguish them. The address is burned into the
+/// controller and is the only stable discriminator BlueZ offers.
+///
+/// A selector that matches nothing is a hard error listing what *is*
+/// present, because the alternative — quietly falling back to the first
+/// adapter — is how you end up debugging the application while the
+/// daemon serves a radio you never meant to use.
+async fn resolve_adapter(
+    session: &bluer::Session,
+    selector: Option<&str>,
+) -> anyhow::Result<bluer::Adapter> {
+    let Some(selector) = selector else {
+        return session.default_adapter().await.map_err(|e| {
+            anyhow::anyhow!(
+                "No default Bluetooth adapter ({e}); check `bluetoothctl show` and that an HCI controller is attached"
+            )
+        });
+    };
+
+    let names = session.adapter_names().await.map_err(|e| {
+        anyhow::anyhow!("Could not list Bluetooth adapters ({e}); is bluetoothd running?")
+    })?;
+
+    // Interface name: exact match, no I/O needed.
+    if names.iter().any(|n| n == selector) {
+        return session
+            .adapter(selector)
+            .map_err(|e| anyhow::anyhow!("Adapter '{selector}' could not be opened ({e})"));
+    }
+
+    // Otherwise treat it as an address. Compare parsed, so formatting
+    // and case in the config don't matter.
+    let wanted: Option<bluer::Address> = selector.parse().ok();
+    let mut available = Vec::new();
+    for name in &names {
+        let Ok(adapter) = session.adapter(name) else {
+            continue;
+        };
+        let address = adapter.address().await.ok();
+        if let (Some(wanted), Some(address)) = (wanted, address)
+            && wanted == address
+        {
+            return Ok(adapter);
+        }
+        available.push(format!(
+            "{name} ({})",
+            address.map(|a| a.to_string()).unwrap_or_else(|| "?".into()),
+        ));
+    }
+
+    let hint = if wanted.is_none() {
+        "\n  (not a controller address or `hciN` name — expected e.g. \"DC:56:7B:1F:7D:EA\")"
+    } else {
+        ""
+    };
+    anyhow::bail!(
+        "Configured Bluetooth adapter '{selector}' is not present.{hint}\n  Available: {}\n  \
+         Set [service.ble_management] adapter to one of the addresses above — \
+         prefer the address over the hciN name, which changes with probe order.",
+        if available.is_empty() {
+            "(none)".to_string()
+        } else {
+            available.join(", ")
+        },
+    )
+}
+
 /// Trim `name` so it fits the advertising PDU beside the service UUID:
 /// at most [`MAX_ADV_NAME_BYTES`] bytes, split on a UTF-8 code-point
 /// boundary, with a trailing ellipsis when anything was dropped. Returns
@@ -147,6 +228,10 @@ pub struct BleServerConfig {
     /// Sentinel file that, when present at startup, wipes the admin
     /// record and the BlueZ bond and returns to the unclaimed state.
     pub reset_sentinel_path: PathBuf,
+    /// Which controller to serve on: an address (`"DC:56:7B:1F:7D:EA"`)
+    /// or an interface name (`"hci1"`). `None` takes whichever BlueZ
+    /// lists first. See [`resolve_adapter`].
+    pub adapter: Option<String>,
 }
 
 impl BleServerConfig {
@@ -255,11 +340,21 @@ impl BleServer {
                 "BlueZ D-Bus session unavailable ({e}); is bluetoothd running and reachable on the system bus?"
             )
         })?;
-        let adapter = session.default_adapter().await.map_err(|e| {
-            anyhow::anyhow!(
-                "No default Bluetooth adapter ({e}); check `bluetoothctl show` and that an HCI controller is attached"
-            )
-        })?;
+        let adapter = resolve_adapter(&session, self.config.adapter.as_deref()).await?;
+        // Resolve to an owned String first: holding the `.await`'s
+        // temporaries inside the macro's `Arguments` makes the future
+        // non-Send, and this runs inside a spawned task.
+        let adapter_address = adapter
+            .address()
+            .await
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        info!(
+            adapter = %adapter.name(),
+            address = %adapter_address,
+            selector = self.config.adapter.as_deref().unwrap_or("<first listed>"),
+            "Selected Bluetooth controller",
+        );
         adapter.set_powered(true).await.map_err(|e| {
             anyhow::anyhow!(
                 "Failed to power on Bluetooth adapter '{}' ({e}); this usually means the daemon user lacks the `bluetooth` group (BlueZ polkit requires it for Adapter1.Set*)",
@@ -1508,6 +1603,20 @@ mod tests {
         assert!(responses[0].error.is_none());
     }
 
+    /// Addresses are compared parsed, so the config may write them in
+    /// any case or the operator may paste them from `bluetoothctl`.
+    #[test]
+    fn adapter_addresses_compare_case_insensitively() {
+        let lower: bluer::Address = "dc:56:7b:1f:7d:ea".parse().unwrap();
+        let upper: bluer::Address = "DC:56:7B:1F:7D:EA".parse().unwrap();
+        assert_eq!(lower, upper);
+        // …and a name is not mistaken for an address.
+        assert!("hci1".parse::<bluer::Address>().is_err());
+        // A bare index is not a valid selector either — it must be the
+        // interface name or the address, so "1" can't silently mean hci1.
+        assert!("1".parse::<bluer::Address>().is_err());
+    }
+
     /// The factory-reset *sentinel* path captures the previously-bonded
     /// admin so `run` can remove the BlueZ bond, and clears the record.
     #[test]
@@ -1557,6 +1666,7 @@ mod tests {
             firmware_version: "test".into(),
             admin_record_path: admin_path.clone(),
             reset_sentinel_path: sentinel_path,
+            adapter: None,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);

@@ -656,6 +656,19 @@ pub struct RawBleManagementConfig {
     /// (and the file is removed). Defaults to
     /// `<data_dir>/.factory-reset-ble`.
     pub reset_sentinel_path: Option<PathBuf>,
+
+    /// Which Bluetooth controller to serve on, when the host has more
+    /// than one.
+    ///
+    /// Accepts a controller address (`"DC:56:7B:1F:7D:EA"`, preferred)
+    /// or an interface name (`"hci1"`). Defaults to whichever adapter
+    /// BlueZ lists first, which is **not** stable: the index tracks
+    /// probe order, so re-plugging a dongle, a rebind, or a boot that
+    /// enumerates USB differently can silently move the daemon onto the
+    /// other radio. The address is burned into the controller and is the
+    /// only identifier BlueZ exposes that both distinguishes adapters
+    /// and survives that.
+    pub adapter: Option<String>,
 }
 
 /// Volume control configuration

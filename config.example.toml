@@ -132,6 +132,21 @@ enabled = true
 # device_name = "shepherd"              # Advertised local name. Pick something
                                         # the companion app can disambiguate
                                         # when multiple devices are in range.
+# adapter = "DC:56:7B:1F:7D:EA"         # Which controller to serve on, when the
+                                        # host has more than one. Default: the
+                                        # first one BlueZ lists.
+                                        #
+                                        # Use the controller *address*, not the
+                                        # hciN name: the index tracks USB probe
+                                        # order, so re-plugging a dongle or a
+                                        # differently-enumerated boot renumbers
+                                        # the adapters and a config pinned to
+                                        # "hci1" quietly follows the number onto
+                                        # the other radio. `bluetoothctl list`
+                                        # prints the addresses. An adapter that
+                                        # isn't present is a startup error
+                                        # listing the ones that are, rather than
+                                        # a silent fallback.
 # admin_record_path = "/var/lib/shepherdd/admin.toml"
                                         # Where the admin record is persisted.
                                         # Default: <data_dir>/admin.toml.
