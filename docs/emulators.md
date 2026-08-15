@@ -244,6 +244,59 @@ those still live under `~/.config/retroarch/`. Nothing there affects a
 supervised session; it is worth knowing if you expected the activity to leave
 no trace at all.
 
+### Settings you make outside shepherd carry in
+
+Configure RetroArch however you like from a normal desktop session — bind your
+controllers, pick a video driver, set per-core options — and shepherd picks it
+all up. Every launch loads your `~/.config/retroarch/retroarch.cfg` first and
+appends its fragment on top:
+
+```
+[INFO] [Config] Loading config: "~/.config/retroarch/retroarch.cfg".
+[INFO] [Config] Appending config: "…/append.cfg".
+```
+
+Only the settings in the table above are shepherd's; everything else is yours.
+Controller autoconfig profiles (`autoconfig/`), input remaps (`remaps/`) and
+per-core options (`retroarch-core-options.cfg`, the `.opt` files) are separate
+files shepherd never touches. Traffic is one-way — `config_save_on_exit =
+"false"` means a supervised session cannot write back into your config, so
+shepherd's per-activity choices never become your global ones.
+
+### …and per-core overrides beat shepherd
+
+One sharp edge. RetroArch applies **overrides** —
+`~/.config/retroarch/config/<Core>/<Core>.cfg`, and the per-content-directory
+and per-game files beside it — *after* `--appendconfig`, so an override that
+names one of shepherd's settings wins.
+
+Mostly that is what you want: overrides are how per-core video and input tuning
+carries into a session. But for the nine settings shepherd relies on it is a
+footgun, and two of them fail quietly:
+
+- `kiosk_mode_enable = "false"` unlocks RetroArch's menu inside a supervised
+  session — the child can reach the file browser again.
+- `savestate_auto_save` / `savestate_auto_load` break resume with no error at
+  all. The activity runs fine; the child just loses their place.
+
+The rest are `config_save_on_exit`, `savefile_directory`,
+`savestate_directory`, `autosave_interval`, `pause_nonactive` and
+`video_fullscreen`.
+
+shepherd checks for this at every launch and warns, naming the file and the
+keys:
+
+```
+WARN shepherd_host_linux::retroarch: RetroArch override sets settings shepherd
+relies on; RetroArch applies overrides after --appendconfig, so these win …
+override_file=~/.config/retroarch/config/mGBA/mGBA.cfg
+settings=savestate_auto_save, kiosk_mode_enable
+```
+
+It is a warning, not an error: your overrides are yours, and shepherd will not
+silently discard them. Remove those keys from the override file to hand the
+settings back.
+
 ### The network command interface is not enabled
 
 RetroArch can expose a UDP control port (`network_cmd_enable`), and shepherd

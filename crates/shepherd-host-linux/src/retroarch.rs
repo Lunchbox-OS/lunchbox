@@ -449,6 +449,153 @@ pub fn build_argv(spec: &Spec<'_>, config: &Path, core: &str, content: &str) -> 
     argv
 }
 
+/// The settings the generated fragment relies on to make an activity
+/// supervisable.
+///
+/// RetroArch applies per-core and per-game *overrides* after `--appendconfig`,
+/// so an override that names any of these silently wins over shepherd. Two are
+/// worse than the rest: `kiosk_mode_enable` unlocks RetroArch's menu inside a
+/// supervised session, and the `savestate_auto_*` pair break resume with no
+/// error at all — just a child who lost their place.
+const GUARDED_SETTINGS: [&str; 9] = [
+    "config_save_on_exit",
+    "savefile_directory",
+    "savestate_directory",
+    "savestate_auto_save",
+    "savestate_auto_load",
+    "autosave_interval",
+    "pause_nonactive",
+    "video_fullscreen",
+    "kiosk_mode_enable",
+];
+
+/// Overrides RetroArch's config directory (`~/.config/retroarch`). For installs
+/// that keep it elsewhere, and for tests.
+pub const RETROARCH_CONFIG_DIR_ENV: &str = "SHEPHERD_RETROARCH_CONFIG_DIR";
+
+/// RetroArch's own config directory — where `retroarch.cfg`, `config/`
+/// (overrides) and `info/` live.
+fn retroarch_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(RETROARCH_CONFIG_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("retroarch"));
+    }
+    dirs::home_dir().map(|h| h.join(".config/retroarch"))
+}
+
+/// Read `key = "value"` pairs out of a RetroArch config file. Values may or may
+/// not be quoted; comments start with `#`.
+fn parse_cfg(path: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            let value = value.trim().trim_matches('"');
+            Some((key.trim().to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// RetroArch's display name for a core (`mGBA` for `mgba_libretro.so`), read
+/// from the `.info` file `libretro-core-info` ships. Override directories are
+/// named after it, not after the shared object.
+fn core_display_name(core_path: &Path) -> Option<String> {
+    let stem = core_path.file_name()?.to_str()?.strip_suffix(".so")?;
+    let config_dir = retroarch_config_dir();
+    let candidates = [
+        PathBuf::from("/usr/share/libretro/info"),
+        PathBuf::from("/usr/local/share/libretro/info"),
+    ]
+    .into_iter()
+    .chain(config_dir.map(|d| d.join("info")));
+
+    for dir in candidates {
+        let info = dir.join(format!("{stem}.info"));
+        if let Some((_, name)) = parse_cfg(&info).into_iter().find(|(k, _)| k == "corename") {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Per-core, per-content-directory and per-game override files RetroArch would
+/// apply to this launch, in the order it applies them.
+fn override_files(core_path: &Path, content: &Path) -> Vec<PathBuf> {
+    let Some(config_dir) = retroarch_config_dir() else {
+        return Vec::new();
+    };
+    // `rgui_config_directory` moves the override tree; default is `config/`
+    // beside retroarch.cfg.
+    let overrides_root = parse_cfg(&config_dir.join("retroarch.cfg"))
+        .into_iter()
+        .find(|(k, _)| k == "rgui_config_directory")
+        .map(|(_, v)| {
+            PathBuf::from(v.replacen(
+                '~',
+                &dirs::home_dir().unwrap_or_default().to_string_lossy(),
+                1,
+            ))
+        })
+        .unwrap_or_else(|| config_dir.join("config"));
+
+    let Some(core_name) = core_display_name(core_path) else {
+        return Vec::new();
+    };
+    let dir = overrides_root.join(&core_name);
+
+    let mut files = vec![dir.join(format!("{core_name}.cfg"))];
+    if let Some(parent) = content.parent().and_then(|p| p.file_name()) {
+        files.push(dir.join(format!("{}.cfg", parent.to_string_lossy())));
+    }
+    if let Some(stem) = content.file_stem() {
+        files.push(dir.join(format!("{}.cfg", stem.to_string_lossy())));
+    }
+    files
+}
+
+/// Find RetroArch overrides that would beat the generated fragment.
+///
+/// Returns each offending file with the guarded settings it names. Read-only
+/// and best-effort: anything unreadable is simply not reported.
+pub fn conflicting_overrides(core_path: &Path, content: &Path) -> Vec<(PathBuf, Vec<String>)> {
+    override_files(core_path, content)
+        .into_iter()
+        .filter_map(|file| {
+            let hits: Vec<String> = parse_cfg(&file)
+                .into_iter()
+                .map(|(k, _)| k)
+                .filter(|k| GUARDED_SETTINGS.contains(&k.as_str()))
+                .collect();
+            (!hits.is_empty()).then_some((file, hits))
+        })
+        .collect()
+}
+
+/// Log any override that would quietly undo the settings this module depends
+/// on. A warning only: the operator's overrides are theirs to keep, and most of
+/// what they carry (controllers, video, per-core tuning) is exactly what should
+/// survive into a supervised session.
+fn warn_about_conflicting_overrides(core_path: &Path, content: &Path) {
+    for (file, settings) in conflicting_overrides(core_path, content) {
+        warn!(
+            override_file = %file.display(),
+            settings = %settings.join(", "),
+            "RetroArch override sets settings shepherd relies on; RetroArch applies \
+             overrides after --appendconfig, so these win. Save-state resume, the \
+             save directories, or the menu lock may not behave as configured — \
+             remove those keys from the override file to restore them"
+        );
+    }
+}
+
 /// Resolve paths, write the config fragment, and build the argv.
 ///
 /// `expand` is the caller's tilde expansion, threaded in so this module and
@@ -469,6 +616,8 @@ where
         // hand-built EntryKind. Let RetroArch report it.
         (None, None) => String::new(),
     };
+
+    warn_about_conflicting_overrides(Path::new(&core), Path::new(&content));
 
     let command = expand(spec.command);
     let spec = Spec {
@@ -787,6 +936,116 @@ mod tests {
         assert_eq!(discard_auto_state(&paths).unwrap(), 0);
 
         unsafe { std::env::remove_var(RETROARCH_ROOT_ENV) };
+    }
+
+    /// Build a RetroArch config tree with a per-core override, and a core
+    /// `.info` file so the override directory's name can be resolved.
+    fn retroarch_tree(scratch: &Path, override_name: &str, body: &[u8]) -> PathBuf {
+        let info = scratch.join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(
+            info.join("mgba_libretro.info"),
+            b"display_name = \"Nintendo - Game Boy Advance (mGBA)\"\ncorename = \"mGBA\"\n",
+        )
+        .unwrap();
+
+        let overrides = scratch.join("config/mGBA");
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(overrides.join(override_name), body).unwrap();
+
+        scratch.join("cores/mgba_libretro.so")
+    }
+
+    /// RetroArch applies overrides *after* `--appendconfig`, so one that names
+    /// a guarded setting silently wins. Verified against the real emulator:
+    /// a core override with `savestate_auto_save = "false"` meant no save
+    /// state was written at all on close.
+    #[test]
+    fn a_core_override_that_fights_the_fragment_is_reported() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let core = retroarch_tree(
+            scratch.path(),
+            "mGBA.cfg",
+            b"# a plausible operator override\n\
+              video_smooth = \"true\"\n\
+              savestate_auto_save = \"false\"\n\
+              kiosk_mode_enable = \"false\"\n",
+        );
+
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
+
+        let found = conflicting_overrides(&core, Path::new("/roms/game.gba"));
+        assert_eq!(found.len(), 1, "expected one offending file: {found:?}");
+        let (file, settings) = &found[0];
+        assert!(file.ends_with("config/mGBA/mGBA.cfg"));
+        // Only the guarded ones: an override is allowed to carry anything else.
+        assert_eq!(settings, &["savestate_auto_save", "kiosk_mode_enable"]);
+
+        unsafe { std::env::remove_var(RETROARCH_CONFIG_DIR_ENV) };
+    }
+
+    /// The common case: an override that only carries the settings an operator
+    /// actually wants to keep. Warning about it would train them to ignore it.
+    #[test]
+    fn a_harmless_override_is_not_reported() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let core = retroarch_tree(
+            scratch.path(),
+            "mGBA.cfg",
+            b"video_smooth = \"true\"\ninput_player1_a = \"x\"\n",
+        );
+
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
+
+        assert!(conflicting_overrides(&core, Path::new("/roms/game.gba")).is_empty());
+
+        unsafe { std::env::remove_var(RETROARCH_CONFIG_DIR_ENV) };
+    }
+
+    /// Overrides come in three scopes and the per-game one is the easiest to
+    /// forget, since it is named after the ROM rather than the core.
+    #[test]
+    fn a_per_game_override_is_reported_too() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let core = retroarch_tree(
+            scratch.path(),
+            "game.cfg",
+            b"savestate_auto_load = \"false\"\n",
+        );
+
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
+
+        let found = conflicting_overrides(&core, Path::new("/roms/game.gba"));
+        assert_eq!(found.len(), 1, "expected the per-game override: {found:?}");
+        assert!(found[0].0.ends_with("config/mGBA/game.cfg"));
+
+        unsafe { std::env::remove_var(RETROARCH_CONFIG_DIR_ENV) };
+    }
+
+    /// No RetroArch config tree at all is the normal case on a fresh install.
+    #[test]
+    fn a_missing_config_tree_reports_nothing() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
+
+        assert!(
+            conflicting_overrides(
+                Path::new("/usr/lib/libretro/mgba_libretro.so"),
+                Path::new("/roms/game.gba"),
+            )
+            .is_empty()
+        );
+
+        unsafe { std::env::remove_var(RETROARCH_CONFIG_DIR_ENV) };
     }
 
     #[test]

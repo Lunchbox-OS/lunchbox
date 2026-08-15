@@ -259,6 +259,14 @@ it leaks back into the user's own `retroarch.cfg`. Those sessions also get a
 longer graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown
 has to unload the core and write both kinds of save.
 
+The fragment is *appended* to the user's own `retroarch.cfg`, so controller
+bindings, video settings and per-core options configured outside shepherd carry
+into supervised sessions. RetroArch applies per-core **overrides** after
+`--appendconfig`, though, so an override naming one of the settings above wins
+over shepherd — `retroarch::conflicting_overrides` detects that at launch and
+warns rather than silently losing save-state resume or the menu lock. See
+`docs/emulators.md`.
+
 `discard_saved_state` (the `HostAdapter` hook behind the HUD's reset button)
 deletes the `*.state.auto` files so the next launch boots from the content's
 own start screen. It deliberately leaves the in-game save (`.srm`) alone:
