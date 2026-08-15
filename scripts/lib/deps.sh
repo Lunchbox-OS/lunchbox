@@ -19,6 +19,23 @@ DEPS_DIR="$(get_repo_root)/scripts/deps"
 # Rust installation URL
 RUSTUP_URL="https://sh.rustup.rs"
 
+# bpf-linker is pinned because its LLVM coupling changes between releases,
+# and an unpinned `cargo install` silently adopts whatever that coupling
+# has become. 0.10.3 defaults to the `rust-llvm-22` feature, which links
+# through `aya-rustc-llvm-proxy` against **rustc's own bundled LLVM** — so
+# it needs no system LLVM at all, and it matches the toolchain that
+# actually compiles the BPF crate (`rustc --version --verbose` reports
+# LLVM 22). 0.11.0 dropped the `rust-llvm-*` features entirely and
+# defaults to `llvm-23`, i.e. a *system* LLVM 23 that Ubuntu doesn't ship
+# yet; picking it up unpinned is what broke the CI image build with
+# "could not find llvm-config in directories specified by ... PATH".
+#
+# Before bumping this: check which LLVM the toolchain bundles
+# (`rustc --version --verbose | grep LLVM`) and pick the bpf-linker
+# feature that matches it. A mismatch here produces BPF objects the
+# kernel verifier rejects, not a build error.
+BPF_LINKER_VERSION="0.10.3"
+
 # Android SDK location and the command-line-tools bundle used to bootstrap
 # sdkmanager. The SDK lives outside any user home so it can be shared and
 # so apt never touches it. Versions track what the companion-android
@@ -100,13 +117,25 @@ install_bpf_toolchain() {
         rustup toolchain install nightly --component rust-src --profile minimal
     fi
 
-    if command_exists bpf-linker; then
-        info "bpf-linker already installed ($(bpf-linker --version 2>/dev/null || echo '?'))"
+    # Match on the exact pinned version, not merely "is it on PATH": a host
+    # (or a cached image layer) carrying a different bpf-linker is the
+    # failure this pin exists to prevent, and skipping the install because
+    # *something* is present would preserve it.
+    local installed
+    installed="$(bpf-linker --version 2>/dev/null | awk '{print $2}')"
+    if [[ "$installed" == "$BPF_LINKER_VERSION" ]]; then
+        info "bpf-linker $BPF_LINKER_VERSION already installed"
     else
-        info "Installing bpf-linker (cargo install, ~1-2 min on first build)..."
-        # llvm-sys 201.x looks for $LLVM_SYS_201_PREFIX; Ubuntu's llvm-20-dev
-        # puts everything under /usr/lib/llvm-20.
-        LLVM_SYS_201_PREFIX=/usr/lib/llvm-20 cargo install bpf-linker
+        if [[ -n "$installed" ]]; then
+            info "Replacing bpf-linker $installed with pinned $BPF_LINKER_VERSION..."
+        else
+            info "Installing bpf-linker $BPF_LINKER_VERSION (cargo install, ~1-2 min on first build)..."
+        fi
+        # --locked: build against the versions upstream released with, so a
+        # dependency publishing a breaking change can't fail this the way an
+        # unpinned bpf-linker itself did. No LLVM_* variable is set on
+        # purpose — see BPF_LINKER_VERSION; this build links rustc's LLVM.
+        cargo install bpf-linker --version "$BPF_LINKER_VERSION" --locked --force
     fi
 }
 

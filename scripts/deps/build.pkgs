@@ -28,10 +28,20 @@ libgirepository1.0-dev
 # Layer shell for HUD overlay
 libgtk4-layer-shell-dev
 
-# LLVM toolchain for bpf-linker (compiles the cgroup_skb BPF program in
-# crates/shepherd-firewall-bpf to bpfel-unknown-none). bpf-linker uses
-# llvm-sys, which links against libLLVM at runtime; the -dev packages
-# carry the headers needed to compile bpf-linker via `cargo install`.
+# LLVM toolchain.
+#
+# NOT for bpf-linker, despite what this comment used to claim: it is
+# pinned to a release whose default `rust-llvm-*` feature links through
+# rustc's own bundled LLVM (see BPF_LINKER_VERSION in scripts/lib/deps.sh),
+# so it builds with no system LLVM present and ignores these entirely.
+# Verified by installing it with these packages absent from the search
+# path and no LLVM_* variable set.
+#
+# They are kept because `clang` is a generally-assumed build tool and the
+# -dev packages are cheap insurance for any crate that grows a bindgen or
+# llvm-sys dependency; if you are trimming the CI image, these are
+# candidates, but drop them behind a green firewall-BPF build rather than
+# on the strength of this note.
 clang
 llvm-20-dev
 libpolly-20-dev
