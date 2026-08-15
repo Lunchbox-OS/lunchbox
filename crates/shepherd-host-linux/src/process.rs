@@ -980,15 +980,23 @@ impl ManagedProcess {
         descendants
     }
 
-    /// Send SIGTERM to all processes in this session
+    /// Send **exactly one** SIGTERM to this session's process group.
+    ///
+    /// One signal per process, deliberately. An app whose signal handler counts
+    /// reads a repeated SIGTERM as "the user is impatient" and hard-exits
+    /// without running its shutdown path. RetroArch is the case that forced
+    /// this: `frontend_unix_sighandler` calls `exit(1)` on the *second* signal,
+    /// which skips the SRAM flush and the auto save state — i.e. the child's
+    /// save file, gone. This used to send three (pkill by name, the group, then
+    /// each descendant), so no RetroArch session ever exited cleanly.
+    ///
+    /// `setsid()` in [`Self::spawn_with_cmd`] makes this process both session
+    /// and group leader, so one group-directed signal reaches it *and* every
+    /// descendant that stayed in the group — which is all of them unless one
+    /// deliberately broke away. Those, and anything the app re-parented, are
+    /// left to the caller's SIGKILL escalation rather than being chased with a
+    /// second SIGTERM here.
     pub fn terminate(&self) -> HostResult<()> {
-        // For snap apps, we rely on cgroup-based killing in the adapter, not pkill
-        // Using pkill with broad patterns like "snap" would kill unrelated processes
-        if self.snap_name.is_none() {
-            kill_by_command(&self.command_name, Signal::SIGTERM);
-        }
-
-        // Also try to kill the process group
         let pgid = Pid::from_raw(-(self.pgid as i32)); // Negative for process group
 
         match signal::kill(pgid, Signal::SIGTERM) {
@@ -1001,15 +1009,6 @@ impl ManagedProcess {
             Err(e) => {
                 debug!(pgid = self.pgid, error = %e, "Failed to send SIGTERM to process group");
             }
-        }
-
-        // Also kill all descendants (they may have escaped the process group)
-        let descendants = self.get_descendant_pids();
-        for pid in &descendants {
-            let _ = signal::kill(Pid::from_raw(*pid), Signal::SIGTERM);
-        }
-        if !descendants.is_empty() {
-            debug!(descendants = ?descendants, "Sent SIGTERM to descendant processes");
         }
 
         Ok(())

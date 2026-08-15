@@ -211,9 +211,20 @@ All spawned processes are placed in their own process group:
 ```
 
 When stopping a session:
-1. SIGTERM is sent to the process group (`-pgid`)
-2. After timeout, SIGKILL is sent to the process group
+1. **Exactly one** SIGTERM is sent to the process group (`-pgid`)
+2. After timeout, SIGKILL is sent to the process group, plus a `pkill` by
+   command name to sweep up anything that escaped it
 3. Orphaned children are cleaned up
+
+The "exactly one" matters. The graceful path used to send three SIGTERMs — a
+`pkill -f` by command name, the process-group kill, and one per descendant —
+and an app whose handler *counts* signals reads the second as "the user is
+impatient". RetroArch's calls `exit(1)` on it, which skips flushing the
+in-game save and writing the save state, so no emulator session could close
+without losing progress. Sandboxed kinds (snap, flatpak, Steam) still get
+their cgroup- or app-id-based delivery, because the real process is not in our
+child's process group; `GracefulSignal` in `adapter.rs` is the single place
+that decision is made.
 
 ## Window attribution
 

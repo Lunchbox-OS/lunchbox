@@ -208,6 +208,41 @@ struct SessionInfo {
     firewall_scope: Option<String>,
 }
 
+/// How a session's graceful SIGTERM is delivered.
+///
+/// Extracted from `stop` so the rule that matters can be asserted directly:
+/// **a plain process is signalled once, via its process group, and by nothing
+/// else.** It cannot be tested through an actual process — a shell stand-in
+/// folds two SIGTERMs arriving milliseconds apart into a single trap
+/// invocation, and the C-level counting handler that actually breaks (RetroArch
+/// hard-exits on the second signal, skipping its save) has no equivalent a
+/// test script can install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GracefulSignal {
+    /// Snap app: signal the runtime's cgroup, which holds the real process.
+    SnapCgroup(String),
+    /// Steam game: signal the game's own processes, found by app id.
+    SteamProcesses(u32),
+    /// Flatpak app: signal the runtime's cgroup.
+    FlatpakCgroup(String),
+    /// Everything else: one signal to the session's process group.
+    ProcessGroup,
+}
+
+impl GracefulSignal {
+    fn for_session(info: &SessionInfo) -> Self {
+        if let Some(ref snap) = info.snap_name {
+            Self::SnapCgroup(snap.clone())
+        } else if let Some(app_id) = info.steam_app_id {
+            Self::SteamProcesses(app_id)
+        } else if let Some(ref app_id) = info.flatpak_app_id {
+            Self::FlatpakCgroup(app_id.clone())
+        } else {
+            Self::ProcessGroup
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SteamSession {
     pid: u32,
@@ -1632,12 +1667,16 @@ impl HostAdapter for LinuxHost {
 
         match mode {
             StopMode::Graceful { timeout } => {
-                // If this is a snap or flatpak app, use cgroup-based killing (most reliable)
-                if let Some(ref info) = session_info {
-                    if let Some(ref snap) = info.snap_name {
+                let plan = session_info.as_ref().map(GracefulSignal::for_session);
+
+                match plan {
+                    // Sandboxed runtimes put the real app in a cgroup of their
+                    // own, so signalling our direct child would miss it.
+                    Some(GracefulSignal::SnapCgroup(ref snap)) => {
                         kill_snap_cgroup(snap, nix::sys::signal::Signal::SIGTERM);
                         info!(snap = %snap, "Sent SIGTERM via snap cgroup");
-                    } else if let Some(app_id) = info.steam_app_id {
+                    }
+                    Some(GracefulSignal::SteamProcesses(app_id)) => {
                         let _ =
                             kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGTERM);
                         if let Ok(mut map) = self.steam_sessions.lock() {
@@ -1647,21 +1686,18 @@ impl HostAdapter for LinuxHost {
                             steam_app_id = app_id,
                             "Sent SIGTERM to Steam game processes"
                         );
-                    } else if let Some(ref app_id) = info.flatpak_app_id {
+                    }
+                    Some(GracefulSignal::FlatpakCgroup(ref app_id)) => {
                         kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGTERM);
                         info!(flatpak = %app_id, "Sent SIGTERM via flatpak cgroup");
-                    } else {
-                        // Fall back to command name for non-sandboxed apps
-                        kill_by_command(&info.command_name, nix::sys::signal::Signal::SIGTERM);
-                        info!(command = %info.command_name, "Sent SIGTERM via command name");
                     }
+                    // A plain process gets its one SIGTERM from `p.terminate()`
+                    // below, which signals the whole process group.
+                    Some(GracefulSignal::ProcessGroup) | None => {}
                 }
 
                 // Also send SIGTERM via process handle (skip for Steam sessions)
-                let is_steam = session_info
-                    .as_ref()
-                    .and_then(|info| info.steam_app_id)
-                    .is_some();
+                let is_steam = matches!(plan, Some(GracefulSignal::SteamProcesses(_)));
                 if !is_steam {
                     // Signal the group from the handle rather than only through
                     // `ManagedProcess`: once the spawned process is reaped its
@@ -2383,6 +2419,140 @@ mod tests {
         let mut reported = HashSet::new();
         assert!(
             LinuxHost::report_unowned_windows(&[hidden], &HashSet::new(), &mut reported).is_empty()
+        );
+    }
+
+    fn session_info(command: &str) -> SessionInfo {
+        SessionInfo {
+            command_name: command.to_string(),
+            snap_name: None,
+            flatpak_app_id: None,
+            steam_app_id: None,
+            firewall_scope: None,
+        }
+    }
+
+    /// A plain process is signalled *only* through its process group.
+    ///
+    /// The graceful path used to also run `pkill -f <command>`, which landed a
+    /// second SIGTERM on the same process a few milliseconds later. RetroArch
+    /// hard-exits on the second — `frontend_unix_sighandler` calls `exit(1)` —
+    /// skipping the in-game save flush and the save state, so an emulator
+    /// session could not be closed without losing the child's progress. The
+    /// same pkill would also reach unrelated copies of the program running
+    /// outside the session, since it matches on command line.
+    #[test]
+    fn plain_process_is_signalled_once_via_its_process_group() {
+        assert_eq!(
+            GracefulSignal::for_session(&session_info("retroarch")),
+            GracefulSignal::ProcessGroup
+        );
+    }
+
+    /// Sandboxed runtimes keep their cgroup-based delivery: the real app isn't
+    /// in our child's process group, so signalling the group alone would miss.
+    #[test]
+    fn sandboxed_kinds_keep_their_own_delivery() {
+        let snap = SessionInfo {
+            snap_name: Some("mc-installer".into()),
+            ..session_info("snap")
+        };
+        assert_eq!(
+            GracefulSignal::for_session(&snap),
+            GracefulSignal::SnapCgroup("mc-installer".into())
+        );
+
+        let flatpak = SessionInfo {
+            flatpak_app_id: Some("com.google.Chrome".into()),
+            ..session_info("flatpak")
+        };
+        assert_eq!(
+            GracefulSignal::for_session(&flatpak),
+            GracefulSignal::FlatpakCgroup("com.google.Chrome".into())
+        );
+
+        let steam = SessionInfo {
+            steam_app_id: Some(504230),
+            ..session_info("steam")
+        };
+        assert_eq!(
+            GracefulSignal::for_session(&steam),
+            GracefulSignal::SteamProcesses(504230)
+        );
+    }
+
+    /// A graceful stop must let the activity finish saving.
+    ///
+    /// It used to send three SIGTERMs — a `pkill -f` by command name, a
+    /// process-group kill, and one per descendant. An app that treats a
+    /// repeated SIGTERM as "the user is impatient" never survives that:
+    /// RetroArch's `frontend_unix_sighandler` calls `exit(1)` on the second,
+    /// skipping the in-game save flush and the save state, so no emulator
+    /// session could close without losing progress.
+    ///
+    /// The stand-in copies those semantics exactly — the first signal starts a
+    /// shutdown that takes a moment, and it resets its own disposition so a
+    /// second signal is fatal. Asserting on the completed shutdown rather than
+    /// on a count of signals is also the only reliable way to write this: a
+    /// shell trap folds two signals arriving milliseconds apart into one
+    /// invocation, so counting receipts cannot tell one SIGTERM from two.
+    #[tokio::test]
+    async fn graceful_stop_lets_the_activity_finish_saving() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let script = scratch.path().join("saves-on-sigterm.sh");
+        let marker = scratch.path().join("saved");
+
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             # First SIGTERM: start saving. Reset the handler first, so a\n\
+             # second one kills us outright -- what RetroArch's exit(1) does.\n\
+             trap 'trap - TERM; sleep 1; printf saved > \"$MARKER_FILE\"; exit 0' TERM\n\
+             while true; do sleep 0.05; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let host = LinuxHost::new();
+        let _rx = host.subscribe();
+        // Without the monitor nothing reaps the child, so `stop` would poll
+        // for its whole timeout even after a clean exit -- which would hide
+        // whether the app exited on its own or was killed at the deadline.
+        let _monitor = host.start_monitor();
+
+        let entry = EntryKind::Process {
+            command: script.to_string_lossy().into_owned(),
+            args: vec![],
+            env: HashMap::from([("MARKER_FILE".to_string(), marker.display().to_string())]),
+            cwd: None,
+        };
+
+        let handle = host
+            .spawn(SessionId::new(), &entry, SpawnOptions::default())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stop_started = std::time::Instant::now();
+        host.stop(
+            &handle,
+            StopMode::Graceful {
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default(),
+            "saved",
+            "the activity was cut off before it finished saving"
+        );
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(4),
+            "stop should have returned when the activity exited, not at the deadline"
         );
     }
 }
