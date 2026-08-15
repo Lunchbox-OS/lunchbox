@@ -49,6 +49,11 @@ pub enum EventPayload {
         /// session (issue #78). Defaults to `true` when absent.
         #[serde(default = "default_confirm_on_close")]
         confirm_on_close: bool,
+        /// Whether the HUD should offer a reset button for this session.
+        /// Defaults to `false` when absent, so an older payload just doesn't
+        /// show the button.
+        #[serde(default)]
+        can_reset: bool,
     },
 
     /// Warning issued for current session
@@ -164,6 +169,7 @@ mod tests {
             label: "Test Game".into(),
             deadline: Some(shepherd_util::now()),
             confirm_on_close: true,
+            can_reset: false,
         });
 
         let json = serde_json::to_string(&event).unwrap();
@@ -185,6 +191,7 @@ mod tests {
             label: "Unlimited Game".into(),
             deadline: None,
             confirm_on_close: false,
+            can_reset: false,
         });
 
         let json = serde_json::to_string(&event).unwrap();

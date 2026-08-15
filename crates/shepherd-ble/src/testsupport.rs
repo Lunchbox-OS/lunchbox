@@ -62,6 +62,9 @@ impl ManagementService for MockSvc {
     async fn stop_current(&self, _mode: StopMode) -> ManagementResult<()> {
         Err(ManagementError::NotFound("none".into()))
     }
+    async fn reset_current(&self) -> ManagementResult<()> {
+        Err(ManagementError::NotFound("none".into()))
+    }
     async fn extend_current(&self, _seconds: i64) -> ManagementResult<Option<DateTime<Local>>> {
         Ok(None)
     }

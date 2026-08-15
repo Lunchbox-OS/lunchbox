@@ -568,6 +568,9 @@ pub enum RawEntryKind {
         /// Lock RetroArch's own menu. On by default.
         #[serde(default = "default_true")]
         kiosk: bool,
+        /// Offer the HUD's reset ("reboot the console") button. On by default.
+        #[serde(default = "default_true")]
+        reset: bool,
     },
     Custom {
         type_name: String,
@@ -1061,6 +1064,7 @@ mod tests {
                 save_state,
                 command,
                 kiosk,
+                reset,
                 ..
             } => {
                 assert_eq!(core.as_deref(), Some("mgba"));
@@ -1072,6 +1076,9 @@ mod tests {
                 assert_eq!(command, "retroarch");
                 // Supervised by default: no wandering into RetroArch's menu.
                 assert!(*kiosk);
+                // And the reset button is on, because auto save-state resume
+                // is what makes the title screen otherwise unreachable.
+                assert!(*reset);
             }
             other => panic!("expected a retroarch kind, got {:?}", other),
         }
@@ -1094,6 +1101,7 @@ mod tests {
             command = "/usr/local/bin/retroarch"
             args = ["--verbose"]
             kiosk = false
+            reset = false
         "#;
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         match &config.entries[0].kind {
@@ -1104,6 +1112,7 @@ mod tests {
                 command,
                 args,
                 kiosk,
+                reset,
                 ..
             } => {
                 assert_eq!(*core, None);
@@ -1115,6 +1124,7 @@ mod tests {
                 assert_eq!(command, "/usr/local/bin/retroarch");
                 assert_eq!(args, &["--verbose".to_string()]);
                 assert!(!*kiosk);
+                assert!(!*reset);
             }
             other => panic!("expected a retroarch kind, got {:?}", other),
         }

@@ -314,6 +314,12 @@ pub enum EntryKind {
         /// a supervised kiosk.
         #[serde(default = "default_true")]
         kiosk: bool,
+        /// Offer a reset ("reboot the console") button on the HUD. On by
+        /// default, because `save_state = "auto"` otherwise makes the
+        /// console's own power-on screen unreachable — there is no way back to
+        /// the title screen from inside a resumed save state.
+        #[serde(default = "default_true")]
+        reset: bool,
     },
     Custom {
         type_name: String,
@@ -512,6 +518,17 @@ impl EntryKind {
             EntryKind::Retroarch { .. } => EntryKindTag::Retroarch,
             EntryKind::Custom { .. } => EntryKindTag::Custom,
         }
+    }
+
+    /// Whether this activity can be reset in place — torn down and brought
+    /// back at its starting state without ending the session.
+    ///
+    /// Only RetroArch entries, and only when they ask for the button. It is
+    /// the save-state resume that creates the need: once every launch restores
+    /// where the child left off, the console's own power-on screen is
+    /// otherwise unreachable.
+    pub fn supports_reset(&self) -> bool {
+        matches!(self, EntryKind::Retroarch { reset: true, .. })
     }
 }
 
@@ -744,6 +761,11 @@ pub struct SessionInfo {
     /// keep the safe behaviour.
     #[serde(default = "default_confirm_on_close")]
     pub confirm_on_close: bool,
+    /// Whether the HUD should offer a reset button for this session — see
+    /// [`EntryKind::supports_reset`]. Defaults to `false` when absent, so an
+    /// older payload simply doesn't show the button.
+    #[serde(default)]
+    pub can_reset: bool,
 }
 
 /// Default for [`SessionInfo::confirm_on_close`] / the `SessionStarted` event:
@@ -1258,6 +1280,35 @@ mod tests {
         let parsed: EntryKind = serde_json::from_str(&json).unwrap();
 
         assert_eq!(kind, parsed);
+    }
+
+    #[test]
+    fn only_retroarch_entries_that_ask_for_it_support_reset() {
+        let retroarch = |reset| EntryKind::Retroarch {
+            core: Some("mgba".into()),
+            core_path: None,
+            content: "/roms/game.gba".into(),
+            save_state: RetroarchSaveState::Auto,
+            command: "retroarch".into(),
+            args: vec![],
+            env: HashMap::new(),
+            kiosk: true,
+            reset,
+        };
+
+        assert!(retroarch(true).supports_reset());
+        assert!(!retroarch(false).supports_reset());
+        // Nothing else can be restarted in place: the host has no way to put
+        // another kind back at a meaningful starting state.
+        assert!(
+            !EntryKind::Process {
+                command: "scummvm".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            }
+            .supports_reset()
+        );
     }
 
     #[test]

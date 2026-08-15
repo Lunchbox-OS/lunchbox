@@ -92,6 +92,13 @@
       }
     },
     {
+      "name": "reset_current",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "extend_current",
       "params": [
         {

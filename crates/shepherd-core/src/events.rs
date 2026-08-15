@@ -18,6 +18,8 @@ pub enum CoreEvent {
         /// Whether the HUD should confirm before its "X" button ends this
         /// session (issue #78).
         confirm_on_close: bool,
+        /// Whether the HUD should offer a reset button for this session.
+        can_reset: bool,
     },
 
     /// The set of available entries has changed (e.g., due to time window boundaries)

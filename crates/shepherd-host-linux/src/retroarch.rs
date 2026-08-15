@@ -372,6 +372,52 @@ pub fn render_append_config(paths: &Paths, save_state: RetroarchSaveState, kiosk
     out
 }
 
+/// Suffixes of the files RetroArch's auto save state is made of: the state
+/// itself and, when `savestate_thumbnail_enable` is on, its screenshot.
+const AUTO_STATE_SUFFIXES: [&str; 2] = [".state.auto", ".state.auto.png"];
+
+/// Delete the auto save state, so the next launch boots the content from its
+/// power-on screen instead of resuming.
+///
+/// Only the save *state* — the in-game save (`.srm`) beside it is the child's
+/// actual progress and is deliberately left alone. Resetting a console returns
+/// it to the title screen; it does not wipe the cartridge.
+///
+/// RetroArch files states under a per-core subdirectory of the one we hand it,
+/// so this walks one level down rather than assuming a flat layout. Returns
+/// how many files it removed.
+pub fn discard_auto_state(paths: &Paths) -> io::Result<usize> {
+    let mut removed = 0;
+
+    let mut dirs = vec![paths.states.clone()];
+    if let Ok(entries) = std::fs::read_dir(&paths.states) {
+        dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    }
+
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if AUTO_STATE_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        debug!(path = %path.display(), "Discarded auto save state");
+                        removed += 1;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
 /// Create the per-entry directories and write the config fragment.
 pub fn materialize(paths: &Paths, save_state: RetroarchSaveState, kiosk: bool) -> io::Result<()> {
     std::fs::create_dir_all(&paths.states)?;
@@ -684,6 +730,61 @@ mod tests {
         // Tilde expansion reached the content path, not just the argv.
         assert!(launch.argv.contains(&"/home/kid/roms/game.gba".to_string()));
         assert!(launch.paths.root.ends_with("my-game"));
+
+        unsafe { std::env::remove_var(RETROARCH_ROOT_ENV) };
+    }
+
+    /// Resetting returns the console to its title screen; it must not touch
+    /// the child's actual saved game.
+    #[test]
+    fn discarding_the_auto_state_keeps_the_in_game_save() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(RETROARCH_ROOT_ENV, scratch.path()) };
+
+        let paths = paths_for(Some("game"), Path::new("/roms/game.gba"));
+        // RetroArch files states under a per-core subdirectory of the one we
+        // give it, so seed both layouts.
+        let core_dir = paths.states.join("mGBA");
+        std::fs::create_dir_all(&core_dir).unwrap();
+        std::fs::create_dir_all(&paths.saves).unwrap();
+        std::fs::write(core_dir.join("game.state.auto"), b"state").unwrap();
+        std::fs::write(core_dir.join("game.state.auto.png"), b"thumb").unwrap();
+        std::fs::write(paths.states.join("flat.state.auto"), b"state").unwrap();
+        // Numbered manual states and the in-game save must survive.
+        std::fs::write(core_dir.join("game.state1"), b"slot").unwrap();
+        std::fs::write(paths.saves.join("game.srm"), b"battery").unwrap();
+
+        assert_eq!(discard_auto_state(&paths).unwrap(), 3);
+
+        assert!(!core_dir.join("game.state.auto").exists());
+        assert!(!core_dir.join("game.state.auto.png").exists());
+        assert!(!paths.states.join("flat.state.auto").exists());
+        assert!(
+            core_dir.join("game.state1").exists(),
+            "a manual save state is not resume state"
+        );
+        assert!(
+            paths.saves.join("game.srm").exists(),
+            "resetting the console must not wipe the cartridge"
+        );
+
+        // Idempotent: resetting twice in a row is not an error.
+        assert_eq!(discard_auto_state(&paths).unwrap(), 0);
+
+        unsafe { std::env::remove_var(RETROARCH_ROOT_ENV) };
+    }
+
+    #[test]
+    fn discarding_state_that_was_never_written_is_not_an_error() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(RETROARCH_ROOT_ENV, scratch.path()) };
+
+        let paths = paths_for(Some("never-launched"), Path::new("/roms/game.gba"));
+        assert_eq!(discard_auto_state(&paths).unwrap(), 0);
 
         unsafe { std::env::remove_var(RETROARCH_ROOT_ENV) };
     }

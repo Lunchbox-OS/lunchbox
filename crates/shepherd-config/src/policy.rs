@@ -944,6 +944,7 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
             args,
             env,
             kiosk,
+            reset,
         } => EntryKind::Retroarch {
             core,
             core_path,
@@ -953,6 +954,7 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
             args,
             env,
             kiosk,
+            reset,
         },
         RawEntryKind::Custom { type_name, payload } => EntryKind::Custom {
             type_name,

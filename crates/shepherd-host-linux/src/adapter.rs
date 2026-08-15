@@ -1396,6 +1396,9 @@ impl HostAdapter for LinuxHost {
                 args,
                 env,
                 kiosk,
+                // The reset button is a HUD concern; nothing about the launch
+                // changes with it.
+                reset: _,
             } => {
                 let spec = crate::retroarch::Spec {
                     core: core.as_deref(),
@@ -1688,6 +1691,28 @@ impl HostAdapter for LinuxHost {
         info!(pid = pid, pgid = pgid, "Spawned process");
 
         Ok(handle)
+    }
+
+    async fn discard_saved_state(
+        &self,
+        entry_kind: &EntryKind,
+        entry_id: Option<&str>,
+    ) -> HostResult<()> {
+        let EntryKind::Retroarch { content, .. } = entry_kind else {
+            return Ok(());
+        };
+
+        let content = expand_tilde(&content.to_string_lossy());
+        let paths = crate::retroarch::paths_for(entry_id, std::path::Path::new(&content));
+        let removed = crate::retroarch::discard_auto_state(&paths).map_err(|e| {
+            HostError::Internal(format!("Failed to discard RetroArch save state: {e}"))
+        })?;
+        info!(
+            removed,
+            states = %paths.states.display(),
+            "Discarded RetroArch auto save state"
+        );
+        Ok(())
     }
 
     async fn stop(&self, handle: &HostSessionHandle, mode: StopMode) -> HostResult<()> {
@@ -2577,6 +2602,7 @@ mod tests {
             args: vec!["--verbose".into()],
             env: HashMap::from([("ARGV_FILE".to_string(), recorded.display().to_string())]),
             kiosk: true,
+            reset: true,
         };
 
         let handle = host

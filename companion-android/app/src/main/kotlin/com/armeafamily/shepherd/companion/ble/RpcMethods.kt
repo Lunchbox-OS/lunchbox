@@ -21,6 +21,7 @@ object RpcMethods {
     const val CURRENT_SESSION: String = "current_session"
     const val LAUNCH: String = "launch"
     const val STOP_CURRENT: String = "stop_current"
+    const val RESET_CURRENT: String = "reset_current"
     const val EXTEND_CURRENT: String = "extend_current"
     const val LIST_OVERRIDES: String = "list_overrides"
     const val GET_OVERRIDE: String = "get_override"

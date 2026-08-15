@@ -1013,6 +1013,7 @@ impl Service {
                 label,
                 deadline,
                 confirm_on_close,
+                can_reset,
             } => {
                 Self::broadcast(
                     ipc,
@@ -1023,6 +1024,7 @@ impl Service {
                         label: label.clone(),
                         deadline: *deadline,
                         confirm_on_close: *confirm_on_close,
+                        can_reset: *can_reset,
                     }),
                 );
             }

@@ -259,6 +259,13 @@ it leaks back into the user's own `retroarch.cfg`. Those sessions also get a
 longer graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown
 has to unload the core and write both kinds of save.
 
+`discard_saved_state` (the `HostAdapter` hook behind the HUD's reset button)
+deletes the `*.state.auto` files so the next launch boots from the content's
+own start screen. It deliberately leaves the in-game save (`.srm`) alone:
+resetting a console returns it to the title screen, it does not wipe the
+cartridge. Call it only between the stop and the respawn — against a live
+activity it would race RetroArch's own writes.
+
 ## Log Capture
 
 stdout and stderr can be captured to session log files:

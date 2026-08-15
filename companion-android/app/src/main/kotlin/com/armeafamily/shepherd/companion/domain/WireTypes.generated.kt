@@ -641,6 +641,13 @@ sealed interface EntryKind {
          */
         val kiosk: Boolean = true,
         /**
+         * Offer a reset ("reboot the console") button on the HUD. On by
+         * default, because `save_state = "auto"` otherwise makes the
+         * console's own power-on screen unreachable — there is no way back to
+         * the title screen from inside a resumed save state.
+         */
+        val reset: Boolean = true,
+        /**
          * Whether closing the activity saves state and opening restores it.
          */
         val saveState: RetroarchSaveState? = null,
@@ -1296,6 +1303,12 @@ typealias SessionId = String
  */
 @Serializable
 data class SessionInfo(
+    /**
+     * Whether the HUD should offer a reset button for this session — see
+     * [`EntryKind::supports_reset`]. Defaults to `false` when absent, so an
+     * older payload simply doesn't show the button.
+     */
+    val canReset: Boolean = false,
     /**
      * Whether the HUD should confirm before its "X" button ends this
      * session (issue #78). Defaults to `true` when absent so older payloads

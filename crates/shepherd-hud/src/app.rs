@@ -50,6 +50,61 @@ fn request_stop_current(socket_path: PathBuf) {
     });
 }
 
+/// Ask shepherdd to reset the current activity — the "reboot the console"
+/// button (issue #125). The session keeps running; only the activity restarts.
+fn request_reset_current(socket_path: PathBuf) {
+    tracing::info!("Requesting activity reset");
+    spawn_action(socket_path, "reset_current", |mut client| async move {
+        client.reset_current().await
+    });
+}
+
+/// What a confirmation prompt does when its affirmative button is pressed.
+///
+/// Both prompts lose something the child cares about, so both confirm and both
+/// use the destructive styling; they differ only in wording and in which RPC
+/// they send.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfirmAction {
+    /// End the session (issue #78).
+    EndActivity,
+    /// Restart the activity at its starting state (issue #125).
+    ResetActivity,
+}
+
+impl ConfirmAction {
+    /// Label for the affirmative button.
+    fn button_label(self) -> &'static str {
+        match self {
+            Self::EndActivity => "End activity",
+            Self::ResetActivity => "Restart",
+        }
+    }
+
+    /// The question, naming the activity when the HUD knows it.
+    fn message(self, activity: Option<&str>) -> String {
+        match (self, activity) {
+            (Self::EndActivity, Some(name)) => {
+                format!("End {name}? Unsaved progress may be lost.")
+            }
+            (Self::EndActivity, None) => "End this activity? Unsaved progress may be lost.".into(),
+            (Self::ResetActivity, Some(name)) => {
+                format!("Restart {name} from the beginning? Your saved game is kept.")
+            }
+            (Self::ResetActivity, None) => {
+                "Restart this activity from the beginning? Your saved game is kept.".into()
+            }
+        }
+    }
+
+    fn run(self, socket_path: PathBuf) {
+        match self {
+            Self::EndActivity => request_stop_current(socket_path),
+            Self::ResetActivity => request_reset_current(socket_path),
+        }
+    }
+}
+
 /// Pixel size for all symbolic icons in the HUD bar at scale 1.0. The
 /// timer in `build_hud_content` multiplies this by the current HUD scale
 /// factor so icons stay at their usual physical size when shepherdd drops
@@ -517,6 +572,21 @@ fn build_hud_content(
 
     right_box.append(&battery_box);
 
+    // Reset ("reboot the console") button, shown only for activities that
+    // support it (issue #125). With RetroArch's save-state resume on, every
+    // launch puts the child back exactly where they stopped, so this is the
+    // only way back to a game's own title screen.
+    let reset_icon = gtk4::Image::from_icon_name("view-refresh-symbolic");
+    reset_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let reset_button = gtk4::Button::builder()
+        .child(&reset_icon)
+        .has_frame(false)
+        .tooltip_text("Restart activity")
+        .visible(false)
+        .build();
+    reset_button.add_css_class("indicator-button");
+    right_box.append(&reset_button);
+
     // Action button: shows as "End session" when a session is active, "Log out" otherwise.
     // Uses an explicit child Image for the same reason as `volume_button`.
     let action_icon = gtk4::Image::from_icon_name("system-log-out-symbolic");
@@ -534,6 +604,15 @@ fn build_hud_content(
         &action_button,
         &window,
         1.0,
+        ConfirmAction::EndActivity,
+    )));
+    // The reset button gets its own prompt, parented to its own button so it
+    // drops from the right place. Same rebuild-on-scale-change rules apply.
+    let reset_prompt = std::rc::Rc::new(std::cell::RefCell::new(build_confirm_prompt(
+        &reset_button,
+        &window,
+        1.0,
+        ConfirmAction::ResetActivity,
     )));
 
     let state_for_action = state.clone();
@@ -578,27 +657,59 @@ fn build_hud_content(
     });
     right_box.append(&action_button);
 
+    let state_for_reset = state.clone();
+    let prompt_for_reset = reset_prompt.clone();
+    let window_for_reset = window.clone();
+    reset_button.connect_clicked(move |btn| {
+        let session_state = state_for_reset.session_state();
+        if !session_state.can_reset() {
+            return;
+        }
+        // Same borrow discipline as the close prompt: take clones and drop the
+        // borrow before `popup()` runs handlers that may reach back in.
+        let (popover, content, label) = {
+            let prompt = prompt_for_reset.borrow();
+            (
+                prompt.popover.clone(),
+                prompt.content.clone(),
+                prompt.label.clone(),
+            )
+        };
+        label.set_text(&ConfirmAction::ResetActivity.message(session_state.entry_name()));
+        window_for_reset.set_keyboard_mode(KeyboardMode::OnDemand);
+        align_popover_to_button(&popover, &content, btn, state_for_reset.scale_factor());
+        popover.popup();
+    });
+
     // Debug-build test hook for the headless dev harness, which has no way to
     // click a GTK button (the synthetic pointer does not fire `clicked`; see the
     // `headless-dev` skill). With `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
-    // set, creating `<path>` pops the close-confirmation prompt and creating
-    // `<path>.down` dismisses it; both files are consumed. That is enough to
-    // drive open/close cycles — and scale changes across them — from a shell.
-    // Never compiled into a release build.
+    // set, creating `<path>` pops the close-confirmation prompt, `<path>.reset`
+    // pops the reset one, and `<path>.down` dismisses whichever is up; every
+    // file is consumed. That is enough to drive open/close cycles — and scale
+    // changes across them — from a shell. Never compiled into a release build.
     #[cfg(debug_assertions)]
     if let Ok(trigger) = std::env::var("SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER") {
         let up = std::path::PathBuf::from(&trigger);
+        let up_reset = std::path::PathBuf::from(format!("{trigger}.reset"));
         let down = std::path::PathBuf::from(format!("{trigger}.down"));
         let action_button_for_debug = action_button.clone();
+        let reset_button_for_debug = reset_button.clone();
         let prompt_for_debug = confirm_prompt.clone();
+        let reset_prompt_for_debug = reset_prompt.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
             if up.exists() {
                 let _ = std::fs::remove_file(&up);
                 action_button_for_debug.emit_clicked();
             }
+            if up_reset.exists() {
+                let _ = std::fs::remove_file(&up_reset);
+                reset_button_for_debug.emit_clicked();
+            }
             if down.exists() {
                 let _ = std::fs::remove_file(&down);
                 prompt_for_debug.borrow().popover.popdown();
+                reset_prompt_for_debug.borrow().popover.popdown();
             }
             glib::ControlFlow::Continue
         });
@@ -631,6 +742,9 @@ fn build_hud_content(
     let action_icon_clone = action_icon.clone();
     let confirm_prompt_for_timer = confirm_prompt.clone();
     let action_button_for_rebuild = action_button.clone();
+    let reset_button_clone = reset_button.clone();
+    let reset_prompt_for_timer = reset_prompt.clone();
+    let reset_button_for_rebuild = reset_button.clone();
     let window_for_rebuild = window.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
@@ -714,6 +828,18 @@ fn build_hud_content(
                     &action_button_for_rebuild,
                     &window_for_rebuild,
                     desired_scale,
+                    ConfirmAction::EndActivity,
+                );
+            }
+            {
+                let mut prompt = reset_prompt_for_timer.borrow_mut();
+                prompt.popover.popdown();
+                prompt.popover.unparent();
+                *prompt = build_confirm_prompt(
+                    &reset_button_for_rebuild,
+                    &window_for_rebuild,
+                    desired_scale,
+                    ConfirmAction::ResetActivity,
                 );
             }
             applied_scale_for_timer.set(desired_scale);
@@ -756,6 +882,14 @@ fn build_hud_content(
             SessionState::Active { .. } | SessionState::Warning { .. }
         ) {
             confirm_prompt_for_timer.borrow().popover.popdown();
+        }
+        // The reset button belongs to the activity, so it appears and
+        // disappears with one that supports being reset -- and its prompt goes
+        // with it, for the same reason the close prompt does.
+        let can_reset = session_state.can_reset();
+        reset_button_clone.set_visible(can_reset);
+        if !can_reset {
+            reset_prompt_for_timer.borrow().popover.popdown();
         }
         match &session_state {
             SessionState::NoSession => {
@@ -1067,6 +1201,7 @@ fn build_confirm_prompt(
     action_button: &gtk4::Button,
     window: &gtk4::ApplicationWindow,
     factor: f64,
+    action: ConfirmAction,
 ) -> ConfirmPrompt {
     // Parented to the button, so on the layer-shell overlay it renders as a
     // child popup above the running activity.
@@ -1105,7 +1240,7 @@ fn build_confirm_prompt(
         .homogeneous(true)
         .build();
     let cancel_button = gtk4::Button::with_label("Cancel");
-    let end_button = gtk4::Button::with_label("End activity");
+    let end_button = gtk4::Button::with_label(action.button_label());
     end_button.add_css_class("destructive-action");
     button_row.append(&cancel_button);
     button_row.append(&end_button);
@@ -1120,7 +1255,7 @@ fn build_confirm_prompt(
     let popover_for_end = popover.clone();
     end_button.connect_clicked(move |_| {
         popover_for_end.popdown();
-        request_stop_current(default_socket_path());
+        action.run(default_socket_path());
     });
 
     // Release the on-demand keyboard grab whenever the prompt goes away, no
