@@ -48,6 +48,14 @@ ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinet
 # sdkmanager installs it under $ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION, which
 # is what cargo-ndk finds via ANDROID_NDK_HOME.
 ANDROID_NDK_VERSION="27.2.12479018"
+# cargo-ndk is pinned for the same reason as BPF_LINKER_VERSION: an
+# unpinned `cargo install` adopts whatever upstream published last, and a
+# cross-compiler driver is a bad place to discover that unattended. This
+# is the version the Android CI job has been building with, so pinning it
+# changes nothing today — it just stops the toolchain from moving on its
+# own. It bridges the Rust targets above to $ANDROID_NDK_VERSION's
+# clang/sysroot, so bump it deliberately, alongside the NDK.
+CARGO_NDK_VERSION="4.1.2"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
 # Rust targets cargo-ndk cross-compiles the shepherd-media-android cdylib for:
@@ -224,11 +232,25 @@ install_cargo_ndk() {
     info "Adding Android Rust targets: ${ANDROID_RUST_TARGETS[*]}"
     rustup target add "${ANDROID_RUST_TARGETS[@]}"
 
-    if command_exists cargo-ndk; then
-        info "cargo-ndk already installed ($(cargo-ndk --version 2>/dev/null || echo '?'))"
+    # Version-matched rather than "is it on PATH", for the same reason as
+    # bpf-linker: a host or cached layer carrying a different build is
+    # exactly what the pin is meant to displace.
+    #
+    # Ask via the *subcommand* form. `cargo-ndk --version` does not report a
+    # version — the binary answers "This binary may only be called via
+    # `cargo ndk`." and exits 0, so parsing its output yields an empty
+    # string and every run would reinstall.
+    local ndk_installed
+    ndk_installed="$(cargo ndk --version 2>/dev/null | awk '{print $2}')"
+    if [[ "$ndk_installed" == "$CARGO_NDK_VERSION" ]]; then
+        info "cargo-ndk $CARGO_NDK_VERSION already installed"
     else
-        info "Installing cargo-ndk (cargo install, ~1-2 min on first build)..."
-        cargo install cargo-ndk
+        if [[ -n "$ndk_installed" ]]; then
+            info "Replacing cargo-ndk $ndk_installed with pinned $CARGO_NDK_VERSION..."
+        else
+            info "Installing cargo-ndk $CARGO_NDK_VERSION (cargo install, ~1-2 min on first build)..."
+        fi
+        cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked --force
     fi
 }
 
