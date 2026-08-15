@@ -16,6 +16,7 @@ mod brightness;
 mod browser;
 mod light;
 mod process;
+mod retroarch;
 mod sidecar;
 mod steam_interstitial;
 mod sway;

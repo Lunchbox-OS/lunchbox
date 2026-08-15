@@ -249,6 +249,15 @@ cheaper check (`report_unowned_windows`), which only knows about pids it
 spawned. Closing an `unowned` window stays a human's call:
 shepherd will not kill a surface it does not recognize, because a system
 dialog on a kiosk a child depends on is worse than the visibility gap.
+## RetroArch
+
+`EntryKind::Retroarch` entries are launched through `retroarch.rs`, which
+renders a config fragment (`--appendconfig`) around the launch: per-entry save
+and save-state directories, save-state-on-close/restore-on-open, a periodic
+in-game save flush, kiosk mode, and `config_save_on_exit = "false"` so none of
+it leaks back into the user's own `retroarch.cfg`. Those sessions also get a
+longer graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown
+has to unload the core and write both kinds of save.
 
 ## Log Capture
 

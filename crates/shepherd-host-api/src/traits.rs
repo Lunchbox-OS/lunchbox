@@ -59,6 +59,14 @@ impl Default for StopMode {
 /// Options for spawning a session
 #[derive(Debug, Clone, Default)]
 pub struct SpawnOptions {
+    /// Id of the entry being launched, when the caller knows it.
+    ///
+    /// Hosts use it to key per-entry state that outlives a session — today the
+    /// RetroArch save/state directories, so two entries pointing at the same
+    /// ROM keep separate progress. `None` (e.g. a direct `spawn` in a test)
+    /// means the host derives a key from the entry kind instead.
+    pub entry_id: Option<String>,
+
     /// Capture stdout to log file
     pub capture_stdout: bool,
 

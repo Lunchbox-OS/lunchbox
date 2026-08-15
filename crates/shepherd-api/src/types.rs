@@ -18,6 +18,7 @@ pub enum EntryKindTag {
     Flatpak,
     Vm,
     Media,
+    Retroarch,
     Custom,
 }
 
@@ -277,10 +278,82 @@ pub enum EntryKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefetch: Option<bool>,
     },
+    /// A single piece of content played through the RetroArch libretro
+    /// frontend, launched directly on its CLI (`retroarch -L <core> <content>`).
+    ///
+    /// Distinct from [`EntryKind::Process`] because RetroArch needs settings
+    /// materialized around the launch to behave in a kiosk: save state on
+    /// close, restore it on open, flush the in-game save periodically, and
+    /// stay out of its own menu. The host adapter renders those into a config
+    /// fragment it passes with `--appendconfig`; the user's own `retroarch.cfg`
+    /// is never edited. See `shepherd-host-linux::retroarch`.
+    Retroarch {
+        /// Core short name, e.g. `"mgba"` → `mgba_libretro.so`, resolved
+        /// against the usual libretro core directories. Mutually exclusive
+        /// with `core_path`.
+        #[serde(default)]
+        core: Option<String>,
+        /// Absolute path to a `*_libretro.so`, bypassing name resolution.
+        #[serde(default)]
+        core_path: Option<PathBuf>,
+        /// The content (ROM / disc image) to load.
+        content: PathBuf,
+        /// Whether closing the activity saves state and opening restores it.
+        #[serde(default)]
+        save_state: RetroarchSaveState,
+        /// The RetroArch binary. Defaults to `retroarch` on `PATH`.
+        #[serde(default = "default_retroarch_command")]
+        command: String,
+        /// Extra arguments, appended after the ones shepherd derives.
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Lock RetroArch's own menu so the activity can't be used to browse
+        /// the filesystem or change emulator settings. On by default: this is
+        /// a supervised kiosk.
+        #[serde(default = "default_true")]
+        kiosk: bool,
+    },
     Custom {
         type_name: String,
         payload: serde_json::Value,
     },
+}
+
+/// Default for [`EntryKind::Retroarch::command`].
+pub(crate) fn default_retroarch_command() -> String {
+    "retroarch".to_string()
+}
+
+/// How a [`EntryKind::Retroarch`] activity treats its save state across
+/// close and re-open.
+///
+/// This is the emulator's *snapshot*, not the game's own save file. The
+/// in-game save (SRAM / battery save) is flushed on a clean exit either way,
+/// and periodically while playing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RetroarchSaveState {
+    /// Write a save state when the activity closes and load it on the next
+    /// open, so the child resumes exactly where they stopped — mid-battle,
+    /// mid-cutscene, wherever the session ended.
+    ///
+    /// Note this makes the console's own power-on screen unreachable, which is
+    /// what the HUD's reset button is for.
+    #[default]
+    Auto,
+    /// Leave save states alone. Every launch boots the content from scratch;
+    /// only the in-game save carries over.
+    Off,
+}
+
+impl RetroarchSaveState {
+    /// Whether shepherd should turn on RetroArch's auto save-state handling.
+    pub fn is_auto(self) -> bool {
+        matches!(self, Self::Auto)
+    }
 }
 
 /// Input compatibility mode for an activity.
@@ -436,6 +509,7 @@ impl EntryKind {
             EntryKind::Flatpak { .. } => EntryKindTag::Flatpak,
             EntryKind::Vm { .. } => EntryKindTag::Vm,
             EntryKind::Media { .. } => EntryKindTag::Media,
+            EntryKind::Retroarch { .. } => EntryKindTag::Retroarch,
             EntryKind::Custom { .. } => EntryKindTag::Custom,
         }
     }

@@ -63,6 +63,7 @@ impl HostCapabilities {
         spawn_kinds.insert(EntryKindTag::Flatpak);
         spawn_kinds.insert(EntryKindTag::Vm);
         spawn_kinds.insert(EntryKindTag::Media);
+        spawn_kinds.insert(EntryKindTag::Retroarch);
 
         Self {
             spawn_kinds_supported: spawn_kinds,

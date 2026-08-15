@@ -330,88 +330,7 @@ impl ManagementService for DefaultManagementService {
         // applied -- mirrors the IPC `Launch` path in shepherdd/src/main.rs.
         let (entry_kind, spawn_opts, needs_hidpi) = {
             let eng = self.engine.lock().await;
-            let entry = eng.policy().get_entry(&id);
-            let kind = entry.map(|e| e.kind.clone());
-            let firewall =
-                entry
-                    .and_then(|e| e.firewall.clone())
-                    .map(|fw| shepherd_host_api::FirewallSpec {
-                        default_deny: fw.default_deny,
-                        allow: fw.allow,
-                        deny: fw.deny,
-                    });
-            let browser =
-                entry
-                    .and_then(|e| e.browser.clone())
-                    .map(|b| shepherd_host_api::BrowserSpec {
-                        policy_id: id.as_str().to_string(),
-                        profile_id: b.profile_id,
-                        mode: b.mode,
-                        start_url: b.start_url,
-                        url_allowlist: b.url_allowlist,
-                        url_blocklist: b.url_blocklist,
-                        disable_dev_tools: b.disable_dev_tools,
-                        disable_incognito: b.disable_incognito,
-                        disable_extensions: b.disable_extensions,
-                        wipe_on_exit: b.wipe_on_exit,
-                    });
-            let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
-            let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
-            // Hand the activity the same check that gates its availability, so
-            // (e.g.) a media grid hides online-only items instead of leaving
-            // tiles that error on tap. The entry's own target wins over the
-            // service's; `forward_check = false` suppresses both.
-            let connectivity_check = entry.and_then(|e| {
-                if !e.internet.forward_check {
-                    return None;
-                }
-                e.internet
-                    .check
-                    .as_ref()
-                    .or(eng.policy().service.internet.check.as_ref())
-                    .map(|t| t.original.clone())
-            });
-            // The cache the activity writes to is the one shepherdd prefetches
-            // into, so the eviction policy has to travel with the launch.
-            let is_media = matches!(kind, Some(EntryKind::Media { .. }));
-            let media_watched_grace_days =
-                is_media.then(|| eng.policy().service.media.watched_grace_days);
-            let media_cache_max_bytes =
-                is_media.then(|| eng.policy().service.media.cache_max_bytes);
-            let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
-            let opts = if eng.policy().service.capture_child_output {
-                let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
-                let filename = format!(
-                    "{}_{}.log",
-                    id.as_str().replace(['/', '\\', ' '], "_"),
-                    timestamp
-                );
-                SpawnOptions {
-                    capture_stdout: true,
-                    capture_stderr: true,
-                    log_path: Some(eng.policy().service.child_log_dir.join(filename)),
-                    firewall,
-                    browser,
-                    input_compat,
-                    input_compat_options,
-                    connectivity_check,
-                    media_watched_grace_days,
-                    media_cache_max_bytes,
-                    ..Default::default()
-                }
-            } else {
-                SpawnOptions {
-                    firewall,
-                    browser,
-                    input_compat,
-                    input_compat_options,
-                    connectivity_check,
-                    media_watched_grace_days,
-                    media_cache_max_bytes,
-                    ..Default::default()
-                }
-            };
-            (kind, opts, needs_hidpi)
+            resolve_spawn(&eng, &id, now)
         };
 
         let Some(kind) = entry_kind else {
@@ -1571,6 +1490,93 @@ fn stricter_min(a: Option<u8>, b: Option<u8>) -> Option<u8> {
         (Some(a), Some(b)) => Some(a.max(b)),
         (x, None) | (None, x) => x,
     }
+}
+
+/// Resolve everything needed to spawn an entry: its kind, its spawn options
+/// (firewall, browser policy, input-compat sidecars, log capture), and whether
+/// it wants the XWayland HiDPI workaround.
+///
+/// Shared by `launch` and `reset_current` so a restarted activity comes back
+/// under exactly the same rules it launched under — a reset that quietly
+/// dropped the firewall or the browser policy would be a hole.
+fn resolve_spawn(
+    eng: &CoreEngine,
+    id: &EntryId,
+    now: DateTime<Local>,
+) -> (Option<shepherd_api::EntryKind>, SpawnOptions, bool) {
+    let entry = eng.policy().get_entry(id);
+    let kind = entry.map(|e| e.kind.clone());
+    let firewall =
+        entry
+            .and_then(|e| e.firewall.clone())
+            .map(|fw| shepherd_host_api::FirewallSpec {
+                default_deny: fw.default_deny,
+                allow: fw.allow,
+                deny: fw.deny,
+            });
+    let browser = entry
+        .and_then(|e| e.browser.clone())
+        .map(|b| shepherd_host_api::BrowserSpec {
+            policy_id: id.as_str().to_string(),
+            profile_id: b.profile_id,
+            mode: b.mode,
+            start_url: b.start_url,
+            url_allowlist: b.url_allowlist,
+            url_blocklist: b.url_blocklist,
+            disable_dev_tools: b.disable_dev_tools,
+            disable_incognito: b.disable_incognito,
+            disable_extensions: b.disable_extensions,
+            wipe_on_exit: b.wipe_on_exit,
+        });
+    let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
+    let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
+    // Hand the activity the same check that gates its availability, so
+    // (e.g.) a media grid hides online-only items instead of leaving
+    // tiles that error on tap. The entry's own target wins over the
+    // service's; `forward_check = false` suppresses both.
+    let connectivity_check = entry.and_then(|e| {
+        if !e.internet.forward_check {
+            return None;
+        }
+        e.internet
+            .check
+            .as_ref()
+            .or(eng.policy().service.internet.check.as_ref())
+            .map(|t| t.original.clone())
+    });
+    // The cache the activity writes to is the one shepherdd prefetches
+    // into, so the eviction policy has to travel with the launch.
+    let is_media = matches!(kind, Some(EntryKind::Media { .. }));
+    let media_watched_grace_days = is_media.then(|| eng.policy().service.media.watched_grace_days);
+    let media_cache_max_bytes = is_media.then(|| eng.policy().service.media.cache_max_bytes);
+    let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
+
+    let log_path = eng.policy().service.capture_child_output.then(|| {
+        let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+        let filename = format!(
+            "{}_{}.log",
+            id.as_str().replace(['/', '\\', ' '], "_"),
+            timestamp
+        );
+        eng.policy().service.child_log_dir.join(filename)
+    });
+
+    let opts = SpawnOptions {
+        entry_id: Some(id.as_str().to_string()),
+        capture_stdout: log_path.is_some(),
+        capture_stderr: log_path.is_some(),
+        log_path,
+        firewall,
+        browser,
+        input_compat,
+        input_compat_options,
+        connectivity_check,
+        media_watched_grace_days,
+        media_cache_max_bytes,
+        ..Default::default()
+    };
+
+    (kind, opts, needs_hidpi)
 }
 
 fn convert_volume_policy(p: &VolumePolicy) -> VolumeRestrictions {

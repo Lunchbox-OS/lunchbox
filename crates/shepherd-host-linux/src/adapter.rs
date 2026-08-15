@@ -69,7 +69,7 @@ const WINDOW_READY_POLL: Duration = Duration::from_millis(500);
 const RECONCILE_EVERY_TICKS: u64 = 20;
 
 /// Expand `~` at the beginning of a path to the user's home directory
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             return path.replacen("~", &home.to_string_lossy(), 1);
@@ -206,6 +206,10 @@ struct SessionInfo {
     /// *system* manager, so `systemctl stop` on it (via the helper) reaches
     /// processes our own signals may not.
     firewall_scope: Option<String>,
+    /// A RetroArch session, which gets a longer graceful-stop window: its
+    /// shutdown has to unload the core, flush the in-game save, and write a
+    /// save state before the process goes away.
+    retroarch: bool,
 }
 
 /// How a session's graceful SIGTERM is delivered.
@@ -1292,6 +1296,10 @@ impl HostAdapter for LinuxHost {
         entry_kind: &EntryKind,
         options: SpawnOptions,
     ) -> HostResult<HostSessionHandle> {
+        // RetroArch sessions need a longer grace period on stop than the
+        // generic default; `stop` reads this back off the session info.
+        let is_retroarch = matches!(entry_kind, EntryKind::Retroarch { .. });
+
         // Extract argv, env, cwd, snap_name, flatpak_app_id, and steam_app_id based on entry kind
         let (argv, env, cwd, snap_name, flatpak_app_id, steam_app_id) = match entry_kind {
             EntryKind::Process {
@@ -1379,6 +1387,40 @@ impl HostAdapter for LinuxHost {
                 None,
                 None,
             ),
+            EntryKind::Retroarch {
+                core,
+                core_path,
+                content,
+                save_state,
+                command,
+                args,
+                env,
+                kiosk,
+            } => {
+                let spec = crate::retroarch::Spec {
+                    core: core.as_deref(),
+                    core_path: core_path.as_deref(),
+                    content,
+                    save_state: *save_state,
+                    command,
+                    args,
+                    kiosk: *kiosk,
+                };
+                let launch =
+                    crate::retroarch::prepare(&spec, options.entry_id.as_deref(), expand_tilde)
+                        .map_err(|e| {
+                            HostError::SpawnFailed(format!(
+                                "Failed to prepare RetroArch config: {}",
+                                e
+                            ))
+                        })?;
+                info!(
+                    argv = ?launch.argv,
+                    state_dir = %launch.paths.root.display(),
+                    "Prepared RetroArch launch"
+                );
+                (launch.argv, env.clone(), None, None, None, None)
+            }
             EntryKind::Custom {
                 type_name: _,
                 payload: _,
@@ -1607,6 +1649,7 @@ impl HostAdapter for LinuxHost {
             flatpak_app_id: flatpak_app_id.clone(),
             steam_app_id,
             firewall_scope: firewall_scope.clone(),
+            retroarch: is_retroarch,
         };
         self.session_info
             .lock()
@@ -1667,6 +1710,17 @@ impl HostAdapter for LinuxHost {
 
         match mode {
             StopMode::Graceful { timeout } => {
+                // Raise the floor for RetroArch: its shutdown unloads the
+                // core, flushes the in-game save, and writes a save state, and
+                // the cost of cutting that short is the child's save file. The
+                // callers all pass the generic 5s, which is a fine default for
+                // an app whose shutdown is just "exit".
+                let timeout = if session_info.as_ref().is_some_and(|i| i.retroarch) {
+                    timeout.max(crate::retroarch::STOP_TIMEOUT)
+                } else {
+                    timeout
+                };
+
                 let plan = session_info.as_ref().map(GracefulSignal::for_session);
 
                 match plan {
@@ -2180,6 +2234,7 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
+            retroarch: false,
         });
         host.session_info
             .lock()
@@ -2429,6 +2484,7 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
+            retroarch: false,
         }
     }
 
@@ -2479,6 +2535,92 @@ mod tests {
             GracefulSignal::for_session(&steam),
             GracefulSignal::SteamProcesses(504230)
         );
+    }
+
+    /// End-to-end for the RetroArch kind: the adapter materializes the config
+    /// fragment and hands RetroArch the argv that uses it.
+    // Holding the lock across the await is the point: it serializes tests
+    // against the process-global root env var, which `spawn` reads.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn retroarch_spawn_materializes_config_and_argv() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake = scratch.path().join("retroarch");
+        let recorded = scratch.path().join("argv");
+
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$ARGV_FILE\"; done\n\
+             while true; do sleep 0.05; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let state_root = scratch.path().join("state");
+        let _guard = crate::retroarch::ROOT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(crate::retroarch::RETROARCH_ROOT_ENV, &state_root) };
+
+        let host = LinuxHost::new();
+        let _rx = host.subscribe();
+
+        let entry = EntryKind::Retroarch {
+            core: None,
+            core_path: Some("/opt/cores/mgba_libretro.so".into()),
+            content: "/srv/roms/pokemon-firered.gba".into(),
+            save_state: shepherd_api::RetroarchSaveState::Auto,
+            command: fake.to_string_lossy().into_owned(),
+            args: vec!["--verbose".into()],
+            env: HashMap::from([("ARGV_FILE".to_string(), recorded.display().to_string())]),
+            kiosk: true,
+        };
+
+        let handle = host
+            .spawn(
+                SessionId::new(),
+                &entry,
+                SpawnOptions {
+                    entry_id: Some("pokemon-firered".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        let fragment = state_root.join("pokemon-firered/append.cfg");
+        assert_eq!(
+            argv,
+            vec![
+                "--appendconfig".to_string(),
+                fragment.display().to_string(),
+                "-f".to_string(),
+                "-L".to_string(),
+                "/opt/cores/mgba_libretro.so".to_string(),
+                "/srv/roms/pokemon-firered.gba".to_string(),
+                "--verbose".to_string(),
+            ]
+        );
+
+        let cfg = std::fs::read_to_string(&fragment).expect("fragment should exist");
+        assert!(cfg.contains("savestate_auto_save = \"true\""));
+        assert!(cfg.contains("savestate_auto_load = \"true\""));
+        assert!(cfg.contains("config_save_on_exit = \"false\""));
+        assert!(cfg.contains("kiosk_mode_enable = \"true\""));
+
+        host.stop(&handle, StopMode::Force).await.unwrap();
+        unsafe { std::env::remove_var(crate::retroarch::RETROARCH_ROOT_ENV) };
     }
 
     /// A graceful stop must let the activity finish saving.

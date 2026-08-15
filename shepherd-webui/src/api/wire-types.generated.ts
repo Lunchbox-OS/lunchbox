@@ -529,6 +529,53 @@ export type EntryKind =
        */
       sort_by?: MediaSortBy;
     }
+  /**
+   * A single piece of content played through the RetroArch libretro
+   * frontend, launched directly on its CLI (`retroarch -L <core> <content>`).
+   *
+   * Distinct from [`EntryKind::Process`] because RetroArch needs settings
+   * materialized around the launch to behave in a kiosk: save state on
+   * close, restore it on open, flush the in-game save periodically, and
+   * stay out of its own menu. The host adapter renders those into a config
+   * fragment it passes with `--appendconfig`; the user's own `retroarch.cfg`
+   * is never edited. See `shepherd-host-linux::retroarch`.
+   */
+  | {
+      type: "retroarch";
+      /**
+       * Extra arguments, appended after the ones shepherd derives.
+       */
+      args?: string[];
+      /**
+       * The RetroArch binary. Defaults to `retroarch` on `PATH`.
+       */
+      command?: string;
+      /**
+       * The content (ROM / disc image) to load.
+       */
+      content: string;
+      /**
+       * Core short name, e.g. `"mgba"` → `mgba_libretro.so`, resolved
+       * against the usual libretro core directories. Mutually exclusive
+       * with `core_path`.
+       */
+      core?: string | null;
+      /**
+       * Absolute path to a `*_libretro.so`, bypassing name resolution.
+       */
+      core_path?: string | null;
+      env?: Record<string, string>;
+      /**
+       * Lock RetroArch's own menu so the activity can't be used to browse
+       * the filesystem or change emulator settings. On by default: this is
+       * a supervised kiosk.
+       */
+      kiosk?: boolean;
+      /**
+       * Whether closing the activity saves state and opening restores it.
+       */
+      save_state?: RetroarchSaveState;
+    }
   | {
       type: "custom";
       payload: unknown;
@@ -545,6 +592,7 @@ export type EntryKindTag =
   | "flatpak"
   | "vm"
   | "media"
+  | "retroarch"
   | "custom";
 
 /**
@@ -1162,6 +1210,30 @@ export type ReasonCode =
       label: string;
       reason: ReasonCode;
     };
+
+/**
+ * How a [`EntryKind::Retroarch`] activity treats its save state across
+ * close and re-open.
+ *
+ * This is the emulator's *snapshot*, not the game's own save file. The
+ * in-game save (SRAM / battery save) is flushed on a clean exit either way,
+ * and periodically while playing.
+ */
+export type RetroarchSaveState =
+  /**
+   * Write a save state when the activity closes and load it on the next
+   * open, so the child resumes exactly where they stopped — mid-battle,
+   * mid-cutscene, wherever the session ended.
+   *
+   * Note this makes the console's own power-on screen unreachable, which is
+   * what the HUD's reset button is for.
+   */
+  | "auto"
+  /**
+   * Leave save states alone. Every launch boots the content from scratch;
+   * only the in-game save carries over.
+   */
+  | "off";
 
 /**
  * Full service state snapshot

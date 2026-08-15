@@ -8,6 +8,7 @@ use crate::schema::{
 use shepherd_util::GROUP_SUBJECT_PREFIX;
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::path::Path;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -294,6 +295,21 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
                     }
                 }
             }
+        }
+        RawEntryKind::Retroarch {
+            core,
+            core_path,
+            content,
+            command,
+            ..
+        } => {
+            errors.extend(validate_retroarch(
+                &entry.id,
+                core.as_deref(),
+                core_path.as_deref(),
+                content,
+                command,
+            ));
         }
         RawEntryKind::Custom { type_name, .. } => {
             if type_name.is_empty() {
@@ -587,6 +603,78 @@ fn validate_time_window(window: &RawTimeWindow, entry_id: &str) -> Vec<Validatio
     }
 
     errors
+}
+
+/// Validate a `type = "retroarch"` entry kind.
+///
+/// The content path is the strict one: a bare relative path would be resolved
+/// against shepherdd's working directory, not the operator's, so it silently
+/// fails to find the ROM at launch time rather than here.
+fn validate_retroarch(
+    entry_id: &str,
+    core: Option<&str>,
+    core_path: Option<&Path>,
+    content: &Path,
+    command: &str,
+) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    let mut err = |message: String| {
+        errors.push(ValidationError::EntryError {
+            entry_id: entry_id.to_string(),
+            message,
+        })
+    };
+
+    match (core, core_path) {
+        (Some(_), Some(_)) => err("set either core or core_path, not both".into()),
+        (None, None) => err("one of core (e.g. core = \"mgba\") or core_path is required".into()),
+        (Some(name), None) => {
+            if name.is_empty() {
+                err("core cannot be empty".into());
+            } else if name.contains('/') {
+                err(format!(
+                    "core is a name, not a path: use core = \"{}\" or set core_path instead",
+                    Path::new(name)
+                        .file_stem()
+                        .map(|s| s
+                            .to_string_lossy()
+                            .trim_end_matches("_libretro")
+                            .to_string())
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        (None, Some(path)) => {
+            if !is_rooted(path) {
+                err(format!(
+                    "core_path must be absolute or start with ~/: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    if content.as_os_str().is_empty() {
+        err("content cannot be empty".into());
+    } else if !is_rooted(content) {
+        err(format!(
+            "content must be absolute or start with ~/ (a relative path resolves \
+             against the daemon's working directory, not yours): {}",
+            content.display()
+        ));
+    }
+
+    if command.is_empty() {
+        err("command cannot be empty".into());
+    }
+
+    errors
+}
+
+/// Whether a configured path is anchored somewhere predictable — absolute, or
+/// tilde-relative to the user's home (which the host adapter expands).
+fn is_rooted(path: &Path) -> bool {
+    path.is_absolute() || path.starts_with("~")
 }
 
 fn validate_firewall(firewall: &RawFirewallConfig, entry_id: &str) -> Vec<ValidationError> {
@@ -1214,6 +1302,102 @@ mod tests {
     }
 
     /// Build a two-entry config where "minecraft" is gated on "scratch", with
+    /// Validate one `type = "retroarch"` entry whose kind body is `kind_toml`.
+    fn retroarch_errors(kind_toml: &str) -> Vec<String> {
+        let toml = format!(
+            r#"
+            config_version = 1
+
+            [[entries]]
+            id = "pokemon-firered"
+            label = "Pokemon FireRed"
+            [entries.kind]
+            type = "retroarch"
+            {kind_toml}
+            "#
+        );
+        let config: RawConfig = toml::from_str(&toml).expect("test config should parse");
+        validate_config(&config)
+            .iter()
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn valid_retroarch_entry_passes() {
+        assert!(
+            retroarch_errors(
+                r#"core = "mgba"
+                   content = "~/Games/retroarch/pokemon-firered.gba""#
+            )
+            .is_empty()
+        );
+    }
+
+    /// A bare relative path resolves against the daemon's working directory,
+    /// not the operator's, so it fails at launch time with a confusing error
+    /// instead of here. This is the shape of the entry in issue #125.
+    #[test]
+    fn retroarch_rejects_a_relative_content_path() {
+        let errors = retroarch_errors(
+            r#"core = "mgba"
+               content = "Games/retroarch/pokemon-firered.gba""#,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("must be absolute")),
+            "expected a relative-path error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn retroarch_requires_exactly_one_core_source() {
+        let neither = retroarch_errors(r#"content = "/roms/g.gba""#);
+        assert!(
+            neither.iter().any(|e| e.contains("is required")),
+            "expected a missing-core error, got: {neither:?}"
+        );
+
+        let both = retroarch_errors(
+            r#"core = "mgba"
+               core_path = "/opt/cores/mgba_libretro.so"
+               content = "/roms/g.gba""#,
+        );
+        assert!(
+            both.iter().any(|e| e.contains("not both")),
+            "expected a both-set error, got: {both:?}"
+        );
+    }
+
+    /// `core` names a core, `core_path` points at one. Writing a path into
+    /// `core` would be silently turned into a nonsense filename.
+    #[test]
+    fn retroarch_rejects_a_path_in_the_core_name() {
+        let errors = retroarch_errors(
+            r#"core = "/usr/lib/libretro/mgba_libretro.so"
+               content = "/roms/g.gba""#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("core is a name, not a path")),
+            "expected a core-name error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn retroarch_rejects_a_relative_core_path() {
+        let errors = retroarch_errors(
+            r#"core_path = "cores/mgba_libretro.so"
+               content = "/roms/g.gba""#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("core_path must be absolute")),
+            "expected a relative core_path error, got: {errors:?}"
+        );
+    }
+
     /// `tokens_toml` supplying the gate body.
     fn config_with_token_gate(tokens_toml: &str) -> RawConfig {
         let toml = format!(
