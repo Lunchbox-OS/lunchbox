@@ -12,6 +12,7 @@ mod imp {
 
     #[derive(Default)]
     pub struct TimeDisplay {
+        pub icon: RefCell<Option<gtk4::Image>>,
         pub label: RefCell<Option<gtk4::Label>>,
         pub total_secs: RefCell<Option<u64>>,
         pub remaining_secs: RefCell<Option<u64>>,
@@ -36,6 +37,7 @@ mod imp {
             let icon = gtk4::Image::from_icon_name("preferences-system-time-symbolic");
             icon.set_pixel_size(20);
             obj.append(&icon);
+            *self.icon.borrow_mut() = Some(icon);
 
             // Time label
             let label = gtk4::Label::new(Some("--:--"));
@@ -59,6 +61,15 @@ glib::wrapper! {
 impl TimeDisplay {
     pub fn new() -> Self {
         glib::Object::builder().build()
+    }
+
+    /// Resize the clock icon. Called with the HUD scale factor applied, like
+    /// every other HUD icon, so it keeps its physical size when shepherdd drops
+    /// the compositor scale for an XWayland activity (issue #114).
+    pub fn set_icon_pixel_size(&self, px: i32) {
+        if let Some(icon) = self.imp().icon.borrow().as_ref() {
+            icon.set_pixel_size(px);
+        }
     }
 
     /// Set the time limit in seconds

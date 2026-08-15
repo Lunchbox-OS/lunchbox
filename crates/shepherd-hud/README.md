@@ -137,6 +137,42 @@ The HUD is designed to be:
 - **Touch-friendly** - Large touch targets
 - **Minimal** - Icons over text where possible
 
+## HUD scale factor (the XWayland DPI hack)
+
+While an `xwayland_native_resolution` activity runs, shepherdd drops every sway
+output to `scale 1.0` and broadcasts the captured pre-launch scale as
+`HudScaleChanged { factor }` (issue #45). The HUD is layer-shell and lives in
+logical pixels, so it counter-scales by that factor to keep its physical size.
+
+The event only fires on *change*, so the HUD also fetches the current factor with
+`get_hud_scale` on every (re)connect — otherwise a HUD that started late, or
+whose connection dropped mid-activity, would render un-counter-scaled for the
+rest of the session with nothing to correct it (issue #118).
+
+**The rule for anything you add to the HUD:** a dimension only follows the factor
+if it is either
+
+1. an `Npx` literal in `CSS_TEMPLATE` — `apply_scale` multiplies every one of
+   them (`scale_px_literals`), or
+2. rescaled explicitly in the 500ms timer in `build_hud_content`, next to the
+   icon `set_pixel_size`, slider `width_request`, and `gtk4::Box` spacing calls.
+
+Anything else — a size the GTK theme supplies, or a widget property left at its
+constructor value — keeps its logical-pixel value and renders 1/factor too small
+on a HiDPI panel. That is issue #114 and its follow-ups; note that a theme rule
+on the element (e.g. `button { font-size }`) beats an inherited value, so a size
+"inherited from the root" is not scaled unless the more specific rule states it.
+
+One further trap, from #118: GTK validates a widget's style when it is **mapped**
+and leaves it alone while hidden. A widget that is hidden across a
+`HudScaleChanged` therefore keeps the *previous* factor's style — it measures,
+and can paint, at the old size while the always-mapped bar around it is already
+correct. Re-rooting it does not clear that; only building it fresh does (a new
+widget has no cached style and takes the current stylesheet immediately). Hence
+`build_confirm_prompt`, which is called again on every scale change instead of
+restyling the prompt in place. Anything else that lives hidden across a scale
+change needs the same treatment.
+
 ## Layer-Shell Details
 
 ```rust

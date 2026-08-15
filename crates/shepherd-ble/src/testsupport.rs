@@ -181,6 +181,9 @@ impl ManagementService for MockSvc {
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Err(ManagementError::Internal("nope".into()))
     }
+    async fn get_hud_scale(&self) -> f64 {
+        1.0
+    }
     async fn get_display_state(&self) -> DisplayState {
         DisplayState {
             mode: DisplayMode::SingleInternal,

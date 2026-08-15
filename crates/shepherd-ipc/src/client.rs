@@ -175,6 +175,12 @@ impl IpcClient {
         self.call("get_brightness", Value::Null).await
     }
 
+    /// The HUD counter-scale factor currently in force. Shells seed this on
+    /// connect because `HudScaleChanged` is only broadcast when it changes.
+    pub async fn get_hud_scale(&mut self) -> IpcResult<f64> {
+        self.call("get_hud_scale", Value::Null).await
+    }
+
     pub async fn get_display_state(&mut self) -> IpcResult<DisplayState> {
         self.call("get_display_state", Value::Null).await
     }
