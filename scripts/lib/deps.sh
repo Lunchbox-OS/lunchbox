@@ -129,8 +129,17 @@ install_bpf_toolchain() {
     # (or a cached image layer) carrying a different bpf-linker is the
     # failure this pin exists to prevent, and skipping the install because
     # *something* is present would preserve it.
-    local installed
-    installed="$(bpf-linker --version 2>/dev/null | awk '{print $2}')"
+    # Guard the probe: this script runs under `set -euo pipefail`, so on a
+    # host without bpf-linker the missing command returns 127, pipefail
+    # promotes that to the pipeline's status, the bare assignment inherits
+    # it, and `set -e` kills the whole install. That is not hypothetical —
+    # it is how this line first reached CI, which died with exit 127 on a
+    # fresh image while working on every machine that already had the
+    # binary. `command_exists` keeps the probe off the failure path.
+    local installed=""
+    if command_exists bpf-linker; then
+        installed="$(bpf-linker --version 2>/dev/null | awk '{print $2}' || true)"
+    fi
     if [[ "$installed" == "$BPF_LINKER_VERSION" ]]; then
         info "bpf-linker $BPF_LINKER_VERSION already installed"
     else
@@ -240,8 +249,13 @@ install_cargo_ndk() {
     # version — the binary answers "This binary may only be called via
     # `cargo ndk`." and exits 0, so parsing its output yields an empty
     # string and every run would reinstall.
+    # `|| true` for the same reason the bpf-linker probe is guarded: under
+    # `set -euo pipefail`, `cargo ndk` on a host without cargo-ndk exits
+    # non-zero, pipefail propagates it, and the bare assignment would abort
+    # the install. command_exists can't help here — the binary is invoked
+    # through cargo — so absorb the status instead.
     local ndk_installed
-    ndk_installed="$(cargo ndk --version 2>/dev/null | awk '{print $2}')"
+    ndk_installed="$(cargo ndk --version 2>/dev/null | awk '{print $2}' || true)"
     if [[ "$ndk_installed" == "$CARGO_NDK_VERSION" ]]; then
         info "cargo-ndk $CARGO_NDK_VERSION already installed"
     else
