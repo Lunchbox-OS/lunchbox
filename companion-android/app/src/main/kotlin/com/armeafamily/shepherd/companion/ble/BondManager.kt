@@ -63,6 +63,31 @@ class BondManager(private val context: Context) {
         }
     }
 
+    /**
+     * Remove the bond for [identifier] and wait for it to clear.
+     *
+     * **Drops any GATT connection to that peer as a side effect**, so the
+     * caller must not be holding a link it still needs — close it first
+     * and reconnect afterwards. Doing this underneath a live pairing
+     * connection killed the link that the subsequent bond and claim ran
+     * over, surfacing as "pairing was cancelled or failed" with nothing
+     * having been cancelled.
+     *
+     * Best-effort, like [removeBond]: a platform that blocks the hidden
+     * call, or a removal that doesn't settle in time, is logged and the
+     * caller carries on with the bond in place — it might still work, and
+     * failing outright would leave no path forward.
+     */
+    @SuppressLint("MissingPermission")
+    suspend fun dropBond(identifier: String) {
+        val device = adapter.getRemoteDevice(identifier)
+        if (device.bondState == BluetoothDevice.BOND_NONE) return
+        Log.i(TAG, "Dropping the pre-existing bond for $identifier before re-pairing")
+        if (removeBond(identifier) && !awaitUnbonded(device)) {
+            Log.w(TAG, "Bond for $identifier did not clear in time; pairing with it in place")
+        }
+    }
+
     private companion object {
         const val TAG = "ShepherdBle"
 
@@ -72,42 +97,6 @@ class BondManager(private val context: Context) {
          * old bond is still tearing down.
          */
         const val UNBOND_TIMEOUT_MS = 3_000L
-    }
-
-    /**
-     * Bond with [identifier] from a clean slate, discarding any bond
-     * Android is already holding.
-     *
-     * This is what the pairing flow wants, and [ensureBonded] is not.
-     * `BOND_BONDED` on this side says nothing about whether the *peer*
-     * still has its half: after the device is factory-reset it calls
-     * BlueZ `remove_device`, and Android happily keeps listing the peer
-     * as bonded. That stale bond comes up at GATT level and then fails to
-     * encrypt, and because [ensureBonded] short-circuits on it, a fresh
-     * pairing never starts — the user re-pairs, the app skips straight to
-     * `claim` over a link that can't carry it, and pairing fails with a
-     * message about something else entirely.
-     *
-     * Dropping and re-creating is safe here because we only get called
-     * when the user is deliberately pairing, and the caller has already
-     * confirmed the device reports itself Unclaimed. A device that is
-     * Unclaimed has no admin, so any bond we're holding for it is either
-     * stale or about to be superseded.
-     *
-     * If [removeBond] is blocked by the platform we carry on with the
-     * existing bond: it might be fine, and failing outright would leave
-     * no path forward at all.
-     */
-    @SuppressLint("MissingPermission")
-    suspend fun ensureFreshBond(identifier: String): Boolean {
-        val device = adapter.getRemoteDevice(identifier)
-        if (device.bondState != BluetoothDevice.BOND_NONE) {
-            Log.i(TAG, "Dropping the existing bond for $identifier before re-pairing")
-            if (removeBond(identifier) && !awaitUnbonded(device)) {
-                Log.w(TAG, "Bond for $identifier did not clear in time; pairing with it in place")
-            }
-        }
-        return ensureBonded(identifier)
     }
 
     /**
@@ -161,9 +150,10 @@ class BondManager(private val context: Context) {
      * (`BOND_NONE`). Cancelling the coroutine unregisters the receiver
      * but does not abort an in-flight OS pairing.
      *
-     * Note this trusts an existing `BOND_BONDED` without verifying the
-     * peer agrees — see [ensureFreshBond], which is what the pairing flow
-     * should call.
+     * Trusts an existing `BOND_BONDED` and returns immediately. That is
+     * only correct when the peer is known to still hold its half; when it
+     * may not — a device that was factory-reset keeps Android listing a
+     * bond it has itself forgotten — the caller must [dropBond] first.
      */
     @SuppressLint("MissingPermission")
     suspend fun ensureBonded(identifier: String): Boolean {

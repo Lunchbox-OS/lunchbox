@@ -1,0 +1,17 @@
+# Build context for .ci/Dockerfile and .ci/Dockerfile.android.
+#
+# Both images copy only VERSION and scripts/ (they install dependencies;
+# the source is mounted or checked out by the jobs that use them). An
+# allowlist keeps the context to a few hundred KB.
+#
+# Without this the context is the whole working tree, which on a
+# developer machine means target/ — tens of gigabytes of build artifacts
+# streamed into the daemon before the first layer runs. CI never noticed
+# because a fresh checkout has no target/, but it makes reproducing an
+# image build locally fail with a confusing out-of-space error from
+# *inside* the container.
+#
+# If you add a COPY to either Dockerfile, add a matching `!` line here.
+*
+!VERSION
+!scripts

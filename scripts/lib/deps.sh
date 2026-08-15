@@ -19,6 +19,23 @@ DEPS_DIR="$(get_repo_root)/scripts/deps"
 # Rust installation URL
 RUSTUP_URL="https://sh.rustup.rs"
 
+# bpf-linker is pinned because its LLVM coupling changes between releases,
+# and an unpinned `cargo install` silently adopts whatever that coupling
+# has become. 0.10.3 defaults to the `rust-llvm-22` feature, which links
+# through `aya-rustc-llvm-proxy` against **rustc's own bundled LLVM** — so
+# it needs no system LLVM at all, and it matches the toolchain that
+# actually compiles the BPF crate (`rustc --version --verbose` reports
+# LLVM 22). 0.11.0 dropped the `rust-llvm-*` features entirely and
+# defaults to `llvm-23`, i.e. a *system* LLVM 23 that Ubuntu doesn't ship
+# yet; picking it up unpinned is what broke the CI image build with
+# "could not find llvm-config in directories specified by ... PATH".
+#
+# Before bumping this: check which LLVM the toolchain bundles
+# (`rustc --version --verbose | grep LLVM`) and pick the bpf-linker
+# feature that matches it. A mismatch here produces BPF objects the
+# kernel verifier rejects, not a build error.
+BPF_LINKER_VERSION="0.10.3"
+
 # Android SDK location and the command-line-tools bundle used to bootstrap
 # sdkmanager. The SDK lives outside any user home so it can be shared and
 # so apt never touches it. Versions track what the companion-android
@@ -31,6 +48,14 @@ ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinet
 # sdkmanager installs it under $ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION, which
 # is what cargo-ndk finds via ANDROID_NDK_HOME.
 ANDROID_NDK_VERSION="27.2.12479018"
+# cargo-ndk is pinned for the same reason as BPF_LINKER_VERSION: an
+# unpinned `cargo install` adopts whatever upstream published last, and a
+# cross-compiler driver is a bad place to discover that unattended. This
+# is the version the Android CI job has been building with, so pinning it
+# changes nothing today — it just stops the toolchain from moving on its
+# own. It bridges the Rust targets above to $ANDROID_NDK_VERSION's
+# clang/sysroot, so bump it deliberately, alongside the NDK.
+CARGO_NDK_VERSION="4.1.2"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
 # Rust targets cargo-ndk cross-compiles the shepherd-media-android cdylib for:
@@ -100,13 +125,34 @@ install_bpf_toolchain() {
         rustup toolchain install nightly --component rust-src --profile minimal
     fi
 
+    # Match on the exact pinned version, not merely "is it on PATH": a host
+    # (or a cached image layer) carrying a different bpf-linker is the
+    # failure this pin exists to prevent, and skipping the install because
+    # *something* is present would preserve it.
+    # Guard the probe: this script runs under `set -euo pipefail`, so on a
+    # host without bpf-linker the missing command returns 127, pipefail
+    # promotes that to the pipeline's status, the bare assignment inherits
+    # it, and `set -e` kills the whole install. That is not hypothetical —
+    # it is how this line first reached CI, which died with exit 127 on a
+    # fresh image while working on every machine that already had the
+    # binary. `command_exists` keeps the probe off the failure path.
+    local installed=""
     if command_exists bpf-linker; then
-        info "bpf-linker already installed ($(bpf-linker --version 2>/dev/null || echo '?'))"
+        installed="$(bpf-linker --version 2>/dev/null | awk '{print $2}' || true)"
+    fi
+    if [[ "$installed" == "$BPF_LINKER_VERSION" ]]; then
+        info "bpf-linker $BPF_LINKER_VERSION already installed"
     else
-        info "Installing bpf-linker (cargo install, ~1-2 min on first build)..."
-        # llvm-sys 201.x looks for $LLVM_SYS_201_PREFIX; Ubuntu's llvm-20-dev
-        # puts everything under /usr/lib/llvm-20.
-        LLVM_SYS_201_PREFIX=/usr/lib/llvm-20 cargo install bpf-linker
+        if [[ -n "$installed" ]]; then
+            info "Replacing bpf-linker $installed with pinned $BPF_LINKER_VERSION..."
+        else
+            info "Installing bpf-linker $BPF_LINKER_VERSION (cargo install, ~1-2 min on first build)..."
+        fi
+        # --locked: build against the versions upstream released with, so a
+        # dependency publishing a breaking change can't fail this the way an
+        # unpinned bpf-linker itself did. No LLVM_* variable is set on
+        # purpose — see BPF_LINKER_VERSION; this build links rustc's LLVM.
+        cargo install bpf-linker --version "$BPF_LINKER_VERSION" --locked --force
     fi
 }
 
@@ -195,11 +241,30 @@ install_cargo_ndk() {
     info "Adding Android Rust targets: ${ANDROID_RUST_TARGETS[*]}"
     rustup target add "${ANDROID_RUST_TARGETS[@]}"
 
-    if command_exists cargo-ndk; then
-        info "cargo-ndk already installed ($(cargo-ndk --version 2>/dev/null || echo '?'))"
+    # Version-matched rather than "is it on PATH", for the same reason as
+    # bpf-linker: a host or cached layer carrying a different build is
+    # exactly what the pin is meant to displace.
+    #
+    # Ask via the *subcommand* form. `cargo-ndk --version` does not report a
+    # version — the binary answers "This binary may only be called via
+    # `cargo ndk`." and exits 0, so parsing its output yields an empty
+    # string and every run would reinstall.
+    # `|| true` for the same reason the bpf-linker probe is guarded: under
+    # `set -euo pipefail`, `cargo ndk` on a host without cargo-ndk exits
+    # non-zero, pipefail propagates it, and the bare assignment would abort
+    # the install. command_exists can't help here — the binary is invoked
+    # through cargo — so absorb the status instead.
+    local ndk_installed
+    ndk_installed="$(cargo ndk --version 2>/dev/null | awk '{print $2}' || true)"
+    if [[ "$ndk_installed" == "$CARGO_NDK_VERSION" ]]; then
+        info "cargo-ndk $CARGO_NDK_VERSION already installed"
     else
-        info "Installing cargo-ndk (cargo install, ~1-2 min on first build)..."
-        cargo install cargo-ndk
+        if [[ -n "$ndk_installed" ]]; then
+            info "Replacing cargo-ndk $ndk_installed with pinned $CARGO_NDK_VERSION..."
+        else
+            info "Installing cargo-ndk $CARGO_NDK_VERSION (cargo install, ~1-2 min on first build)..."
+        fi
+        cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked --force
     fi
 }
 

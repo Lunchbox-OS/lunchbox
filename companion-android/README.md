@@ -82,7 +82,15 @@ sideload-friendly (`adb install`).
 
 Unit tests cover the load-bearing, hardware-independent layers: the
 framing codec (`FramingTest`) and the wire decode of every sampled
-payload in the spec (`WireTest`). Against a real device, follow the
-spec's §10 smoke test: build a shepherd-launcher device with
-`[service.ble_management] enabled = true`, then scan → pair → claim and
-exercise each screen.
+payload in the spec (`WireTest`).
+
+Everything that has actually broken in production lives below that line —
+implicit bonding, link encryption, and the connect-time drain are all in
+the Android and BlueZ stacks, where no unit test reaches. Verify those
+against real hardware with the **`companion-pairing` skill**
+(<.claude/skills/companion-pairing/SKILL.md>), which drives a
+USB-attached phone through pair → claim → reconnect → re-pair against the
+headless dev session and records what to check on both sides. Treat a
+pass through it as required for changes to `ShepherdConnection` or
+`BondManager`; the operator-facing version of the same flow is "Pairing
+your phone with a device" in <docs/INSTALL.md>.
