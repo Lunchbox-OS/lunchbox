@@ -136,7 +136,8 @@ That adds a third-party apt source for the whole system, which is why it is
 opt-in; `sudo add-apt-repository --remove ppa:libretro/testing` reverts it.
 
 **No games are installed** — supply your own, and only ones you have the right
-to.
+to. See [emulators.md](./emulators.md) for configuring an activity, where saves
+live, and how the reset button works.
 
 `apps install steam` also connects the snap's `mount-observe` interface and
 permits unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`
