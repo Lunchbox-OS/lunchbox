@@ -786,17 +786,213 @@ ensure_flathub() {
     flatpak remote-add --if-not-exists flathub "$FLATHUB_REMOTE_URL"
 }
 
+# ---------------------------------------------------------------------------
+# RetroArch (type = "retroarch" entries)
+# ---------------------------------------------------------------------------
+
+# libretro cores packaged for Ubuntu, by the short name an entry's `core =`
+# field takes. The package is always `libretro-<name>` and the shared object
+# `<name>_libretro.so`, which is what shepherd's core resolution looks for.
+#
+# Deliberately only the distro's own packages: RetroArch's built-in "core
+# downloader" pulls unsigned binaries at runtime, which is not something a
+# supervised kiosk should be doing behind the operator's back.
+#
+# Each row is `<core name>:<the system it runs>`, so the usage text can say
+# what a core is for instead of listing bare names.
+RETROARCH_CORES=(
+    "beetle-pce-fast:PC Engine / TurboGrafx-16"
+    "beetle-psx:PlayStation"
+    "beetle-vb:Virtual Boy"
+    "beetle-wswan:WonderSwan"
+    "bsnes-mercury-accuracy:SNES (accuracy over speed)"
+    "bsnes-mercury-balanced:SNES"
+    "bsnes-mercury-performance:SNES (speed over accuracy)"
+    "desmume:Nintendo DS"
+    "gambatte:Game Boy / Color"
+    "genesisplusgx:Mega Drive / Genesis / Master System"
+    "mgba:Game Boy Advance, Game Boy / Color"
+    "nestopia:NES"
+    "sameboy:Game Boy / Color"
+    "snes9x:SNES"
+)
+
+# Installed when no core is named: the one config.example.toml documents.
+RETROARCH_DEFAULT_CORES=(mgba)
+
+# Whether $1 is a core this script knows how to install.
+retroarch_core_is_known() {
+    local candidate="$1" row
+    for row in "${RETROARCH_CORES[@]}"; do
+        [[ "${row%%:*}" == "$candidate" ]] && return 0
+    done
+    return 1
+}
+
+# Just the core names, space-separated (for error messages).
+retroarch_core_names() {
+    local row names=()
+    for row in "${RETROARCH_CORES[@]}"; do
+        names+=("${row%%:*}")
+    done
+    printf '%s' "${names[*]}"
+}
+
+# The available cores, one indented `name  — system` line each.
+retroarch_core_table() {
+    local row
+    for row in "${RETROARCH_CORES[@]}"; do
+        printf '                %-26s %s\n' "${row%%:*}" "${row#*:}"
+    done
+}
+
+# The libretro team's PPAs, opted into with `--ppa[=channel]`.
+#
+# Which one matters, and not the way the names suggest:
+#
+#   testing  ~98 core packages — everything the Ubuntu archive has plus N64,
+#            GameCube/Wii, DS, PlayStation, MAME and the rest. This is the only
+#            source that adds cores, so it is what a bare `--ppa` selects.
+#   stable   the RetroArch *frontend* only: no cores at all. Its version has
+#            matched the archive's on recent releases, so it is rarely worth
+#            adding; offered for tracking upstream builds between Ubuntu
+#            releases.
+RETROARCH_PPA_CHANNELS="testing stable"
+RETROARCH_PPA_DEFAULT_CHANNEL="testing"
+
+# Whether a package exists in the configured apt sources.
+apt_package_available() {
+    local candidate
+    candidate=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+    [[ -n "$candidate" && "$candidate" != "(none)" ]]
+}
+
+# Add a libretro PPA (idempotent; `add-apt-repository` no-ops if present).
+retroarch_add_ppa() {
+    local channel="$1"
+    if ! command_exists add-apt-repository; then
+        info "Installing software-properties-common (for add-apt-repository)..."
+        maybe_sudo apt-get install -y software-properties-common
+    fi
+    warn "Adding ppa:libretro/$channel — a third-party apt source, which can"
+    warn "install and upgrade packages on this system from here on. Remove it"
+    warn "with: sudo add-apt-repository --remove ppa:libretro/$channel"
+    maybe_sudo add-apt-repository -y "ppa:libretro/$channel"
+}
+
+# Install RetroArch plus the named cores (default: mgba).
+#
+# Cores are named the way an entry names them (`core = "mgba"`), not by package,
+# so there is one spelling to learn — and the naming holds across both the
+# Ubuntu archive and the PPAs, so an entry does not care where its core came
+# from. Everything lands in the multiarch libretro directory, which is on
+# shepherd's core search path.
+retroarch_install() {
+    local -a cores=()
+    local ppa_channel=""
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            --ppa)
+                ppa_channel="$RETROARCH_PPA_DEFAULT_CHANNEL"
+                ;;
+            --ppa=*)
+                ppa_channel="${arg#--ppa=}"
+                if [[ " $RETROARCH_PPA_CHANNELS " != *" $ppa_channel "* ]]; then
+                    die "Unknown PPA channel '$ppa_channel' (expected: $RETROARCH_PPA_CHANNELS)"
+                fi
+                ;;
+            -*)
+                die "Unknown option '$arg' (expected: --ppa[=${RETROARCH_PPA_CHANNELS// /|}])"
+                ;;
+            *)
+                # A package name is about to be built from this, so keep it to
+                # something that cannot be mistaken for an option or a path.
+                if [[ ! "$arg" =~ ^[a-z0-9][a-z0-9._+-]*$ ]]; then
+                    die "Invalid core name '$arg'"
+                fi
+                cores+=("$arg")
+                ;;
+        esac
+    done
+
+    if [[ ${#cores[@]} -eq 0 ]]; then
+        cores=("${RETROARCH_DEFAULT_CORES[@]}")
+    fi
+
+    # Without a PPA the catalog is known up front, so a typo can be caught
+    # before asking for root. With one it isn't — the whole point is that more
+    # cores become available — so those names are checked against apt after the
+    # repository is added, below.
+    local core
+    if [[ -z "$ppa_channel" ]]; then
+        for core in "${cores[@]}"; do
+            if ! retroarch_core_is_known "$core"; then
+                die "Unknown core '$core'. Available: $(retroarch_core_names)
+Many more (N64, GameCube/Wii, Saturn, arcade...) are packaged only in the
+libretro PPA, which is opt-in:
+    sudo shepherd-admin apps install retroarch --ppa $core"
+            fi
+        done
+    fi
+
+    require_root
+
+    if [[ -n "$ppa_channel" ]]; then
+        retroarch_add_ppa "$ppa_channel"
+    fi
+
+    maybe_sudo apt-get update
+
+    local -a packages=(retroarch retroarch-assets libretro-core-info)
+    for core in "${cores[@]}"; do
+        if ! apt_package_available "libretro-$core"; then
+            die "No package 'libretro-$core' in the configured apt sources.
+List what is available with:
+    apt-cache search --names-only '^libretro-'"
+        fi
+        packages+=("libretro-$core")
+    done
+
+    info "Installing RetroArch and cores: ${cores[*]}"
+    if ! maybe_sudo apt-get install -y "${packages[@]}"; then
+        die "Failed to install: ${packages[*]}"
+    fi
+    success "Installed RetroArch with cores: ${cores[*]}"
+
+    cat <<EOF
+
+Reference a game with:
+
+    [entries.kind]
+    type = "retroarch"
+    core = "${cores[0]}"
+    content = "~/Games/roms/your-game.rom"
+
+The content path must be absolute or start with ~/. shepherd stores each
+entry's saves and save states under its own directory in the data dir, and
+saves state on close / restores it on open by default.
+
+No games are installed — supply your own, and only ones you have the right to.
+EOF
+}
+
 # Install a supported activity backend, or one of the project's own Android
 # apps, using whichever packaging each actually expects — they all differ. The
 # type="steam" adapter drives Canonical's Steam *snap* (config.example.toml
 # documents `snap install steam`), Chrome is wrapped as the Flathub flatpak
-# `com.google.Chrome`, and the companion/media apps are APKs pushed over adb to
-# an attached phone or TV stick (see the Android-apps section above). Add rows
-# here as new backends are supported.
+# `com.google.Chrome`, RetroArch comes from the distro's own packages, and the
+# companion/media apps are APKs pushed over adb to an attached phone or TV
+# stick (see the Android-apps section above). Add rows here as new backends are
+# supported.
 apps_install() {
     local app="${1:-}"
     shift || true
     case "$app" in
+        retroarch)
+            retroarch_install "$@"
+            ;;
         steam)
             require_root
             require_command snap
@@ -829,27 +1025,49 @@ apps_install() {
             return 0
             ;;
         *)
-            die "Unknown app '$app' (supported: steam, chrome, companion, media)"
+            die "Unknown app '$app' (supported: steam, chrome, retroarch, companion, media)"
             ;;
     esac
 }
 
 apps_usage() {
     cat <<EOF
-Usage: shepherd-admin apps install <steam|chrome>
+Usage: shepherd-admin apps install <steam|chrome|retroarch [core...]>
        shepherd-admin apps install <companion|media> [options]
 
 Installs a supported activity backend, or one of shepherd's own Android apps,
 with the packaging each expects (they differ):
 
-    steam    Canonical's Steam snap (drives type = "steam" entries). Launch it
-             and log in once before those entries will work. Also permits
-             unprivileged user namespaces (Ubuntu restricts them by default),
-             which Steam's sandbox needs — see $USERNS_DROPIN.
-    chrome   com.google.Chrome from Flathub (for kind = "flatpak" entries).
+    steam       Canonical's Steam snap (drives type = "steam" entries). Launch
+                it and log in once before those entries will work. Also permits
+                unprivileged user namespaces (Ubuntu restricts them by default),
+                which Steam's sandbox needs — see $USERNS_DROPIN.
+    chrome      com.google.Chrome from Flathub (for kind = "flatpak" entries).
+    retroarch   RetroArch and libretro cores (drives type = "retroarch"
+                entries). Takes the cores to install, named as an entry's
+                \`core =\` field names them; defaults to ${RETROARCH_DEFAULT_CORES[*]}.
+                Installs no games.
 
-    companion  Shepherd Companion, the parent-facing admin app.
-    media      Shepherd Media, the media player for phones/tablets/Fire TV.
+                From the Ubuntu archive by default. Pass --ppa to add the
+                libretro team's PPA instead, which is the only way to get cores
+                the archive does not package (N64, GameCube/Wii, Saturn, arcade
+                via MAME, and ~85 more). That is a third-party apt source for
+                the whole system, so it is opt-in:
+
+                    --ppa            ppa:libretro/testing — the cores
+                    --ppa=testing    same
+                    --ppa=stable     the RetroArch frontend only, NO cores
+                                     (and the same version the archive ships
+                                     on recent releases)
+
+                Cores in the Ubuntu archive (docs/emulators.md lists the
+                full catalog, including everything --ppa adds):
+$(retroarch_core_table)
+                e.g.  shepherd-admin apps install retroarch mgba nestopia
+                      shepherd-admin apps install retroarch --ppa mupen64plus-next
+
+    companion   Shepherd Companion, the parent-facing admin app.
+    media       Shepherd Media, the media player for phones/tablets/Fire TV.
 
 Both Android apps are installed onto an attached Android device over adb. The
 APK is built from this checkout's Gradle project when run from source, and

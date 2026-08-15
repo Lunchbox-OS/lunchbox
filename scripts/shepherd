@@ -55,8 +55,9 @@ Commands:
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
     version     Show or bump the project version
     package     Build distributable packages (.deb, F-Droid repo)
-    apps        Install activity backends (steam via snap, chrome via Flathub)
-                or the Android apps (companion/media) onto an attached device
+    apps        Install activity backends (steam via snap, chrome via Flathub,
+                retroarch) or the Android apps (companion/media) onto an
+                attached device
     power-key   Map the power button to suspend instead of shutdown
     setup-user  Deploy config + add a user to shepherd's groups
 
