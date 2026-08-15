@@ -97,6 +97,20 @@ impl HidpiController for XwaylandHidpi {
         // For the common single-output kiosk this is just that output's
         // scale; multi-output errs on the readable side.
         let factor = outputs.iter().map(|o| o.scale).fold(1.0_f64, f64::max);
+        if (factor - 1.0).abs() < f64::EPSILON && !outputs.is_empty() {
+            // Nothing to counter-scale, so the HUD will render at its logical
+            // size. That is correct on a genuinely 1x panel, and a symptom
+            // otherwise: it also happens when a *previous* activity's restore
+            // never ran (shepherdd restarted mid-session, or `set_output_scale`
+            // failed), leaving sway at 1.0 with no record of the real scale.
+            // Say so, because from the HUD's side the two are indistinguishable
+            // and the second looks like "the HUD is too small" (issue #118).
+            warn!(
+                outputs = outputs.len(),
+                "Every output is already at scale 1.0; the HUD will not counter-scale. \
+                 If this panel is HiDPI, a previous session's scale restore was lost."
+            );
+        }
         for output in &outputs {
             if (output.scale - 1.0).abs() < f64::EPSILON {
                 continue;
@@ -112,6 +126,17 @@ impl HidpiController for XwaylandHidpi {
         // Re-assert the mirror after changing scales so the activity launches
         // into a correctly-configured docked layout (issue #87).
         self.reassert_display().await;
+    }
+
+    /// The factor a shell should currently be counter-scaling by: the largest
+    /// captured pre-launch scale while the workaround is active, 1.0 otherwise.
+    /// Derived from the same `saved` scales `restore` reinstates, so it cannot
+    /// drift from what `apply` broadcast.
+    async fn factor(&self) -> f64 {
+        match self.saved.lock().await.as_ref() {
+            Some(outputs) => outputs.iter().map(|o| o.scale).fold(1.0_f64, f64::max),
+            None => 1.0,
+        }
     }
 
     /// Restore the captured scales and broadcast factor=1.0. No-op if not

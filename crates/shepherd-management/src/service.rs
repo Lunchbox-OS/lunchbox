@@ -130,6 +130,13 @@ pub trait ManagementService: Send + Sync {
     async fn set_auto_brightness(&self, enabled: bool) -> ManagementResult<BrightnessInfo>;
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo>;
 
+    /// The HUD counter-scale factor in force (1.0 unless an
+    /// `xwayland_native_resolution` activity is running). Shells fetch this on
+    /// every connect: `HudScaleChanged` is a one-shot event at launch, so one
+    /// that was not subscribed at that instant would otherwise stay
+    /// un-counter-scaled for the rest of the session (issue #118).
+    async fn get_hud_scale(&self) -> f64;
+
     // Display / docking (issue #87)
     async fn get_display_state(&self) -> DisplayState;
     async fn set_display_mode(&self, mode: DisplayMode) -> DisplayState;
@@ -769,6 +776,10 @@ impl ManagementService for DefaultManagementService {
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
         let current = self.auto_brightness.lock().await.enabled();
         self.apply_auto_enabled(!current).await
+    }
+
+    async fn get_hud_scale(&self) -> f64 {
+        self.hidpi.factor().await
     }
 
     // --------------------------------------------------------------- display

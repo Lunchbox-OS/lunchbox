@@ -375,6 +375,13 @@
       }
     },
     {
+      "name": "get_hud_scale",
+      "params": [],
+      "result": {
+        "type": "f64"
+      }
+    },
+    {
       "name": "get_display_state",
       "params": [],
       "result": {

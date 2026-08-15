@@ -104,13 +104,16 @@ Example (bedtime restriction):
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/shepherd-ipc/src/client.rs`.
-  - **A HUD-only UI action** (e.g. opening the "End session" confirm popover):
-    add a temporary one-shot debug hook gated behind an env var that calls
-    `widget.emit_clicked()`, boot with the env var set (it propagates from the
-    `dev headless` invocation into the sway-spawned HUD), screenshot, then remove
-    the hook. `dev key` (keyboard) *does* reach the focused surface, but the
-    always-on HUD bar uses `KeyboardMode::None`, so keys won't reach it unless a
-    popover raises it to `OnDemand`.
+  - **The HUD's "End session" confirm popover** has a permanent debug-build hook:
+    export `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>` before `dev headless`
+    (env propagates from the invocation into the sway-spawned HUD), then
+    `: > <path>` pops the prompt and `: > <path>.down` dismisses it. Both files
+    are consumed, so open/close cycles are just two `touch`es.
+  - **Any other HUD-only UI action**: add a temporary one-shot debug hook gated
+    behind an env var that calls `widget.emit_clicked()`, boot with the env var
+    set, screenshot, then remove the hook. `dev key` (keyboard) *does* reach the
+    focused surface, but the always-on HUD bar uses `KeyboardMode::None`, so keys
+    won't reach it unless a popover raises it to `OnDemand`.
 - **`dev key` needs a longer-lived keyboard for egui/winit apps.** `shepherd-media`
   is an eframe (winit) client, and a single `dev key <keysym>` lands nowhere: the
   headless seat has *no* input devices (`swaymsg -t get_seats` shows an empty
@@ -148,6 +151,20 @@ Example (bedtime restriction):
 - **Config edits.** `config.example.toml` must pass `./scripts/shepherd config
   validate` (CI checks this). Test config-driven changes with `--config` against
   a fixture first.
+- **Never give a fixture entry `command = "sleep"`.** Stopping a session calls
+  `kill_by_command(<command name>)`, which kills *every* process of that name the
+  user owns — including the `sleep`s in your own driver script, which then dies
+  mid-scenario (exit 144). Point the fixture at a small wrapper script
+  (`exec tail -f /dev/null`) so the name is unique to the fixture.
+- **A stale `dev-runtime/headless/session.env` breaks the next boot.** The start
+  path sources it, so a leftover `SWAYSOCK` from a dead session is inherited by
+  the new sway, which uses *that* socket path while the script waits on the one
+  it derived from the new pid: "Headless Sway did not answer IPC within 10s"
+  while a perfectly healthy stack is running. `dev stop` first, or delete the
+  file (and `unset SWAYSOCK`) before `dev headless`.
+- **`--no-build` against a cleaned `target/debug`** boots a session whose
+  `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
+  session down a second later. Build once before using `--no-build`.
 
 ## Under the hood
 

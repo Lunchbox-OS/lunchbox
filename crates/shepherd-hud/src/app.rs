@@ -528,109 +528,44 @@ fn build_hud_content(
         .build();
     action_button.add_css_class("close-button");
 
-    // Confirmation popover for the "X" button. Ending an activity forcibly
-    // loses its unsaved state, and the button is easy to hit by accident, so
-    // activities that opt in (the default) get a "really end?" prompt before
-    // the session is stopped (issue #78). The popover is parented to the
-    // button, so on the layer-shell overlay it renders as a child popup above
-    // the running activity. It is built once and re-shown on demand; its
-    // message label is refreshed with the current activity name each time.
-    let confirm_popover = gtk4::Popover::new();
-    confirm_popover.set_parent(&action_button);
-    confirm_popover.add_css_class("confirm-close-popover");
-    // Drop the prompt straight down from the "X" button. The button sits at the
-    // extreme right of the bar, so the default (horizontally centered) placement
-    // would put half the popover past the right screen edge — and neither GTK
-    // nor the compositor slides an oversized layer-shell popup back on-screen,
-    // so it gets clipped (issue #97). `popup()` below additionally offsets it
-    // left to keep it fully visible; Bottom gives it unlimited vertical room.
-    confirm_popover.set_position(gtk4::PositionType::Bottom);
-    // Autohide so the prompt dismisses itself when it loses focus (the user
-    // taps the activity, presses Escape, etc.). Autohide relies on an input
-    // grab that needs the layer surface to accept keyboard focus, so we switch
-    // the HUD to on-demand keyboard interactivity only while the prompt is up
-    // (see the popup/`closed` handlers below) and back to none otherwise, so
-    // the always-present bar never steals keyboard focus from the activity.
-    confirm_popover.set_autohide(true);
-    let confirm_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(12)
-        .build();
-    let confirm_label = gtk4::Label::new(Some("End this activity?"));
-    confirm_label.add_css_class("confirm-close-message");
-    confirm_label.set_wrap(true);
-    confirm_label.set_max_width_chars(28);
-    confirm_box.append(&confirm_label);
-    let confirm_button_row = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .homogeneous(true)
-        .build();
-    let cancel_button = gtk4::Button::with_label("Cancel");
-    let end_button = gtk4::Button::with_label("End activity");
-    end_button.add_css_class("destructive-action");
-    confirm_button_row.append(&cancel_button);
-    confirm_button_row.append(&end_button);
-    confirm_box.append(&confirm_button_row);
-    confirm_popover.set_child(Some(&confirm_box));
-
-    let popover_for_cancel = confirm_popover.clone();
-    cancel_button.connect_clicked(move |_| {
-        popover_for_cancel.popdown();
-    });
-
-    let popover_for_end = confirm_popover.clone();
-    end_button.connect_clicked(move |_| {
-        popover_for_end.popdown();
-        request_stop_current(default_socket_path());
-    });
-
-    // Release the on-demand keyboard grab whenever the prompt goes away, no
-    // matter how it was dismissed (Cancel, End, Escape, focus loss, or a
-    // programmatic popdown when the activity ends by other means), so the HUD
-    // returns to not competing for keyboard focus.
-    let window_for_closed = window.clone();
-    confirm_popover.connect_closed(move |_| {
-        window_for_closed.set_keyboard_mode(KeyboardMode::None);
-    });
+    // Confirmation prompt for the "X" button (issue #78). Built for the current
+    // scale factor and rebuilt whenever it changes — see `build_confirm_prompt`.
+    let confirm_prompt = std::rc::Rc::new(std::cell::RefCell::new(build_confirm_prompt(
+        &action_button,
+        &window,
+        1.0,
+    )));
 
     let state_for_action = state.clone();
-    let popover_for_action = confirm_popover.clone();
-    let confirm_box_for_offset = confirm_box.clone();
+    let prompt_for_action = confirm_prompt.clone();
     let window_for_action = window.clone();
     action_button.connect_clicked(move |btn| {
         let session_state = state_for_action.session_state();
         let socket_path = default_socket_path();
         if session_state.session_id().is_some() {
             if session_state.confirm_on_close() {
+                // Take our own references and drop the borrow before popping:
+                // `popup()` runs signal handlers, and one of them reaching back
+                // into the cell would panic.
+                let (popover, content, label) = {
+                    let prompt = prompt_for_action.borrow();
+                    (
+                        prompt.popover.clone(),
+                        prompt.content.clone(),
+                        prompt.label.clone(),
+                    )
+                };
                 // Refresh the prompt with the activity's name, then ask. Take
                 // keyboard focus so the autohide grab can dismiss on focus loss.
                 if let Some(name) = session_state.entry_name() {
-                    confirm_label.set_text(&format!("End {name}? Unsaved progress may be lost."));
+                    label.set_text(&format!("End {name}? Unsaved progress may be lost."));
                 } else {
-                    confirm_label.set_text("End this activity? Unsaved progress may be lost.");
+                    label.set_text("End this activity? Unsaved progress may be lost.");
                 }
                 window_for_action.set_keyboard_mode(KeyboardMode::OnDemand);
-                // Right-align the popover to the button instead of letting it
-                // center and spill off the right screen edge (issue #97). A
-                // Bottom popover is centered on the button, so shifting its
-                // center left by (popover_width - button_width)/2 lands its
-                // right edge on the button's right edge — fully on-screen, and
-                // independent of the compositor doing any slide-to-fit.
-                //
-                // Measure the content box (a plain widget) rather than the
-                // popover itself: a GtkPopover is a native surface and reports a
-                // near-zero preferred size before it is mapped. Add the popover
-                // chrome (the `> contents` padding, which scales with the HUD
-                // factor) so the whole surface, not just the content, clears the
-                // edge.
-                let (_, content_w, _, _) =
-                    confirm_box_for_offset.measure(gtk4::Orientation::Horizontal, -1);
-                let chrome = (2.0 * 14.0 * state_for_action.scale_factor()).round() as i32;
-                let popover_w = content_w + chrome;
-                let (_, button_w, _, _) = btn.measure(gtk4::Orientation::Horizontal, -1);
-                popover_for_action.set_offset((button_w - popover_w) / 2, 0);
-                popover_for_action.popup();
+                // Right-align the popover to the button (issue #97).
+                align_popover_to_button(&popover, &content, btn, state_for_action.scale_factor());
+                popover.popup();
             } else {
                 request_stop_current(socket_path);
             }
@@ -642,6 +577,32 @@ fn build_hud_content(
         }
     });
     right_box.append(&action_button);
+
+    // Debug-build test hook for the headless dev harness, which has no way to
+    // click a GTK button (the synthetic pointer does not fire `clicked`; see the
+    // `headless-dev` skill). With `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
+    // set, creating `<path>` pops the close-confirmation prompt and creating
+    // `<path>.down` dismisses it; both files are consumed. That is enough to
+    // drive open/close cycles — and scale changes across them — from a shell.
+    // Never compiled into a release build.
+    #[cfg(debug_assertions)]
+    if let Ok(trigger) = std::env::var("SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER") {
+        let up = std::path::PathBuf::from(&trigger);
+        let down = std::path::PathBuf::from(format!("{trigger}.down"));
+        let action_button_for_debug = action_button.clone();
+        let prompt_for_debug = confirm_prompt.clone();
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            if up.exists() {
+                let _ = std::fs::remove_file(&up);
+                action_button_for_debug.emit_clicked();
+            }
+            if down.exists() {
+                let _ = std::fs::remove_file(&down);
+                prompt_for_debug.borrow().popover.popdown();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     container.append(&right_box);
 
@@ -668,7 +629,9 @@ fn build_hud_content(
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
-    let confirm_popover_for_timer = confirm_popover.clone();
+    let confirm_prompt_for_timer = confirm_prompt.clone();
+    let action_button_for_rebuild = action_button.clone();
+    let window_for_rebuild = window.clone();
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
     let display_button_clone = display_button.clone();
@@ -685,6 +648,25 @@ fn build_hud_content(
         action_icon.clone(),
         network_icon.clone(),
         display_icon.clone(),
+    ];
+    let time_display_for_scale = time_display.clone();
+    // Every `gtk4::Box` in the HUD, with the spacing it uses at factor 1.0.
+    // Box spacing is a widget property rather than CSS, so `scale_px_literals`
+    // never reaches it: left alone it keeps its logical-pixel value and the
+    // counter-scaled HUD comes out visibly tighter than the same UI on an
+    // un-hacked HiDPI panel — most obviously in the close-confirmation prompt,
+    // whose whole surface then measures short (issue #118). Rescaling these
+    // alongside the icons and sliders closes the gap the #114 fix left open.
+    let scaled_boxes: [(gtk4::Box, i32); 9] = [
+        (container.clone(), 16),
+        (left_box.clone(), 12),
+        (warning_box.clone(), 8),
+        (right_box.clone(), 8),
+        (clock_box.clone(), 4),
+        (volume_box.clone(), 4),
+        (brightness_box.clone(), 4),
+        (network_box.clone(), 4),
+        (battery_box.clone(), 4),
     ];
     // Track the most-recently-applied scale factor so we only rebuild the
     // stylesheet when shepherdd sends a new HudScaleChanged value.
@@ -709,11 +691,31 @@ fn build_hud_content(
             for icon in &scaled_icons {
                 icon.set_pixel_size(icon_size);
             }
+            time_display_for_scale.set_icon_pixel_size(icon_size);
+            for (boxed, base_spacing) in &scaled_boxes {
+                boxed.set_spacing((f64::from(*base_spacing) * desired_scale).round() as i32);
+            }
             let slider_width = (f64::from(BASE_VOLUME_SLIDER_WIDTH) * desired_scale).round() as i32;
             volume_slider_clone.set_width_request(slider_width);
             let brightness_slider_width =
                 (f64::from(BASE_BRIGHTNESS_SLIDER_WIDTH) * desired_scale).round() as i32;
             brightness_slider_clone.set_width_request(brightness_slider_width);
+            // Rebuild the close-confirmation prompt for the new factor. It is
+            // hidden right now, and GTK does not restyle hidden widgets, so the
+            // one built for the previous factor would keep that factor's sizes
+            // — the failure where the bar is correct but the prompt renders
+            // un-counter-scaled (issue #118). Must come after `apply_scale`, so
+            // the fresh widgets pick up the stylesheet it just loaded.
+            {
+                let mut prompt = confirm_prompt_for_timer.borrow_mut();
+                prompt.popover.popdown();
+                prompt.popover.unparent();
+                *prompt = build_confirm_prompt(
+                    &action_button_for_rebuild,
+                    &window_for_rebuild,
+                    desired_scale,
+                );
+            }
             applied_scale_for_timer.set(desired_scale);
         }
 
@@ -753,7 +755,7 @@ fn build_hud_content(
             session_state,
             SessionState::Active { .. } | SessionState::Warning { .. }
         ) {
-            confirm_popover_for_timer.popdown();
+            confirm_prompt_for_timer.borrow().popover.popdown();
         }
         match &session_state {
             SessionState::NoSession => {
@@ -1009,6 +1011,160 @@ fn install_css_provider() -> gtk4::CssProvider {
     provider
 }
 
+/// Horizontal padding of the confirm popover's surface, per side. Must match
+/// the `padding` on `.confirm-close-popover > contents` in `CSS_TEMPLATE`,
+/// which scales with the HUD factor.
+const POPOVER_PADDING_PX: f64 = 14.0;
+
+/// Spacing between the confirm prompt's message and its button row, at factor 1.0.
+const CONFIRM_ROW_SPACING_PX: f64 = 12.0;
+
+/// Spacing between the confirm prompt's two buttons, at factor 1.0.
+const CONFIRM_BUTTON_SPACING_PX: f64 = 8.0;
+
+/// The HUD's close-confirmation prompt: the popover itself, the content box
+/// (measured to right-align it against the "X"), and the message label (retitled
+/// with the activity's name each time it is shown).
+struct ConfirmPrompt {
+    popover: gtk4::Popover,
+    content: gtk4::Box,
+    label: gtk4::Label,
+}
+
+/// Build the "really end?" prompt (issue #78), parented to the "X" button and
+/// sized for HUD scale `factor`.
+///
+/// **Rebuilt from scratch on every HudScaleChanged rather than restyled in
+/// place.** GTK validates a widget's style while it is mapped and leaves it
+/// alone otherwise, so a popover hidden across a scale change keeps the previous
+/// factor's style: it measures — and can paint — at the old size while the
+/// always-mapped bar around it is already correct, which is what "only the
+/// dialog renders un-counter-scaled" looks like (issue #118). Re-rooting the
+/// contents does not clear it; freshly built widgets, on the other hand, have no
+/// cached style and take the current stylesheet immediately (verified in the
+/// headless harness: the same label measures 183px at factor 1.0 and 366px at
+/// 2.0 when newly built while hidden, against a stale 218px for the widget that
+/// survived the change).
+///
+/// Everything sized here in *widget properties* rather than CSS — the two box
+/// spacings — is multiplied by `factor` for the same reason the timer rescales
+/// the bar's spacings: `scale_px_literals` only reaches the stylesheet.
+fn build_confirm_prompt(
+    action_button: &gtk4::Button,
+    window: &gtk4::ApplicationWindow,
+    factor: f64,
+) -> ConfirmPrompt {
+    // Parented to the button, so on the layer-shell overlay it renders as a
+    // child popup above the running activity.
+    let popover = gtk4::Popover::new();
+    popover.set_parent(action_button);
+    popover.add_css_class("confirm-close-popover");
+    // Drop the prompt straight down from the "X" button. The button sits at the
+    // extreme right of the bar, so the default (horizontally centered) placement
+    // would put half the popover past the right screen edge — and neither GTK
+    // nor the compositor slides an oversized layer-shell popup back on-screen,
+    // so it gets clipped (issue #97). `align_popover_to_button` additionally
+    // offsets it left to keep it fully visible; Bottom gives it unlimited
+    // vertical room.
+    popover.set_position(gtk4::PositionType::Bottom);
+    // Autohide so the prompt dismisses itself when it loses focus (the user
+    // taps the activity, presses Escape, etc.). Autohide relies on an input
+    // grab that needs the layer surface to accept keyboard focus, so we switch
+    // the HUD to on-demand keyboard interactivity only while the prompt is up
+    // (see the click and `closed` handlers) and back to none otherwise, so the
+    // always-present bar never steals keyboard focus from the activity.
+    popover.set_autohide(true);
+
+    let content = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing((CONFIRM_ROW_SPACING_PX * factor).round() as i32)
+        .build();
+    let label = gtk4::Label::new(Some("End this activity?"));
+    label.add_css_class("confirm-close-message");
+    label.set_wrap(true);
+    label.set_max_width_chars(28);
+    content.append(&label);
+
+    let button_row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing((CONFIRM_BUTTON_SPACING_PX * factor).round() as i32)
+        .homogeneous(true)
+        .build();
+    let cancel_button = gtk4::Button::with_label("Cancel");
+    let end_button = gtk4::Button::with_label("End activity");
+    end_button.add_css_class("destructive-action");
+    button_row.append(&cancel_button);
+    button_row.append(&end_button);
+    content.append(&button_row);
+    popover.set_child(Some(&content));
+
+    let popover_for_cancel = popover.clone();
+    cancel_button.connect_clicked(move |_| {
+        popover_for_cancel.popdown();
+    });
+
+    let popover_for_end = popover.clone();
+    end_button.connect_clicked(move |_| {
+        popover_for_end.popdown();
+        request_stop_current(default_socket_path());
+    });
+
+    // Release the on-demand keyboard grab whenever the prompt goes away, no
+    // matter how it was dismissed (Cancel, End, Escape, focus loss, or a
+    // programmatic popdown when the activity ends by other means), so the HUD
+    // returns to not competing for keyboard focus.
+    let window_for_closed = window.clone();
+    popover.connect_closed(move |_| {
+        window_for_closed.set_keyboard_mode(KeyboardMode::None);
+    });
+
+    ConfirmPrompt {
+        popover,
+        content,
+        label,
+    }
+}
+
+/// Right-align `popover` to `button` instead of letting GTK center it.
+///
+/// A `Bottom` popover is centered on its parent, and the "X" sits at the extreme
+/// right of the bar, so half of a centered prompt lands past the right edge of
+/// the output — and neither GTK nor sway slides an oversized layer-shell popup
+/// back on-screen, so it is simply clipped (issue #97). Shifting the center left
+/// by (popover_width - button_width)/2 lands the popover's right edge on the
+/// button's right edge, fully on-screen, without relying on any slide-to-fit.
+///
+/// `content` is the popover's child box: a `GtkPopover` is a native surface and
+/// reports a near-zero preferred size before it is mapped, so the width has to
+/// come from a plain widget inside it, plus the popover's own chrome (the
+/// `> contents` padding, which follows the HUD scale `factor`).
+///
+///
+/// The measurement is trustworthy because the prompt is rebuilt on every scale
+/// change (see `build_confirm_prompt`): its widgets are always styled for the
+/// factor in force, so this never reads the previous factor's layout.
+fn align_popover_to_button(
+    popover: &gtk4::Popover,
+    content: &gtk4::Box,
+    button: &gtk4::Button,
+    factor: f64,
+) {
+    let (_, content_w, _, _) = content.measure(gtk4::Orientation::Horizontal, -1);
+    let chrome = (2.0 * POPOVER_PADDING_PX * factor).round() as i32;
+    let popover_w = content_w + chrome;
+    let (_, button_w, _, _) = button.measure(gtk4::Orientation::Horizontal, -1);
+    let offset = (button_w - popover_w) / 2;
+    tracing::debug!(
+        factor,
+        content_w,
+        chrome,
+        button_w,
+        offset,
+        "Aligning confirm popover"
+    );
+    popover.set_offset(offset, 0);
+}
+
 /// Apply the current scale factor to the HUD: regenerate the stylesheet
 /// with px values multiplied by `factor`, and resize the window so its
 /// physical height stays consistent with the pre-scale value. Called once
@@ -1020,6 +1176,7 @@ fn apply_scale(
     factor: f64,
 ) {
     let scaled_height = ((base_height as f64) * factor).round() as i32;
+    tracing::info!(factor, height = scaled_height, "Applying HUD scale");
     window.set_default_height(scaled_height);
     window.set_exclusive_zone(scaled_height);
     provider.load_from_data(&css_for_scale(factor));
@@ -1433,6 +1590,25 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                             state.set_initial_brightness(info);
                         }
                         Err(e) => tracing::warn!("Failed to get initial brightness: {}", e),
+                    }
+
+                    // Seed the counter-scale factor. shepherdd only *broadcasts*
+                    // HudScaleChanged when it changes — at launch and at exit of
+                    // an `xwayland_native_resolution` activity — so a HUD that
+                    // was not subscribed at that instant (started late, or its
+                    // connection dropped and reconnected mid-activity) would
+                    // render every element, and the close-confirmation prompt
+                    // most visibly, 1/factor too small for the rest of the
+                    // session, with nothing to correct it (issue #118). Asking
+                    // on every connect makes that self-healing.
+                    match client.get_hud_scale().await {
+                        Ok(factor) => {
+                            tracing::debug!(factor, "Seeded HUD scale factor");
+                            state.handle_event(&shepherd_api::Event::new(
+                                shepherd_api::EventPayload::HudScaleChanged { factor },
+                            ));
+                        }
+                        Err(e) => tracing::warn!("Failed to get initial HUD scale: {}", e),
                     }
 
                     // Seed the display arrangement so the mirror/external toggle

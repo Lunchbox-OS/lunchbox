@@ -251,6 +251,16 @@ pub trait HidpiController: Send + Sync {
     async fn apply(&self);
     /// Restore the captured scale (and HUD scale factor).
     async fn restore(&self);
+    /// The counter-scale factor currently in force — 1.0 unless the workaround
+    /// is active — for `get_hud_scale` and for shells that connect after the
+    /// last `HudScaleChanged` broadcast.
+    ///
+    /// The factor is otherwise only ever announced as a one-shot event at
+    /// launch, so a shell that was not subscribed at that instant (it started
+    /// late, or its connection dropped and reconnected mid-activity) would
+    /// render un-counter-scaled for the rest of the session with no way to
+    /// notice. Same reason [`DisplayController::state`] exists.
+    async fn factor(&self) -> f64;
 }
 
 /// No-op [`HidpiController`] used in tests and on hosts where the
@@ -261,6 +271,9 @@ pub struct NoOpHidpiController;
 impl HidpiController for NoOpHidpiController {
     async fn apply(&self) {}
     async fn restore(&self) {}
+    async fn factor(&self) -> f64 {
+        1.0
+    }
 }
 
 /// External-display / docking controller (issue #87).

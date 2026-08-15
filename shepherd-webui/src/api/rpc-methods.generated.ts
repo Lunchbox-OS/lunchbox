@@ -39,6 +39,7 @@ export type RpcMethod =
   | "brightness_down"
   | "set_auto_brightness"
   | "toggle_auto_brightness"
+  | "get_hud_scale"
   | "get_display_state"
   | "set_display_mode"
   | "ping"
