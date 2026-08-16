@@ -1,0 +1,251 @@
+# "Can't reach this device securely" after a long activity session
+
+## Prompt
+
+> After the latest round of BLE fixes, I am still observing the app fail
+> to connect. I did the initial pair, launched Minecraft via Prism
+> Launcher, played for roughly 20 minutes, and while it was still
+> running, attempted to connect the app. It failed with "Can't reach this
+> device securely" and never recovered in this session -- even after
+> closing Minecraft or restarting shepherdd with a logout/login. See if
+> you can reproduce this on your setup -- the phone from before (passcode
+> 314159) and dongle should still be available
+
+Reported against `main` at e79d34a (0.3.5), i.e. after
+<2026-08-01 001 ble-connect-drain-unbounded.md>,
+<2026-07-18 003 companion-ble-connection-audit-and-fixes.md> and the
+<2026-08-10 002 ble-management-stress-test.md> follow-ups.
+
+## What the message actually means
+
+`"Can't reach this device securely"` is `LinkStatus.RepairSuggested`
+(`ui/components/Components.kt`), and `ShepherdViewModel.runConnectionLoop`
+reaches it on exactly one path:
+
+1. `connectWithin()` failed **six times in a row** (initial attempt plus
+   the `1s, 2s, 5s, 10s, 20s` backoff ladder — each attempt itself has a
+   30 s `CONNECT_TIMEOUT_MS`, so this is minutes, not seconds), **and**
+2. Android still lists the peer as `BOND_BONDED`, **and**
+3. the 5 s scan probe **still sees the device advertising the shepherd
+   service** — i.e. the box is powered, in range, and shepherdd is up.
+
+So the banner is not a claim that the bond is broken; it is "shepherd is
+right there, advertising, and I still cannot hold an encrypted link to
+it". If the device is *not* advertising at give-up the app shows
+`Disconnected` instead.
+
+**The give-up is terminal.** `runConnectionLoop` returns after setting the
+banner; nothing retries on its own. Only `Retry`/`Re-pair`, a
+device-switch, or a background→foreground cycle (`onForeground` restarts
+the loop when `connection == null`) starts it again. This is the
+already-recorded Finding 1 of the stress test — "the app never reconnects
+on its own" — and it is the half of the report that reproduces trivially:
+*whatever* transient fault first exhausts the ladder, the app then sits on
+the banner forever, so closing Minecraft, restarting shepherdd, and
+logging out/in cannot change anything. The device side is not being asked
+to do anything at that point.
+
+## Reproduction attempts (all on the dev box, real phone + dongle)
+
+Setup: headless dev session, `config.example.toml` with the BLE adapter
+**pinned to the Realtek dongle** (`8C:68:8B:41:02:DC`) — the box also has
+the Qualcomm radio (`DC:56:7B:1F:7D:EA`) that the pairing skill documents
+as individually broken (ACL connects, service discovery hangs for the
+whole connect budget), and with no `adapter` set shepherdd takes
+"whichever BlueZ lists first", which had selected exactly that radio.
+Pixel 10a re-paired from scratch; `lofi-beats` given Prism Launcher's
+limits and warnings (`max_run 1800`, warnings at 600/120/30 s) so a
+20-minute session hits the same warning schedule; six busy loops on the
+host for game-like CPU load.
+
+| # | Scenario | Result |
+| --- | --- | --- |
+| 1 | Event-rate measurement over a running session (IPC `subscribe_events`) | **No flood**: 5 events / 90 s, 4–5 KiB snapshots. The events outbox cannot outrun the connect drain this way. |
+| 2 | Cold app start 2 min into the session, under load | **Connects** (~15 s), live state |
+| 3 | App foregrounded + connected, screen off, phone forced into deep doze for 18 min while the session runs, then woken | **Recovers by itself** in ~6 s (`events drained 296 stale bytes`, then RPCs) |
+| 4 | 75 s device-radio outage (`hciconfig hci2 down/up`) with the app foregrounded | **Recovers by itself** ~7 s after the radio returns (ladder not yet exhausted) |
+| 5 | One-sided bond (`bluetoothctl remove` on the device only) | App ends on **`Disconnected`**, not the reported banner — and the device pops an *unattended Numeric Comparison prompt on the TV*, because the phone's stale bond makes its first read start a fresh pairing |
+| 6 | The literal report: app force-stopped, phone locked and screen off, 23-minute session under load, then cold start | **Connects** in ~5 s, live state (`6:06 left`) |
+
+None of the device-side scenarios produced a connect failure at all.
+Prism Launcher itself is not installed on this box, so scenario 6 used
+`shepherd-media` under Prism's limits rather than Minecraft — the session
+lifecycle, warning schedule and host load are reproduced, the specific
+workload is not.
+
+## Where that leaves the report
+
+The device side of the reported flow does not fail here: a 20-minute
+activity session, with warnings firing and the host loaded, leaves the
+daemon advertising, the outboxes empty, and the companion connecting in
+seconds — cold, warm, or after doze.
+
+What does reproduce is one kind of permanence: once the ladder is
+exhausted the app is inert until the user acts on it, so a *foregrounded*
+app stays dead long after the fault clears. That is a real defect and it
+is fixed below — but see the journal section: it does **not** explain
+this report, because the reporter also force-closed the companion, which
+starts a fresh loop and bypasses that path entirely.
+
+Scenario 5 also shows a second, real defect worth its own fix: a phone
+that kept a bond the device has forgotten silently raises a pairing
+prompt on the TV (30 s of "someone wants to pair" with nobody there),
+which is both confusing and, on a kiosk, a prompt a child sees.
+
+## The fix
+
+`runConnectionLoop` no longer returns when it gives up. It sets the
+banner exactly as before — the user still gets `Retry`/`Re-pair` — and
+then parks a slow retry in `sessionJob`
+(`RETRY_AFTER_GIVE_UP_MS = 60_000`) that rebuilds the connection and
+re-runs the whole ladder. Being in `sessionJob` is what makes it safe:
+`teardown()`/`onBackground()` cancel it like any other session work, so
+the "no background BLE" rule still holds, and `onForeground` still gets
+an immediate attempt on return rather than waiting out the interval. The
+`NeedsRepair` branch (the OS bond is provably gone) stays terminal —
+retrying genuinely cannot help there.
+
+### Verified on hardware, before and after
+
+Same test both times: companion foregrounded and connected, the serving
+controller taken down for **6 minutes** (`hciconfig hci2 down`) — long
+enough to outlast the ladder, which a 75 s outage does not — then brought
+back with the phone untouched for 3 minutes.
+
+| Build | At give-up | 3 min after the radio returned |
+| --- | --- | --- |
+| Before | `Disconnected` + Retry/Re-pair | **Nothing.** No app log lines, no connection, no RPC — dead exactly like `copernicus` |
+| After | `Reconnecting…` (mid-ladder on a retry cycle) | **Reconnected 2 s after the radio came back**: peer connected, `service_state`/`list_groups`/`get_volume`/`get_brightness` all `ok=true`, live entry list on screen |
+
+### The suspend/resume check could not be run here
+
+The intended final check was a real s2idle cycle on the dev box
+(`rtcwake -m mem -s 120`, the same sleep mode `copernicus` used). **Do
+not repeat it on this VM.** The box is a KVM/QEMU guest with a
+PCI-passthrough USB card; it entered `PM: suspend entry (s2idle)` and
+never resumed — the RTC alarm did not wake the guest — and it took a
+host-side reboot to recover, which also wiped everything under `/tmp`.
+The radio-outage test above exercises the same thing the suspend does to
+the companion (the box unreachable for longer than the ladder) without
+betting the machine on a resume.
+
+## The journal from the affected box (`copernicus`, same day)
+
+Supplied after the reproduction attempts above. It settles the question:
+the trigger is not the game, it is a **suspend/resume**, and after the
+resume the phone stops talking to the box entirely.
+
+| Time (EDT) | Event |
+| --- | --- |
+| 07:35:49 | BLE server up on `hci0` (`D8:B3:2F:E8:47:B2`), `selector="<first listed>"`, advertising started |
+| 07:38:46–51 | Numeric Comparison, pairing complete, `claim` recorded (`SM-S911…`, a Galaxy S23) |
+| 07:39:14–24 | Companion session: `service_state`, `list_groups`, `get_volume`, `get_brightness`, **`launch`** (Minecraft started *from the app*), `current_session`, … all `ok=true` |
+| 07:39:27 | Peer disconnected — the app is backgrounded |
+| 07:39:29 | Peer connected again — **and never sends another RPC, all day** |
+| 08:31:30 | `Power key pressed short` → `Suspending...` |
+| 09:13:59 | `System returned from sleep`; peer disconnected |
+| 09:14:00 | Peer connected (outboxes empty) — again **no RPC**, for the 2m50s until logout |
+| 09:16:50 | BLE server shutting down (user logs out) |
+| 09:17:15 | Fresh session: server starts, **advertising started**, no errors |
+| 09:18:25 | `Power key pressed short` → `Suspending...` (second suspend) |
+| 09:18:43–44 | Resume; peer disconnected |
+| 09:18:44 → 09:22:40 | **No peer connection at all** — nothing, until the session is shut down |
+
+Three things follow.
+
+1. **The device side is healthy throughout.** It advertises, it answers
+   every RPC it is asked, it re-registers cleanly on the new session, and
+   the outbox depths logged at each connect are `0/0` — no drain backlog,
+   no stalled queue. Nothing here resembles the connect-drain failure the
+   0.3.5 fixes were about.
+2. **After the fresh login the phone never establishes a link.** BlueZ
+   reports the peer's `Connected` property false from 09:18:44 to the
+   shutdown at 09:22:40 — four minutes of the user trying with nothing to
+   show for it.
+3. **The journal cannot say why**, and an earlier draft of this note
+   claimed it could. `Connected` flips on a link that comes *up*; a
+   connect that never gets one leaves no device-side trace at all. So
+   silence here is equally consistent with "the app wasn't trying" and
+   "the app tried and never reached the air", and only the first of those
+   is the terminal give-up.
+
+The reporter settles that: they force-closed the companion and logged out
+and back in, and it still never reconnected. A cold start is a new
+process, a new `ShepherdViewModel`, and a fresh ladder — it bypasses the
+give-up path entirely. **So the give-up fix below is not the explanation
+for this report.** It is a real defect, reproduced and fixed, and it would
+have kept any *already-open* app dead after the box came back; it is not
+what stopped a freshly-launched app from connecting.
+
+What is left has to survive both a companion force-close and a shepherdd
+restart, which rules out everything in the daemon's own state. In rough
+order of likelihood:
+
+- **Phone-side Bluetooth state.** The pairing skill already records a
+  wedge on this hardware that survived a reboot, a Bluetooth toggle and a
+  storage wipe, and cleared only via Settings → Reset Bluetooth & Wi-Fi.
+  A stale GATT attribute cache is the milder version: Android caches the
+  peer's handles per *bond*, so it outlives the app entirely, and a
+  daemon restart that re-registers the GATT application can leave the
+  phone reading handles that no longer mean anything. That would look
+  exactly like 09:14:00 — link up, no RPC, forever.
+- **The controller not actually radiating after the resume.** The daemon
+  logs "advertising started" once, when `RegisterAdvertisement` returns;
+  it is not evidence about the radio 90 minutes and two suspends later,
+  and nothing re-checks. Note this did *not* reproduce on the dev box: a
+  full `rfkill block`/`unblock` cycle left `LEAdvertisingManager1.ActiveInstances`
+  at 1 with no daemon involvement, and the companion reconnected
+  afterwards. Different controller, and rfkill is not s2idle, so it is
+  weakened rather than excluded.
+- **The phone's classic profiles.** The S23 keeps trying A2DP/HFP against
+  the box on the cross-transport key (`a2dp.c:auth_cb() Access denied` at
+  09:16:59 and 09:17:22, i.e. after the session restart).
+
+Discriminating between these needs the phone, not the box: a
+`adb logcat -s ShepherdBle` capture at failure time says directly whether
+the app is attempting, and how far it gets ("connect: ready", "drained N
+stale bytes", read failures, service-not-found). Worth trying before the
+force-close, too: toggle the phone's Bluetooth off and on. If that alone
+restores it, the fault is phone-side cache/wedge and the fix belongs in
+the app (a `BluetoothGatt.refresh()` on connect, by reflection, the way
+`removeBond` is done).
+
+One more caveat on reading these lines: `Device.Connected` is
+transport-agnostic, so the connections at 07:39:29 and 09:14:00 that
+carry no RPC may be the phone's *classic* profiles rather than the
+companion at all — Numeric Comparison over LE on a dual-mode phone mints
+a cross-transport key, and the S23 starts trying A2DP/HFP against the box
+immediately. Our "BLE peer connected" line fires for those too. It would
+be worth logging the transport (and whether the link is encrypted)
+alongside it; as it stands the line proves less than its wording
+suggests.
+
+## What to capture on the box when it happens again
+
+The daemon logs every peer-level event, so the journal separates the
+three candidate causes without guessing:
+
+shepherdd is `exec`-ed from `sway.conf`, so its output lands wherever the
+session's sway log goes (`journalctl --user -b` on a systemd-managed
+session, otherwise sway's own log file):
+
+```sh
+journalctl --user -b | grep -E \
+  'BLE peer (connected|disconnected)|BLE RPC|Numeric Comparison|advertising'
+```
+
+- **No `BLE peer connected` at all** while the app retries → the phone
+  never got an ACL link up: radio/controller or range, not the daemon.
+  Check `dmesg -T | grep -i bluetooth` for `command tx timeout` /
+  `Resetting usb device` (this box's Realtek dongle has done exactly that
+  before, on 2026-08-14), and try `systemctl restart bluetooth`.
+- **`connected` … `disconnected` a few hundred ms later, repeatedly, with
+  no RPC** → the link comes up and then fails to encrypt or discover:
+  one-sided bond, or the discovery-hang failure mode of a bad controller.
+- **`connected` + `Numeric Comparison pairing requested`** → the device
+  has forgotten the bond (scenario 5); `Re-pair` is the fix.
+
+Also worth recording: whether the box has more than one Bluetooth
+controller and which one `[service.ble_management] adapter` pins. With it
+unset, shepherdd takes whatever BlueZ lists first, and that can change
+across a re-plug or a differently-enumerated boot.

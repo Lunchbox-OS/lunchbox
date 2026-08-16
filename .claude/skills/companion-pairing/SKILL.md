@@ -124,6 +124,15 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   `User Confirmation Reply: Success` within a millisecond and shows the
   digits on the TV; the human comparison happens on the phone. A stalled
   pairing is therefore always the phone's side.
+- **Never suspend the dev box to test a reconnect.** It is a KVM/QEMU
+  guest with a PCI-passthrough USB card: `rtcwake -m mem` enters s2idle
+  and the guest never comes back (the RTC alarm doesn't wake it), so it
+  takes a host-side reboot and `/tmp` — scratch scripts, results — goes
+  with it. To exercise what a suspended box does to the companion, take
+  the serving controller down instead: `sudo hciconfig hciN down`, wait
+  longer than the app's backoff ladder (**6 minutes**; 75 s is not
+  enough — it recovers on its own at the 4th attempt), then bring it up.
+  See <docs/ai/history/2026-08-16 001 ble-connect-fails-after-long-session.md>.
 - **Repeated aborted attempts can wedge the stack.** Runs of failed
   pairings have produced `SMP: Pairing Failed, Reason: DHKey check
   failed (0x0b)` on otherwise-valid attempts, cleared by
