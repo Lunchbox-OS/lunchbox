@@ -95,7 +95,9 @@ sealed interface PairingPhase {
  * A connection exists only while the UI is bound ([onForeground]) — going
  * to the background tears it down, honouring the project's "no background
  * BLE" constraint. Reconnects are attempted silently a few times with
- * backoff before the link is surfaced as dropped.
+ * backoff before the link is surfaced as dropped — and once it is, a slow
+ * retry keeps running behind the banner so a fault that outlasts the
+ * backoff ladder (a suspended box, a radio reset) still heals itself.
  */
 class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -256,6 +258,22 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                         LinkStatus.Disconnected
                     }
                     _state.update { it.copy(link = link) }
+                    // Give up on this *connection*, not on the device. The
+                    // faults that land here outlive the ladder routinely — a
+                    // box asleep on the couch outlasts it by an hour — and
+                    // this used to `return`, so a foregrounded app that had
+                    // given up made no further attempt for as long as it
+                    // stayed foregrounded. On 2026-08-16 that turned one
+                    // power-key suspend into a companion that stayed dead
+                    // across the resume, a logout/login, and a whole fresh
+                    // shepherdd: the device-side journal shows it advertising
+                    // and answering, with the phone never going on air again
+                    // (docs/ai/history/2026-08-16 001
+                    // ble-connect-fails-after-long-session.md). The banner
+                    // stays — the user still gets Retry/Re-pair — but a slow
+                    // retry keeps running underneath it so the link heals
+                    // itself the moment the fault clears.
+                    scheduleRetryAfterGiveUp(record)
                     return
                 }
                 delay(backoffs[failures - 1])
@@ -342,6 +360,35 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         eventsJob?.cancel(); eventsJob = null
         connection?.close(); connection = null
         client = null
+    }
+
+    /**
+     * Keep trying, slowly, after [runConnectionLoop] has given up.
+     *
+     * Parked in `sessionJob` so `teardown()`/[onBackground] cancel it like
+     * any other session work — the app must not hold BLE work in the
+     * background — and so [onForeground] (which rebuilds when
+     * `connection == null`) still gets the user an *immediate* attempt on
+     * return rather than waiting out the interval.
+     *
+     * The interval is deliberately far longer than the ladder: this runs
+     * behind a banner that already tells the user something is wrong, so
+     * it only has to beat "never", not be quick. Each firing rebuilds the
+     * connection and re-runs the whole ladder, so a device that comes
+     * back is picked up within a minute of doing so.
+     */
+    private fun scheduleRetryAfterGiveUp(record: ShepherdRecord) {
+        sessionJob = viewModelScope.launch {
+            while (isActive) {
+                delay(RETRY_AFTER_GIVE_UP_MS)
+                // `connectTo` would tear this job down mid-flight; hand the
+                // rebuild to the scope instead and stop looping here.
+                if (bound && connection == null) {
+                    viewModelScope.launch { connectTo(record) }
+                    return@launch
+                }
+            }
+        }
     }
 
     /** User-initiated reconnect after the link was surfaced as dropped. */
@@ -728,6 +775,16 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
          * something connect() doesn't bound at all.
          */
         const val CONNECT_TIMEOUT_MS = 30_000L
+
+        /**
+         * Pause between give-up and the next full attempt, while the app
+         * stays foregrounded. Long on purpose: the retry runs behind a
+         * banner the user can already act on, so its job is to beat
+         * "never", not to be fast. One rebuilt connection per minute is
+         * also cheap enough to leave running for as long as the screen
+         * is up.
+         */
+        const val RETRY_AFTER_GIVE_UP_MS = 60_000L
     }
 }
 
