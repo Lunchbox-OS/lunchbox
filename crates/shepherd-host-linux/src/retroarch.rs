@@ -20,7 +20,9 @@
 //!   itself writes — the file a child would call "my save". RetroArch flushes
 //!   it when content unloads, and `autosave_interval` makes it flush
 //!   periodically too, so a crash or a `SIGKILL` costs seconds rather than an
-//!   afternoon.
+//!   afternoon. Shepherd does **not** relocate it: it stays beside the content
+//!   where RetroArch puts it, so one game has one save however it was
+//!   launched, and a save made before the entry existed is still found.
 //! - The **save state** (`.state.auto`) is a snapshot of the whole emulator.
 //!   With [`RetroarchSaveState::Auto`] closing the activity writes one and
 //!   opening restores it, so the child resumes mid-battle rather than at the
@@ -75,8 +77,6 @@ pub struct Paths {
     pub root: PathBuf,
     /// `savestate_directory`
     pub states: PathBuf,
-    /// `savefile_directory` — the in-game saves
-    pub saves: PathBuf,
     /// The generated `--appendconfig` fragment.
     pub config: PathBuf,
 }
@@ -146,7 +146,6 @@ pub fn paths_for(entry_id: Option<&str>, content: &Path) -> Paths {
     let root = root_dir().join(key);
     Paths {
         states: root.join("states"),
-        saves: root.join("saves"),
         config: root.join("append.cfg"),
         root,
     }
@@ -317,11 +316,13 @@ pub fn render_append_config(paths: &Paths, save_state: RetroarchSaveState, kiosk
     );
     out.push_str(&format!("config_save_on_exit = {}\n\n", cfg_quote("false")));
 
-    out.push_str("# Per-activity save and state directories.\n");
-    out.push_str(&format!(
-        "savefile_directory = {}\n",
-        cfg_quote(&paths.saves.to_string_lossy())
-    ));
+    out.push_str(
+        "# The save *state* is shepherd's own mechanism, so it lives in the\n\
+         # activity's own directory. The in-game save is deliberately left\n\
+         # where RetroArch would put it (beside the content), so a game keeps\n\
+         # one save whether it was launched from here or from a desktop\n\
+         # session -- and so a save made before this entry existed is found.\n",
+    );
     out.push_str(&format!(
         "savestate_directory = {}\n\n",
         cfg_quote(&paths.states.to_string_lossy())
@@ -421,7 +422,6 @@ pub fn discard_auto_state(paths: &Paths) -> io::Result<usize> {
 /// Create the per-entry directories and write the config fragment.
 pub fn materialize(paths: &Paths, save_state: RetroarchSaveState, kiosk: bool) -> io::Result<()> {
     std::fs::create_dir_all(&paths.states)?;
-    std::fs::create_dir_all(&paths.saves)?;
     if let Some(parent) = paths.config.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -457,9 +457,8 @@ pub fn build_argv(spec: &Spec<'_>, config: &Path, core: &str, content: &str) -> 
 /// worse than the rest: `kiosk_mode_enable` unlocks RetroArch's menu inside a
 /// supervised session, and the `savestate_auto_*` pair break resume with no
 /// error at all — just a child who lost their place.
-const GUARDED_SETTINGS: [&str; 9] = [
+const GUARDED_SETTINGS: [&str; 8] = [
     "config_save_on_exit",
-    "savefile_directory",
     "savestate_directory",
     "savestate_auto_save",
     "savestate_auto_load",
@@ -734,7 +733,6 @@ mod tests {
         assert_ne!(a.root, b.root);
         assert!(a.root.ends_with("pokemon-firered"));
         assert!(a.states.starts_with(&a.root));
-        assert!(a.saves.starts_with(&a.root));
         assert!(a.config.starts_with(&a.root));
     }
 
@@ -754,7 +752,6 @@ mod tests {
 
         let paths = paths_for(Some("e"), Path::new("/roms/game.gba"));
         assert!(paths.root.is_absolute(), "root: {}", paths.root.display());
-        assert!(paths.saves.is_absolute());
         assert!(paths.states.is_absolute());
         assert!(paths.config.is_absolute());
 
@@ -800,17 +797,21 @@ mod tests {
     }
 
     #[test]
-    fn fragment_points_at_the_entrys_own_directories() {
+    fn fragment_owns_the_state_dir_but_not_the_save_file() {
         let paths = paths_for(Some("e"), Path::new("/roms/game.gba"));
         let cfg = render_append_config(&paths, RetroarchSaveState::Auto, true);
-        assert!(cfg.contains(&format!(
-            "savefile_directory = \"{}\"",
-            paths.saves.display()
-        )));
         assert!(cfg.contains(&format!(
             "savestate_directory = \"{}\"",
             paths.states.display()
         )));
+        // The in-game save stays where RetroArch puts it: beside the content.
+        // Relocating it would strand a save made before the entry existed, and
+        // would give the same game two saves -- one for desktop play, one for
+        // shepherd.
+        assert!(
+            !cfg.contains("savefile_directory"),
+            "shepherd must not relocate the in-game save:\n{cfg}"
+        );
     }
 
     #[test]
@@ -874,7 +875,6 @@ mod tests {
         let launch = prepare(&spec, Some("my-game"), |s| s.replace('~', "/home/kid")).unwrap();
 
         assert!(launch.paths.states.is_dir());
-        assert!(launch.paths.saves.is_dir());
         assert!(launch.paths.config.is_file());
         // Tilde expansion reached the content path, not just the argv.
         assert!(launch.argv.contains(&"/home/kid/roms/game.gba".to_string()));
@@ -897,13 +897,13 @@ mod tests {
         // give it, so seed both layouts.
         let core_dir = paths.states.join("mGBA");
         std::fs::create_dir_all(&core_dir).unwrap();
-        std::fs::create_dir_all(&paths.saves).unwrap();
         std::fs::write(core_dir.join("game.state.auto"), b"state").unwrap();
         std::fs::write(core_dir.join("game.state.auto.png"), b"thumb").unwrap();
         std::fs::write(paths.states.join("flat.state.auto"), b"state").unwrap();
-        // Numbered manual states and the in-game save must survive.
+        // A numbered manual state is not resume state and must survive. The
+        // in-game save lives beside the content, nowhere near this directory,
+        // so a reset cannot reach it at all.
         std::fs::write(core_dir.join("game.state1"), b"slot").unwrap();
-        std::fs::write(paths.saves.join("game.srm"), b"battery").unwrap();
 
         assert_eq!(discard_auto_state(&paths).unwrap(), 3);
 
@@ -914,11 +914,6 @@ mod tests {
             core_dir.join("game.state1").exists(),
             "a manual save state is not resume state"
         );
-        assert!(
-            paths.saves.join("game.srm").exists(),
-            "resetting the console must not wipe the cartridge"
-        );
-
         // Idempotent: resetting twice in a row is not an error.
         assert_eq!(discard_auto_state(&paths).unwrap(), 0);
 

@@ -544,6 +544,38 @@ both — the failure mode that needed fixing three times before (#114, #118,
 
 [gba-tests]: https://github.com/jsmolka/gba-tests
 
+## Save location: relocating the in-game save was wrong
+
+The first cut set `savefile_directory` to a per-entry directory, for isolation
+and a one-directory backup story. Two questions from the operator showed that to
+be the wrong call, and the second exposed a migration bug.
+
+RetroArch on this platform defaults the in-game save to
+`~/.config/retroarch/saves/<Core>/`. A `type = "process"` entry — the shape
+issue #125 started from — therefore wrote the child's save there. Redirecting
+`savefile_directory` pointed the new entry kind somewhere that save had never
+been, so the game booted as a fresh cartridge (`[SRAM] Skipping SRAM load.`)
+and began accumulating a second, divergent save. Nothing was destroyed, but
+the child's progress was invisible and would silently fork.
+
+The same redirect broke the operator's stated workflow: configure and play from
+a desktop session, then hand the machine to the child. With the save relocated,
+the same game had one save per launch path.
+
+So the split is now by *ownership* rather than by tidiness:
+
+- the **in-game save** is the game's, and stays where RetroArch puts it —
+  shared with desktop play, and found without migration;
+- the **save state** is shepherd's, since nothing outside a supervised session
+  produces one, and stays in the per-entry directory.
+
+Verified live: with a save at the legacy location, `Skipping SRAM load` is gone
+from the log and the file is read and written back by the session.
+
+The lesson is the same one as the core-naming bug: the design was reasoned from
+what looked tidy rather than from where the data already was. Checking the
+default first would have settled it.
+
 ## Core naming: a bug only the second core found
 
 The installer and the entry kind were built and shipped having only ever been

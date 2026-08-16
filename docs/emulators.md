@@ -192,26 +192,36 @@ less useful — every launch is already a fresh boot — but it still works as a
 
 ## Where files live
 
-Each activity gets its own directory, keyed by entry id, under shepherd's data
-directory (`$XDG_DATA_HOME/shepherdd`, i.e. `~/.local/share/shepherdd` by
-default):
+The two kinds of save live in two different places, on purpose.
+
+**The in-game save stays where RetroArch puts it** — normally
+`~/.config/retroarch/saves/<Core>/<content>.srm`. Shepherd does not relocate
+it, so one game has one save whether it was launched from here or from a
+desktop session, and a save made before the entry existed is found without any
+migration. Back it up by copying `~/.config/retroarch/saves/`, the same
+directory you would back up for RetroArch on its own.
+
+**The resume state is shepherd's**, since nothing outside a supervised session
+produces one:
 
 ```
 ~/.local/share/shepherdd/retroarch/pokemon-firered/
 ├── append.cfg              # generated on every launch; see below
-├── saves/mGBA/…srm         # the in-game save
 └── states/mGBA/…state.auto # the resume state (+ .png thumbnail)
 ```
 
-Per-entry directories mean two entries pointing at the same ROM keep separate
-progress, and backing up one child's game is one directory copy. The `mGBA/`
-level is RetroArch's own doing — it files saves under the core that wrote them,
-which is what you want, since a state written by one core cannot be loaded by
+Keyed by entry id, so two entries pointing at the same ROM resume
+independently even though they share the underlying save. The `mGBA/` level is
+RetroArch's own doing — it files states under the core that wrote them, which
+is what you want, since a state written by one core cannot be loaded by
 another.
 
-To back up: copy the `saves/` tree (the real progress). To reset an activity
-from the admin side rather than the HUD, delete its `states/` tree while the
-activity is not running.
+To reset an activity from the admin side rather than the HUD, delete its
+`states/` tree while the activity is not running.
+
+> **Coming from a `type = "process"` entry?** Nothing to do. That entry used
+> RetroArch's default save location, and so does this one, so the child's
+> existing save carries over untouched.
 
 ## What shepherd generates, and what it leaves alone
 
@@ -232,7 +242,7 @@ The fragment sets, and only sets:
 | Setting | Why |
 | --- | --- |
 | `config_save_on_exit = false` | The above. |
-| `savefile_directory`, `savestate_directory` | The per-entry directories. |
+| `savestate_directory` | The per-entry resume-state directory. The in-game save is deliberately *not* redirected. |
 | `savestate_auto_save`, `savestate_auto_load` | Save on close, restore on open. |
 | `autosave_interval = 10` | Flush the in-game save while playing. |
 | `pause_nonactive = false` | The HUD takes keyboard focus for its prompts; left at RetroArch's default the game would pause whenever one opened. |
@@ -279,9 +289,8 @@ footgun, and two of them fail quietly:
 - `savestate_auto_save` / `savestate_auto_load` break resume with no error at
   all. The activity runs fine; the child just loses their place.
 
-The rest are `config_save_on_exit`, `savefile_directory`,
-`savestate_directory`, `autosave_interval`, `pause_nonactive` and
-`video_fullscreen`.
+The rest are `config_save_on_exit`, `savestate_directory`,
+`autosave_interval`, `pause_nonactive` and `video_fullscreen`.
 
 shepherd checks for this at every launch and warns, naming the file and the
 keys:
