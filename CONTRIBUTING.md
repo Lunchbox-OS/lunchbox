@@ -157,6 +157,14 @@ cd companion-android
 ./gradlew :app:testDebugUnitTest           # unit tests
 ```
 
+To build *and* push it to a phone/tablet/Fire TV attached over `adb` in one
+step (from a checkout this builds; from an installed `.deb` the same command
+downloads the matching signed release instead):
+
+```sh
+./scripts/shepherd apps install companion   # or: media — no sudo, adb keys are per-user
+```
+
 See [`companion-android/README.md`](companion-android/README.md) for the
 architecture and the BLE protocol it speaks.
 

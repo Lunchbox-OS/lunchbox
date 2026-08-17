@@ -397,6 +397,342 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Android apps (Shepherd Companion + Shepherd Media)
+# ---------------------------------------------------------------------------
+#
+# Both apps run on a phone, tablet, or Fire TV rather than on the shepherd
+# device, so "installing" one means obtaining an APK and pushing it over adb to
+# the attached Android device. Where the APK comes from follows how shepherd
+# itself was installed:
+#
+#   * source checkout  — built from the app's own Gradle project, exactly as
+#                        CONTRIBUTING.md documents (debug-signed; no keystore
+#                        needed), so a developer installs what they just wrote.
+#   * packaged install — the signed release asset matching the installed
+#                        version, downloaded from the Forgejo release and
+#                        verified against its published .sha256 sidecar.
+#
+# For a phone that should keep *itself* updated, the F-Droid repository is still
+# the better route (docs/INSTALL.md). This covers what F-Droid cannot: Fire TV
+# sticks, whose Android has no unattended-update path and whose F-Droid client
+# has no remote-friendly UI, and development phones tracking a local build.
+
+# The Forgejo project whose releases carry the APKs. Overridable so a fork or a
+# staging server can be pointed at without editing this file.
+SHEPHERD_FORGE_URL="${SHEPHERD_FORGE_URL:-https://git.armeafamily.com/albert/shepherd-launcher}"
+
+# Downloaded release APKs are cached here so a re-run does not re-fetch. Per
+# user rather than system-wide, because this command deliberately does not want
+# root: adb authorises devices against the *invoking user's* ~/.android key, so
+# running it under sudo is how you get a phone that reports `unauthorized`.
+ANDROID_APK_CACHE="${SHEPHERD_APK_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/shepherd/apk}"
+
+# Per-app metadata, keyed by the name `apps install` takes. Sets:
+#   ANDROID_APP_DIR       Gradle project, relative to the repo root
+#   ANDROID_APP_ARTIFACT  release-asset stem (<artifact>_<version>.apk, named by
+#                         release.yml's apk matrix)
+#   ANDROID_APP_PACKAGE   applicationId
+#   ANDROID_APP_LABEL     human-readable name
+# Returns 1 for an unknown app so the caller can report it.
+android_app_meta() {
+    case "${1:-}" in
+        companion)
+            ANDROID_APP_DIR="companion-android"
+            ANDROID_APP_ARTIFACT="shepherd-companion"
+            ANDROID_APP_PACKAGE="com.armeafamily.shepherd.companion"
+            ANDROID_APP_LABEL="Shepherd Companion"
+            ;;
+        media)
+            ANDROID_APP_DIR="crates/shepherd-media-android/android"
+            ANDROID_APP_ARTIFACT="shepherd-media"
+            ANDROID_APP_PACKAGE="com.armeafamily.shepherd.media"
+            ANDROID_APP_LABEL="Shepherd Media"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# True when these libs are running out of a source checkout rather than the
+# .deb's /usr/lib/shepherd/lib. This is what decides build-vs-download: a
+# checkout has the Gradle projects, a packaged install has only the VERSION file
+# naming the release to fetch.
+is_source_checkout() {
+    local root
+    root="$(get_repo_root)"
+    [[ -f "$root/Cargo.toml" && -d "$root/companion-android" ]]
+}
+
+# The version an unqualified download asks for: the canonical VERSION shipped
+# beside these scripts (repo root from source, /usr/share/shepherd when
+# packaged). Kept separate from version.sh's version_read, which resolves
+# through get_repo_root and so is meaningless under /usr.
+installed_version() {
+    local f v
+    f="$(get_data_dir)/VERSION"
+    [[ -f "$f" ]] || die "No VERSION file at $f; pass --version X.Y.Z"
+    v="$(head -n1 "$f" | tr -d '[:space:]')"
+    [[ -n "$v" ]] || die "VERSION file is empty: $f"
+    printf '%s\n' "$v"
+}
+
+# Print the path to an adb binary, preferring one on PATH and falling back to
+# the SDK the android deps set installs (whose platform-tools are not linked
+# onto PATH).
+find_adb() {
+    if command_exists adb; then
+        command -v adb
+        return 0
+    fi
+    local sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/opt/android-sdk}}"
+    if [[ -x "$sdk/platform-tools/adb" ]]; then
+        printf '%s\n' "$sdk/platform-tools/adb"
+        return 0
+    fi
+    return 1
+}
+
+# Resolve which attached device to install onto: $2 if given, otherwise the sole
+# device in `device` state. Ambiguity is an error rather than a guess — the
+# wrong pick here is an app on a family member's phone.
+android_resolve_device() {
+    local adb="$1" want="${2:-}"
+    local -a serials=() pending=()
+
+    # A host:port serial is a device on the network (a Fire TV with ADB
+    # debugging on, typically). Connecting is idempotent and a no-op when the
+    # link is already up, so try it before deciding the device is missing.
+    if [[ "$want" == *:* ]]; then
+        info "Connecting to $want over the network..."
+        "$adb" connect "$want" >&2 || true
+    fi
+
+    # `adb devices` prints a header line, then "<serial>\t<state>".
+    mapfile -t serials < <("$adb" devices 2>/dev/null | awk 'NR > 1 && $2 == "device" { print $1 }')
+    mapfile -t pending < <("$adb" devices 2>/dev/null | awk 'NR > 1 && $2 != "" && $2 != "device" { print $1 " (" $2 ")" }')
+
+    if [[ -n "$want" ]]; then
+        local s
+        for s in "${serials[@]-}"; do
+            if [[ "$s" == "$want" ]]; then
+                printf '%s\n' "$s"
+                return 0
+            fi
+        done
+        die "No attached device with serial '$want' (adb devices: ${serials[*]-none})"
+    fi
+
+    if [[ ${#serials[@]} -eq 1 ]]; then
+        printf '%s\n' "${serials[0]}"
+        return 0
+    fi
+
+    if [[ ${#serials[@]} -eq 0 ]]; then
+        if [[ ${#pending[@]} -gt 0 ]]; then
+            # Almost always `unauthorized`: the phone shows an RSA-fingerprint
+            # prompt on first connection that a human has to accept.
+            error "No usable Android device; adb sees: ${pending[*]}"
+            die "Accept the USB-debugging prompt on the device (or re-run without sudo — adb keys are per-user)"
+        fi
+        error "No Android device attached (adb devices is empty)"
+        die "Connect the phone/tablet/Fire TV with USB debugging enabled, or 'adb connect <host>:5555' for one on the network"
+    fi
+
+    error "Several devices attached: ${serials[*]}"
+    die "Pick one with --device SERIAL"
+}
+
+# Build an app's APK from the Gradle project in this checkout and print its
+# path. Debug-signed: producing the release signature needs the project's
+# keystore, which lives only in CI (release.yml decodes it from a secret).
+android_build_apk() {
+    local app="$1"
+    android_app_meta "$app" || die "Unknown Android app: $app"
+
+    local repo_root gradle_dir
+    repo_root="$(get_repo_root)"
+    gradle_dir="$repo_root/$ANDROID_APP_DIR"
+    [[ -x "$gradle_dir/gradlew" ]] || die "No Gradle project at $gradle_dir"
+
+    # Gradle finds the SDK via ANDROID_SDK_ROOT or local.properties; point it at
+    # the location `shepherd deps install android` uses when neither is set.
+    local sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/opt/android-sdk}}"
+    if [[ ! -d "$sdk" && ! -f "$gradle_dir/local.properties" ]]; then
+        die "Android SDK not found at $sdk; run 'shepherd deps install android' (or set ANDROID_SDK_ROOT)"
+    fi
+
+    # The media app is a NativeActivity whose Gradle build cross-compiles a Rust
+    # cdylib through cargo-ndk, so it needs more than the SDK. Say which piece is
+    # missing here rather than letting Gradle fail deep inside the Exec task.
+    if [[ "$app" == "media" ]]; then
+        cargo ndk --version >/dev/null 2>&1 \
+            || die "cargo-ndk not installed (the media APK cross-compiles a Rust cdylib); run 'shepherd deps install android'"
+        if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
+            # sdkmanager installs under $sdk/ndk/<version>; take the newest.
+            local ndk
+            ndk="$(find "$sdk/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -n1)"
+            [[ -n "$ndk" ]] || die "No NDK under $sdk/ndk; run 'shepherd deps install android' (or set ANDROID_NDK_HOME)"
+            export ANDROID_NDK_HOME="$ndk"
+            info "Using ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+        fi
+    fi
+
+    info "Building the $ANDROID_APP_LABEL APK from source ($ANDROID_APP_DIR)..."
+    # Gradle's own output goes to stderr: this function's stdout is the APK path
+    # its caller captures, and a build log mixed into it becomes the filename.
+    ( cd "$gradle_dir" && ANDROID_SDK_ROOT="$sdk" ./gradlew --no-daemon :app:assembleDebug >&2 ) \
+        || die "Gradle build failed for $ANDROID_APP_LABEL"
+
+    local apk
+    apk="$(find "$gradle_dir/app/build/outputs/apk/debug" -name '*.apk' -type f 2>/dev/null | head -n1)"
+    [[ -n "$apk" ]] || die "Gradle reported success but produced no APK under $gradle_dir/app/build/outputs/apk/debug"
+    printf '%s\n' "$apk"
+}
+
+# Download an app's release APK from the Forgejo release for $2 (default: the
+# installed version) and print its path. Verified against the .sha256 sidecar
+# release.yml uploads beside every asset — this file is about to be installed on
+# a family device, so a download that cannot be checked is a failure, not a
+# warning. Cached, so a re-run neither re-downloads nor re-verifies blindly.
+android_download_apk() {
+    local app="$1" version="${2:-}"
+    android_app_meta "$app" || die "Unknown Android app: $app"
+    require_command curl
+
+    [[ -n "$version" ]] || version="$(installed_version)"
+
+    local name url dest
+    name="${ANDROID_APP_ARTIFACT}_${version}.apk"
+    url="$SHEPHERD_FORGE_URL/releases/download/v${version}/${name}"
+    dest="$ANDROID_APK_CACHE/$name"
+
+    ensure_dir "$ANDROID_APK_CACHE" 0755
+
+    if [[ -f "$dest" && -f "$dest.sha256" ]] \
+        && ( cd "$ANDROID_APK_CACHE" && sha256sum --check --status "$name.sha256" ); then
+        info "Using the cached $ANDROID_APP_LABEL APK at $dest"
+        printf '%s\n' "$dest"
+        return 0
+    fi
+
+    info "Downloading $name from $SHEPHERD_FORGE_URL (release v$version)..."
+    if ! curl -fSL --proto '=https' --tlsv1.2 -o "$dest.part" "$url"; then
+        rm -f "$dest.part"
+        error "Could not download $url"
+        die "No such release asset. Check the release page, pass --version X.Y.Z, or build from a checkout with --source."
+    fi
+    if ! curl -fsSL --proto '=https' --tlsv1.2 -o "$dest.sha256.part" "$url.sha256"; then
+        rm -f "$dest.part" "$dest.sha256.part"
+        die "Release asset $name has no .sha256 sidecar; refusing to install an unverified APK (override with --apk PATH)"
+    fi
+
+    mv "$dest.part" "$dest"
+    mv "$dest.sha256.part" "$dest.sha256"
+    # The sidecar records the basename only, so check from the cache directory.
+    if ! ( cd "$ANDROID_APK_CACHE" && sha256sum --check --status "$name.sha256" ); then
+        rm -f "$dest" "$dest.sha256"
+        die "Checksum mismatch for $name; the download was corrupted or tampered with"
+    fi
+
+    success "Downloaded and verified $name"
+    printf '%s\n' "$dest"
+}
+
+# `adb install -r` the APK, translating the one failure that is guaranteed to
+# happen sooner or later into what to do about it.
+android_adb_install() {
+    local adb="$1" serial="$2" apk="$3" package="$4" label="$5"
+    local out status=0
+
+    info "Installing $label on $serial..."
+    out="$("$adb" -s "$serial" install -r "$apk" 2>&1)" || status=$?
+    printf '%s\n' "$out" >&2
+
+    if [[ $status -eq 0 ]] && ! grep -qi 'INSTALL_FAILED\|^Failure' <<<"$out"; then
+        success "$label installed on $serial"
+        return 0
+    fi
+
+    # A local debug build and a release/F-Droid build are signed with different
+    # keys, and Android refuses to replace one with the other.
+    if grep -qi 'INSTALL_FAILED_UPDATE_INCOMPATIBLE\|signatures do not match\|INSTALL_FAILED_VERSION_DOWNGRADE' <<<"$out"; then
+        error "$label is already installed from a differently signed (or newer) build"
+        info "Replacing it means removing the installed copy first:"
+        info "  adb -s $serial uninstall $package"
+        if [[ "$package" == *.companion ]]; then
+            warn "That erases the app's data — the admin records and claim tokens for every"
+            warn "device this phone administers. A device whose token is lost has to be"
+            warn "factory-reset (see docs/INSTALL.md, \"Re-pairing\") before it can be"
+            warn "claimed again. Confirm with the owner first."
+        fi
+    fi
+    die "adb install failed for $label"
+}
+
+# Install one of the Android apps onto an attached device.
+android_app_install() {
+    local app="$1"; shift || true
+    local device="" apk="" version="" provenance=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --device|-s) device="${2:-}"; [[ -n "$device" ]] || die "--device needs a serial"; shift 2 ;;
+            --apk) apk="${2:-}"; [[ -n "$apk" ]] || die "--apk needs a path"; shift 2 ;;
+            --version) version="${2:-}"; [[ -n "$version" ]] || die "--version needs X.Y.Z"; shift 2 ;;
+            --source) provenance="source"; shift ;;
+            --release) provenance="release"; shift ;;
+            *) die "Unknown option for 'apps install $app': $1" ;;
+        esac
+    done
+
+    android_app_meta "$app" || die "Unknown Android app: $app"
+
+    # Unlike the steam/chrome backends, nothing here touches the host: the APK
+    # goes to a phone. Root would only hurt — adb authorises per user, and a
+    # root Gradle run leaves root-owned build output in the checkout.
+    if is_root; then
+        if [[ -n "${SUDO_USER:-}" ]]; then
+            die "Run 'apps install $app' without sudo: adb authorises devices per user, so under sudo the device reports 'unauthorized'"
+        fi
+        warn "Running as root: adb will use root's ~/.android key, so a device authorised for another user reports 'unauthorized'."
+    fi
+
+    local adb
+    adb="$(find_adb)" \
+        || die "adb not found. Install it with: apt install adb (or 'shepherd deps install android' for the full SDK)"
+
+    # Pick the target before building or downloading: a missing phone is the
+    # likeliest failure, and it should not cost a Gradle run to discover.
+    local serial
+    serial="$(android_resolve_device "$adb" "$device")"
+
+    if [[ -n "$apk" ]]; then
+        [[ -f "$apk" ]] || die "No such APK: $apk"
+        info "Using the APK at $apk"
+    else
+        # Provenance follows the installation unless the caller overrides it.
+        [[ -n "$provenance" ]] || { is_source_checkout && provenance="source" || provenance="release"; }
+        if [[ "$provenance" == "source" ]]; then
+            is_source_checkout || die "--source needs a source checkout; this is a packaged install (try --release)"
+            apk="$(android_build_apk "$app")"
+        else
+            apk="$(android_download_apk "$app" "$version")"
+        fi
+    fi
+
+    android_adb_install "$adb" "$serial" "$apk" "$ANDROID_APP_PACKAGE" "$ANDROID_APP_LABEL"
+
+    if [[ "$app" == "companion" ]]; then
+        info "Open $ANDROID_APP_LABEL and tap \"Pair a device\" — see docs/INSTALL.md, \"Pairing your phone with a device\"."
+    else
+        info "Open $ANDROID_APP_LABEL and add a library from Settings."
+    fi
+    info "For a phone that should keep itself updated, install from the F-Droid repository instead"
+    info "(https://git.armeafamily.com/fdroid/repo — see docs/INSTALL.md)."
+}
+
+# ---------------------------------------------------------------------------
 # Flatpak apps
 # ---------------------------------------------------------------------------
 
@@ -450,13 +786,16 @@ ensure_flathub() {
     flatpak remote-add --if-not-exists flathub "$FLATHUB_REMOTE_URL"
 }
 
-# Install a supported activity backend, using whichever packaging shepherd's
-# integration actually expects for it. These are NOT both flatpaks: the
+# Install a supported activity backend, or one of the project's own Android
+# apps, using whichever packaging each actually expects — they all differ. The
 # type="steam" adapter drives Canonical's Steam *snap* (config.example.toml
-# documents `snap install steam`), while Chrome is wrapped as the Flathub
-# flatpak `com.google.Chrome`. Add rows here as new backends are supported.
+# documents `snap install steam`), Chrome is wrapped as the Flathub flatpak
+# `com.google.Chrome`, and the companion/media apps are APKs pushed over adb to
+# an attached phone or TV stick (see the Android-apps section above). Add rows
+# here as new backends are supported.
 apps_install() {
     local app="${1:-}"
+    shift || true
     case "$app" in
         steam)
             require_root
@@ -482,12 +821,15 @@ apps_install() {
             success "Installed com.google.Chrome"
             info "Reference it with kind = \"flatpak\", app_id = \"com.google.Chrome\"."
             ;;
+        companion|media)
+            android_app_install "$app" "$@"
+            ;;
         ""|help|-h|--help)
             apps_usage
             return 0
             ;;
         *)
-            die "Unknown app '$app' (supported: steam, chrome)"
+            die "Unknown app '$app' (supported: steam, chrome, companion, media)"
             ;;
     esac
 }
@@ -495,15 +837,39 @@ apps_install() {
 apps_usage() {
     cat <<EOF
 Usage: shepherd-admin apps install <steam|chrome>
+       shepherd-admin apps install <companion|media> [options]
 
-Installs a supported activity backend with the packaging shepherd's integration
-expects (they differ):
+Installs a supported activity backend, or one of shepherd's own Android apps,
+with the packaging each expects (they differ):
 
     steam    Canonical's Steam snap (drives type = "steam" entries). Launch it
              and log in once before those entries will work. Also permits
              unprivileged user namespaces (Ubuntu restricts them by default),
              which Steam's sandbox needs — see $USERNS_DROPIN.
     chrome   com.google.Chrome from Flathub (for kind = "flatpak" entries).
+
+    companion  Shepherd Companion, the parent-facing admin app.
+    media      Shepherd Media, the media player for phones/tablets/Fire TV.
+
+Both Android apps are installed onto an attached Android device over adb. The
+APK is built from this checkout's Gradle project when run from source, and
+otherwise downloaded from the release matching the installed version — at
+$SHEPHERD_FORGE_URL — and verified
+against its .sha256 sidecar. Run them WITHOUT sudo: adb authorises devices per
+user, so under sudo the device reports 'unauthorized'.
+
+Options (companion/media):
+    --device SERIAL   Install onto this device (default: the only one attached).
+                      A HOST:PORT serial is connected to first, for a TV stick
+                      reached over the network.
+    --source          Force a build from this checkout, not a release download
+    --release         Force a release download, even in a checkout
+    --version X.Y.Z   Download this release instead of the installed version
+    --apk PATH        Install a specific APK file
+
+A phone that should keep itself updated is better served by the F-Droid
+repository (docs/INSTALL.md); this is the sideload path, for Fire TV sticks and
+development phones.
 EOF
 }
 

@@ -173,6 +173,11 @@ App listing metadata lives in [`dist/fdroid/`](../../dist/fdroid/README.md).
 Fire TV sticks are the sideload case: F-Droid has no remote-friendly interface,
 so `adb install` stays the practical route there.
 
+`shepherd-admin apps install media` does that sideload for you, onto whatever
+Android device is attached over `adb`: it downloads the version-matched signed
+release asset (verifying its `.sha256`) on a packaged install, and builds the
+Gradle project below in a source checkout.
+
 ## Build the APK
 
 The Gradle project under [`android/`](./android) is a pure-`NativeActivity` app
