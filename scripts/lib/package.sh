@@ -346,6 +346,15 @@ _package_write_control() {
     depends="$(grep -vE '^[[:space:]]*(#|$)' "$repo_root/scripts/deps/run.pkgs" \
         | paste -sd, - | sed 's/,/, /g')"
 
+    # Optional tooling for `shepherd-admin apps install companion|media`, which
+    # sideloads an Android app onto a phone or TV stick: curl fetches the release
+    # APK, adb installs it. Suggests rather than Depends because that command is
+    # a convenience nobody needs to run a kiosk — a device that never has a
+    # phone plugged into it should not carry the Android platform tools. Both are
+    # checked at call time, with the apt line to fix it (see admin.sh's
+    # find_adb / android_download_apk).
+    local suggests="adb, curl"
+
     # Installed-Size in KiB (Debian policy: excludes the control area).
     local size
     size="$(du -ks "$stage" | cut -f1)"
@@ -359,6 +368,7 @@ Section: admin
 Priority: optional
 Homepage: https://git.armeafamily.com/albert/shepherd-launcher
 Depends: $depends
+Suggests: $suggests
 Installed-Size: $size
 Description: Parent-guided kiosk desktop environment for Wayland
  shepherd-launcher provides supervised, time-scoped access to the

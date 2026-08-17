@@ -185,6 +185,51 @@ adb install shepherd-companion_0.3.0.apk
 Both APKs are signed with the same key across releases, so an `adb install` over
 an existing install upgrades it in place.
 
+### With `shepherd-admin` (does the sideload for you)
+
+`shepherd-admin` can fetch and install either app onto an Android device
+attached over `adb` — useful for Fire TV sticks, where F-Droid is not a
+practical route:
+
+```sh
+shepherd-admin apps install companion    # or: media
+```
+
+Run it **without `sudo`**: `adb` authorises devices against the invoking user's
+key, so under `sudo` the device reports `unauthorized`.
+
+Where the APK comes from follows how shepherd itself was installed. From the
+`.deb` it downloads the release asset matching the installed version and checks
+it against the release's published `.sha256`; from a source checkout it builds
+the app's Gradle project instead, so you install what you just wrote. Either can
+be forced with `--release` / `--source`.
+
+| Option | Effect |
+|---|---|
+| `--device SERIAL` | Which device to install onto (default: the only one attached). A `HOST:PORT` serial is `adb connect`ed first, for a TV stick reached over the network |
+| `--version X.Y.Z` | Download that release instead of the installed version |
+| `--apk PATH` | Install a specific APK file |
+
+`adb` and `curl` are `Suggests:` of the `.deb`, not `Depends:` — a kiosk that
+never has a phone plugged into it should not carry the Android platform tools,
+so `apt` does not install them by default. Both are checked when you run the
+command, which prints the apt line to fix it:
+
+```sh
+sudo apt install adb          # curl is already present on stock Ubuntu images
+```
+
+The copy of `adb` in `/opt/android-sdk/platform-tools` that
+`shepherd deps install android` provides is found automatically, so a build host
+needs nothing extra.
+
+A locally built APK is debug-signed, so it cannot replace a release- or
+F-Droid-installed copy in place. `shepherd-admin` says so and prints the
+`adb uninstall` that would be needed first — for the companion app that erases
+its admin records and claim tokens, which means factory-resetting every device
+it administers (see [Re-pairing](#re-pairing)), so read the warning before
+following it.
+
 ## Pairing your phone with a device
 
 Pairing is how a phone becomes the device's admin. The first phone to pair

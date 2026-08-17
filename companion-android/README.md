@@ -18,6 +18,11 @@ the app updated) and attached to each release as an APK. See
 [Installing the Android apps](../docs/INSTALL.md#installing-the-android-apps).
 App listing metadata lives in [`dist/fdroid/`](../dist/fdroid/README.md).
 
+`shepherd-admin apps install companion` does the sideload for you, onto whatever
+Android device is attached over `adb` — building the APK from this Gradle
+project in a source checkout, and downloading the version-matched signed release
+asset on a packaged install.
+
 ## Build
 
 The Android SDK and a JDK are installed by the parent repo's tooling:

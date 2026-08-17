@@ -65,7 +65,9 @@ Commands:
     media-deps <cmd>  Install everything shepherd-media needs: va-api + yt-dlp
     va-api <cmd>      Install/detect VA-API drivers for hardware video decoding
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
-    apps install APP  Install an activity backend (steam via snap, chrome via Flathub)
+    apps install APP  Install an activity backend (steam via snap, chrome via
+                      Flathub) or an Android app (companion/media) onto an
+                      attached phone or TV stick over adb
     power-key <cmd>   Map the power button to suspend instead of shutdown
     harden <cmd>      Apply/revert/status kiosk hardening for a user
     bluetooth clear   Force-unpair a user's BLE admin and reset to unclaimed
@@ -82,6 +84,7 @@ Examples:
     shepherd-admin va-api detect
     sudo shepherd-admin yt-dlp install
     sudo shepherd-admin apps install steam
+    shepherd-admin apps install companion        # no sudo: adb keys are per-user
     sudo shepherd-admin harden apply --user kiosk
     sudo shepherd-admin bluetooth clear --user kiosk
 EOF

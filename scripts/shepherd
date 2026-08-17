@@ -56,6 +56,7 @@ Commands:
     version     Show or bump the project version
     package     Build distributable packages (.deb, F-Droid repo)
     apps        Install activity backends (steam via snap, chrome via Flathub)
+                or the Android apps (companion/media) onto an attached device
     power-key   Map the power button to suspend instead of shutdown
     setup-user  Deploy config + add a user to shepherd's groups
 
@@ -92,6 +93,10 @@ Hardening:
 Bluetooth:
     shepherd bluetooth clear --user USER      Unpair + clear admin record
                                               for a logged-out user
+
+Android apps (built from this checkout, installed over adb):
+    shepherd apps install companion           Shepherd Companion (admin app)
+    shepherd apps install media               Shepherd Media (player)
 
 Configuration:
     shepherd config validate                  Validate installed config
