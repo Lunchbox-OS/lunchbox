@@ -49,6 +49,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -784,6 +785,7 @@ fn spawn_device_watcher(
                         events_bytes,
                         "BLE peer connected; companion will drain these before its first RPC",
                     );
+                    spawn_first_rpc_watchdog(device.clone(), addr, last_peer.clone());
                 }
                 DeviceProperty::Connected(false) => {
                     info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
@@ -792,6 +794,77 @@ fn spawn_device_watcher(
                 }
                 _ => {}
             }
+        }
+    });
+}
+
+/// How long a bonded peer may hold a link without sending a single RPC
+/// before we take the link away from it.
+///
+/// Sized above the worst healthy first-RPC latency, not near it: the
+/// companion drains both outboxes and lets the link encryption settle
+/// (up to three 5 s attempts) before its first write, and the slowest
+/// healthy connect measured on hardware — host loaded, cold app start —
+/// was 8 s. Twenty-five seconds is comfortably clear of that and still
+/// well inside the companion's own 30 s connect budget, so a link this
+/// silent is one that was never going to work.
+const FIRST_RPC_GRACE: Duration = Duration::from_secs(25);
+
+/// Disconnect a bonded peer that connects and then never talks.
+///
+/// The failure this exists for: if the *box* originates the LE
+/// connection, it is the central and the phone is the peripheral — and
+/// only a central may start encryption. The phone's stack decides it
+/// needs to encrypt and then has no way to act on it (its one lever, an
+/// SMP Security Request, is not sent on behalf of its GATT client), while
+/// nothing on our side is asking BlueZ for a secure link either. The
+/// result is a link that stays up forever with every read of an
+/// `encrypt_authenticated` characteristic answered `Insufficient
+/// Authentication (0x05)` and not one SMP frame on the air. Observed on
+/// the reporter's box on 2026-08-16; see
+/// `docs/ai/history/2026-08-16 001 ble-connect-fails-after-long-session.md`.
+///
+/// bluetoothd answers those reads itself, so our characteristic callbacks
+/// never fire and the daemon cannot see the failure directly. What it
+/// *can* see is the absence of any request write — `last_peer` is set by
+/// the first one — and dropping the link on that evidence hands the next
+/// connection to the phone, which then initiates, becomes central, and
+/// encrypts normally.
+///
+/// Deliberately skips unpaired peers: during pairing the companion
+/// legitimately holds a link for as long as the Numeric Comparison
+/// prompt takes a human to answer, and it sends no RPC until the bond
+/// completes.
+fn spawn_first_rpc_watchdog(
+    device: bluer::Device,
+    addr: Address,
+    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(FIRST_RPC_GRACE).await;
+        if last_peer.lock().await.is_some() {
+            return; // It talked to us. Nothing to do.
+        }
+        if !device.is_connected().await.unwrap_or(false) {
+            return; // Already gone.
+        }
+        if !device.is_paired().await.unwrap_or(false) {
+            debug!(
+                peer = %addr,
+                "peer has held a link without sending an RPC, but isn't bonded yet; \
+                 leaving it alone in case pairing is in flight",
+            );
+            return;
+        }
+        warn!(
+            peer = %addr,
+            grace_secs = FIRST_RPC_GRACE.as_secs(),
+            "Bonded peer connected but sent no RPC; dropping the link so the companion \
+             reconnects as central. A link the device originated cannot be encrypted by \
+             the phone, and every encrypted read on it fails",
+        );
+        if let Err(e) = device.disconnect().await {
+            warn!(peer = %addr, error = %e, "Could not drop the silent peer's link");
         }
     });
 }

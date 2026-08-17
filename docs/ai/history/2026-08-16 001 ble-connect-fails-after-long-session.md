@@ -271,8 +271,73 @@ Neither side ever attempts encryption. The phone's stack decides to
 `cur_sec_level=0x4` = it still holds the authenticated LTK) and puts
 nothing on air; BlueZ answers 0x05 without sending a Security Request.
 
-**This one is still open.** Neither an adapter power cycle on the box nor
-a Bluetooth toggle on the phone cleared it.
+Neither an adapter power cycle on the box nor a Bluetooth toggle on the
+phone cleared it — and the same capture says why.
+
+### The roles are backwards
+
+```
+> ACL Data RX  … LE L2CAP: Connection Parameter Update Request   (phone → box)
+< ACL Data TX  … LE L2CAP: Connection Parameter Update Response  (box → phone)
+< HCI Command: LE Connection Update (0x08|0x0013)                (box → controller)
+```
+
+Only a peripheral sends the L2CAP Connection Parameter Update Request;
+only the central answers it and issues `HCI LE Connection Update`. Both
+exchanges in the capture run that way, so on that link **the box is the
+central and the phone is the peripheral**.
+
+Only a central may start encryption. The phone therefore *cannot*: its
+stack decides it must (`sec_req_act=BTM_BLE_SEC_REQ_ACT_ENCRYPT`, holding
+an authenticated LTK) and has no way to act, because its one lever as
+peripheral — an SMP Security Request — is not sent on behalf of its own
+GATT client. The box, which could, never does: nothing on our side asks
+BlueZ for a secure link, so bluetoothd just answers ATT 0x05 and carries
+on. Nobody can break the tie, which is exactly the "no SMP frames at all"
+the capture shows.
+
+The role is decided by whoever initiates, so if the box keeps originating
+the connection every new link is born broken — which is why a phone
+Bluetooth toggle, an adapter power cycle, a shepherdd restart and an app
+force-close all reproduced it identically. It also explains the morning
+journal's `BLE peer connected` at 09:14:00 with no RPC ever arriving, and
+why it started after a resume: on resume BlueZ reconnects devices it
+knows, and the box reached out instead of waiting to be reached.
+
+Caveat: the capture starts mid-connection, so "the box initiated" is
+inferred from the role rather than observed. `btmon` across a fresh
+reconnect would show the `LE Create Connection` directly.
+
+### Mitigation: evict a link the box shouldn't own
+
+`spawn_first_rpc_watchdog` — a bonded peer that connects and sends no RPC
+within [`FIRST_RPC_GRACE`] (25 s) gets its link dropped, with a `warn!`
+naming the reason. The companion reconnects immediately and, because it
+initiates, becomes central and encrypts normally. `last_peer` is the
+signal: it is set by the first request write, and that write is itself
+`encrypt_authenticated`, so on a deadlocked link it never happens.
+
+This also closes the observability gap that made the fault so expensive
+to find: bluetoothd answers those 0x05 reads itself, so our
+characteristic callbacks never fire and the daemon previously logged
+nothing at all between "peer connected" and an RPC that never came.
+
+Unpaired peers are skipped deliberately — during pairing the companion
+holds a link for as long as the Numeric Comparison prompt takes a human
+to answer, and sends no RPC until the bond completes.
+
+Verified on hardware in both directions. With the grace temporarily cut
+to 3 s, a real connecting companion is caught (`peer connected` 03:01:13
+→ `Bonded peer connected but sent no RPC` 03:01:16 → link dropped → the
+app reconnects and RPCs flow), which also demonstrates the false positive
+a tight value would cause. Back at 25 s, a normal cold start connects and
+runs 90 s with zero warnings.
+
+**The root cause is still open**: nothing here stops the box from
+originating the connection in the first place. We never set `Trusted`, so
+something else on the box is reconnecting the phone — the cross-transport
+bond makes it look like an audio device, and the journal shows repeated
+A2DP/HFP auth attempts against it.
 
 ## The advertisement does not survive a controller power cycle
 
