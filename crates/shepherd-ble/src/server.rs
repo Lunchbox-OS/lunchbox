@@ -41,7 +41,7 @@ use bluer::gatt::local::{
     Application, ApplicationHandle, Characteristic, CharacteristicRead, CharacteristicWrite,
     CharacteristicWriteMethod, Service,
 };
-use bluer::{AdapterEvent, Address, DeviceEvent, DeviceProperty};
+use bluer::{AdapterEvent, AdapterProperty, Address, DeviceEvent, DeviceProperty};
 use futures_util::{FutureExt, StreamExt};
 use shepherd_api::EventPayload;
 use shepherd_management::ManagementService;
@@ -400,50 +400,18 @@ impl BleServer {
         // adapter and calls `remove_device`.
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
-        let application = build_application(
-            self.config.clone(),
-            self.svc.clone(),
-            self.claim.clone(),
-            reader.clone(),
-            last_peer.clone(),
-            unbond_tx,
-            response_outbox.clone(),
-            events_outbox.clone(),
-        );
-
-        let _app_handle: ApplicationHandle = adapter.serve_gatt_application(application).await?;
-
-        // The service UUID must share the 31-byte legacy PDU with the
-        // device name; a name that pushes the total over the limit makes
-        // BlueZ reject the advertisement outright (0x0d), taking the UUID
-        // off air with it. Trim the *advertised* name to fit — the full
-        // name still reaches the companion over GATT.
-        let adv_name = advertised_name(&self.config.device_name);
-        if adv_name.len() != self.config.device_name.len() {
-            warn!(
-                device = %self.config.device_name,
-                advertised = %adv_name,
-                max_bytes = MAX_ADV_NAME_BYTES,
-                "device name too long for the BLE advertising PDU; advertising a \
-                 truncated name so the management service UUID still fits",
-            );
-        }
-
-        let _adv_handle: AdvertisementHandle = adapter
-            .advertise(Advertisement {
-                advertisement_type: bluer::adv::Type::Peripheral,
-                service_uuids: [SHEPHERD_MANAGEMENT_SERVICE_UUID].into_iter().collect(),
-                local_name: Some(adv_name.to_string()),
-                discoverable: Some(true),
-                ..Default::default()
-            })
-            .await?;
-        info!(
-            device = %self.config.device_name,
-            advertised = %adv_name,
-            service = %SHEPHERD_MANAGEMENT_SERVICE_UUID,
-            "BLE management advertising started",
-        );
+        let mut on_air = go_on_air(
+            &adapter,
+            &self.config,
+            &self.svc,
+            &self.claim,
+            &reader,
+            &last_peer,
+            &unbond_tx,
+            &response_outbox,
+            &events_outbox,
+        )
+        .await?;
 
         let events_task = tokio::spawn(events_forwarder(self.svc.clone(), events_outbox.clone()));
 
@@ -453,8 +421,8 @@ impl BleServer {
         // desynced byte stream.
         let disconnect_task = tokio::spawn(disconnect_monitor(
             adapter.clone(),
-            reader,
-            last_peer,
+            reader.clone(),
+            last_peer.clone(),
             response_outbox.clone(),
             events_outbox.clone(),
         ));
@@ -488,7 +456,74 @@ impl BleServer {
             }
         });
 
-        let _ = shutdown_rx.wait_for(|v| *v).await;
+        // Hold the air until shutdown — and put it back if the controller
+        // power cycles underneath us. See [`go_on_air`] for why nothing
+        // else notices when that happens.
+        let mut adapter_events = match adapter.events().await {
+            Ok(events) => Some(events),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Could not watch the adapter for power cycles; BLE management will not \
+                     recover on its own if the controller is powered off and back on",
+                );
+                None
+            }
+        };
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+            let Some(events) = adapter_events.as_mut() else {
+                let _ = shutdown_rx.wait_for(|v| *v).await;
+                break;
+            };
+            tokio::select! {
+                _ = shutdown_rx.changed() => {}
+                event = events.next() => match event {
+                    Some(AdapterEvent::PropertyChanged(AdapterProperty::Powered(true))) => {
+                        warn!(
+                            adapter = %adapter.name(),
+                            "Bluetooth controller powered back on; re-registering the GATT \
+                             application and advertisement",
+                        );
+                        // Drop first: the stale handles still own their
+                        // D-Bus object paths, and BlueZ rejects a second
+                        // registration under a path it already holds.
+                        drop(on_air);
+                        match go_on_air(
+                            &adapter,
+                            &self.config,
+                            &self.svc,
+                            &self.claim,
+                            &reader,
+                            &last_peer,
+                            &unbond_tx,
+                            &response_outbox,
+                            &events_outbox,
+                        )
+                        .await
+                        {
+                            Ok(fresh) => on_air = fresh,
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    "Failed to re-register BLE management after the controller \
+                                     powered on; the device is off air until the session restarts",
+                                );
+                                let _ = shutdown_rx.wait_for(|v| *v).await;
+                                break;
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        warn!("Adapter event stream ended; no longer watching for power cycles");
+                        adapter_events = None;
+                    }
+                },
+            }
+        }
         info!("BLE management server shutting down");
         events_task.abort();
         let _ = events_task.await;
@@ -773,6 +808,91 @@ async fn reset_transport_session(
     *last_peer.lock().await = None;
     response_outbox.clear().await;
     events_outbox.clear().await;
+}
+
+/// The two registrations that stop existing when the controller power
+/// cycles: the GATT application and the LE advertisement. Both are
+/// handles whose `Drop` unregisters them, so re-arming is "drop, then
+/// register again".
+struct OnAir {
+    _app: ApplicationHandle,
+    _adv: AdvertisementHandle,
+}
+
+/// Put the management service on air: serve the GATT application and
+/// start advertising.
+///
+/// Called once at startup and again every time the controller is powered
+/// back on. **Nothing else notices that transition.** A
+/// `bluetoothctl power off/on`, an `rfkill` cycle, or a suspend that
+/// resets the controller takes the advertisement off air while BlueZ goes
+/// on reporting it as registered — `LEAdvertisingManager1.ActiveInstances`
+/// still reads 1, and `Adapter1.Powered` reads true — so a device that has
+/// silently vanished looks identical to a healthy one from every property
+/// we can query. Verified on the dev box: after a power cycle the
+/// companion could not connect at all, and the phone's pairing scan (which
+/// filters on our service UUID) listed nothing, while the daemon sat there
+/// believing it was advertising. The power-on signal is the only reliable
+/// cue, which is why this is driven by an event rather than a poll.
+#[allow(clippy::too_many_arguments)]
+async fn go_on_air(
+    adapter: &bluer::Adapter,
+    config: &BleServerConfig,
+    svc: &Arc<dyn ManagementService>,
+    claim: &Arc<ClaimMachine>,
+    reader: &Arc<Mutex<FrameReader>>,
+    last_peer: &Arc<Mutex<Option<PeerIdentity>>>,
+    unbond_tx: &mpsc::Sender<Address>,
+    response_outbox: &Arc<Outbox>,
+    events_outbox: &Arc<Outbox>,
+) -> bluer::Result<OnAir> {
+    let application = build_application(
+        config.clone(),
+        svc.clone(),
+        claim.clone(),
+        reader.clone(),
+        last_peer.clone(),
+        unbond_tx.clone(),
+        response_outbox.clone(),
+        events_outbox.clone(),
+    );
+    let app: ApplicationHandle = adapter.serve_gatt_application(application).await?;
+
+    // The service UUID must share the 31-byte legacy PDU with the
+    // device name; a name that pushes the total over the limit makes
+    // BlueZ reject the advertisement outright (0x0d), taking the UUID
+    // off air with it. Trim the *advertised* name to fit — the full
+    // name still reaches the companion over GATT.
+    let adv_name = advertised_name(&config.device_name);
+    if adv_name.len() != config.device_name.len() {
+        warn!(
+            device = %config.device_name,
+            advertised = %adv_name,
+            max_bytes = MAX_ADV_NAME_BYTES,
+            "device name too long for the BLE advertising PDU; advertising a \
+             truncated name so the management service UUID still fits",
+        );
+    }
+
+    let adv: AdvertisementHandle = adapter
+        .advertise(Advertisement {
+            advertisement_type: bluer::adv::Type::Peripheral,
+            service_uuids: [SHEPHERD_MANAGEMENT_SERVICE_UUID].into_iter().collect(),
+            local_name: Some(adv_name.to_string()),
+            discoverable: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    info!(
+        device = %config.device_name,
+        advertised = %adv_name,
+        service = %SHEPHERD_MANAGEMENT_SERVICE_UUID,
+        "BLE management advertising started",
+    );
+    Ok(OnAir {
+        _app: app,
+        _adv: adv,
+    })
 }
 
 async fn register_agent(
