@@ -169,7 +169,21 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         val conn = ShepherdConnection.fromIdentifier(record.androidIdentifier, viewModelScope)
         connection = conn
         client = ManagementClient(conn)
-        _state.value = DeviceUiState(record = record, link = LinkStatus.Connecting)
+        // Keep what we already know about *this* device across a
+        // reconnect. The link status is rendered alongside it, so the
+        // screen reads "here is the last known state, and the link is
+        // down" rather than blanking to "No activities yet." — which is
+        // what it did on every attempt once the give-up path started
+        // retrying once a minute. Switching devices still starts clean:
+        // showing one box's activities under another box's name would be
+        // worse than showing nothing.
+        _state.update { prev ->
+            if (prev.record?.androidIdentifier == record.androidIdentifier) {
+                prev.copy(record = record, link = LinkStatus.Connecting)
+            } else {
+                DeviceUiState(record = record, link = LinkStatus.Connecting)
+            }
+        }
         conn.start()
         eventsJob = viewModelScope.launch {
             conn.events.collect { event -> applyEvent(event.payload) }
