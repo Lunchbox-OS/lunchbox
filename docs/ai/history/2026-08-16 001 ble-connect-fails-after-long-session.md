@@ -220,6 +220,86 @@ be worth logging the transport (and whether the link is encrypted)
 alongside it; as it stands the line proves less than its wording
 suggests.
 
+## Phone-side evidence: two different failures
+
+Two Android bug reports from the box's phone (a Galaxy S23), taken minutes
+apart while the failure was live, turn out to describe *different* faults.
+
+### 16:04 — nothing on air
+
+Ten direct LE connects to the box's address between 16:04:51 and
+16:05:41, every one ending
+
+```
+le_impl.h:1539 on_create_connection_timeout, address: xx:xx:xx:xx:47:b2
+bta_gattc_act.cc:358 bta_gattc_open_fail: Connection timed out after 30 seconds
+BluetoothGatt: onClientConnectionState() - status=147 connected=false
+```
+
+and the companion's own 5 s scan probe (`scannerId 15`) returned **zero
+results** — the box's address appears in no scan result from any app
+anywhere in the report. The box's journal for that session explains why:
+`shepherdd` started at 16:03:07 and there is not one `shepherd_ble` line
+in the whole boot, because `[service.ble_management]` had been switched
+off. `Policy::from_raw` drops the section with `.filter(|c| c.enabled)`,
+`main.rs` matches `None => (None, None)`, and **nothing is logged either
+way** — an intentionally-disabled transport and a broken one look
+identical in the journal. `ActiveInstances = 0` from `busctl` confirmed
+it independently.
+
+### 16:37 — on air, connected, and never encrypted
+
+With BLE re-enabled and a fresh pairing, one connection worked; after a
+sleep/resume of the box the companion showed "Can't reach this device
+securely" again, and this time the phone reached the device:
+
+```
+ShepherdBle: response: first read did not land while the link warms up (attempt 1/3):
+  OnCharacteristicRead(characteristic=8c0c0004-…, status=GATT_INSUFFICIENT_AUTHENTICATION(5))
+…47:B2 [DUAL] [ACL BR/EDR:N LE:Y] [Encryption status(BR/EDR): null LE: null]
+```
+
+An LE link is up (`LE:Y`) and completely unencrypted (`LE: null`, where a
+healthy link reads `EncryptionStatus{keySize=16, algorithm=2}`), so BlueZ
+correctly refuses every read of an `encrypt_authenticated_read`
+characteristic. `btmon` on the box over 1052 lines shows the same thing
+from the other side — endless `Read Request` / `Error: Insufficient
+Authentication (0x05)` on handle 0x0021 — and, decisively, **zero SMP
+frames, zero `LE Long Term Key Request`, zero `Encryption Change`**.
+Neither side ever attempts encryption. The phone's stack decides to
+(`btm_ble_link_sec_check … sec_req_act=BTM_BLE_SEC_REQ_ACT_ENCRYPT`, with
+`cur_sec_level=0x4` = it still holds the authenticated LTK) and puts
+nothing on air; BlueZ answers 0x05 without sending a Security Request.
+
+**This one is still open.** Neither an adapter power cycle on the box nor
+a Bluetooth toggle on the phone cleared it.
+
+## The advertisement does not survive a controller power cycle
+
+Found while chasing the above, and reproduced on the dev box: after
+`bluetoothctl power off` / `power on`, the companion could not connect at
+all and the phone's pairing scan listed nothing — while BlueZ still
+reported `Adapter1.Powered = true` **and
+`LEAdvertisingManager1.ActiveInstances = 1`**. The device had silently
+gone off air, and every property we can query said it was fine. On the
+reporter's box this is what made `copernicus` stop appearing in the
+pairing list after they ran that power cycle.
+
+`BleServer::run` registered the GATT application and the advertisement
+once at startup and then parked on the shutdown watch, so nothing ever
+put them back. It now watches the adapter for
+`AdapterProperty::Powered(true)` and re-registers both, logging it. A
+suspend that resets the controller takes the same path.
+
+Verified on hardware: companion connected, `bluetoothctl power off` /
+`power on`, phone untouched → daemon logs "Bluetooth controller powered
+back on; re-registering…" 4 s later, the peer reconnects, and RPCs are
+flowing 3 s after that (`service_state`, `list_groups`, `get_volume`,
+`get_brightness`, all `ok=true`). Note that these RPCs ride the same
+`encrypt_authenticated` characteristics, so a power cycle does *not*
+break link encryption here — which is another reason the 16:37 failure
+above is something else.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
