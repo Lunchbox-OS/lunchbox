@@ -49,6 +49,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -420,8 +421,13 @@ impl BleServer {
         // that resumes the same connection across a transient BLE
         // reconnect (no fresh `id == 1` sentinel) doesn't inherit a
         // desynced byte stream.
+        // Distinguishes one peer connection from the next, so a
+        // watchdog armed for a link that has since dropped cannot act on
+        // whatever connection happens to be live when its timer expires.
+        let connection_epoch = Arc::new(AtomicU64::new(0));
         let disconnect_task = tokio::spawn(disconnect_monitor(
             adapter.clone(),
+            connection_epoch,
             reader.clone(),
             last_peer.clone(),
             response_outbox.clone(),
@@ -674,6 +680,7 @@ fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
 /// race a fresh response into oblivion.
 async fn disconnect_monitor(
     adapter: bluer::Adapter,
+    epoch: Arc<AtomicU64>,
     reader: Arc<Mutex<FrameReader>>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
@@ -702,6 +709,7 @@ async fn disconnect_monitor(
                     spawn_device_watcher(
                         &adapter,
                         addr,
+                        epoch.clone(),
                         reader.clone(),
                         last_peer.clone(),
                         response_outbox.clone(),
@@ -720,6 +728,7 @@ async fn disconnect_monitor(
                     spawn_device_watcher(
                         &adapter,
                         addr,
+                        epoch.clone(),
                         reader.clone(),
                         last_peer.clone(),
                         response_outbox.clone(),
@@ -744,6 +753,7 @@ async fn disconnect_monitor(
 fn spawn_device_watcher(
     adapter: &bluer::Adapter,
     addr: Address,
+    epoch: Arc<AtomicU64>,
     reader: Arc<Mutex<FrameReader>>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
@@ -785,9 +795,17 @@ fn spawn_device_watcher(
                         events_bytes,
                         "BLE peer connected; companion will drain these before its first RPC",
                     );
-                    spawn_first_rpc_watchdog(device.clone(), addr, last_peer.clone());
+                    let generation = epoch.fetch_add(1, Ordering::Relaxed) + 1;
+                    spawn_first_rpc_watchdog(
+                        device.clone(),
+                        addr,
+                        generation,
+                        epoch.clone(),
+                        last_peer.clone(),
+                    );
                 }
                 DeviceProperty::Connected(false) => {
+                    epoch.fetch_add(1, Ordering::Relaxed);
                     info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
                     reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox)
                         .await;
@@ -838,10 +856,21 @@ const FIRST_RPC_GRACE: Duration = Duration::from_secs(25);
 fn spawn_first_rpc_watchdog(
     device: bluer::Device,
     addr: Address,
+    generation: u64,
+    epoch: Arc<AtomicU64>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_RPC_GRACE).await;
+        if epoch.load(Ordering::Relaxed) != generation {
+            // The link this timer was armed for is long gone; anything
+            // live now is a *different* connection with its own timer.
+            // Without this check the state below is read against the
+            // wrong link: on 2026-08-17 a timer armed at 03:37:47 fired
+            // at 03:38:12 and killed a healthy connection that had come
+            // up 1.2s earlier and was about to send its first RPC.
+            return;
+        }
         if last_peer.lock().await.is_some() {
             return; // It talked to us. Nothing to do.
         }
