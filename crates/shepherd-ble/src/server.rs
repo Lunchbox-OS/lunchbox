@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::admin::{AdminStore, PendingUnbondStore, check_reset_sentinel};
@@ -463,72 +463,100 @@ impl BleServer {
             }
         });
 
-        // Hold the air until shutdown — and put it back if the controller
-        // power cycles underneath us. See [`go_on_air`] for why nothing
-        // else notices when that happens.
+        // Hold the air until shutdown — and put it back whenever
+        // something underneath us could have taken it off. See
+        // [`go_on_air`] for why nothing else notices when that happens.
+        //
+        // Two triggers, because one is not enough. A controller power
+        // cycle announces itself as `Powered(true)`. A *suspend* does
+        // not: on the reporter's box a resume produced only bluetoothd's
+        // "Controller resume with wake event 0x0" and our own peer
+        // disconnect, with no property transition anywhere — and the
+        // device was off air afterwards, the phone's every connect
+        // ending in `status=147` (connection timeout) with our address
+        // in zero scan results. So we also re-arm on the daemon's own
+        // `SystemResumed`, which reaches us through the same event
+        // stream the outbox forwarder already consumes.
         let mut adapter_events = match adapter.events().await {
             Ok(events) => Some(events),
             Err(e) => {
                 warn!(
                     error = %e,
-                    "Could not watch the adapter for power cycles; BLE management will not \
-                     recover on its own if the controller is powered off and back on",
+                    "Could not watch the adapter for power cycles; BLE management will still \
+                     re-arm on resume, but not on a bare controller power cycle",
                 );
                 None
             }
         };
+        let mut service_events = self.svc.subscribe_events();
         loop {
             if *shutdown_rx.borrow() {
                 break;
             }
-            let Some(events) = adapter_events.as_mut() else {
-                let _ = shutdown_rx.wait_for(|v| *v).await;
-                break;
-            };
-            tokio::select! {
-                _ = shutdown_rx.changed() => {}
-                event = events.next() => match event {
-                    Some(AdapterEvent::PropertyChanged(AdapterProperty::Powered(true))) => {
-                        warn!(
-                            adapter = %adapter.name(),
-                            "Bluetooth controller powered back on; re-registering the GATT \
-                             application and advertisement",
-                        );
-                        // Drop first: the stale handles still own their
-                        // D-Bus object paths, and BlueZ rejects a second
-                        // registration under a path it already holds.
-                        drop(on_air);
-                        match go_on_air(
-                            &adapter,
-                            &self.config,
-                            &self.svc,
-                            &self.claim,
-                            &reader,
-                            &last_peer,
-                            &unbond_tx,
-                            &response_outbox,
-                            &events_outbox,
-                        )
-                        .await
-                        {
-                            Ok(fresh) => on_air = fresh,
-                            Err(e) => {
-                                error!(
-                                    error = %e,
-                                    "Failed to re-register BLE management after the controller \
-                                     powered on; the device is off air until the session restarts",
-                                );
-                                let _ = shutdown_rx.wait_for(|v| *v).await;
-                                break;
-                            }
-                        }
+            // `None` = nothing to do; `Some(reason)` = go back on air.
+            let reason: Option<&'static str> = tokio::select! {
+                _ = shutdown_rx.changed() => None,
+                event = async {
+                    match adapter_events.as_mut() {
+                        Some(events) => events.next().await,
+                        // No adapter stream: park forever and let the
+                        // other branches drive the loop.
+                        None => std::future::pending().await,
                     }
-                    Some(_) => {}
+                } => match event {
+                    Some(event) => rearm_reason_for_adapter_event(&event),
                     None => {
                         warn!("Adapter event stream ended; no longer watching for power cycles");
                         adapter_events = None;
+                        None
                     }
                 },
+                event = service_events.recv() => match event {
+                    Ok(event) => rearm_reason_for_service_event(&event.payload),
+                    // Lagging only means we may have missed events; the
+                    // next resume still arrives.
+                    Err(broadcast::error::RecvError::Lagged(_)) => None,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("Service event stream closed; no longer watching for resume");
+                        let _ = shutdown_rx.wait_for(|v| *v).await;
+                        break;
+                    }
+                },
+            };
+            let Some(reason) = reason else { continue };
+            warn!(
+                adapter = %adapter.name(),
+                reason,
+                "Re-registering the GATT application and advertisement",
+            );
+            // Drop first: the stale handles still own their D-Bus object
+            // paths, and BlueZ rejects a second registration under a path
+            // it already holds.
+            drop(on_air);
+            match go_on_air(
+                &adapter,
+                &self.config,
+                &self.svc,
+                &self.claim,
+                &reader,
+                &last_peer,
+                &unbond_tx,
+                &response_outbox,
+                &events_outbox,
+            )
+            .await
+            {
+                Ok(fresh) => on_air = fresh,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        reason,
+                        "Failed to re-register BLE management; the device is off air until \
+                         the session restarts",
+                    );
+                    let _ = shutdown_rx.wait_for(|v| *v).await;
+                    break;
+                }
             }
         }
         info!("BLE management server shutting down");
@@ -910,6 +938,32 @@ async fn reset_transport_session(
     *last_peer.lock().await = None;
     response_outbox.clear().await;
     events_outbox.clear().await;
+}
+
+/// Why, if at all, an adapter event means the service needs to go back
+/// on air. Split out from the run loop so the *decision* is testable
+/// without an adapter.
+fn rearm_reason_for_adapter_event(event: &AdapterEvent) -> Option<&'static str> {
+    match event {
+        AdapterEvent::PropertyChanged(AdapterProperty::Powered(true)) => {
+            Some("the Bluetooth controller powered back on")
+        }
+        _ => None,
+    }
+}
+
+/// Same, for the daemon's own event stream.
+///
+/// `SystemResumed` is here because a suspend/resume does **not** always
+/// move `Adapter1.Powered`: on the 2026-08-17 report the resume produced
+/// only bluetoothd's "Controller resume" line and our peer disconnect,
+/// with no property transition at all — and the device was off air
+/// afterwards. Watching the power property alone missed it entirely.
+fn rearm_reason_for_service_event(payload: &EventPayload) -> Option<&'static str> {
+    match payload {
+        EventPayload::SystemResumed => Some("the system resumed from sleep"),
+        _ => None,
+    }
 }
 
 /// The two registrations that stop existing when the controller power
@@ -1723,6 +1777,50 @@ mod tests {
             .expect("a complete frame is present");
         let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
         assert_eq!(parsed.id, 8);
+    }
+
+    /// A suspend/resume is not always visible as a power transition, so
+    /// the run loop watches two independent triggers. The 2026-08-17
+    /// report was a resume that moved no adapter property at all and
+    /// still left the device off air.
+    #[test]
+    fn resume_and_power_on_both_re_arm_the_air() {
+        assert_eq!(
+            rearm_reason_for_service_event(&EventPayload::SystemResumed),
+            Some("the system resumed from sleep"),
+        );
+        assert_eq!(
+            rearm_reason_for_adapter_event(&AdapterEvent::PropertyChanged(
+                AdapterProperty::Powered(true)
+            )),
+            Some("the Bluetooth controller powered back on"),
+        );
+    }
+
+    /// Everything else must leave the registrations alone: re-arming
+    /// drops the GATT application, which disconnects whoever is on it.
+    #[test]
+    fn ordinary_events_do_not_re_arm_the_air() {
+        assert_eq!(
+            rearm_reason_for_service_event(&EventPayload::SystemSuspending),
+            None,
+        );
+        assert_eq!(
+            rearm_reason_for_service_event(&EventPayload::PolicyReloaded { entry_count: 3 }),
+            None,
+        );
+        assert_eq!(
+            rearm_reason_for_adapter_event(&AdapterEvent::PropertyChanged(
+                AdapterProperty::Powered(false)
+            )),
+            None,
+        );
+        assert_eq!(
+            rearm_reason_for_adapter_event(&AdapterEvent::DeviceAdded(
+                "AA:BB:CC:DD:EE:FF".parse().expect("valid address")
+            )),
+            None,
+        );
     }
 
     /// Snapshots coalesce; incremental facts don't.

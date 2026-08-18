@@ -365,6 +365,63 @@ flowing 3 s after that (`service_state`, `list_groups`, `get_volume`,
 break link encryption here — which is another reason the 16:37 failure
 above is something else.
 
+## 2026-08-17: still failing after suspend — a *third* failure mode
+
+With all of the above deployed to both the box and the phone, a
+suspend/resume still killed it — but not the same way. The device-side
+journal:
+
+```
+19:42:33  Power key pressed short. / Suspending...
+19:43:30  System returned from sleep operation 'suspend'
+19:43:30  bluetoothd: Controller resume with wake event 0x0
+19:43:30  shepherd_ble::server: BLE peer disconnected; clearing transport session state
+          … and then nothing at all, for six minutes
+```
+
+No `Powered` transition, so **the power-cycle re-arm never fired**. No
+peer connection either, and `btmon -i hci0` over the failure window
+captured nothing but its own header — zero HCI traffic.
+
+The phone says why: every attempt ends `status=147` (connection timeout),
+27 `on_create_connection_timeout` entries, **zero**
+`GATT_INSUFFICIENT_AUTHENTICATION`, and the box's address in **zero**
+scan results from any app. So this is "off air", not the encryption
+deadlock — the same shape as the 16:04 report, except BLE was enabled and
+the daemon believed it was advertising the whole time.
+
+Two of the fixes did behave as designed: the companion retried steadily
+for five minutes instead of giving up once (`19:45:08, 19:45:34, 19:45:45,
+19:45:57, 19:46:12, 19:48:06, 19:49:43, 19:49:54`), and the first-RPC
+watchdog correctly stayed quiet — there was no link to evict.
+
+### The gap, and the second trigger
+
+`go_on_air` was re-armed only by `AdapterProperty::Powered(true)`. That
+covers a controller power cycle and misses a suspend that takes the
+advertisement off air without moving any property we can see — which is
+exactly what this box does.
+
+The run loop now also re-arms on the daemon's own
+`EventPayload::SystemResumed`, which arrives through
+`ManagementService::subscribe_events` — the stream the events forwarder
+already consumes, so no new plumbing crosses the crate boundary. Both
+triggers route through the same `go_on_air` call and log a `reason`.
+
+The decisions are split into `rearm_reason_for_adapter_event` and
+`rearm_reason_for_service_event` so they are unit-testable without an
+adapter; the tests assert both triggers fire and that ordinary events
+(including `Powered(false)` and `SystemSuspending`) do not, because
+re-arming drops the GATT application and disconnects whoever is on it.
+
+**Verified**: both trigger decisions by unit test, and the shared re-arm
+body on hardware via a controller power cycle (`Re-registering the GATT
+application and advertisement … reason="the Bluetooth controller powered
+back on"`, then the companion reconnects and RPCs flow). **Not verified**:
+the resume trigger itself on real hardware — this dev box is a KVM guest
+that cannot resume from s2idle, and logind's signal cannot be spoofed
+(zbus matches on sender). That one needs a suspend on the affected box.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
