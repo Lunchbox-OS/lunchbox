@@ -844,43 +844,49 @@ fn spawn_device_watcher(
     });
 }
 
-/// How long a bonded peer may hold a link without sending a single RPC
-/// before we take the link away from it.
+/// How long a peer may hold a link without sending a single RPC before
+/// we say so in the log.
 ///
 /// Sized above the worst healthy first-RPC latency, not near it: the
 /// companion drains both outboxes and lets the link encryption settle
 /// (up to three 5 s attempts) before its first write, and the slowest
 /// healthy connect measured on hardware — host loaded, cold app start —
-/// was 8 s. Twenty-five seconds is comfortably clear of that and still
-/// well inside the companion's own 30 s connect budget, so a link this
-/// silent is one that was never going to work.
+/// was 8 s. Note this is *not* long enough to clear a pairing, which
+/// waits on a human comparing six digits; that is one of the reasons
+/// this no longer acts on the link, only reports it.
 const FIRST_RPC_GRACE: Duration = Duration::from_secs(25);
 
-/// Disconnect a bonded peer that connects and then never talks.
+/// Report a bonded peer that connects and then never talks.
 ///
 /// The failure this exists for: if the *box* originates the LE
 /// connection, it is the central and the phone is the peripheral — and
 /// only a central may start encryption. The phone's stack decides it
-/// needs to encrypt and then has no way to act on it (its one lever, an
-/// SMP Security Request, is not sent on behalf of its GATT client), while
-/// nothing on our side is asking BlueZ for a secure link either. The
-/// result is a link that stays up forever with every read of an
+/// needs to encrypt and then has no way to act on it, while nothing on
+/// our side is asking BlueZ for a secure link either. The result is a
+/// link that stays up forever with every read of an
 /// `encrypt_authenticated` characteristic answered `Insufficient
 /// Authentication (0x05)` and not one SMP frame on the air. Observed on
 /// the reporter's box on 2026-08-16; see
 /// `docs/ai/history/2026-08-16 001 ble-connect-fails-after-long-session.md`.
 ///
-/// bluetoothd answers those reads itself, so our characteristic callbacks
-/// never fire and the daemon cannot see the failure directly. What it
-/// *can* see is the absence of any request write — `last_peer` is set by
-/// the first one — and dropping the link on that evidence hands the next
-/// connection to the phone, which then initiates, becomes central, and
-/// encrypts normally.
+/// bluetoothd answers those reads itself, so our characteristic
+/// callbacks never fire and the daemon cannot see the failure directly.
+/// What it *can* see is the absence of any request write — `last_peer`
+/// is set by the first one — which is what this reports.
 ///
-/// Deliberately skips unpaired peers: during pairing the companion
-/// legitimately holds a link for as long as the Numeric Comparison
-/// prompt takes a human to answer, and it sends no RPC until the bond
-/// completes.
+/// **It only reports.** It used to drop the link, on the theory that the
+/// companion would reconnect and, by initiating, become central. That
+/// broke pairing outright: a box holding a stale bond reads as
+/// `is_paired()` even while the phone is mid-`BOND_BONDING`, so the
+/// timer fired 25 s into the Numeric Comparison window — before the
+/// human could compare the digits — and hung up on the pairing
+/// (`status=19 GATT_CONN_TERMINATE_PEER_USER` on the phone, three
+/// attempts in a row on 2026-08-17). Silence on a fresh link is simply
+/// not specific enough to act on: pairing, a slow drain and the
+/// role-inversion deadlock all look identical from here. Eviction can
+/// come back when the deadlock itself is reproducible and there is a
+/// signal that distinguishes it — until then this line is what turns an
+/// invisible failure into a diagnosable one.
 fn spawn_first_rpc_watchdog(
     device: bluer::Device,
     addr: Address,
@@ -895,8 +901,8 @@ fn spawn_first_rpc_watchdog(
             // live now is a *different* connection with its own timer.
             // Without this check the state below is read against the
             // wrong link: on 2026-08-17 a timer armed at 03:37:47 fired
-            // at 03:38:12 and killed a healthy connection that had come
-            // up 1.2s earlier and was about to send its first RPC.
+            // at 03:38:12 against a healthy connection that had come up
+            // 1.2s earlier and was about to send its first RPC.
             return;
         }
         if last_peer.lock().await.is_some() {
@@ -905,24 +911,16 @@ fn spawn_first_rpc_watchdog(
         if !device.is_connected().await.unwrap_or(false) {
             return; // Already gone.
         }
-        if !device.is_paired().await.unwrap_or(false) {
-            debug!(
-                peer = %addr,
-                "peer has held a link without sending an RPC, but isn't bonded yet; \
-                 leaving it alone in case pairing is in flight",
-            );
-            return;
-        }
+        let paired = device.is_paired().await.unwrap_or(false);
         warn!(
             peer = %addr,
+            paired,
             grace_secs = FIRST_RPC_GRACE.as_secs(),
-            "Bonded peer connected but sent no RPC; dropping the link so the companion \
-             reconnects as central. A link the device originated cannot be encrypted by \
-             the phone, and every encrypted read on it fails",
+            "Peer has held a link this long without sending an RPC. If it is bonded and \
+             the companion is trying to reach us, the link is probably one the device \
+             originated — the phone cannot encrypt those, and every encrypted read on \
+             them fails. Pairing in progress looks the same and is fine",
         );
-        if let Err(e) = device.disconnect().await {
-            warn!(peer = %addr, error = %e, "Could not drop the silent peer's link");
-        }
     });
 }
 

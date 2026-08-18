@@ -422,6 +422,52 @@ the resume trigger itself on real hardware — this dev box is a KVM guest
 that cannot resume from s2idle, and logind's signal cannot be spoofed
 (zbus matches on sender). That one needs a suspend on the affected box.
 
+## 2026-08-17, later: the watchdog broke pairing — now report-only
+
+Deployed to the affected box, the first-RPC watchdog made pairing
+impossible. Three attempts, each identical:
+
+```
+20:24:42  BLE peer connected …
+20:25:07  WARN Bonded peer connected but sent no RPC; dropping the link …   (T+25.0s)
+20:25:09  BLE peer disconnected
+```
+
+and on the phone, `BOND_NONE → BOND_BONDING` at 20:24:42 followed by
+`onClientConnectionState() status=19 connected=false` —
+`GATT_CONN_TERMINATE_PEER_USER`, i.e. *we* hung up, 25 seconds into the
+window where a human is comparing six digits.
+
+The `is_paired()` gate was supposed to prevent exactly this, and didn't:
+the box still held a **stale bond** from the previous pairing, so the
+peer read as bonded while the phone was mid-bond with no keys of its own.
+The gate tests the wrong side of the relationship, and there is no
+reliable "bonding in flight" signal available before SMP reaches the
+agent.
+
+**The eviction is removed; the line stays.** Silence on a fresh link is
+not specific enough to act on — pairing, a slow drain, and the
+role-inversion deadlock are indistinguishable from the daemon's side,
+and only one of them wants a disconnect. What the log line buys is the
+thing that was actually missing: bluetoothd answers the `0x05` reads
+itself, so our callbacks never fire and the failure was invisible.
+Eviction can return when the deadlock is reproducible and something
+distinguishes it.
+
+Verified after the change: pairing from scratch completes normally
+(Numeric Comparison → `Pairing complete` → `claim` → bond at
+`keySize=16`), including with the grace forced to 3 s so the timer fires
+mid-flow. Note the timer did *not* arm during pairing on the dev box at
+all — for a peer BlueZ only learns about at connect time, the device
+watcher attaches after the `Connected` transition. On the reporter's box
+the peer was already known, so it armed. That asymmetry is worth
+remembering when reasoning about this path.
+
+Unrelated flake seen while testing, worth its own look: one session died
+at startup with `Failed to register BlueZ pairing agent (D-Bus
+NoReply)`, which takes BLE management down for the whole session with no
+retry and no advertising.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
