@@ -42,6 +42,17 @@ FIREWALL_GROUP="shepherd-firewall"
 UDEV_RULES_DIR="/etc/udev/rules.d"
 UINPUT_RULES_NAME="71-shepherd-uinput.rules"
 
+# systemd drop-in that runs bluetoothd with experimental D-Bus interfaces,
+# which is what exposes `Device1.PreferredBearer` — see install_bluetooth_dropin
+# and dist/systemd/. A drop-in rather than an edit to /etc/bluetooth/main.conf
+# because BlueZ has no conf.d: it reads exactly one file, so shipping config
+# there means fighting the distro's conffile on every upgrade.
+BLUETOOTH_DROPIN_DIR="/etc/systemd/system/bluetooth.service.d"
+BLUETOOTH_DROPIN_NAME="10-shepherd-bluetooth-experimental.conf"
+# Used only when the target's own unit can't be read (i.e. under DESTDIR,
+# where we are staging on a build host rather than the eventual machine).
+BLUETOOTHD_DEFAULT_PATH="/usr/libexec/bluetooth/bluetoothd"
+
 # Install release binaries
 install_bins() {
     local prefix="${1:-$DEFAULT_PREFIX}"
@@ -312,6 +323,83 @@ install_user_groups() {
     success "Updated group memberships for $user"
 }
 
+# Resolve the path bluetoothd is actually started from, so the drop-in's
+# ExecStart matches the distro rather than a guess. Getting this wrong is
+# not a cosmetic error — a drop-in pointing at a non-existent binary stops
+# Bluetooth working entirely — so we read it back from the unit that is
+# installed, and only fall back to the well-known Ubuntu path when there is
+# no unit to read (staging under DESTDIR on a build host).
+_bluetoothd_exec_path() {
+    local line
+    line="$(systemctl cat bluetooth.service 2>/dev/null \
+        | awk -F= '/^ExecStart=./ { sub(/^ExecStart=/, ""); print; exit }')"
+    # ExecStart may carry arguments and systemd's own prefix characters.
+    line="${line#[-@:+!]}"
+    line="${line%% *}"
+
+    if [[ -n "$line" ]]; then
+        printf '%s\n' "$line"
+    else
+        printf '%s\n' "$BLUETOOTHD_DEFAULT_PATH"
+    fi
+}
+
+# Install the bluetoothd drop-in that enables experimental D-Bus interfaces.
+#
+# shepherd needs `Device1.PreferredBearer` to pin the admin phone to the
+# BR/EDR bearer; without it BlueZ arms the kernel to auto-connect the phone
+# over LE, the device ends up central, and the companion can never encrypt
+# the link (see dist/systemd/ for the full story). shepherd degrades
+# gracefully without this — it says so in the log and falls back — so a box
+# with no BlueZ at all is skipped rather than treated as an error.
+install_bluetooth_dropin() {
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    require_root
+
+    local template="$repo_root/dist/systemd/$BLUETOOTH_DROPIN_NAME"
+    local dropin_dst="$destdir$BLUETOOTH_DROPIN_DIR/$BLUETOOTH_DROPIN_NAME"
+
+    if [[ ! -f "$template" ]]; then
+        die "Bluetooth drop-in missing at $template"
+    fi
+
+    # No bluetooth unit and not staging a package? Nothing to extend.
+    if [[ -z "$destdir" ]] && ! systemctl cat bluetooth.service >/dev/null 2>&1; then
+        info "No bluetooth.service on this system; skipping the bluetoothd drop-in"
+        return 0
+    fi
+
+    local bluetoothd
+    bluetoothd="$(_bluetoothd_exec_path)"
+
+    info "Installing bluetoothd drop-in to $dropin_dst (ExecStart=$bluetoothd -E)..."
+    ensure_dir "$(dirname "$dropin_dst")" 0755
+    sed "s|@BLUETOOTHD@|$bluetoothd|" "$template" >"$dropin_dst"
+    chmod 0644 "$dropin_dst"
+    chown root:root "$dropin_dst"
+
+    # Reload + restart only on a real (non-packaging) install; under DESTDIR
+    # these would touch the build host.
+    #
+    # NOTE: the .deb runs these same steps from its generated postinst
+    # instead (scripts/lib/package.sh, _package_write_control). Keep them in
+    # sync.
+    if [[ -z "$destdir" ]]; then
+        systemctl daemon-reload 2>/dev/null \
+            || warn "Could not reload systemd; the drop-in applies at next boot"
+        if systemctl is-active --quiet bluetooth.service; then
+            info "Restarting bluetooth to apply (briefly drops Bluetooth connections)"
+            systemctl restart bluetooth.service 2>/dev/null \
+                || warn "Could not restart bluetooth; restart it or reboot to apply"
+        fi
+    fi
+
+    success "Installed bluetoothd drop-in"
+}
+
 # Install the udev rules shepherd-launcher needs.
 #
 # Currently just the /dev/uinput access rule. The input-compat sidecars
@@ -455,6 +543,7 @@ install_system() {
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"
     install_udev
+    install_bluetooth_dropin
 }
 
 # Install everything
@@ -586,6 +675,32 @@ uninstall_desktop_entry() {
     success "Removed desktop entry"
 }
 
+# Remove the bluetoothd drop-in. Mirrors install_bluetooth_dropin.
+uninstall_bluetooth_dropin() {
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local dropin_dst="$destdir$BLUETOOTH_DROPIN_DIR/$BLUETOOTH_DROPIN_NAME"
+
+    info "Removing bluetoothd drop-in..."
+    remove_path "$dropin_dst"
+    # Leave the directory if anything else dropped files in it.
+    rmdir "$destdir$BLUETOOTH_DROPIN_DIR" 2>/dev/null || true
+
+    if [[ -z "$destdir" ]]; then
+        systemctl daemon-reload 2>/dev/null \
+            || warn "Could not reload systemd; bluetoothd keeps the old options until reboot"
+        if systemctl is-active --quiet bluetooth.service; then
+            info "Restarting bluetooth to drop the override"
+            systemctl restart bluetooth.service 2>/dev/null \
+                || warn "Could not restart bluetooth; restart it or reboot to apply"
+        fi
+    fi
+
+    success "Removed bluetoothd drop-in"
+}
+
 # Remove the udev rule. Mirrors install_udev.
 uninstall_udev() {
     local destdir="${DESTDIR:-}"
@@ -621,6 +736,7 @@ uninstall_system() {
     uninstall_sway_config
     uninstall_desktop_entry "$prefix"
     uninstall_udev
+    uninstall_bluetooth_dropin
 }
 
 # Remove everything shepherd installed system-wide.

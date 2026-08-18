@@ -392,6 +392,7 @@ EOF
 $SWAY_CONFIG_DIR/$SHEPHERD_SWAY_CONFIG
 $UDEV_RULES_DIR/$UINPUT_RULES_NAME
 $POLKIT_RULES_DIR/$FIREWALL_RULES_NAME
+$BLUETOOTH_DROPIN_DIR/$BLUETOOTH_DROPIN_NAME
 EOF
 
     # postinst: the host-mutating steps install.sh's install_firewall /
@@ -417,6 +418,24 @@ if [ "$1" = "configure" ]; then
         systemctl reload polkit 2>/dev/null \
             || systemctl restart polkit 2>/dev/null \
             || true
+    fi
+    # Bluetooth drop-in: the staged file carries the *build* host's daemon
+    # path, so re-point it at this machine's before reloading. Mirrors
+    # install.sh's install_bluetooth_dropin (and its _bluetoothd_exec_path).
+    dropin=/etc/systemd/system/bluetooth.service.d/10-shepherd-bluetooth-experimental.conf
+    if command -v systemctl >/dev/null 2>&1 && [ -f "$dropin" ]; then
+        if systemctl cat bluetooth.service >/dev/null 2>&1; then
+            bluetoothd=$(systemctl cat bluetooth.service 2>/dev/null \
+                | sed -n 's/^ExecStart=[-@:+!]*\([^ ]*\).*/\1/p' \
+                | grep -v '^$' | grep -v 'shepherd' | head -n 1)
+            [ -n "$bluetoothd" ] && sed -i "s|^ExecStart=.* -E$|ExecStart=$bluetoothd -E|" "$dropin"
+            systemctl daemon-reload || true
+            if systemctl is-active --quiet bluetooth.service; then
+                systemctl restart bluetooth.service || true
+            fi
+        else
+            rm -f "$dropin"
+        fi
     fi
     cat <<'EOM'
 shepherd-launcher installed. Finish setting up a kiosk user (replace USER):
@@ -444,6 +463,11 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl reload polkit 2>/dev/null || true
+        rmdir /etc/systemd/system/bluetooth.service.d 2>/dev/null || true
+        systemctl daemon-reload || true
+        if systemctl is-active --quiet bluetooth.service; then
+            systemctl restart bluetooth.service || true
+        fi
     fi
 fi
 exit 0
