@@ -49,7 +49,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
@@ -396,6 +396,12 @@ impl BleServer {
         // adapter and calls `remove_device`.
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
+        // Whether `PreferredBearer=bredr` took, and whether any peer has
+        // completed real work on this boot. Together they gate the
+        // fallback eviction in `spawn_first_rpc_watchdog`.
+        let bearer_pinned = Arc::new(BearerPin::default());
+        let had_session = Arc::new(AtomicBool::new(false));
+
         let mut on_air = go_on_air(
             &adapter,
             &self.config,
@@ -406,6 +412,7 @@ impl BleServer {
             &unbond_tx,
             &response_outbox,
             &events_outbox,
+            &had_session,
         )
         .await?;
 
@@ -422,6 +429,8 @@ impl BleServer {
         let disconnect_task = tokio::spawn(disconnect_monitor(
             adapter.clone(),
             connection_epoch,
+            bearer_pinned,
+            had_session.clone(),
             reader.clone(),
             last_peer.clone(),
             response_outbox.clone(),
@@ -542,6 +551,7 @@ impl BleServer {
                 &unbond_tx,
                 &response_outbox,
                 &events_outbox,
+                &had_session,
             )
             .await
             {
@@ -705,9 +715,12 @@ fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
 /// in-flight bytes we'd disturb. The `Connected(false)` event fires at
 /// drop time, well before the reconnect + next write, so the wipe can't
 /// race a fresh response into oblivion.
+#[allow(clippy::too_many_arguments)]
 async fn disconnect_monitor(
     adapter: bluer::Adapter,
     epoch: Arc<AtomicU64>,
+    bearer_pinned: Arc<BearerPin>,
+    had_session: Arc<AtomicBool>,
     reader: Arc<Mutex<FrameReader>>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
@@ -733,10 +746,23 @@ async fn disconnect_monitor(
         Ok(addrs) => {
             for addr in addrs {
                 if watched.insert(addr) {
+                    // Pin bonded peers here as well as on connect. A peer
+                    // that is already connected when we start — the usual
+                    // case after a daemon restart, since the ACL outlives
+                    // it — never produces a `Connected(true)` transition,
+                    // so the on-connect path alone would leave the admin
+                    // phone unpinned for the whole session.
+                    if let Ok(device) = adapter.device(addr)
+                        && device.is_paired().await.unwrap_or(false)
+                    {
+                        pin_peer_to_bredr(&device, addr, &bearer_pinned).await;
+                    }
                     spawn_device_watcher(
                         &adapter,
                         addr,
                         epoch.clone(),
+                        bearer_pinned.clone(),
+                        had_session.clone(),
                         reader.clone(),
                         last_peer.clone(),
                         response_outbox.clone(),
@@ -756,6 +782,8 @@ async fn disconnect_monitor(
                         &adapter,
                         addr,
                         epoch.clone(),
+                        bearer_pinned.clone(),
+                        had_session.clone(),
                         reader.clone(),
                         last_peer.clone(),
                         response_outbox.clone(),
@@ -777,10 +805,13 @@ async fn disconnect_monitor(
 /// `addr` transitions to disconnected. The task lives until the device
 /// object is removed from BlueZ (its event stream ends), which spans
 /// many connect/disconnect cycles for a bonded peer.
+#[allow(clippy::too_many_arguments)]
 fn spawn_device_watcher(
     adapter: &bluer::Adapter,
     addr: Address,
     epoch: Arc<AtomicU64>,
+    bearer_pinned: Arc<BearerPin>,
+    had_session: Arc<AtomicBool>,
     reader: Arc<Mutex<FrameReader>>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
@@ -823,12 +854,20 @@ fn spawn_device_watcher(
                         "BLE peer connected; companion will drain these before its first RPC",
                     );
                     let generation = epoch.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Do this on every connect, not just the first: it is
+                    // idempotent in BlueZ, and the arming we are undoing
+                    // happens on service probe, which can recur.
+                    if device.is_paired().await.unwrap_or(false) {
+                        pin_peer_to_bredr(&device, addr, &bearer_pinned).await;
+                    }
                     spawn_first_rpc_watchdog(
                         device.clone(),
                         addr,
                         generation,
                         epoch.clone(),
                         last_peer.clone(),
+                        bearer_pinned.clone(),
+                        had_session.clone(),
                     );
                 }
                 DeviceProperty::Connected(false) => {
@@ -854,6 +893,111 @@ fn spawn_device_watcher(
 /// waits on a human comparing six digits; that is one of the reasons
 /// this no longer acts on the link, only reports it.
 const FIRST_RPC_GRACE: Duration = Duration::from_secs(25);
+
+/// How long before the *fallback* eviction acts (see
+/// [`spawn_first_rpc_watchdog`]). Far beyond the 30s the OS allows for a
+/// Numeric Comparison, so a pairing that is merely slow is never caught
+/// by it — the last time this path fired at 25s it hung up on the
+/// comparison window and made pairing impossible.
+const EVICT_GRACE: Duration = Duration::from_secs(90);
+
+/// Pin a bonded peer to the BR/EDR bearer so BlueZ stops arming the
+/// kernel to dial it over LE.
+///
+/// This is the fix for the week's worst failure, and it is aimed at the
+/// mechanism rather than the symptom. Probing an `auto_connect` profile
+/// on a bonded device — `a2dp`, `bap`, `hog`, `input`, all of which a
+/// phone matches — makes bluetoothd call `device_set_auto_connect(TRUE)`
+/// (`src/device.c:5551`), which sends `MGMT_OP_ADD_DEVICE` with
+/// `action = 0x02`: *the kernel* then connects that address the moment it
+/// advertises. Because our companion is a GATT server, a link the box
+/// originates puts the box in the central role — and only a central may
+/// start encryption, so the phone can never encrypt it and every read of
+/// an `encrypt_authenticated` characteristic comes back
+/// `Insufficient Authentication`, forever, on a link that never drops.
+///
+/// Setting `PreferredBearer = "bredr"` makes `device_set_auto_connect`
+/// return before `adapter_auto_connect_add()` — BlueZ's own comment there
+/// reads "Remove device from auto-connect list so the kernel does not
+/// attempt to auto-connect to it in case it starts advertising". It is
+/// stored in the bond record, and both the load and the inhibit are
+/// ungated, so it survives restarts and keeps working even where the
+/// property itself is hidden. BR/EDR auto-connect is untouched, which
+/// matters on a box whose radio is also the user's headphones.
+///
+/// The property is `experimental` upstream, so on a stock bluetoothd it
+/// does not exist and this fails — see the caller for what happens then.
+/// bluer does not wrap it, hence the direct D-Bus call; it is blocking,
+/// which is why it runs on the blocking pool.
+async fn prefer_bredr_bearer(adapter_name: &str, addr: Address) -> Result<(), String> {
+    let path = format!(
+        "/org/bluez/{adapter_name}/dev_{}",
+        addr.to_string().replace(':', "_")
+    );
+    tokio::task::spawn_blocking(move || {
+        use dbus::blocking::Connection;
+        use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+
+        let conn = Connection::new_system().map_err(|e| e.to_string())?;
+        let proxy = conn.with_proxy("org.bluez", path, Duration::from_secs(5));
+        proxy
+            .set("org.bluez.Device1", "PreferredBearer", "bredr".to_string())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Tracks the bearer pin across connections: whether it has taken, and
+/// whether we have already told the operator how to make it possible.
+///
+/// Retrying every connect is worth it — the property becomes available
+/// the moment bluetoothd is restarted with `Experimental`, and a
+/// controller power cycle or resume already brings us back through here —
+/// but repeating the same paragraph on every reconnect is not.
+#[derive(Default)]
+struct BearerPin {
+    pinned: AtomicBool,
+    warned: AtomicBool,
+}
+
+/// Apply [`prefer_bredr_bearer`] and say something useful either way.
+///
+/// Success is logged once (the flag also tells the watchdog it no longer
+/// needs its fallback). Failure is almost always "the property is
+/// experimental and this bluetoothd was started without it", which is not
+/// something the daemon can fix for the operator — so say exactly what to
+/// do about it, once, rather than repeating it on every reconnect.
+async fn pin_peer_to_bredr(device: &bluer::Device, addr: Address, pin: &Arc<BearerPin>) {
+    if pin.pinned.load(Ordering::Relaxed) {
+        return;
+    }
+    match prefer_bredr_bearer(device.adapter_name(), addr).await {
+        Ok(()) => {
+            pin.pinned.store(true, Ordering::Relaxed);
+            info!(
+                peer = %addr,
+                "Pinned peer to the BR/EDR bearer; the kernel will no longer auto-connect \
+                 it over LE, so the companion keeps the central role and can encrypt",
+            );
+        }
+        Err(e) if pin.warned.swap(true, Ordering::Relaxed) => debug!(
+            error = %e,
+            peer = %addr,
+            "PreferredBearer=bredr still unavailable",
+        ),
+        Err(e) => warn!(
+            error = %e,
+            peer = %addr,
+            "Could not set PreferredBearer=bredr. The device may dial this phone over LE \
+             after any disconnect, taking the central role, after which the phone cannot \
+             encrypt the link and every read fails. The property is experimental: enable \
+             `Experimental = true` in /etc/bluetooth/main.conf, or add \
+             `PreferredBearer=bredr` under [General] in the peer's file in \
+             /var/lib/bluetooth/<adapter>/<peer>/info with bluetoothd stopped",
+        ),
+    }
+}
 
 /// Report a bonded peer that connects and then never talks.
 ///
@@ -892,6 +1036,8 @@ fn spawn_first_rpc_watchdog(
     generation: u64,
     epoch: Arc<AtomicU64>,
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+    bearer_pinned: Arc<BearerPin>,
+    had_session: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_RPC_GRACE).await;
@@ -920,6 +1066,38 @@ fn spawn_first_rpc_watchdog(
              originated — the phone cannot encrypt those, and every encrypted read on \
              them fails. Pairing in progress looks the same and is fine",
         );
+
+        // Fallback, for boxes where the bearer could not be pinned: take
+        // the link away so the phone reconnects and, by initiating,
+        // becomes central. Three gates, because this is the mechanism
+        // that once hung up on a Numeric Comparison window:
+        //
+        // - only when the bearer is unpinned, i.e. the real fix is
+        //   unavailable and the device really can dial this peer;
+        // - only once a session has actually exchanged RPCs on this
+        //   boot, which a first pairing never has;
+        // - and only after a much longer wait than the report above,
+        //   comfortably past the 30s the OS gives a human to compare six
+        //   digits, so a slow pairing outlives it.
+        if bearer_pinned.pinned.load(Ordering::Relaxed) || !had_session.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(EVICT_GRACE - FIRST_RPC_GRACE).await;
+        if epoch.load(Ordering::Relaxed) != generation
+            || last_peer.lock().await.is_some()
+            || !device.is_connected().await.unwrap_or(false)
+        {
+            return;
+        }
+        warn!(
+            peer = %addr,
+            grace_secs = EVICT_GRACE.as_secs(),
+            "Dropping the link: still silent, and the bearer could not be pinned. The \
+             companion should reconnect and take the central role",
+        );
+        if let Err(e) = device.disconnect().await {
+            warn!(peer = %addr, error = %e, "Could not drop the silent peer's link");
+        }
     });
 }
 
@@ -998,6 +1176,7 @@ async fn go_on_air(
     unbond_tx: &mpsc::Sender<Address>,
     response_outbox: &Arc<Outbox>,
     events_outbox: &Arc<Outbox>,
+    had_session: &Arc<AtomicBool>,
 ) -> bluer::Result<OnAir> {
     let application = build_application(
         config.clone(),
@@ -1008,6 +1187,7 @@ async fn go_on_air(
         unbond_tx.clone(),
         response_outbox.clone(),
         events_outbox.clone(),
+        had_session.clone(),
     );
     let app: ApplicationHandle = adapter.serve_gatt_application(application).await?;
 
@@ -1130,6 +1310,7 @@ fn build_application(
     unbond_tx: mpsc::Sender<Address>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
+    had_session: Arc<AtomicBool>,
 ) -> Application {
     Application {
         services: vec![Service {
@@ -1145,6 +1326,7 @@ fn build_application(
                     unbond_tx,
                     response_outbox.clone(),
                     events_outbox.clone(),
+                    had_session,
                 ),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
@@ -1204,6 +1386,7 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
 /// `encrypt_authenticated_write` flag is satisfied by Legacy MITM
 /// pairing too — that gives us the property we actually want
 /// (encrypted + authenticated link) without requiring LESC.
+#[allow(clippy::too_many_arguments)]
 fn request_characteristic(
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
@@ -1212,6 +1395,7 @@ fn request_characteristic(
     unbond_tx: mpsc::Sender<Address>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
+    had_session: Arc<AtomicBool>,
 ) -> Characteristic {
     // `reader`/`last_peer` are the single-connection frame reassembly
     // state (v1 expects one admin connection at a time). They're created
@@ -1232,6 +1416,11 @@ fn request_characteristic(
                 let unbond_tx = unbond_tx.clone();
                 let response_outbox = response_outbox.clone();
                 let events_outbox = events_outbox.clone();
+                // A write landed on an encrypt-authenticated
+                // characteristic, so this link demonstrably works. That is
+                // what the fallback eviction waits to see before it will
+                // ever act on a silent one.
+                had_session.store(true, Ordering::Relaxed);
                 async move {
                     let peer = PeerIdentity {
                         address: req.device_address.to_string(),

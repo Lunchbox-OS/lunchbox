@@ -704,6 +704,84 @@ a session with real RPCs already seen **on this boot**, and no
 pairing-agent activity since the link came up — a first pairing has no
 prior session, so it can never be caught.
 
+## The fix: pin the admin phone to the BR/EDR bearer
+
+Reading BlueZ 5.85's source settles both the mechanism and the remedy.
+
+**Why the box dials.** `probe_service()` (`src/device.c:5551`):
+
+```c
+/* Only set auto connect if profile has set the flag and can really
+ * accept connections. */
+if (profile->auto_connect && profile->accept) {
+        ...
+        device_set_auto_connect(device, TRUE);
+}
+```
+
+Profiles carrying `auto_connect = true` include `a2dp` (twice), `bap`
+(LE Audio), `hog`, `input`, `midi`, `asha` — a phone matches several. That
+call reaches `adapter_auto_connect_add()`, which sends
+`MGMT_OP_ADD_DEVICE` with **`cp.action = 0x02`**: from then on *the
+kernel* connects that address whenever it advertises. No D-Bus caller, no
+policy plugin, nothing userspace to disable — which is exactly what the
+captures showed.
+
+For completeness, `plugins/policy.c:816` only reconnects on
+`DISCONN_TIMEOUT` or `LOCAL_HOST_SUSPEND`, and its suspend path further
+requires `A2DP_SINK_UUID` on the device — a phone is a *source*. The
+policy plugin was never involved, which is why `ReconnectAttempts=0`
+changed nothing.
+
+**Why `PreferredBearer=bredr` fixes it** (`src/device.c:3608`):
+
+```c
+case PREFER_BREDR:
+        /* Remove device from auto-connect list so the kernel does not
+         * attempt to auto-connect to it in case it starts advertising. */
+        device_set_auto_connect(device, FALSE);
+```
+
+BlueZ's own comment describes our bug. The value is persisted by
+`store_device_info()`, reloaded unconditionally at `device.c:4303`, and
+re-checked inside `device_set_auto_connect()` ("Inhibit auto connect if
+BR/EDR bearer is preferred"), so a later service probe cannot re-arm the
+kernel. BR/EDR auto-connect is untouched — headphones and controllers on
+the same radio keep working, which is why this beats `--noplugin`.
+
+The property is `G_DBUS_PROPERTY_FLAG_EXPERIMENTAL`, so it is only
+exposed when bluetoothd runs with `Experimental`. Verified on the dev box
+(bluez 5.85-4ubuntu0.1): hidden by default, present and writable with
+`Experimental = true`, and the value persists to
+`/var/lib/bluetooth/<adapter>/<peer>/info`. Both the load and the inhibit
+are ungated, so the setting keeps working after experimental is turned
+back off — and it can equally be written straight into the bond file with
+bluetoothd stopped.
+
+### What shepherd does now
+
+`pin_peer_to_bredr` sets it on every bonded peer, at server startup (for
+peers already known — the ACL outlives a daemon restart, so a
+`Connected(true)` transition never arrives for them) and on each connect
+(for peers that appear later, including a freshly paired phone). It is
+idempotent, and it is retried on every connect because the property
+becomes available the moment bluetoothd is restarted with `Experimental`
+— but the paragraph explaining how to enable it is logged only once per
+boot.
+
+Where the pin cannot be applied, the eviction returns as a **fallback**,
+behind three gates chosen so it can never repeat the 2026-08-17 pairing
+regression: only when the bearer is unpinned, only after some peer has
+actually exchanged RPCs on this boot (a first pairing never has), and
+only after `EVICT_GRACE` = 90 s — far past the 30 s the OS allows a human
+to compare six digits. The 25 s report-only line is unchanged.
+
+Verified on hardware both ways. Stock bluetoothd: one guidance warning at
+startup, session connects and runs, no eviction. With `Experimental =
+true`: `Pinned peer to the BR/EDR bearer …`, no warnings, and
+`PreferredBearer=bredr` in the bond file afterwards. The box was restored
+to its original configuration after the test.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
