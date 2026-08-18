@@ -642,6 +642,68 @@ Candidates that survive `ReconnectAttempts=0`: a kernel LE background
 connect re-armed on resume, gnome-bluetooth, or PipeWire/WirePlumber
 reconnecting an audio device.
 
+## 2026-08-17, 21:38: caught in the act — bluetoothd dials, unprompted
+
+Monitors started before the sequence this time (btmon + dbus-monitor +
+journal), covering: login, connect, sleep, wake, reconnect, close the
+companion, reopen. The wake reconnected fine; the close/reopen failed.
+
+Three connections in the capture, and only the third fails:
+
+| # | Role | Peer | Outcome |
+| --- | --- | --- | --- |
+| 1 | `Peripheral` | RPA `41:25:C5:4A:B5:A6` | phone dialled — works |
+| 2 | `Peripheral` | RPA `6F:AC:86:4E:14:28` | phone dialled after resume — works |
+| 3 | **`Central`** | **`A4:75:B9:AA:54:05`** (identity) | **box dialled — 54 × `Insufficient Authentication`** |
+
+The third one, in full:
+
+```
+147.97  Disconnect Complete — Reason: Remote User Terminated Connection   (companion closed)
+150.18  < HCI Command: LE Extended Create Connection
+             Filter policy: Accept list is not used (0x00)
+             Peer address type: Public — A4:75:B9:AA:54:05
+150.50  > LE Enhanced Connection Complete — Role: Central (0x00)
+        @ MGMT Event: Device Connected — Flags: Connection Locally Initiated
+```
+
+**2.2 seconds after the phone hangs up, the box dials it back**, direct
+(no accept list), to the identity address, and takes the central role.
+The reopened companion attaches to that link and can never encrypt on it.
+
+And the D-Bus monitor across the whole window contains **no
+`Device1.Connect` call at all** — only two `Disconnected` signals
+(`org.bluez.Reason.Suspend`, then `org.bluez.Reason.Remote`). No
+userspace client asked for this. It is bluetoothd's own logic, and it
+survives `[Policy] ReconnectAttempts=0`, so it is not the policy
+plugin's link-loss reconnect — or that setting does not govern this
+path.
+
+Note the failure is not tied to one trigger. In the previous run
+`ReconnectAttempts=0` fixed close/reopen and the resume failed; here the
+resume worked and close/reopen failed. The invariant is simpler than
+either: **whoever dials first after a link drops decides the roles**, and
+if the box wins, that link is poisoned.
+
+### Identifying the plugin
+
+`bluetoothd -d` names the caller. Via `systemctl edit bluetooth`, adding
+`--noplugin=` to `ExecStart` narrows it — the GATT-client-side plugins
+that keep bonded LE devices connected are the candidates (`battery`,
+`hog`, `scanparam`, `deviceinfo`, `gap`), with `policy` still worth
+excluding by test rather than by assumption.
+
+### Why eviction is worth revisiting
+
+`Device1.Disconnect()` does not merely drop the link: in BlueZ it also
+marks the device as disconnected-by-user, which suppresses the
+auto-connect that created it. So the eviction removed in 2785ab1 would
+both break the deadlock and stop the box re-dialing. The gates that
+would have been safe across every trace in this note: device **claimed**,
+a session with real RPCs already seen **on this boot**, and no
+pairing-agent activity since the link came up — a first pairing has no
+prior session, so it can never be caught.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
