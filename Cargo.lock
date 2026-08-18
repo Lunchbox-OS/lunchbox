@@ -4217,6 +4217,7 @@ dependencies = [
  "async-trait",
  "bluer",
  "chrono",
+ "dbus",
  "futures-util",
  "rand",
  "schemars",
