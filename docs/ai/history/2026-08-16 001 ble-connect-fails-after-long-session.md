@@ -499,6 +499,74 @@ log shows two retries and the ERROR, advertising still starts, and an
 already-paired companion connects and runs a full session
 (`service_state`, `list_groups`, `get_volume`, `get_brightness`).
 
+## 2026-08-17, 21:07: the resume fix works — and the deadlock is now pinned
+
+First field confirmation of the resume trigger, from the reporter's box
+after a `systemctl restart bluetooth` and a fresh pair:
+
+```
+21:07:24  Numeric Comparison pairing requested …
+21:07:28  Admin claim recorded  device=SM-S911U1
+21:07:35  Power key pressed short → suspend
+21:08:19  BLE peer disconnected …
+21:08:19  Re-registering the GATT application and advertisement
+            adapter=hci0 reason="the system resumed from sleep"
+21:08:19  BLE management advertising started …
+21:08:27  BLE peer connected …
+21:08:30  BLE RPC received … id=6 … through id=9, all ok=true
+```
+
+That is the failure from earlier in the day — box silently off air after a
+resume, no `Powered` transition to react to — now recovering by itself.
+The companion reconnected without being touched.
+
+### Then closing and reopening the app brings the deadlock straight back
+
+```
+21:08:34  BLE peer disconnected …          (app closed)
+21:08:36  BLE peer connected …             (2s later)
+21:09:01  Peer has held a link this long without sending an RPC …
+```
+
+and on the phone, 316 `GATT_INSUFFICIENT_AUTHENTICATION` — the
+role-inversion deadlock again, and the report-only line naming it within
+25 s instead of leaving the journal silent.
+
+**The two-second gap is the tell.** A human reopening an app does not
+produce a reconnect two seconds after the close. Something on the box
+dials the phone back the moment the link frees up, takes the central
+role, and the reopened companion inherits a link it can never encrypt.
+That is the auto-dial this note has suspected since the btmon capture of
+16:37, now visible as a repeatable trigger: *close the app and it happens
+every time.*
+
+### The Wi-Fi correlation
+
+The reporter had a `mosh` session to the box throughout. It died shortly
+after the failed reconnects and recovered about a minute after the
+companion was closed — i.e. when the stuck LE link finally dropped. The
+box's `hci0` is a MediaTek combo part sharing its front end with
+`wlp1s0`, so a wedged LE link plausibly starves Wi-Fi. Worth keeping in
+mind: on this hardware the stuck link is not just a companion problem, it
+takes the network with it.
+
+### What to try next on the box
+
+Stop bluetoothd dialing the phone at all. The policy plugin reconnects
+audio profiles after a link loss, and its defaults include A2DP/HFP,
+which is precisely what this phone looks like to the box after
+cross-transport key derivation. In `/etc/bluetooth/main.conf`:
+
+```
+[Policy]
+ReconnectAttempts=0
+```
+
+then `systemctl restart bluetooth`. If close/reopen stops producing a
+two-second reconnect, that is the culprit, and the structural fix is a
+dedicated LE-only adapter (`btmgmt bredr off` on a dongle) so no
+cross-transport bond exists to reconnect.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
