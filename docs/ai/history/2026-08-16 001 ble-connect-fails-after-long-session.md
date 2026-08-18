@@ -468,6 +468,37 @@ at startup with `Failed to register BlueZ pairing agent (D-Bus
 NoReply)`, which takes BLE management down for the whole session with no
 retry and no advertising.
 
+## A transient agent registration failure no longer kills the transport
+
+Hit while testing the above: one session died at startup with
+
+```
+ERROR shepherdd: BLE management server error
+  error=Failed to register BlueZ pairing agent (D-Bus error
+        org.freedesktop.DBus.Error.NoReply: …)
+```
+
+bluetoothd was busy for a moment; `run` returned the error and BLE
+management was gone for the whole session — no advertising, no retry, and
+that single line as the only evidence. From the outside it is
+indistinguishable from every other "the device just isn't there" failure
+in this note, which is exactly why it cost time.
+
+Registration now retries (500 ms, 2 s) and, if it still fails, the server
+**carries on without an agent** and says so at ERROR. The trade is
+deliberate: losing the agent costs pairing — the Numeric Comparison
+overlay on the TV — while losing the server costs everything, including a
+bonded admin phone that only wanted to reconnect to an already-claimed
+device. The re-arm path retries registration whenever it puts the service
+back on air, so a box that starts degraded recovers on the next resume or
+power cycle rather than needing a session restart.
+
+Verified both ways on hardware with a temporary fault injection: normal
+boot registers first try and pairs; with registration forced to fail, the
+log shows two retries and the ERROR, advertising still starts, and an
+already-paired companion connects and runs a full session
+(`service_state`, `list_groups`, `get_volume`, `get_brightness`).
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the

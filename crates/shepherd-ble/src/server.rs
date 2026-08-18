@@ -376,13 +376,7 @@ impl BleServer {
         // stick. Entries survive until BlueZ confirms the peer is gone.
         drain_pending_unbonds(&adapter, &self.pending_unbond).await;
 
-        let _agent_handle = register_agent(&session, self.display.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to register BlueZ pairing agent ({e}); without this, pairing falls back to a PIN entry on the phone and no Numeric Comparison overlay appears on the TV. Likely cause: the daemon user lacks the `bluetooth` group."
-                )
-            })?;
+        let mut agent_handle = register_agent_with_retry(&session, &self.display).await;
 
         let response_outbox = Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES));
         let events_outbox = Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES));
@@ -529,6 +523,11 @@ impl BleServer {
                 reason,
                 "Re-registering the GATT application and advertisement",
             );
+            // A startup without an agent is survivable but degraded, so
+            // take every re-arm as another chance at one.
+            if agent_handle.is_none() {
+                agent_handle = register_agent_with_retry(&session, &self.display).await;
+            }
             // Drop first: the stale handles still own their D-Bus object
             // paths, and BlueZ rejects a second registration under a path
             // it already holds.
@@ -1047,6 +1046,70 @@ async fn go_on_air(
         _app: app,
         _adv: adv,
     })
+}
+
+/// Attempts at registering the pairing agent before giving up on it for
+/// now, and the pause before each retry.
+///
+/// Short and few: a permission problem fails identically every time, and
+/// the case worth riding out is a momentarily busy bluetoothd — whose
+/// own D-Bus timeout can already make a single attempt take ~25 s.
+const AGENT_REGISTER_BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(2)];
+
+/// Register the Numeric Comparison agent, retrying briefly, and carry on
+/// without one rather than taking the whole transport down.
+///
+/// This used to be fatal to `run`. On 2026-08-17 a single
+/// `org.freedesktop.DBus.Error.NoReply` — bluetoothd busy for a moment
+/// during startup — killed BLE management for the entire session: no
+/// advertising, no retry, and one ERROR line as the only evidence, which
+/// is indistinguishable from every other "the device just isn't there"
+/// failure we spent this week chasing.
+///
+/// Losing the agent costs pairing (the TV overlay and the Numeric
+/// Comparison flow); losing the server costs *everything*, including a
+/// bonded admin phone that only wanted to reconnect to an
+/// already-claimed device. The degraded state is the better one, and the
+/// re-arm path retries later.
+async fn register_agent_with_retry(
+    session: &bluer::Session,
+    display: &Arc<dyn PairingDisplay>,
+) -> Option<AgentHandle> {
+    for (attempt, backoff) in AGENT_REGISTER_BACKOFF
+        .iter()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        match register_agent(session, display.clone()).await {
+            Ok(handle) => {
+                if attempt > 0 {
+                    info!(attempt = attempt + 1, "BlueZ pairing agent registered");
+                }
+                return Some(handle);
+            }
+            Err(e) => match backoff {
+                Some(delay) => {
+                    warn!(
+                        error = %e,
+                        attempt = attempt + 1,
+                        retry_in_ms = delay.as_millis() as u64,
+                        "Could not register the BlueZ pairing agent; retrying",
+                    );
+                    tokio::time::sleep(*delay).await;
+                }
+                None => error!(
+                    error = %e,
+                    attempts = attempt + 1,
+                    "Could not register the BlueZ pairing agent. BLE management stays up and \
+                     an already-paired companion still works, but pairing a new phone will \
+                     not show the Numeric Comparison code on the TV. If this persists, check \
+                     that the daemon user is in the `bluetooth` group",
+                ),
+            },
+        }
+    }
+    None
 }
 
 async fn register_agent(
