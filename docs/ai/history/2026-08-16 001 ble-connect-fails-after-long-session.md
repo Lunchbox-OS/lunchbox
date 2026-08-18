@@ -567,6 +567,81 @@ two-second reconnect, that is the culprit, and the structural fix is a
 dedicated LE-only adapter (`btmgmt bredr off` on a dongle) so no
 cross-transport bond exists to reconnect.
 
+## 2026-08-17, 21:25: one dialer down, another at resume
+
+With `[Policy] ReconnectAttempts=0` set and bluetoothd restarted, the
+reporter paired and used the companion normally, and **close/reopen no
+longer produces the deadlock** — that dialer was the policy plugin
+reconnecting audio profiles after link loss, exactly as suspected. One
+observation from the good run: the `mosh` session dropped during the
+first few seconds of the LE connection, which is the coexistence cost of
+this combo radio showing up even when everything works.
+
+A suspend/resume still fails, and the capture is unambiguous about what
+kind of failure it is:
+
+```
+21:25:03  Power key pressed short → suspend
+21:25:20  System returned from sleep; Controller resume with wake event 0x0
+21:25:20  Re-registering … reason="the system resumed from sleep"   ← our fix, again
+21:25:20  BLE management advertising started
+21:25:29  BLE peer connected …
+21:25:54  Peer has held a link this long without sending an RPC …
+```
+
+`btmon` over the following 82 s, with the link already up:
+
+| Measure | Count |
+| --- | --- |
+| `ATT: Error Response` (all `Insufficient Authentication`) | 90 |
+| `Read By Group Type` / `Find Information` (discovery retries) | 30 / 30 |
+| `LE Connection Update` issued **by the box** | 20 |
+| L2CAP Connection Parameter Update **Request** received from the phone | 3 |
+| SMP frames | 0 |
+| Disconnect Complete | **0** |
+
+The parameter-update direction says it again: the phone asks, the box
+decides — **the box is central**, so the phone cannot start encryption
+and every read of an `encrypt_authenticated` characteristic is refused.
+`ReconnectAttempts=0` did not prevent this, so whatever dials at resume
+is *not* the policy plugin.
+
+### Why the companion can never escape this on its own
+
+Zero disconnects in 82 seconds, while the app retried discovery thirty
+times. The ACL belongs to the box; Android's `disconnect()` tears down
+its own GATT client but does not drop a link the peer originated, so
+every retry — including the once-a-minute one this branch added — lands
+back on the same poisoned link. Closing and reopening the app does not
+help either. Only the *device* dropping the link (or a Bluetooth
+restart) can break it, which is precisely the eviction removed in
+2785ab1 for breaking pairing.
+
+If eviction returns, the gates that would have been safe across every
+trace in this note are: the device is **claimed**, a session with real
+RPCs has already happened **on this boot** (a first pairing has none),
+and no pairing-agent activity since the link came up. The clean
+discriminator would be the link role, but BlueZ exposes it neither on
+`Device1` nor through bluer.
+
+### The one capture still missing
+
+Every artifact so far starts *after* the resume, so the create-connection
+that establishes the inverted link has never been recorded. Started
+before the suspend, this would name the dialer:
+
+```sh
+sudo btmon -i hci0 -w /tmp/ble-resume.btsnoop &
+sudo dbus-monitor --system "interface='org.bluez.Device1'" > /tmp/dbus-resume.log &
+# then suspend, resume, and stop both
+```
+
+`LE Extended Create Connection` from the host settles it; a
+`member=Connect` in the D-Bus log names the process that asked for it.
+Candidates that survive `ReconnectAttempts=0`: a kernel LE background
+connect re-armed on resume, gnome-bluetooth, or PipeWire/WirePlumber
+reconnecting an audio device.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
