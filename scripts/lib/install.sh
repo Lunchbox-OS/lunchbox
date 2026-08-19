@@ -13,6 +13,11 @@ source "$INSTALL_LIB_DIR/common.sh"
 # shellcheck source=build.sh
 source "$INSTALL_LIB_DIR/build.sh"
 
+# Distro package name. Lives here rather than in package.sh because the
+# uninstall path needs it to point at `apt purge`, and package.sh sources
+# this file (not the other way round).
+DISTRO_PACKAGE_NAME="shepherd-launcher"
+
 # Default installation paths
 DEFAULT_PREFIX="/usr/local"
 DEFAULT_BINDIR="bin"
@@ -585,9 +590,43 @@ install_all() {
 # function is a no-op for files that are already gone, so uninstall is safe to
 # re-run and safe to run after a partial install.
 
+# Count of files this uninstall left alone because dpkg owns them, so
+# uninstall_all can say so once at the end rather than only per-file.
+UNINSTALL_SKIPPED_OWNED=0
+
+# True when dpkg tracks $1 as belonging to an installed package.
+#
+# A source uninstall must never delete a file the package manager owns.
+# The .deb ships four of them as *conffiles* -- /etc/sway/shepherd.conf,
+# the polkit rule, the udev rule and the bluetoothd drop-in -- and dpkg
+# records a hash for each. Delete one behind dpkg's back and it reads the
+# absence as "the admin removed this deliberately", so it will not put the
+# file back, not even on `apt install --reinstall` of the same version.
+# The result is a box that reports itself installed while missing its sway
+# config (the session bounces straight back to the greeter) and its
+# bluetoothd drop-in (the bearer pin silently cannot apply).
+#
+# Recovering from that needs --force-confmiss; see docs/INSTALL.md.
+path_owned_by_dpkg() {
+    local path="$1"
+    # Under DESTDIR the paths point into a staging tree, where ownership is
+    # meaningless and dpkg must not be consulted.
+    [[ -z "${DESTDIR:-}" ]] || return 1
+    command_exists dpkg-query || return 1
+    dpkg-query -S "$path" >/dev/null 2>&1
+}
+
 # Remove a single file if it exists, logging what happened.
+#
+# Files owned by an installed package are left for that package manager to
+# remove; see path_owned_by_dpkg for why deleting them is actively harmful.
 remove_path() {
     local path="$1"
+    if path_owned_by_dpkg "$path"; then
+        warn "  Leaving $path (owned by an installed package)"
+        UNINSTALL_SKIPPED_OWNED=$((UNINSTALL_SKIPPED_OWNED + 1))
+        return 0
+    fi
     if [[ -e "$path" || -L "$path" ]]; then
         info "  Removing $path"
         rm -f "$path"
@@ -750,6 +789,14 @@ uninstall_all() {
     uninstall_system "$prefix"
 
     success "Uninstall complete!"
+
+    if (( UNINSTALL_SKIPPED_OWNED > 0 )); then
+        info ""
+        warn "Left $UNINSTALL_SKIPPED_OWNED file(s) that an installed package owns."
+        warn "Deleting those would leave dpkg unable to restore them later."
+        warn "To remove the packaged install too:  sudo apt purge $DISTRO_PACKAGE_NAME"
+    fi
+
     info ""
     info "Left in place (remove by hand if you want them gone):"
     info "  - Per-user config under ~/.config/shepherd/ (config.toml, movies.toml)"

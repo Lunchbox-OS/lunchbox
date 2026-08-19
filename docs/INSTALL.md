@@ -428,6 +428,44 @@ sudo ./scripts/shepherd uninstall all
 (If you installed the `.deb`, use `sudo apt-get remove shepherd-launcher`
 instead.)
 
+Files that belong to an installed package are left alone, and `uninstall`
+says so. Four of the files a from-source install places are shipped by the
+`.deb` as *conffiles* — the sway config, the polkit rule, the udev rule and
+the bluetoothd drop-in — and dpkg records a checksum for each. Deleting one
+behind dpkg's back makes it read the absence as a deliberate admin removal,
+so it will not restore the file, not even on `apt install --reinstall`.
+
+#### Recovering a box with missing config
+
+If a source uninstall ran before this behaviour existed, an apt install on
+that box can silently come up missing those files. The symptoms are a
+Shepherd session that appears in the greeter and drops straight back to it
+(no `/etc/sway/shepherd.conf`) and an empty
+`/etc/systemd/system/bluetooth.service.d/` (no drop-in, so the bearer pin
+cannot apply). The polkit and udev rules go the same way, taking the
+firewall helper and the input-compat sidecars with them.
+
+Check which files dpkg expects and compare against what is on disk:
+
+```sh
+dpkg-query -W -f='${Conffiles}\n' shepherd-launcher
+ls -l /etc/sway/shepherd.conf \
+      /etc/systemd/system/bluetooth.service.d/ \
+      /etc/polkit-1/rules.d/50-shepherd-firewall.rules \
+      /etc/udev/rules.d/71-shepherd-uinput.rules
+```
+
+Restore the missing ones:
+
+```sh
+sudo apt install --reinstall -o Dpkg::Options::="--force-confmiss" shepherd-launcher
+```
+
+`--force-confmiss` is the override that tells dpkg to put back conffiles it
+believes were removed on purpose. The postinst re-points the drop-in at this
+machine's `bluetoothd` and restarts Bluetooth, so the pin applies without
+further steps.
+
 ## Input compatibility sidecars (optional)
 
 Activities can opt into one or more input-compat sidecars via the
