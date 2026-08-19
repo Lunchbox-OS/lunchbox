@@ -46,12 +46,12 @@ use futures_util::{FutureExt, StreamExt};
 use shepherd_api::EventPayload;
 use shepherd_management::ManagementService;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::admin::{AdminStore, PendingUnbondStore, check_reset_sentinel};
@@ -376,24 +376,13 @@ impl BleServer {
         // stick. Entries survive until BlueZ confirms the peer is gone.
         drain_pending_unbonds(&adapter, &self.pending_unbond).await;
 
-        let _agent_handle = register_agent(&session, self.display.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to register BlueZ pairing agent ({e}); without this, pairing falls back to a PIN entry on the phone and no Numeric Comparison overlay appears on the TV. Likely cause: the daemon user lacks the `bluetooth` group."
-                )
-            })?;
+        let mut agent_handle = register_agent_with_retry(&session, &self.display).await;
 
-        let response_outbox = Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES));
-        let events_outbox = Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES));
-
-        // Request-side reassembly state, shared with the disconnect
-        // monitor so a peer drop can wipe any half-written frame (see
-        // `disconnect_monitor`). v1 holds a single reader because we
-        // only expect one admin connection at a time.
-        let reader: Arc<Mutex<FrameReader>> =
-            Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer: Arc<Mutex<Option<PeerIdentity>>> = Arc::new(Mutex::new(None));
+        // Everything the GATT characteristics, the disconnect monitor
+        // and the first-RPC watchdog share about the peer session: the
+        // outboxes, the request reassembler, and the facts each of them
+        // reasons about. See [`TransportState`].
+        let state = Arc::new(TransportState::new());
 
         // A successful `factory_reset` RPC must also forget the BlueZ
         // bond, or the same lockout as the sentinel path results. The RPC
@@ -407,32 +396,21 @@ impl BleServer {
             &self.config,
             &self.svc,
             &self.claim,
-            &reader,
-            &last_peer,
             &unbond_tx,
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await?;
 
-        let events_task = tokio::spawn(events_forwarder(self.svc.clone(), events_outbox.clone()));
+        let events_task = tokio::spawn(events_forwarder(
+            self.svc.clone(),
+            state.events_outbox.clone(),
+        ));
 
         // Wipe stale transport bytes when a peer drops, so a companion
         // that resumes the same connection across a transient BLE
         // reconnect (no fresh `id == 1` sentinel) doesn't inherit a
         // desynced byte stream.
-        // Distinguishes one peer connection from the next, so a
-        // watchdog armed for a link that has since dropped cannot act on
-        // whatever connection happens to be live when its timer expires.
-        let connection_epoch = Arc::new(AtomicU64::new(0));
-        let disconnect_task = tokio::spawn(disconnect_monitor(
-            adapter.clone(),
-            connection_epoch,
-            reader.clone(),
-            last_peer.clone(),
-            response_outbox.clone(),
-            events_outbox.clone(),
-        ));
+        let disconnect_task = tokio::spawn(disconnect_monitor(adapter.clone(), state.clone()));
 
         // Drain factory-reset unbond requests for the server's lifetime.
         // Same durability contract as the startup path: record the debt
@@ -463,72 +441,107 @@ impl BleServer {
             }
         });
 
-        // Hold the air until shutdown — and put it back if the controller
-        // power cycles underneath us. See [`go_on_air`] for why nothing
-        // else notices when that happens.
+        // Hold the air until shutdown — and put it back whenever
+        // something underneath us could have taken it off. See
+        // [`go_on_air`] for why nothing else notices when that happens.
+        //
+        // Two triggers, because one is not enough. A controller power
+        // cycle announces itself as `Powered(true)`. A *suspend* does
+        // not: on the reporter's box a resume produced only bluetoothd's
+        // "Controller resume with wake event 0x0" and our own peer
+        // disconnect, with no property transition anywhere — and the
+        // device was off air afterwards, the phone's every connect
+        // ending in `status=147` (connection timeout) with our address
+        // in zero scan results. So we also re-arm on the daemon's own
+        // `SystemResumed`, which reaches us through the same event
+        // stream the outbox forwarder already consumes.
         let mut adapter_events = match adapter.events().await {
             Ok(events) => Some(events),
             Err(e) => {
                 warn!(
                     error = %e,
-                    "Could not watch the adapter for power cycles; BLE management will not \
-                     recover on its own if the controller is powered off and back on",
+                    "Could not watch the adapter for power cycles; BLE management will still \
+                     re-arm on resume, but not on a bare controller power cycle",
                 );
                 None
             }
         };
+        let mut service_events = self.svc.subscribe_events();
         loop {
             if *shutdown_rx.borrow() {
                 break;
             }
-            let Some(events) = adapter_events.as_mut() else {
-                let _ = shutdown_rx.wait_for(|v| *v).await;
-                break;
-            };
-            tokio::select! {
-                _ = shutdown_rx.changed() => {}
-                event = events.next() => match event {
-                    Some(AdapterEvent::PropertyChanged(AdapterProperty::Powered(true))) => {
-                        warn!(
-                            adapter = %adapter.name(),
-                            "Bluetooth controller powered back on; re-registering the GATT \
-                             application and advertisement",
-                        );
-                        // Drop first: the stale handles still own their
-                        // D-Bus object paths, and BlueZ rejects a second
-                        // registration under a path it already holds.
-                        drop(on_air);
-                        match go_on_air(
-                            &adapter,
-                            &self.config,
-                            &self.svc,
-                            &self.claim,
-                            &reader,
-                            &last_peer,
-                            &unbond_tx,
-                            &response_outbox,
-                            &events_outbox,
-                        )
-                        .await
-                        {
-                            Ok(fresh) => on_air = fresh,
-                            Err(e) => {
-                                error!(
-                                    error = %e,
-                                    "Failed to re-register BLE management after the controller \
-                                     powered on; the device is off air until the session restarts",
-                                );
-                                let _ = shutdown_rx.wait_for(|v| *v).await;
-                                break;
-                            }
-                        }
+            // `None` = nothing to do; `Some(reason)` = go back on air.
+            let reason: Option<&'static str> = tokio::select! {
+                _ = shutdown_rx.changed() => None,
+                event = async {
+                    match adapter_events.as_mut() {
+                        Some(events) => events.next().await,
+                        // No adapter stream: park forever and let the
+                        // other branches drive the loop.
+                        None => std::future::pending().await,
                     }
-                    Some(_) => {}
+                } => match event {
+                    Some(event) => rearm_reason_for_adapter_event(&event),
                     None => {
                         warn!("Adapter event stream ended; no longer watching for power cycles");
                         adapter_events = None;
+                        None
                     }
                 },
+                event = service_events.recv() => match event {
+                    Ok(event) => rearm_reason_for_service_event(&event.payload),
+                    // Lagging only means we may have missed events; the
+                    // next resume still arrives.
+                    Err(broadcast::error::RecvError::Lagged(_)) => None,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("Service event stream closed; no longer watching for resume");
+                        let _ = shutdown_rx.wait_for(|v| *v).await;
+                        break;
+                    }
+                },
+            };
+            let Some(reason) = reason else { continue };
+            // Info, not warn: on a box that suspends this is routine and
+            // it succeeds. Logging expected success at warning level is
+            // how a journal trains its readers to skim past warnings —
+            // and this project debugs from the journal. The failure path
+            // below is the part worth raising your voice about.
+            info!(
+                adapter = %adapter.name(),
+                reason,
+                "Re-registering the GATT application and advertisement",
+            );
+            // A startup without an agent is survivable but degraded, so
+            // take every re-arm as another chance at one.
+            if agent_handle.is_none() {
+                agent_handle = register_agent_with_retry(&session, &self.display).await;
+            }
+            // Drop first: the stale handles still own their D-Bus object
+            // paths, and BlueZ rejects a second registration under a path
+            // it already holds.
+            drop(on_air);
+            match go_on_air(
+                &adapter,
+                &self.config,
+                &self.svc,
+                &self.claim,
+                &unbond_tx,
+                &state,
+            )
+            .await
+            {
+                Ok(fresh) => on_air = fresh,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        reason,
+                        "Failed to re-register BLE management; the device is off air until \
+                         the session restarts",
+                    );
+                    let _ = shutdown_rx.wait_for(|v| *v).await;
+                    break;
+                }
             }
         }
         info!("BLE management server shutting down");
@@ -678,14 +691,7 @@ fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
 /// in-flight bytes we'd disturb. The `Connected(false)` event fires at
 /// drop time, well before the reconnect + next write, so the wipe can't
 /// race a fresh response into oblivion.
-async fn disconnect_monitor(
-    adapter: bluer::Adapter,
-    epoch: Arc<AtomicU64>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
-) {
+async fn disconnect_monitor(adapter: bluer::Adapter, state: Arc<TransportState>) {
     let mut events = match adapter.events().await {
         Ok(e) => e,
         Err(e) => {
@@ -701,20 +707,32 @@ async fn disconnect_monitor(
     // Devices BlueZ already knows about at startup — most importantly the
     // bonded admin, which persists across daemon restarts as a known
     // device and therefore won't arrive as a later `DeviceAdded`.
-    let mut watched: HashSet<Address> = HashSet::new();
+    // Keyed by address and holding the task, not just the address. A
+    // `HashSet` let a `DeviceRemoved`/`DeviceAdded` pair — which BlueZ
+    // emits routinely for a bonded peer as private addresses rotate —
+    // free the slot while the old watcher was still running, so a second
+    // one attached to the same peer. Observed on 2026-08-18: every
+    // connect and disconnect handled exactly twice, for the whole
+    // session. Idempotent work, so it was invisible, but the tasks and
+    // their D-Bus subscriptions are never reclaimed and a long-running
+    // kiosk would keep accruing them.
+    let mut watchers: HashMap<Address, tokio::task::JoinHandle<()>> = HashMap::new();
     match adapter.device_addresses().await {
         Ok(addrs) => {
             for addr in addrs {
-                if watched.insert(addr) {
-                    spawn_device_watcher(
-                        &adapter,
-                        addr,
-                        epoch.clone(),
-                        reader.clone(),
-                        last_peer.clone(),
-                        response_outbox.clone(),
-                        events_outbox.clone(),
-                    );
+                if let std::collections::hash_map::Entry::Vacant(slot) = watchers.entry(addr) {
+                    // Pin bonded peers here as well as on connect. A peer
+                    // that is already connected when we start — the usual
+                    // case after a daemon restart, since the ACL outlives
+                    // it — never produces a `Connected(true)` transition,
+                    // so the on-connect path alone would leave the admin
+                    // phone unpinned for the whole session.
+                    if let Ok(device) = adapter.device(addr)
+                        && device.is_paired().await.unwrap_or(false)
+                    {
+                        pin_peer_to_bredr(&device, addr, &state.bearer, PinFailure::Quiet).await;
+                    }
+                    slot.insert(spawn_device_watcher(&adapter, addr, state.clone()));
                 }
             }
         }
@@ -724,22 +742,25 @@ async fn disconnect_monitor(
     while let Some(ev) = events.next().await {
         match ev {
             AdapterEvent::DeviceAdded(addr) => {
-                if watched.insert(addr) {
-                    spawn_device_watcher(
-                        &adapter,
-                        addr,
-                        epoch.clone(),
-                        reader.clone(),
-                        last_peer.clone(),
-                        response_outbox.clone(),
-                        events_outbox.clone(),
-                    );
+                // Re-attach only if nothing live is already watching this
+                // peer. `is_finished` covers the case where the watcher's
+                // own stream ended without us seeing a `DeviceRemoved`.
+                let live = watchers.get(&addr).is_some_and(|h| !h.is_finished());
+                if !live {
+                    let handle = spawn_device_watcher(&adapter, addr, state.clone());
+                    if let Some(stale) = watchers.insert(addr, handle) {
+                        stale.abort();
+                    }
                 }
             }
-            // A removed device may later be re-added; drop it from the set
-            // so we re-attach a watcher if that happens.
+            // A removed device may later be re-added. Stop the watcher
+            // rather than just forgetting it: the device event stream does
+            // not reliably end with the object, and leaving the task
+            // running is what produced duplicate watchers.
             AdapterEvent::DeviceRemoved(addr) => {
-                watched.remove(&addr);
+                if let Some(handle) = watchers.remove(&addr) {
+                    handle.abort();
+                }
             }
             AdapterEvent::PropertyChanged(_) => {}
         }
@@ -753,17 +774,15 @@ async fn disconnect_monitor(
 fn spawn_device_watcher(
     adapter: &bluer::Adapter,
     addr: Address,
-    epoch: Arc<AtomicU64>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
-) {
+    state: Arc<TransportState>,
+) -> tokio::task::JoinHandle<()> {
     let device = match adapter.device(addr) {
         Ok(d) => d,
         Err(e) => {
             debug!(peer = %addr, error = %e, "could not open device for disconnect watch");
-            return;
+            // A handle that is already finished, so callers can store it
+            // uniformly and the liveness check reads false.
+            return tokio::spawn(async {});
         }
     };
     tokio::spawn(async move {
@@ -774,7 +793,22 @@ fn spawn_device_watcher(
                 return;
             }
         };
+        // Act on *transitions*, not on every delivery. BlueZ (or bluer's
+        // subscription to it) reports each `Connected` change twice,
+        // fractions of a millisecond apart — verified by tagging the
+        // watcher task and seeing one instance log the same connect
+        // twice. Everything below is idempotent, so the duplicates were
+        // harmless, but they doubled every epoch bump (leaving the first
+        // watchdog of each pair to no-op on a stale generation) and put
+        // two identical lines in the journal for every event, which is
+        // its own cost when the journal is the debugging tool.
+        let mut connected: Option<bool> = None;
         while let Some(DeviceEvent::PropertyChanged(prop)) = events.next().await {
+            if let DeviceProperty::Connected(now) = prop
+                && connected.replace(now) == Some(now)
+            {
+                continue;
+            }
             match prop {
                 // A companion drains both outboxes before it will send
                 // its first RPC, so the depth logged here *is* the
@@ -785,112 +819,367 @@ fn spawn_device_watcher(
                 // between "advertising started" and an RPC that may
                 // arrive minutes later or not at all.
                 DeviceProperty::Connected(true) => {
-                    let (response_frames, response_bytes) = response_outbox.depth().await;
-                    let (events_frames, events_bytes) = events_outbox.depth().await;
+                    // Anything queued while nobody was connected is stale:
+                    // the companion discards its entire post-connect drain
+                    // and opens with a fresh `service_state`. Handing it
+                    // over costs a GATT round trip per 512 bytes and buys
+                    // nothing — on the reporter's box ~4 KiB of queued
+                    // snapshots stretched a 1.5s reconnect to 3.3s, which
+                    // is the "sometimes it takes a few seconds" they saw.
+                    // `clear_if_aligned` declines if the peer has already
+                    // started reading, so a drain in flight is never cut
+                    // mid-frame.
+                    let response = state.response_outbox.clear_if_aligned().await;
+                    let events = state.events_outbox.clear_if_aligned().await;
+                    let (response_frames, response_bytes) = response.unwrap_or((0, 0));
+                    let (events_frames, events_bytes) = events.unwrap_or((0, 0));
                     info!(
                         peer = %addr,
                         response_frames,
                         response_bytes,
                         events_frames,
                         events_bytes,
-                        "BLE peer connected; companion will drain these before its first RPC",
+                        kept_for_drain = response.is_none() || events.is_none(),
+                        "BLE peer connected; discarded what had queued up while it was away",
                     );
-                    let generation = epoch.fetch_add(1, Ordering::Relaxed) + 1;
-                    spawn_first_rpc_watchdog(
-                        device.clone(),
-                        addr,
-                        generation,
-                        epoch.clone(),
-                        last_peer.clone(),
-                    );
+                    let generation = state.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Do this on every connect, not just the first: it is
+                    // idempotent in BlueZ, and the arming we are undoing
+                    // happens on service probe, which can recur.
+                    if device.is_paired().await.unwrap_or(false) {
+                        pin_peer_to_bredr(&device, addr, &state.bearer, PinFailure::Loud).await;
+                    }
+                    spawn_first_rpc_watchdog(device.clone(), addr, generation, state.clone());
                 }
                 DeviceProperty::Connected(false) => {
-                    epoch.fetch_add(1, Ordering::Relaxed);
+                    state.epoch.fetch_add(1, Ordering::Relaxed);
                     info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
-                    reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox)
-                        .await;
+                    state.reset_session().await;
                 }
                 _ => {}
             }
         }
-    });
+    })
 }
 
-/// How long a bonded peer may hold a link without sending a single RPC
-/// before we take the link away from it.
+/// How long a peer may hold a link without sending a single RPC before
+/// we say so in the log.
 ///
 /// Sized above the worst healthy first-RPC latency, not near it: the
 /// companion drains both outboxes and lets the link encryption settle
 /// (up to three 5 s attempts) before its first write, and the slowest
 /// healthy connect measured on hardware — host loaded, cold app start —
-/// was 8 s. Twenty-five seconds is comfortably clear of that and still
-/// well inside the companion's own 30 s connect budget, so a link this
-/// silent is one that was never going to work.
+/// was 8 s. Note this is *not* long enough to clear a pairing, which
+/// waits on a human comparing six digits; that is one of the reasons
+/// this no longer acts on the link, only reports it.
 const FIRST_RPC_GRACE: Duration = Duration::from_secs(25);
 
-/// Disconnect a bonded peer that connects and then never talks.
+/// How long before the *fallback* eviction acts (see
+/// [`spawn_first_rpc_watchdog`]). Far beyond the 30s the OS allows for a
+/// Numeric Comparison, so a pairing that is merely slow is never caught
+/// by it — the last time this path fired at 25s it hung up on the
+/// comparison window and made pairing impossible.
+const EVICT_GRACE: Duration = Duration::from_secs(90);
+
+/// Pin a bonded peer to the BR/EDR bearer so BlueZ stops arming the
+/// kernel to dial it over LE.
+///
+/// This is the fix for the week's worst failure, and it is aimed at the
+/// mechanism rather than the symptom. Probing an `auto_connect` profile
+/// on a bonded device — `a2dp`, `bap`, `hog`, `input`, all of which a
+/// phone matches — makes bluetoothd call `device_set_auto_connect(TRUE)`
+/// (`src/device.c:5551`), which sends `MGMT_OP_ADD_DEVICE` with
+/// `action = 0x02`: *the kernel* then connects that address the moment it
+/// advertises. Because our companion is a GATT server, a link the box
+/// originates puts the box in the central role — and only a central may
+/// start encryption, so the phone can never encrypt it and every read of
+/// an `encrypt_authenticated` characteristic comes back
+/// `Insufficient Authentication`, forever, on a link that never drops.
+///
+/// Setting `PreferredBearer = "bredr"` makes `device_set_auto_connect`
+/// return before `adapter_auto_connect_add()` — BlueZ's own comment there
+/// reads "Remove device from auto-connect list so the kernel does not
+/// attempt to auto-connect to it in case it starts advertising". It is
+/// stored in the bond record, and both the load and the inhibit are
+/// ungated, so it survives restarts and keeps working even where the
+/// property itself is hidden. BR/EDR auto-connect is untouched, which
+/// matters on a box whose radio is also the user's headphones.
+///
+/// The property is `experimental` upstream, so on a stock bluetoothd it
+/// does not exist and this fails — see the caller for what happens then.
+/// bluer does not wrap it, hence the direct D-Bus call; it is blocking,
+/// which is why it runs on the blocking pool.
+async fn prefer_bredr_bearer(adapter_name: &str, addr: Address) -> Result<(), String> {
+    let path = format!(
+        "/org/bluez/{adapter_name}/dev_{}",
+        addr.to_string().replace(':', "_")
+    );
+    tokio::task::spawn_blocking(move || {
+        use dbus::blocking::Connection;
+        use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+
+        let conn = Connection::new_system().map_err(|e| e.to_string())?;
+        let proxy = conn.with_proxy("org.bluez", path, Duration::from_secs(5));
+        proxy
+            .set("org.bluez.Device1", "PreferredBearer", "bredr".to_string())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Everything the transport layers share about the current peer session.
+///
+/// These fields have always travelled together — the request
+/// reassembler, the peer marker, both outboxes, and the facts the
+/// watchdog reasons about — through the GATT characteristics, the
+/// disconnect monitor, the per-device watchers and back. Passing them
+/// individually meant nine-parameter functions and a `too_many_arguments`
+/// allow on almost everything that touched them, which buried the one or
+/// two arguments that actually varied per call.
+struct TransportState {
+    /// Request-side reassembly. v1 holds a single reader because only one
+    /// admin connection is expected at a time.
+    reader: Mutex<FrameReader>,
+    /// Who we last accepted a request write from. Set by the first write
+    /// of a session, cleared when the peer drops — which is what the
+    /// watchdog reads as "this link has never carried anything".
+    last_peer: Mutex<Option<PeerIdentity>>,
+    /// The read-poll queues the companion drains over GATT: RPC replies
+    /// and live state events. `Arc`, not plain, because each is also
+    /// captured by its own read characteristic and — for events — by the
+    /// forwarder task that runs whether or not anyone is connected.
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
+    /// Distinguishes one peer connection from the next, so a watchdog
+    /// armed for a link that has since dropped cannot act on whatever
+    /// connection happens to be live when its timer expires.
+    epoch: AtomicU64,
+    /// Whether any peer has exchanged real RPCs on this boot. A first
+    /// pairing never has, which is what keeps the fallback eviction away
+    /// from the Numeric Comparison window.
+    had_session: AtomicBool,
+    /// Which peers have been pinned to the BR/EDR bearer. Together with
+    /// `had_session` this gates the fallback eviction in
+    /// [`spawn_first_rpc_watchdog`]; see [`pin_peer_to_bredr`] for why
+    /// the pin is the actual fix.
+    bearer: BearerPin,
+}
+
+impl TransportState {
+    fn new() -> Self {
+        Self {
+            reader: Mutex::new(FrameReader::new(MAX_FRAME_BYTES)),
+            last_peer: Mutex::new(None),
+            response_outbox: Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES)),
+            events_outbox: Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES)),
+            epoch: AtomicU64::new(0),
+            had_session: AtomicBool::new(false),
+            bearer: BearerPin::default(),
+        }
+    }
+
+    /// Drop every byte of per-session transport state: any half-assembled
+    /// request frame, the last-peer marker, and both read-poll outboxes.
+    async fn reset_session(&self) {
+        *self.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
+        *self.last_peer.lock().await = None;
+        self.response_outbox.clear().await;
+        self.events_outbox.clear().await;
+    }
+}
+
+/// Tracks the bearer pin across connections: whether it has taken, and
+/// whether we have already told the operator how to make it possible.
+///
+/// Retrying every connect is worth it — the property becomes available
+/// the moment bluetoothd is restarted with `Experimental`, and a
+/// controller power cycle or resume already brings us back through here —
+/// but repeating the same paragraph on every reconnect is not.
+#[derive(Default)]
+struct BearerPin {
+    /// Peers pinned so far, by address.
+    ///
+    /// Per-peer rather than a single flag: a box carries more than one
+    /// bond (a stale object from an earlier pairing, headphones, a
+    /// controller), and a shared flag means the first peer to succeed
+    /// suppresses the attempt for everyone after it. On 2026-08-18 that
+    /// came within one enumeration-order coin flip of skipping the admin
+    /// phone and silently restoring the whole dialling failure, with a
+    /// reassuring "Pinned peer" line in the log naming a different device.
+    pinned: std::sync::Mutex<HashSet<Address>>,
+    /// Whether the operator has been told how to make the property
+    /// available. Once per server is plenty.
+    warned: AtomicBool,
+}
+
+impl BearerPin {
+    fn is_pinned(&self, addr: Address) -> bool {
+        self.pinned
+            .lock()
+            .expect("bearer pin lock poisoned")
+            .contains(&addr)
+    }
+
+    fn mark_pinned(&self, addr: Address) {
+        self.pinned
+            .lock()
+            .expect("bearer pin lock poisoned")
+            .insert(addr);
+    }
+}
+
+/// How loudly [`pin_peer_to_bredr`] should complain when it cannot pin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinFailure {
+    /// A peer we are actively serving: unprotected means the next
+    /// disconnect can hand the device the central role, so say so.
+    Loud,
+    /// A sweep over everything BlueZ knows, where failures are expected —
+    /// stale objects from old pairings have no `Device1` to set. Warning
+    /// about those buries the case that matters, and did: every session
+    /// opened with an alarming paragraph about a device that never
+    /// connects, immediately before the admin phone pinned fine.
+    Quiet,
+}
+
+/// Apply [`prefer_bredr_bearer`] and say something useful either way.
+///
+/// Success is logged once (the flag also tells the watchdog it no longer
+/// needs its fallback). Failure is almost always "the property is
+/// experimental and this bluetoothd was started without it", which is not
+/// something the daemon can fix for the operator — so say exactly what to
+/// do about it, once, rather than repeating it on every reconnect.
+async fn pin_peer_to_bredr(
+    device: &bluer::Device,
+    addr: Address,
+    pin: &BearerPin,
+    on_failure: PinFailure,
+) {
+    if pin.is_pinned(addr) {
+        return;
+    }
+    match prefer_bredr_bearer(device.adapter_name(), addr).await {
+        Ok(()) => {
+            pin.mark_pinned(addr);
+            info!(
+                peer = %addr,
+                "Pinned peer to the BR/EDR bearer; the kernel will no longer auto-connect \
+                 it over LE, so the companion keeps the central role and can encrypt",
+            );
+        }
+        Err(e) if on_failure == PinFailure::Quiet || pin.warned.swap(true, Ordering::Relaxed) => {
+            debug!(
+                error = %e,
+                peer = %addr,
+                "PreferredBearer=bredr unavailable for this peer",
+            )
+        }
+        Err(e) => warn!(
+            error = %e,
+            peer = %addr,
+            "Could not set PreferredBearer=bredr. The device may dial this phone over LE \
+             after any disconnect, taking the central role, after which the phone cannot \
+             encrypt the link and every read fails. The property is experimental: enable \
+             `Experimental = true` in /etc/bluetooth/main.conf, or add \
+             `PreferredBearer=bredr` under [General] in the peer's file in \
+             /var/lib/bluetooth/<adapter>/<peer>/info with bluetoothd stopped",
+        ),
+    }
+}
+
+/// Report a bonded peer that connects and then never talks.
 ///
 /// The failure this exists for: if the *box* originates the LE
 /// connection, it is the central and the phone is the peripheral — and
 /// only a central may start encryption. The phone's stack decides it
-/// needs to encrypt and then has no way to act on it (its one lever, an
-/// SMP Security Request, is not sent on behalf of its GATT client), while
-/// nothing on our side is asking BlueZ for a secure link either. The
-/// result is a link that stays up forever with every read of an
+/// needs to encrypt and then has no way to act on it, while nothing on
+/// our side is asking BlueZ for a secure link either. The result is a
+/// link that stays up forever with every read of an
 /// `encrypt_authenticated` characteristic answered `Insufficient
 /// Authentication (0x05)` and not one SMP frame on the air. Observed on
 /// the reporter's box on 2026-08-16; see
 /// `docs/ai/history/2026-08-16 001 ble-connect-fails-after-long-session.md`.
 ///
-/// bluetoothd answers those reads itself, so our characteristic callbacks
-/// never fire and the daemon cannot see the failure directly. What it
-/// *can* see is the absence of any request write — `last_peer` is set by
-/// the first one — and dropping the link on that evidence hands the next
-/// connection to the phone, which then initiates, becomes central, and
-/// encrypts normally.
+/// bluetoothd answers those reads itself, so our characteristic
+/// callbacks never fire and the daemon cannot see the failure directly.
+/// What it *can* see is the absence of any request write — `last_peer`
+/// is set by the first one — which is what this reports.
 ///
-/// Deliberately skips unpaired peers: during pairing the companion
-/// legitimately holds a link for as long as the Numeric Comparison
-/// prompt takes a human to answer, and it sends no RPC until the bond
-/// completes.
+/// **It only reports.** It used to drop the link, on the theory that the
+/// companion would reconnect and, by initiating, become central. That
+/// broke pairing outright: a box holding a stale bond reads as
+/// `is_paired()` even while the phone is mid-`BOND_BONDING`, so the
+/// timer fired 25 s into the Numeric Comparison window — before the
+/// human could compare the digits — and hung up on the pairing
+/// (`status=19 GATT_CONN_TERMINATE_PEER_USER` on the phone, three
+/// attempts in a row on 2026-08-17). Silence on a fresh link is simply
+/// not specific enough to act on: pairing, a slow drain and the
+/// role-inversion deadlock all look identical from here. Eviction can
+/// come back when the deadlock itself is reproducible and there is a
+/// signal that distinguishes it — until then this line is what turns an
+/// invisible failure into a diagnosable one.
 fn spawn_first_rpc_watchdog(
     device: bluer::Device,
     addr: Address,
     generation: u64,
-    epoch: Arc<AtomicU64>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
+    state: Arc<TransportState>,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_RPC_GRACE).await;
-        if epoch.load(Ordering::Relaxed) != generation {
+        if state.epoch.load(Ordering::Relaxed) != generation {
             // The link this timer was armed for is long gone; anything
             // live now is a *different* connection with its own timer.
             // Without this check the state below is read against the
             // wrong link: on 2026-08-17 a timer armed at 03:37:47 fired
-            // at 03:38:12 and killed a healthy connection that had come
-            // up 1.2s earlier and was about to send its first RPC.
+            // at 03:38:12 against a healthy connection that had come up
+            // 1.2s earlier and was about to send its first RPC.
             return;
         }
-        if last_peer.lock().await.is_some() {
+        if state.last_peer.lock().await.is_some() {
             return; // It talked to us. Nothing to do.
         }
         if !device.is_connected().await.unwrap_or(false) {
             return; // Already gone.
         }
-        if !device.is_paired().await.unwrap_or(false) {
-            debug!(
-                peer = %addr,
-                "peer has held a link without sending an RPC, but isn't bonded yet; \
-                 leaving it alone in case pairing is in flight",
-            );
+        let paired = device.is_paired().await.unwrap_or(false);
+        warn!(
+            peer = %addr,
+            paired,
+            grace_secs = FIRST_RPC_GRACE.as_secs(),
+            "Peer has held a link this long without sending an RPC. If it is bonded and \
+             the companion is trying to reach us, the link is probably one the device \
+             originated — the phone cannot encrypt those, and every encrypted read on \
+             them fails. Pairing in progress looks the same and is fine",
+        );
+
+        // Fallback, for boxes where the bearer could not be pinned: take
+        // the link away so the phone reconnects and, by initiating,
+        // becomes central. Three gates, because this is the mechanism
+        // that once hung up on a Numeric Comparison window:
+        //
+        // - only when the bearer is unpinned, i.e. the real fix is
+        //   unavailable and the device really can dial this peer;
+        // - only once a session has actually exchanged RPCs on this
+        //   boot, which a first pairing never has;
+        // - and only after a much longer wait than the report above,
+        //   comfortably past the 30s the OS gives a human to compare six
+        //   digits, so a slow pairing outlives it.
+        if state.bearer.is_pinned(addr) || !state.had_session.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(EVICT_GRACE - FIRST_RPC_GRACE).await;
+        if state.epoch.load(Ordering::Relaxed) != generation
+            || state.last_peer.lock().await.is_some()
+            || !device.is_connected().await.unwrap_or(false)
+        {
             return;
         }
         warn!(
             peer = %addr,
-            grace_secs = FIRST_RPC_GRACE.as_secs(),
-            "Bonded peer connected but sent no RPC; dropping the link so the companion \
-             reconnects as central. A link the device originated cannot be encrypted by \
-             the phone, and every encrypted read on it fails",
+            grace_secs = EVICT_GRACE.as_secs(),
+            "Dropping the link: still silent, and the bearer could not be pinned. The \
+             companion should reconnect and take the central role",
         );
         if let Err(e) = device.disconnect().await {
             warn!(peer = %addr, error = %e, "Could not drop the silent peer's link");
@@ -898,18 +1187,30 @@ fn spawn_first_rpc_watchdog(
     });
 }
 
-/// Drop every byte of per-session transport state: any half-assembled
-/// request frame, the last-peer marker, and both read-poll outboxes.
-async fn reset_transport_session(
-    reader: &Arc<Mutex<FrameReader>>,
-    last_peer: &Arc<Mutex<Option<PeerIdentity>>>,
-    response_outbox: &Arc<Outbox>,
-    events_outbox: &Arc<Outbox>,
-) {
-    *reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
-    *last_peer.lock().await = None;
-    response_outbox.clear().await;
-    events_outbox.clear().await;
+/// Why, if at all, an adapter event means the service needs to go back
+/// on air. Split out from the run loop so the *decision* is testable
+/// without an adapter.
+fn rearm_reason_for_adapter_event(event: &AdapterEvent) -> Option<&'static str> {
+    match event {
+        AdapterEvent::PropertyChanged(AdapterProperty::Powered(true)) => {
+            Some("the Bluetooth controller powered back on")
+        }
+        _ => None,
+    }
+}
+
+/// Same, for the daemon's own event stream.
+///
+/// `SystemResumed` is here because a suspend/resume does **not** always
+/// move `Adapter1.Powered`: on the 2026-08-17 report the resume produced
+/// only bluetoothd's "Controller resume" line and our peer disconnect,
+/// with no property transition at all — and the device was off air
+/// afterwards. Watching the power property alone missed it entirely.
+fn rearm_reason_for_service_event(payload: &EventPayload) -> Option<&'static str> {
+    match payload {
+        EventPayload::SystemResumed => Some("the system resumed from sleep"),
+        _ => None,
+    }
 }
 
 /// The two registrations that stop existing when the controller power
@@ -936,27 +1237,20 @@ struct OnAir {
 /// filters on our service UUID) listed nothing, while the daemon sat there
 /// believing it was advertising. The power-on signal is the only reliable
 /// cue, which is why this is driven by an event rather than a poll.
-#[allow(clippy::too_many_arguments)]
 async fn go_on_air(
     adapter: &bluer::Adapter,
     config: &BleServerConfig,
     svc: &Arc<dyn ManagementService>,
     claim: &Arc<ClaimMachine>,
-    reader: &Arc<Mutex<FrameReader>>,
-    last_peer: &Arc<Mutex<Option<PeerIdentity>>>,
     unbond_tx: &mpsc::Sender<Address>,
-    response_outbox: &Arc<Outbox>,
-    events_outbox: &Arc<Outbox>,
+    state: &Arc<TransportState>,
 ) -> bluer::Result<OnAir> {
     let application = build_application(
         config.clone(),
         svc.clone(),
         claim.clone(),
-        reader.clone(),
-        last_peer.clone(),
         unbond_tx.clone(),
-        response_outbox.clone(),
-        events_outbox.clone(),
+        state.clone(),
     );
     let app: ApplicationHandle = adapter.serve_gatt_application(application).await?;
 
@@ -997,6 +1291,70 @@ async fn go_on_air(
     })
 }
 
+/// Attempts at registering the pairing agent before giving up on it for
+/// now, and the pause before each retry.
+///
+/// Short and few: a permission problem fails identically every time, and
+/// the case worth riding out is a momentarily busy bluetoothd — whose
+/// own D-Bus timeout can already make a single attempt take ~25 s.
+const AGENT_REGISTER_BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(2)];
+
+/// Register the Numeric Comparison agent, retrying briefly, and carry on
+/// without one rather than taking the whole transport down.
+///
+/// This used to be fatal to `run`. On 2026-08-17 a single
+/// `org.freedesktop.DBus.Error.NoReply` — bluetoothd busy for a moment
+/// during startup — killed BLE management for the entire session: no
+/// advertising, no retry, and one ERROR line as the only evidence, which
+/// is indistinguishable from every other "the device just isn't there"
+/// failure we spent this week chasing.
+///
+/// Losing the agent costs pairing (the TV overlay and the Numeric
+/// Comparison flow); losing the server costs *everything*, including a
+/// bonded admin phone that only wanted to reconnect to an
+/// already-claimed device. The degraded state is the better one, and the
+/// re-arm path retries later.
+async fn register_agent_with_retry(
+    session: &bluer::Session,
+    display: &Arc<dyn PairingDisplay>,
+) -> Option<AgentHandle> {
+    for (attempt, backoff) in AGENT_REGISTER_BACKOFF
+        .iter()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        match register_agent(session, display.clone()).await {
+            Ok(handle) => {
+                if attempt > 0 {
+                    info!(attempt = attempt + 1, "BlueZ pairing agent registered");
+                }
+                return Some(handle);
+            }
+            Err(e) => match backoff {
+                Some(delay) => {
+                    warn!(
+                        error = %e,
+                        attempt = attempt + 1,
+                        retry_in_ms = delay.as_millis() as u64,
+                        "Could not register the BlueZ pairing agent; retrying",
+                    );
+                    tokio::time::sleep(*delay).await;
+                }
+                None => error!(
+                    error = %e,
+                    attempts = attempt + 1,
+                    "Could not register the BlueZ pairing agent. BLE management stays up and \
+                     an already-paired companion still works, but pairing a new phone will \
+                     not show the Numeric Comparison code on the TV. If this persists, check \
+                     that the daemon user is in the `bluetooth` group",
+                ),
+            },
+        }
+    }
+    None
+}
+
 async fn register_agent(
     session: &bluer::Session,
     display: Arc<dyn PairingDisplay>,
@@ -1005,16 +1363,12 @@ async fn register_agent(
     session.register_agent(agent).await
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_application(
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     unbond_tx: mpsc::Sender<Address>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
+    state: Arc<TransportState>,
 ) -> Application {
     Application {
         services: vec![Service {
@@ -1022,21 +1376,17 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(
-                    svc,
-                    claim,
-                    reader,
-                    last_peer,
-                    unbond_tx,
-                    response_outbox.clone(),
-                    events_outbox.clone(),
-                ),
+                request_characteristic(svc, claim, unbond_tx, state.clone()),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
-                    response_outbox,
+                    state.response_outbox.clone(),
                     "Response",
                 ),
-                outbox_read_characteristic(SHEPHERD_EVENTS_CHAR_UUID, events_outbox, "Events"),
+                outbox_read_characteristic(
+                    SHEPHERD_EVENTS_CHAR_UUID,
+                    state.events_outbox.clone(),
+                    "Events",
+                ),
             ],
             ..Default::default()
         }],
@@ -1092,17 +1442,14 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
 fn request_characteristic(
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     unbond_tx: mpsc::Sender<Address>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
+    state: Arc<TransportState>,
 ) -> Characteristic {
-    // `reader`/`last_peer` are the single-connection frame reassembly
-    // state (v1 expects one admin connection at a time). They're created
-    // in `run` and shared with `disconnect_monitor` so a peer drop can
-    // reset a half-written frame; if a second device writes here we wipe
-    // the buffer and start fresh.
+    // The reassembly state in `state` is single-connection (v1 expects
+    // one admin connection at a time). It's created in `run` and shared
+    // with `disconnect_monitor` so a peer drop can reset a half-written
+    // frame; if a second device writes here we wipe the buffer and start
+    // fresh.
     Characteristic {
         uuid: SHEPHERD_REQUEST_CHAR_UUID,
         write: Some(CharacteristicWrite {
@@ -1112,11 +1459,13 @@ fn request_characteristic(
             method: CharacteristicWriteMethod::Fun(Box::new(move |chunk, req| {
                 let svc = svc.clone();
                 let claim = claim.clone();
-                let reader = reader.clone();
-                let last_peer = last_peer.clone();
                 let unbond_tx = unbond_tx.clone();
-                let response_outbox = response_outbox.clone();
-                let events_outbox = events_outbox.clone();
+                let state = state.clone();
+                // A write landed on an encrypt-authenticated
+                // characteristic, so this link demonstrably works. That is
+                // what the fallback eviction waits to see before it will
+                // ever act on a silent one.
+                state.had_session.store(true, Ordering::Relaxed);
                 async move {
                     let peer = PeerIdentity {
                         address: req.device_address.to_string(),
@@ -1127,18 +1476,7 @@ fn request_characteristic(
                         // ignores this field on the inbound side.
                         address_type: "public".to_string(),
                     };
-                    handle_write(
-                        &peer,
-                        chunk,
-                        reader,
-                        last_peer,
-                        claim,
-                        svc,
-                        &unbond_tx,
-                        response_outbox,
-                        events_outbox,
-                    )
-                    .await
+                    handle_write(&peer, chunk, claim, svc, &unbond_tx, &state).await
                 }
                 .boxed()
             })),
@@ -1215,17 +1553,13 @@ fn outbox_read_characteristic(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_write(
     peer: &PeerIdentity,
     chunk: Vec<u8>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     claim: Arc<ClaimMachine>,
     svc: Arc<dyn ManagementService>,
     unbond_tx: &mpsc::Sender<Address>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
+    state: &TransportState,
 ) -> bluer::gatt::local::ReqResult<()> {
     debug!(
         peer = %peer.address,
@@ -1237,31 +1571,22 @@ async fn handle_write(
     // half-frame from one client from polluting the next client's
     // first request.
     {
-        let mut lp = last_peer.lock().await;
+        let mut lp = state.last_peer.lock().await;
         if lp.as_ref() != Some(peer) {
             *lp = Some(peer.clone());
-            *reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
+            *state.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
         }
     }
 
     {
-        let mut r = reader.lock().await;
+        let mut r = state.reader.lock().await;
         r.push(&chunk);
         loop {
             match r.pop_frame() {
                 Ok(Some(frame)) => {
                     drop(r);
-                    dispatch_frame(
-                        peer,
-                        &frame,
-                        &claim,
-                        &svc,
-                        unbond_tx,
-                        &response_outbox,
-                        &events_outbox,
-                    )
-                    .await;
-                    r = reader.lock().await;
+                    dispatch_frame(peer, &frame, &claim, &svc, unbond_tx, state).await;
+                    r = state.reader.lock().await;
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -1275,15 +1600,13 @@ async fn handle_write(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_frame(
     peer: &PeerIdentity,
     frame: &[u8],
     claim: &Arc<ClaimMachine>,
     svc: &Arc<dyn ManagementService>,
     unbond_tx: &mpsc::Sender<Address>,
-    response_outbox: &Arc<Outbox>,
-    events_outbox: &Arc<Outbox>,
+    state: &TransportState,
 ) {
     let request: RpcRequest = match serde_json::from_slice(frame) {
         Ok(r) => r,
@@ -1295,7 +1618,7 @@ async fn dispatch_frame(
                 "Dropping BLE frame: not valid JSON-RPC"
             );
             let resp = RpcResponse::err(0, ErrorCode::ParseError, e.to_string());
-            push_response(response_outbox, &resp).await;
+            push_response(&state.response_outbox, &resp).await;
             return;
         }
     };
@@ -1315,8 +1638,8 @@ async fn dispatch_frame(
     // queue mid-delivery on a single legitimate session.
     if id == 1 {
         info!(peer = %peer.address, "RPC id=1; clearing outboxes for new session");
-        response_outbox.clear().await;
-        events_outbox.clear().await;
+        state.response_outbox.clear().await;
+        state.events_outbox.clear().await;
     }
 
     info!(
@@ -1345,7 +1668,7 @@ async fn dispatch_frame(
         ok = response.error.is_none(),
         "BLE RPC response queued"
     );
-    push_response(response_outbox, &response).await;
+    push_response(&state.response_outbox, &response).await;
 }
 
 async fn handle_claim_rpc(
@@ -1480,10 +1803,6 @@ mod tests {
         Arc::new(ClaimMachine::new(store, ClaimState::Claimed(record)))
     }
 
-    fn outbox() -> Arc<Outbox> {
-        Arc::new(Outbox::new("test", RESPONSE_OUTBOX_BYTES))
-    }
-
     /// A live unbond sender for the write path. None of these tests drive
     /// `factory_reset`, so nothing is ever sent; the background drainer
     /// just keeps the receiver alive so `send` wouldn't fail on a closed
@@ -1524,12 +1843,14 @@ mod tests {
         let claim = claimed_machine();
         let mock = Arc::new(MockSvc::new());
         let svc: Arc<dyn ManagementService> = mock.clone();
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
 
         // Bytes the previous BLE session left behind, unread.
-        response_outbox.push(encode_frame(b"stale-response")).await;
-        events_outbox.push(encode_frame(b"stale-event")).await;
+        state
+            .response_outbox
+            .push(encode_frame(b"stale-response"))
+            .await;
+        state.events_outbox.push(encode_frame(b"stale-event")).await;
 
         // The first RPC of a fresh session always carries id == 1.
         let body = serde_json::to_vec(&req(1, "health", serde_json::Value::Null)).unwrap();
@@ -1539,17 +1860,16 @@ mod tests {
             &claim,
             &svc,
             &unbond_sender(),
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
         // Events outbox is wiped and nothing re-queues onto it.
-        assert_eq!(events_outbox.pending_bytes().await, 0);
+        assert_eq!(state.events_outbox.pending_bytes().await, 0);
 
         // Response outbox holds exactly the fresh health response — the
         // stale frame was dropped, not stacked in front of it.
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 1);
         assert!(responses[0].error.is_none());
@@ -1560,11 +1880,13 @@ mod tests {
     async fn non_first_rpc_leaves_pending_events_intact() {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
 
-        events_outbox.push(encode_frame(b"pending-event")).await;
-        let before = events_outbox.pending_bytes().await;
+        state
+            .events_outbox
+            .push(encode_frame(b"pending-event"))
+            .await;
+        let before = state.events_outbox.pending_bytes().await;
 
         // id != 1: a mid-session RPC must not disturb events the companion
         // has not yet polled.
@@ -1575,13 +1897,12 @@ mod tests {
             &claim,
             &svc,
             &unbond_sender(),
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
-        assert_eq!(events_outbox.pending_bytes().await, before);
-        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(state.events_outbox.pending_bytes().await, before);
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 2);
     }
@@ -1590,28 +1911,22 @@ mod tests {
     async fn peer_change_resets_partial_frame() {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
-        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer = Arc::new(Mutex::new(None));
+        let state = TransportState::new();
 
         // Peer A writes only the head of a longer frame, then vanishes.
         let partial = request_frame(7, "health")[..3].to_vec();
         handle_write(
             &peer("AA:AA:AA:AA:AA:AA"),
             partial,
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
         assert!(
-            drain_responses(&response_outbox).await.is_empty(),
+            drain_responses(&state.response_outbox).await.is_empty(),
             "an incomplete frame must not produce a response"
         );
 
@@ -1621,18 +1936,15 @@ mod tests {
         handle_write(
             &peer("BB:BB:BB:BB:BB:BB"),
             request_frame(8, "health"),
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
 
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 8);
         assert!(responses[0].error.is_none());
@@ -1642,10 +1954,7 @@ mod tests {
     async fn framing_error_drops_state_and_recovers() {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
-        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer = Arc::new(Mutex::new(None));
+        let state = TransportState::new();
         let p = peer("CC:CC:CC:CC:CC:CC");
 
         // A length prefix past MAX_FRAME_BYTES is an unrecoverable framing
@@ -1655,35 +1964,29 @@ mod tests {
         handle_write(
             &p,
             bad,
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
-        assert!(drain_responses(&response_outbox).await.is_empty());
+        assert!(drain_responses(&state.response_outbox).await.is_empty());
 
         // A valid frame from the same peer afterwards still parses — the
         // reader was reset, not left holding the rejected prefix.
         handle_write(
             &p,
             request_frame(2, "health"),
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
 
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 2);
         assert!(responses[0].error.is_none());
@@ -1695,27 +1998,32 @@ mod tests {
     /// same connection across a transient drop (no fresh `id == 1`)
     /// doesn't inherit a desynced byte stream.
     #[tokio::test]
-    async fn reset_transport_session_wipes_all_session_state() {
-        let response_outbox = outbox();
-        let events_outbox = outbox();
-        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer = Arc::new(Mutex::new(Some(peer("AA:BB:CC:DD:EE:FF"))));
+    async fn reset_session_wipes_all_session_state() {
+        let state = TransportState::new();
+        *state.last_peer.lock().await = Some(peer("AA:BB:CC:DD:EE:FF"));
 
         // Bytes a dropped session left behind: unread outbox frames plus
         // the head of a request frame whose tail never arrived.
-        response_outbox.push(encode_frame(b"stale-response")).await;
-        events_outbox.push(encode_frame(b"stale-event")).await;
-        reader.lock().await.push(&request_frame(7, "health")[..3]);
+        state
+            .response_outbox
+            .push(encode_frame(b"stale-response"))
+            .await;
+        state.events_outbox.push(encode_frame(b"stale-event")).await;
+        state
+            .reader
+            .lock()
+            .await
+            .push(&request_frame(7, "health")[..3]);
 
-        reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox).await;
+        state.reset_session().await;
 
-        assert_eq!(response_outbox.pending_bytes().await, 0);
-        assert_eq!(events_outbox.pending_bytes().await, 0);
-        assert!(last_peer.lock().await.is_none());
+        assert_eq!(state.response_outbox.pending_bytes().await, 0);
+        assert_eq!(state.events_outbox.pending_bytes().await, 0);
+        assert!(state.last_peer.lock().await.is_none());
 
         // The reader kept no leftover prefix: a full frame pushed now
         // parses as itself rather than stitched onto the discarded head.
-        let mut r = reader.lock().await;
+        let mut r = state.reader.lock().await;
         r.push(&request_frame(8, "health"));
         let frame = r
             .pop_frame()
@@ -1723,6 +2031,50 @@ mod tests {
             .expect("a complete frame is present");
         let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
         assert_eq!(parsed.id, 8);
+    }
+
+    /// A suspend/resume is not always visible as a power transition, so
+    /// the run loop watches two independent triggers. The 2026-08-17
+    /// report was a resume that moved no adapter property at all and
+    /// still left the device off air.
+    #[test]
+    fn resume_and_power_on_both_re_arm_the_air() {
+        assert_eq!(
+            rearm_reason_for_service_event(&EventPayload::SystemResumed),
+            Some("the system resumed from sleep"),
+        );
+        assert_eq!(
+            rearm_reason_for_adapter_event(&AdapterEvent::PropertyChanged(
+                AdapterProperty::Powered(true)
+            )),
+            Some("the Bluetooth controller powered back on"),
+        );
+    }
+
+    /// Everything else must leave the registrations alone: re-arming
+    /// drops the GATT application, which disconnects whoever is on it.
+    #[test]
+    fn ordinary_events_do_not_re_arm_the_air() {
+        assert_eq!(
+            rearm_reason_for_service_event(&EventPayload::SystemSuspending),
+            None,
+        );
+        assert_eq!(
+            rearm_reason_for_service_event(&EventPayload::PolicyReloaded { entry_count: 3 }),
+            None,
+        );
+        assert_eq!(
+            rearm_reason_for_adapter_event(&AdapterEvent::PropertyChanged(
+                AdapterProperty::Powered(false)
+            )),
+            None,
+        );
+        assert_eq!(
+            rearm_reason_for_adapter_event(&AdapterEvent::DeviceAdded(
+                "AA:BB:CC:DD:EE:FF".parse().expect("valid address")
+            )),
+            None,
+        );
     }
 
     /// Snapshots coalesce; incremental facts don't.
@@ -1766,8 +2118,7 @@ mod tests {
         // (the file remove is a no-op) and returns the previous record.
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
         let body = serde_json::to_vec(&req(5, "factory_reset", serde_json::Value::Null)).unwrap();
@@ -1777,8 +2128,7 @@ mod tests {
             &claim,
             &svc,
             &unbond_tx,
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
@@ -1787,7 +2137,7 @@ mod tests {
         assert_eq!(addr.to_string(), "AA:BB:CC:DD:EE:FF");
 
         // The reset still returns a success response to the peer.
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 5);
         assert!(responses[0].error.is_none());
@@ -1800,8 +2150,7 @@ mod tests {
         let store = AdminStore::new(PathBuf::from("/nonexistent/shepherd-ble-test/admin.toml"));
         let claim: Arc<ClaimMachine> = Arc::new(ClaimMachine::new(store, ClaimState::Unclaimed));
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
         let body = serde_json::to_vec(&req(1, "factory_reset", serde_json::Value::Null)).unwrap();
@@ -1811,8 +2160,7 @@ mod tests {
             &claim,
             &svc,
             &unbond_tx,
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
@@ -1820,7 +2168,7 @@ mod tests {
             unbond_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert!(responses[0].error.is_none());
     }

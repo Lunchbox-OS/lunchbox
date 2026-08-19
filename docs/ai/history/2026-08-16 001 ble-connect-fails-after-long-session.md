@@ -16,6 +16,37 @@ Reported against `main` at e79d34a (0.3.5), i.e. after
 <2026-07-18 003 companion-ble-connection-audit-and-fixes.md> and the
 <2026-08-10 002 ble-management-stress-test.md> follow-ups.
 
+## Where this ended up (read this first)
+
+The note below is chronological, and several of its middle sections
+describe things later ones undo. The state it settled in:
+
+- **The device pins the paired phone to the BR/EDR bearer**
+  (`Device1.PreferredBearer = "bredr"`), which stops BlueZ arming the
+  kernel to auto-connect it over LE. That was the whole bug: a link the
+  device originates makes the device *central*, and only a central can
+  start encryption, so the phone could never encrypt and every read
+  failed on a link that never dropped. Pinned per peer, at startup and on
+  each connect.
+- **The property is experimental upstream**, so a system install ships
+  `dist/systemd/10-shepherd-bluetooth-experimental.conf` to run
+  `bluetoothd -E`. Without it shepherd still runs: it logs how to enable
+  the property and falls back to dropping unusable links.
+- **The service goes back on air after a controller power cycle *or* a
+  resume** — two independent triggers, because a suspend does not always
+  move `Adapter1.Powered`.
+- **The first-RPC watchdog reports; it does not evict** — except as a
+  gated fallback where the bearer could not be pinned. It once hung up on
+  a Numeric Comparison window and made pairing impossible.
+- **The pairing agent retries and the server survives without one**,
+  rather than taking the transport down over a transient D-Bus timeout.
+- **The outboxes are wiped when a peer connects**, not shipped to it. The
+  companion discards that drain anyway, and carrying it cost seconds on
+  every reconnect.
+
+Companion-side (merged earlier, PR #130): the connect loop keeps retrying
+after it gives up, and a reconnect no longer blanks the cached state.
+
 ## What the message actually means
 
 `"Can't reach this device securely"` is `LinkStatus.RepairSuggested`
@@ -364,6 +395,528 @@ flowing 3 s after that (`service_state`, `list_groups`, `get_volume`,
 `encrypt_authenticated` characteristics, so a power cycle does *not*
 break link encryption here — which is another reason the 16:37 failure
 above is something else.
+
+## 2026-08-17: still failing after suspend — a *third* failure mode
+
+With all of the above deployed to both the box and the phone, a
+suspend/resume still killed it — but not the same way. The device-side
+journal:
+
+```
+19:42:33  Power key pressed short. / Suspending...
+19:43:30  System returned from sleep operation 'suspend'
+19:43:30  bluetoothd: Controller resume with wake event 0x0
+19:43:30  shepherd_ble::server: BLE peer disconnected; clearing transport session state
+          … and then nothing at all, for six minutes
+```
+
+No `Powered` transition, so **the power-cycle re-arm never fired**. No
+peer connection either, and `btmon -i hci0` over the failure window
+captured nothing but its own header — zero HCI traffic.
+
+The phone says why: every attempt ends `status=147` (connection timeout),
+27 `on_create_connection_timeout` entries, **zero**
+`GATT_INSUFFICIENT_AUTHENTICATION`, and the box's address in **zero**
+scan results from any app. So this is "off air", not the encryption
+deadlock — the same shape as the 16:04 report, except BLE was enabled and
+the daemon believed it was advertising the whole time.
+
+Two of the fixes did behave as designed: the companion retried steadily
+for five minutes instead of giving up once (`19:45:08, 19:45:34, 19:45:45,
+19:45:57, 19:46:12, 19:48:06, 19:49:43, 19:49:54`), and the first-RPC
+watchdog correctly stayed quiet — there was no link to evict.
+
+### The gap, and the second trigger
+
+`go_on_air` was re-armed only by `AdapterProperty::Powered(true)`. That
+covers a controller power cycle and misses a suspend that takes the
+advertisement off air without moving any property we can see — which is
+exactly what this box does.
+
+The run loop now also re-arms on the daemon's own
+`EventPayload::SystemResumed`, which arrives through
+`ManagementService::subscribe_events` — the stream the events forwarder
+already consumes, so no new plumbing crosses the crate boundary. Both
+triggers route through the same `go_on_air` call and log a `reason`.
+
+The decisions are split into `rearm_reason_for_adapter_event` and
+`rearm_reason_for_service_event` so they are unit-testable without an
+adapter; the tests assert both triggers fire and that ordinary events
+(including `Powered(false)` and `SystemSuspending`) do not, because
+re-arming drops the GATT application and disconnects whoever is on it.
+
+**Verified**: both trigger decisions by unit test, and the shared re-arm
+body on hardware via a controller power cycle (`Re-registering the GATT
+application and advertisement … reason="the Bluetooth controller powered
+back on"`, then the companion reconnects and RPCs flow). **Not verified**:
+the resume trigger itself on real hardware — this dev box is a KVM guest
+that cannot resume from s2idle, and logind's signal cannot be spoofed
+(zbus matches on sender). That one needs a suspend on the affected box.
+
+## 2026-08-17, later: the watchdog broke pairing — now report-only
+
+Deployed to the affected box, the first-RPC watchdog made pairing
+impossible. Three attempts, each identical:
+
+```
+20:24:42  BLE peer connected …
+20:25:07  WARN Bonded peer connected but sent no RPC; dropping the link …   (T+25.0s)
+20:25:09  BLE peer disconnected
+```
+
+and on the phone, `BOND_NONE → BOND_BONDING` at 20:24:42 followed by
+`onClientConnectionState() status=19 connected=false` —
+`GATT_CONN_TERMINATE_PEER_USER`, i.e. *we* hung up, 25 seconds into the
+window where a human is comparing six digits.
+
+The `is_paired()` gate was supposed to prevent exactly this, and didn't:
+the box still held a **stale bond** from the previous pairing, so the
+peer read as bonded while the phone was mid-bond with no keys of its own.
+The gate tests the wrong side of the relationship, and there is no
+reliable "bonding in flight" signal available before SMP reaches the
+agent.
+
+**The eviction is removed; the line stays.** Silence on a fresh link is
+not specific enough to act on — pairing, a slow drain, and the
+role-inversion deadlock are indistinguishable from the daemon's side,
+and only one of them wants a disconnect. What the log line buys is the
+thing that was actually missing: bluetoothd answers the `0x05` reads
+itself, so our callbacks never fire and the failure was invisible.
+Eviction can return when the deadlock is reproducible and something
+distinguishes it.
+
+Verified after the change: pairing from scratch completes normally
+(Numeric Comparison → `Pairing complete` → `claim` → bond at
+`keySize=16`), including with the grace forced to 3 s so the timer fires
+mid-flow. Note the timer did *not* arm during pairing on the dev box at
+all — for a peer BlueZ only learns about at connect time, the device
+watcher attaches after the `Connected` transition. On the reporter's box
+the peer was already known, so it armed. That asymmetry is worth
+remembering when reasoning about this path.
+
+Unrelated flake seen while testing, worth its own look: one session died
+at startup with `Failed to register BlueZ pairing agent (D-Bus
+NoReply)`, which takes BLE management down for the whole session with no
+retry and no advertising.
+
+## A transient agent registration failure no longer kills the transport
+
+Hit while testing the above: one session died at startup with
+
+```
+ERROR shepherdd: BLE management server error
+  error=Failed to register BlueZ pairing agent (D-Bus error
+        org.freedesktop.DBus.Error.NoReply: …)
+```
+
+bluetoothd was busy for a moment; `run` returned the error and BLE
+management was gone for the whole session — no advertising, no retry, and
+that single line as the only evidence. From the outside it is
+indistinguishable from every other "the device just isn't there" failure
+in this note, which is exactly why it cost time.
+
+Registration now retries (500 ms, 2 s) and, if it still fails, the server
+**carries on without an agent** and says so at ERROR. The trade is
+deliberate: losing the agent costs pairing — the Numeric Comparison
+overlay on the TV — while losing the server costs everything, including a
+bonded admin phone that only wanted to reconnect to an already-claimed
+device. The re-arm path retries registration whenever it puts the service
+back on air, so a box that starts degraded recovers on the next resume or
+power cycle rather than needing a session restart.
+
+Verified both ways on hardware with a temporary fault injection: normal
+boot registers first try and pairs; with registration forced to fail, the
+log shows two retries and the ERROR, advertising still starts, and an
+already-paired companion connects and runs a full session
+(`service_state`, `list_groups`, `get_volume`, `get_brightness`).
+
+## 2026-08-17, 21:07: the resume fix works — and the deadlock is now pinned
+
+First field confirmation of the resume trigger, from the reporter's box
+after a `systemctl restart bluetooth` and a fresh pair:
+
+```
+21:07:24  Numeric Comparison pairing requested …
+21:07:28  Admin claim recorded  device=SM-S911U1
+21:07:35  Power key pressed short → suspend
+21:08:19  BLE peer disconnected …
+21:08:19  Re-registering the GATT application and advertisement
+            adapter=hci0 reason="the system resumed from sleep"
+21:08:19  BLE management advertising started …
+21:08:27  BLE peer connected …
+21:08:30  BLE RPC received … id=6 … through id=9, all ok=true
+```
+
+That is the failure from earlier in the day — box silently off air after a
+resume, no `Powered` transition to react to — now recovering by itself.
+The companion reconnected without being touched.
+
+### Then closing and reopening the app brings the deadlock straight back
+
+```
+21:08:34  BLE peer disconnected …          (app closed)
+21:08:36  BLE peer connected …             (2s later)
+21:09:01  Peer has held a link this long without sending an RPC …
+```
+
+and on the phone, 316 `GATT_INSUFFICIENT_AUTHENTICATION` — the
+role-inversion deadlock again, and the report-only line naming it within
+25 s instead of leaving the journal silent.
+
+**The two-second gap is the tell.** A human reopening an app does not
+produce a reconnect two seconds after the close. Something on the box
+dials the phone back the moment the link frees up, takes the central
+role, and the reopened companion inherits a link it can never encrypt.
+That is the auto-dial this note has suspected since the btmon capture of
+16:37, now visible as a repeatable trigger: *close the app and it happens
+every time.*
+
+### The Wi-Fi correlation
+
+The reporter had a `mosh` session to the box throughout. It died shortly
+after the failed reconnects and recovered about a minute after the
+companion was closed — i.e. when the stuck LE link finally dropped. The
+box's `hci0` is a MediaTek combo part sharing its front end with
+`wlp1s0`, so a wedged LE link plausibly starves Wi-Fi. Worth keeping in
+mind: on this hardware the stuck link is not just a companion problem, it
+takes the network with it.
+
+### What to try next on the box
+
+Stop bluetoothd dialing the phone at all. The policy plugin reconnects
+audio profiles after a link loss, and its defaults include A2DP/HFP,
+which is precisely what this phone looks like to the box after
+cross-transport key derivation. In `/etc/bluetooth/main.conf`:
+
+```
+[Policy]
+ReconnectAttempts=0
+```
+
+then `systemctl restart bluetooth`. If close/reopen stops producing a
+two-second reconnect, that is the culprit, and the structural fix is a
+dedicated LE-only adapter (`btmgmt bredr off` on a dongle) so no
+cross-transport bond exists to reconnect.
+
+## 2026-08-17, 21:25: one dialer down, another at resume
+
+With `[Policy] ReconnectAttempts=0` set and bluetoothd restarted, the
+reporter paired and used the companion normally, and **close/reopen no
+longer produces the deadlock** — that dialer was the policy plugin
+reconnecting audio profiles after link loss, exactly as suspected. One
+observation from the good run: the `mosh` session dropped during the
+first few seconds of the LE connection, which is the coexistence cost of
+this combo radio showing up even when everything works.
+
+A suspend/resume still fails, and the capture is unambiguous about what
+kind of failure it is:
+
+```
+21:25:03  Power key pressed short → suspend
+21:25:20  System returned from sleep; Controller resume with wake event 0x0
+21:25:20  Re-registering … reason="the system resumed from sleep"   ← our fix, again
+21:25:20  BLE management advertising started
+21:25:29  BLE peer connected …
+21:25:54  Peer has held a link this long without sending an RPC …
+```
+
+`btmon` over the following 82 s, with the link already up:
+
+| Measure | Count |
+| --- | --- |
+| `ATT: Error Response` (all `Insufficient Authentication`) | 90 |
+| `Read By Group Type` / `Find Information` (discovery retries) | 30 / 30 |
+| `LE Connection Update` issued **by the box** | 20 |
+| L2CAP Connection Parameter Update **Request** received from the phone | 3 |
+| SMP frames | 0 |
+| Disconnect Complete | **0** |
+
+The parameter-update direction says it again: the phone asks, the box
+decides — **the box is central**, so the phone cannot start encryption
+and every read of an `encrypt_authenticated` characteristic is refused.
+`ReconnectAttempts=0` did not prevent this, so whatever dials at resume
+is *not* the policy plugin.
+
+### Why the companion can never escape this on its own
+
+Zero disconnects in 82 seconds, while the app retried discovery thirty
+times. The ACL belongs to the box; Android's `disconnect()` tears down
+its own GATT client but does not drop a link the peer originated, so
+every retry — including the once-a-minute one this branch added — lands
+back on the same poisoned link. Closing and reopening the app does not
+help either. Only the *device* dropping the link (or a Bluetooth
+restart) can break it, which is precisely the eviction removed in
+2785ab1 for breaking pairing.
+
+If eviction returns, the gates that would have been safe across every
+trace in this note are: the device is **claimed**, a session with real
+RPCs has already happened **on this boot** (a first pairing has none),
+and no pairing-agent activity since the link came up. The clean
+discriminator would be the link role, but BlueZ exposes it neither on
+`Device1` nor through bluer.
+
+### The one capture still missing
+
+Every artifact so far starts *after* the resume, so the create-connection
+that establishes the inverted link has never been recorded. Started
+before the suspend, this would name the dialer:
+
+```sh
+sudo btmon -i hci0 -w /tmp/ble-resume.btsnoop &
+sudo dbus-monitor --system "interface='org.bluez.Device1'" > /tmp/dbus-resume.log &
+# then suspend, resume, and stop both
+```
+
+`LE Extended Create Connection` from the host settles it; a
+`member=Connect` in the D-Bus log names the process that asked for it.
+Candidates that survive `ReconnectAttempts=0`: a kernel LE background
+connect re-armed on resume, gnome-bluetooth, or PipeWire/WirePlumber
+reconnecting an audio device.
+
+## 2026-08-17, 21:38: caught in the act — bluetoothd dials, unprompted
+
+Monitors started before the sequence this time (btmon + dbus-monitor +
+journal), covering: login, connect, sleep, wake, reconnect, close the
+companion, reopen. The wake reconnected fine; the close/reopen failed.
+
+Three connections in the capture, and only the third fails:
+
+| # | Role | Peer | Outcome |
+| --- | --- | --- | --- |
+| 1 | `Peripheral` | RPA `41:25:C5:4A:B5:A6` | phone dialled — works |
+| 2 | `Peripheral` | RPA `6F:AC:86:4E:14:28` | phone dialled after resume — works |
+| 3 | **`Central`** | **`A4:75:B9:AA:54:05`** (identity) | **box dialled — 54 × `Insufficient Authentication`** |
+
+The third one, in full:
+
+```
+147.97  Disconnect Complete — Reason: Remote User Terminated Connection   (companion closed)
+150.18  < HCI Command: LE Extended Create Connection
+             Filter policy: Accept list is not used (0x00)
+             Peer address type: Public — A4:75:B9:AA:54:05
+150.50  > LE Enhanced Connection Complete — Role: Central (0x00)
+        @ MGMT Event: Device Connected — Flags: Connection Locally Initiated
+```
+
+**2.2 seconds after the phone hangs up, the box dials it back**, direct
+(no accept list), to the identity address, and takes the central role.
+The reopened companion attaches to that link and can never encrypt on it.
+
+And the D-Bus monitor across the whole window contains **no
+`Device1.Connect` call at all** — only two `Disconnected` signals
+(`org.bluez.Reason.Suspend`, then `org.bluez.Reason.Remote`). No
+userspace client asked for this. It is bluetoothd's own logic, and it
+survives `[Policy] ReconnectAttempts=0`, so it is not the policy
+plugin's link-loss reconnect — or that setting does not govern this
+path.
+
+Note the failure is not tied to one trigger. In the previous run
+`ReconnectAttempts=0` fixed close/reopen and the resume failed; here the
+resume worked and close/reopen failed. The invariant is simpler than
+either: **whoever dials first after a link drops decides the roles**, and
+if the box wins, that link is poisoned.
+
+### Identifying the plugin
+
+`bluetoothd -d` names the caller. Via `systemctl edit bluetooth`, adding
+`--noplugin=` to `ExecStart` narrows it — the GATT-client-side plugins
+that keep bonded LE devices connected are the candidates (`battery`,
+`hog`, `scanparam`, `deviceinfo`, `gap`), with `policy` still worth
+excluding by test rather than by assumption.
+
+### Why eviction is worth revisiting
+
+`Device1.Disconnect()` does not merely drop the link: in BlueZ it also
+marks the device as disconnected-by-user, which suppresses the
+auto-connect that created it. So the eviction removed in 2785ab1 would
+both break the deadlock and stop the box re-dialing. The gates that
+would have been safe across every trace in this note: device **claimed**,
+a session with real RPCs already seen **on this boot**, and no
+pairing-agent activity since the link came up — a first pairing has no
+prior session, so it can never be caught.
+
+## The fix: pin the admin phone to the BR/EDR bearer
+
+Reading BlueZ 5.85's source settles both the mechanism and the remedy.
+
+**Why the box dials.** `probe_service()` (`src/device.c:5551`):
+
+```c
+/* Only set auto connect if profile has set the flag and can really
+ * accept connections. */
+if (profile->auto_connect && profile->accept) {
+        ...
+        device_set_auto_connect(device, TRUE);
+}
+```
+
+Profiles carrying `auto_connect = true` include `a2dp` (twice), `bap`
+(LE Audio), `hog`, `input`, `midi`, `asha` — a phone matches several. That
+call reaches `adapter_auto_connect_add()`, which sends
+`MGMT_OP_ADD_DEVICE` with **`cp.action = 0x02`**: from then on *the
+kernel* connects that address whenever it advertises. No D-Bus caller, no
+policy plugin, nothing userspace to disable — which is exactly what the
+captures showed.
+
+For completeness, `plugins/policy.c:816` only reconnects on
+`DISCONN_TIMEOUT` or `LOCAL_HOST_SUSPEND`, and its suspend path further
+requires `A2DP_SINK_UUID` on the device — a phone is a *source*. The
+policy plugin was never involved, which is why `ReconnectAttempts=0`
+changed nothing.
+
+**Why `PreferredBearer=bredr` fixes it** (`src/device.c:3608`):
+
+```c
+case PREFER_BREDR:
+        /* Remove device from auto-connect list so the kernel does not
+         * attempt to auto-connect to it in case it starts advertising. */
+        device_set_auto_connect(device, FALSE);
+```
+
+BlueZ's own comment describes our bug. The value is persisted by
+`store_device_info()`, reloaded unconditionally at `device.c:4303`, and
+re-checked inside `device_set_auto_connect()` ("Inhibit auto connect if
+BR/EDR bearer is preferred"), so a later service probe cannot re-arm the
+kernel. BR/EDR auto-connect is untouched — headphones and controllers on
+the same radio keep working, which is why this beats `--noplugin`.
+
+The property is `G_DBUS_PROPERTY_FLAG_EXPERIMENTAL`, so it is only
+exposed when bluetoothd runs with `Experimental`. Verified on the dev box
+(bluez 5.85-4ubuntu0.1): hidden by default, present and writable with
+`Experimental = true`, and the value persists to
+`/var/lib/bluetooth/<adapter>/<peer>/info`. Both the load and the inhibit
+are ungated, so the setting keeps working after experimental is turned
+back off — and it can equally be written straight into the bond file with
+bluetoothd stopped.
+
+### What shepherd does now
+
+`pin_peer_to_bredr` sets it on every bonded peer, at server startup (for
+peers already known — the ACL outlives a daemon restart, so a
+`Connected(true)` transition never arrives for them) and on each connect
+(for peers that appear later, including a freshly paired phone). It is
+idempotent, and it is retried on every connect because the property
+becomes available the moment bluetoothd is restarted with `Experimental`
+— but the paragraph explaining how to enable it is logged only once per
+boot.
+
+Where the pin cannot be applied, the eviction returns as a **fallback**,
+behind three gates chosen so it can never repeat the 2026-08-17 pairing
+regression: only when the bearer is unpinned, only after some peer has
+actually exchanged RPCs on this boot (a first pairing never has), and
+only after `EVICT_GRACE` = 90 s — far past the 30 s the OS allows a human
+to compare six digits. The 25 s report-only line is unchanged.
+
+Verified on hardware both ways. Stock bluetoothd: one guidance warning at
+startup, session connects and runs, no eviction. With `Experimental =
+true`: `Pinned peer to the BR/EDR bearer …`, no warnings, and
+`PreferredBearer=bredr` in the bond file afterwards. The box was restored
+to its original configuration after the test.
+
+## 2026-08-18: three defects the first good logs exposed
+
+The run worked end to end — suspend/wake on both sides, close/reopen,
+backgrounding — which is exactly why the logs were worth reading closely.
+
+- **The bearer pin was tracked by one flag**, so the first peer to
+  succeed suppressed every attempt after it. The box enumerated a stale
+  object (`E7:96:…`) before the phone, and only because that one *failed*
+  did the phone get pinned. Reverse the order and the phone is skipped,
+  the kernel keeps dialling it, and the journal says "Pinned peer" about
+  a different device. Now keyed by address.
+- **Every event was handled twice** — 22 connect lines for 11 connects.
+  Tagging the watcher task showed a single instance logging each
+  transition twice, so BlueZ (or bluer's subscription) double-delivers;
+  it was never two watchers. The watcher now acts on transitions. Watcher
+  `JoinHandle`s are also tracked and aborted on `DeviceRemoved`, which
+  does not fix the duplication but closes a real leak.
+- **The startup sweep cried wolf**, warning about stale objects that
+  never connect, immediately before the admin phone pinned fine. Sweep
+  failures are `debug`; the warning is reserved for a peer that has
+  actually connected.
+
+### Reconnect latency was the outbox, not the radio
+
+From the Minecraft stress test: an empty outbox reconnected in 1.4–1.8 s,
+~4 KiB of queued events took 3.1–3.3 s. Reads are capped at 512 bytes and
+cost a round trip each, and the companion drains fully before its first
+RPC — while *discarding* everything it drains and then asking for a fresh
+snapshot. Clearing the outboxes on connect (alignment-checked, so a drain
+in flight is never cut mid-frame) put backlogged reconnects on the
+no-backlog floor: 5.35 s → 2.04 s on an identical 13-frame backlog,
+against a 2.06 s control.
+
+## 2026-08-19: the pin verified on the wire, on the dev box
+
+Everything above about `PreferredBearer` was reasoned from BlueZ's source
+and from captures of the *failure*. This is the first end-to-end
+confirmation of the fix itself, on leibniz (the dev VM) with the Realtek
+dongle `8C:68:8B:41:02:DC` and a bonded Pixel 10a.
+
+The drop-in was installed through the installer's own function rather
+than by hand, which also exercised the packaging path:
+
+```sh
+sudo bash -c 'source scripts/lib/install.sh && install_bluetooth_dropin'
+```
+
+`_bluetoothd_exec_path` read `/usr/libexec/bluetooth/bluetoothd` back out
+of the installed unit (not the hardcoded fallback), the rendered drop-in
+reset `ExecStart=` and re-set it with `-E`, systemd reloaded, and
+bluetoothd came back as `/usr/libexec/bluetooth/bluetoothd -E`.
+
+What changed, in order:
+
+1. **The property appeared.** Before: no `PreferredBearer` on
+   `org.bluez.Device1` at all — the exact `No such property` error the
+   daemon had been warning about. After: `s "last-used"`, `writable`.
+2. **shepherd set it, on the startup sweep.** `Pinned peer to the BR/EDR
+   bearer` for `B8:F4:A4:E5:20:F1` — from the `disconnect_monitor`
+   enumeration, not the on-connect path, because the phone's ACL was
+   already up when the daemon started. That is the case the sweep was
+   added for.
+3. **It persisted.** `busctl` reads `s "bredr"`, and
+   `/var/lib/bluetooth/8C:68:8B:41:02:DC/B8:F4:A4:E5:20:F1/info` gained
+   `PreferredBearer=bredr` on disk. The claim that it survives a restart
+   is not a guess — BlueZ wrote it into the bond record.
+
+### The wire, after a disconnect
+
+The mechanism is only really proven by what the box *doesn't* do. With
+the pin set, `btmon -i hci2` across the 30 s following a companion
+disconnect recorded:
+
+```
+> HCI Event: Disconnect Complete (0x05)
+@ MGMT Event: Device Disconnected (0x000c)
+< HCI Command: LE Set Extended Advertising Enable (0x08|0x0039)
+```
+
+That is the entire capture. One command, and it puts the box back to
+*advertising* — peripheral, waiting to be connected to. No
+`LE Create Connection`, no `LE Extended Create Connection`, and no
+`Add Device`. The kernel auto-connect list is never armed, so there is
+nothing to dial the phone when it next advertises, so the box cannot
+take the central role, so the phone keeps the one role that can start
+encryption. That is the whole failure chain, cut at the first link.
+
+Note what this run does *not* re-prove: the unpinned box dialling. That
+evidence is the 2026-08-17 21:38 capture above; this run only confirms
+the fix's side of it.
+
+### Everything else still works
+
+Four connect/disconnect cycles, an app force-stop/relaunch, and a
+controller power cycle (`hciconfig hci2 down/up`) — the re-arm fired with
+`reason="the Bluetooth controller powered back on"`, re-advertised, and
+the phone was exchanging RPCs again ~8 s later. Reconnect to first RPC
+was 3.1–3.2 s with the pin, against 5.1 s in the same test before it.
+
+**Zero warnings and zero errors from `shepherd_ble` for the whole
+session**, where every previous session on this box opened with the
+`Could not set PreferredBearer=bredr` paragraph. That warning is now the
+signal it was meant to be: if it shows up again, the drop-in is missing
+or bluetoothd lost `-E`.
 
 ## What to capture on the box when it happens again
 

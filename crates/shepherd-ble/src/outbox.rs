@@ -232,6 +232,36 @@ impl Outbox {
         s.drained_reads = 0;
     }
 
+    /// Discard the queue, but only while the client is not partway
+    /// through a frame. Returns what was dropped, or `None` if the head
+    /// was mid-delivery and nothing was touched.
+    ///
+    /// This is what makes a *connect-time* wipe safe. Everything queued
+    /// while nobody was connected is stale by definition — the companion
+    /// discards its whole post-connect drain and then asks for a fresh
+    /// `service_state` anyway — so shipping it costs a GATT round trip
+    /// per 512 bytes and buys nothing. Measured on the reporter's box:
+    /// ~4 KiB of queued snapshots turned a 1.5 s reconnect into 3.3 s.
+    ///
+    /// The alignment check is the safety. A peer that has already begun
+    /// reading is holding a partial frame, and dropping it underneath
+    /// would jump its byte stream forward mid-frame and desync the
+    /// length-prefix reassembler — the same reason [`Outbox::push_inner`]
+    /// spares a mid-delivery head. In that case we leave the queue alone
+    /// and let the drain do its job.
+    pub async fn clear_if_aligned(&self) -> Option<(usize, usize)> {
+        let mut s = self.state.lock().await;
+        if s.head_offset > 0 {
+            return None;
+        }
+        let dropped = (s.queue.len(), s.total_bytes);
+        s.queue.clear();
+        s.total_bytes = 0;
+        s.drained_bytes = 0;
+        s.drained_reads = 0;
+        Some(dropped)
+    }
+
     #[cfg(test)]
     pub async fn pending_bytes(&self) -> usize {
         self.state.lock().await.total_bytes
@@ -343,6 +373,30 @@ mod tests {
         assert_eq!(ob.read(10).await, vec![3, 4]);
         assert_eq!(ob.read(10).await, vec![5, 6]);
         assert!(ob.read(10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_if_aligned_drops_a_stale_queue() {
+        let ob = Outbox::new("test", 1024);
+        ob.push(vec![1, 2, 3]).await;
+        ob.push(vec![4, 5]).await;
+
+        assert_eq!(ob.clear_if_aligned().await, Some((2, 5)));
+        assert_eq!(ob.pending_bytes().await, 0);
+        assert!(ob.read(10).await.is_empty());
+    }
+
+    /// The safety property: a client partway through a frame must not
+    /// have the ground moved under it, or its reassembler desyncs.
+    #[tokio::test]
+    async fn clear_if_aligned_spares_a_mid_delivery_head() {
+        let ob = Outbox::new("test", 1024);
+        ob.push(vec![1, 2, 3, 4]).await;
+        assert_eq!(ob.read(2).await, vec![1, 2]);
+
+        assert_eq!(ob.clear_if_aligned().await, None);
+        // The rest of the frame is still there, in order.
+        assert_eq!(ob.read(10).await, vec![3, 4]);
     }
 
     #[tokio::test]

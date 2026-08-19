@@ -13,6 +13,10 @@ shepherd-api = { workspace = true }
 shepherd-management = { workspace = true }
 
 bluer = { version = "0.17", features = ["bluetoothd"] }
+# Already in the tree via bluer. Used directly for the one BlueZ property
+# bluer does not wrap — `Device1.PreferredBearer`, which is flagged
+# experimental upstream and so absent from bluer's generated API.
+dbus = "0.9"
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
