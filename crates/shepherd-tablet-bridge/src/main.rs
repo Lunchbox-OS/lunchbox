@@ -48,12 +48,28 @@ struct Args {
 }
 
 /// Touch state update emitted by reader threads.
+///
+/// Coordinates are already normalized against *the emitting device's* own
+/// axis range (see [`DeviceRange::normalize`]), so grabbing more than one
+/// device can't make one device's range govern another's coordinates — the
+/// same defect that broke the touch bridge on a handheld whose clickpad was
+/// grabbed alongside its panel.
 #[derive(Debug, Clone, Copy)]
 enum TouchUpdate {
-    /// Contact begins at absolute device coordinates.
-    Down { x: i32, y: i32 },
+    /// Contact begins at normalized coordinates.
+    Down {
+        x: u32,
+        y: u32,
+        x_extent: u32,
+        y_extent: u32,
+    },
     /// Contact moved while still down.
-    Move { x: i32, y: i32 },
+    Move {
+        x: u32,
+        y: u32,
+        x_extent: u32,
+        y_extent: u32,
+    },
     /// Contact lifted.
     Up,
 }
@@ -170,11 +186,17 @@ fn spawn_device_reader(
     let path_buf = path.to_path_buf();
     let handle = thread::Builder::new()
         .name(format!("tablet-{}", path_buf.display()))
-        .spawn(move || device_loop(dev, path_buf, tx, shutdown))?;
+        .spawn(move || device_loop(dev, path_buf, range, tx, shutdown))?;
     Ok(handle)
 }
 
-fn device_loop(mut dev: Device, path: PathBuf, tx: Sender<TouchUpdate>, shutdown: Arc<AtomicBool>) {
+fn device_loop(
+    mut dev: Device,
+    path: PathBuf,
+    range: DeviceRange,
+    tx: Sender<TouchUpdate>,
+    shutdown: Arc<AtomicBool>,
+) {
     let mut pending_x = 0;
     let mut pending_y = 0;
     let mut last_x = 0;
@@ -216,14 +238,20 @@ fn device_loop(mut dev: Device, path: PathBuf, tx: Sender<TouchUpdate>, shutdown
                     let moved = pending_x != last_x || pending_y != last_y;
 
                     if target_contact && !contact {
+                        let (x, y, x_extent, y_extent) = range.normalize(pending_x, pending_y);
                         let _ = tx.send(TouchUpdate::Down {
-                            x: pending_x,
-                            y: pending_y,
+                            x,
+                            y,
+                            x_extent,
+                            y_extent,
                         });
                     } else if target_contact && contact && moved {
+                        let (x, y, x_extent, y_extent) = range.normalize(pending_x, pending_y);
                         let _ = tx.send(TouchUpdate::Move {
-                            x: pending_x,
-                            y: pending_y,
+                            x,
+                            y,
+                            x_extent,
+                            y_extent,
                         });
                     } else if !target_contact && contact {
                         let _ = tx.send(TouchUpdate::Up);
@@ -299,19 +327,12 @@ fn main() -> Result<()> {
         ));
     }
 
-    // Per-device range used for normalizing touch events. We pick the range
-    // from the first device that successfully opens; the kernel grab ensures
-    // the focused device's events are the only ones we handle.
-    let mut device_range: Option<DeviceRange> = None;
+    // Each reader normalizes against its own device's axis range before
+    // sending, so grabbing more than one device can't make one device's range
+    // govern another's coordinates.
     let (tx, rx) = mpsc::channel::<TouchUpdate>();
     let mut readers: Vec<thread::JoinHandle<()>> = Vec::new();
     for path in &device_paths {
-        if device_range.is_none()
-            && let Ok(dev) = Device::open(path)
-            && let Ok(range) = DeviceRange::from_device(&dev)
-        {
-            device_range = Some(range);
-        }
         match spawn_device_reader(path, tx.clone(), shutdown.clone()) {
             Ok(handle) => readers.push(handle),
             Err(e) => warn!(path = %path.display(), error = %e, "failed to start reader"),
@@ -323,13 +344,11 @@ fn main() -> Result<()> {
         return Err(anyhow!("failed to grab any tablet device"));
     }
 
-    let device_range = device_range.ok_or_else(|| anyhow!("no usable device range"))?;
-
     let mut sink = UinputSink::new_touchscreen().context("failed to create uinput touchscreen")?;
 
     info!("Tablet-to-touch bridge ready");
 
-    run_main_loop(rx, &mut sink, device_range, &shutdown)?;
+    run_main_loop(rx, &mut sink, &shutdown)?;
 
     info!("Shutting down tablet-to-touch bridge");
     let _ = sink.flush();
@@ -339,13 +358,12 @@ fn main() -> Result<()> {
 fn run_main_loop(
     rx: Receiver<TouchUpdate>,
     sink: &mut UinputSink,
-    range: DeviceRange,
     shutdown: &AtomicBool,
 ) -> Result<()> {
     while !shutdown.load(Ordering::SeqCst) {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(update) => {
-                emit_update(sink, range, update);
+                emit_update(sink, update);
                 sink.flush()?;
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -360,32 +378,40 @@ fn run_main_loop(
     Ok(())
 }
 
-fn emit_update(sink: &mut UinputSink, range: DeviceRange, update: TouchUpdate) {
+fn emit_update(sink: &mut UinputSink, update: TouchUpdate) {
     // uinput stamps its own event times, so the timestamp argument is unused.
     match update {
-        TouchUpdate::Down { x, y } => {
-            let (nx, ny, xe, ye) = range.normalize(x, y);
+        TouchUpdate::Down {
+            x,
+            y,
+            x_extent,
+            y_extent,
+        } => {
             sink.dispatch(
                 OutputEvent::TouchDown {
                     slot: SLOT,
-                    x: nx,
-                    y: ny,
-                    x_extent: xe,
-                    y_extent: ye,
+                    x,
+                    y,
+                    x_extent,
+                    y_extent,
                 },
                 0,
             );
             sink.frame();
         }
-        TouchUpdate::Move { x, y } => {
-            let (nx, ny, xe, ye) = range.normalize(x, y);
+        TouchUpdate::Move {
+            x,
+            y,
+            x_extent,
+            y_extent,
+        } => {
             sink.dispatch(
                 OutputEvent::TouchMotion {
                     slot: SLOT,
-                    x: nx,
-                    y: ny,
-                    x_extent: xe,
-                    y_extent: ye,
+                    x,
+                    y,
+                    x_extent,
+                    y_extent,
                 },
                 0,
             );

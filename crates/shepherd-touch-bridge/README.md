@@ -10,13 +10,19 @@ activity and exits when terminated.
 
 ## How it works
 
-1. Auto-detects every touchscreen device under `/dev/input/event*` (devices
-   with `BTN_TOUCH` and an absolute X axis).
+1. Auto-detects every touchscreen device under `/dev/input/event*`: a device
+   with `BTN_TOUCH` and absolute X/Y axes that is also *direct* — it declares
+   `INPUT_PROP_DIRECT`, or claims neither `INPUT_PROP_POINTER` nor
+   `BTN_TOOL_FINGER`. Clickpads report `BTN_TOUCH` and absolute axes too, so
+   without the property test a handheld's touchpad is grabbed alongside its
+   panel — see `docs/ai/history/2026-08-19 001 touch-bridge-grabs-the-clickpad.md`.
 2. `EVIOCGRAB`s each one so no other Wayland client receives raw touch
    events while the bridge is running.
-3. Connects to the Wayland display, binds `zwlr_virtual_pointer_manager_v1`,
-   and creates a virtual pointer.
-4. Translates single-touch events:
+3. Creates a `/dev/uinput` virtual absolute pointer, which every compositor
+   consumes through libinput (the wlroots-only virtual-pointer protocol it
+   used before is gone; issue #58).
+4. Translates single-touch events, normalizing each device's coordinates
+   against **that device's own** axis range:
    - finger down at *(x, y)* → `motion_absolute(x, y)` + `button(BTN_LEFT, pressed)`
    - finger move → `motion_absolute(x', y')`
    - finger up → `button(BTN_LEFT, released)`
