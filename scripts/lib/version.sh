@@ -58,6 +58,20 @@ _version_cargo_bpf() {
         | sed -E 's/^version = "(.*)"/\1/'
 }
 
+# Read the shepherd-firewall-bpf pin from that crate's *own* Cargo.lock.
+#
+# The bpf crate is excluded from the workspace (it builds for a different
+# target), so it carries a separate lockfile that `cargo update --workspace`
+# at the repo root never reaches. Left unchecked it drifts one release
+# behind and then resurfaces as an unexplained modified file the next time
+# anyone builds that crate.
+_version_cargo_bpf_lock() {
+    awk '/^name = "shepherd-firewall-bpf"$/ { found = 1; next }
+         found && /^version = "/ {
+             sub(/^version = "/, ""); sub(/"$/, ""); print; exit
+         }' "$(get_repo_root)/crates/shepherd-firewall-bpf/Cargo.lock"
+}
+
 # Read the top-level "version" field from a package.json / package-lock.json.
 _version_npm() {
     node -p "require('$1').version"
@@ -109,11 +123,16 @@ version_set() {
     # a normal build fixes the lock too, so a failure here is not fatal.
     if command_exists cargo; then
         (cd "$root" && cargo update --workspace --offline >/dev/null 2>&1) || true
+        # And again for the excluded bpf crate, which the line above cannot
+        # see. See _version_cargo_bpf_lock for why this is worth its own call.
+        (cd "$root/crates/shepherd-firewall-bpf" \
+            && cargo update --workspace --offline >/dev/null 2>&1) || true
     fi
 
     success "Bumped version: $old -> $new"
-    info "Review the changes and commit VERSION, Cargo.toml, Cargo.lock, and"
-    info "shepherd-webui/package*.json together."
+    info "Review the changes and commit them together: VERSION, Cargo.toml,"
+    info "Cargo.lock, crates/shepherd-firewall-bpf/Cargo.{toml,lock}, and"
+    info "shepherd-webui/package*.json."
 }
 
 # `shepherd version check` — fail if any synced literal has drifted from the
@@ -133,6 +152,10 @@ version_check() {
 
     actual="$(_version_cargo_bpf)"
     [[ "$actual" == "$canonical" ]] || mismatches+=("shepherd-firewall-bpf: $actual")
+
+    actual="$(_version_cargo_bpf_lock)"
+    [[ "$actual" == "$canonical" ]] \
+        || mismatches+=("shepherd-firewall-bpf Cargo.lock: $actual")
 
     if command_exists node; then
         actual="$(_version_npm "$root/shepherd-webui/package.json")"
