@@ -846,6 +846,78 @@ in flight is never cut mid-frame) put backlogged reconnects on the
 no-backlog floor: 5.35 s → 2.04 s on an identical 13-frame backlog,
 against a 2.06 s control.
 
+## 2026-08-19: the pin verified on the wire, on the dev box
+
+Everything above about `PreferredBearer` was reasoned from BlueZ's source
+and from captures of the *failure*. This is the first end-to-end
+confirmation of the fix itself, on leibniz (the dev VM) with the Realtek
+dongle `8C:68:8B:41:02:DC` and a bonded Pixel 10a.
+
+The drop-in was installed through the installer's own function rather
+than by hand, which also exercised the packaging path:
+
+```sh
+sudo bash -c 'source scripts/lib/install.sh && install_bluetooth_dropin'
+```
+
+`_bluetoothd_exec_path` read `/usr/libexec/bluetooth/bluetoothd` back out
+of the installed unit (not the hardcoded fallback), the rendered drop-in
+reset `ExecStart=` and re-set it with `-E`, systemd reloaded, and
+bluetoothd came back as `/usr/libexec/bluetooth/bluetoothd -E`.
+
+What changed, in order:
+
+1. **The property appeared.** Before: no `PreferredBearer` on
+   `org.bluez.Device1` at all — the exact `No such property` error the
+   daemon had been warning about. After: `s "last-used"`, `writable`.
+2. **shepherd set it, on the startup sweep.** `Pinned peer to the BR/EDR
+   bearer` for `B8:F4:A4:E5:20:F1` — from the `disconnect_monitor`
+   enumeration, not the on-connect path, because the phone's ACL was
+   already up when the daemon started. That is the case the sweep was
+   added for.
+3. **It persisted.** `busctl` reads `s "bredr"`, and
+   `/var/lib/bluetooth/8C:68:8B:41:02:DC/B8:F4:A4:E5:20:F1/info` gained
+   `PreferredBearer=bredr` on disk. The claim that it survives a restart
+   is not a guess — BlueZ wrote it into the bond record.
+
+### The wire, after a disconnect
+
+The mechanism is only really proven by what the box *doesn't* do. With
+the pin set, `btmon -i hci2` across the 30 s following a companion
+disconnect recorded:
+
+```
+> HCI Event: Disconnect Complete (0x05)
+@ MGMT Event: Device Disconnected (0x000c)
+< HCI Command: LE Set Extended Advertising Enable (0x08|0x0039)
+```
+
+That is the entire capture. One command, and it puts the box back to
+*advertising* — peripheral, waiting to be connected to. No
+`LE Create Connection`, no `LE Extended Create Connection`, and no
+`Add Device`. The kernel auto-connect list is never armed, so there is
+nothing to dial the phone when it next advertises, so the box cannot
+take the central role, so the phone keeps the one role that can start
+encryption. That is the whole failure chain, cut at the first link.
+
+Note what this run does *not* re-prove: the unpinned box dialling. That
+evidence is the 2026-08-17 21:38 capture above; this run only confirms
+the fix's side of it.
+
+### Everything else still works
+
+Four connect/disconnect cycles, an app force-stop/relaunch, and a
+controller power cycle (`hciconfig hci2 down/up`) — the re-arm fired with
+`reason="the Bluetooth controller powered back on"`, re-advertised, and
+the phone was exchanging RPCs again ~8 s later. Reconnect to first RPC
+was 3.1–3.2 s with the pin, against 5.1 s in the same test before it.
+
+**Zero warnings and zero errors from `shepherd_ble` for the whole
+session**, where every previous session on this box opened with the
+`Could not set PreferredBearer=bredr` paragraph. That warning is now the
+signal it was meant to be: if it shows up again, the drop-in is missing
+or bluetoothd lost `-E`.
+
 ## What to capture on the box when it happens again
 
 The daemon logs every peer-level event, so the journal separates the
