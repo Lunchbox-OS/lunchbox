@@ -881,15 +881,28 @@ fn spawn_device_watcher(
                 // between "advertising started" and an RPC that may
                 // arrive minutes later or not at all.
                 DeviceProperty::Connected(true) => {
-                    let (response_frames, response_bytes) = response_outbox.depth().await;
-                    let (events_frames, events_bytes) = events_outbox.depth().await;
+                    // Anything queued while nobody was connected is stale:
+                    // the companion discards its entire post-connect drain
+                    // and opens with a fresh `service_state`. Handing it
+                    // over costs a GATT round trip per 512 bytes and buys
+                    // nothing — on the reporter's box ~4 KiB of queued
+                    // snapshots stretched a 1.5s reconnect to 3.3s, which
+                    // is the "sometimes it takes a few seconds" they saw.
+                    // `clear_if_aligned` declines if the peer has already
+                    // started reading, so a drain in flight is never cut
+                    // mid-frame.
+                    let response = response_outbox.clear_if_aligned().await;
+                    let events = events_outbox.clear_if_aligned().await;
+                    let (response_frames, response_bytes) = response.unwrap_or((0, 0));
+                    let (events_frames, events_bytes) = events.unwrap_or((0, 0));
                     info!(
                         peer = %addr,
                         response_frames,
                         response_bytes,
                         events_frames,
                         events_bytes,
-                        "BLE peer connected; companion will drain these before its first RPC",
+                        kept_for_drain = response.is_none() || events.is_none(),
+                        "BLE peer connected; discarded what had queued up while it was away",
                     );
                     let generation = epoch.fetch_add(1, Ordering::Relaxed) + 1;
                     // Do this on every connect, not just the first: it is
