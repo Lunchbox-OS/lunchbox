@@ -4199,7 +4199,7 @@ checksum = "45bb67a18fa91266cc7807181f62f9178a6873bfad7dc788c42e6430db40184f"
 
 [[package]]
 name = "shepherd-api"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "schemars",
@@ -4211,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-ble"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4237,7 +4237,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-bridge"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "evdev",
@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-config"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "serde",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "serde",
@@ -4279,7 +4279,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-e2e"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4297,7 +4297,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-firewall-helper"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aya",
  "libc",
@@ -4305,7 +4305,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-gamepad-bridge"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-host-api"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "async-trait",
  "serde",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-host-linux"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "async-trait",
  "dirs",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-http"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-hud"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4398,7 +4398,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-ipc"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "nix 0.29.0",
@@ -4414,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-launcher-ui"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4435,7 +4435,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-management"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4458,7 +4458,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-management-macros"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4467,7 +4467,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-media"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -4496,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-media-android"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -4524,7 +4524,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-media-app"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "log",
@@ -4536,7 +4536,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-media-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "libmpv2",
  "percent-encoding",
@@ -4551,7 +4551,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-media-ui"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "egui",
  "glow",
@@ -4560,7 +4560,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-pairing-display"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -4572,7 +4572,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-store"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -4588,7 +4588,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-tablet-bridge"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -4601,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-touch-bridge"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -4614,7 +4614,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-util"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "schemars",
@@ -4628,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd-wire-codegen"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "schemars",
@@ -4642,7 +4642,7 @@ dependencies = [
 
 [[package]]
 name = "shepherdd"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
