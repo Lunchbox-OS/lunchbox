@@ -46,7 +46,7 @@ use futures_util::{FutureExt, StreamExt};
 use shepherd_api::EventPayload;
 use shepherd_management::ManagementService;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -741,11 +741,20 @@ async fn disconnect_monitor(
     // Devices BlueZ already knows about at startup — most importantly the
     // bonded admin, which persists across daemon restarts as a known
     // device and therefore won't arrive as a later `DeviceAdded`.
-    let mut watched: HashSet<Address> = HashSet::new();
+    // Keyed by address and holding the task, not just the address. A
+    // `HashSet` let a `DeviceRemoved`/`DeviceAdded` pair — which BlueZ
+    // emits routinely for a bonded peer as private addresses rotate —
+    // free the slot while the old watcher was still running, so a second
+    // one attached to the same peer. Observed on 2026-08-18: every
+    // connect and disconnect handled exactly twice, for the whole
+    // session. Idempotent work, so it was invisible, but the tasks and
+    // their D-Bus subscriptions are never reclaimed and a long-running
+    // kiosk would keep accruing them.
+    let mut watchers: HashMap<Address, tokio::task::JoinHandle<()>> = HashMap::new();
     match adapter.device_addresses().await {
         Ok(addrs) => {
             for addr in addrs {
-                if watched.insert(addr) {
+                if let std::collections::hash_map::Entry::Vacant(slot) = watchers.entry(addr) {
                     // Pin bonded peers here as well as on connect. A peer
                     // that is already connected when we start — the usual
                     // case after a daemon restart, since the ACL outlives
@@ -755,9 +764,9 @@ async fn disconnect_monitor(
                     if let Ok(device) = adapter.device(addr)
                         && device.is_paired().await.unwrap_or(false)
                     {
-                        pin_peer_to_bredr(&device, addr, &bearer_pinned).await;
+                        pin_peer_to_bredr(&device, addr, &bearer_pinned, PinFailure::Quiet).await;
                     }
-                    spawn_device_watcher(
+                    let handle = spawn_device_watcher(
                         &adapter,
                         addr,
                         epoch.clone(),
@@ -768,6 +777,7 @@ async fn disconnect_monitor(
                         response_outbox.clone(),
                         events_outbox.clone(),
                     );
+                    slot.insert(handle);
                 }
             }
         }
@@ -777,8 +787,12 @@ async fn disconnect_monitor(
     while let Some(ev) = events.next().await {
         match ev {
             AdapterEvent::DeviceAdded(addr) => {
-                if watched.insert(addr) {
-                    spawn_device_watcher(
+                // Re-attach only if nothing live is already watching this
+                // peer. `is_finished` covers the case where the watcher's
+                // own stream ended without us seeing a `DeviceRemoved`.
+                let live = watchers.get(&addr).is_some_and(|h| !h.is_finished());
+                if !live {
+                    let handle = spawn_device_watcher(
                         &adapter,
                         addr,
                         epoch.clone(),
@@ -789,12 +803,19 @@ async fn disconnect_monitor(
                         response_outbox.clone(),
                         events_outbox.clone(),
                     );
+                    if let Some(stale) = watchers.insert(addr, handle) {
+                        stale.abort();
+                    }
                 }
             }
-            // A removed device may later be re-added; drop it from the set
-            // so we re-attach a watcher if that happens.
+            // A removed device may later be re-added. Stop the watcher
+            // rather than just forgetting it: the device event stream does
+            // not reliably end with the object, and leaving the task
+            // running is what produced duplicate watchers.
             AdapterEvent::DeviceRemoved(addr) => {
-                watched.remove(&addr);
+                if let Some(handle) = watchers.remove(&addr) {
+                    handle.abort();
+                }
             }
             AdapterEvent::PropertyChanged(_) => {}
         }
@@ -816,12 +837,14 @@ fn spawn_device_watcher(
     last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     response_outbox: Arc<Outbox>,
     events_outbox: Arc<Outbox>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let device = match adapter.device(addr) {
         Ok(d) => d,
         Err(e) => {
             debug!(peer = %addr, error = %e, "could not open device for disconnect watch");
-            return;
+            // A handle that is already finished, so callers can store it
+            // uniformly and the liveness check reads false.
+            return tokio::spawn(async {});
         }
     };
     tokio::spawn(async move {
@@ -832,7 +855,22 @@ fn spawn_device_watcher(
                 return;
             }
         };
+        // Act on *transitions*, not on every delivery. BlueZ (or bluer's
+        // subscription to it) reports each `Connected` change twice,
+        // fractions of a millisecond apart — verified by tagging the
+        // watcher task and seeing one instance log the same connect
+        // twice. Everything below is idempotent, so the duplicates were
+        // harmless, but they doubled every epoch bump (leaving the first
+        // watchdog of each pair to no-op on a stale generation) and put
+        // two identical lines in the journal for every event, which is
+        // its own cost when the journal is the debugging tool.
+        let mut connected: Option<bool> = None;
         while let Some(DeviceEvent::PropertyChanged(prop)) = events.next().await {
+            if let DeviceProperty::Connected(now) = prop
+                && connected.replace(now) == Some(now)
+            {
+                continue;
+            }
             match prop {
                 // A companion drains both outboxes before it will send
                 // its first RPC, so the depth logged here *is* the
@@ -858,7 +896,7 @@ fn spawn_device_watcher(
                     // idempotent in BlueZ, and the arming we are undoing
                     // happens on service probe, which can recur.
                     if device.is_paired().await.unwrap_or(false) {
-                        pin_peer_to_bredr(&device, addr, &bearer_pinned).await;
+                        pin_peer_to_bredr(&device, addr, &bearer_pinned, PinFailure::Loud).await;
                     }
                     spawn_first_rpc_watchdog(
                         device.clone(),
@@ -879,7 +917,7 @@ fn spawn_device_watcher(
                 _ => {}
             }
         }
-    });
+    })
 }
 
 /// How long a peer may hold a link without sending a single RPC before
@@ -957,8 +995,49 @@ async fn prefer_bredr_bearer(adapter_name: &str, addr: Address) -> Result<(), St
 /// but repeating the same paragraph on every reconnect is not.
 #[derive(Default)]
 struct BearerPin {
-    pinned: AtomicBool,
+    /// Peers pinned so far, by address.
+    ///
+    /// Per-peer rather than a single flag: a box carries more than one
+    /// bond (a stale object from an earlier pairing, headphones, a
+    /// controller), and a shared flag means the first peer to succeed
+    /// suppresses the attempt for everyone after it. On 2026-08-18 that
+    /// came within one enumeration-order coin flip of skipping the admin
+    /// phone and silently restoring the whole dialling failure, with a
+    /// reassuring "Pinned peer" line in the log naming a different device.
+    pinned: std::sync::Mutex<HashSet<Address>>,
+    /// Whether the operator has been told how to make the property
+    /// available. Once per server is plenty.
     warned: AtomicBool,
+}
+
+impl BearerPin {
+    fn is_pinned(&self, addr: Address) -> bool {
+        self.pinned
+            .lock()
+            .expect("bearer pin lock poisoned")
+            .contains(&addr)
+    }
+
+    fn mark_pinned(&self, addr: Address) {
+        self.pinned
+            .lock()
+            .expect("bearer pin lock poisoned")
+            .insert(addr);
+    }
+}
+
+/// How loudly [`pin_peer_to_bredr`] should complain when it cannot pin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinFailure {
+    /// A peer we are actively serving: unprotected means the next
+    /// disconnect can hand the device the central role, so say so.
+    Loud,
+    /// A sweep over everything BlueZ knows, where failures are expected —
+    /// stale objects from old pairings have no `Device1` to set. Warning
+    /// about those buries the case that matters, and did: every session
+    /// opened with an alarming paragraph about a device that never
+    /// connects, immediately before the admin phone pinned fine.
+    Quiet,
 }
 
 /// Apply [`prefer_bredr_bearer`] and say something useful either way.
@@ -968,24 +1047,31 @@ struct BearerPin {
 /// experimental and this bluetoothd was started without it", which is not
 /// something the daemon can fix for the operator — so say exactly what to
 /// do about it, once, rather than repeating it on every reconnect.
-async fn pin_peer_to_bredr(device: &bluer::Device, addr: Address, pin: &Arc<BearerPin>) {
-    if pin.pinned.load(Ordering::Relaxed) {
+async fn pin_peer_to_bredr(
+    device: &bluer::Device,
+    addr: Address,
+    pin: &Arc<BearerPin>,
+    on_failure: PinFailure,
+) {
+    if pin.is_pinned(addr) {
         return;
     }
     match prefer_bredr_bearer(device.adapter_name(), addr).await {
         Ok(()) => {
-            pin.pinned.store(true, Ordering::Relaxed);
+            pin.mark_pinned(addr);
             info!(
                 peer = %addr,
                 "Pinned peer to the BR/EDR bearer; the kernel will no longer auto-connect \
                  it over LE, so the companion keeps the central role and can encrypt",
             );
         }
-        Err(e) if pin.warned.swap(true, Ordering::Relaxed) => debug!(
-            error = %e,
-            peer = %addr,
-            "PreferredBearer=bredr still unavailable",
-        ),
+        Err(e) if on_failure == PinFailure::Quiet || pin.warned.swap(true, Ordering::Relaxed) => {
+            debug!(
+                error = %e,
+                peer = %addr,
+                "PreferredBearer=bredr unavailable for this peer",
+            )
+        }
         Err(e) => warn!(
             error = %e,
             peer = %addr,
@@ -1079,7 +1165,7 @@ fn spawn_first_rpc_watchdog(
         // - and only after a much longer wait than the report above,
         //   comfortably past the 30s the OS gives a human to compare six
         //   digits, so a slow pairing outlives it.
-        if bearer_pinned.pinned.load(Ordering::Relaxed) || !had_session.load(Ordering::Relaxed) {
+        if bearer_pinned.is_pinned(addr) || !had_session.load(Ordering::Relaxed) {
             return;
         }
         tokio::time::sleep(EVICT_GRACE - FIRST_RPC_GRACE).await;
