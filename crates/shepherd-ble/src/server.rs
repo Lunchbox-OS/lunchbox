@@ -378,16 +378,11 @@ impl BleServer {
 
         let mut agent_handle = register_agent_with_retry(&session, &self.display).await;
 
-        let response_outbox = Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES));
-        let events_outbox = Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES));
-
-        // Request-side reassembly state, shared with the disconnect
-        // monitor so a peer drop can wipe any half-written frame (see
-        // `disconnect_monitor`). v1 holds a single reader because we
-        // only expect one admin connection at a time.
-        let reader: Arc<Mutex<FrameReader>> =
-            Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer: Arc<Mutex<Option<PeerIdentity>>> = Arc::new(Mutex::new(None));
+        // Everything the GATT characteristics, the disconnect monitor
+        // and the first-RPC watchdog share about the peer session: the
+        // outboxes, the request reassembler, and the facts each of them
+        // reasons about. See [`TransportState`].
+        let state = Arc::new(TransportState::new());
 
         // A successful `factory_reset` RPC must also forget the BlueZ
         // bond, or the same lockout as the sentinel path results. The RPC
@@ -396,46 +391,26 @@ impl BleServer {
         // adapter and calls `remove_device`.
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
-        // Whether `PreferredBearer=bredr` took, and whether any peer has
-        // completed real work on this boot. Together they gate the
-        // fallback eviction in `spawn_first_rpc_watchdog`.
-        let bearer_pinned = Arc::new(BearerPin::default());
-        let had_session = Arc::new(AtomicBool::new(false));
-
         let mut on_air = go_on_air(
             &adapter,
             &self.config,
             &self.svc,
             &self.claim,
-            &reader,
-            &last_peer,
             &unbond_tx,
-            &response_outbox,
-            &events_outbox,
-            &had_session,
+            &state,
         )
         .await?;
 
-        let events_task = tokio::spawn(events_forwarder(self.svc.clone(), events_outbox.clone()));
+        let events_task = tokio::spawn(events_forwarder(
+            self.svc.clone(),
+            state.events_outbox.clone(),
+        ));
 
         // Wipe stale transport bytes when a peer drops, so a companion
         // that resumes the same connection across a transient BLE
         // reconnect (no fresh `id == 1` sentinel) doesn't inherit a
         // desynced byte stream.
-        // Distinguishes one peer connection from the next, so a
-        // watchdog armed for a link that has since dropped cannot act on
-        // whatever connection happens to be live when its timer expires.
-        let connection_epoch = Arc::new(AtomicU64::new(0));
-        let disconnect_task = tokio::spawn(disconnect_monitor(
-            adapter.clone(),
-            connection_epoch,
-            bearer_pinned,
-            had_session.clone(),
-            reader.clone(),
-            last_peer.clone(),
-            response_outbox.clone(),
-            events_outbox.clone(),
-        ));
+        let disconnect_task = tokio::spawn(disconnect_monitor(adapter.clone(), state.clone()));
 
         // Drain factory-reset unbond requests for the server's lifetime.
         // Same durability contract as the startup path: record the debt
@@ -551,12 +526,8 @@ impl BleServer {
                 &self.config,
                 &self.svc,
                 &self.claim,
-                &reader,
-                &last_peer,
                 &unbond_tx,
-                &response_outbox,
-                &events_outbox,
-                &had_session,
+                &state,
             )
             .await
             {
@@ -720,17 +691,7 @@ fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
 /// in-flight bytes we'd disturb. The `Connected(false)` event fires at
 /// drop time, well before the reconnect + next write, so the wipe can't
 /// race a fresh response into oblivion.
-#[allow(clippy::too_many_arguments)]
-async fn disconnect_monitor(
-    adapter: bluer::Adapter,
-    epoch: Arc<AtomicU64>,
-    bearer_pinned: Arc<BearerPin>,
-    had_session: Arc<AtomicBool>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
-) {
+async fn disconnect_monitor(adapter: bluer::Adapter, state: Arc<TransportState>) {
     let mut events = match adapter.events().await {
         Ok(e) => e,
         Err(e) => {
@@ -769,20 +730,9 @@ async fn disconnect_monitor(
                     if let Ok(device) = adapter.device(addr)
                         && device.is_paired().await.unwrap_or(false)
                     {
-                        pin_peer_to_bredr(&device, addr, &bearer_pinned, PinFailure::Quiet).await;
+                        pin_peer_to_bredr(&device, addr, &state.bearer, PinFailure::Quiet).await;
                     }
-                    let handle = spawn_device_watcher(
-                        &adapter,
-                        addr,
-                        epoch.clone(),
-                        bearer_pinned.clone(),
-                        had_session.clone(),
-                        reader.clone(),
-                        last_peer.clone(),
-                        response_outbox.clone(),
-                        events_outbox.clone(),
-                    );
-                    slot.insert(handle);
+                    slot.insert(spawn_device_watcher(&adapter, addr, state.clone()));
                 }
             }
         }
@@ -797,17 +747,7 @@ async fn disconnect_monitor(
                 // own stream ended without us seeing a `DeviceRemoved`.
                 let live = watchers.get(&addr).is_some_and(|h| !h.is_finished());
                 if !live {
-                    let handle = spawn_device_watcher(
-                        &adapter,
-                        addr,
-                        epoch.clone(),
-                        bearer_pinned.clone(),
-                        had_session.clone(),
-                        reader.clone(),
-                        last_peer.clone(),
-                        response_outbox.clone(),
-                        events_outbox.clone(),
-                    );
+                    let handle = spawn_device_watcher(&adapter, addr, state.clone());
                     if let Some(stale) = watchers.insert(addr, handle) {
                         stale.abort();
                     }
@@ -831,17 +771,10 @@ async fn disconnect_monitor(
 /// `addr` transitions to disconnected. The task lives until the device
 /// object is removed from BlueZ (its event stream ends), which spans
 /// many connect/disconnect cycles for a bonded peer.
-#[allow(clippy::too_many_arguments)]
 fn spawn_device_watcher(
     adapter: &bluer::Adapter,
     addr: Address,
-    epoch: Arc<AtomicU64>,
-    bearer_pinned: Arc<BearerPin>,
-    had_session: Arc<AtomicBool>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
+    state: Arc<TransportState>,
 ) -> tokio::task::JoinHandle<()> {
     let device = match adapter.device(addr) {
         Ok(d) => d,
@@ -896,8 +829,8 @@ fn spawn_device_watcher(
                     // `clear_if_aligned` declines if the peer has already
                     // started reading, so a drain in flight is never cut
                     // mid-frame.
-                    let response = response_outbox.clear_if_aligned().await;
-                    let events = events_outbox.clear_if_aligned().await;
+                    let response = state.response_outbox.clear_if_aligned().await;
+                    let events = state.events_outbox.clear_if_aligned().await;
                     let (response_frames, response_bytes) = response.unwrap_or((0, 0));
                     let (events_frames, events_bytes) = events.unwrap_or((0, 0));
                     info!(
@@ -909,28 +842,19 @@ fn spawn_device_watcher(
                         kept_for_drain = response.is_none() || events.is_none(),
                         "BLE peer connected; discarded what had queued up while it was away",
                     );
-                    let generation = epoch.fetch_add(1, Ordering::Relaxed) + 1;
+                    let generation = state.epoch.fetch_add(1, Ordering::Relaxed) + 1;
                     // Do this on every connect, not just the first: it is
                     // idempotent in BlueZ, and the arming we are undoing
                     // happens on service probe, which can recur.
                     if device.is_paired().await.unwrap_or(false) {
-                        pin_peer_to_bredr(&device, addr, &bearer_pinned, PinFailure::Loud).await;
+                        pin_peer_to_bredr(&device, addr, &state.bearer, PinFailure::Loud).await;
                     }
-                    spawn_first_rpc_watchdog(
-                        device.clone(),
-                        addr,
-                        generation,
-                        epoch.clone(),
-                        last_peer.clone(),
-                        bearer_pinned.clone(),
-                        had_session.clone(),
-                    );
+                    spawn_first_rpc_watchdog(device.clone(), addr, generation, state.clone());
                 }
                 DeviceProperty::Connected(false) => {
-                    epoch.fetch_add(1, Ordering::Relaxed);
+                    state.epoch.fetch_add(1, Ordering::Relaxed);
                     info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
-                    reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox)
-                        .await;
+                    state.reset_session().await;
                 }
                 _ => {}
             }
@@ -1004,6 +928,67 @@ async fn prefer_bredr_bearer(adapter_name: &str, addr: Address) -> Result<(), St
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Everything the transport layers share about the current peer session.
+///
+/// These fields have always travelled together — the request
+/// reassembler, the peer marker, both outboxes, and the facts the
+/// watchdog reasons about — through the GATT characteristics, the
+/// disconnect monitor, the per-device watchers and back. Passing them
+/// individually meant nine-parameter functions and a `too_many_arguments`
+/// allow on almost everything that touched them, which buried the one or
+/// two arguments that actually varied per call.
+struct TransportState {
+    /// Request-side reassembly. v1 holds a single reader because only one
+    /// admin connection is expected at a time.
+    reader: Mutex<FrameReader>,
+    /// Who we last accepted a request write from. Set by the first write
+    /// of a session, cleared when the peer drops — which is what the
+    /// watchdog reads as "this link has never carried anything".
+    last_peer: Mutex<Option<PeerIdentity>>,
+    /// The read-poll queues the companion drains over GATT: RPC replies
+    /// and live state events. `Arc`, not plain, because each is also
+    /// captured by its own read characteristic and — for events — by the
+    /// forwarder task that runs whether or not anyone is connected.
+    response_outbox: Arc<Outbox>,
+    events_outbox: Arc<Outbox>,
+    /// Distinguishes one peer connection from the next, so a watchdog
+    /// armed for a link that has since dropped cannot act on whatever
+    /// connection happens to be live when its timer expires.
+    epoch: AtomicU64,
+    /// Whether any peer has exchanged real RPCs on this boot. A first
+    /// pairing never has, which is what keeps the fallback eviction away
+    /// from the Numeric Comparison window.
+    had_session: AtomicBool,
+    /// Which peers have been pinned to the BR/EDR bearer. Together with
+    /// `had_session` this gates the fallback eviction in
+    /// [`spawn_first_rpc_watchdog`]; see [`pin_peer_to_bredr`] for why
+    /// the pin is the actual fix.
+    bearer: BearerPin,
+}
+
+impl TransportState {
+    fn new() -> Self {
+        Self {
+            reader: Mutex::new(FrameReader::new(MAX_FRAME_BYTES)),
+            last_peer: Mutex::new(None),
+            response_outbox: Arc::new(Outbox::new("response", RESPONSE_OUTBOX_BYTES)),
+            events_outbox: Arc::new(Outbox::new("events", EVENTS_OUTBOX_BYTES)),
+            epoch: AtomicU64::new(0),
+            had_session: AtomicBool::new(false),
+            bearer: BearerPin::default(),
+        }
+    }
+
+    /// Drop every byte of per-session transport state: any half-assembled
+    /// request frame, the last-peer marker, and both read-poll outboxes.
+    async fn reset_session(&self) {
+        *self.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
+        *self.last_peer.lock().await = None;
+        self.response_outbox.clear().await;
+        self.events_outbox.clear().await;
+    }
+}
+
 /// Tracks the bearer pin across connections: whether it has taken, and
 /// whether we have already told the operator how to make it possible.
 ///
@@ -1068,7 +1053,7 @@ enum PinFailure {
 async fn pin_peer_to_bredr(
     device: &bluer::Device,
     addr: Address,
-    pin: &Arc<BearerPin>,
+    pin: &BearerPin,
     on_failure: PinFailure,
 ) {
     if pin.is_pinned(addr) {
@@ -1138,14 +1123,11 @@ fn spawn_first_rpc_watchdog(
     device: bluer::Device,
     addr: Address,
     generation: u64,
-    epoch: Arc<AtomicU64>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
-    bearer_pinned: Arc<BearerPin>,
-    had_session: Arc<AtomicBool>,
+    state: Arc<TransportState>,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_RPC_GRACE).await;
-        if epoch.load(Ordering::Relaxed) != generation {
+        if state.epoch.load(Ordering::Relaxed) != generation {
             // The link this timer was armed for is long gone; anything
             // live now is a *different* connection with its own timer.
             // Without this check the state below is read against the
@@ -1154,7 +1136,7 @@ fn spawn_first_rpc_watchdog(
             // 1.2s earlier and was about to send its first RPC.
             return;
         }
-        if last_peer.lock().await.is_some() {
+        if state.last_peer.lock().await.is_some() {
             return; // It talked to us. Nothing to do.
         }
         if !device.is_connected().await.unwrap_or(false) {
@@ -1183,12 +1165,12 @@ fn spawn_first_rpc_watchdog(
         // - and only after a much longer wait than the report above,
         //   comfortably past the 30s the OS gives a human to compare six
         //   digits, so a slow pairing outlives it.
-        if bearer_pinned.is_pinned(addr) || !had_session.load(Ordering::Relaxed) {
+        if state.bearer.is_pinned(addr) || !state.had_session.load(Ordering::Relaxed) {
             return;
         }
         tokio::time::sleep(EVICT_GRACE - FIRST_RPC_GRACE).await;
-        if epoch.load(Ordering::Relaxed) != generation
-            || last_peer.lock().await.is_some()
+        if state.epoch.load(Ordering::Relaxed) != generation
+            || state.last_peer.lock().await.is_some()
             || !device.is_connected().await.unwrap_or(false)
         {
             return;
@@ -1203,20 +1185,6 @@ fn spawn_first_rpc_watchdog(
             warn!(peer = %addr, error = %e, "Could not drop the silent peer's link");
         }
     });
-}
-
-/// Drop every byte of per-session transport state: any half-assembled
-/// request frame, the last-peer marker, and both read-poll outboxes.
-async fn reset_transport_session(
-    reader: &Arc<Mutex<FrameReader>>,
-    last_peer: &Arc<Mutex<Option<PeerIdentity>>>,
-    response_outbox: &Arc<Outbox>,
-    events_outbox: &Arc<Outbox>,
-) {
-    *reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
-    *last_peer.lock().await = None;
-    response_outbox.clear().await;
-    events_outbox.clear().await;
 }
 
 /// Why, if at all, an adapter event means the service needs to go back
@@ -1269,29 +1237,20 @@ struct OnAir {
 /// filters on our service UUID) listed nothing, while the daemon sat there
 /// believing it was advertising. The power-on signal is the only reliable
 /// cue, which is why this is driven by an event rather than a poll.
-#[allow(clippy::too_many_arguments)]
 async fn go_on_air(
     adapter: &bluer::Adapter,
     config: &BleServerConfig,
     svc: &Arc<dyn ManagementService>,
     claim: &Arc<ClaimMachine>,
-    reader: &Arc<Mutex<FrameReader>>,
-    last_peer: &Arc<Mutex<Option<PeerIdentity>>>,
     unbond_tx: &mpsc::Sender<Address>,
-    response_outbox: &Arc<Outbox>,
-    events_outbox: &Arc<Outbox>,
-    had_session: &Arc<AtomicBool>,
+    state: &Arc<TransportState>,
 ) -> bluer::Result<OnAir> {
     let application = build_application(
         config.clone(),
         svc.clone(),
         claim.clone(),
-        reader.clone(),
-        last_peer.clone(),
         unbond_tx.clone(),
-        response_outbox.clone(),
-        events_outbox.clone(),
-        had_session.clone(),
+        state.clone(),
     );
     let app: ApplicationHandle = adapter.serve_gatt_application(application).await?;
 
@@ -1404,17 +1363,12 @@ async fn register_agent(
     session.register_agent(agent).await
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_application(
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     unbond_tx: mpsc::Sender<Address>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
-    had_session: Arc<AtomicBool>,
+    state: Arc<TransportState>,
 ) -> Application {
     Application {
         services: vec![Service {
@@ -1422,22 +1376,17 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(
-                    svc,
-                    claim,
-                    reader,
-                    last_peer,
-                    unbond_tx,
-                    response_outbox.clone(),
-                    events_outbox.clone(),
-                    had_session,
-                ),
+                request_characteristic(svc, claim, unbond_tx, state.clone()),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
-                    response_outbox,
+                    state.response_outbox.clone(),
                     "Response",
                 ),
-                outbox_read_characteristic(SHEPHERD_EVENTS_CHAR_UUID, events_outbox, "Events"),
+                outbox_read_characteristic(
+                    SHEPHERD_EVENTS_CHAR_UUID,
+                    state.events_outbox.clone(),
+                    "Events",
+                ),
             ],
             ..Default::default()
         }],
@@ -1490,22 +1439,17 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
 /// `encrypt_authenticated_write` flag is satisfied by Legacy MITM
 /// pairing too — that gives us the property we actually want
 /// (encrypted + authenticated link) without requiring LESC.
-#[allow(clippy::too_many_arguments)]
 fn request_characteristic(
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     unbond_tx: mpsc::Sender<Address>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
-    had_session: Arc<AtomicBool>,
+    state: Arc<TransportState>,
 ) -> Characteristic {
-    // `reader`/`last_peer` are the single-connection frame reassembly
-    // state (v1 expects one admin connection at a time). They're created
-    // in `run` and shared with `disconnect_monitor` so a peer drop can
-    // reset a half-written frame; if a second device writes here we wipe
-    // the buffer and start fresh.
+    // The reassembly state in `state` is single-connection (v1 expects
+    // one admin connection at a time). It's created in `run` and shared
+    // with `disconnect_monitor` so a peer drop can reset a half-written
+    // frame; if a second device writes here we wipe the buffer and start
+    // fresh.
     Characteristic {
         uuid: SHEPHERD_REQUEST_CHAR_UUID,
         write: Some(CharacteristicWrite {
@@ -1515,16 +1459,13 @@ fn request_characteristic(
             method: CharacteristicWriteMethod::Fun(Box::new(move |chunk, req| {
                 let svc = svc.clone();
                 let claim = claim.clone();
-                let reader = reader.clone();
-                let last_peer = last_peer.clone();
                 let unbond_tx = unbond_tx.clone();
-                let response_outbox = response_outbox.clone();
-                let events_outbox = events_outbox.clone();
+                let state = state.clone();
                 // A write landed on an encrypt-authenticated
                 // characteristic, so this link demonstrably works. That is
                 // what the fallback eviction waits to see before it will
                 // ever act on a silent one.
-                had_session.store(true, Ordering::Relaxed);
+                state.had_session.store(true, Ordering::Relaxed);
                 async move {
                     let peer = PeerIdentity {
                         address: req.device_address.to_string(),
@@ -1535,18 +1476,7 @@ fn request_characteristic(
                         // ignores this field on the inbound side.
                         address_type: "public".to_string(),
                     };
-                    handle_write(
-                        &peer,
-                        chunk,
-                        reader,
-                        last_peer,
-                        claim,
-                        svc,
-                        &unbond_tx,
-                        response_outbox,
-                        events_outbox,
-                    )
-                    .await
+                    handle_write(&peer, chunk, claim, svc, &unbond_tx, &state).await
                 }
                 .boxed()
             })),
@@ -1623,17 +1553,13 @@ fn outbox_read_characteristic(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_write(
     peer: &PeerIdentity,
     chunk: Vec<u8>,
-    reader: Arc<Mutex<FrameReader>>,
-    last_peer: Arc<Mutex<Option<PeerIdentity>>>,
     claim: Arc<ClaimMachine>,
     svc: Arc<dyn ManagementService>,
     unbond_tx: &mpsc::Sender<Address>,
-    response_outbox: Arc<Outbox>,
-    events_outbox: Arc<Outbox>,
+    state: &TransportState,
 ) -> bluer::gatt::local::ReqResult<()> {
     debug!(
         peer = %peer.address,
@@ -1645,31 +1571,22 @@ async fn handle_write(
     // half-frame from one client from polluting the next client's
     // first request.
     {
-        let mut lp = last_peer.lock().await;
+        let mut lp = state.last_peer.lock().await;
         if lp.as_ref() != Some(peer) {
             *lp = Some(peer.clone());
-            *reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
+            *state.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
         }
     }
 
     {
-        let mut r = reader.lock().await;
+        let mut r = state.reader.lock().await;
         r.push(&chunk);
         loop {
             match r.pop_frame() {
                 Ok(Some(frame)) => {
                     drop(r);
-                    dispatch_frame(
-                        peer,
-                        &frame,
-                        &claim,
-                        &svc,
-                        unbond_tx,
-                        &response_outbox,
-                        &events_outbox,
-                    )
-                    .await;
-                    r = reader.lock().await;
+                    dispatch_frame(peer, &frame, &claim, &svc, unbond_tx, state).await;
+                    r = state.reader.lock().await;
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -1683,15 +1600,13 @@ async fn handle_write(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_frame(
     peer: &PeerIdentity,
     frame: &[u8],
     claim: &Arc<ClaimMachine>,
     svc: &Arc<dyn ManagementService>,
     unbond_tx: &mpsc::Sender<Address>,
-    response_outbox: &Arc<Outbox>,
-    events_outbox: &Arc<Outbox>,
+    state: &TransportState,
 ) {
     let request: RpcRequest = match serde_json::from_slice(frame) {
         Ok(r) => r,
@@ -1703,7 +1618,7 @@ async fn dispatch_frame(
                 "Dropping BLE frame: not valid JSON-RPC"
             );
             let resp = RpcResponse::err(0, ErrorCode::ParseError, e.to_string());
-            push_response(response_outbox, &resp).await;
+            push_response(&state.response_outbox, &resp).await;
             return;
         }
     };
@@ -1723,8 +1638,8 @@ async fn dispatch_frame(
     // queue mid-delivery on a single legitimate session.
     if id == 1 {
         info!(peer = %peer.address, "RPC id=1; clearing outboxes for new session");
-        response_outbox.clear().await;
-        events_outbox.clear().await;
+        state.response_outbox.clear().await;
+        state.events_outbox.clear().await;
     }
 
     info!(
@@ -1753,7 +1668,7 @@ async fn dispatch_frame(
         ok = response.error.is_none(),
         "BLE RPC response queued"
     );
-    push_response(response_outbox, &response).await;
+    push_response(&state.response_outbox, &response).await;
 }
 
 async fn handle_claim_rpc(
@@ -1888,10 +1803,6 @@ mod tests {
         Arc::new(ClaimMachine::new(store, ClaimState::Claimed(record)))
     }
 
-    fn outbox() -> Arc<Outbox> {
-        Arc::new(Outbox::new("test", RESPONSE_OUTBOX_BYTES))
-    }
-
     /// A live unbond sender for the write path. None of these tests drive
     /// `factory_reset`, so nothing is ever sent; the background drainer
     /// just keeps the receiver alive so `send` wouldn't fail on a closed
@@ -1932,12 +1843,14 @@ mod tests {
         let claim = claimed_machine();
         let mock = Arc::new(MockSvc::new());
         let svc: Arc<dyn ManagementService> = mock.clone();
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
 
         // Bytes the previous BLE session left behind, unread.
-        response_outbox.push(encode_frame(b"stale-response")).await;
-        events_outbox.push(encode_frame(b"stale-event")).await;
+        state
+            .response_outbox
+            .push(encode_frame(b"stale-response"))
+            .await;
+        state.events_outbox.push(encode_frame(b"stale-event")).await;
 
         // The first RPC of a fresh session always carries id == 1.
         let body = serde_json::to_vec(&req(1, "health", serde_json::Value::Null)).unwrap();
@@ -1947,17 +1860,16 @@ mod tests {
             &claim,
             &svc,
             &unbond_sender(),
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
         // Events outbox is wiped and nothing re-queues onto it.
-        assert_eq!(events_outbox.pending_bytes().await, 0);
+        assert_eq!(state.events_outbox.pending_bytes().await, 0);
 
         // Response outbox holds exactly the fresh health response — the
         // stale frame was dropped, not stacked in front of it.
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 1);
         assert!(responses[0].error.is_none());
@@ -1968,11 +1880,13 @@ mod tests {
     async fn non_first_rpc_leaves_pending_events_intact() {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
 
-        events_outbox.push(encode_frame(b"pending-event")).await;
-        let before = events_outbox.pending_bytes().await;
+        state
+            .events_outbox
+            .push(encode_frame(b"pending-event"))
+            .await;
+        let before = state.events_outbox.pending_bytes().await;
 
         // id != 1: a mid-session RPC must not disturb events the companion
         // has not yet polled.
@@ -1983,13 +1897,12 @@ mod tests {
             &claim,
             &svc,
             &unbond_sender(),
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
-        assert_eq!(events_outbox.pending_bytes().await, before);
-        let responses = drain_responses(&response_outbox).await;
+        assert_eq!(state.events_outbox.pending_bytes().await, before);
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 2);
     }
@@ -1998,28 +1911,22 @@ mod tests {
     async fn peer_change_resets_partial_frame() {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
-        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer = Arc::new(Mutex::new(None));
+        let state = TransportState::new();
 
         // Peer A writes only the head of a longer frame, then vanishes.
         let partial = request_frame(7, "health")[..3].to_vec();
         handle_write(
             &peer("AA:AA:AA:AA:AA:AA"),
             partial,
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
         assert!(
-            drain_responses(&response_outbox).await.is_empty(),
+            drain_responses(&state.response_outbox).await.is_empty(),
             "an incomplete frame must not produce a response"
         );
 
@@ -2029,18 +1936,15 @@ mod tests {
         handle_write(
             &peer("BB:BB:BB:BB:BB:BB"),
             request_frame(8, "health"),
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
 
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 8);
         assert!(responses[0].error.is_none());
@@ -2050,10 +1954,7 @@ mod tests {
     async fn framing_error_drops_state_and_recovers() {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
-        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer = Arc::new(Mutex::new(None));
+        let state = TransportState::new();
         let p = peer("CC:CC:CC:CC:CC:CC");
 
         // A length prefix past MAX_FRAME_BYTES is an unrecoverable framing
@@ -2063,35 +1964,29 @@ mod tests {
         handle_write(
             &p,
             bad,
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
-        assert!(drain_responses(&response_outbox).await.is_empty());
+        assert!(drain_responses(&state.response_outbox).await.is_empty());
 
         // A valid frame from the same peer afterwards still parses — the
         // reader was reset, not left holding the rejected prefix.
         handle_write(
             &p,
             request_frame(2, "health"),
-            reader.clone(),
-            last_peer.clone(),
             claim.clone(),
             svc.clone(),
             &unbond_sender(),
-            response_outbox.clone(),
-            events_outbox.clone(),
+            &state,
         )
         .await
         .unwrap();
 
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 2);
         assert!(responses[0].error.is_none());
@@ -2103,27 +1998,32 @@ mod tests {
     /// same connection across a transient drop (no fresh `id == 1`)
     /// doesn't inherit a desynced byte stream.
     #[tokio::test]
-    async fn reset_transport_session_wipes_all_session_state() {
-        let response_outbox = outbox();
-        let events_outbox = outbox();
-        let reader = Arc::new(Mutex::new(FrameReader::new(MAX_FRAME_BYTES)));
-        let last_peer = Arc::new(Mutex::new(Some(peer("AA:BB:CC:DD:EE:FF"))));
+    async fn reset_session_wipes_all_session_state() {
+        let state = TransportState::new();
+        *state.last_peer.lock().await = Some(peer("AA:BB:CC:DD:EE:FF"));
 
         // Bytes a dropped session left behind: unread outbox frames plus
         // the head of a request frame whose tail never arrived.
-        response_outbox.push(encode_frame(b"stale-response")).await;
-        events_outbox.push(encode_frame(b"stale-event")).await;
-        reader.lock().await.push(&request_frame(7, "health")[..3]);
+        state
+            .response_outbox
+            .push(encode_frame(b"stale-response"))
+            .await;
+        state.events_outbox.push(encode_frame(b"stale-event")).await;
+        state
+            .reader
+            .lock()
+            .await
+            .push(&request_frame(7, "health")[..3]);
 
-        reset_transport_session(&reader, &last_peer, &response_outbox, &events_outbox).await;
+        state.reset_session().await;
 
-        assert_eq!(response_outbox.pending_bytes().await, 0);
-        assert_eq!(events_outbox.pending_bytes().await, 0);
-        assert!(last_peer.lock().await.is_none());
+        assert_eq!(state.response_outbox.pending_bytes().await, 0);
+        assert_eq!(state.events_outbox.pending_bytes().await, 0);
+        assert!(state.last_peer.lock().await.is_none());
 
         // The reader kept no leftover prefix: a full frame pushed now
         // parses as itself rather than stitched onto the discarded head.
-        let mut r = reader.lock().await;
+        let mut r = state.reader.lock().await;
         r.push(&request_frame(8, "health"));
         let frame = r
             .pop_frame()
@@ -2218,8 +2118,7 @@ mod tests {
         // (the file remove is a no-op) and returns the previous record.
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
         let body = serde_json::to_vec(&req(5, "factory_reset", serde_json::Value::Null)).unwrap();
@@ -2229,8 +2128,7 @@ mod tests {
             &claim,
             &svc,
             &unbond_tx,
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
@@ -2239,7 +2137,7 @@ mod tests {
         assert_eq!(addr.to_string(), "AA:BB:CC:DD:EE:FF");
 
         // The reset still returns a success response to the peer.
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].id, 5);
         assert!(responses[0].error.is_none());
@@ -2252,8 +2150,7 @@ mod tests {
         let store = AdminStore::new(PathBuf::from("/nonexistent/shepherd-ble-test/admin.toml"));
         let claim: Arc<ClaimMachine> = Arc::new(ClaimMachine::new(store, ClaimState::Unclaimed));
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
-        let response_outbox = outbox();
-        let events_outbox = outbox();
+        let state = TransportState::new();
         let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
 
         let body = serde_json::to_vec(&req(1, "factory_reset", serde_json::Value::Null)).unwrap();
@@ -2263,8 +2160,7 @@ mod tests {
             &claim,
             &svc,
             &unbond_tx,
-            &response_outbox,
-            &events_outbox,
+            &state,
         )
         .await;
 
@@ -2272,7 +2168,7 @@ mod tests {
             unbond_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
-        let responses = drain_responses(&response_outbox).await;
+        let responses = drain_responses(&state.response_outbox).await;
         assert_eq!(responses.len(), 1);
         assert!(responses[0].error.is_none());
     }
