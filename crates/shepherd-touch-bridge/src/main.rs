@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, SynchronizationCode};
+use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, PropType, SynchronizationCode};
 use shepherd_bridge::{OutputEvent, OutputSink, UinputSink};
 use tracing::{debug, info, warn};
 
@@ -49,12 +49,27 @@ struct Args {
 }
 
 /// Touch state update emitted by reader threads.
+///
+/// Coordinates are already normalized against *the emitting device's* own
+/// axis range (see [`DeviceRange::normalize`]). Normalizing in the reader
+/// rather than in the main loop is what keeps a second grabbed device from
+/// imposing its range on everyone else's coordinates.
 #[derive(Debug, Clone, Copy)]
 enum TouchUpdate {
-    /// Finger down at absolute device coordinates.
-    Down { x: i32, y: i32 },
+    /// Finger down at normalized coordinates.
+    Down {
+        x: u32,
+        y: u32,
+        x_extent: u32,
+        y_extent: u32,
+    },
     /// Finger moved while still down.
-    Move { x: i32, y: i32 },
+    Move {
+        x: u32,
+        y: u32,
+        x_extent: u32,
+        y_extent: u32,
+    },
     /// Finger up.
     Up,
 }
@@ -108,20 +123,62 @@ fn normalize_axis(raw: i32, min: i32, max: i32) -> (u32, u32) {
     (value, extent)
 }
 
-/// True if the device has both `BTN_TOUCH` and absolute X/Y axes — i.e.,
-/// looks like a touchscreen.
+/// The capability bits that decide whether a device is a touchscreen.
+/// Split out from [`looks_like_touchscreen`] so the rule itself is testable
+/// without a real `/dev/input` node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TouchCaps {
+    /// Reports `BTN_TOUCH`.
+    btn_touch: bool,
+    /// Reports both `ABS_X` and `ABS_Y`.
+    abs_xy: bool,
+    /// Declares `INPUT_PROP_DIRECT`: you touch the surface you look at.
+    direct: bool,
+    /// Declares `INPUT_PROP_POINTER`: an indirect device (touchpad, tablet).
+    pointer: bool,
+    /// Reports `BTN_TOOL_FINGER`, which touchpads set and panels do not.
+    tool_finger: bool,
+}
+
+/// True if the capabilities describe a *direct* touchscreen — a panel you
+/// touch — rather than an indirect absolute pointer.
+///
+/// `BTN_TOUCH` plus absolute X/Y is not enough on its own: clickpads report
+/// exactly that too. On the Legion Go S the touchpad
+/// (`INPUT_PROP_POINTER | INPUT_PROP_BUTTONPAD`, range `0..400`) matched the
+/// old test and got grabbed alongside the 1920x1200 panel, so whichever node
+/// `readdir` happened to yield first decided the coordinate mapping for both.
+/// The extra properties mirror how udev's `input_id` builtin classifies these
+/// devices: `INPUT_PROP_DIRECT` marks a touchscreen outright, and a device
+/// that claims neither `INPUT_PROP_POINTER` nor `BTN_TOOL_FINGER` is treated
+/// as one as well, so panels that omit the property still work.
+fn is_direct_touchscreen(caps: TouchCaps) -> bool {
+    if !(caps.btn_touch && caps.abs_xy) {
+        return false;
+    }
+    caps.direct || !(caps.pointer || caps.tool_finger)
+}
+
+/// Read a device's [`TouchCaps`] and apply [`is_direct_touchscreen`].
 fn looks_like_touchscreen(dev: &Device) -> bool {
-    let has_btn = dev
-        .supported_keys()
-        .map(|keys| keys.contains(KeyCode::BTN_TOUCH))
-        .unwrap_or(false);
-    let has_abs = dev
-        .supported_absolute_axes()
-        .map(|axes| {
-            axes.contains(AbsoluteAxisCode::ABS_X) && axes.contains(AbsoluteAxisCode::ABS_Y)
-        })
-        .unwrap_or(false);
-    has_btn && has_abs
+    let keys = dev.supported_keys();
+    let caps = TouchCaps {
+        btn_touch: keys
+            .map(|k| k.contains(KeyCode::BTN_TOUCH))
+            .unwrap_or(false),
+        abs_xy: dev
+            .supported_absolute_axes()
+            .map(|axes| {
+                axes.contains(AbsoluteAxisCode::ABS_X) && axes.contains(AbsoluteAxisCode::ABS_Y)
+            })
+            .unwrap_or(false),
+        direct: dev.properties().contains(PropType::DIRECT),
+        pointer: dev.properties().contains(PropType::POINTER),
+        tool_finger: keys
+            .map(|k| k.contains(KeyCode::BTN_TOOL_FINGER))
+            .unwrap_or(false),
+    };
+    is_direct_touchscreen(caps)
 }
 
 fn discover_touchscreens() -> Vec<PathBuf> {
@@ -130,6 +187,8 @@ fn discover_touchscreens() -> Vec<PathBuf> {
         if looks_like_touchscreen(&dev) {
             debug!(path = %path.display(), name = %dev.name().unwrap_or(""), "Found touchscreen");
             paths.push(path);
+        } else {
+            debug!(path = %path.display(), name = %dev.name().unwrap_or(""), "Not a direct touchscreen; skipping");
         }
     }
     paths
@@ -208,14 +267,20 @@ fn device_loop(
                     let moved = pending_x != last_x || pending_y != last_y;
 
                     if target_press && !pressed {
+                        let (x, y, x_extent, y_extent) = range.normalize(pending_x, pending_y);
                         let _ = tx.send(TouchUpdate::Down {
-                            x: pending_x,
-                            y: pending_y,
+                            x,
+                            y,
+                            x_extent,
+                            y_extent,
                         });
                     } else if target_press && pressed && moved {
+                        let (x, y, x_extent, y_extent) = range.normalize(pending_x, pending_y);
                         let _ = tx.send(TouchUpdate::Move {
-                            x: pending_x,
-                            y: pending_y,
+                            x,
+                            y,
+                            x_extent,
+                            y_extent,
                         });
                     } else if !target_press && pressed {
                         let _ = tx.send(TouchUpdate::Up);
@@ -296,19 +361,12 @@ fn main() -> Result<()> {
         ));
     }
 
-    // Per-device range used for normalizing pointer events. We pick the
-    // range from the first device that successfully opens; the kernel grab
-    // ensures the focused device's events are the only ones we handle.
-    let mut device_range: Option<DeviceRange> = None;
+    // Each reader normalizes against its own device's axis range before
+    // sending, so grabbing more than one device can't make one device's range
+    // govern another's coordinates.
     let (tx, rx) = mpsc::channel::<TouchUpdate>();
     let mut readers: Vec<thread::JoinHandle<()>> = Vec::new();
     for path in &device_paths {
-        if device_range.is_none()
-            && let Ok(dev) = Device::open(path)
-            && let Ok(range) = DeviceRange::from_device(&dev)
-        {
-            device_range = Some(range);
-        }
         match spawn_device_reader(path, tx.clone(), shutdown.clone()) {
             Ok(handle) => readers.push(handle),
             Err(e) => warn!(path = %path.display(), error = %e, "failed to start reader"),
@@ -330,14 +388,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let device_range = device_range.ok_or_else(|| anyhow!("no usable device range"))?;
-
     let mut sink = UinputSink::new_absolute().context("failed to create uinput pointer")?;
 
     info!("Touch-to-mouse bridge ready");
 
     let start = Instant::now();
-    run_main_loop(rx, &mut sink, device_range, start, &shutdown)?;
+    run_main_loop(rx, &mut sink, start, &shutdown)?;
 
     info!("Shutting down touch-to-mouse bridge");
     let _ = sink.flush();
@@ -364,7 +420,6 @@ fn run_grab_only_loop(rx: Receiver<TouchUpdate>, shutdown: &AtomicBool) {
 fn run_main_loop(
     rx: Receiver<TouchUpdate>,
     sink: &mut UinputSink,
-    range: DeviceRange,
     start: Instant,
     shutdown: &AtomicBool,
 ) -> Result<()> {
@@ -372,7 +427,7 @@ fn run_main_loop(
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(update) => {
                 let time = millis_since(start);
-                emit_update(sink, range, time, update);
+                emit_update(sink, time, update);
                 sink.flush()?;
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -387,16 +442,20 @@ fn run_main_loop(
     Ok(())
 }
 
-fn emit_update(sink: &mut UinputSink, range: DeviceRange, time: u32, update: TouchUpdate) {
+fn emit_update(sink: &mut UinputSink, time: u32, update: TouchUpdate) {
     match update {
-        TouchUpdate::Down { x, y } => {
-            let (nx, ny, xe, ye) = range.normalize(x, y);
+        TouchUpdate::Down {
+            x,
+            y,
+            x_extent,
+            y_extent,
+        } => {
             sink.dispatch(
                 OutputEvent::PointerMotionAbsolute {
-                    x: nx,
-                    y: ny,
-                    x_extent: xe,
-                    y_extent: ye,
+                    x,
+                    y,
+                    x_extent,
+                    y_extent,
                 },
                 time,
             );
@@ -409,14 +468,18 @@ fn emit_update(sink: &mut UinputSink, range: DeviceRange, time: u32, update: Tou
             );
             sink.frame();
         }
-        TouchUpdate::Move { x, y } => {
-            let (nx, ny, xe, ye) = range.normalize(x, y);
+        TouchUpdate::Move {
+            x,
+            y,
+            x_extent,
+            y_extent,
+        } => {
             sink.dispatch(
                 OutputEvent::PointerMotionAbsolute {
-                    x: nx,
-                    y: ny,
-                    x_extent: xe,
-                    y_extent: ye,
+                    x,
+                    y,
+                    x_extent,
+                    y_extent,
                 },
                 time,
             );
@@ -438,6 +501,112 @@ fn emit_update(sink: &mut UinputSink, range: DeviceRange, time: u32, update: Tou
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capability set that satisfies the button/axis test, so each case
+    /// below varies only the property bits that decide direct vs indirect.
+    fn caps() -> TouchCaps {
+        TouchCaps {
+            btn_touch: true,
+            abs_xy: true,
+            direct: false,
+            pointer: false,
+            tool_finger: false,
+        }
+    }
+
+    #[test]
+    fn direct_panel_is_a_touchscreen() {
+        // NVTK0603 panel on the Legion Go S: INPUT_PROP_DIRECT.
+        assert!(is_direct_touchscreen(TouchCaps {
+            direct: true,
+            ..caps()
+        }));
+    }
+
+    #[test]
+    fn panel_without_the_direct_property_is_still_a_touchscreen() {
+        // Claims neither INPUT_PROP_POINTER nor BTN_TOOL_FINGER, so there is
+        // nothing marking it indirect.
+        assert!(is_direct_touchscreen(caps()));
+    }
+
+    #[test]
+    fn clickpad_is_not_a_touchscreen() {
+        // The regression: the Legion Go S touchpad reports BTN_TOUCH and
+        // absolute X/Y, but is INPUT_PROP_POINTER | INPUT_PROP_BUTTONPAD.
+        assert!(!is_direct_touchscreen(TouchCaps {
+            pointer: true,
+            tool_finger: true,
+            ..caps()
+        }));
+    }
+
+    #[test]
+    fn touchpad_without_the_pointer_property_is_rejected_on_tool_finger() {
+        assert!(!is_direct_touchscreen(TouchCaps {
+            tool_finger: true,
+            ..caps()
+        }));
+    }
+
+    #[test]
+    fn direct_wins_over_the_indirect_hints() {
+        // A panel that sets DIRECT *and* reports BTN_TOOL_FINGER is still a
+        // touchscreen; DIRECT is the authoritative bit.
+        assert!(is_direct_touchscreen(TouchCaps {
+            direct: true,
+            tool_finger: true,
+            ..caps()
+        }));
+    }
+
+    #[test]
+    fn button_and_axis_bits_are_still_required() {
+        assert!(!is_direct_touchscreen(TouchCaps {
+            btn_touch: false,
+            direct: true,
+            ..caps()
+        }));
+        assert!(!is_direct_touchscreen(TouchCaps {
+            abs_xy: false,
+            direct: true,
+            ..caps()
+        }));
+    }
+
+    #[test]
+    fn each_device_normalizes_against_its_own_range() {
+        // Two grabbed devices with very different ranges: a 1920x1200 panel
+        // and a 400x400 clickpad. Before the fix a single shared range was
+        // applied to both, so the panel's coordinates were divided by 400 and
+        // clamped -- the top 400/1920 of the panel covered the whole screen.
+        let panel = DeviceRange {
+            x_min: 0,
+            x_max: 1920,
+            y_min: 0,
+            y_max: 1200,
+        };
+        let pad = DeviceRange {
+            x_min: 0,
+            x_max: 400,
+            y_min: 0,
+            y_max: 400,
+        };
+
+        // Mid-panel stays mid-range rather than saturating.
+        let (x, y, xe, ye) = panel.normalize(960, 600);
+        assert_eq!((x, xe), (960, 1920));
+        assert_eq!((y, ye), (600, 1200));
+
+        // The pad keeps its own, much smaller extent.
+        let (x, _, xe, _) = pad.normalize(200, 200);
+        assert_eq!((x, xe), (200, 400));
+
+        // The old behavior, for contrast: the panel's coordinate normalized
+        // against the pad's range saturates well before the panel's edge.
+        let (x, _, xe, _) = pad.normalize(960, 600);
+        assert_eq!((x, xe), (400, 400));
+    }
 
     #[test]
     fn normalize_axis_basic() {
