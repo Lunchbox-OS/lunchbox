@@ -26,7 +26,8 @@ source "$PACKAGE_LIB_DIR/version.sh"
 # System package conventions: a distro package installs under /usr, not the
 # /usr/local default used by a manual `shepherd install`.
 PACKAGE_PREFIX="/usr"
-PACKAGE_NAME="shepherd-launcher"
+# Single-sourced from install.sh, which this lib sources.
+PACKAGE_NAME="$DISTRO_PACKAGE_NAME"
 PACKAGE_MAINTAINER="Albert Armea <shepherd-launcher-patch@albertarmea.com>"
 # Where the package drops the example config + media library. A from-source
 # install copies these into the user's config dir from the repo (install_config);
