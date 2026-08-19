@@ -527,7 +527,12 @@ impl BleServer {
                 },
             };
             let Some(reason) = reason else { continue };
-            warn!(
+            // Info, not warn: on a box that suspends this is routine and
+            // it succeeds. Logging expected success at warning level is
+            // how a journal trains its readers to skim past warnings —
+            // and this project debugs from the journal. The failure path
+            // below is the part worth raising your voice about.
+            info!(
                 adapter = %adapter.name(),
                 reason,
                 "Re-registering the GATT application and advertisement",

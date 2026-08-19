@@ -16,6 +16,37 @@ Reported against `main` at e79d34a (0.3.5), i.e. after
 <2026-07-18 003 companion-ble-connection-audit-and-fixes.md> and the
 <2026-08-10 002 ble-management-stress-test.md> follow-ups.
 
+## Where this ended up (read this first)
+
+The note below is chronological, and several of its middle sections
+describe things later ones undo. The state it settled in:
+
+- **The device pins the paired phone to the BR/EDR bearer**
+  (`Device1.PreferredBearer = "bredr"`), which stops BlueZ arming the
+  kernel to auto-connect it over LE. That was the whole bug: a link the
+  device originates makes the device *central*, and only a central can
+  start encryption, so the phone could never encrypt and every read
+  failed on a link that never dropped. Pinned per peer, at startup and on
+  each connect.
+- **The property is experimental upstream**, so a system install ships
+  `dist/systemd/10-shepherd-bluetooth-experimental.conf` to run
+  `bluetoothd -E`. Without it shepherd still runs: it logs how to enable
+  the property and falls back to dropping unusable links.
+- **The service goes back on air after a controller power cycle *or* a
+  resume** — two independent triggers, because a suspend does not always
+  move `Adapter1.Powered`.
+- **The first-RPC watchdog reports; it does not evict** — except as a
+  gated fallback where the bearer could not be pinned. It once hung up on
+  a Numeric Comparison window and made pairing impossible.
+- **The pairing agent retries and the server survives without one**,
+  rather than taking the transport down over a transient D-Bus timeout.
+- **The outboxes are wiped when a peer connects**, not shipped to it. The
+  companion discards that drain anyway, and carrying it cost seconds on
+  every reconnect.
+
+Companion-side (merged earlier, PR #130): the connect loop keeps retrying
+after it gives up, and a reconnect no longer blanks the cached state.
+
 ## What the message actually means
 
 `"Can't reach this device securely"` is `LinkStatus.RepairSuggested`
@@ -781,6 +812,39 @@ startup, session connects and runs, no eviction. With `Experimental =
 true`: `Pinned peer to the BR/EDR bearer …`, no warnings, and
 `PreferredBearer=bredr` in the bond file afterwards. The box was restored
 to its original configuration after the test.
+
+## 2026-08-18: three defects the first good logs exposed
+
+The run worked end to end — suspend/wake on both sides, close/reopen,
+backgrounding — which is exactly why the logs were worth reading closely.
+
+- **The bearer pin was tracked by one flag**, so the first peer to
+  succeed suppressed every attempt after it. The box enumerated a stale
+  object (`E7:96:…`) before the phone, and only because that one *failed*
+  did the phone get pinned. Reverse the order and the phone is skipped,
+  the kernel keeps dialling it, and the journal says "Pinned peer" about
+  a different device. Now keyed by address.
+- **Every event was handled twice** — 22 connect lines for 11 connects.
+  Tagging the watcher task showed a single instance logging each
+  transition twice, so BlueZ (or bluer's subscription) double-delivers;
+  it was never two watchers. The watcher now acts on transitions. Watcher
+  `JoinHandle`s are also tracked and aborted on `DeviceRemoved`, which
+  does not fix the duplication but closes a real leak.
+- **The startup sweep cried wolf**, warning about stale objects that
+  never connect, immediately before the admin phone pinned fine. Sweep
+  failures are `debug`; the warning is reserved for a peer that has
+  actually connected.
+
+### Reconnect latency was the outbox, not the radio
+
+From the Minecraft stress test: an empty outbox reconnected in 1.4–1.8 s,
+~4 KiB of queued events took 3.1–3.3 s. Reads are capped at 512 bytes and
+cost a round trip each, and the companion drains fully before its first
+RPC — while *discarding* everything it drains and then asking for a fresh
+snapshot. Clearing the outboxes on connect (alignment-checked, so a drain
+in flight is never cut mid-frame) put backlogged reconnects on the
+no-backlog floor: 5.35 s → 2.04 s on an identical 13-frame backlog,
+against a 2.06 s control.
 
 ## What to capture on the box when it happens again
 
