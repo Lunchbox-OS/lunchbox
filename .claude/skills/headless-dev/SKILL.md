@@ -162,6 +162,15 @@ Example (bedtime restriction):
   it derived from the new pid: "Headless Sway did not answer IPC within 10s"
   while a perfectly healthy stack is running. `dev stop` first, or delete the
   file (and `unset SWAYSOCK`) before `dev headless`.
+  **`dev stop` will not save you here**: it reads the stale pid, says "No live
+  headless session to stop", and exits — so the orphaned stack keeps running and
+  the *next* boot fails the same way, this time as a bare
+  "[ERROR] Failed to start headless session" with a fully working daemon behind
+  it. If `dev stop` denies there is a session while `pgrep -f sway.headless.conf`
+  finds one, kill that pid directly, `rm dev-runtime/headless/session.env`, and
+  boot again. Also note that killing shepherdd runs `kill_by_command` on the way
+  down, which kills every `sleep` you own — a driver command containing one dies
+  with exit 144 alongside it.
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
   `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
