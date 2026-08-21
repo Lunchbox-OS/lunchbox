@@ -23,7 +23,8 @@ use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
     build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name, pid_is_live, steam_webhelper_running,
+    kill_steam_game_processes, make_scope_name, pgid_is_live, pid_is_live, signal_group,
+    steam_webhelper_running,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -348,7 +349,12 @@ impl LinuxHost {
     ///
     /// For Steam the process we spawned is only the `rungameid` request, which
     /// exits immediately, so liveness is the game's own pids instead.
-    fn activity_is_running(pid: u32, session_info: &Option<SessionInfo>, is_steam: bool) -> bool {
+    fn activity_is_running(
+        pid: u32,
+        pgid: u32,
+        session_info: &Option<SessionInfo>,
+        is_steam: bool,
+    ) -> bool {
         if is_steam {
             return session_info
                 .as_ref()
@@ -356,7 +362,10 @@ impl LinuxHost {
                 .map(|id| !find_steam_game_pids(id).is_empty())
                 .unwrap_or(false);
         }
-        pid_is_live(pid)
+        // The group as well as the pid: a launcher script that execs and exits
+        // leaves the real activity behind in the same group, and calling that
+        // a clean exit is how an activity ends up unsupervised.
+        pid_is_live(pid) || pgid_is_live(pgid)
     }
 
     /// Wait for a kill to actually take.
@@ -369,12 +378,13 @@ impl LinuxHost {
         &self,
         session_id: &SessionId,
         pid: u32,
+        pgid: u32,
         session_info: &Option<SessionInfo>,
         is_steam: bool,
     ) -> HostResult<()> {
         let deadline = std::time::Instant::now() + KILL_CONFIRM_WINDOW;
         loop {
-            if !Self::activity_is_running(pid, session_info, is_steam) {
+            if !Self::activity_is_running(pid, pgid, session_info, is_steam) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -398,6 +408,32 @@ impl LinuxHost {
         self.session_info.lock().unwrap().remove(session_id);
     }
 
+    /// Finish an activity's exit: reap its sidecars, wipe an ephemeral browser
+    /// profile, and tell the engine.
+    fn finish_exit(
+        pid: u32,
+        pgid: u32,
+        status: ExitStatus,
+        sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+        profile_wipes: &Arc<Mutex<HashMap<u32, PathBuf>>>,
+        event_tx: &mpsc::UnboundedSender<HostEvent>,
+    ) {
+        info!(pid, pgid, status = ?status, "Activity exited - sending HostEvent::Exited");
+
+        reap_sidecars(sidecars, pid);
+
+        // Wipe an ephemeral browser profile now that the activity (and, for
+        // flatpak, its Chrome instance) is fully gone.
+        if let Some(dir) = profile_wipes.lock().unwrap().remove(&pid) {
+            crate::browser::wipe_profile_dir(&dir);
+        }
+
+        // The session id is unknown here; the engine matches on the payload.
+        let handle =
+            HostSessionHandle::new(SessionId::new(), HostHandlePayload::Linux { pid, pgid });
+        let _ = event_tx.send(HostEvent::Exited { handle, status });
+    }
+
     /// Start the background process monitor
     pub fn start_monitor(&self) -> tokio::task::JoinHandle<()> {
         let processes = self.processes.clone();
@@ -408,6 +444,9 @@ impl LinuxHost {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
+            // Activities whose spawned process is reaped but whose process
+            // group still has members. Keyed by the spawned pid.
+            let mut winding_down: HashMap<u32, (u32, ExitStatus)> = HashMap::new();
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -446,24 +485,39 @@ impl LinuxHost {
                         steam_preload_pids.lock().unwrap().remove(&pid);
                         continue;
                     }
-                    info!(pid = pid, pgid = pgid, status = ?status, "Process exited - sending HostEvent::Exited");
 
-                    reap_sidecars(&sidecars, pid);
-
-                    // Wipe an ephemeral browser profile now that the activity
-                    // (and, for flatpak, its Chrome instance) is fully gone.
-                    if let Some(dir) = profile_wipes.lock().unwrap().remove(&pid) {
-                        crate::browser::wipe_profile_dir(&dir);
+                    // The process we spawned is not always the activity. A
+                    // launcher script that backgrounds the real program and
+                    // exits is reaped here within milliseconds while the
+                    // window stays on screen — and calling that "exited" ends
+                    // the session under a running activity, which is the
+                    // supervision escape from the other direction (issue #136).
+                    // Wait for the whole process group instead.
+                    if pgid_is_live(pgid) {
+                        info!(
+                            pid = pid,
+                            pgid = pgid,
+                            status = ?status,
+                            "Spawned process exited but its process group is still alive; \
+                             holding the session"
+                        );
+                        winding_down.insert(pid, (pgid, status));
+                        continue;
                     }
 
-                    // We don't have the session_id here, so we use a placeholder
-                    // The service should track the mapping
-                    let handle = HostSessionHandle::new(
-                        SessionId::new(), // This will be matched by PID
-                        HostHandlePayload::Linux { pid, pgid },
-                    );
+                    Self::finish_exit(pid, pgid, status, &sidecars, &profile_wipes, &event_tx);
+                }
 
-                    let _ = event_tx.send(HostEvent::Exited { handle, status });
+                // Sessions whose direct child was reaped but whose group had
+                // survivors: end them only once the group is genuinely empty.
+                let settled: Vec<(u32, u32, ExitStatus)> = winding_down
+                    .iter()
+                    .filter(|(_, (pgid, _))| !pgid_is_live(*pgid))
+                    .map(|(pid, (pgid, status))| (*pid, *pgid, status.clone()))
+                    .collect();
+                for (pid, pgid, status) in settled {
+                    winding_down.remove(&pid);
+                    Self::finish_exit(pid, pgid, status, &sidecars, &profile_wipes, &event_tx);
                 }
 
                 // Track Steam sessions by Steam App ID instead of process exit
@@ -879,7 +933,7 @@ impl HostAdapter for LinuxHost {
 
     async fn stop(&self, handle: &HostSessionHandle, mode: StopMode) -> HostResult<()> {
         let session_id = handle.session_id.clone();
-        let (pid, _pgid) = match handle.payload() {
+        let (pid, pgid) = match handle.payload() {
             HostHandlePayload::Linux { pid, pgid } => (*pid, *pgid),
             _ => return Err(HostError::SessionNotFound),
         };
@@ -928,6 +982,11 @@ impl HostAdapter for LinuxHost {
                     .and_then(|info| info.steam_app_id)
                     .is_some();
                 if !is_steam {
+                    // Signal the group from the handle rather than only through
+                    // `ManagedProcess`: once the spawned process is reaped its
+                    // entry is gone, and with it the only path that reached a
+                    // descendant still holding the screen.
+                    signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
                     let procs = self.processes.lock().unwrap();
                     if let Some(p) = procs.get(&pid) {
                         let _ = p.terminate();
@@ -966,17 +1025,18 @@ impl HostAdapter for LinuxHost {
 
                         // Also force kill via process handle (skip for Steam sessions)
                         if !is_steam {
+                            signal_group(pgid, nix::sys::signal::Signal::SIGKILL);
                             let procs = self.processes.lock().unwrap();
                             if let Some(p) = procs.get(&pid) {
                                 let _ = p.kill();
                             }
                         }
-                        self.confirm_stopped(&session_id, pid, &session_info, is_steam)
+                        self.confirm_stopped(&session_id, pid, pgid, &session_info, is_steam)
                             .await?;
                         break;
                     }
 
-                    if !Self::activity_is_running(pid, &session_info, is_steam) {
+                    if !Self::activity_is_running(pid, pgid, &session_info, is_steam) {
                         break;
                     }
 
@@ -1014,6 +1074,7 @@ impl HostAdapter for LinuxHost {
                     .and_then(|info| info.steam_app_id)
                     .is_some();
                 if !is_steam {
+                    signal_group(pgid, nix::sys::signal::Signal::SIGKILL);
                     let procs = self.processes.lock().unwrap();
                     if let Some(p) = procs.get(&pid) {
                         let _ = p.kill();
@@ -1022,7 +1083,7 @@ impl HostAdapter for LinuxHost {
 
                 // Same confirmation as the graceful path: a force stop that
                 // left the activity running must say so.
-                self.confirm_stopped(&session_id, pid, &session_info, is_steam)
+                self.confirm_stopped(&session_id, pid, pgid, &session_info, is_steam)
                     .await?;
             }
         }

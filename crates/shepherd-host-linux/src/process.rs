@@ -619,6 +619,47 @@ pub fn pid_is_live(pid: u32) -> bool {
     !matches!(after_comm.split_whitespace().next(), Some("Z") | None)
 }
 
+/// Whether any process in the group `pgid` is still running.
+///
+/// The tracked pid is only the activity's *direct* child. Plenty of activities
+/// outlive it — a launcher script that execs and exits, a program that forks a
+/// worker — and those descendants stay in the process group unless they call
+/// `setsid`. Checking the group as well as the pid keeps a stop from declaring
+/// success while the thing the child is looking at is still on screen.
+pub fn pgid_is_live(pgid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if !pid_is_live(pid) {
+            continue;
+        }
+        if nix::unistd::getpgid(Some(Pid::from_raw(pid as i32)))
+            .is_ok_and(|g| g.as_raw() as u32 == pgid)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Signal every process in the group `pgid`.
+///
+/// Kept separate from [`ManagedProcess::terminate`] because that requires the
+/// spawned process to still be tracked. It very often is not: the moment the
+/// direct child is reaped its entry is dropped, and a descendant still holding
+/// the screen becomes unreachable through it.
+pub fn signal_group(pgid: u32, signal: Signal) {
+    match signal::kill(Pid::from_raw(-(pgid as i32)), signal) {
+        Ok(()) => debug!(pgid, ?signal, "Signalled process group"),
+        Err(nix::errno::Errno::ESRCH) => {}
+        Err(e) => debug!(pgid, ?signal, error = %e, "Failed to signal process group"),
+    }
+}
+
 /// Kill processes by command name using pkill
 pub fn kill_by_command(command_name: &str, signal: Signal) -> bool {
     let signal_name = match signal {
@@ -1164,5 +1205,38 @@ mod tests {
 
         // A pid that cannot exist.
         assert!(!pid_is_live(u32::MAX));
+    }
+
+    /// A launcher script that backgrounds the real activity and exits leaves
+    /// its child in the same process group. Treating the script's exit as the
+    /// activity's is how a session ends under a running window (issue #136).
+    #[test]
+    fn pgid_is_live_sees_a_survivor_after_the_group_leader_exits() {
+        // setsid gives the shell its own group; the backgrounded sleep-alike
+        // inherits it and outlives the shell.
+        let mut leader = Command::new("setsid")
+            .args(["sh", "-c", "tail -f /dev/null & exit 0"])
+            .spawn()
+            .expect("spawn group leader");
+        let pgid = leader.id();
+        let _ = leader.wait();
+
+        assert!(!pid_is_live(pgid), "the group leader itself has exited");
+        assert!(
+            pgid_is_live(pgid),
+            "but its group still has a member, so the activity is still running"
+        );
+
+        signal_group(pgid, Signal::SIGKILL);
+        for _ in 0..200 {
+            if !pgid_is_live(pgid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !pgid_is_live(pgid),
+            "signalling the group must reach the survivor"
+        );
     }
 }
