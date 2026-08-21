@@ -240,6 +240,26 @@ the artifact is missing; pass `--wasm` to the latter to force a rebuild after
 changing the crate. `src/config/wasm/` is generated and gitignored;
 `npm run typecheck` needs it to exist.
 
+#### Hosting
+
+The standalone bundle is published to Cloudflare Pages at
+<https://shepherd.armeafamily.com>, from the `config-editor` job in
+[`release.yml`](.github/workflows/release.yml). It deploys on `vX.Y.Z` tags
+rather than on every push to main, so the hosted editor matches the last
+released shepherd — it renders a `config_version` that ships with the daemon,
+and an editor ahead of the release would offer fields the installed version
+cannot read. Prerelease tags (`v0.4.0-rc1`) are skipped.
+
+Direct Upload, so Cloudflare needs no access to the repo. Two secrets:
+`CLOUDFLARE_API_TOKEN` (with the "Cloudflare Pages: Edit" permission) and
+`CLOUDFLARE_ACCOUNT_ID`.
+
+The bundle needs nothing unusual from a host — no rewrite rules, since the
+editor has no router; no COOP/COEP, since there are no threads. Two things do
+matter if you ever serve it elsewhere: `application/wasm` for `.wasm` (a
+mismatch falls back to a slower non-streaming load rather than breaking), and a
+`script-src` that permits `'wasm-unsafe-eval'`.
+
 Two rules keep the split working, both enforced:
 
 * **`src/config/` must not import `src/api/`**, axios, or react-query — the
