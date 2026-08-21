@@ -26,6 +26,24 @@ import { AdminPage } from "./pages/AdminPage";
 import { WindowsPage } from "./pages/WindowsPage";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 
+// The config editor (src/config/) is deliberately NOT routed from here.
+//
+// Its only ConfigSource is FileConfigSource, which edits a file on whatever
+// computer is doing the browsing. In this device's own management UI a "Config"
+// tab reads as "edit this device's configuration", which it would not be. Until
+// DeviceConfigSource exists there is nothing honest for the tab to do.
+//
+// That waits on privilege separation in shepherd-http: a config write is an
+// arbitrary-code-execution primitive (`kind = { type = "process", command =
+// ... }` runs whatever it is given), and today one blanket auth layer covers
+// all of /api/v1, so any token that can read usage stats could call it.
+//
+// To bring it back, add a `config` page here behind `React.lazy(() =>
+// import("./config/ConfigApp"))` and give ConfigDocProvider a
+// DeviceConfigSource. The editor itself needs no changes. Leaving it unrouted
+// also keeps its chunks and its ~800 kB wasm validator out of dist/, and so out
+// of the daemon binary that rust-embed builds from it.
+
 type Page = "dashboard" | "entries" | "usage" | "admin" | "health" | "windows";
 
 const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [

@@ -150,6 +150,15 @@ The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
 
+Unit tests, typechecking and the import boundary check:
+
+```sh
+cd shepherd-webui
+npm test             # vitest, for the pure logic (day masks, durations)
+npm run typecheck    # tsc --noEmit
+npm run check:boundary
+```
+
 ### Generated client types
 
 The payload types both clients use are **generated** from the Rust definitions,
@@ -182,6 +191,66 @@ tests therefore needs `cargo test --workspace` (which is what CI runs); a bare
 `shepherd-webui/src/api/types.ts` re-exports the generated types and keeps only
 the presentation helpers, so the rest of the UI still imports wire shapes from
 one place.
+
+### Config editor
+
+A graphical editor for `config.toml` lives in
+[`shepherd-webui/src/config/`](shepherd-webui/src/config/) and builds two ways
+from one source:
+
+| Target | Build | Output |
+|---|---|---|
+| Standalone static site | `shepherd build config-editor` | `dist-standalone/`, for a static host |
+| Embedded in shepherdd | `npm run build` | `dist/` — the management UI, which does **not** route to the editor today |
+
+The editor is not reachable from the management UI yet, and `src/App.tsx` says
+why at the point where the route would go. Its only `ConfigSource` reads and
+writes files on whatever computer is doing the browsing, so a "Config" tab in a
+device's own web UI would read as "edit this device's configuration" while doing
+nothing of the sort. That waits on a `DeviceConfigSource`, which waits on
+privilege separation in `shepherd-http` — a config write runs arbitrary commands,
+and one blanket auth layer currently covers all of `/api/v1`.
+
+Leaving it unrouted also keeps the editor's chunks and its ~800 kB wasm
+validator out of `dist/`, and so out of the binary `rust-embed` builds from it.
+
+The two **must** write different directories — anything left in `dist/` is
+compiled into the daemon binary by `rust-embed`. `rsbuild.config.ts` switches on
+`SHEPHERD_UI_TARGET`, and `output.distPath` is resolved relative to the working
+directory, so always run the npm scripts from inside `shepherd-webui/`.
+
+The editor validates with the daemon's own parser, compiled to WebAssembly from
+[`crates/shepherd-config-wasm`](crates/shepherd-config-wasm/), rather than a
+TypeScript reimplementation of `validation.rs`. That crate also holds the
+`toml_edit` document model that makes editing comment-preserving. Build the wasm
+artifact before the npm build:
+
+```sh
+./scripts/shepherd build config-wasm   # wasm-pack -> src/config/wasm/
+```
+
+`shepherd build config-editor` does this for you. `src/config/wasm/` is generated
+and gitignored; `npm run typecheck` needs it to exist.
+
+Two rules keep the split working, both enforced:
+
+* **`src/config/` must not import `src/api/`**, axios, or react-query — the
+  standalone bundle has no daemon to talk to. Genuinely shared code goes in
+  `src/shared/`. Checked by `npm run check:boundary`.
+* **The TypeScript mirrors of the config schema are generated**, by
+  `cargo run -p shepherd-wire-codegen --bin rpc-codegen`, into
+  `src/config/model/config.generated.ts`. A drift test fails CI if the
+  checked-in copy goes stale.
+
+The document model is plain Rust with strings on its edges, so it tests
+natively without a browser:
+
+```sh
+cargo test -p shepherd-config-wasm
+```
+
+`crates/shepherd-config-wasm/tests/preservation.rs` is the suite that matters:
+it holds the line on editing `config.example.toml` without disturbing a comment.
 
 ### Android companion app
 
@@ -271,7 +340,6 @@ Bump every version at once:
 Then commit `VERSION`, `Cargo.toml`, `Cargo.lock`, and
 `shepherd-webui/package*.json` together. CI runs `shepherd version check` to
 fail the build if any literal is edited by hand and drifts out of sync.
-
 
 ## Contribution guidelines
 

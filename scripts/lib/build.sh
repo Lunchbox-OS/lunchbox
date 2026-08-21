@@ -112,6 +112,30 @@ build_webui() {
     cd "$repo_root" || die "Failed to return to repo root"
 }
 
+# Build the standalone config editor bundle for static hosting. Separate from
+# build_webui because it writes a different directory: `dist/` is what
+# rust-embed compiles into shepherdd, and the standalone bundle must not land
+# there.
+build_config_editor() {
+    local repo_root
+    repo_root="$(get_repo_root)"
+    local webui_dir="$repo_root/shepherd-webui"
+
+    require_command npm
+
+    build_config_wasm
+
+    info "Building standalone config editor..."
+    cd "$webui_dir" || die "Failed to change directory to $webui_dir"
+    if [[ ! -d node_modules ]]; then
+        info "Installing npm dependencies..."
+        npm install
+    fi
+    npm run build:standalone
+    success "Config editor built (shepherd-webui/dist-standalone/)"
+    cd "$repo_root" || die "Failed to return to repo root"
+}
+
 # Build the project
 build_cargo() {
     local release="${1:-false}"
@@ -180,6 +204,13 @@ build_main() {
                 build_clean
                 return
                 ;;
+            config-editor)
+                # The standalone static bundle. Not part of the normal build:
+                # `dist/` is what ships inside shepherdd, and this writes
+                # `dist-standalone/` for a static host instead.
+                build_config_editor
+                return
+                ;;
             config-wasm)
                 build_config_wasm
                 return
@@ -191,6 +222,7 @@ Usage: shepherd build [OPTIONS]
 Options:
     --release, -r    Build in release mode (optimized)
     clean            Clean build artifacts
+    config-editor    Build the standalone config editor into dist-standalone/
     config-wasm      Build only the config editor's wasm validator
     help             Show this help
 
@@ -198,6 +230,7 @@ Examples:
     shepherd build                  # Debug build
     shepherd build --release        # Release build
     shepherd build clean            # Clean artifacts
+    shepherd build config-editor    # Static bundle for a web host
 EOF
                 return
                 ;;
