@@ -191,6 +191,26 @@ impl LauncherApp {
         let state_clone = state.clone();
         let rt = runtime.clone();
         grid.connect_launch(move |entry_id| {
+            // Only act while the grid is what the child is actually looking
+            // at. Every input path funnels through here — keyboard, pointer
+            // and the evdev-polled gamepad — so this is the one place that
+            // covers them all.
+            //
+            // Without it, a press aimed at a running activity reaches the grid
+            // behind it and starts something unintended. That is what happened
+            // on 2026-08-20 (issue #136): a close that took 5s to complete left
+            // a stale grid under the child's thumb, and their second press
+            // launched Bitwig Studio.
+            let current = state_clone.get();
+            if !matches!(current, LauncherState::Idle { .. }) {
+                debug!(
+                    entry_id = %entry_id,
+                    state = ?std::mem::discriminant(&current),
+                    "Ignoring launch: the grid is not the active view"
+                );
+                return;
+            }
+
             info!(entry_id = %entry_id, "Launch requested");
             state_clone.set(LauncherState::Launching {
                 entry_id: entry_id.to_string(),
@@ -465,11 +485,23 @@ impl LauncherApp {
                 return glib::ControlFlow::Break;
             };
 
+            // Gamepads are read straight from evdev via gilrs, so — unlike the
+            // keyboard — these presses do not go through the compositor and
+            // are not gated by which surface has focus. The grid must
+            // therefore gate on its own state, or a press meant for a running
+            // activity acts on the tile that happens to be selected behind it
+            // (issue #136). Nav is harmless, but only act at all while we are
+            // actually showing the grid.
+            let showing_grid = matches!(state_clone.get(), LauncherState::Idle { .. });
+
             // Drain button events. Drop axis events on the floor — we poll
             // the stick directly below so we can drive auto-repeat from the
             // timer rather than depending on AxisChanged deltas.
             while let Some(event) = gilrs.next_event() {
                 if let gilrs::EventType::ButtonPressed(button, _) = event.event {
+                    if !showing_grid && button != gilrs::Button::Mode {
+                        continue;
+                    }
                     match button {
                         gilrs::Button::DPadUp => grid.move_selection(0, -1),
                         gilrs::Button::DPadDown => grid.move_selection(0, 1),
@@ -493,6 +525,9 @@ impl LauncherApp {
             // Left stick: shared analog-nav logic with shepherd-media so the
             // two launcher UIs feel identical (deadzone crossing fires once,
             // then waits, then auto-repeats).
+            if !showing_grid {
+                return glib::ControlFlow::Continue;
+            }
             if let Some((_id, gp)) = gilrs.gamepads().next() {
                 let x = gp.value(gilrs::Axis::LeftStickX);
                 let y = gp.value(gilrs::Axis::LeftStickY);
