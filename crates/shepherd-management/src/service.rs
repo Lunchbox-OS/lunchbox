@@ -331,7 +331,7 @@ impl ManagementService for DefaultManagementService {
 
         let Some(kind) = entry_kind else {
             let mut eng = self.engine.lock().await;
-            eng.notify_session_exited(Some(-1), now_mono, now);
+            eng.end_current_session(Some(-1), now_mono, now);
             return Err(ManagementError::NotFound("Entry not found".into()));
         };
 
@@ -370,7 +370,7 @@ impl ManagementService for DefaultManagementService {
                 self.hidpi.restore().await;
                 let snap = {
                     let mut eng = self.engine.lock().await;
-                    eng.notify_session_exited(Some(-1), now_mono, now);
+                    eng.end_current_session(Some(-1), now_mono, now);
                     eng.get_state()
                 };
                 (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));

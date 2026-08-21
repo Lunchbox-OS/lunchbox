@@ -911,14 +911,19 @@ impl Service {
                     "Host process exited - will end session"
                 );
 
+                // Matched against the current session by handle payload: the
+                // monitor cannot know the session id, so it reports a
+                // fabricated one. An unmatched exit belongs to a previous
+                // activity whose reap is only surfacing now, and must not end
+                // whatever session replaced it (issue #136).
                 let core_event = {
                     let mut engine = engine.lock().await;
-                    engine.notify_session_exited(status.code, now_mono, now)
+                    engine.notify_activity_exited(&handle, status.code, now_mono, now)
                 };
 
                 info!(
                     has_event = core_event.is_some(),
-                    "notify_session_exited result"
+                    "notify_activity_exited result"
                 );
 
                 if let Some(CoreEvent::SessionEnded {

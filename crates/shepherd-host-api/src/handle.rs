@@ -30,7 +30,11 @@ impl HostSessionHandle {
 }
 
 /// Platform-specific handle payload
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Compared by value to decide whether a [`crate::HostEvent::Exited`] belongs
+/// to a given session: the process monitor has no session id to report, so the
+/// payload is the only reliable identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "platform", rename_all = "snake_case")]
 pub enum HostHandlePayload {
     /// Linux: process group ID

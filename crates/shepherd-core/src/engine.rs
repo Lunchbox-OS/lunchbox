@@ -1201,8 +1201,42 @@ impl CoreEngine {
         events
     }
 
-    /// Notify that a session has exited
-    pub fn notify_session_exited(
+    /// Notify that the activity behind `handle` has exited.
+    ///
+    /// Returns `None` — leaving the current session untouched — when the exit
+    /// belongs to something else. The process monitor reports exits with a
+    /// fabricated session id and identifies the activity only by handle
+    /// payload, so without this check a late reap from a *previous* activity
+    /// ends whichever session happens to be current (issue #136: RetroArch's
+    /// SIGKILL exit arrived 24ms after Bitwig's session started and ended
+    /// Bitwig instead, at `duration 0s`).
+    pub fn notify_activity_exited(
+        &mut self,
+        handle: &HostSessionHandle,
+        exit_code: Option<i32>,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) -> Option<CoreEvent> {
+        match self.current_session.as_ref() {
+            Some(session) if session.owns_handle(handle) => {}
+            Some(session) => {
+                debug!(
+                    current_session = %session.plan.session_id,
+                    exited = ?handle.payload(),
+                    "Ignoring exit for an activity that is not the current session"
+                );
+                return None;
+            }
+            None => return None,
+        }
+        self.end_current_session(exit_code, now_mono, now)
+    }
+
+    /// End the current session without a host handle to match against.
+    ///
+    /// For paths where the engine itself knows the activity is gone — a spawn
+    /// that never produced a process, or a stop the host has confirmed.
+    pub fn end_current_session(
         &mut self,
         exit_code: Option<i32>,
         now_mono: MonotonicInstant,
@@ -2414,7 +2448,7 @@ mod tests {
         };
         let started = MonotonicInstant::now();
         engine.start_session(plan, now, started);
-        engine.notify_session_exited(Some(0), started + duration, now);
+        engine.end_current_session(Some(0), started + duration, now);
     }
 
     fn balance_of(engine: &CoreEngine, id: &str, now: DateTime<Local>) -> Duration {

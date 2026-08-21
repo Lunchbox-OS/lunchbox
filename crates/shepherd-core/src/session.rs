@@ -92,6 +92,19 @@ impl ActiveSession {
         }
     }
 
+    /// Whether this exit event describes *this* session's activity.
+    ///
+    /// The process monitor cannot know the session id, so it fabricates one
+    /// and identifies the activity by handle payload (pid/pgid on Linux).
+    /// Matching on the payload is therefore the only sound check — and not
+    /// doing it is what let a dead activity's late reap end the session that
+    /// had already replaced it (issue #136).
+    pub fn owns_handle(&self, handle: &HostSessionHandle) -> bool {
+        self.host_handle
+            .as_ref()
+            .is_some_and(|own| own.payload() == handle.payload())
+    }
+
     /// Attach the host handle once spawn succeeds
     pub fn attach_handle(&mut self, handle: HostSessionHandle) {
         self.host_handle = Some(handle);
