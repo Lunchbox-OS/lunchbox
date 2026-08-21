@@ -67,6 +67,13 @@ fn codegen_outputs_match_checked_in() {
             "shepherd-webui/src/api/wire-types.generated.ts",
             "wire-types.generated.ts",
         ),
+        // The config editor's mirrors of the `Raw*` types. Same reasoning: a
+        // field added to `schema.rs` that the editor never renders is a field
+        // nobody can set, and only a generated mirror makes that visible.
+        (
+            "shepherd-webui/src/config/model/config.generated.ts",
+            "config.generated.ts",
+        ),
     ];
 
     for (checked_in, temp_name) in files {

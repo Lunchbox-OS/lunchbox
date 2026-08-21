@@ -9,6 +9,8 @@
 //!   — typed method-name constants for the Kotlin companion. Kills
 //!   the raw method-name string literals scattered through
 //!   `ManagementClient.kt`.
+//! - `shepherd-webui/src/config/model/config.generated.ts` — TypeScript
+//!   mirrors of the `config.toml` schema, for the config editor.
 //! - `shepherd-webui/src/api/rpc-methods.generated.ts` — the same
 //!   for the TypeScript web UI: a union type of all method names
 //!   plus a per-method result-type helper.
@@ -63,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 5] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 6] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
@@ -72,6 +74,7 @@ fn main() -> anyhow::Result<()> {
             (base.join("rpc-methods.generated.ts"), render_ts(&schema)),
             (base.join("WireTypes.generated.kt"), render_wire_types()),
             (base.join("wire-types.generated.ts"), render_wire_types_ts()),
+            (base.join("config.generated.ts"), render_config_types()),
         ]
     } else {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -101,6 +104,10 @@ fn main() -> anyhow::Result<()> {
                 repo.join("shepherd-webui/src/api/wire-types.generated.ts"),
                 render_wire_types_ts(),
             ),
+            (
+                repo.join("shepherd-webui/src/config/model/config.generated.ts"),
+                render_config_types(),
+            ),
         ]
     };
 
@@ -116,6 +123,11 @@ fn main() -> anyhow::Result<()> {
 fn render_wire_types_ts() -> String {
     let schema = shepherd_wire_codegen::wire_schema::wire_schema();
     shepherd_wire_codegen::ts_types::render(&schema)
+}
+
+/// TypeScript mirrors of the config schema, for the web config editor.
+fn render_config_types() -> String {
+    shepherd_wire_codegen::config_ts::render_config_types()
 }
 
 /// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.

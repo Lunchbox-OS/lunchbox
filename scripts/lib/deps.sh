@@ -56,6 +56,14 @@ ANDROID_NDK_VERSION="27.2.12479018"
 # own. It bridges the Rust targets above to $ANDROID_NDK_VERSION's
 # clang/sysroot, so bump it deliberately, alongside the NDK.
 CARGO_NDK_VERSION="4.1.2"
+
+# wasm-pack builds crates/shepherd-config-wasm into the browser artifact the
+# web config editor loads. Pinned for the same reason as the tools above: an
+# unpinned installer silently adopts whatever upstream published last, and the
+# generated JS glue has to match the `wasm-bindgen` version the crate compiles
+# against. Installed from the upstream release binary rather than
+# `cargo install`, which takes minutes to build from source.
+WASM_PACK_VERSION="0.13.1"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
 # Rust targets cargo-ndk cross-compiles the shepherd-media-android cdylib for:
@@ -153,6 +161,40 @@ install_bpf_toolchain() {
         # unpinned bpf-linker itself did. No LLVM_* variable is set on
         # purpose — see BPF_LINKER_VERSION; this build links rustc's LLVM.
         cargo install bpf-linker --version "$BPF_LINKER_VERSION" --locked --force
+    fi
+}
+
+# Install the wasm toolchain the web config editor's validator needs: the
+# wasm32 target and a pinned wasm-pack. Idempotent — each step skips when
+# already satisfied.
+install_wasm_toolchain() {
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env" 2>/dev/null || true
+
+    if ! command_exists rustup; then
+        die "rustup not on PATH; install_rust must succeed before install_wasm_toolchain"
+    fi
+
+    if rustup target list --installed 2>/dev/null | grep -qx "wasm32-unknown-unknown"; then
+        info "wasm32-unknown-unknown target already installed"
+    else
+        info "Installing wasm32-unknown-unknown target..."
+        rustup target add wasm32-unknown-unknown
+    fi
+
+    # Same guarded probe as bpf-linker: under `set -euo pipefail` a missing
+    # command would otherwise return 127 and kill the whole install.
+    local installed=""
+    if command_exists wasm-pack; then
+        installed="$(wasm-pack --version 2>/dev/null | awk '{print $2}' || true)"
+    fi
+    if [[ "$installed" == "$WASM_PACK_VERSION" ]]; then
+        info "wasm-pack $WASM_PACK_VERSION already installed"
+    else
+        info "Installing wasm-pack $WASM_PACK_VERSION..."
+        curl --proto '=https' --tlsv1.2 -sSf \
+            "https://rustwasm.github.io/wasm-pack/installer/init.sh" \
+            | sh -s -- --version "$WASM_PACK_VERSION"
     fi
 }
 
@@ -362,6 +404,7 @@ deps_install() {
     if [[ "$set_name" == "build" ]] || [[ "$set_name" == "dev" ]]; then
         install_rust
         install_bpf_toolchain
+        install_wasm_toolchain
     fi
 
     # For run and dev sets, add shepherd-media's non-apt dependencies: yt-dlp in

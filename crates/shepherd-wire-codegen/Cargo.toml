@@ -15,6 +15,7 @@ description = "Generates client mirrors of the shepherdd wire types from their J
 shepherd-api = { workspace = true, features = ["schema"] }
 shepherd-management = { workspace = true, features = ["schema"] }
 shepherd-ble = { workspace = true, features = ["schema"] }
+shepherd-config = { workspace = true, features = ["schema"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

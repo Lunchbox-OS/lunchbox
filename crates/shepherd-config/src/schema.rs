@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Raw configuration as parsed from TOML
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawConfig {
     /// Config schema version
     pub config_version: u32,
@@ -30,6 +31,7 @@ pub struct RawConfig {
 /// The daily quota is the *combined* usage of every member, so once the
 /// category's budget is spent all of its activities disappear at once.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawGroup {
     /// Unique stable ID, referenced by `group = "..."` on entries
     pub id: String,
@@ -54,6 +56,7 @@ pub struct RawGroup {
 
 /// Service-level settings
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawServiceConfig {
     /// IPC socket path (default: $XDG_RUNTIME_DIR/shepherdd/shepherdd.sock)
     pub socket_path: Option<PathBuf>,
@@ -121,6 +124,7 @@ pub struct RawServiceConfig {
 
 /// Raw entry definition
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawEntry {
     /// Unique stable ID
     pub id: String,
@@ -232,6 +236,7 @@ pub struct RawEntry {
 /// layer; pair with a browser-side allowlist (e.g. Chrome `URLAllowlist`) when
 /// hostname resolution is needed.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawFirewallConfig {
     /// Default policy when no `allow` or `deny` rule matches.
     /// "deny" (default) blocks all traffic except `allow` entries.
@@ -264,6 +269,7 @@ fn default_firewall_default() -> String {
 ///
 /// [policies]: https://chromeenterprise.google/policies/
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawBrowserConfig {
     /// Filesystem segment selecting the on-disk user-data-dir. Entries that
     /// share a `profile_id` share cookies/logins; each unique id is isolated.
@@ -315,6 +321,7 @@ fn default_browser_mode() -> String {
 
 /// Input compatibility mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RawInputCompat {
     /// Translate touchscreen input into mouse events via a sidecar that
@@ -339,6 +346,7 @@ pub enum RawInputCompat {
 
 /// Per-entry tunables forwarded to input-compat sidecars.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawInputCompatOptions {
     /// Stick deadzone as a fraction of full deflection (0..1).
     pub gamepad_deadzone: Option<f32>,
@@ -376,6 +384,7 @@ where
 /// enum is closed, so `camera`, `microphone`, and `midi` (future work) fail to
 /// parse rather than being silently accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RawInputDevice {
     /// A relative pointing device (mouse, trackball, trackpad).
@@ -411,6 +420,7 @@ where
 /// How a `media` entry opens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RawMediaMode {
     /// Open the poster grid over the whole library.
     #[default]
@@ -421,6 +431,7 @@ pub enum RawMediaMode {
 
 /// Maximum video quality for a `media` entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RawMediaQuality {
     #[serde(rename = "best")]
     Best,
@@ -436,6 +447,7 @@ pub enum RawMediaQuality {
 /// Item ordering for a `media` entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RawMediaSortBy {
     #[default]
     Library,
@@ -448,6 +460,7 @@ pub enum RawMediaSortBy {
 
 /// Raw entry kind
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RawEntryKind {
     Process {
@@ -585,6 +598,7 @@ fn default_retroarch_command() -> String {
 
 /// Availability configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawAvailability {
     /// Time windows when entry is available
     #[serde(default)]
@@ -597,6 +611,7 @@ pub struct RawAvailability {
 
 /// Time window
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawTimeWindow {
     /// Days of week: "weekdays", "weekends", "all", or list like ["mon", "tue", "wed"]
     pub days: RawDays,
@@ -610,6 +625,7 @@ pub struct RawTimeWindow {
 
 /// Days specification
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum RawDays {
     Preset(String),
@@ -618,6 +634,7 @@ pub enum RawDays {
 
 /// Time limits
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawLimits {
     /// Maximum run duration in seconds
     pub max_run_seconds: Option<u64>,
@@ -639,6 +656,7 @@ pub struct RawLimits {
 /// Configured on the *target* entry: time spent on the entries listed in
 /// `from` banks a balance that this entry spends down as it runs.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawTokens {
     /// Subjects whose sessions bank time toward this one: an entry ID, or a
     /// group ID prefixed with `group:` to count every member of a category.
@@ -663,6 +681,7 @@ pub struct RawTokens {
 
 /// Warning threshold
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawWarningThreshold {
     /// Seconds before expiry
     pub seconds_before: u64,
@@ -677,6 +696,7 @@ pub struct RawWarningThreshold {
 
 /// Internet connectivity check configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawInternetConfig {
     /// Connectivity check target (e.g., "https://example.com" or "tcp://1.1.1.1:53")
     pub check: Option<String>,
@@ -690,6 +710,7 @@ pub struct RawInternetConfig {
 
 /// Service-wide media behaviour (issue #127).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawMediaServiceConfig {
     /// Download remote library items in the background, so a video the child
     /// opens later plays from disk instead of buffering. On by default when any
@@ -763,6 +784,7 @@ fn default_cache_max_bytes() -> u64 {
 
 /// Steam-specific service configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawSteamConfig {
     /// Known Steam launch interstitials (blocking modals between launch and the
     /// game starting) to auto-dismiss by clicking their affirmative button, so
@@ -787,6 +809,7 @@ pub struct RawSteamConfig {
 
 /// Per-entry internet requirement
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawEntryInternet {
     /// Whether this entry requires internet connectivity
     #[serde(default)]
@@ -814,6 +837,7 @@ fn default_severity() -> String {
 
 /// Management HTTP API configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawManagementApiConfig {
     /// Whether the management API is enabled (default: false)
     #[serde(default)]
@@ -836,6 +860,7 @@ pub struct RawManagementApiConfig {
 
 /// Bluetooth LE management transport configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawBleManagementConfig {
     /// Whether the BLE management transport is enabled (default: false).
     #[serde(default)]
@@ -872,6 +897,7 @@ pub struct RawBleManagementConfig {
 
 /// Volume control configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawVolumeConfig {
     /// Maximum volume percentage allowed (0-100)
     pub max_volume: Option<u8>,
@@ -890,6 +916,7 @@ pub struct RawVolumeConfig {
 
 /// Screen-brightness control configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawBrightnessConfig {
     /// Maximum brightness percentage allowed (0-100)
     pub max_brightness: Option<u8>,
@@ -912,6 +939,7 @@ pub struct RawBrightnessConfig {
 
 /// Automatic screen-brightness configuration (ambient-light driven).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawAutoBrightnessConfig {
     /// Whether automatic brightness starts enabled. This is only the default;
     /// the runtime state (toggled from the HUD or management API) is persisted
@@ -937,6 +965,7 @@ pub struct RawAutoBrightnessConfig {
 
 /// External monitor / docking settings (issue #87).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawDisplayConfig {
     /// Master switch for docking support. When false, shepherdd leaves display
     /// configuration entirely to sway (default: true).

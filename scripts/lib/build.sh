@@ -56,6 +56,34 @@ binaries_exist() {
     return 0
 }
 
+# Build the config editor's wasm validator into shepherd-webui/src/config/wasm.
+#
+# Must run before the npm build, which imports it. The editor runs the real
+# `shepherd_config` parser and validator rather than a TypeScript
+# reimplementation, so this artifact is a build input, not an optimization.
+build_config_wasm() {
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    if [[ ! -d "$repo_root/crates/shepherd-config-wasm" ]]; then
+        warn "shepherd-config-wasm crate not found; skipping wasm build"
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env" 2>/dev/null || true
+    require_command wasm-pack
+
+    info "Building config editor wasm validator..."
+    cd "$repo_root" || die "Failed to change directory to $repo_root"
+    wasm-pack build --target web --release \
+        --out-dir ../../shepherd-webui/src/config/wasm \
+        --out-name shepherd_config \
+        crates/shepherd-config-wasm \
+        || die "wasm-pack build failed"
+    success "Config editor wasm built"
+}
+
 # Build the web UI (must run before cargo so rust-embed picks up dist/)
 build_webui() {
     local repo_root
@@ -68,6 +96,8 @@ build_webui() {
     fi
 
     require_command npm
+
+    build_config_wasm
 
     info "Building web UI..."
     cd "$webui_dir" || die "Failed to change directory to $webui_dir"
@@ -150,6 +180,10 @@ build_main() {
                 build_clean
                 return
                 ;;
+            config-wasm)
+                build_config_wasm
+                return
+                ;;
             help|-h|--help)
                 cat <<EOF
 Usage: shepherd build [OPTIONS]
@@ -157,12 +191,13 @@ Usage: shepherd build [OPTIONS]
 Options:
     --release, -r    Build in release mode (optimized)
     clean            Clean build artifacts
+    config-wasm      Build only the config editor's wasm validator
     help             Show this help
 
 Examples:
-    shepherd build              # Debug build
-    shepherd build --release    # Release build
-    shepherd build clean        # Clean artifacts
+    shepherd build                  # Debug build
+    shepherd build --release        # Release build
+    shepherd build clean            # Clean artifacts
 EOF
                 return
                 ;;

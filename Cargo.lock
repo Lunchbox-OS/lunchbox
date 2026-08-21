@@ -4249,6 +4249,7 @@ name = "shepherd-config"
 version = "0.3.7"
 dependencies = [
  "chrono",
+ "schemars",
  "serde",
  "serde_json",
  "shepherd-api",
@@ -4257,6 +4258,19 @@ dependencies = [
  "thiserror 1.0.69",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "shepherd-config-wasm"
+version = "0.3.7"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shepherd-config",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "uuid",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4657,6 +4671,7 @@ dependencies = [
  "serde_json",
  "shepherd-api",
  "shepherd-ble",
+ "shepherd-config",
  "shepherd-management",
  "tempfile",
 ]
