@@ -119,6 +119,38 @@ pub trait VolumeController: Send + Sync {
     async fn set_mute(&self, muted: bool) -> VolumeResult<()>;
 }
 
+/// No-op [`VolumeController`] for tests and hosts with no sound backend.
+/// Reports unavailable and accepts (ignores) every change.
+#[derive(Default)]
+pub struct NoOpVolumeController {
+    capabilities: VolumeCapabilities,
+}
+
+#[async_trait]
+impl VolumeController for NoOpVolumeController {
+    fn capabilities(&self) -> &VolumeCapabilities {
+        &self.capabilities
+    }
+    async fn get_status(&self) -> VolumeResult<VolumeStatus> {
+        Ok(VolumeStatus::default())
+    }
+    async fn set_volume(&self, _percent: u8) -> VolumeResult<()> {
+        Ok(())
+    }
+    async fn volume_up(&self, _step: u8) -> VolumeResult<()> {
+        Ok(())
+    }
+    async fn volume_down(&self, _step: u8) -> VolumeResult<()> {
+        Ok(())
+    }
+    async fn toggle_mute(&self) -> VolumeResult<()> {
+        Ok(())
+    }
+    async fn set_mute(&self, _muted: bool) -> VolumeResult<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,6 +39,21 @@ pub struct MockHost {
 
     /// Auto-exit delay (simulates process exiting on its own)
     pub auto_exit_delay: Arc<Mutex<Option<Duration>>>,
+
+    /// How long `stop` blocks before returning, modelling the graceful
+    /// SIGTERM-then-SIGKILL wait in the Linux adapter.
+    pub stop_blocks_for: Arc<Mutex<Option<Duration>>>,
+
+    /// When set, `stop` leaves the session running and emits no exit event —
+    /// the "activity survived the kill" case behind issue #136. A conformant
+    /// adapter reports this as [`HostError::StopFailed`] rather than pretending
+    /// to have succeeded, so that is what the mock does.
+    pub stop_leaves_running: Arc<Mutex<bool>>,
+
+    /// When set, `stop` defers its exit event by this long instead of
+    /// emitting it inline. Models the real monitor, whose 100ms poll can
+    /// notice the reap only *after* `stop` has already returned.
+    pub stop_exit_after: Arc<Mutex<Option<Duration>>>,
 }
 
 impl MockHost {
@@ -54,7 +69,24 @@ impl MockHost {
             fail_spawn: Arc::new(Mutex::new(false)),
             fail_stop: Arc::new(Mutex::new(false)),
             auto_exit_delay: Arc::new(Mutex::new(None)),
+            stop_blocks_for: Arc::new(Mutex::new(None)),
+            stop_leaves_running: Arc::new(Mutex::new(false)),
+            stop_exit_after: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Model an activity that ignores every signal: `stop` waits `blocks_for`,
+    /// reports success, and the process is still there afterwards.
+    pub fn set_unkillable(&self, blocks_for: Duration) {
+        *self.stop_blocks_for.lock().unwrap() = Some(blocks_for);
+        *self.stop_leaves_running.lock().unwrap() = true;
+    }
+
+    /// Model an activity that dies during `stop` but whose exit is only
+    /// noticed `after` the call returns, as the real monitor's poll does.
+    pub fn set_late_reap(&self, blocks_for: Duration, after: Duration) {
+        *self.stop_blocks_for.lock().unwrap() = Some(blocks_for);
+        *self.stop_exit_after.lock().unwrap() = Some(after);
     }
 
     pub fn with_capabilities(mut self, caps: HostCapabilities) -> Self {
@@ -158,17 +190,50 @@ impl HostAdapter for MockHost {
             _ => return Err(HostError::SessionNotFound),
         };
 
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.get_mut(&mock_id) {
-            session.running = false;
-            let _ = self.event_tx.send(HostEvent::Exited {
-                handle: handle.clone(),
-                status: ExitStatus::signaled(15), // SIGTERM
-            });
-            Ok(())
-        } else {
-            Err(HostError::SessionNotFound)
+        if !self.sessions.lock().unwrap().contains_key(&mock_id) {
+            return Err(HostError::SessionNotFound);
         }
+
+        // Graceful stops take time in the real adapter; let callers model that
+        // so tests can observe what the rest of the system does meanwhile.
+        let blocks_for = *self.stop_blocks_for.lock().unwrap();
+        if let Some(d) = blocks_for {
+            tokio::time::sleep(d).await;
+        }
+
+        // The activity shrugged off the kill and is still there.
+        if *self.stop_leaves_running.lock().unwrap() {
+            return Err(HostError::StopFailed(format!(
+                "mock activity {mock_id} survived the stop"
+            )));
+        }
+
+        self.sessions
+            .lock()
+            .unwrap()
+            .get_mut(&mock_id)
+            .expect("checked above")
+            .running = false;
+
+        let exited = HostEvent::Exited {
+            handle: handle.clone(),
+            status: ExitStatus::signaled(15), // SIGTERM
+        };
+
+        match *self.stop_exit_after.lock().unwrap() {
+            Some(after) => {
+                let tx = self.event_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(after).await;
+                    let _ = tx.send(exited);
+                });
+            }
+            None => {
+                let _ = self.event_tx.send(exited);
+            }
+        }
+
+        Ok(())
     }
 
     fn subscribe(&self) -> mpsc::UnboundedReceiver<HostEvent> {
