@@ -31,11 +31,14 @@ import type { FocusRequest } from "../navigation";
 export function GroupsPage({
   config,
   focus,
+  onFocusHandled,
   onOpenEntry,
 }: {
   config: RawConfig;
   /** A request from elsewhere to select one category. */
   focus?: FocusRequest | null;
+  /** Called once the request has been acted on, so it cannot fire again. */
+  onFocusHandled?: () => void;
   /** Jump to one of this category's members. */
   onOpenEntry?: (entryId: string) => void;
 }) {
@@ -49,9 +52,11 @@ export function GroupsPage({
 
   const membersOf = (id: string) => (config.entries ?? []).filter((e) => e.group === id);
 
-  // Keyed on the nonce so a repeat request still takes effect. See navigation.ts.
+  // Consumed on apply — see navigation.ts for why an unspent request re-fires.
   useEffect(() => {
-    if (focus) setSelectedId(focus.subject.id);
+    if (!focus) return;
+    setSelectedId(focus.subject.id);
+    onFocusHandled?.();
   }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (

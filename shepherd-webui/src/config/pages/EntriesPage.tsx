@@ -50,11 +50,14 @@ const UNGROUPED = "__ungrouped__";
 export function EntriesPage({
   config,
   focus,
+  onFocusHandled,
   onOpenGroup,
 }: {
   config: RawConfig;
   /** A request from elsewhere to open one activity's drawer. */
   focus?: FocusRequest | null;
+  /** Called once the request has been acted on, so it cannot fire again. */
+  onFocusHandled?: () => void;
   /** Jump to a category's own settings. */
   onOpenGroup?: (groupId: string) => void;
 }) {
@@ -63,10 +66,13 @@ export function EntriesPage({
   const [adding, setAdding] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<RawEntry | null>(null);
 
-  // Keyed on the nonce, not the id: asking for the same activity twice must
-  // re-open the drawer if it was closed in between.
+  // Consumed on apply: this page unmounts when you leave the tab, and a fresh
+  // mount runs this effect whatever its deps say, so an unspent request would
+  // re-open the same activity every time you came back.
   useEffect(() => {
-    if (focus) setSelectedId(focus.subject.id);
+    if (!focus) return;
+    setSelectedId(focus.subject.id);
+    onFocusHandled?.();
   }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sensors = useSensors(useSensor(PointerSensor, {

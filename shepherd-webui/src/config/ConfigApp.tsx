@@ -78,6 +78,8 @@ function ConfigShell() {
     setPage(subject.kind === "group" ? "groups" : "entries");
     setFocus((prev) => ({ subject, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
+  // A request is spent once the page has acted on it. See navigation.ts.
+  const clearFocus = useCallback(() => setFocus(null), []);
 
   if (loadError) {
     return (
@@ -195,6 +197,7 @@ function ConfigShell() {
             <EntriesPage
               config={view}
               focus={focusFor(focus, "entry")}
+              onFocusHandled={clearFocus}
               onOpenGroup={(id) => focusOn({ kind: "group", id })}
             />
           )}
@@ -202,6 +205,7 @@ function ConfigShell() {
             <GroupsPage
               config={view}
               focus={focusFor(focus, "group")}
+              onFocusHandled={clearFocus}
               onOpenEntry={(id) => focusOn({ kind: "entry", id })}
             />
           )}
