@@ -7,7 +7,7 @@
  * more here than on the schedule grid, where every gesture already has a
  * numeric equivalent in the detail panel.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -30,6 +30,7 @@ import DialogTitle from "@mui/material/DialogTitle";
 import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
+import Link from "@mui/material/Link";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
@@ -42,14 +43,31 @@ import { entryPath, insert, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry } from "../model/config.generated";
 import { issuesForEntry } from "../model/report";
 import { EntryDetail } from "../components/EntryDetail";
+import type { FocusRequest } from "../navigation";
 
 const UNGROUPED = "__ungrouped__";
 
-export function EntriesPage({ config }: { config: RawConfig }) {
+export function EntriesPage({
+  config,
+  focus,
+  onOpenGroup,
+}: {
+  config: RawConfig;
+  /** A request from elsewhere to open one activity's drawer. */
+  focus?: FocusRequest | null;
+  /** Jump to a category's own settings. */
+  onOpenGroup?: (groupId: string) => void;
+}) {
   const { apply, report } = useConfigDoc();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<RawEntry | null>(null);
+
+  // Keyed on the nonce, not the id: asking for the same activity twice must
+  // re-open the drawer if it was closed in between.
+  useEffect(() => {
+    if (focus) setSelectedId(focus.subject.id);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sensors = useSensors(useSensor(PointerSensor, {
     // A small threshold so clicking a card to open it still works.
@@ -120,6 +138,7 @@ export function EntriesPage({ config }: { config: RawConfig }) {
                   : (groups.find((g) => g.id === groupId)?.label ?? groupId)
               }
               count={members.length}
+              onOpen={groupId === UNGROUPED ? undefined : () => onOpenGroup?.(groupId)}
             >
               {members.map((entry) => (
                 <EntryCard
@@ -200,11 +219,14 @@ function GroupColumn({
   label,
   count,
   children,
+  onOpen,
 }: {
   id: string;
   label: string;
   count: number;
   children: React.ReactNode;
+  /** Absent for the "No category" column, which has no settings to open. */
+  onOpen?: () => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id });
   return (
@@ -222,9 +244,23 @@ function GroupColumn({
       }}
     >
       <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 1, px: 0.5 }}>
-        <Typography variant="subtitle2" sx={{ flex: 1 }}>
-          {label}
-        </Typography>
+        {onOpen ? (
+          <Link
+            component="button"
+            type="button"
+            onClick={onOpen}
+            underline="hover"
+            variant="subtitle2"
+            title={`Open ${label}'s schedule, limits and token gate`}
+            sx={{ flex: 1, textAlign: "left", cursor: "pointer" }}
+          >
+            {label}
+          </Link>
+        ) : (
+          <Typography variant="subtitle2" sx={{ flex: 1 }}>
+            {label}
+          </Typography>
+        )}
         <Chip size="small" label={count} />
       </Stack>
       <Stack spacing={1}>{children}</Stack>

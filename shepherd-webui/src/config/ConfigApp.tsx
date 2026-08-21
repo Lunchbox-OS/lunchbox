@@ -5,7 +5,7 @@
  * lazily-loaded route inside the management UI. It takes no props and talks to
  * no daemon, which is what makes that work.
  */
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import AppBar from "@mui/material/AppBar";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -29,6 +29,8 @@ import RedoIcon from "@mui/icons-material/Redo";
 import SaveIcon from "@mui/icons-material/Save";
 import UndoIcon from "@mui/icons-material/Undo";
 import { ConfigDocProvider, useConfigDoc } from "./doc/ConfigDocProvider";
+import type { Subject } from "./doc/patches";
+import { focusFor, type FocusRequest } from "./navigation";
 import { FileConfigSource, hasFileSystemAccess } from "./sources/FileConfigSource";
 import { IssueList } from "./components/IssueList";
 import { RawTomlPane } from "./components/RawTomlPane";
@@ -68,6 +70,15 @@ function ConfigShell() {
   } = useConfigDoc();
   const [page, setPage] = useState<Page>("entries");
 
+  // "Show me that activity/category" — from a category header on the board, or
+  // from a validation issue. Switches to the page that owns the subject and
+  // asks it to reveal it.
+  const [focus, setFocus] = useState<FocusRequest | null>(null);
+  const focusOn = useCallback((subject: Subject) => {
+    setPage(subject.kind === "group" ? "groups" : "entries");
+    setFocus((prev) => ({ subject, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+
   if (loadError) {
     return (
       <Container sx={{ py: 4 }}>
@@ -101,7 +112,7 @@ function ConfigShell() {
       <AppBar position="sticky" color="default" elevation={0} sx={{ borderBottom: "1px solid", borderColor: "divider" }}>
         <Toolbar sx={{ gap: 1, flexWrap: "wrap" }}>
           <Typography variant="h6" color="primary" sx={{ fontWeight: 700, mr: 2 }}>
-            Config editor
+            shepherd-launcher config editor
           </Typography>
 
           <Button size="small" startIcon={<FolderOpenIcon />} onClick={() => openFrom(fileSource)}>
@@ -180,8 +191,20 @@ function ConfigShell() {
         )}
 
         <Box sx={{ flex: 1, minHeight: 0 }}>
-          {page === "entries" && <EntriesPage config={view} />}
-          {page === "groups" && <GroupsPage config={view} />}
+          {page === "entries" && (
+            <EntriesPage
+              config={view}
+              focus={focusFor(focus, "entry")}
+              onOpenGroup={(id) => focusOn({ kind: "group", id })}
+            />
+          )}
+          {page === "groups" && (
+            <GroupsPage
+              config={view}
+              focus={focusFor(focus, "group")}
+              onOpenEntry={(id) => focusOn({ kind: "entry", id })}
+            />
+          )}
           {page === "service" && <ServicePage config={view} />}
           {page === "raw" && <RawTomlPane />}
         </Box>
@@ -189,7 +212,11 @@ function ConfigShell() {
         {page !== "raw" && report?.kind === "semantic" && report.errors.length > 0 && (
           <Box sx={{ mt: 3 }}>
             <Divider sx={{ mb: 2 }} />
-            <IssueList report={report} />
+            <IssueList
+              report={report}
+              onSelectEntry={(id) => focusOn({ kind: "entry", id })}
+              onSelectGroup={(id) => focusOn({ kind: "group", id })}
+            />
           </Box>
         )}
       </Container>

@@ -5,7 +5,7 @@
  * member disappears at once — so the member list sits beside the limits rather
  * than on another page.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -26,8 +26,19 @@ import { insert, unset } from "../doc/patches";
 import type { RawConfig, RawGroup } from "../model/config.generated";
 import { issuesForGroup } from "../model/report";
 import { SubjectDetail } from "../components/SubjectDetail";
+import type { FocusRequest } from "../navigation";
 
-export function GroupsPage({ config }: { config: RawConfig }) {
+export function GroupsPage({
+  config,
+  focus,
+  onOpenEntry,
+}: {
+  config: RawConfig;
+  /** A request from elsewhere to select one category. */
+  focus?: FocusRequest | null;
+  /** Jump to one of this category's members. */
+  onOpenEntry?: (entryId: string) => void;
+}) {
   const { apply, report } = useConfigDoc();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -37,6 +48,11 @@ export function GroupsPage({ config }: { config: RawConfig }) {
   const selected = groups.find((g) => g.id === selectedId) ?? groups[0] ?? null;
 
   const membersOf = (id: string) => (config.entries ?? []).filter((e) => e.group === id);
+
+  // Keyed on the nonce so a repeat request still takes effect. See navigation.ts.
+  useEffect(() => {
+    if (focus) setSelectedId(focus.subject.id);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Box>
@@ -113,6 +129,7 @@ export function GroupsPage({ config }: { config: RawConfig }) {
                 group={selected}
                 members={membersOf(selected.id)}
                 config={config}
+                onOpenEntry={onOpenEntry}
               />
             )}
           </Box>
@@ -169,10 +186,12 @@ function GroupDetail({
   group,
   members,
   config,
+  onOpenEntry,
 }: {
   group: RawGroup;
   members: { id: string; label: string }[];
   config: RawConfig;
+  onOpenEntry?: (entryId: string) => void;
 }) {
   return (
     <SubjectDetail
@@ -191,7 +210,13 @@ function GroupDetail({
           ) : (
             <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }} useFlexGap>
               {members.map((m) => (
-                <Chip key={m.id} label={m.label} size="small" />
+                <Chip
+                  key={m.id}
+                  label={m.label}
+                  size="small"
+                  clickable={onOpenEntry !== undefined}
+                  onClick={onOpenEntry ? () => onOpenEntry(m.id) : undefined}
+                />
               ))}
             </Stack>
           )}
