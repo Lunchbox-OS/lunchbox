@@ -990,6 +990,42 @@ impl Service {
                 error!(session_id = %session_id, error = %error, "Spawn failed");
             }
 
+            HostEvent::LaunchFailed { handle, error } => {
+                let now_mono = MonotonicInstant::now();
+                let now = shepherd_util::now();
+                warn!(session_id = %handle.session_id, error = %error, "Launch never started");
+
+                let core_event = {
+                    let mut engine = engine.lock().await;
+                    engine.notify_launch_failed(Some(&handle), error, now_mono, now)
+                };
+
+                if let Some(CoreEvent::SessionEnded {
+                    session_id,
+                    entry_id,
+                    reason,
+                    duration,
+                }) = core_event
+                {
+                    Self::broadcast(
+                        ipc,
+                        event_tx,
+                        Event::new(EventPayload::SessionEnded {
+                            session_id,
+                            entry_id,
+                            reason,
+                            duration,
+                        }),
+                    );
+                    hidpi.restore().await;
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                }
+            }
+
             HostEvent::ActivityEscaped {
                 session_id,
                 pid,

@@ -1,7 +1,9 @@
 //! Regression tests for the activity-supervision escapes in issues #135/#136.
 //!
-//! These pin the contract between the engine's session lifetime and the host's
-//! process lifetime, which is what both issues violate.
+//! These pin the *ordering* contract between the engine's session lifetime and
+//! the host's process lifetime, which is what both issues violate: a session
+//! must not be reported ended — and the launcher must not be handed back its
+//! input — until the host confirms the activity is actually gone.
 //!
 //! Reconstructed from the `copernicus` journal of 2026-08-20; see
 //! `docs/ai/history/2026-08-20 001 activity-supervision-escapes.md`.
@@ -336,6 +338,59 @@ async fn the_session_reports_itself_as_stopping_during_teardown() {
     assert!(
         h.svc.current_session().await.is_none(),
         "the session is gone once teardown completes"
+    );
+    let _ = drained(&mut h.events);
+}
+
+// ---------------------------------------------------------------------------
+// #135 — escape on open
+// ---------------------------------------------------------------------------
+
+/// A launch that never produced a running activity must not be charged.
+///
+/// Usage for `steam-stray` on 2026-08-20 was 256s against 245s of real play,
+/// because two launches that timed out before the game ever started were
+/// billed 60s each. On a time-limited entry that is a straight budget loss for
+/// something the child never got to do.
+#[tokio::test]
+async fn a_launch_that_never_started_is_not_charged() {
+    let mut h = harness();
+
+    launch(&h.svc, "tetris").await;
+    let handle = {
+        let eng = h.svc.engine.lock().await;
+        eng.current_session()
+            .and_then(|s| s.host_handle.clone())
+            .expect("tetris has a host handle")
+    };
+
+    // Let some time accrue, as a stalled launch would.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let ended = {
+        let mut eng = h.svc.engine.lock().await;
+        eng.notify_launch_failed(
+            Some(&handle),
+            "never started".into(),
+            shepherd_util::MonotonicInstant::now(),
+            shepherd_util::now(),
+        )
+    };
+    assert!(ended.is_some(), "the session must still end");
+
+    let used = h
+        .svc
+        .usage_entry(
+            &EntryId::new("tetris"),
+            shepherd_util::now().date_naive(),
+            shepherd_util::now().date_naive(),
+        )
+        .await
+        .unwrap();
+    let charged: u64 = used.iter().map(|u| u.duration_seconds).sum();
+    assert_eq!(
+        charged, 0,
+        "a launch that never ran must not consume the child's budget"
     );
     let _ = drained(&mut h.events);
 }

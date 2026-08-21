@@ -251,9 +251,12 @@ impl LinuxHost {
                     steam_sessions.lock().unwrap().remove(&pid);
                     processes.lock().unwrap().remove(&pid);
                     reap_sidecars(&sidecars, pid);
-                    let _ = event_tx.send(HostEvent::Exited {
+                    let _ = event_tx.send(HostEvent::LaunchFailed {
                         handle,
-                        status: ExitStatus::with_code(75),
+                        error: format!(
+                            "Steam did not start app {app_id} within {}s",
+                            timeout_ms / 1000
+                        ),
                     });
                     return;
                 }

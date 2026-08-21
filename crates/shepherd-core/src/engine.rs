@@ -1263,15 +1263,30 @@ impl CoreEngine {
             SessionEndReason::ProcessExited { exit_code }
         };
 
-        // Update usage accounting
-        let today = now.date_naive();
-        let _ = self
-            .store
-            .add_usage(&session.plan.entry_id, today, duration);
+        // A launch that never produced a running activity is not play time.
+        // On `copernicus` two Stray launches timed out without the game ever
+        // starting and were still billed 60s each (issue #135); the child paid
+        // 120s of their budget for a spinner. The audit record is still
+        // written, so the attempt is visible.
+        let billable = !matches!(reason, SessionEndReason::LaunchFailed { .. });
 
-        // Settle token balances (issue #8) and cooldowns, on the entry and on
-        // its group (issue #5)
-        self.settle_session_end(&session.plan.entry_id, duration, now, today);
+        let today = now.date_naive();
+        if billable {
+            let _ = self
+                .store
+                .add_usage(&session.plan.entry_id, today, duration);
+
+            // Settle token balances (issue #8) and cooldowns, on the entry and
+            // on its group (issue #5)
+            self.settle_session_end(&session.plan.entry_id, duration, now, today);
+        } else {
+            info!(
+                session_id = %session.plan.session_id,
+                entry_id = %session.plan.entry_id,
+                duration_secs = duration.as_secs(),
+                "Launch never produced an activity; not charging usage or tokens"
+            );
+        }
 
         // Log to audit
         let _ = self
@@ -1297,6 +1312,38 @@ impl CoreEngine {
             reason,
             duration,
         })
+    }
+
+    /// End the current session because its launch never produced a running
+    /// activity. Skips usage and token settlement (see
+    /// [`Self::end_current_session`]).
+    ///
+    /// `handle` is matched against the session exactly as
+    /// [`Self::notify_activity_exited`] does, so a stale failure cannot end a
+    /// session that has since moved on. Pass `None` when the caller *is* the
+    /// launch path and no handle exists yet.
+    pub fn notify_launch_failed(
+        &mut self,
+        handle: Option<&HostSessionHandle>,
+        error: String,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) -> Option<CoreEvent> {
+        match (self.current_session.as_mut(), handle) {
+            (None, _) => return None,
+            (Some(session), Some(h)) if !session.owns_handle(h) => {
+                debug!(
+                    current_session = %session.plan.session_id,
+                    failed = ?h.payload(),
+                    "Ignoring launch failure for an activity that is not the current session"
+                );
+                return None;
+            }
+            (Some(session), _) => {
+                session.stopping = Some(SessionEndReason::LaunchFailed { error });
+            }
+        }
+        self.end_current_session(None, now_mono, now)
     }
 
     /// Begin tearing the current session down.

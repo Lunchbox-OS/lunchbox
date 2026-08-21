@@ -171,6 +171,16 @@ pub enum HostEvent {
         error: String,
     },
 
+    /// A launch was given up on before it ever produced a running activity.
+    ///
+    /// Distinct from [`Self::Exited`] because nothing ran: the session must be
+    /// ended without charging the child for the wait (issue #135, where two
+    /// Steam launches that never started were billed 60s each).
+    LaunchFailed {
+        handle: HostSessionHandle,
+        error: String,
+    },
+
     /// An activity outlived every kill the adapter knows how to send, and its
     /// session has already ended — so nothing is supervising it (issue #136).
     ///
