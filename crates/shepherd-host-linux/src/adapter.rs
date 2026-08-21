@@ -24,7 +24,7 @@ use crate::process::{
     build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
     kill_steam_game_processes, make_scope_name, pgid_is_live, pid_is_live, signal_group,
-    steam_webhelper_running,
+    steam_webhelper_running, stop_firewall_scope,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -107,6 +107,11 @@ struct SessionInfo {
     snap_name: Option<String>,
     flatpak_app_id: Option<String>,
     steam_app_id: Option<u32>,
+    /// Transient systemd scope the activity runs in, when it was launched
+    /// through the privileged firewall helper. That scope lives in the
+    /// *system* manager, so `systemctl stop` on it (via the helper) reaches
+    /// processes our own signals may not.
+    firewall_scope: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +438,7 @@ impl LinuxHost {
             None,
             None,
             Some("steam".to_string()),
+            None,
         ) {
             Ok(proc) => {
                 let pid = proc.pid;
@@ -665,12 +671,17 @@ impl LinuxHost {
         pid_is_live(pid) || pgid_is_live(pgid)
     }
 
-    /// Wait for a kill to actually take.
+    /// Wait for a kill to actually take, escalating once to the activity's
+    /// systemd scope if it has one.
     ///
     /// A SIGKILL is not a guarantee: the pid may have escaped the process
-    /// group, and the command-name fallback may not match it. Returns
-    /// `StopFailed` if the activity outlives every kill we sent, so a survivor
-    /// is reported rather than silently abandoned (issue #136).
+    /// group, and the command-name fallback may not match it. A firewalled
+    /// Process-kind entry has one more lever — its transient *system* scope,
+    /// whose cgroup `systemctl stop` empties regardless of what escaped where.
+    ///
+    /// Returns `StopFailed` if the activity outlives all of it, and registers
+    /// it as escaped so the reconciliation sweep keeps working on it rather
+    /// than letting it run unsupervised (issue #136).
     async fn confirm_stopped(
         &self,
         session_id: &SessionId,
@@ -679,12 +690,32 @@ impl LinuxHost {
         session_info: &Option<SessionInfo>,
         is_steam: bool,
     ) -> HostResult<()> {
-        let deadline = std::time::Instant::now() + KILL_CONFIRM_WINDOW;
+        let mut escalated = false;
+        let mut deadline = std::time::Instant::now() + KILL_CONFIRM_WINDOW;
         loop {
             if !Self::activity_is_running(pid, pgid, session_info, is_steam) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
+                // One escalation left: empty the systemd scope's cgroup.
+                if let Some(scope) = session_info
+                    .as_ref()
+                    .and_then(|i| i.firewall_scope.as_ref())
+                    && !escalated
+                {
+                    warn!(
+                        session_id = %session_id,
+                        pid,
+                        scope = %scope,
+                        "Activity survived SIGKILL; stopping its firewall scope"
+                    );
+                    let scope = scope.clone();
+                    let _ = tokio::task::spawn_blocking(move || stop_firewall_scope(&scope)).await;
+                    escalated = true;
+                    deadline = std::time::Instant::now() + KILL_CONFIRM_WINDOW;
+                    continue;
+                }
+
                 warn!(session_id = %session_id, pid, "Activity still running after force kill");
                 self.register_escaped(session_id, pid, pgid, session_info);
                 return Err(HostError::StopFailed(format!(
@@ -1084,11 +1115,13 @@ impl HostAdapter for LinuxHost {
         // Steam isn't supported. If the helper isn't installed or polkit
         // doesn't grant us, skip the wrapper rather than spawning under a
         // silent no-op.
+        let mut firewall_scope: Option<String> = None;
         let final_argv = if let Some(ref spec) = options.firewall {
             if sandboxed_app_name.is_none() && steam_app_id.is_none() {
                 match firewall_enforcement_status() {
                     FirewallEnforcementStatus::Supported => {
                         let scope_name = make_scope_name(&session_id.to_string());
+                        firewall_scope = Some(scope_name.clone());
                         let activity_env = build_inherited_env(&env);
                         let uid = nix::unistd::getuid().as_raw();
                         let gid = nix::unistd::getgid().as_raw();
@@ -1162,6 +1195,8 @@ impl HostAdapter for LinuxHost {
             cwd.as_ref(),
             options.log_path.clone(),
             sandboxed_app_name,
+            // Not `final_argv[0]`: under firewall enforcement that is `pkexec`.
+            Some(&command_name),
         )
         .inspect_err(|_| {
             // Tear down any sidecars if the activity itself fails to spawn.
@@ -1230,6 +1265,7 @@ impl HostAdapter for LinuxHost {
             snap_name: snap_name.clone(),
             flatpak_app_id: flatpak_app_id.clone(),
             steam_app_id,
+            firewall_scope: firewall_scope.clone(),
         };
         self.session_info
             .lock()
@@ -1610,6 +1646,7 @@ mod tests {
             snap_name: None,
             flatpak_app_id: None,
             steam_app_id: None,
+            firewall_scope: None,
         });
         host.session_info
             .lock()

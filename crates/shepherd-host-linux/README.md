@@ -261,6 +261,23 @@ supported — a warning is logged and the browser policy ignored.
 
 A failed policy write is logged and Chrome launches without the policy.
 
+## Running this crate's tests
+
+The tests here drive real processes, and some of the code under test kills by
+command name (`kill_by_command` runs `pkill -f <name>`). `pkill -f` matches
+against whole command lines, including your shell's.
+
+`test_spawn_and_kill` spawns `sleep 60` and stops it by the command name
+"sleep", so `pkill -f sleep` runs during the suite. **If the shell you launch
+`cargo test` from has "sleep" anywhere in its command line, that shell is
+killed too** (it exits 144, mid-command, with no obvious cause). The same
+applies to any wrapper script or CI step whose invocation contains the word.
+
+Keep the invocation free of the names the suite pkills, or run the tests from
+a command line you do not mind losing. The equivalent trap for headless
+fixtures — never give a fixture entry `command = "sleep"` — is documented in
+the `headless-dev` skill.
+
 ## Future Enhancements
 
 Planned features (hooks are designed in):

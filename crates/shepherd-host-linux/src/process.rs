@@ -598,6 +598,47 @@ pub fn kill_steam_game_processes(app_id: u32, signal: Signal) -> bool {
     true
 }
 
+/// Stop the transient systemd scope a firewalled Process-kind activity runs in.
+///
+/// That scope lives in the *system* manager (it needs `CAP_NET_ADMIN` to attach
+/// the cgroup BPF programs behind `IPAddressDeny=`), so tearing it down means
+/// going back through the privileged helper. `systemctl stop` kills every
+/// process in the unit's cgroup, which reaches an activity that has escaped our
+/// process group or outlived the pids we know about.
+///
+/// The helper's single polkit action gates the binary as a whole, so this needs
+/// no grant beyond the one `apply-process` already requires.
+pub fn stop_firewall_scope(scope_name: &str) -> bool {
+    let output = Command::new("pkexec")
+        .args([
+            &firewall_helper_path(),
+            "stop-scope",
+            "--scope-name",
+            scope_name,
+        ])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            info!(scope = scope_name, "Stopped firewall scope via helper");
+            true
+        }
+        Ok(out) => {
+            warn!(
+                scope = scope_name,
+                status = ?out.status.code(),
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "Helper could not stop firewall scope"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(scope = scope_name, error = %e, "Failed to invoke firewall helper to stop scope");
+            false
+        }
+    }
+}
+
 /// Whether `pid` names a process that is still actually running.
 ///
 /// A zombie counts as gone: it has exited and is only waiting to be reaped, so
@@ -708,12 +749,20 @@ impl ManagedProcess {
     /// If `log_path` is provided, stdout and stderr will be redirected to that file.
     /// For snap apps, we use `script` to capture output from all child processes
     /// via a pseudo-terminal, since snap child processes don't inherit file descriptors.
+    ///
+    /// `kill_name` is the command name to `pkill -f` as a last resort. It must
+    /// be the *activity's* own command, which is not always `argv[0]`: a
+    /// firewalled Process entry is launched as
+    /// `pkexec … shepherd-firewall-helper … systemd-run … <activity>`, and
+    /// pkill'ing `pkexec` would both miss the activity and signal unrelated
+    /// privileged operations. `None` falls back to `argv[0]`.
     pub fn spawn(
         argv: &[String],
         env: &HashMap<String, String>,
         cwd: Option<&std::path::PathBuf>,
         log_path: Option<PathBuf>,
         snap_name: Option<String>,
+        kill_name: Option<&str>,
     ) -> HostResult<Self> {
         if argv.is_empty() {
             return Err(HostError::SpawnFailed("Empty argv".into()));
@@ -801,7 +850,12 @@ impl ManagedProcess {
                             cmd.stderr(Stdio::inherit());
                             cmd.stdin(Stdio::null());
                             // Skip to spawn
-                            return Self::spawn_with_cmd(cmd, program, snap_name);
+                            return Self::spawn_with_cmd(
+                                cmd,
+                                program,
+                                kill_name.unwrap_or(program),
+                                snap_name,
+                            );
                         }
                     };
                     cmd.stdout(Stdio::from(file));
@@ -822,17 +876,20 @@ impl ManagedProcess {
 
         cmd.stdin(Stdio::null());
 
-        Self::spawn_with_cmd(cmd, program, snap_name)
+        let kill_name = kill_name.unwrap_or(program).to_string();
+        Self::spawn_with_cmd(cmd, program, &kill_name, snap_name)
     }
 
     /// Complete the spawn process with the configured command
     fn spawn_with_cmd(
         mut cmd: Command,
         program: &str,
+        kill_name: &str,
         snap_name: Option<String>,
     ) -> HostResult<Self> {
-        // Store the command name for later use in killing
-        let command_name = program.to_string();
+        // The name to pkill by if signals to the group don't take -- the
+        // activity's own command, not necessarily the program we exec'd.
+        let command_name = kill_name.to_string();
 
         // Set up process group - this child becomes its own process group leader
         // SAFETY: This is safe in the pre-exec context
@@ -1132,7 +1189,7 @@ mod tests {
         let argv = vec!["true".to_string()];
         let env = HashMap::new();
 
-        let mut proc = ManagedProcess::spawn(&argv, &env, None, None, None).unwrap();
+        let mut proc = ManagedProcess::spawn(&argv, &env, None, None, None, None).unwrap();
 
         // Wait for it to complete
         let status = proc.wait().unwrap();
@@ -1144,7 +1201,7 @@ mod tests {
         let argv = vec!["echo".to_string(), "hello".to_string()];
         let env = HashMap::new();
 
-        let mut proc = ManagedProcess::spawn(&argv, &env, None, None, None).unwrap();
+        let mut proc = ManagedProcess::spawn(&argv, &env, None, None, None, None).unwrap();
         let status = proc.wait().unwrap();
         assert!(status.is_success());
     }
@@ -1154,7 +1211,7 @@ mod tests {
         let argv = vec!["sleep".to_string(), "60".to_string()];
         let env = HashMap::new();
 
-        let proc = ManagedProcess::spawn(&argv, &env, None, None, None).unwrap();
+        let proc = ManagedProcess::spawn(&argv, &env, None, None, None, None).unwrap();
 
         // Give it a moment to start
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1238,5 +1295,54 @@ mod tests {
             !pgid_is_live(pgid),
             "signalling the group must reach the survivor"
         );
+    }
+
+    /// `command_name` is the `pkill -f` fallback, so it must name the
+    /// *activity* — not whatever we happened to exec.
+    ///
+    /// A firewalled Process entry is launched as
+    /// `pkexec … shepherd-firewall-helper … systemd-run … <activity>`, so
+    /// deriving it from `argv[0]` yielded `"pkexec"`: useless against the
+    /// activity, and `pkill -f pkexec` would signal unrelated privileged
+    /// operations on the machine (issue #136).
+    #[test]
+    fn kill_name_overrides_argv0_for_wrapped_launches() {
+        // What the firewall path really builds: the activity is the tail of
+        // a pkexec/helper/systemd-run prefix, so argv[0] is `pkexec`.
+        let argv = [
+            "pkexec".to_string(),
+            "--keep-cwd".to_string(),
+            "/usr/libexec/shepherd-firewall-helper".to_string(),
+            "apply-process".to_string(),
+            "--".to_string(),
+            "true".to_string(),
+        ];
+        let mut wrapped = ManagedProcess::spawn(
+            &argv[argv.len() - 1..],
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            Some("/opt/games/my-activity"),
+        )
+        .expect("spawn");
+        assert_eq!(
+            wrapped.command_name, "/opt/games/my-activity",
+            "the caller's kill name must win over argv[0]"
+        );
+        let _ = wrapped.wait();
+
+        // With no override we still fall back to argv[0].
+        let mut plain = ManagedProcess::spawn(
+            &["true".to_string()],
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("spawn");
+        assert_eq!(plain.command_name, "true");
+        let _ = plain.wait();
     }
 }
