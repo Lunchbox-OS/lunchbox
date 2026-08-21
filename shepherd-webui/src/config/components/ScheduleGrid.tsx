@@ -50,6 +50,8 @@ export interface ScheduleGridProps {
   availability: AvailabilityView | null;
   /** Snap granularity in minutes. */
   step?: number;
+  /** What to call the thing being edited: an activity, or a category. */
+  selfLabel?: string;
   selected: number | null;
   onSelect: (index: number | null) => void;
   onCreate: (mask: number, start: number, end: number) => void;
@@ -79,6 +81,7 @@ export function ScheduleGrid({
   windows,
   availability,
   step = 15,
+  selfLabel = "This activity",
   selected,
   onSelect,
   onCreate,
@@ -179,7 +182,7 @@ export function ScheduleGrid({
   return (
     <Box>
       <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", flexWrap: "wrap", mb: 1 }}>
-        <Legend color={theme.palette.primary.main} label="This activity" />
+        <Legend color={theme.palette.primary.main} label={selfLabel} />
         {availability?.group && (
           <Legend color={theme.palette.text.disabled} label="Its category" dashed />
         )}

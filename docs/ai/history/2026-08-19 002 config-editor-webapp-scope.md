@@ -845,6 +845,44 @@ parent stays a manual check.
 group gate written through patches lands as `[groups.tokens]`, validates clean,
 and reaches the policy layer — plus the member-listing rule the picker encodes.
 
+### Follow-up: one detail view for both subjects
+
+The group-tokens fix above treated the symptom. The structural cause, pointed
+out immediately after — *"it seems like Basics, Schedule and Limits could all be
+implemented as the same component for both activities and categories, which
+would have both addressed this issue"* — is that `EntryDetail` and `GroupDetail`
+were separate components rendering the same three tabs from the same schema.
+Nothing made a missing tab visible, so `[groups.tokens]` went unnoticed and the
+token graph reached only one of the two.
+
+`RawGroup`'s fields turn out to be a strict subset of `RawEntry`'s — `id`,
+`label`, `availability`, `limits`, `tokens`, with nothing a category has that an
+activity does not. That makes the shared component well defined rather than a
+lowest common denominator: `SubjectDetail` renders the subset for either
+subject, and activities extend it through slots.
+
+| | |
+|---|---|
+| `SubjectDetail` | The tab strip, the issue list, and Basics (label) / Schedule / Limits (limits + token gate) for either subject |
+| `EntryDetail` | Icon, category, kind, disabled; warnings as `limitsExtra`; the Advanced tab |
+| `GroupDetail` | The member list |
+
+`warnings` is the single asymmetry — only `RawEntry` has it — and arrives as an
+explicit slot rather than a `subject.kind` branch, so the reason is legible at
+the call site rather than buried in a conditional.
+
+The refactor immediately surfaced two pieces of copy written when only
+activities had these tabs: the schedule grid's legend said "This activity" on a
+category, and the empty-limits note told a category that "this activity uses
+whatever the category and service defaults say". Both now follow the subject.
+That is the argument for the shape in miniature — the duplication was not just
+more code, it was two places for the same idea to drift.
+
+Net effect on the class of bug: adding a field to `RawGroup` now means adding it
+to `SubjectDetail`, where both subjects pick it up. The coverage guard's blind
+spot — a sub-table wired to one parent and not the other — mostly closes,
+because there is only one parent left to wire.
+
 ### Follow-up: `shepherd dev webui`
 
 Added after the phases landed, on the request *"add a command to just run the

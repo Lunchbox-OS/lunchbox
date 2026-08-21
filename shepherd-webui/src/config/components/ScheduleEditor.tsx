@@ -150,6 +150,7 @@ export function ScheduleEditor({ subject, availability, step = 15 }: Props) {
           windows={windows}
           availability={view}
           step={step}
+          selfLabel={subject.kind === "group" ? "This category" : "This activity"}
           selected={selected}
           onSelect={setSelected}
           onCreate={addWindow}

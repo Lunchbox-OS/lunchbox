@@ -6,7 +6,6 @@
  * than on another page.
  */
 import { useState } from "react";
-import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -18,21 +17,15 @@ import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
-import Tab from "@mui/material/Tab";
-import Tabs from "@mui/material/Tabs";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
-import { groupPath, insert, unset } from "../doc/patches";
-import { useFields } from "../doc/useFields";
+import { insert, unset } from "../doc/patches";
 import type { RawConfig, RawGroup } from "../model/config.generated";
 import { issuesForGroup } from "../model/report";
-import { IssueList } from "../components/IssueList";
-import { LimitsEditor } from "../components/LimitsEditor";
-import { TokensEditor } from "../components/TokensEditor";
-import { ScheduleEditor } from "../components/ScheduleEditor";
+import { SubjectDetail } from "../components/SubjectDetail";
 
 export function GroupsPage({ config }: { config: RawConfig }) {
   const { apply, report } = useConfigDoc();
@@ -118,8 +111,8 @@ export function GroupsPage({ config }: { config: RawConfig }) {
               <GroupDetail
                 key={selected.id}
                 group={selected}
-                config={config}
                 members={membersOf(selected.id)}
+                config={config}
               />
             )}
           </Box>
@@ -174,88 +167,37 @@ export function GroupsPage({ config }: { config: RawConfig }) {
 
 function GroupDetail({
   group,
-  config,
   members,
+  config,
 }: {
   group: RawGroup;
-  config: RawConfig;
   members: { id: string; label: string }[];
+  config: RawConfig;
 }) {
-  const { report } = useConfigDoc();
-  const f = useFields(groupPath(group.id));
-  const [tab, setTab] = useState<"basics" | "schedule" | "limits">("basics");
-  const issues = issuesForGroup(report, group.id);
-
   return (
-    <Stack spacing={2}>
-      {issues.length > 0 && <IssueList report={report} compact />}
-
-      <Tabs value={tab} onChange={(_, v) => setTab(v)}>
-        <Tab value="basics" label="Basics" />
-        <Tab value="schedule" label="Schedule" />
-        <Tab value="limits" label="Limits" />
-      </Tabs>
-
-      {tab === "basics" && (
-        <Stack spacing={2}>
-          <TextField
-            size="small"
-            label="Label"
-            value={group.label}
-            onChange={(e) => f.setField("label", e.target.value)}
-            helperText="Used when explaining why one of its activities is unavailable."
-            sx={{ maxWidth: 400 }}
-          />
-          <Box>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              Members
+    <SubjectDetail
+      subject={{ kind: "group", id: group.id }}
+      config={config}
+      basics={
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Members
+          </Typography>
+          {members.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              No activities in this category yet — drag cards into it on the Activities
+              page.
             </Typography>
-            {members.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">
-                No activities in this category yet — drag cards into it on the Activities
-                page.
-              </Typography>
-            ) : (
-              <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-                {members.map((m) => (
-                  <Chip key={m.id} label={m.label} size="small" />
-                ))}
-              </Stack>
-            )}
-          </Box>
-        </Stack>
-      )}
-
-      {tab === "schedule" && (
-        <Stack spacing={2}>
-          <Alert severity="info">
-            This schedule applies on top of each member's own. Both must allow a moment for
-            an activity to appear.
-          </Alert>
-          <ScheduleEditor
-            subject={{ kind: "group", id: group.id }}
-            availability={group.availability}
-          />
-        </Stack>
-      )}
-
-      {tab === "limits" && (
-        <Stack spacing={4}>
-          <LimitsEditor
-            subject={{ kind: "group", id: group.id }}
-            limits={group.limits}
-            serviceMaxRun={config.service?.default_max_run_seconds}
-            serviceCooldownGrace={config.service?.cooldown_min_session_seconds}
-          />
-
-          <TokensEditor
-            subject={{ kind: "group", id: group.id }}
-            tokens={group.tokens}
-            config={config}
-          />
-        </Stack>
-      )}
-    </Stack>
+          ) : (
+            <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }} useFlexGap>
+              {members.map((m) => (
+                <Chip key={m.id} label={m.label} size="small" />
+              ))}
+            </Stack>
+          )}
+        </Box>
+      }
+    />
   );
 }
 
