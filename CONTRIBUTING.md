@@ -138,13 +138,19 @@ types** — a genuine type error compiles and ships. `npm run typecheck` is the
 only thing that checks them, so run it alongside the build; CI runs it as its
 own job.
 
-During development, you can run the rsbuild dev server (which proxies API calls
-to `localhost:8080`) instead of embedding:
+During development, run the rsbuild dev server (which proxies API calls to
+`localhost:8080`) instead of embedding:
 
 ```sh
-cd shepherd-webui
-npm run dev      # hot-reloading dev server, usually on port 3000
+shepherd dev webui                    # hot-reloading, usually on port 3000
+shepherd dev webui --standalone       # config editor only, no daemon needed
+shepherd dev webui -- --port 3001     # anything after -- goes to rsbuild
 ```
+
+This builds the config editor's wasm validator when it is missing, installs npm
+dependencies on first run, and then hands off to rsbuild in the foreground —
+Ctrl-C stops it. `npm run dev` from inside `shepherd-webui/` does the same thing
+without those two steps.
 
 The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
@@ -198,10 +204,10 @@ A graphical editor for `config.toml` lives in
 [`shepherd-webui/src/config/`](shepherd-webui/src/config/) and builds two ways
 from one source:
 
-| Target | Build | Output |
-|---|---|---|
-| Standalone static site | `shepherd build config-editor` | `dist-standalone/`, for a static host |
-| Embedded in shepherdd | `npm run build` | `dist/` — the management UI, which does **not** route to the editor today |
+| Target | Build | Dev server | Output |
+|---|---|---|---|
+| Standalone static site | `shepherd build config-editor` | `shepherd dev webui --standalone` | `dist-standalone/`, for a static host |
+| Embedded in shepherdd | `npm run build` | `shepherd dev webui` | `dist/` — the management UI, which does **not** route to the editor today |
 
 The editor is not reachable from the management UI yet, and `src/App.tsx` says
 why at the point where the route would go. Its only `ConfigSource` reads and
@@ -229,8 +235,10 @@ artifact before the npm build:
 ./scripts/shepherd build config-wasm   # wasm-pack -> src/config/wasm/
 ```
 
-`shepherd build config-editor` does this for you. `src/config/wasm/` is generated
-and gitignored; `npm run typecheck` needs it to exist.
+`shepherd build config-editor` and `shepherd dev webui` both do this for you when
+the artifact is missing; pass `--wasm` to the latter to force a rebuild after
+changing the crate. `src/config/wasm/` is generated and gitignored;
+`npm run typecheck` needs it to exist.
 
 Two rules keep the split working, both enforced:
 

@@ -70,6 +70,7 @@ Development:
     shepherd deps install dev     Install all development dependencies
     shepherd build                Build debug binaries
     shepherd dev run              Build and run in nested sway
+    shepherd dev webui            Hot-reloading web UI / config editor
 
 CI/Build:
     shepherd deps install build   Install build-only dependencies
@@ -138,6 +139,9 @@ main() {
                 run)
                     sway_dev_run "$@"
                     ;;
+                webui)
+                    dev_webui "$@"
+                    ;;
                 headless|shot|tree|key|type|click|stop)
                     # Headless, agent-drivable session (see lib/headless.sh).
                     headless_dev_dispatch "$subcmd" "$@"
@@ -149,6 +153,14 @@ Usage: shepherd dev <command>
 Commands:
     run         Build and run shepherd in a NESTED sway session
                 (needs a graphical login session — for local, interactive dev)
+
+    webui       Serve the web UI with hot reload (foreground; Ctrl-C to stop):
+        webui                   Management UI, proxying /api to localhost:8080
+        webui --standalone      Config editor only, the way a static host
+                                serves it — needs no daemon
+        webui --wasm            Rebuild the config editor's wasm validator
+                                first (built automatically when missing)
+        Anything after -- goes to rsbuild, e.g. -- --port 3001
 
     headless    Start a detached HEADLESS session (no login session, no GPU)
                 that an agent or SSH user can screenshot and drive:
@@ -163,6 +175,7 @@ Commands:
 
 Examples:
     shepherd dev run
+    shepherd dev webui --standalone
     shepherd dev headless --time "2025-12-25 21:00:00"
     shepherd dev shot /tmp/home.png && shepherd dev stop
 EOF
