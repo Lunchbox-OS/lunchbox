@@ -201,7 +201,10 @@ jobs:
 
   # --------------------------------------------------------------------------
   # config-editor: build the standalone config editor and publish it to
-  # Cloudflare Pages, which serves it at shepherd.armeafamily.com.
+  # Cloudflare Pages, which serves it at config.shepherd.armeafamily.com.
+  # (Its own subdomain, so shepherd.armeafamily.com is free for a landing and
+  # documentation site later. The hostname lives in the Pages project's custom
+  # domain settings, not here — nothing in this job hardcodes it.)
   #
   # Tag-driven like everything else here, so the hosted editor matches the last
   # released shepherd rather than whatever is on main — it renders a schema

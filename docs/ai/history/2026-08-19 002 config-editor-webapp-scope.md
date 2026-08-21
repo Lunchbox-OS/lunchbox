@@ -824,7 +824,7 @@ rebuilds it and then serves.
 ### Follow-up: hosting
 
 Open question 1 resolved to **Cloudflare Pages**, Direct Upload, at
-`shepherd.armeafamily.com`, deployed from the `config-editor` job in
+`config.shepherd.armeafamily.com`, deployed from the `config-editor` job in
 `release.yml`. Direct Upload rather than a git integration because the repo is
 on Forgejo and not mirrored; Cloudflare therefore needs no repo access, only an
 API token.
@@ -844,6 +844,17 @@ installs.
 `release.yml`'s existing `workflow_dispatch` `publish` toggle covers the deploy
 step too, so the first run can be a dry build and the second a real deploy,
 without cutting a tag to find out whether the credentials work.
+
+**Why a subdomain and not `shepherd.armeafamily.com/config`.** The apex is
+wanted for a landing and documentation site, and Pages leaves only bad ways to
+share a hostname across two independently-deployed sites: Direct Upload replaces
+the *entire* deployment, so one project cannot hold both unless one pipeline
+builds both (coupling the docs' cadence to release tags), and Pages custom
+domains map hostnames rather than paths, so splitting by path needs a Worker
+proxying to a second project. A subdomain costs nothing and reaches the same
+goal. The build supports the subpath form regardless — `PUBLIC_BASE_PATH=/config/`
+emits absolute asset URLs, verified serving from a `config/` subdirectory — it
+is just not needed.
 
 Two deploy-shape decisions taken with it:
 
@@ -869,8 +880,8 @@ because it is the part people assume is hard:
   `file://` in a future Tauri shell.
 - `dist-standalone/` contains only `index.html` and `static/`: no `_redirects`,
   no `_routes.json`, no `404.html`. With no router there are no sub-paths to
-  catch, so `shepherd.armeafamily.com/anything` returns Cloudflare's own 404
-  rather than the app. Deliberate; a one-line `_redirects` would change it.
+  catch, so `config.shepherd.armeafamily.com/anything` returns Cloudflare's own
+  404 rather than the app. Deliberate; a one-line `_redirects` would change it.
 
 ### Notes for whoever picks this up
 

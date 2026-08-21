@@ -243,7 +243,7 @@ changing the crate. `src/config/wasm/` is generated and gitignored;
 #### Hosting
 
 The standalone bundle is published to Cloudflare Pages at
-<https://shepherd.armeafamily.com>, from the `config-editor` job in
+<https://config.shepherd.armeafamily.com>, from the `config-editor` job in
 [`release.yml`](.github/workflows/release.yml). It deploys on `vX.Y.Z` tags
 rather than on every push to main, so the hosted editor matches the last
 released shepherd — it renders a `config_version` that ships with the daemon,
@@ -254,11 +254,23 @@ Direct Upload, so Cloudflare needs no access to the repo. Two secrets:
 `CLOUDFLARE_API_TOKEN` (with the "Cloudflare Pages: Edit" permission) and
 `CLOUDFLARE_ACCOUNT_ID`.
 
+It gets its own subdomain rather than a path under `shepherd.armeafamily.com`,
+which is left free for a landing and documentation site. A path would have meant
+either building both from one pipeline (Direct Upload replaces the whole
+deployment, so one project cannot host two independently-deployed sites) or
+putting a Worker in front to route `/config*` — machinery a subdomain does not
+need.
+
 The bundle needs nothing unusual from a host — no rewrite rules, since the
 editor has no router; no COOP/COEP, since there are no threads. Two things do
 matter if you ever serve it elsewhere: `application/wasm` for `.wasm` (a
 mismatch falls back to a slower non-streaming load rather than breaking), and a
 `script-src` that permits `'wasm-unsafe-eval'`.
+
+Served at a domain root, so the default relative `assetPrefix` is correct and
+`PUBLIC_BASE_PATH` stays unset. Set it (to e.g. `/config/`) only if the editor
+ever moves under a subpath — relative paths would otherwise break on the
+no-trailing-slash form of the URL.
 
 Two rules keep the split working, both enforced:
 
