@@ -43,6 +43,14 @@ const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
 /// rather than leaving the launcher held indefinitely (issue #136).
 const KILL_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 
+/// How long to keep watching for a Steam game to appear *after* its launch
+/// timed out and the session was ended (issue #135). Steam honours a
+/// `steam://rungameid` request on its own schedule and there is no way to
+/// cancel one; on `copernicus` the game arrived 17s late. Generous enough to
+/// cover a slow shader precompile, bounded so we don't kill a game the child
+/// deliberately started much later.
+const STEAM_ORPHAN_WATCH: Duration = Duration::from_secs(180);
+
 /// Monitor ticks (100ms each) between reconciliation sweeps for escaped
 /// activities. The sweep talks to the compositor, so it is deliberately much
 /// slower than the process poll it rides on.
@@ -194,6 +202,17 @@ impl LinuxHost {
     /// the launch down and emit an error exit so the session ends (back to the
     /// launcher) instead of hanging on the spinner. The Steam window is never
     /// surfaced; a blocker we're not allowed to dismiss simply times out.
+    /// Timing out does **not** cancel the launch, because nothing can:
+    /// `steam://rungameid` is a request to the long-lived preloaded client, and
+    /// that client will honour it on its own schedule. On `copernicus`
+    /// (2026-08-20) Stray came up 17 seconds after a 60s deadline had already
+    /// expired — twice — and because the watchdog had deleted its
+    /// `steam_sessions` entry, nothing was tracking the game when it appeared.
+    /// It ran unsupervised over the launcher until the child happened to launch
+    /// the same entry again, and 110s of that play was never metered.
+    ///
+    /// So after the deadline the watchdog keeps watching (see
+    /// [`Self::spawn_steam_orphan_watcher`]) instead of forgetting the launch.
     fn spawn_steam_launch_watchdog(
         &self,
         handle: HostSessionHandle,
@@ -242,11 +261,18 @@ impl LinuxHost {
                 }
 
                 if Instant::now() >= deadline {
+                    // Re-check first: the interstitial probe above can burn up
+                    // to 5s, so the game may have come up since the check at
+                    // the top of this iteration.
+                    if !find_steam_game_pids(app_id).is_empty() {
+                        info!(app_id, "Steam game appeared just before the deadline");
+                        return;
+                    }
+
                     warn!(
                         app_id,
                         pid, "Steam game did not launch within timeout; ending session with error"
                     );
-                    // Best-effort teardown of the stuck launch.
                     kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGKILL);
                     steam_sessions.lock().unwrap().remove(&pid);
                     processes.lock().unwrap().remove(&pid);
@@ -258,10 +284,76 @@ impl LinuxHost {
                             timeout_ms / 1000
                         ),
                     });
+
+                    // The session is over, but Steam's request is not: keep
+                    // watching so a game that turns up later is killed rather
+                    // than left running unsupervised (issue #135).
+                    Self::watch_for_orphaned_steam_game(steam_sessions, app_id, pid);
                     return;
                 }
             }
         });
+    }
+
+    /// After a Steam launch has been given up on, keep watching for the game to
+    /// turn up anyway and kill it if it does (issue #135).
+    ///
+    /// The alternative — adopting a late game back into a session — would mean
+    /// resurrecting a session the child has already been told ended, and would
+    /// bill them for however long the launch dragged on. Killing it is the
+    /// honest outcome: the launch failed, so nothing should be running. The
+    /// child can simply launch again, which now works because the entry is
+    /// no longer shadowed by an untracked copy of itself.
+    ///
+    /// Stands down the moment a *new* session for the same app id exists —
+    /// otherwise the child relaunching the entry (exactly what they did on
+    /// `copernicus`) would have their legitimate game killed by the previous
+    /// attempt's watcher. Gives up after [`STEAM_ORPHAN_WATCH`]; past that, a
+    /// game appearing is no longer plausibly this request.
+    fn watch_for_orphaned_steam_game(
+        steam_sessions: Arc<Mutex<HashMap<u32, SteamSession>>>,
+        app_id: u32,
+        session_pid: u32,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let deadline = Instant::now() + STEAM_ORPHAN_WATCH;
+            loop {
+                tokio::time::sleep(Duration::from_millis(750)).await;
+
+                // Someone launched this app again: it is their game now.
+                let relaunched = steam_sessions
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .any(|s| s.app_id == app_id && s.pid != session_pid);
+                if relaunched {
+                    info!(
+                        app_id,
+                        "Entry was launched again; standing down the orphan watch"
+                    );
+                    return;
+                }
+
+                if !find_steam_game_pids(app_id).is_empty() {
+                    warn!(
+                        app_id,
+                        "Steam launched a game for a request we already gave up on; killing it \
+                         rather than leaving it unsupervised"
+                    );
+                    kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGKILL);
+                    return;
+                }
+
+                if Instant::now() >= deadline {
+                    debug!(
+                        app_id,
+                        watched_secs = STEAM_ORPHAN_WATCH.as_secs(),
+                        "No late Steam game appeared; stopping orphan watch"
+                    );
+                    return;
+                }
+            }
+        })
     }
 
     /// Watch the preloaded Steam client and report when it has finished its
