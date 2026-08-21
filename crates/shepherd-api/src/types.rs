@@ -497,10 +497,24 @@ pub enum SessionEndReason {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
+    /// Approved and spawning; the activity has not mapped a window yet.
     Launching,
+    /// The activity is running normally.
     Running,
+    /// Running, and at least one time warning has been issued.
     Warned,
+    /// Past its deadline and being wound down.
     Expiring,
+    /// Teardown has been requested and the activity is being stopped.
+    ///
+    /// The session is still current: the activity is on screen until the host
+    /// confirms otherwise, so nothing else may launch and shells must keep the
+    /// launcher out of the way. Shells should render this as a
+    /// non-interactive "closing" state — without it a child gets no feedback
+    /// that their press registered, which is why they pressed again on
+    /// 2026-08-20 (issue #136).
+    Stopping,
+    /// Settled and cleared; no activity is running.
     Ended,
 }
 

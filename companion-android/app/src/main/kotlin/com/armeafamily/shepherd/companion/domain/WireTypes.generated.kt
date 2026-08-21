@@ -860,10 +860,36 @@ data class SessionInfo(
  */
 @Serializable
 enum class SessionState {
+    /**
+     * Approved and spawning; the activity has not mapped a window yet.
+     */
     @SerialName("launching") LAUNCHING,
+    /**
+     * The activity is running normally.
+     */
     @SerialName("running") RUNNING,
+    /**
+     * Running, and at least one time warning has been issued.
+     */
     @SerialName("warned") WARNED,
+    /**
+     * Past its deadline and being wound down.
+     */
     @SerialName("expiring") EXPIRING,
+    /**
+     * Teardown has been requested and the activity is being stopped.
+     *
+     * The session is still current: the activity is on screen until the host
+     * confirms otherwise, so nothing else may launch and shells must keep the
+     * launcher out of the way. Shells should render this as a
+     * non-interactive "closing" state — without it a child gets no feedback
+     * that their press registered, which is why they pressed again on
+     * 2026-08-20 (issue #136).
+     */
+    @SerialName("stopping") STOPPING,
+    /**
+     * Settled and cleared; no activity is running.
+     */
     @SerialName("ended") ENDED,
 }
 

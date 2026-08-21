@@ -190,7 +190,13 @@ impl ActiveSession {
             session_id: self.plan.session_id.clone(),
             entry_id: self.plan.entry_id.clone(),
             label: self.plan.label.clone(),
-            state: self.state,
+            // Report the teardown, not the state the session was in when it
+            // was asked to stop: shells key their "closing" view off this.
+            state: if self.stopping.is_some() {
+                SessionState::Stopping
+            } else {
+                self.state
+            },
             started_at: self.started_at,
             deadline: self.deadline,
             time_remaining: self.time_remaining(now_mono),

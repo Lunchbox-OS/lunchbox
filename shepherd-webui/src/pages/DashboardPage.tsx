@@ -112,6 +112,7 @@ const STATE_COLOR: Record<string, "success" | "warning" | "error" | "primary" | 
   warned: "warning",
   expiring: "error",
   launching: "primary",
+  stopping: "warning",
   ended: "disabled",
 };
 

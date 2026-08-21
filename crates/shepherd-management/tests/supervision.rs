@@ -301,6 +301,45 @@ async fn nothing_can_launch_while_the_previous_activity_is_still_being_stopped()
     let _ = drained(&mut h.events);
 }
 
+/// While teardown is in flight the session must report itself as `Stopping`,
+/// so shells can show a closing state instead of an unchanged screen.
+///
+/// The child on 2026-08-20 pressed close, saw nothing change, and pressed
+/// again. Holding the session (the fix above) stops the second press doing
+/// damage; this is what stops it happening in the first place.
+#[tokio::test]
+async fn the_session_reports_itself_as_stopping_during_teardown() {
+    let mut h = harness();
+    h.host
+        .set_late_reap(Duration::from_millis(400), Duration::ZERO);
+
+    launch(&h.svc, "tetris").await;
+    assert_eq!(
+        h.svc.current_session().await.map(|s| s.state),
+        Some(shepherd_api::SessionState::Running)
+    );
+
+    let stopping = h.svc.stop_current(StopMode::Graceful);
+    tokio::pin!(stopping);
+    tokio::select! {
+        r = &mut stopping => panic!("stop finished before the mock released it: {r:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+    }
+
+    assert_eq!(
+        h.svc.current_session().await.map(|s| s.state),
+        Some(shepherd_api::SessionState::Stopping),
+        "shells need this to render a closing state"
+    );
+
+    stopping.await.unwrap();
+    assert!(
+        h.svc.current_session().await.is_none(),
+        "the session is gone once teardown completes"
+    );
+    let _ = drained(&mut h.events);
+}
+
 /// A stop that did not actually stop anything must be reported as a failure,
 /// not swallowed.
 ///

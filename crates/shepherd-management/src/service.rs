@@ -423,6 +423,13 @@ impl ManagementService for DefaultManagementService {
             }
         };
 
+        // Tell everyone we are closing *before* the blocking teardown, so the
+        // launcher and HUD can show it. Without this the screen looks
+        // unchanged for the whole (up to 5s) wait, which is what made the
+        // child press again on 2026-08-20 (issue #136).
+        let snap = self.engine.lock().await.get_state();
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+
         // Tear the activity down first — everything below assumes it is gone.
         let stop_result = match handle {
             Some(h) => {

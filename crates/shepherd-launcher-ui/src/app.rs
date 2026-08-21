@@ -300,6 +300,7 @@ impl LauncherApp {
         let window_weak = window.downgrade();
         let error_label = error_view.1.clone();
         let session_label = session_view.1.clone();
+        let session_hint = session_view.2.clone();
 
         glib::spawn_future_local(async move {
             let mut receiver = state_receiver;
@@ -346,12 +347,23 @@ impl LauncherApp {
                         }
                         stack.set_visible_child_name("loading");
                     }
+                    LauncherState::Closing { entry_label } => {
+                        // Same surface as the session view, so the grid stays
+                        // out of reach while the activity is torn down.
+                        session_label.set_text(&format!("Closing {}…", entry_label));
+                        session_hint.set_text("Please wait while the activity closes");
+                        if let Some(ref win) = window {
+                            win.set_visible(true);
+                        }
+                        stack.set_visible_child_name("session");
+                    }
                     LauncherState::SessionActive {
                         session_id: _,
                         entry_label,
                         time_remaining: _,
                     } => {
                         session_label.set_text(&format!("Loading: {}", entry_label));
+                        session_hint.set_text("Please wait while the application starts");
                         // Show the session view as a loading screen behind the game
                         // The game window will appear on top when it launches
                         if let Some(ref win) = window {
@@ -561,7 +573,10 @@ impl LauncherApp {
         (container, label)
     }
 
-    fn create_session_view() -> (gtk4::Box, gtk4::Label) {
+    /// The screen shown over a session — both while the activity is starting
+    /// and while it is being closed. Returns the headline and the sublabel,
+    /// because the two states need different hints.
+    fn create_session_view() -> (gtk4::Box, gtk4::Label, gtk4::Label) {
         let container = gtk4::Box::new(gtk4::Orientation::Vertical, 24);
         container.set_halign(gtk4::Align::Center);
         container.set_valign(gtk4::Align::Center);
@@ -580,7 +595,7 @@ impl LauncherApp {
         hint.add_css_class("session-sublabel");
         container.append(&hint);
 
-        (container, label)
+        (container, label, hint)
     }
 
     fn create_disconnected_view() -> (gtk4::Box, gtk4::Button) {

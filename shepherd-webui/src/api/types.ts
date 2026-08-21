@@ -95,6 +95,8 @@ export type SessionState =
   | "running"
   | "warned"
   | "expiring"
+  /** Teardown requested; the activity is still up until the host confirms. */
+  | "stopping"
   | "ended";
 
 export interface SessionInfo {

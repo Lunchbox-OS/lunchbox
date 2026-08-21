@@ -416,6 +416,16 @@ impl SharedState {
                 self.set_suspended(false);
                 self.set_internet_status(snapshot.internet_status.clone());
                 if let Some(session) = &snapshot.current_session {
+                    // Teardown in flight: the activity is still up, but the
+                    // child needs to see that their close registered rather
+                    // than an unchanged bar (issue #136).
+                    if session.state == shepherd_api::SessionState::Stopping {
+                        self.set_session_state(SessionState::Ending {
+                            session_id: session.session_id.clone(),
+                            reason: "Closing…".to_string(),
+                        });
+                        return;
+                    }
                     let now = shepherd_util::now();
                     // For unlimited sessions (deadline=None), time_remaining is None
                     let time_remaining = session.deadline.map(|d| {
