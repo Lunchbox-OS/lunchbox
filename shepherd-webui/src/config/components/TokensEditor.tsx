@@ -14,12 +14,14 @@
  */
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
+import Checkbox from "@mui/material/Checkbox";
 import Chip from "@mui/material/Chip";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import Box from "@mui/material/Box";
 import { useFields } from "../doc/useFields";
 import { subjectPath, type Subject } from "../doc/patches";
 import type { RawConfig, RawTokens } from "../model/config.generated";
@@ -52,7 +54,7 @@ function sourceOptions(config: RawConfig, subject: Subject): Option[] {
         .filter((g) => g.id !== subject.id)
         .map((g) => ({
           value: `${GROUP_PREFIX}${g.id}`,
-          label: `${g.label} (whole category)`,
+          label: g.label,
           kind: "group" as const,
         })),
       ...entries
@@ -67,7 +69,7 @@ function sourceOptions(config: RawConfig, subject: Subject): Option[] {
       .filter((g) => g.id !== ownGroup)
       .map((g) => ({
         value: `${GROUP_PREFIX}${g.id}`,
-        label: `${g.label} (whole category)`,
+        label: g.label,
         kind: "group" as const,
       })),
     ...entries
@@ -118,13 +120,33 @@ export function TokensEditor({
           isOptionEqualToValue={(a, b) => a.value === b.value}
           getOptionLabel={(o) => o.label}
           onChange={(_, next) => f.setField("from", next.map((o) => o.value))}
+          // A gate usually draws on several sources, and reopening the list
+          // after every pick makes choosing three of them four interactions
+          // instead of one.
+          disableCloseOnSelect
+          // `sourceOptions` returns categories first, which is what grouping
+          // requires — MUI groups consecutive runs rather than sorting.
+          groupBy={(o) => (o.kind === "group" ? "Categories" : "Activities")}
+          renderOption={(props, option, { selected: isSelected }) => {
+            // In MUI 9 the key arrives inside props; spreading it onto the li
+            // would hand React a key through props rather than as a key.
+            const { key, ...liProps } = props;
+            return (
+              <Box component="li" key={key} {...liProps}>
+                <Checkbox size="small" checked={isSelected} sx={{ mr: 1, p: 0.5 }} />
+                {option.label}
+              </Box>
+            );
+          }}
           renderValue={(value, getItemProps) =>
             value.map((option, index) => (
               <Chip
                 {...getItemProps({ index })}
                 key={option.value}
                 size="small"
-                label={option.label}
+                label={
+                  option.kind === "group" ? `${option.label} (category)` : option.label
+                }
                 color={option.kind === "group" ? "secondary" : "default"}
               />
             ))
