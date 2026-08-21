@@ -258,8 +258,13 @@ impl IpcClient {
 /// Client-side mirror of the server's `LaunchOutcome`. Kept as a
 /// small stable enum so callers can pattern-match without pulling in
 /// `shepherd-management`.
+///
+/// Externally tagged (`{"Approved": {…}}`), matching how
+/// `shepherd_management::LaunchOutcome` serializes. It was previously
+/// `#[serde(untagged)]`, which could never match that shape: *every* launch
+/// failed to decode, and a `Denied` outcome — the one carrying the reason the
+/// child needs to see — was silently dropped on the floor.
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
 pub enum LaunchOutcome {
     Approved {
         session_id: String,
@@ -293,4 +298,50 @@ impl EventStream {
 mod tests {
     // Client tests would require a running server; see integration
     // tests under `crates/shepherd-e2e/`.
+    //
+    // The exception is wire-shape agreement with the server's types, which is
+    // pure serde and needs no server at all — and which silently regressed
+    // once already (see [`LaunchOutcome`]).
+    use super::*;
+
+    /// The exact bytes shepherdd puts on the wire, captured from a headless
+    /// `launch` on 2026-08-20. Externally tagged, not untagged.
+    const APPROVED_ON_THE_WIRE: &str = r#"{
+        "Approved": {
+            "session_id": "3288e400-38f6-415e-ad22-f89635794178",
+            "deadline": "2026-08-20T22:00:47.706134268-04:00"
+        }
+    }"#;
+
+    /// Built from the real [`ReasonCode`] so the inner shape cannot drift out
+    /// from under this test; the outer `{"Denied": …}` tag is the assertion.
+    fn denied_on_the_wire() -> String {
+        let reasons = vec![ReasonCode::OutsideTimeWindow {
+            next_window_start: None,
+        }];
+        format!(
+            r#"{{"Denied":{{"reasons":{}}}}}"#,
+            serde_json::to_string(&reasons).unwrap()
+        )
+    }
+
+    #[test]
+    fn decodes_the_approved_shape_the_server_sends() {
+        match serde_json::from_str::<LaunchOutcome>(APPROVED_ON_THE_WIRE) {
+            Ok(LaunchOutcome::Approved { session_id, .. }) => {
+                assert_eq!(session_id, "3288e400-38f6-415e-ad22-f89635794178");
+            }
+            other => panic!("expected Approved, got {other:?}"),
+        }
+    }
+
+    /// The one that actually mattered: a denial has to reach the UI, or a
+    /// child who is out of time just sees the launcher do nothing.
+    #[test]
+    fn decodes_the_denied_shape_the_server_sends() {
+        match serde_json::from_str::<LaunchOutcome>(&denied_on_the_wire()) {
+            Ok(LaunchOutcome::Denied { reasons }) => assert_eq!(reasons.len(), 1),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
 }
