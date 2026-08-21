@@ -1381,6 +1381,13 @@ impl CoreEngine {
         }
     }
 
+    /// The audit/usage store, for callers that need to record something the
+    /// engine itself does not model (e.g. shepherdd auditing an escaped
+    /// activity reported by the host).
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
+    }
+
     /// Get current session reference
     pub fn current_session(&self) -> Option<&ActiveSession> {
         self.current_session.as_ref()

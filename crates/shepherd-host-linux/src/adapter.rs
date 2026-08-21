@@ -43,6 +43,11 @@ const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
 /// rather than leaving the launcher held indefinitely (issue #136).
 const KILL_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 
+/// Monitor ticks (100ms each) between reconciliation sweeps for escaped
+/// activities. The sweep talks to the compositor, so it is deliberately much
+/// slower than the process poll it rides on.
+const RECONCILE_EVERY_TICKS: u64 = 20;
+
 /// Expand `~` at the beginning of a path to the user's home directory
 fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
@@ -130,6 +135,22 @@ pub struct LinuxHost {
     steam_auto_dismiss: Arc<Mutex<HashSet<InterstitialKind>>>,
     /// Watchdog deadline for a Steam game to appear, in milliseconds.
     steam_launch_timeout_ms: Arc<AtomicU64>,
+    /// Activities that outlived every kill we know how to send. Their session
+    /// is already over, so nothing else is watching them — the monitor keeps
+    /// working on these rather than letting them run unsupervised (issue #136).
+    escaped: Arc<Mutex<HashMap<u32, EscapedActivity>>>,
+}
+
+/// An activity that survived teardown and is still on the machine.
+#[derive(Clone, Debug)]
+struct EscapedActivity {
+    session_id: SessionId,
+    pgid: u32,
+    info: Option<SessionInfo>,
+    /// Kill attempts made by the reconciliation sweep so far.
+    attempts: u32,
+    /// Whether we have already told the daemon about this one.
+    reported: bool,
 }
 
 impl LinuxHost {
@@ -152,6 +173,7 @@ impl LinuxHost {
             event_rx: Arc::new(Mutex::new(Some(rx))),
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
             steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
+            escaped: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -345,6 +367,186 @@ impl LinuxHost {
         }
     }
 
+    /// `app_id`s that are shepherd's own furniture rather than an activity.
+    /// A window matching one of these is expected to outlive every session.
+    fn is_infrastructure(window: &WindowInfo) -> bool {
+        const INFRA: &[&str] = &[
+            "org.shepherd.launcher",
+            "org.shepherd.hud",
+            "org.shepherd.pairing",
+            "at.yrlf.wl_mirror",
+        ];
+        window
+            .app_id
+            .as_deref()
+            .is_some_and(|id| INFRA.contains(&id))
+    }
+
+    /// Report windows that belong to no activity we are tracking.
+    ///
+    /// This is the backstop for an orphan nobody predicted — an activity whose
+    /// direct child exited while a `setsid`'d descendant kept the window, or a
+    /// late Steam game arriving after we stopped watching. Neither shows up in
+    /// `processes`, so only the compositor knows they exist.
+    ///
+    /// Deliberately **report-only** for pids shepherd did not spawn. Closing an
+    /// unrecognized window is a policy call with real blast radius (a system
+    /// dialog, something an admin started deliberately), and getting it wrong
+    /// on a kiosk a child depends on is worse than the visibility gap. Windows
+    /// belonging to a *known* escaped activity are closed — see
+    /// [`Self::reconcile_escaped`].
+    /// Returns the pids reported for the first time by this call, so the
+    /// caller (and tests) can see what changed. `reported` carries the set
+    /// across sweeps so a persistent orphan is logged once rather than every
+    /// two seconds, and is pruned of pids whose windows have gone.
+    fn report_unowned_windows(
+        windows: &[WindowInfo],
+        known: &HashSet<u32>,
+        reported: &mut HashSet<u32>,
+    ) -> Vec<u32> {
+        let mut fresh = Vec::new();
+        for w in windows {
+            let Some(pid) = w.pid else { continue };
+            if w.in_scratchpad || Self::is_infrastructure(w) || known.contains(&pid) {
+                continue;
+            }
+            if reported.insert(pid) {
+                fresh.push(pid);
+                warn!(
+                    pid,
+                    app_id = ?w.app_id,
+                    class = ?w.window_class,
+                    name = ?w.name,
+                    "Window on screen belongs to no tracked activity"
+                );
+            }
+        }
+        // Forget windows that have gone, so if one comes back it is reported
+        // again rather than silently ignored forever.
+        reported.retain(|pid| windows.iter().any(|w| w.pid == Some(*pid)));
+        fresh
+    }
+
+    /// Send every kill we have at an activity, hardest first. Shared by the
+    /// stop paths and by the reconciliation sweep.
+    fn kill_activity(pid: u32, pgid: u32, info: &Option<SessionInfo>) {
+        use nix::sys::signal::Signal::SIGKILL;
+
+        signal_group(pgid, SIGKILL);
+        if let Some(info) = info {
+            if let Some(ref snap) = info.snap_name {
+                kill_snap_cgroup(snap, SIGKILL);
+            } else if let Some(app_id) = info.steam_app_id {
+                let _ = kill_steam_game_processes(app_id, SIGKILL);
+            } else if let Some(ref app_id) = info.flatpak_app_id {
+                kill_flatpak_cgroup(app_id, SIGKILL);
+            } else {
+                kill_by_command(&info.command_name, SIGKILL);
+            }
+        }
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), SIGKILL);
+    }
+
+    /// Keep working on activities that survived teardown, and close any window
+    /// they still have.
+    ///
+    /// Reporting a survivor is not enough: its session is over, so nothing else
+    /// is watching it and — as on `copernicus` — it stays on screen with no way
+    /// to close it. This retries the kill, and if the activity is still holding
+    /// a surface it asks the compositor to close that too, which reaches an
+    /// activity whose process we cannot signal.
+    async fn reconcile_escaped(
+        escaped: &Arc<Mutex<HashMap<u32, EscapedActivity>>>,
+        session_info: &Arc<Mutex<HashMap<SessionId, SessionInfo>>>,
+        processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
+        sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+        unowned_reported: &mut HashSet<u32>,
+        event_tx: &mpsc::UnboundedSender<HostEvent>,
+    ) {
+        let snapshot: Vec<(u32, EscapedActivity)> = {
+            let map = escaped.lock().unwrap();
+            map.iter().map(|(pid, a)| (*pid, a.clone())).collect()
+        };
+
+        // Windows still on screen: both to close activities we cannot kill,
+        // and to notice surfaces that belong to nothing we know about.
+        let windows = crate::sway::list_windows().await.unwrap_or_default();
+
+        let known: HashSet<u32> = {
+            let mut k: HashSet<u32> = processes.lock().unwrap().keys().copied().collect();
+            k.extend(sidecars.lock().unwrap().keys().copied());
+            k.extend(snapshot.iter().map(|(pid, _)| *pid));
+            k
+        };
+        let _ = Self::report_unowned_windows(&windows, &known, unowned_reported);
+
+        if snapshot.is_empty() {
+            return;
+        }
+
+        for (pid, activity) in snapshot {
+            let steam = activity
+                .info
+                .as_ref()
+                .and_then(|i| i.steam_app_id)
+                .is_some();
+
+            if !Self::activity_is_running(pid, activity.pgid, &activity.info, steam) {
+                escaped.lock().unwrap().remove(&pid);
+                // Only now is it safe to drop the kill recipe we were using.
+                session_info.lock().unwrap().remove(&activity.session_id);
+                info!(pid, session_id = %activity.session_id, "Escaped activity is finally gone");
+                let _ = event_tx.send(HostEvent::ActivityEscaped {
+                    session_id: activity.session_id.clone(),
+                    pid,
+                    command: activity
+                        .info
+                        .as_ref()
+                        .map(|i| i.command_name.clone())
+                        .unwrap_or_default(),
+                    resolved: true,
+                });
+                continue;
+            }
+
+            if !activity.reported {
+                let _ = event_tx.send(HostEvent::ActivityEscaped {
+                    session_id: activity.session_id.clone(),
+                    pid,
+                    command: activity
+                        .info
+                        .as_ref()
+                        .map(|i| i.command_name.clone())
+                        .unwrap_or_default(),
+                    resolved: false,
+                });
+            }
+
+            Self::kill_activity(pid, activity.pgid, &activity.info);
+
+            // Close any surface it is still showing. A window we can close is
+            // the difference between "unsupervised activity on the child's
+            // screen" and "gone from view while we keep killing it".
+            for w in windows.iter().filter(|w| w.pid == Some(pid)) {
+                if let Err(e) = crate::sway::act_on_window(w.id, WindowAction::Close).await {
+                    debug!(pid, window = w.id, error = %e, "Could not close escaped window");
+                }
+            }
+
+            if let Some(entry) = escaped.lock().unwrap().get_mut(&pid) {
+                entry.attempts += 1;
+                entry.reported = true;
+                if entry.attempts % 10 == 1 {
+                    warn!(
+                        pid,
+                        attempts = entry.attempts,
+                        session_id = %entry.session_id,
+                        "Activity is still running after its session ended; retrying"
+                    );
+                }
+            }
+        }
+    }
     /// Whether the activity behind `pid` is still alive.
     ///
     /// For Steam the process we spawned is only the `rungameid` request, which
@@ -389,7 +591,7 @@ impl LinuxHost {
             }
             if std::time::Instant::now() >= deadline {
                 warn!(session_id = %session_id, pid, "Activity still running after force kill");
-                self.forget_session(session_id, pid);
+                self.register_escaped(session_id, pid, pgid, session_info);
                 return Err(HostError::StopFailed(format!(
                     "activity (pid {pid}) still running after force kill"
                 )));
@@ -398,14 +600,34 @@ impl LinuxHost {
         }
     }
 
-    /// Drop all per-session bookkeeping for a session we are done with.
-    fn forget_session(&self, session_id: &SessionId, pid: u32) {
-        if let Some(children) = self.sidecars.lock().unwrap().remove(&pid) {
-            for child in children {
-                terminate_sidecar(child, "sidecar");
-            }
-        }
-        self.session_info.lock().unwrap().remove(session_id);
+    /// Record an activity that survived teardown, so the reconciliation sweep
+    /// keeps trying. Deliberately does *not* drop `session_info`: that is the
+    /// recipe the sweep needs to keep killing by cgroup/scope/command name.
+    /// `reconcile_escaped` removes it once the activity is actually gone.
+    ///
+    /// Per-activity sidecars *are* torn down here. They are input shims, not
+    /// the activity, and leaving them running strands a uinput virtual
+    /// pointer+keyboard across sessions — which is what happened to Bitwig's
+    /// gamepad bridge on 2026-08-20 (pid 93535 was still logging 64s after
+    /// shepherdd exited).
+    fn register_escaped(
+        &self,
+        session_id: &SessionId,
+        pid: u32,
+        pgid: u32,
+        info: &Option<SessionInfo>,
+    ) {
+        reap_sidecars(&self.sidecars, pid);
+        self.escaped.lock().unwrap().insert(
+            pid,
+            EscapedActivity {
+                session_id: session_id.clone(),
+                pgid,
+                info: info.clone(),
+                attempts: 0,
+                reported: false,
+            },
+        );
     }
 
     /// Finish an activity's exit: reap its sidecars, wipe an ephemeral browser
@@ -442,13 +664,33 @@ impl LinuxHost {
         let sidecars = self.sidecars.clone();
         let profile_wipes = self.profile_wipes.clone();
         let event_tx = self.event_tx.clone();
+        let escaped = self.escaped.clone();
+        let session_info = self.session_info.clone();
 
         tokio::spawn(async move {
+            let mut ticks: u64 = 0;
+            let mut unowned_reported: HashSet<u32> = HashSet::new();
             // Activities whose spawned process is reaped but whose process
             // group still has members. Keyed by the spawned pid.
             let mut winding_down: HashMap<u32, (u32, ExitStatus)> = HashMap::new();
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                ticks += 1;
+
+                // Reconciliation is a rescue path, not a hot loop: it shells
+                // out to the compositor, so run it every ~2s rather than on
+                // every poll. Cheap no-op when nothing has escaped.
+                if ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
+                    Self::reconcile_escaped(
+                        &escaped,
+                        &session_info,
+                        &processes,
+                        &sidecars,
+                        &mut unowned_reported,
+                        &event_tx,
+                    )
+                    .await;
+                }
 
                 let mut exited = Vec::new();
                 let steam_pids: HashSet<u32> =
@@ -1198,5 +1440,249 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Reconciliation sweep (issue #136)
+    //
+    // The rescue path for an activity that outlived teardown. It is the last
+    // thing standing between "supervision was lost" and "supervision was lost
+    // and nobody noticed", so it gets tested against real processes rather
+    // than a mock.
+    // -----------------------------------------------------------------------
+
+    fn window(pid: u32, app_id: &str) -> WindowInfo {
+        WindowInfo {
+            id: pid as u64,
+            name: Some(format!("window {pid}")),
+            app_id: Some(app_id.to_string()),
+            window_class: None,
+            pid: Some(pid),
+            workspace: Some("1".into()),
+            in_scratchpad: false,
+            visible: true,
+            focused: false,
+        }
+    }
+
+    /// Spawn a process in its own group that will not exit on its own.
+    ///
+    /// `token` ends up in its command line so a `pkill -f` in the code under
+    /// test matches this process and nothing else. The caller keeps the
+    /// returned `Child` and reaps it once the code under test has killed it.
+    fn spawn_survivor(token: &str) -> (std::process::Child, u32, u32) {
+        let child = std::process::Command::new("setsid")
+            .args(["sh", "-c", &format!("exec tail -f /dev/null # {token}")])
+            .spawn()
+            .expect("spawn survivor");
+        let pid = child.id();
+        // `setsid` forks when it is already a group leader, so the process
+        // holding the token may be a child of the one we spawned. Wait for the
+        // group to exist and use it as the identity.
+        for _ in 0..200 {
+            if pgid_is_live(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (child, pid, pid)
+    }
+
+    fn escaped_events(rx: &mut mpsc::UnboundedReceiver<HostEvent>) -> Vec<(u32, bool)> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let HostEvent::ActivityEscaped { pid, resolved, .. } = ev {
+                out.push((pid, resolved));
+            }
+        }
+        out
+    }
+
+    /// The whole rescue arc: an activity that outlived teardown is reported,
+    /// killed by the sweep, and then reported resolved — and only at that
+    /// point is its bookkeeping dropped.
+    #[tokio::test]
+    async fn reconcile_kills_an_escaped_activity_and_reports_when_it_is_gone() {
+        let host = LinuxHost::new();
+        let mut rx = host.subscribe();
+        let mut unowned = HashSet::new();
+
+        let token = "shepherd-reconcile-test-alpha";
+        let (mut survivor, pid, pgid) = spawn_survivor(token);
+        let session_id = SessionId::new();
+        let info = Some(SessionInfo {
+            command_name: token.to_string(),
+            snap_name: None,
+            flatpak_app_id: None,
+            steam_app_id: None,
+        });
+        host.session_info
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), info.clone().unwrap());
+        host.register_escaped(&session_id, pid, pgid, &info);
+
+        // First sweep: still alive, so it is announced and attacked.
+        LinuxHost::reconcile_escaped(
+            &host.escaped,
+            &host.session_info,
+            &host.processes,
+            &host.sidecars,
+            &mut unowned,
+            &host.event_tx,
+        )
+        .await;
+
+        assert_eq!(
+            escaped_events(&mut rx),
+            vec![(pid, false)],
+            "an escape must be announced so it reaches the audit log"
+        );
+
+        // The sweep's kill lands asynchronously; give the group time to die.
+        for _ in 0..200 {
+            if !pgid_is_live(pgid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !pgid_is_live(pgid),
+            "the sweep must actually kill the activity, not just log about it"
+        );
+
+        // Bookkeeping is still held until a sweep confirms the kill.
+        assert!(host.escaped.lock().unwrap().contains_key(&pid));
+        assert!(host.session_info.lock().unwrap().contains_key(&session_id));
+
+        // Second sweep: gone, so it resolves and the bookkeeping is released.
+        LinuxHost::reconcile_escaped(
+            &host.escaped,
+            &host.session_info,
+            &host.processes,
+            &host.sidecars,
+            &mut unowned,
+            &host.event_tx,
+        )
+        .await;
+
+        assert_eq!(
+            escaped_events(&mut rx),
+            vec![(pid, true)],
+            "resolving must be announced too, so the log shows supervision came back"
+        );
+        assert!(
+            host.escaped.lock().unwrap().is_empty(),
+            "a resolved escape must leave the registry"
+        );
+        assert!(
+            !host.session_info.lock().unwrap().contains_key(&session_id),
+            "and only then is its kill recipe dropped"
+        );
+
+        let _ = survivor.wait();
+    }
+
+    /// A survivor that is still there next time round must not be re-announced
+    /// on every sweep, but must keep being attacked.
+    ///
+    /// Needs a target that shrugs off SIGKILL, which no child of ours can do.
+    /// `kthreadd` (pid 2) can: the kernel discards signals to kernel threads
+    /// outright, so this is inert even when run as root — and it is exactly
+    /// the shape of the real case, an activity that is demonstrably alive and
+    /// does not die when we signal it.
+    #[tokio::test]
+    async fn reconcile_announces_an_escape_once_but_keeps_retrying() {
+        const KTHREADD: u32 = 2;
+        if !pid_is_live(KTHREADD) {
+            eprintln!("no kernel thread at pid 2; skipping");
+            return;
+        }
+
+        let host = LinuxHost::new();
+        let mut rx = host.subscribe();
+        let mut unowned = HashSet::new();
+        let session_id = SessionId::new();
+
+        host.escaped.lock().unwrap().insert(
+            KTHREADD,
+            EscapedActivity {
+                session_id: session_id.clone(),
+                // Must not be a real group: `kill(-pgid)` with pgid 1 would
+                // signal everything we own.
+                pgid: u32::MAX / 2,
+                // No SessionInfo, so no `pkill -f` runs from a unit test.
+                info: None,
+                attempts: 0,
+                reported: false,
+            },
+        );
+
+        for _ in 0..3 {
+            LinuxHost::reconcile_escaped(
+                &host.escaped,
+                &host.session_info,
+                &host.processes,
+                &host.sidecars,
+                &mut unowned,
+                &host.event_tx,
+            )
+            .await;
+        }
+
+        assert_eq!(
+            escaped_events(&mut rx),
+            vec![(KTHREADD, false)],
+            "three sweeps, one announcement — otherwise a stuck activity spams \
+             the log and the audit trail every two seconds"
+        );
+        assert_eq!(
+            host.escaped.lock().unwrap()[&KTHREADD].attempts,
+            3,
+            "but every sweep must try again rather than giving up"
+        );
+    }
+
+    #[test]
+    fn unowned_windows_are_reported_once_and_forgotten_when_they_close() {
+        let known: HashSet<u32> = [100].into_iter().collect();
+        let mut reported = HashSet::new();
+
+        let windows = vec![
+            window(100, "org.example.TrackedActivity"), // a tracked activity
+            window(101, "org.shepherd.launcher"),       // our own furniture
+            window(102, "org.example.Orphan"),          // the one that matters
+        ];
+
+        assert_eq!(
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported),
+            vec![102],
+            "only the surface belonging to nothing we know about"
+        );
+        assert!(
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported).is_empty(),
+            "a persistent orphan must not be re-announced on every sweep"
+        );
+
+        // It closes, then something takes its pid slot later: report again.
+        assert!(LinuxHost::report_unowned_windows(&[], &known, &mut reported).is_empty());
+        assert_eq!(
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported),
+            vec![102],
+            "a window that comes back must be reported again"
+        );
+    }
+
+    #[test]
+    fn scratchpad_windows_are_not_orphans() {
+        // Steam's own client is moved to the scratchpad by sway.conf rather
+        // than being an activity; it is hidden, not loose on the child's
+        // screen.
+        let mut hidden = window(200, "steam");
+        hidden.in_scratchpad = true;
+        let mut reported = HashSet::new();
+        assert!(
+            LinuxHost::report_unowned_windows(&[hidden], &HashSet::new(), &mut reported).is_empty()
+        );
     }
 }

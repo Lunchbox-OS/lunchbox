@@ -989,6 +989,43 @@ impl Service {
             HostEvent::SpawnFailed { session_id, error } => {
                 error!(session_id = %session_id, error = %error, "Spawn failed");
             }
+
+            HostEvent::ActivityEscaped {
+                session_id,
+                pid,
+                command,
+                resolved,
+            } => {
+                if resolved {
+                    info!(
+                        session_id = %session_id,
+                        pid, command = %command,
+                        "Escaped activity has been cleaned up"
+                    );
+                } else {
+                    error!(
+                        session_id = %session_id,
+                        pid, command = %command,
+                        "Activity outlived its session and every kill; supervision lost"
+                    );
+                }
+                // Audit it either way: a caregiver reading the log should be
+                // able to see that supervision was lost and when it came back.
+                let audited = {
+                    let engine = engine.lock().await;
+                    engine
+                        .store()
+                        .append_audit(AuditEvent::new(AuditEventType::ActivityEscaped {
+                            session_id,
+                            pid,
+                            command,
+                            resolved,
+                        }))
+                };
+                if let Err(e) = audited {
+                    warn!(error = %e, "Failed to audit escaped activity");
+                }
+            }
         }
     }
 
