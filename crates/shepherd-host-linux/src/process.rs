@@ -598,6 +598,27 @@ pub fn kill_steam_game_processes(app_id: u32, signal: Signal) -> bool {
     true
 }
 
+/// Whether `pid` names a process that is still actually running.
+///
+/// A zombie counts as gone: it has exited and is only waiting to be reaped, so
+/// treating it as alive would make a successful kill look like a failure.
+///
+/// Asks the kernel rather than consulting our own bookkeeping, because the
+/// `processes` map is only pruned by the background monitor — a stop that
+/// judged liveness from the map would depend on the monitor running, and would
+/// hang in any context without one.
+pub fn pid_is_live(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false; // no such process
+    };
+    // "pid (comm) state ..." — comm may contain spaces and parens, so scan
+    // from the last ')' rather than splitting from the left.
+    let Some(after_comm) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+        return false;
+    };
+    !matches!(after_comm.split_whitespace().next(), Some("Z") | None)
+}
+
 /// Kill processes by command name using pkill
 pub fn kill_by_command(command_name: &str, signal: Signal) -> bool {
     let signal_name = match signal {
@@ -1104,5 +1125,44 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Process should be gone or terminating
+    }
+
+    /// A killed-but-unreaped child is a zombie: it has exited, so `stop` must
+    /// not mistake it for an activity that survived the kill (issue #136).
+    #[test]
+    fn pid_is_live_treats_a_zombie_as_gone() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+
+        // Wait for it to exit without reaping it.
+        for _ in 0..200 {
+            if !pid_is_live(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            !pid_is_live(pid),
+            "an exited-but-unreaped child must read as gone"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn pid_is_live_sees_a_running_process_and_a_missing_one() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exec tail -f /dev/null"])
+            .spawn()
+            .expect("spawn tail");
+        let pid = child.id();
+        assert!(pid_is_live(pid), "a running process must read as live");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!pid_is_live(pid), "a reaped process must read as gone");
+
+        // A pid that cannot exist.
+        assert!(!pid_is_live(u32::MAX));
     }
 }

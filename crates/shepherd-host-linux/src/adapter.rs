@@ -23,7 +23,7 @@ use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
     build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name, steam_webhelper_running,
+    kill_steam_game_processes, make_scope_name, pid_is_live, steam_webhelper_running,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -35,6 +35,12 @@ use crate::steam_interstitial::{self, DEFAULT_CEF_PORT, DismissOutcome};
 /// un-gating Steam activities anyway (issue #76). A safety net so a missed
 /// readiness signal never leaves Steam games permanently hidden.
 const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
+
+/// How long to keep checking that a SIGKILL actually took before declaring the
+/// activity a survivor. Long enough for the kernel to reap and the monitor to
+/// notice; short enough that a genuinely stuck activity is reported promptly
+/// rather than leaving the launcher held indefinitely (issue #136).
+const KILL_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Expand `~` at the beginning of a path to the user's home directory
 fn expand_tilde(path: &str) -> String {
@@ -336,6 +342,60 @@ impl LinuxHost {
             kill_snap_cgroup("steam", nix::sys::signal::Signal::SIGKILL);
             self.steam_preload_pids.lock().unwrap().clear();
         }
+    }
+
+    /// Whether the activity behind `pid` is still alive.
+    ///
+    /// For Steam the process we spawned is only the `rungameid` request, which
+    /// exits immediately, so liveness is the game's own pids instead.
+    fn activity_is_running(pid: u32, session_info: &Option<SessionInfo>, is_steam: bool) -> bool {
+        if is_steam {
+            return session_info
+                .as_ref()
+                .and_then(|info| info.steam_app_id)
+                .map(|id| !find_steam_game_pids(id).is_empty())
+                .unwrap_or(false);
+        }
+        pid_is_live(pid)
+    }
+
+    /// Wait for a kill to actually take.
+    ///
+    /// A SIGKILL is not a guarantee: the pid may have escaped the process
+    /// group, and the command-name fallback may not match it. Returns
+    /// `StopFailed` if the activity outlives every kill we sent, so a survivor
+    /// is reported rather than silently abandoned (issue #136).
+    async fn confirm_stopped(
+        &self,
+        session_id: &SessionId,
+        pid: u32,
+        session_info: &Option<SessionInfo>,
+        is_steam: bool,
+    ) -> HostResult<()> {
+        let deadline = std::time::Instant::now() + KILL_CONFIRM_WINDOW;
+        loop {
+            if !Self::activity_is_running(pid, session_info, is_steam) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!(session_id = %session_id, pid, "Activity still running after force kill");
+                self.forget_session(session_id, pid);
+                return Err(HostError::StopFailed(format!(
+                    "activity (pid {pid}) still running after force kill"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Drop all per-session bookkeeping for a session we are done with.
+    fn forget_session(&self, session_id: &SessionId, pid: u32) {
+        if let Some(children) = self.sidecars.lock().unwrap().remove(&pid) {
+            for child in children {
+                terminate_sidecar(child, "sidecar");
+            }
+        }
+        self.session_info.lock().unwrap().remove(session_id);
     }
 
     /// Start the background process monitor
@@ -911,20 +971,12 @@ impl HostAdapter for LinuxHost {
                                 let _ = p.kill();
                             }
                         }
+                        self.confirm_stopped(&session_id, pid, &session_info, is_steam)
+                            .await?;
                         break;
                     }
 
-                    // Check if process is still running
-                    let still_running = if is_steam {
-                        let app_id = session_info.as_ref().and_then(|info| info.steam_app_id);
-                        app_id
-                            .map(|id| !find_steam_game_pids(id).is_empty())
-                            .unwrap_or(false)
-                    } else {
-                        self.processes.lock().unwrap().contains_key(&pid)
-                    };
-
-                    if !still_running {
+                    if !Self::activity_is_running(pid, &session_info, is_steam) {
                         break;
                     }
 
@@ -967,6 +1019,11 @@ impl HostAdapter for LinuxHost {
                         let _ = p.kill();
                     }
                 }
+
+                // Same confirmation as the graceful path: a force stop that
+                // left the activity running must say so.
+                self.confirm_stopped(&session_id, pid, &session_info, is_steam)
+                    .await?;
             }
         }
 
