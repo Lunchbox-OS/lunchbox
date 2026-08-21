@@ -6,6 +6,7 @@
 //! Reconstructed from the `copernicus` journal of 2026-08-20; see
 //! `docs/ai/history/2026-08-20 001 activity-supervision-escapes.md`.
 
+use async_trait::async_trait;
 use shepherd_api::{EntryKind, Event, EventPayload, StopMode};
 use shepherd_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
@@ -13,8 +14,8 @@ use shepherd_config::{
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
-    HostCapabilities, MockHost, NoOpBrightnessController, NoOpDisplayController,
-    NoOpHidpiController, NoOpVolumeController,
+    HidpiController, HostCapabilities, MockHost, NoOpBrightnessController, NoOpDisplayController,
+    NoOpVolumeController,
 };
 use shepherd_management::{
     AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementService,
@@ -29,6 +30,26 @@ use tokio::sync::{Mutex, broadcast, watch};
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
+
+/// Records the order in which the service touches the compositor, so tests can
+/// assert that the launcher is restored *after* teardown rather than before.
+#[derive(Default)]
+struct RecordingHidpi {
+    log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl HidpiController for RecordingHidpi {
+    async fn apply(&self) {
+        self.log.lock().unwrap().push("hidpi.apply");
+    }
+    async fn restore(&self) {
+        self.log.lock().unwrap().push("hidpi.restore");
+    }
+    async fn factor(&self) -> f64 {
+        1.0
+    }
+}
 
 fn entry(id: &str) -> Entry {
     Entry {
@@ -85,12 +106,18 @@ fn test_policy() -> Policy {
 
 struct Harness {
     svc: DefaultManagementService,
+    host: Arc<MockHost>,
     events: broadcast::Receiver<Event>,
+    hidpi_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
 fn harness() -> Harness {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
+    let hidpi_log: Arc<std::sync::Mutex<Vec<&'static str>>> = Default::default();
+    let hidpi = Arc::new(RecordingHidpi {
+        log: hidpi_log.clone(),
+    });
     let engine = Arc::new(Mutex::new(CoreEngine::new(
         test_policy(),
         store.clone(),
@@ -103,7 +130,7 @@ fn harness() -> Harness {
     let svc = DefaultManagementService {
         engine,
         store,
-        host,
+        host: host.clone(),
         volume: Arc::new(NoOpVolumeController::default()),
         brightness: Arc::new(NoOpBrightnessController::default()),
         light_sensor: None,
@@ -114,11 +141,16 @@ fn harness() -> Harness {
         }),
         config_path: std::path::PathBuf::from("/nonexistent/config.toml"),
         shutdown_tx,
-        hidpi: Arc::new(NoOpHidpiController),
+        hidpi,
         display: Arc::new(NoOpDisplayController),
     };
 
-    Harness { svc, events }
+    Harness {
+        svc,
+        host,
+        events,
+        hidpi_log,
+    }
 }
 
 /// Drain the broadcast channel into the payloads seen so far.
@@ -128,6 +160,12 @@ fn drained(rx: &mut broadcast::Receiver<Event>) -> Vec<EventPayload> {
         out.push(ev.payload);
     }
     out
+}
+
+fn has_session_ended(payloads: &[EventPayload]) -> bool {
+    payloads
+        .iter()
+        .any(|p| matches!(p, EventPayload::SessionEnded { .. }))
 }
 
 async fn launch(svc: &DefaultManagementService, id: &str) {
@@ -140,6 +178,153 @@ async fn launch(svc: &DefaultManagementService, id: &str) {
 // ---------------------------------------------------------------------------
 // #136 — escape on close
 // ---------------------------------------------------------------------------
+
+/// The launcher must not be told the session is over while the activity is
+/// still being torn down.
+///
+/// Journal, 19:48:37–19:48:42: `Session stopped` and its `SessionEnded`
+/// broadcast landed at t=0, but RetroArch ran on for another 5.1s. The child
+/// saw an interactive grid over a live activity and their next press launched
+/// Bitwig by accident.
+#[tokio::test]
+async fn session_end_is_not_announced_until_teardown_finishes() {
+    let mut h = harness();
+    h.host
+        .set_late_reap(Duration::from_millis(300), Duration::ZERO);
+
+    launch(&h.svc, "tetris").await;
+    let _ = drained(&mut h.events);
+
+    let stopping = h.svc.stop_current(StopMode::Graceful);
+    tokio::pin!(stopping);
+
+    // Drive the stop for a while without letting it finish, so we can look at
+    // what the rest of the system was told mid-teardown.
+    tokio::select! {
+        r = &mut stopping => panic!("stop finished before the mock released it: {r:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+    }
+    let midway = drained(&mut h.events);
+    assert!(
+        !has_session_ended(&midway),
+        "SessionEnded was broadcast while the activity was still being stopped; \
+         this is what put an interactive launcher over a live RetroArch"
+    );
+
+    stopping.await.unwrap();
+    let after = drained(&mut h.events);
+    assert!(
+        has_session_ended(&after),
+        "SessionEnded must be broadcast once teardown completes"
+    );
+}
+
+/// The compositor must not be handed back to the launcher before the outgoing
+/// activity is gone.
+///
+/// Journal: `Restored sway output scales` at 19:48:37.161 — 40ms *before*
+/// SIGTERM was even sent, while RetroArch's XWayland window was still mapped.
+#[tokio::test]
+async fn hidpi_is_restored_after_teardown_not_before() {
+    let mut h = harness();
+    h.host
+        .set_late_reap(Duration::from_millis(300), Duration::ZERO);
+
+    launch(&h.svc, "tetris").await;
+    h.hidpi_log.lock().unwrap().clear();
+
+    let stopping = h.svc.stop_current(StopMode::Graceful);
+    tokio::pin!(stopping);
+
+    tokio::select! {
+        r = &mut stopping => panic!("stop finished before the mock released it: {r:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+    }
+    assert!(
+        h.hidpi_log.lock().unwrap().is_empty(),
+        "output scale was restored while the activity was still mapped"
+    );
+
+    stopping.await.unwrap();
+    assert_eq!(
+        h.hidpi_log.lock().unwrap().clone(),
+        vec!["hidpi.restore"],
+        "expected exactly one restore, after teardown"
+    );
+    let _ = drained(&mut h.events);
+}
+
+/// Nothing else may launch while the outgoing activity is still being torn
+/// down. This is the assertion that actually protects the child.
+///
+/// On 2026-08-20 the close was pressed on a gamepad. The launcher polls
+/// gamepads straight from evdev via `gilrs` on a 16ms timer
+/// (`shepherd-launcher-ui/src/app.rs`), so those presses never go through the
+/// compositor and are not gated by window focus at all — the second press
+/// reached the grid and `launch_selected()` fired regardless of what was on
+/// screen. Refusing the launch in the engine is therefore the only layer that
+/// covers every input path.
+#[tokio::test]
+async fn nothing_can_launch_while_the_previous_activity_is_still_being_stopped() {
+    let mut h = harness();
+    h.host
+        .set_late_reap(Duration::from_millis(400), Duration::ZERO);
+
+    launch(&h.svc, "tetris").await;
+    let _ = drained(&mut h.events);
+
+    let stopping = h.svc.stop_current(StopMode::Graceful);
+    tokio::pin!(stopping);
+    tokio::select! {
+        r = &mut stopping => panic!("stop finished before the mock released it: {r:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+    }
+
+    // The stray press lands mid-teardown.
+    let outcome = h.svc.launch(EntryId::new("bitwig-studio")).await.unwrap();
+    match outcome {
+        LaunchOutcome::Denied { .. } => {}
+        LaunchOutcome::Approved { .. } => panic!(
+            "an activity launched while the previous one was still running — \
+             exactly the accidental Bitwig launch from the journal"
+        ),
+    }
+
+    stopping.await.unwrap();
+
+    // And once teardown really is done, launching works again.
+    let after = h.svc.launch(EntryId::new("bitwig-studio")).await.unwrap();
+    assert!(
+        matches!(after, LaunchOutcome::Approved { .. }),
+        "launching must be possible again once the activity is gone"
+    );
+    let _ = drained(&mut h.events);
+}
+
+/// A stop that did not actually stop anything must be reported as a failure,
+/// not swallowed.
+///
+/// `LinuxHost::stop` sends SIGKILL at the timeout and returns `Ok(())` without
+/// re-checking, and `stop_current` discards the result with `let _`.
+#[tokio::test]
+async fn stop_reports_failure_when_the_activity_survives() {
+    let mut h = harness();
+    h.host.set_unkillable(Duration::from_millis(100));
+
+    launch(&h.svc, "tetris").await;
+    let _ = drained(&mut h.events);
+
+    let result = h.svc.stop_current(StopMode::Graceful).await;
+    assert!(
+        result.is_err(),
+        "stop_current reported success for an activity that is still running"
+    );
+    assert_eq!(
+        h.host.running_sessions().len(),
+        1,
+        "the activity really did survive, so the harness models #136 correctly"
+    );
+}
 
 /// A late exit event from the *previous* activity must not end the session that
 /// replaced it.

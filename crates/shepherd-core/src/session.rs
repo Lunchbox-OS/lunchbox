@@ -66,6 +66,14 @@ pub struct ActiveSession {
 
     /// Host session handle (for stopping)
     pub host_handle: Option<HostSessionHandle>,
+
+    /// Set once teardown has been requested, carrying the reason to settle
+    /// with. The session deliberately stays *current* while this is set: the
+    /// activity is still on screen until the host confirms otherwise, so
+    /// nothing else may launch and clients must keep seeing a session. See
+    /// issue #136 — announcing the end at request time handed an interactive
+    /// launcher back over a still-running activity.
+    pub stopping: Option<SessionEndReason>,
 }
 
 impl ActiveSession {
@@ -89,6 +97,7 @@ impl ActiveSession {
             deadline_mono,
             warnings_issued: Vec::new(),
             host_handle: None,
+            stopping: None,
         }
     }
 

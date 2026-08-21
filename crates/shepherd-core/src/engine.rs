@@ -23,10 +23,20 @@ pub enum LaunchDecision {
     Denied { reasons: Vec<ReasonCode> },
 }
 
-/// Stop decision from the core engine
+/// Outcome of asking the core engine to begin a stop.
+///
+/// Teardown is two-phase — `begin_stop` then `finish_stop` — so the session
+/// stays current (and the launcher stays out of the way) for as long as the
+/// activity is actually still running. See issue #136.
 #[derive(Debug)]
-pub enum StopDecision {
-    Stopped(StopResult),
+pub enum BeginStopDecision {
+    Stopping {
+        /// The host handle to act on, if the activity was ever spawned.
+        handle: Option<HostSessionHandle>,
+        /// True when a stop was already in flight and this call changed
+        /// nothing — e.g. the close button pressed twice.
+        already_stopping: bool,
+    },
     NoActiveSession,
 }
 
@@ -1245,7 +1255,9 @@ impl CoreEngine {
         let session = self.current_session.take()?;
 
         let duration = session.duration_so_far(now_mono);
-        let reason = if session.state == shepherd_api::SessionState::Expiring {
+        let reason = if let Some(requested) = session.stopping.clone() {
+            requested
+        } else if session.state == shepherd_api::SessionState::Expiring {
             SessionEndReason::Expired
         } else {
             SessionEndReason::ProcessExited { exit_code }
@@ -1287,52 +1299,66 @@ impl CoreEngine {
         })
     }
 
-    /// Stop the current session
-    pub fn stop_current(
-        &mut self,
-        reason: SessionEndReason,
-        now_mono: MonotonicInstant,
-        now: DateTime<Local>,
-    ) -> StopDecision {
-        let session = match self.current_session.take() {
+    /// Begin tearing the current session down.
+    ///
+    /// Marks the session stopping and hands back the host handle to act on, but
+    /// deliberately **keeps it current**: the activity is still on screen until
+    /// the host says otherwise, so the launcher must stay out of the way and no
+    /// other entry may launch. Settle and clear with [`Self::finish_stop`] once
+    /// teardown is confirmed.
+    ///
+    /// Idempotent: asking twice — a child pressing close again because nothing
+    /// visibly happened — re-reports the same in-flight stop rather than
+    /// double-settling usage.
+    pub fn begin_stop(&mut self, reason: SessionEndReason) -> BeginStopDecision {
+        let session = match self.current_session.as_mut() {
             Some(s) => s,
-            None => return StopDecision::NoActiveSession,
+            None => return BeginStopDecision::NoActiveSession,
         };
 
-        let duration = session.duration_so_far(now_mono);
+        let already_stopping = session.stopping.is_some();
+        if !already_stopping {
+            session.stopping = Some(reason.clone());
+            info!(
+                session_id = %session.plan.session_id,
+                reason = ?reason,
+                "Session stopping; held current until teardown confirms"
+            );
+        }
 
-        // Update usage accounting
-        let today = now.date_naive();
-        let _ = self
-            .store
-            .add_usage(&session.plan.entry_id, today, duration);
+        BeginStopDecision::Stopping {
+            handle: session.host_handle.clone(),
+            already_stopping,
+        }
+    }
 
-        // Settle token balances (issue #8) and cooldowns, on the entry and on
-        // its group (issue #5)
-        self.settle_session_end(&session.plan.entry_id, duration, now, today);
+    /// Settle and clear a session previously marked by [`Self::begin_stop`].
+    ///
+    /// Returns `None` if the session already went away on its own — its exit
+    /// event can land while the host is still being asked to stop it.
+    pub fn finish_stop(
+        &mut self,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) -> Option<StopResult> {
+        let session = self.current_session.as_ref()?;
+        session.stopping.as_ref()?;
 
-        // Log to audit
-        let _ = self
-            .store
-            .append_audit(AuditEvent::new(AuditEventType::SessionEnded {
-                session_id: session.plan.session_id.clone(),
-                entry_id: session.plan.entry_id.clone(),
-                reason: reason.clone(),
+        let event = self.end_current_session(None, now_mono, now)?;
+        match event {
+            CoreEvent::SessionEnded {
+                session_id,
+                entry_id,
+                reason,
                 duration,
-            }));
-
-        info!(
-            session_id = %session.plan.session_id,
-            reason = ?reason,
-            "Session stopped"
-        );
-
-        StopDecision::Stopped(StopResult {
-            session_id: session.plan.session_id,
-            entry_id: session.plan.entry_id,
-            reason,
-            duration,
-        })
+            } => Some(StopResult {
+                session_id,
+                entry_id,
+                reason,
+                duration,
+            }),
+            _ => None,
+        }
     }
 
     /// Get current service state snapshot
