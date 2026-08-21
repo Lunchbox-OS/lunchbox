@@ -8,9 +8,12 @@
  */
 import { useState } from "react";
 import Alert from "@mui/material/Alert";
+import Badge from "@mui/material/Badge";
 import Box from "@mui/material/Box";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
+import Switch from "@mui/material/Switch";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
 import TextField from "@mui/material/TextField";
@@ -20,14 +23,18 @@ import { useFields } from "../doc/useFields";
 import { entryPath, insert, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry, RawEntryKind } from "../model/config.generated";
 import { issuesForEntry } from "../model/report";
+import { BrowserEditor, FirewallEditor, InternetEditor } from "./NetworkEditors";
+import { BrightnessEditor, VolumeEditor } from "./RestrictionEditors";
+import { InputCompatEditor, RequiresInputEditor } from "./InputEditors";
 import { IssueList } from "./IssueList";
 import { KindEditor } from "./KindEditor";
 import { LimitsEditor } from "./LimitsEditor";
 import { ScheduleEditor } from "./ScheduleEditor";
 import { Section } from "./Section";
+import { TokensEditor } from "./TokensEditor";
 import { WarningTimeline } from "./WarningTimeline";
 
-type TabKey = "basics" | "schedule" | "limits";
+type TabKey = "basics" | "schedule" | "limits" | "advanced";
 
 export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawConfig }) {
   const { apply, report, endGesture } = useConfigDoc();
@@ -55,6 +62,14 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
         <Tab value="basics" label="Basics" />
         <Tab value="schedule" label="Schedule" />
         <Tab value="limits" label="Limits" />
+        <Tab
+          value="advanced"
+          label={
+            <Badge color="primary" variant="dot" invisible={!hasAdvanced(entry)}>
+              <span>Advanced</span>
+            </Badge>
+          }
+        />
       </Tabs>
 
       {tab === "basics" && (
@@ -174,9 +189,81 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
               onRemove={(i) => apply(unset(`${warningsPath}[${i}]`))}
             />
           </Section>
+
+          <TokensEditor
+            basePath={base}
+            entryId={entry.id}
+            tokens={entry.tokens}
+            config={config}
+          />
         </Stack>
       )}
 
+      {tab === "advanced" && (
+        <Stack spacing={1}>
+          <InternetEditor path={`${base}.internet`} value={entry.internet} />
+          <FirewallEditor path={`${base}.firewall`} value={entry.firewall} />
+          <BrowserEditor path={`${base}.browser`} value={entry.browser} />
+          <InputCompatEditor
+            basePath={base}
+            compat={entry.input_compat ?? []}
+            options={entry.input_compat_options}
+          />
+          <RequiresInputEditor basePath={base} devices={entry.requires_input ?? []} />
+          <VolumeEditor path={`${base}.volume`} value={entry.volume} />
+          <BrightnessEditor path={`${base}.brightness`} value={entry.brightness} />
+
+          <Section title="Behaviour" defaultExpanded>
+            <Stack>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={entry.confirm_on_close ?? true}
+                    onChange={(e) => f.setField("confirm_on_close", e.target.checked)}
+                  />
+                }
+                label="Confirm before the HUD's X ends this activity"
+              />
+              <Typography variant="caption" color="text.secondary" sx={{ ml: 6, mt: -1 }}>
+                Worth turning off only for activities that lose nothing when closed
+                instantly.
+              </Typography>
+              <FormControlLabel
+                sx={{ mt: 1 }}
+                control={
+                  <Switch
+                    checked={entry.xwayland_native_resolution ?? false}
+                    onChange={(e) =>
+                      e.target.checked
+                        ? f.setField("xwayland_native_resolution", true)
+                        : f.unsetField("xwayland_native_resolution")
+                    }
+                  />
+                }
+                label="Drop the compositor scale to 1.0 while running"
+              />
+              <Typography variant="caption" color="text.secondary" sx={{ ml: 6, mt: -1 }}>
+                For XWayland games that would otherwise render into a corner of the panel.
+              </Typography>
+            </Stack>
+          </Section>
+        </Stack>
+      )}
     </Stack>
+  );
+}
+
+/** Whether anything on the Advanced tab is actually set. */
+function hasAdvanced(entry: RawEntry): boolean {
+  return Boolean(
+    entry.internet ||
+      entry.firewall ||
+      entry.browser ||
+      entry.volume ||
+      entry.brightness ||
+      (entry.input_compat?.length ?? 0) > 0 ||
+      (entry.requires_input?.length ?? 0) > 0 ||
+      entry.xwayland_native_resolution ||
+      entry.confirm_on_close === false,
   );
 }

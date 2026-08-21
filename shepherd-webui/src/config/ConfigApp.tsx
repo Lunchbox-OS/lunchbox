@@ -34,8 +34,9 @@ import { IssueList } from "./components/IssueList";
 import { RawTomlPane } from "./components/RawTomlPane";
 import { EntriesPage } from "./pages/EntriesPage";
 import { GroupsPage } from "./pages/GroupsPage";
+import { ServicePage } from "./pages/ServicePage";
 
-type Page = "entries" | "groups" | "raw";
+type Page = "entries" | "groups" | "service" | "raw";
 
 const fileSource = new FileConfigSource();
 
@@ -159,6 +160,7 @@ function ConfigShell() {
         <Tabs value={page} onChange={(_, v) => setPage(v as Page)} sx={{ px: 2 }}>
           <Tab value="entries" label="Activities" />
           <Tab value="groups" label="Categories" />
+          <Tab value="service" label="Device" />
           <Tab value="raw" label="TOML" />
         </Tabs>
       </AppBar>
@@ -180,6 +182,7 @@ function ConfigShell() {
         <Box sx={{ flex: 1, minHeight: 0 }}>
           {page === "entries" && <EntriesPage config={view} />}
           {page === "groups" && <GroupsPage config={view} />}
+          {page === "service" && <ServicePage config={view} />}
           {page === "raw" && <RawTomlPane />}
         </Box>
 

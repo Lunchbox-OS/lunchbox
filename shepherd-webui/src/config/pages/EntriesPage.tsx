@@ -1,10 +1,23 @@
 /**
  * Activities, as a board grouped by category.
  *
- * The category a card sits in comes from its `group` field, which is set from
- * the detail drawer for now.
+ * Dragging a card into a column sets `group = "..."` — the one field whose
+ * meaning is genuinely spatial. `@dnd-kit` rather than raw pointer events
+ * because it brings keyboard and screen-reader support with it, which matters
+ * more here than on the schedule grid, where every gesture already has a
+ * numeric equivalent in the detail panel.
  */
 import { useMemo, useState } from "react";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -25,7 +38,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import ErrorIcon from "@mui/icons-material/ErrorOutlined";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
-import { insert, unset } from "../doc/patches";
+import { entryPath, insert, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry } from "../model/config.generated";
 import { issuesForEntry } from "../model/report";
 import { EntryDetail } from "../components/EntryDetail";
@@ -37,6 +50,11 @@ export function EntriesPage({ config }: { config: RawConfig }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<RawEntry | null>(null);
+
+  const sensors = useSensors(useSensor(PointerSensor, {
+    // A small threshold so clicking a card to open it still works.
+    activationConstraint: { distance: 6 },
+  }), useSensor(KeyboardSensor));
 
   const entries = config.entries ?? [];
   const groups = config.groups ?? [];
@@ -52,6 +70,15 @@ export function EntriesPage({ config }: { config: RawConfig }) {
     }
     return byGroup;
   }, [entries, groups]);
+
+  const onDragEnd = (event: DragEndEvent) => {
+    const entryId = String(event.active.id);
+    const target = event.over ? String(event.over.id) : null;
+    if (!target) return;
+    const path = entryPath(entryId, "group");
+    if (target === UNGROUPED) apply(unset(path));
+    else apply(set(path, target));
+  };
 
   const deleteEntry = (entry: RawEntry) => {
     apply(unset(`entries[id=${entry.id}]`));
@@ -81,30 +108,33 @@ export function EntriesPage({ config }: { config: RawConfig }) {
         </Card>
       )}
 
-      <Stack direction="row" spacing={2} sx={{ overflowX: "auto", pb: 2 }}>
-        {[...columns.entries()].map(([groupId, members]) => (
-          <GroupColumn
-            key={groupId}
-            label={
+      <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+        <Stack direction="row" spacing={2} sx={{ overflowX: "auto", pb: 2 }}>
+          {[...columns.entries()].map(([groupId, members]) => (
+            <GroupColumn
+              key={groupId}
+              id={groupId}
+              label={
                 groupId === UNGROUPED
-                ? "No category"
-                : (groups.find((g) => g.id === groupId)?.label ?? groupId)
-            }
-            count={members.length}
-          >
-            {members.map((entry) => (
-              <EntryCard
-                key={entry.id}
-                entry={entry}
-                issueCount={issuesForEntry(report, entry.id).length}
-                selected={entry.id === selectedId}
-                onOpen={() => setSelectedId(entry.id)}
-                onDelete={() => setConfirmDelete(entry)}
-              />
-            ))}
-          </GroupColumn>
-        ))}
-      </Stack>
+                  ? "No category"
+                  : (groups.find((g) => g.id === groupId)?.label ?? groupId)
+              }
+              count={members.length}
+            >
+              {members.map((entry) => (
+                <EntryCard
+                  key={entry.id}
+                  entry={entry}
+                  issueCount={issuesForEntry(report, entry.id).length}
+                  selected={entry.id === selectedId}
+                  onOpen={() => setSelectedId(entry.id)}
+                  onDelete={() => setConfirmDelete(entry)}
+                />
+              ))}
+            </GroupColumn>
+          ))}
+        </Stack>
+      </DndContext>
 
       <Drawer
         anchor="right"
@@ -166,16 +196,20 @@ export function EntriesPage({ config }: { config: RawConfig }) {
 }
 
 function GroupColumn({
+  id,
   label,
   count,
   children,
 }: {
+  id: string;
   label: string;
   count: number;
   children: React.ReactNode;
 }) {
+  const { setNodeRef, isOver } = useDroppable({ id });
   return (
     <Box
+      ref={setNodeRef}
       sx={{
         minWidth: 260,
         maxWidth: 300,
@@ -183,7 +217,8 @@ function GroupColumn({
         p: 1,
         borderRadius: 2,
         border: "1px dashed",
-        borderColor: "divider",
+        borderColor: isOver ? "primary.main" : "divider",
+        backgroundColor: isOver ? "action.hover" : "transparent",
       }}
     >
       <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 1, px: 0.5 }}>
@@ -210,16 +245,24 @@ function EntryCard({
   onOpen: () => void;
   onDelete: () => void;
 }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: entry.id,
+  });
+
   return (
     <Card
+      ref={setNodeRef}
       variant="outlined"
       onClick={onOpen}
       sx={{
         cursor: "pointer",
-        opacity: entry.disabled ? 0.55 : 1,
+        opacity: isDragging ? 0.4 : entry.disabled ? 0.55 : 1,
+        transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
         borderColor: selected ? "primary.main" : issueCount > 0 ? "error.main" : "divider",
         borderWidth: selected ? 2 : 1,
       }}
+      {...attributes}
+      {...listeners}
     >
       <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
         <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
