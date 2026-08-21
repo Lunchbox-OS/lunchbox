@@ -686,7 +686,8 @@ doc comments carried through as JSDoc. Added to the existing drift test.
 **The editor**, in `shepherd-webui/src/config/`: schedule grid, budget sliders,
 warning timeline, entry board with drag-to-group, token graph, and the
 form-shaped remainder. Phase 2's exit criterion — no field in `schema.rs`
-unreachable from the UI — is met, with two deliberate exceptions noted below.
+unreachable from the UI — is met with one deliberate exception, noted below.
+It was *not* met on first delivery; see "Follow-up: the fields phase 2 missed".
 
 **Two build targets** from one `rsbuild.config.ts` switching on
 `SHEPHERD_UI_TARGET`. Sizes, gzipped: the standalone bundle is 26 kB entry +
@@ -757,9 +758,9 @@ three source activities and the earn graph with ×0.5 edge labels.
 
 ### Deliberately not built
 
-- **`vm` and `media` driver arguments** (`args: HashMap<String, Value>`) are
-  free-form JSON with no schema to render a form from. The UI says so and points
-  at the raw TOML pane.
+- **Free-form JSON**: the `vm` and `media` driver arguments
+  (`args: HashMap<String, Value>`) and `kind.custom.payload`. No schema to
+  render a form from; the UI says so and points at the raw TOML pane.
 - **Everything in phase 3**: the unknown-key lint, structured error paths, the
   diff-before-save view, `export_clean`, templates, and the week scrubber.
 - **Phase 4's `DeviceConfigSource`**, which stays gated on privilege separation
@@ -797,6 +798,52 @@ Two consequences worth knowing:
   comes back when the tab does.
 - `dist-standalone/` is untouched: still 802 kB / 278 kB of wasm, and verified
   in a browser after the change.
+
+### Follow-up: the fields phase 2 missed
+
+Phase 2 claimed its exit criterion — every field in `schema.rs` reachable from
+the UI — and did not meet it. Caught by the question *"the groups config UI
+doesn't allow you to set token gates. Is this reflective of the underlying
+feature?"*
+
+It was not. `RawGroup.tokens` exists, and group gates are implemented all the
+way down: validated with their own rules (`validation.rs:207`), converted to
+policy, and enforced by the engine — both as an availability gate
+(`engine.rs:658`) and as a clamp on session length (`engine.rs:570`). A category
+gate unlocks every member at once, which is the whole point of it, and the
+editor simply could not express it.
+
+Fixing it surfaced two more, in the same area:
+
+- **The source picker offered choices the validator rejects.** An activity's own
+  category was in the list, though `validate_tokens` forbids it — an activity
+  cannot be unlocked by time that includes its own. The picker now encodes all
+  four self-unlock rules: an activity excludes itself and its own category; a
+  category excludes itself and its members.
+- **`TokenGraph` only walked `entries[].tokens`**, so a category's gate was
+  invisible in the very picture meant to show the whole arrangement.
+
+Plus two small ones from a sweep of every generated field:
+`ble_management.admin_record_path` and `reset_sentinel_path` were unreachable.
+`kind.custom.payload` was too, and belongs with the free-form JSON exemptions
+rather than being fixed.
+
+**The root cause is the missing test.** The risk table above promised "a test
+that every `Raw*` field is referenced under `src/config/`" as a phase-2 exit
+gate. It was never written. It exists now, as
+`src/config/model/coverage.test.ts`, with an exemption list that has to carry a
+reason and is itself checked for staleness.
+
+It would not have caught this bug. `tokens`, `from` and `earn_ratio` were all
+referenced — just only from the activity editor. A name-level sweep sees that as
+covered, and real per-owner coverage needs a type graph the generated types
+don't carry. The test says so in its own docstring, which is the honest state of
+it: it catches whole-field omissions, and adding a `Raw*` sub-table to a second
+parent stays a manual check.
+
+`crates/shepherd-config-wasm/tests/group_tokens.rs` covers the round trip — a
+group gate written through patches lands as `[groups.tokens]`, validates clean,
+and reaches the policy layer — plus the member-listing rule the picker encodes.
 
 ### Follow-up: `shepherd dev webui`
 

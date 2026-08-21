@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "check:boundary": "node scripts/check-boundary.mjs"
+    "check:boundary": "node scripts/check-boundary.mjs",
+    "check:coverage": "node scripts/check-schema-coverage.mjs"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

@@ -31,6 +31,7 @@ import type { RawConfig, RawGroup } from "../model/config.generated";
 import { issuesForGroup } from "../model/report";
 import { IssueList } from "../components/IssueList";
 import { LimitsEditor } from "../components/LimitsEditor";
+import { TokensEditor } from "../components/TokensEditor";
 import { ScheduleEditor } from "../components/ScheduleEditor";
 
 export function GroupsPage({ config }: { config: RawConfig }) {
@@ -239,12 +240,20 @@ function GroupDetail({
       )}
 
       {tab === "limits" && (
-        <LimitsEditor
-          subject={{ kind: "group", id: group.id }}
-          limits={group.limits}
-          serviceMaxRun={config.service?.default_max_run_seconds}
-          serviceCooldownGrace={config.service?.cooldown_min_session_seconds}
-        />
+        <Stack spacing={4}>
+          <LimitsEditor
+            subject={{ kind: "group", id: group.id }}
+            limits={group.limits}
+            serviceMaxRun={config.service?.default_max_run_seconds}
+            serviceCooldownGrace={config.service?.cooldown_min_session_seconds}
+          />
+
+          <TokensEditor
+            subject={{ kind: "group", id: group.id }}
+            tokens={group.tokens}
+            config={config}
+          />
+        </Stack>
       )}
     </Stack>
   );

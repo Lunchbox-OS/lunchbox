@@ -13,6 +13,7 @@ import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 import type { RawConfig } from "../model/config.generated";
+import type { Subject } from "../doc/patches";
 
 const GROUP_PREFIX = "group:";
 const ROW_HEIGHT = 34;
@@ -27,10 +28,11 @@ interface Edge {
 
 export function TokenGraph({
   config,
-  highlightEntryId,
+  highlight,
 }: {
   config: RawConfig;
-  highlightEntryId?: string;
+  /** Draw this subject's incoming edges in the accent colour. */
+  highlight?: Subject;
 }) {
   const theme = useTheme();
 
@@ -50,6 +52,16 @@ export function TokenGraph({
       edges.push({ from, to: entry.id, ratio: entry.tokens?.earn_ratio ?? 1 });
     }
   }
+  // A category can be gated too, and its gate unlocks every member at once.
+  for (const group of config.groups ?? []) {
+    for (const from of group.tokens?.from ?? []) {
+      edges.push({
+        from,
+        to: `${GROUP_PREFIX}${group.id}`,
+        ratio: group.tokens?.earn_ratio ?? 1,
+      });
+    }
+  }
 
   if (edges.length === 0) {
     return (
@@ -58,6 +70,12 @@ export function TokenGraph({
       </Typography>
     );
   }
+
+  const highlightKey = highlight
+    ? highlight.kind === "group"
+      ? `${GROUP_PREFIX}${highlight.id}`
+      : highlight.id
+    : undefined;
 
   const sources = [...new Set(edges.map((e) => e.from))];
   const targets = [...new Set(edges.map((e) => e.to))];
@@ -80,7 +98,7 @@ export function TokenGraph({
         {edges.map((e, i) => {
           const y1 = sourceY(e.from);
           const y2 = targetY(e.to);
-          const highlighted = e.to === highlightEntryId;
+          const highlighted = e.to === highlightKey;
           return (
             <g key={i}>
               <path
@@ -122,9 +140,9 @@ export function TokenGraph({
             x={COLUMN_GAP + 96}
             y={targetY(t) + 4}
             fontSize="12"
-            fontWeight={t === highlightEntryId ? 700 : 400}
+            fontWeight={t === highlightKey ? 700 : 400}
             fill={
-              t === highlightEntryId
+              t === highlightKey
                 ? theme.palette.primary.main
                 : theme.palette.text.primary
             }

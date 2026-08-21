@@ -163,6 +163,7 @@ cd shepherd-webui
 npm test             # vitest, for the pure logic (day masks, durations)
 npm run typecheck    # tsc --noEmit
 npm run check:boundary
+npm run check:coverage
 ```
 
 ### Generated client types
@@ -280,7 +281,11 @@ Two rules keep the split working, both enforced:
 * **The TypeScript mirrors of the config schema are generated**, by
   `cargo run -p shepherd-wire-codegen --bin rpc-codegen`, into
   `src/config/model/config.generated.ts`. A drift test fails CI if the
-  checked-in copy goes stale.
+  checked-in copy goes stale, and `npm run check:coverage` fails if a generated
+  field is never referenced under `src/config/` — a field the editor cannot set
+  is a field nobody can set. That check works on field *names*, so it does not
+  catch a sub-table wired to one parent but not another; adding a `Raw*` table
+  to a second owner stays a manual check.
 
 The document model is plain Rust with strings on its edges, so it tests
 natively without a browser:

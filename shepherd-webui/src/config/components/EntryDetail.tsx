@@ -191,8 +191,7 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
           </Section>
 
           <TokensEditor
-            basePath={base}
-            entryId={entry.id}
+            subject={{ kind: "entry", id: entry.id }}
             tokens={entry.tokens}
             config={config}
           />

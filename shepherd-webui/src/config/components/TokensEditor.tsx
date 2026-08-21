@@ -1,10 +1,16 @@
 /**
  * Token gates: time earned on some activities unlocking another.
  *
- * Configured on the *target* — the activity that stays locked — which reads
- * backwards until you see it drawn. `from` takes entry ids, or a category as
- * `group:<id>`, so it needs a picker over the current document rather than a
- * text field.
+ * Configured on the *target* — the thing that stays locked — which reads
+ * backwards until you see it drawn. Both activities and categories can carry a
+ * gate (`[entries.tokens]` and `[groups.tokens]`), and a category's gate
+ * unlocks every member at once.
+ *
+ * `from` takes entry ids, or a category as `group:<id>`, so it needs a picker
+ * over the current document rather than a text field. The picker also has to
+ * know what the validator forbids, because "a thing cannot unlock itself" takes
+ * four forms depending on who owns the gate — see `validate_tokens` in
+ * `crates/shepherd-config/src/validation.rs`.
  */
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";
@@ -15,6 +21,7 @@ import Switch from "@mui/material/Switch";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { useFields } from "../doc/useFields";
+import { subjectPath, type Subject } from "../doc/patches";
 import type { RawConfig, RawTokens } from "../model/config.generated";
 import { DurationField } from "./DurationField";
 import { Section } from "./Section";
@@ -28,39 +35,77 @@ interface Option {
   kind: "entry" | "group";
 }
 
+/**
+ * Sources this subject is allowed to earn from.
+ *
+ * An activity cannot be unlocked by itself, nor by the category it belongs to
+ * (its own time would count toward the group total). A category cannot be
+ * unlocked by itself, nor by any of its members.
+ */
+function sourceOptions(config: RawConfig, subject: Subject): Option[] {
+  const groups = config.groups ?? [];
+  const entries = config.entries ?? [];
+
+  if (subject.kind === "group") {
+    return [
+      ...groups
+        .filter((g) => g.id !== subject.id)
+        .map((g) => ({
+          value: `${GROUP_PREFIX}${g.id}`,
+          label: `${g.label} (whole category)`,
+          kind: "group" as const,
+        })),
+      ...entries
+        .filter((e) => e.group !== subject.id)
+        .map((e) => ({ value: e.id, label: e.label, kind: "entry" as const })),
+    ];
+  }
+
+  const ownGroup = entries.find((e) => e.id === subject.id)?.group;
+  return [
+    ...groups
+      .filter((g) => g.id !== ownGroup)
+      .map((g) => ({
+        value: `${GROUP_PREFIX}${g.id}`,
+        label: `${g.label} (whole category)`,
+        kind: "group" as const,
+      })),
+    ...entries
+      .filter((e) => e.id !== subject.id)
+      .map((e) => ({ value: e.id, label: e.label, kind: "entry" as const })),
+  ];
+}
+
 export function TokensEditor({
-  basePath,
-  entryId,
+  subject,
   tokens,
   config,
 }: {
-  basePath: string;
-  entryId: string;
+  subject: Subject;
   tokens: RawTokens | null | undefined;
   config: RawConfig;
 }) {
-  const f = useFields(`${basePath}.tokens`);
+  const f = useFields(subjectPath(subject, "tokens"));
+  const isGroup = subject.kind === "group";
+  const options = sourceOptions(config, subject);
 
-  const options: Option[] = [
-    ...(config.groups ?? []).map((g) => ({
-      value: `${GROUP_PREFIX}${g.id}`,
-      label: `${g.label} (whole category)`,
-      kind: "group" as const,
-    })),
-    // An activity cannot bank time toward itself; validation rejects it, so it
-    // is not offered.
-    ...(config.entries ?? [])
-      .filter((e) => e.id !== entryId)
-      .map((e) => ({ value: e.id, label: e.label, kind: "entry" as const })),
-  ];
-
-  const selected = (tokens?.from ?? [])
-    .map((v) => options.find((o) => o.value === v) ?? { value: v, label: v, kind: "entry" as const });
+  const selected = (tokens?.from ?? []).map(
+    (v) =>
+      options.find((o) => o.value === v) ?? {
+        value: v,
+        label: v,
+        kind: "entry" as const,
+      },
+  );
 
   return (
     <Section
       title="Token gate"
-      description="Stay locked until time has been spent on something else."
+      description={
+        isGroup
+          ? "Keep every activity in this category locked until time has been spent elsewhere."
+          : "Stay locked until time has been spent on something else."
+      }
       present={tokens != null}
       onTogglePresent={(on) => (on ? f.setTable("", { from: [] }) : f.setField("", undefined))}
     >
@@ -72,9 +117,7 @@ export function TokensEditor({
           value={selected}
           isOptionEqualToValue={(a, b) => a.value === b.value}
           getOptionLabel={(o) => o.label}
-          onChange={(_, next) =>
-            f.setField("from", next.map((o) => o.value))
-          }
+          onChange={(_, next) => f.setField("from", next.map((o) => o.value))}
           renderValue={(value, getItemProps) =>
             value.map((option, index) => (
               <Chip
@@ -90,7 +133,11 @@ export function TokensEditor({
             <TextField
               {...params}
               label="Time on these unlocks it"
-              helperText="Pick activities, or a whole category to count every member."
+              helperText={
+                isGroup
+                  ? "This category's own members are not offered — a category cannot unlock itself."
+                  : "Pick activities, or a whole category to count every member."
+              }
             />
           )}
         />
@@ -102,7 +149,7 @@ export function TokensEditor({
           </Alert>
         )}
 
-        <Stack direction="row" spacing={2} useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap" }} useFlexGap>
           <TextField
             size="small"
             type="number"
@@ -143,11 +190,12 @@ export function TokensEditor({
 
         <Typography variant="caption" color="text.secondary">
           Once the threshold is crossed the gate ratchets open and stays open until the
-          balance is spent to zero, so a partly-used balance never re-locks the activity.
+          balance is spent to zero, so a partly-used balance never re-locks
+          {isGroup ? " the category" : " the activity"}.
         </Typography>
 
         {(tokens?.from ?? []).length > 0 && (
-          <TokenGraph config={config} highlightEntryId={entryId} />
+          <TokenGraph config={config} highlight={subject} />
         )}
       </Stack>
     </Section>

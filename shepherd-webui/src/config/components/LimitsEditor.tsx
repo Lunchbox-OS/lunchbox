@@ -114,8 +114,9 @@ export function LimitsEditor({
 
       {!limits && (
         <Typography variant="caption" color="text.secondary">
-          Nothing set here yet — this activity uses whatever the category and service
-          defaults say.
+          {subject.kind === "group"
+            ? "Nothing set here yet — this category adds no limits of its own, so each member is bounded only by its own settings and the service defaults."
+            : "Nothing set here yet — this activity uses whatever the category and service defaults say."}
         </Typography>
       )}
     </Stack>

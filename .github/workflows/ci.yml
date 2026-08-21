@@ -608,6 +608,12 @@ jobs:
       - name: Check the config editor's import boundary
         run: npm run check:boundary
 
+      # A field added to schema.rs and never wired into the editor is a field
+      # nobody can set. Catches whole-field omissions; see the script's header
+      # for what it cannot catch.
+      - name: Check the config editor covers the schema
+        run: npm run check:coverage
+
       - name: Unit tests
         run: npm test
 
