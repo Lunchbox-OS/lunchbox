@@ -6,7 +6,7 @@
 //! input — until the host confirms the activity is actually gone.
 //!
 //! Reconstructed from the `copernicus` journal of 2026-08-20; see
-//! `docs/ai/history/2026-08-20 001 activity-supervision-escapes.md`.
+//! `docs/ai/history/2026-08-21 002 activity-supervision-escapes.md`.
 
 use async_trait::async_trait;
 use shepherd_api::{EntryKind, Event, EventPayload, StopMode};
