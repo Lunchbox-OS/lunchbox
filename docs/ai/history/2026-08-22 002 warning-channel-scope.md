@@ -259,6 +259,77 @@ them. There is no RPC-capable CLI to inspect the registry with:
 giving it a `diagnostics` subcommand means building that path first. Until a UI
 consumes it, the registry is only reachable from a test.
 
+## Decisions taken during scoping
+
+> Follow-up prompt:
+>
+> > What decisions you need from me before building
+
+1. **The wire name is `Diagnostic`.** `Diagnostic` / `DiagnosticSeverity` /
+   `DiagnosticCode`, with the UIs free to render it as "Needs attention".
+2. **An entry whose configured protection cannot be applied does not launch.**
+   See below — this is the decision with the most consequences.
+3. **One PR covers all five phases**, both UIs included.
+4. **Nine conditions in the first pass**, the set tabulated above.
+
+### What "block the launch" changes
+
+Reporting was the smaller option; blocking is the honest one, and it reshapes
+two things.
+
+**`FirewallNotApplied` stops being an observed condition and becomes a probed
+precondition.** It was listed above as raised at the launch site
+(`adapter.rs:1424`), which is too late if the launch is not going to happen.
+Enforceability is already a host-level probe
+(`FirewallEnforcementStatus`, `process.rs:277`, cached in a `OnceLock`), so
+"this entry configures a firewall *and* enforcement is unavailable" is derivable
+per entry at any time, without launching anything.
+
+**The gate belongs in `CoreEngine::evaluate`, and #96 is the template.**
+Required-input gating solves the identical problem — a host-level fact that has
+to reach a core-level availability decision:
+
+```rust
+connected_inputs: Option<HashSet<InputDeviceType>>,   // engine.rs:75
+```
+
+set by the daemon's monitor via `set_connected_inputs` (`engine.rs:151`), and
+consumed at `engine.rs:426-429` to push `ReasonCode::RequiredInputUnavailable` and
+flip `enabled = false`.
+
+The firewall gate mirrors it exactly: an `Option<bool>` on the engine, set by
+the daemon from the host probe, consumed in `evaluate` to push a new
+`ReasonCode::ProtectionUnavailable`. **The `Option` matters as much as the
+bool.** #96's comment is explicit that `None` means "not yet reported" and fails
+*open* so a detection failure leaves entries visible rather than hiding them.
+The same default is essential here for a different reason: a probe that has not
+run yet must not blank every firewalled tile during boot. Fail open until the
+probe answers, then gate.
+
+That the launcher already renders `ReasonCode`s
+(`shepherd-launcher-ui/src/tile.rs:166`, `client.rs:247`) means the child-facing
+half needs a new arm and no new mechanism.
+
+### The one case that must not be blocked
+
+`adapter.rs:1498` and `:1503` warn about a firewall configured on a
+snap/flatpak runtime scope or on a Steam entry. Those are **unsupported for that
+kind by design**, not a broken host — and blocking them would permanently remove
+a tile because of a config mistake, with no host change that could ever fix it.
+
+So the two want splitting:
+
+- *Supported kind, unavailable on this host* (helper missing, polkit denies) →
+  blocks the launch, raises a Critical diagnostic, clears when the host is
+  fixed.
+- *Unsupported for this kind, ever* → a **config validation error** at load, in
+  `shepherd-config/src/validation.rs`, alongside the media-kind checks #127
+  added. It is a static property of the config and belongs where the admin finds
+  out before the device is running.
+
+That second half is arguably a bug fix independent of this issue: today the
+config is silently accepted and quietly ignored.
+
 ## Open questions
 
 - **`Diagnostic` vs `Notice`** (above). Needs deciding first; it is pervasive.
