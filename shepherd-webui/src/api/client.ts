@@ -238,11 +238,23 @@ export const hideWindow = (id: number) =>
 export const showWindow = (id: number) =>
   call<null>("act_on_window", { id, action: "show" });
 
-// Build SSE URL with auth token (query param — EventSource can't set
-// headers). The server-side handler still lives at GET /api/v1/events.
-export function sseUrl(): string {
-  const base = getBase();
+/**
+ * Open the SSE event stream at `GET /api/v1/events`.
+ *
+ * Deliberately `fetch` and not `EventSource`. The only thing that ever argued
+ * for putting the token in the query string was the `EventSource` constructor's
+ * inability to set headers — and `require_auth` reads nothing but
+ * `Authorization`, so that stream authenticated with nobody and silently closed
+ * on any claimed device. Streaming the response body keeps one auth mechanism
+ * for every request and no credential in a URL.
+ *
+ * The caller owns the framing (see `useEvents`) and the `AbortSignal`.
+ */
+export function openEventStream(signal: AbortSignal): Promise<Response> {
   const token = getToken();
-  const url = `${base}/api/v1/events`;
-  return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+  return fetch(`${getBase()}/api/v1/events`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal,
+    cache: "no-store", // long-lived stream; never serve it from cache
+  });
 }
