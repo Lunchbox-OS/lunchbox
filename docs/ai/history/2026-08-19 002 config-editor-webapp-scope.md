@@ -883,6 +883,48 @@ to `SubjectDetail`, where both subjects pick it up. The coverage guard's blind
 spot — a sub-table wired to one parent and not the other — mostly closes,
 because there is only one parent left to wire.
 
+### Follow-up: navigation, and the tests it took to hold it
+
+Categories became reachable from the activities board — clicking a column
+header opens that category's own schedule, limits and token gate. Wiring the
+mechanism also revealed that `IssueList` had taken `onSelectEntry` /
+`onSelectGroup` since it was written and nothing ever passed them: the chip
+beside every validation error rendered as clickable and did nothing.
+
+The first cut of it shipped a bug, reported as *"after going back to an activity
+by selecting it from within a category's configuration, if you then navigate
+anywhere else and then back to activities, it always goes to that specific
+activity"*.
+
+The cause is a React lifecycle fact worth writing down, because it will catch
+the next person too: **pages here are conditionally rendered, so leaving a tab
+unmounts one and returning mounts it fresh — and a mount runs every effect
+regardless of its deps.** The focus request was still sitting in the shell's
+state, having already done its job, so every remount applied it again. The nonce
+was no help; it distinguishes *repeat* requests, which is a different problem.
+Requests are now one-shot: whoever acts on one calls `onFocusHandled`, which
+clears it.
+
+**This is the third bug in a row that every existing check was blind to.** The
+schema-coverage guard reads names, the boundary guard reads imports, `tsc` reads
+types, and the pure-logic tests render nothing — but a dead click handler and an
+effect that re-fires on mount are both *behaviour*, and behaviour needs a DOM to
+observe. So `jsdom` and Testing Library are now devDependencies, and
+`src/config/navigation.test.tsx` covers the reported sequence end to end.
+
+The test was checked in both directions: it passes with the fix and fails
+without it, with a message that names the actual symptom. That matters more than
+usual here, because the first version of the assertion failed for the wrong
+reason — the drawer is modal and `aria-hidden`s the page tabs, so a "cannot find
+the Activities tab" error was really "the drawer came back". A regression test
+that fails confusingly is only half a regression test.
+
+Two things future DOM tests need to know, both learned the hard way and recorded
+in `CONTRIBUTING.md`: opt in per file with `// @vitest-environment jsdom` so the
+pure tests stay fast, and register `afterEach(cleanup)` explicitly, because
+Testing Library only self-registers when Vitest's `globals` are on and they are
+not.
+
 ### Follow-up: `shepherd dev webui`
 
 Added after the phases landed, on the request *"add a command to just run the

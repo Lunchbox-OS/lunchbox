@@ -160,11 +160,23 @@ Unit tests, typechecking and the import boundary check:
 
 ```sh
 cd shepherd-webui
-npm test             # vitest, for the pure logic (day masks, durations)
+npm test             # vitest
 npm run typecheck    # tsc --noEmit
 npm run check:boundary
 npm run check:coverage
 ```
+
+Most tests are pure logic — day masks, window merging, duration parsing — and
+run in plain node. A few need a DOM and opt in with `// @vitest-environment
+jsdom` at the top of the file, so the pure ones stay fast. Those cover
+behaviour that only appears *across a mount*, which no static check can see:
+the editor's pages are conditionally rendered, so switching tabs unmounts one
+and returning mounts it fresh, and a mount runs every effect regardless of its
+deps. Both navigation bugs found so far were of that shape.
+
+Testing Library only registers its own cleanup when Vitest's `globals` are on,
+and they are not, so a DOM test must `afterEach(cleanup)` itself or every query
+will find two of everything.
 
 ### Generated client types
 

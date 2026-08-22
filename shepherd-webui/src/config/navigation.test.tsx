@@ -1,0 +1,155 @@
+// @vitest-environment jsdom
+/**
+ * Navigation between pages, which is where the editor keeps getting caught out.
+ *
+ * Both bugs these cover were invisible to every other check in the project.
+ * `tsc` was happy, the boundary and coverage guards had nothing to say, and the
+ * pure-logic tests do not render anything — because both are about *behaviour
+ * across a mount*, which needs a DOM to observe.
+ *
+ * The wasm-backed document is stubbed out. These tests are about which page is
+ * showing and which subject is open, not about editing, and stubbing the module
+ * also keeps them out of the way of `src/config/wasm/` being a generated
+ * directory that may not exist yet.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { RawConfig } from "./model/config.generated";
+
+const CONFIG: RawConfig = {
+  config_version: 1,
+  groups: [{ id: "games", label: "Games" }],
+  entries: [
+    {
+      id: "celeste",
+      label: "Celeste",
+      group: "games",
+      kind: { type: "process", command: "/bin/true" },
+    },
+    {
+      id: "tuxmath",
+      label: "Tux Math",
+      kind: { type: "process", command: "/bin/true" },
+    },
+  ],
+};
+
+const doc = {
+  ready: true,
+  loadError: null,
+  view: CONFIG,
+  report: { kind: "semantic" as const, errors: [] },
+  text: "config_version = 1\n",
+  document: { text: "config_version = 1\n", name: null },
+  dirty: false,
+  apply: vi.fn(),
+  endGesture: vi.fn(),
+  replaceText: vi.fn(() => null),
+  undo: vi.fn(),
+  redo: vi.fn(),
+  canUndo: false,
+  canRedo: false,
+  availabilityFor: () => null,
+  openFrom: vi.fn(),
+  save: vi.fn(),
+  startBlank: vi.fn(),
+  error: null,
+  clearError: vi.fn(),
+};
+
+// Replacing the module stops its transitive import of the generated wasm
+// package from being resolved at all.
+vi.mock("./doc/ConfigDocProvider", () => ({
+  ConfigDocProvider: ({ children }: { children: React.ReactNode }) => children,
+  useConfigDoc: () => doc,
+}));
+
+const { ConfigApp } = await import("./ConfigApp");
+
+const tab = (name: string) => screen.getByRole("tab", { name });
+/** The activity drawer, identified by the heading it puts up. */
+const openActivity = () => screen.queryByRole("heading", { name: "Celeste" });
+
+describe("navigating between activities and categories", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // Testing Library only registers its own cleanup when Vitest's `globals` are
+  // on, and they are not — without this the previous test's tree stays mounted
+  // and every query finds two of everything.
+  afterEach(cleanup);
+
+  it("opens a category's settings from its column header on the board", async () => {
+    const user = userEvent.setup();
+    render(<ConfigApp />);
+
+    // The board groups activities by category; the header is a link.
+    await user.click(screen.getByRole("button", { name: "Games" }));
+
+    await waitFor(() => expect(tab("Categories").getAttribute("aria-selected")).toBe("true"));
+    // The category's own detail is showing, not the activity board.
+    expect(screen.getByRole("tab", { name: "Schedule" })).toBeTruthy();
+  });
+
+  it("opens an activity from its category's member list", async () => {
+    const user = userEvent.setup();
+    render(<ConfigApp />);
+
+    await user.click(tab("Categories"));
+    await user.click(screen.getByText("Celeste"));
+
+    // The drawer is modal, so it aria-hides the page tabs while open — its
+    // presence is the observable outcome, not the tab's selected state.
+    await waitFor(() => expect(openActivity()).not.toBeNull());
+  });
+
+  /**
+   * The regression this file exists for.
+   *
+   * Pages are conditionally rendered, so leaving a tab unmounts one and coming
+   * back mounts it fresh — and a mount runs every effect whatever its deps say.
+   * A focus request left in the shell's state was therefore re-applied on every
+   * return, and the activity you had closed kept reappearing, indefinitely.
+   */
+  it("does not re-open that activity after navigating away and back", async () => {
+    const user = userEvent.setup();
+    render(<ConfigApp />);
+
+    await user.click(tab("Categories"));
+    await user.click(screen.getByText("Celeste"));
+    await waitFor(() => expect(openActivity()).not.toBeNull());
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(openActivity()).toBeNull());
+
+    await user.click(tab("Device"));
+    await user.click(tab("Activities"));
+
+    // `user.click` flushes effects, so the remount's effects have already run
+    // by here — if a stale request were going to re-apply, it would have.
+    expect(
+      openActivity(),
+      "the activity drawer re-opened by itself after returning to the board",
+    ).toBeNull();
+  });
+
+  /**
+   * The other half of the same contract: a request must still work twice.
+   * Consuming it must not make a repeat request a no-op, which is what the
+   * nonce is for.
+   */
+  it("re-opens the same activity when asked a second time", async () => {
+    const user = userEvent.setup();
+    render(<ConfigApp />);
+
+    for (const _pass of [1, 2]) {
+      await user.click(tab("Categories"));
+      await user.click(screen.getByText("Celeste"));
+      await waitFor(() => expect(openActivity()).not.toBeNull());
+      await user.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => expect(openActivity()).toBeNull());
+    }
+  });
+});

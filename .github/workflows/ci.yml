@@ -614,6 +614,8 @@ jobs:
       - name: Check the config editor covers the schema
         run: npm run check:coverage
 
+      # Includes the jsdom-backed navigation tests. They stub the wasm-backed
+      # document, so this job still needs no Rust toolchain.
       - name: Unit tests
         run: npm test
 
