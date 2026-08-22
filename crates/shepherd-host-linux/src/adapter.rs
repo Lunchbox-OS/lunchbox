@@ -23,8 +23,8 @@ use crate::process::{
     FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
     build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
     firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name, pgid_is_live, pid_is_live, signal_group,
-    steam_webhelper_running, stop_firewall_scope,
+    kill_steam_game_processes, make_scope_name, pgid_is_live, pid_in_group, pid_is_live,
+    signal_group, steam_webhelper_running, stop_firewall_scope,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -50,6 +50,17 @@ const KILL_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 /// cover a slow shader precompile, bounded so we don't kill a game the child
 /// deliberately started much later.
 const STEAM_ORPHAN_WATCH: Duration = Duration::from_secs(180);
+
+/// How long to keep looking for an activity's first window before giving up.
+/// Generous: a Steam cold start with a shader precompile took over two minutes
+/// on `copernicus`. Giving up only means billing falls back to the whole
+/// session, so erring long is the safe direction.
+const WINDOW_READY_WATCH: Duration = Duration::from_secs(300);
+
+/// How often to look for that window. Polls `list_windows` rather than
+/// subscribing to sway, because the poll only runs while an activity is
+/// starting and reuses a code path that is already covered by tests.
+const WINDOW_READY_POLL: Duration = Duration::from_millis(500);
 
 /// Monitor ticks (100ms each) between reconciliation sweeps for escaped
 /// activities. The sweep talks to the compositor, so it is deliberately much
@@ -648,6 +659,72 @@ impl LinuxHost {
             }
         }
     }
+    /// Watch for the activity's first window and report it.
+    ///
+    /// `HostEvent::WindowReady` was declared and handled but never actually
+    /// emitted by anything, so the engine had no way to tell "the child is
+    /// looking at a spinner" from "the child is playing" — and billed both the
+    /// same. On `copernicus` that charged 60s of Steam shader precompile as
+    /// play time (issue #135).
+    ///
+    /// The window is often owned by a descendant rather than the process we
+    /// spawned, and for Steam by a process that is not in our tree at all, so
+    /// match on the group and on the game's own pids as well as the pid.
+    fn spawn_window_watch(
+        &self,
+        handle: HostSessionHandle,
+        pid: u32,
+        pgid: u32,
+        steam_app_id: Option<u32>,
+    ) {
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let deadline = Instant::now() + WINDOW_READY_WATCH;
+            loop {
+                tokio::time::sleep(WINDOW_READY_POLL).await;
+
+                // A non-Steam activity that is already gone will never map a
+                // window. Steam's launch process exits immediately, so it has
+                // only the deadline to bound it.
+                if steam_app_id.is_none() && !pid_is_live(pid) && !pgid_is_live(pgid) {
+                    return;
+                }
+
+                let steam_pids: Vec<i32> =
+                    steam_app_id.map(find_steam_game_pids).unwrap_or_default();
+                let windows = crate::sway::list_windows().await.unwrap_or_default();
+                let found = windows.iter().find(|w| {
+                    let Some(wpid) = w.pid else { return false };
+                    if w.in_scratchpad || Self::is_infrastructure(w) {
+                        return false;
+                    }
+                    wpid == pid || pid_in_group(wpid, pgid) || steam_pids.contains(&(wpid as i32))
+                });
+
+                if let Some(w) = found {
+                    info!(
+                        pid,
+                        window_pid = w.pid,
+                        app_id = ?w.app_id,
+                        "Activity window appeared"
+                    );
+                    let _ = event_tx.send(HostEvent::WindowReady { handle });
+                    return;
+                }
+
+                if Instant::now() >= deadline {
+                    debug!(
+                        pid,
+                        watched_secs = WINDOW_READY_WATCH.as_secs(),
+                        "No window appeared for this activity; billing the whole session"
+                    );
+                    return;
+                }
+            }
+        });
+    }
+
     /// Whether the activity behind `pid` is still alive.
     ///
     /// For Steam the process we spawned is only the `rungameid` request, which
@@ -1298,6 +1375,8 @@ impl HostAdapter for LinuxHost {
                 self.spawn_steam_launch_watchdog(handle.clone(), pid, app_id, auto_dismiss);
             }
         }
+
+        self.spawn_window_watch(handle.clone(), pid, pgid, steam_app_id);
 
         info!(pid = pid, pgid = pgid, "Spawned process");
 

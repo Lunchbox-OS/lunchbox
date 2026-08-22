@@ -967,6 +967,10 @@ impl Service {
 
             HostEvent::WindowReady { handle } => {
                 debug!(session_id = %handle.session_id, "Window ready");
+                // Usage is billed from here rather than from approval: until
+                // now the child was looking at a spinner (issue #135).
+                let mut engine = engine.lock().await;
+                engine.notify_window_ready(&handle, MonotonicInstant::now());
             }
 
             HostEvent::KindReadinessChanged { kind, ready } => {

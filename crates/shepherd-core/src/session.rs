@@ -74,6 +74,15 @@ pub struct ActiveSession {
     /// issue #136 — announcing the end at request time handed an interactive
     /// launcher back over a still-running activity.
     pub stopping: Option<SessionEndReason>,
+
+    /// When the activity's first window actually appeared, if it has.
+    ///
+    /// Usage is billed from here rather than from approval. The session clock
+    /// starts when the launch is approved — which is right for the deadline,
+    /// since an activity that never maps a window must still expire — but the
+    /// child is looking at a spinner until this moment, and on `copernicus`
+    /// that was 60s of Steam shader precompile charged as play time.
+    pub window_ready_at_mono: Option<MonotonicInstant>,
 }
 
 impl ActiveSession {
@@ -98,6 +107,7 @@ impl ActiveSession {
             warnings_issued: Vec::new(),
             host_handle: None,
             stopping: None,
+            window_ready_at_mono: None,
         }
     }
 
@@ -182,6 +192,19 @@ impl ActiveSession {
     /// Get session duration so far
     pub fn duration_so_far(&self, now_mono: MonotonicInstant) -> Duration {
         now_mono.duration_since(self.started_at_mono)
+    }
+
+    /// How much of this session the child actually got: the time since the
+    /// activity's window appeared.
+    ///
+    /// Falls back to the whole session when no window was ever reported, so an
+    /// activity that draws nothing (or whose window we failed to spot) is
+    /// billed as before rather than becoming free.
+    pub fn billable_duration(&self, now_mono: MonotonicInstant) -> Duration {
+        match self.window_ready_at_mono {
+            Some(ready) => now_mono.duration_since(ready),
+            None => self.duration_so_far(now_mono),
+        }
     }
 
     /// Get session info for API

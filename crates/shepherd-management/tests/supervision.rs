@@ -170,6 +170,17 @@ fn has_session_ended(payloads: &[EventPayload]) -> bool {
         .any(|p| matches!(p, EventPayload::SessionEnded { .. }))
 }
 
+/// Usage recorded for `id` today, in seconds.
+async fn charged_seconds(svc: &DefaultManagementService, id: &str) -> u64 {
+    let today = shepherd_util::now().date_naive();
+    svc.usage_entry(&EntryId::new(id), today, today)
+        .await
+        .unwrap()
+        .iter()
+        .map(|u| u.duration_seconds)
+        .sum()
+}
+
 async fn launch(svc: &DefaultManagementService, id: &str) {
     match svc.launch(EntryId::new(id)).await.unwrap() {
         LaunchOutcome::Approved { .. } => {}
@@ -393,6 +404,87 @@ async fn a_launch_that_never_started_is_not_charged() {
         "a launch that never ran must not consume the child's budget"
     );
     let _ = drained(&mut h.events);
+}
+
+/// The spinner in front of an activity is not play time.
+///
+/// The session clock starts when the launch is approved, which is right for the
+/// deadline — an activity that never maps a window must still expire. But usage
+/// must start when the child can actually see the thing they launched. On
+/// `copernicus` a 60s Steam shader precompile was charged as play time
+/// (issue #135).
+#[tokio::test]
+async fn time_before_the_window_appears_is_not_charged() {
+    let mut h = harness();
+
+    launch(&h.svc, "tetris").await;
+    let handle = {
+        let eng = h.svc.engine.lock().await;
+        eng.current_session()
+            .and_then(|s| s.host_handle.clone())
+            .expect("tetris has a host handle")
+    };
+
+    // A slow start: over a second of spinner, then a moment of actual use.
+    // Usage is recorded in whole seconds, so the wait has to cross that
+    // boundary for the assertion to discriminate at all.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    {
+        let mut eng = h.svc.engine.lock().await;
+        eng.notify_window_ready(&handle, shepherd_util::MonotonicInstant::now());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    h.svc.stop_current(StopMode::Graceful).await.unwrap();
+
+    assert_eq!(
+        charged_seconds(&h.svc, "tetris").await,
+        0,
+        "1.2s of spinner plus 0.1s of use must bill 0s, not 1s"
+    );
+    let _ = drained(&mut h.events);
+}
+
+/// An activity that never reports a window is billed as before, rather than
+/// becoming free. Failing open in the child's favour here would be a way to
+/// get unlimited time out of anything that draws nothing we can see.
+#[tokio::test]
+async fn an_activity_that_never_maps_a_window_is_billed_in_full() {
+    let mut h = harness();
+
+    launch(&h.svc, "tetris").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.svc.stop_current(StopMode::Graceful).await.unwrap();
+
+    assert!(
+        charged_seconds(&h.svc, "tetris").await >= 1,
+        "with no window ever reported, the whole session is still charged"
+    );
+    let _ = drained(&mut h.events);
+}
+
+/// Only the *first* window starts the clock; an activity that opens more later
+/// must not keep resetting what it is charged from.
+#[tokio::test]
+async fn a_second_window_does_not_restart_the_billing_clock() {
+    let h = harness();
+    launch(&h.svc, "tetris").await;
+    let handle = {
+        let eng = h.svc.engine.lock().await;
+        eng.current_session()
+            .and_then(|s| s.host_handle.clone())
+            .unwrap()
+    };
+
+    let mut eng = h.svc.engine.lock().await;
+    eng.notify_window_ready(&handle, shepherd_util::MonotonicInstant::now());
+    let first = eng.current_session().unwrap().window_ready_at_mono;
+    eng.notify_window_ready(&handle, shepherd_util::MonotonicInstant::now());
+    assert_eq!(
+        eng.current_session().unwrap().window_ready_at_mono,
+        first,
+        "the billing anchor must latch on the first window"
+    );
 }
 
 /// A stop that did not actually stop anything must be reported as a failure,

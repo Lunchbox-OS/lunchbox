@@ -675,16 +675,20 @@ pub fn pgid_is_live(pgid: u32) -> bool {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        if !pid_is_live(pid) {
-            continue;
-        }
-        if nix::unistd::getpgid(Some(Pid::from_raw(pid as i32)))
-            .is_ok_and(|g| g.as_raw() as u32 == pgid)
-        {
+        if pid_is_live(pid) && pid_in_group(pid, pgid) {
             return true;
         }
     }
     false
+}
+
+/// Whether `pid` belongs to the process group `pgid`.
+///
+/// Used to decide whether a window on screen belongs to the activity we
+/// launched: the surface is often owned by a descendant rather than the
+/// process we spawned.
+pub fn pid_in_group(pid: u32, pgid: u32) -> bool {
+    nix::unistd::getpgid(Some(Pid::from_raw(pid as i32))).is_ok_and(|g| g.as_raw() as u32 == pgid)
 }
 
 /// Signal every process in the group `pgid`.

@@ -1113,6 +1113,28 @@ impl CoreEngine {
         event
     }
 
+    /// Note that the current activity's first window has appeared.
+    ///
+    /// Matched by handle payload like every other host event, and latched: only
+    /// the *first* window counts, so an activity that opens more later does not
+    /// restart its billing clock.
+    pub fn notify_window_ready(&mut self, handle: &HostSessionHandle, now_mono: MonotonicInstant) {
+        let Some(session) = self.current_session.as_mut() else {
+            return;
+        };
+        if !session.owns_handle(handle) || session.window_ready_at_mono.is_some() {
+            return;
+        }
+        let waited = session.duration_so_far(now_mono);
+        session.window_ready_at_mono = Some(now_mono);
+        info!(
+            session_id = %session.plan.session_id,
+            entry_id = %session.plan.entry_id,
+            waited_secs = waited.as_secs(),
+            "Activity window appeared; billing starts here"
+        );
+    }
+
     /// Attach host handle to current session
     pub fn attach_host_handle(&mut self, handle: HostSessionHandle) {
         if let Some(session) = &mut self.current_session {
@@ -1254,7 +1276,19 @@ impl CoreEngine {
     ) -> Option<CoreEvent> {
         let session = self.current_session.take()?;
 
-        let duration = session.duration_so_far(now_mono);
+        // The child is charged for the time they could actually use, not for
+        // the spinner in front of it. Reported here too, so the audit log,
+        // the usage table and the broadcast all agree on one number.
+        let duration = session.billable_duration(now_mono);
+        let elapsed = session.duration_so_far(now_mono);
+        if duration != elapsed {
+            debug!(
+                session_id = %session.plan.session_id,
+                elapsed_secs = elapsed.as_secs(),
+                billed_secs = duration.as_secs(),
+                "Not billing the time before the activity's window appeared"
+            );
+        }
         let reason = if let Some(requested) = session.stopping.clone() {
             requested
         } else if session.state == shepherd_api::SessionState::Expiring {
