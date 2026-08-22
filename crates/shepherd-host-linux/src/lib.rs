@@ -23,6 +23,7 @@ mod volume;
 pub use adapter::*;
 pub use audio_route::{AudioRouter, NoOpAudioRouter, PipeWireAudioRouter};
 pub use brightness::*;
+pub use browser::is_supported_browser_flatpak;
 pub use light::*;
 pub use process::*;
 pub use sway::{

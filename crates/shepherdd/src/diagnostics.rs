@@ -22,7 +22,9 @@
 //! easy to get subtly wrong and invisible when they are.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::mpsc;
 
 use chrono::{DateTime, Local};
 use shepherd_api::EntryKind;
@@ -85,6 +87,8 @@ pub struct ProbeFacts {
     /// input devices affect nothing and are not worth an administrator's
     /// attention.
     pub any_entry_requires_input: bool,
+    /// Entries that set a browser policy their kind cannot apply.
+    pub browser_policy_ignored_entries: Vec<EntryId>,
 }
 
 /// Compute the probed diagnostics implied by `facts`.
@@ -184,6 +188,27 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
         });
     }
 
+    // A browser policy on a kind that cannot apply it. Static — derivable from
+    // the policy alone — so it is probed rather than raised at launch: an
+    // administrator should learn their setting does nothing before their child
+    // opens the activity, not from a log line afterwards.
+    for entry_id in &facts.browser_policy_ignored_entries {
+        out.push(Diagnostic {
+            code: DiagnosticCode::BrowserPolicyIgnored,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: "This activity sets a browser policy, but its kind cannot apply one, so \
+                      the policy is ignored"
+                .to_string(),
+            remedy: Some(
+                "Browser policy is supported only for the Chrome flatpak entry kind.".to_string(),
+            ),
+            since: now,
+        });
+    }
+
     // Input devices. Same "only if it matters" rule as yt-dlp: with no
     // input-gated entry, an unreadable /dev/input changes nothing.
     if facts.input_devices_readable == Some(false) && facts.any_entry_requires_input {
@@ -260,7 +285,25 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         sound_backend_available,
         input_devices_readable,
         any_entry_requires_input: policy.entries.iter().any(|e| !e.requires_input.is_empty()),
+        browser_policy_ignored_entries: browser_policy_ignored_entry_ids(policy),
     }
+}
+
+/// Entries whose `[entries.browser]` will be ignored because their kind cannot
+/// apply one. Only the supported Chrome flatpak can.
+fn browser_policy_ignored_entry_ids(policy: &Policy) -> Vec<EntryId> {
+    policy
+        .entries
+        .iter()
+        .filter(|e| e.browser.is_some())
+        .filter(|e| match &e.kind {
+            EntryKind::Flatpak { app_id, .. } => {
+                !shepherd_host_linux::is_supported_browser_flatpak(app_id)
+            }
+            _ => true,
+        })
+        .map(|e| e.id.clone())
+        .collect()
 }
 
 /// Entries whose configured firewall could actually be applied on a working
@@ -328,9 +371,6 @@ impl DiagnosticRegistry {
 
     /// Raise an observed condition, or update one already raised. Preserves the
     /// original `since`, so re-raising does not reset the clock.
-    // Exercised by the tests below; the production callers are the observed
-    // conditions in phase 3 of #143, which removes this allow.
-    #[allow(dead_code)]
     pub fn raise(&self, diagnostic: Diagnostic) -> bool {
         let mut observed = self.observed.lock().expect("diagnostics lock");
         let key = (diagnostic.code, diagnostic.subject.clone());
@@ -354,7 +394,6 @@ impl DiagnosticRegistry {
     }
 
     /// Clear an observed condition. Returns whether anything was removed.
-    #[allow(dead_code)]
     pub fn clear(&self, code: DiagnosticCode, subject: &DiagnosticSubject) -> bool {
         self.observed
             .lock()
@@ -374,6 +413,38 @@ impl DiagnosticRegistry {
             .cloned()
             .collect::<Vec<_>>();
         DiagnosticSet::new(probed.into_iter().chain(observed).collect())
+    }
+}
+
+/// Raises and clears observed conditions from wherever they are noticed, and
+/// nudges the daemon to republish when something actually changed.
+///
+/// Observed conditions cannot be recomputed on a sweep — nothing can ask "did a
+/// library fail to load an hour ago" — so they are raised at the site and
+/// cleared when the same site next succeeds. The nudge is a channel rather than
+/// a direct broadcast because the raise site is usually on a worker with no
+/// access to the engine or the IPC server.
+#[derive(Clone)]
+pub struct DiagnosticPublisher {
+    registry: Arc<DiagnosticRegistry>,
+    changed: mpsc::UnboundedSender<()>,
+}
+
+impl DiagnosticPublisher {
+    pub fn new(registry: Arc<DiagnosticRegistry>, changed: mpsc::UnboundedSender<()>) -> Self {
+        Self { registry, changed }
+    }
+
+    pub fn raise(&self, diagnostic: Diagnostic) {
+        if self.registry.raise(diagnostic) {
+            let _ = self.changed.send(());
+        }
+    }
+
+    pub fn clear(&self, code: DiagnosticCode, subject: &DiagnosticSubject) {
+        if self.registry.clear(code, subject) {
+            let _ = self.changed.send(());
+        }
     }
 }
 
@@ -562,6 +633,64 @@ mod tests {
         assert_eq!(
             codes(&evaluate(&something_does, at(0))),
             vec![DiagnosticCode::InputDevicesUnavailable]
+        );
+    }
+
+    #[test]
+    fn a_browser_policy_that_cannot_be_applied_is_reported_per_activity() {
+        // Static, so it is probed: an admin learns the setting does nothing
+        // before the child opens the activity, not from a log line afterwards.
+        let facts = ProbeFacts {
+            browser_policy_ignored_entries: vec![entry("school"), entry("homework")],
+            ..healthy()
+        };
+        let diags = evaluate(&facts, at(0));
+        assert_eq!(
+            codes(&diags),
+            vec![
+                DiagnosticCode::BrowserPolicyIgnored,
+                DiagnosticCode::BrowserPolicyIgnored
+            ]
+        );
+        let named: Vec<_> = diags.iter().filter_map(|d| d.entry_id()).collect();
+        assert_eq!(named, vec![&entry("school"), &entry("homework")]);
+    }
+
+    #[test]
+    fn an_unreadable_library_is_raised_per_activity_and_clears_on_recovery() {
+        // The observed half: nothing can ask "did this fail an hour ago", so
+        // the site that notices the failure clears it when it next succeeds.
+        let reg = DiagnosticRegistry::new();
+        let subject = DiagnosticSubject::Entry {
+            entry_id: entry("movies"),
+        };
+        let raise = |msg: &str| Diagnostic {
+            code: DiagnosticCode::MediaLibraryUnreadable,
+            subject: subject.clone(),
+            severity: DiagnosticSeverity::Warning,
+            message: msg.to_string(),
+            remedy: None,
+            since: at(1_000),
+        };
+
+        assert!(reg.raise(raise("gone")));
+        assert_eq!(reg.current().items.len(), 1);
+
+        // A different activity's failure is a separate condition, not an
+        // update to this one.
+        assert!(reg.raise(Diagnostic {
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry("shows"),
+            },
+            ..raise("also gone")
+        }));
+        assert_eq!(reg.current().items.len(), 2);
+
+        assert!(reg.clear(DiagnosticCode::MediaLibraryUnreadable, &subject));
+        assert_eq!(
+            reg.current().items.len(),
+            1,
+            "clearing one activity must not clear the other"
         );
     }
 

@@ -41,7 +41,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use shepherd_api::{EntryKind, Event, EventPayload, MediaMode, MediaQuality};
+use shepherd_api::{
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSubject, EntryKind, Event,
+    EventPayload, MediaMode, MediaQuality,
+};
 use shepherd_config::{MediaServiceConfig, Policy};
 use shepherd_core::CoreEngine;
 use shepherd_media_app::Quality;
@@ -50,6 +53,7 @@ use shepherd_media_core::{
     Library, PlatformInfo, build_library_from_entries, is_youtube_playlist_url, load_library,
     resolve_source,
 };
+use shepherd_util::EntryId;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
@@ -125,6 +129,7 @@ impl MediaPrefetcher {
         mut self,
         engine: Arc<Mutex<CoreEngine>>,
         mut events: broadcast::Receiver<Event>,
+        diagnostics: crate::diagnostics::DiagnosticPublisher,
     ) {
         let mut session_active = false;
         let mut online = true;
@@ -143,7 +148,7 @@ impl MediaPrefetcher {
                 _ = ticker.tick() => {
                     self.reread_policy(&engine).await;
                     if self.may_sweep(session_active, online) {
-                        self.sweep().await;
+                        self.sweep(&diagnostics).await;
                     }
                 }
                 received = events.recv() => match received {
@@ -173,7 +178,7 @@ impl MediaPrefetcher {
                         if resume {
                             self.reread_policy(&engine).await;
                             if self.may_sweep(session_active, online) {
-                                self.sweep().await;
+                                self.sweep(&diagnostics).await;
                                 ticker.reset();
                             }
                         }
@@ -229,7 +234,7 @@ impl MediaPrefetcher {
     }
 
     /// One pass over every configured library.
-    async fn sweep(&self) {
+    async fn sweep(&self, diagnostics: &crate::diagnostics::DiagnosticPublisher) {
         for target in &self.targets {
             if !self.have_disk_headroom() {
                 return;
@@ -264,7 +269,7 @@ impl MediaPrefetcher {
             // items" in both cases, because it counted items *offered* rather
             // than downloads actually started.
             match queued {
-                Ok(Some(tally)) => {
+                Ok(Ok(tally)) => {
                     info!(
                         entry = %target.entry_id,
                         total = tally.total,
@@ -273,8 +278,30 @@ impl MediaPrefetcher {
                         cooling = tally.cooling,
                         "media prefetch sweep"
                     );
+                    // The same site that notices the failure notices the
+                    // recovery, so a library that starts parsing again clears
+                    // itself without anything else having to remember.
+                    diagnostics.clear(
+                        DiagnosticCode::MediaLibraryUnreadable,
+                        &DiagnosticSubject::Entry {
+                            entry_id: EntryId::new(target.entry_id.clone()),
+                        },
+                    );
                 }
-                Ok(None) => {}
+                Ok(Err(reason)) => diagnostics.raise(Diagnostic {
+                    code: DiagnosticCode::MediaLibraryUnreadable,
+                    subject: DiagnosticSubject::Entry {
+                        entry_id: EntryId::new(target.entry_id.clone()),
+                    },
+                    severity: DiagnosticSeverity::Warning,
+                    message: format!("This activity's media library could not be read: {reason}"),
+                    remedy: Some(
+                        "Check the `library` path or URL on this activity, and that the \
+                         file parses."
+                            .to_string(),
+                    ),
+                    since: shepherd_util::now(),
+                }),
                 Err(e) => warn!(entry = %target.entry_id, error = %e, "media prefetch task failed"),
             }
         }
@@ -398,18 +425,22 @@ fn queue_library(
     only_item: Option<&str>,
     watched_grace: Duration,
     cache_max_bytes: u64,
-) -> Option<SweepTally> {
+) -> Result<SweepTally, String> {
     let library = match load_prefetch_library(library_source) {
         Ok(l) => l,
         Err(e) => {
             warn!(entry = %entry_id, error = %e, "could not read media library for prefetch");
-            return None;
+            return Err(e.to_string());
         }
     };
 
     // One cache per format selector: the selector is part of the content key,
     // so two entries at different qualities cache side by side.
-    let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes)?;
+    // No cache is not a library problem, so it reports an empty sweep rather
+    // than an error: conflating the two is what the `Option` did before.
+    let Some(cache) = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes) else {
+        return Ok(SweepTally::default());
+    };
 
     let platform_info = PlatformInfo::current();
     let mut tally = SweepTally::default();
@@ -434,7 +465,7 @@ fn queue_library(
             }
         }
     }
-    Some(tally)
+    Ok(tally)
 }
 
 /// Load a library from either a file path or a YouTube playlist URL. Mirrors

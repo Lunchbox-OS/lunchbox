@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -495,6 +495,13 @@ impl Service {
             });
         }
 
+        // Observed diagnostics (issue #143) are raised on workers with no access
+        // to the engine or the IPC server, so they signal here and the main loop
+        // republishes.
+        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
+        let diagnostic_publisher =
+            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
+
         // Background media prefetch (issue #127). Session and connectivity
         // state come off the event bus; it takes the engine to re-read the
         // media settings and the library list before each sweep, so a config
@@ -504,7 +511,10 @@ impl Service {
             let prefetcher = self.media_prefetcher;
             let events = event_tx.subscribe();
             let engine_for_prefetch = engine.clone();
-            tokio::spawn(async move { prefetcher.run(engine_for_prefetch, events).await });
+            let publisher = diagnostic_publisher.clone();
+            tokio::spawn(
+                async move { prefetcher.run(engine_for_prefetch, events, publisher).await },
+            );
         }
 
         {
@@ -642,6 +652,14 @@ impl Service {
                     Self::sweep_diagnostics(
                         &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
                     ).await;
+                }
+
+                // An observed diagnostic was raised or cleared on a worker.
+                Some(()) = diagnostics_changed_rx.recv() => {
+                    // Coalesce a burst — one prefetch sweep can raise several —
+                    // so a run of changes publishes once.
+                    while diagnostics_changed_rx.try_recv().is_ok() {}
+                    Self::publish_diagnostics(&engine, &diagnostics, &ipc_ref, &event_tx).await;
                 }
 
                 // Host events (process exit)
@@ -833,6 +851,19 @@ impl Service {
             return;
         }
 
+        Self::publish_diagnostics(engine, diagnostics, ipc, event_tx).await;
+    }
+
+    /// Push the current diagnostic set onto the snapshot and out to clients.
+    ///
+    /// Shared by the probed sweep and the observed-change path, so the two
+    /// cannot drift into publishing differently.
+    async fn publish_diagnostics(
+        engine: &Arc<Mutex<CoreEngine>>,
+        diagnostics: &Arc<diagnostics::DiagnosticRegistry>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+    ) {
         let set = diagnostics.current();
         debug!(
             count = set.items.len(),
