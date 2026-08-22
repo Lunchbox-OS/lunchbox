@@ -6,10 +6,13 @@ one of them directly via libmpv or opens a poster grid for the user to pick.
 It is designed to be invoked by `shepherdd` as an activity, the same way
 TuxMath or ScummVM are.
 
-The implementation lives in two crates:
+The implementation lives in three crates:
 
 - `shepherd-media-core` — platform-agnostic library (parsing, source
   resolution, session state machine, stdout protocol).
+- `shepherd-media-cache` — the on-disk video cache: keying, the download
+  worker, and LRU eviction. Separate because shepherdd shares it, and a daemon
+  must not link libmpv or egui to prefetch (issue #127).
 - `shepherd-media` — Linux binary (`clap` CLI, libmpv via `libmpv2`,
   egui-based browse UI, async poster prefetch).
 
@@ -40,6 +43,65 @@ difference between roughly 61% and 13% of a CPU core for 1080p30.
 Videos already in the local cache were downloaded under whichever selector was
 in force at the time; `shepherd-media` keeps playing them, and replaces them the
 next time it queues that item for download.
+
+## Video cache
+
+Remote sources — YouTube URLs and plain HTTP files — are downloaded to
+`$XDG_CACHE_HOME/shepherd/media/videos/`, so a later play comes off local disk
+and the item stays watchable offline. Browse mode queues every remote item in
+the library speculatively at launch, and an item watched to the end is queued
+after playback.
+
+shepherdd also fills this cache in the background, so a library is ready before
+anyone opens it — see [Background prefetch](#background-prefetch).
+
+The cache is capped at 10 GiB, overridable with
+`SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` (a byte count). When it is full, files
+nobody has watched are evicted first — all of them, before any watched file is
+touched. A speculative download can recycle space held by other speculative
+downloads; it can never cost the child a video they actually chose. Among
+watched files the least recently played goes first.
+
+Files are named after a hash of their source URL *and* the quality selector, not
+the library item id. Item ids are unique only within a library and one directory
+serves every library on the device; including the selector means two activities
+over one library at different qualities cache side by side instead of deleting
+each other's downloads. Deleting the directory is always safe.
+
+## Background prefetch
+
+shepherdd downloads the remote items of every `media` entry ahead of time, so
+the first open plays from disk rather than buffering and the library keeps
+working offline. It is on by default whenever a media entry exists.
+
+It holds off while:
+
+- **an activity is running** — a download competing with a game, or with the
+  video being watched right now, spends the child's CPU and bandwidth on
+  content nobody has asked for. Set
+  `service.media.prefetch_while_session_active = true` to allow it anyway;
+- **the internet is down**, per the connectivity checks shepherdd already runs;
+- **the disk is nearly full** — below `service.media.free_space_floor_bytes`
+  (2 GiB by default) it logs a warning and stops. The cache cap bounds the
+  cache, not the volume it sits on.
+
+Availability windows are deliberately ignored: an activity outside its window
+today is exactly the one worth having ready for tomorrow. An entry that is
+`disabled` outright is skipped.
+
+To exclude one library, set `prefetch = false` under its `[entries.kind]` — a
+24/7 live stream is the obvious case, since it has no end to download. To turn
+the whole thing off, set `service.media.prefetch = false`.
+
+Prefetch order follows the library's own order, which is what browse shows.
+
+If any media activity references YouTube and `yt-dlp` is not installed,
+shepherdd logs a warning at startup naming the entries — otherwise the failure
+only appears when a child taps a tile and the activity dies.
+
+The implementation, including how a running `shepherd-media` and a prefetching
+shepherdd stay off each other's downloads, is documented in
+[`crates/shepherd-media-cache/README.md`](../crates/shepherd-media-cache/README.md).
 
 ## Authoring a library file
 
@@ -297,6 +359,34 @@ emits the protocol unconditionally and works fine when shepherdd ignores it.
 
 ## shepherdd integration
 
+Media activities use `type = "media"` (issue #127). shepherdd builds the
+`shepherd-media` command line itself from the entry, so the flags above do not
+have to be restated as a `Process` argv, and a mistake — a `mode = "play"` with
+no `item`, a quality that isn't a preset — is caught by
+`shepherd-admin config validate` instead of on the child's screen.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `library` | *required* | Path to a `.toml`/`.m3u`/`.m3u8`, or a YouTube playlist URL. `~` is expanded for paths. |
+| `mode` | `"browse"` | `"browse"` opens the poster grid; `"play"` plays one item end to end. |
+| `item` | — | The item to play. Required by `mode = "play"`, rejected otherwise. |
+| `quality` | `"1080p"` | `best`, `1080p`, `720p`, `480p` — see [Codec selection](#codec-selection). |
+| `sort_by` | `"library"` | `library`, `title`, `id`, `kind`, `category`, `duration`. |
+| `reverse` | `false` | Reverse the final order; combines with `sort_by`. |
+| `resume` | `false` | Remember playback positions — see [Resuming playback](#resuming-playback). |
+| `prefetch` | `service.media.prefetch` | Let shepherdd download this library ahead of time — see [Background prefetch](#background-prefetch). |
+
+There is deliberately no field for `--connectivity-check`: shepherdd already
+knows the check from the entry's `[entries.internet]` block, or
+`[service.internet]` when the entry sets none, and hands it to the activity
+automatically. Set `forward_check = false` under `[entries.internet]` to launch
+without one. `--log-level` and `--no-protocol` are not exposed either; they are
+debugging flags, and shepherdd picks them.
+
+An activity that needs a flag this kind doesn't expose can still be spelled out
+as `type = "process"` with `command = "shepherd-media"`; nothing about that
+path changed.
+
 ### Direct-play activity (single item)
 
 ```toml
@@ -306,12 +396,14 @@ label = "Big Buck Bunny"
 icon = "media-video"
 
 [entries.kind]
-type = "process"
-program = "shepherd-media"
-args = ["play", "--library", "/etc/shepherd/movies.toml", "--item", "big-buck-bunny"]
+type = "media"
+library = "/etc/shepherd/movies.toml"
+mode = "play"
+item = "big-buck-bunny"
 ```
 
-shepherdd treats this exactly like any other process activity.
+shepherdd supervises this exactly like any other activity: the session ends
+when the process exits.
 
 ### Browse-mode activity (whole library)
 
@@ -322,9 +414,9 @@ label = "Movies"
 icon = "folder-videos"
 
 [entries.kind]
-type = "process"
-program = "shepherd-media"
-args = ["browse", "--library", "/etc/shepherd/movies.toml"]
+type = "media"
+library = "/etc/shepherd/movies.toml"
+resume = true
 ```
 
 Once shepherdd grows protocol-reader support, the browse activity can opt
@@ -343,18 +435,22 @@ label = "My Channel"
 icon = "video-x-generic"
 
 [entries.kind]
-type = "process"
-program = "shepherd-media"
-args = [
-    "browse",
-    "--library", "https://www.youtube.com/playlist?list=UU...",
-    "--connectivity-check", "https://www.google.com",
-    "--reverse",
-]
+type = "media"
+library = "https://www.youtube.com/playlist?list=UU..."
+reverse = true
+
+# Optional: without it the service-wide check is forwarded instead.
+[entries.internet]
+check = "https://www.google.com"
 ```
 
 See [YouTube playlist URLs](#youtube-playlist-urls) for the caching
-behavior and why `--reverse` and `--connectivity-check` are recommended.
+behavior and why `reverse` and a connectivity check are recommended.
+
+### Icons
+
+An entry with no `icon` gets one from its mode: `folder-videos` for `browse`,
+`video-x-generic` for `play`.
 
 ## Playback UI
 

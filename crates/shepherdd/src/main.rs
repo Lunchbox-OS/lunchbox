@@ -44,6 +44,7 @@ mod display_watch;
 mod hidpi;
 mod input_devices;
 mod internet;
+mod media;
 mod pairing_display;
 mod system_events;
 
@@ -85,6 +86,7 @@ struct Service {
     rate_limiter: RateLimiter,
     internet_monitor: Option<internet::InternetMonitor>,
     input_monitor: Option<input_devices::InputMonitor>,
+    media_prefetcher: Option<media::MediaPrefetcher>,
 }
 
 impl Service {
@@ -169,6 +171,10 @@ impl Service {
         // Initialize input-device dependency monitor (issue #96). Only runs when
         // some entry declares `requires_input`.
         let input_monitor = input_devices::InputMonitor::from_policy(engine.policy());
+        // Background media prefetch (issue #127). Also where a missing yt-dlp
+        // is reported, since this is the only place that knows both what the
+        // policy references and what is installed.
+        let media_prefetcher = media::MediaPrefetcher::from_policy(engine.policy());
 
         // Initialize IPC server
         let mut ipc = IpcServer::new(&socket_path);
@@ -191,6 +197,7 @@ impl Service {
             rate_limiter,
             internet_monitor,
             input_monitor,
+            media_prefetcher,
         })
     }
 
@@ -473,6 +480,15 @@ impl Service {
                     .run(engine_ref, ipc_for_monitor, event_tx_for_monitor)
                     .await;
             });
+        }
+
+        // Background media prefetch (issue #127). Driven entirely off the
+        // event bus: it pauses for sessions and for a dropped connection
+        // without reaching into the engine.
+        if let Some(prefetcher) = self.media_prefetcher {
+            info!("Media entries detected, starting background prefetch");
+            let events = event_tx.subscribe();
+            tokio::spawn(async move { prefetcher.run(events).await });
         }
 
         {
