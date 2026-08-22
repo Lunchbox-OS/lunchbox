@@ -676,6 +676,37 @@ End-to-end on the headless session with two real devices:
 - The HUD slider's range followed the active output — pinned at maximum showing
   30%.
 
+### Companion rows
+
+Added alongside the web UI, at the maintainer's request, to be validated in an
+environment that can build Android:
+
+- `ManagementClient` — `listAudioOutputs`, `setAudioOutputLimits`,
+  `forgetAudioOutput`.
+- `ShepherdViewModel` — `audioOutputs` in `DeviceUiState`, fetched on connect
+  and refreshed on `VolumeChanged` (which can mean the active output moved, or
+  that a device the list has never seen just appeared), plus the two actions.
+  Both actions refetch the volume as well as the list, because the device may
+  have turned the volume down to obey a newly set cap.
+- `ui/device/AudioOutputsCard.kt` — the rows, mirroring the web UI: switch,
+  max slider, "In use now" chip, Forget (hidden for the active device, which
+  would be rediscovered immediately). Gated on `volume.available` the same way
+  `VolumeCard` is, so a device with no sound backend shows nothing rather than
+  an empty state.
+- `WireTest.kt` — four decode assertions, including that a payload with no
+  `output` field still decodes (an older device against a newer phone).
+
+Verified with the toolchain from `./scripts/shepherd deps install android`
+(JDK 21 + SDK in `/opt/android-sdk`): `:app:compileDebugKotlin` clean, all 33
+`:app:testDebugUnitTest` tests pass including the three new ones, and
+`:app:assembleDebug` produces an APK. `testDebugUnitTest` is exactly what CI
+runs for this module, so the companion is verified to the project's own bar.
+
+`AudioOutputRecord` had to be rooted explicitly in
+`shepherd-wire-codegen`'s `WireTypes`: it is reachable only through
+`list_audio_outputs`, not from `VolumeInfo`, so the Kotlin type was otherwise
+never emitted.
+
 ### Not verified
 
 - **The web UI card is not visually verified.** It typechecks and builds, and
@@ -684,18 +715,17 @@ End-to-end on the headless session with two real devices:
   headless session, so nothing rendered it. The project has no JS test harness
   (no test script, no jsdom/testing-library), and standing one up is a larger
   decision than this issue should make.
-- **The companion app was not touched.** No Android device or emulator is
-  attached, so a Compose screen could not be exercised. Its generated
-  `VolumeInfo` already carries `output`, so it shows correct numbers; the
-  per-device rows remain to do.
+- **The companion's on-device behaviour.** The Kotlin now compiles, its unit
+  tests pass, and the debug APK assembles (see below), but nothing has rendered
+  the card on a phone or driven it against a real device. Pairing and the BLE
+  path stay a manual smoke test — see the `companion-pairing` skill.
 
 ## Open questions
 
 All blocking questions were resolved above. Remaining items are implementation
 details to settle in review, not decisions:
 
-- The companion's per-device rows (see "Not verified" above). Its generated
-  types already carry everything needed.
+- Compiling and exercising the companion rows on a real device.
 - Visual verification of the web UI card, which needs either a browser in the
   headless session or a JS component-test harness.
 - Whether the 2s poll should become a `pw-mon` subscription. Only latency is at
