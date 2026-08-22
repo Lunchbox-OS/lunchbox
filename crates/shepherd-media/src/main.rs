@@ -1,13 +1,12 @@
 //! Linux entry point for the `shepherd-media` library launcher.
 
+mod caching_player;
 mod cli;
 mod connectivity;
 mod ordering;
 mod paths;
 mod posters;
 mod ui;
-mod video_cache;
-mod youtube;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -24,10 +23,11 @@ use shepherd_media_core::{
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::caching_player::CachingPlayer;
 use crate::cli::{Cli, Command, SortBy};
 use crate::ordering::apply_ordering;
 use crate::ui::StartMode;
-use crate::video_cache::{CachingPlayer, VideoCache};
+use shepherd_media_cache::VideoCache;
 
 /// Exit codes per the spec; keep in sync with `docs/shepherd-media.md`.
 const EXIT_OK: u8 = 0;
@@ -83,7 +83,8 @@ fn load_library_from_source(
     reverse: bool,
 ) -> Result<Library, (u8, String)> {
     let mut library = if is_youtube_playlist_url(source) {
-        let info = youtube::fetch_playlist(source).map_err(|e| (EXIT_VALIDATION, e))?;
+        let info =
+            shepherd_media_cache::fetch_playlist(source).map_err(|e| (EXIT_VALIDATION, e))?;
         build_library_from_entries(
             source,
             info.title,

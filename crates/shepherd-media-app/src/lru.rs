@@ -1,13 +1,15 @@
 //! Generic least-recently-used eviction for an on-disk file cache.
 //!
-//! Shared by both media front-ends' video caches. Those caches otherwise
-//! differ in structure — the Linux binary keys files by item id and tracks
-//! completion with `.done` sentinels; the Android app keys by URL hash — so
-//! only the eviction *policy* is shared here: given the cached files with their
-//! sizes and a recency key, delete the oldest until the total is within a byte
-//! cap. Each caller scans its own directory (applying its own filters, building
-//! its own recency key) and supplies an `on_evict` hook for any paired
-//! bookkeeping (deleting a sentinel, logging).
+//! Shared by both media front-ends' video caches, which otherwise have almost
+//! nothing in common. The Android cache names files by a `DefaultHasher` of the
+//! URL and orders them by plain mtime; `shepherd-media-cache` names them by a
+//! SHA-256 of the URL *and* the yt-dlp selector, tracks completion with `.done`
+//! sentinels and download claims with `.lock` files, and orders them by whether
+//! anyone has watched them. So only the eviction *policy* is shared here: given
+//! the cached files with their sizes and a recency key, delete the oldest until
+//! the total is within a byte cap. Each caller scans its own directory
+//! (applying its own filters, building its own recency key) and supplies an
+//! `on_evict` hook for any paired bookkeeping (deleting a sentinel, logging).
 //!
 //! Deliberately std-only: no networking or image work, so it stays reusable and
 //! cross-compiles for Android like the rest of this crate.
@@ -31,8 +33,25 @@ pub struct LruEntry<K> {
 /// delete (that file's bytes still count toward the remaining total, so the
 /// loop may remove more than strictly necessary rather than spin).
 pub fn evict_to_cap<K: Ord>(
+    entries: Vec<LruEntry<K>>,
+    max_bytes: u64,
+    on_evict: impl FnMut(&Path),
+) {
+    evict_to_cap_where(entries, max_bytes, |_| true, on_evict)
+}
+
+/// As [`evict_to_cap`], but only files for which `eligible` returns true may be
+/// deleted. Every entry still counts toward the total, so an ineligible file
+/// occupies space that eviction cannot reclaim — if the eligible set runs out
+/// the total may remain above `max_bytes`.
+///
+/// This is how a caller protects a class of content: `shepherd-media-cache`
+/// uses it so a speculative prefetch can trim other speculative downloads but
+/// never something the user actually watched.
+pub fn evict_to_cap_where<K: Ord>(
     mut entries: Vec<LruEntry<K>>,
     max_bytes: u64,
+    mut eligible: impl FnMut(&LruEntry<K>) -> bool,
     mut on_evict: impl FnMut(&Path),
 ) {
     let mut total: u64 = entries.iter().map(|e| e.size).sum();
@@ -44,6 +63,9 @@ pub fn evict_to_cap<K: Ord>(
     for entry in entries {
         if total <= max_bytes {
             break;
+        }
+        if !eligible(&entry) {
+            continue;
         }
         if std::fs::remove_file(&entry.path).is_ok() {
             total = total.saturating_sub(entry.size);
@@ -114,5 +136,35 @@ mod tests {
         );
         assert!(a.exists());
         assert!(!hook_ran);
+    }
+
+    #[test]
+    fn ineligible_files_are_never_deleted_even_when_over_cap() {
+        // The protection `shepherd-media-cache` relies on: a prefetch may trim
+        // other prefetches, never something watched — so it can leave the cache
+        // above its cap rather than touch a protected file.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let protected = seed(d, "protected", 100);
+        let spare = seed(d, "spare", 100);
+        evict_to_cap_where(
+            vec![
+                LruEntry {
+                    path: protected.clone(),
+                    size: 100,
+                    recency: 1u64,
+                },
+                LruEntry {
+                    path: spare.clone(),
+                    size: 100,
+                    recency: 2,
+                },
+            ],
+            50,
+            |e| e.path != protected,
+            |_| {},
+        );
+        assert!(protected.exists(), "protected file survives");
+        assert!(!spare.exists(), "the eligible file is still reclaimed");
     }
 }

@@ -128,3 +128,48 @@ impl LogLevel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    /// shepherdd builds this CLI's argv from `shepherd_api::EntryKind::Media`
+    /// (issue #127), and its `MediaQuality` / `MediaSortBy` mirrors are
+    /// hand-maintained — `shepherd-api` cannot depend on the media crates.
+    /// This is the guard: every flag string those mirrors emit must still be a
+    /// value this CLI accepts, so renaming or dropping one here fails the
+    /// build rather than the child's launch.
+    #[test]
+    fn api_media_flags_are_accepted_by_this_cli() {
+        for q in [
+            shepherd_api::MediaQuality::Best,
+            shepherd_api::MediaQuality::Q1080,
+            shepherd_api::MediaQuality::Q720,
+            shepherd_api::MediaQuality::Q480,
+        ] {
+            Quality::from_str(q.as_flag(), true)
+                .unwrap_or_else(|e| panic!("--quality {}: {e}", q.as_flag()));
+        }
+
+        for s in [
+            shepherd_api::MediaSortBy::Library,
+            shepherd_api::MediaSortBy::Title,
+            shepherd_api::MediaSortBy::Id,
+            shepherd_api::MediaSortBy::Kind,
+            shepherd_api::MediaSortBy::Category,
+            shepherd_api::MediaSortBy::Duration,
+        ] {
+            SortBy::from_str(s.as_flag(), true)
+                .unwrap_or_else(|e| panic!("--sort-by {}: {e}", s.as_flag()));
+        }
+    }
+
+    /// The other direction: a preset added to the CLI without a mirror in
+    /// `shepherd-api` would be unreachable from config, silently.
+    #[test]
+    fn this_cli_has_no_presets_the_api_cannot_name() {
+        assert_eq!(Quality::value_variants().len(), 4);
+        assert_eq!(SortBy::value_variants().len(), 6);
+    }
+}
