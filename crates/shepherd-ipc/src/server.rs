@@ -3,7 +3,7 @@
 use shepherd_api::{ClientInfo, ClientRole, Event, Request, Response};
 use shepherd_util::ClientId;
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -41,6 +41,14 @@ enum WriterMessage {
 /// IPC Server
 pub struct IpcServer {
     socket_path: PathBuf,
+    /// `(dev, ino)` of the socket file this server bound, so shutdown removes
+    /// only the socket it created. Two daemons briefly overlapping — which is
+    /// routine in the dev loop, where a session is stopped and restarted in one
+    /// breath — otherwise ends with the outgoing one deleting the path the
+    /// incoming one has already bound: the new daemon runs on happily while
+    /// every client sits in a reconnect loop against a path that no longer
+    /// exists. `None` until [`Self::start`] has bound successfully.
+    socket_id: Option<(u64, u64)>,
     listener: Option<UnixListener>,
     clients: Arc<RwLock<HashMap<ClientId, ClientHandle>>>,
     event_tx: broadcast::Sender<Event>,
@@ -61,6 +69,7 @@ impl IpcServer {
 
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
+            socket_id: None,
             listener: None,
             clients: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
@@ -71,7 +80,9 @@ impl IpcServer {
 
     /// Start listening
     pub async fn start(&mut self) -> IpcResult<()> {
-        // Remove existing socket if present
+        // Remove existing socket if present. Deliberately unconditional: a
+        // daemon that crashed leaves its socket behind, and refusing to bind
+        // over it would make a crash unrecoverable without manual cleanup.
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
         }
@@ -99,6 +110,11 @@ impl IpcServer {
 
         info!(path = %self.socket_path.display(), "IPC server listening");
 
+        // Remember which file this is, so shutdown can tell it apart from one
+        // another daemon may have bound to the same path in the meantime.
+        self.socket_id = std::fs::metadata(&self.socket_path)
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
         self.listener = Some(listener);
 
         Ok(())
@@ -343,10 +359,27 @@ impl IpcServer {
         self.clients.read().await.len()
     }
 
-    /// Shutdown the server
+    /// Shut the server down, removing the socket file it created.
+    ///
+    /// Removes the path **only** if it still holds the same file this server
+    /// bound. Anything else at that path belongs to another daemon that has
+    /// since taken over, and deleting it would strand every one of its clients
+    /// on a path that no longer exists while it went on serving a socket nobody
+    /// could reach.
     pub fn shutdown(&self) {
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
+        let Some(bound) = self.socket_id else {
+            return; // never started, or the bind was never observed
+        };
+        match std::fs::metadata(&self.socket_path) {
+            Ok(md) if (md.dev(), md.ino()) == bound => {
+                let _ = std::fs::remove_file(&self.socket_path);
+            }
+            Ok(_) => warn!(
+                path = %self.socket_path.display(),
+                "Another daemon has bound our socket path; leaving it alone"
+            ),
+            // Already gone: nothing to clean up.
+            Err(_) => {}
         }
     }
 }
@@ -393,6 +426,55 @@ mod tests {
             }
             panic!("IPC server start failed: {err}");
         }
+
+        assert!(socket_path.exists());
+    }
+
+    /// The dev loop's overlap, in miniature: one daemon is still shutting down
+    /// while the next has already taken the socket path. The outgoing one used
+    /// to delete it, leaving the incoming daemon healthy but unreachable — the
+    /// session comes up, and every client loops on `No such file or directory`.
+    #[tokio::test]
+    async fn shutdown_does_not_delete_a_socket_another_daemon_has_bound() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("shepherd.sock");
+
+        let mut outgoing = IpcServer::new(&socket_path);
+        if outgoing.start().await.is_err() {
+            return; // sandbox without permission to bind; covered by test_server_start
+        }
+
+        // The incoming daemon replaces the path, exactly as `start` does.
+        let mut incoming = IpcServer::new(&socket_path);
+        incoming.start().await.unwrap();
+        let taken_over = std::fs::metadata(&socket_path).unwrap().ino();
+
+        outgoing.shutdown();
+
+        assert!(
+            socket_path.exists(),
+            "the outgoing daemon deleted the incoming daemon's socket"
+        );
+        assert_eq!(
+            std::fs::metadata(&socket_path).unwrap().ino(),
+            taken_over,
+            "the socket at the path is still the one the incoming daemon bound"
+        );
+
+        // And the daemon that does own it still cleans up after itself.
+        incoming.shutdown();
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_start_removes_nothing() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("shepherd.sock");
+        std::fs::write(&socket_path, b"not ours").unwrap();
+
+        // A server that never bound has no claim on the path, so it must not
+        // touch whatever happens to be sitting there.
+        IpcServer::new(&socket_path).shutdown();
 
         assert!(socket_path.exists());
     }
