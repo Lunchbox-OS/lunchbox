@@ -32,6 +32,26 @@ a pass through this skill before they land.**
 2. **A phone on USB with debugging authorised.** `adb devices` must show
    `device`, not `unauthorized` — the phone shows an RSA-fingerprint
    prompt the first time and a human has to accept it.
+   It must also be **unlocked**: `uiautomator dump` on the lock screen
+   returns a tree with no app labels, so `pair.sh ui` prints nothing and
+   every `tap` reports "not found". Wake it and swipe from mid-screen
+   (`input keyevent KEYCODE_WAKEUP`, then
+   `input touchscreen swipe 540 1500 540 500 300`) to raise the PIN
+   bouncer — a swipe that starts near the bottom is eaten by gesture nav
+   and only opens the notification shade. The dev phone's PIN is
+   **314159** (deliberately guessable; it is a test device with no real
+   accounts on it), so unlock it yourself:
+
+   ```sh
+   adb shell input keyevent KEYCODE_WAKEUP
+   adb shell input touchscreen swipe 540 1500 540 500 300   # raise the bouncer
+   adb shell input text 314159 && adb shell input keyevent KEYCODE_ENTER
+   ```
+
+   Confirm with `adb shell dumpsys window | grep mDreamingLockscreen`
+   (`false` once unlocked), and `adb shell input keyevent KEYCODE_SLEEP`
+   to lock it again when you're done. A phone that is *not* the dev
+   phone has none of this — ask its owner to unlock it.
 3. **`[service.ble_management] enabled = true`** in the config the
    session boots (true in `config.example.toml`).
 
