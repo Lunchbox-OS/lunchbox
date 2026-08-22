@@ -165,10 +165,25 @@ reload-responsive, and `may_sweep` now consults `prefetch`, so switching prefetc
 off stops a task that is already running rather than only preventing the next
 one from starting.
 
-The targets stay snapshotted. Picking up an added or removed `media` entry means
-rebuilding the task, which is a different change; it is written down in
-`docs/shepherd-media.md` as a restart-on-reload limitation rather than left for
-someone to discover.
+The target list is rebuilt from the same read, so adding, removing, disabling,
+or retargeting a `media` entry lands on the next sweep as well. That forced one
+structural change: `from_policy` used to return `None` when no media entry
+existed, and the task was then never spawned — so a reload could never hand work
+to a prefetcher that had decided at startup it had none. It is now always
+constructed, and an idle sweep costs a lock, a clone, and a walk of the entry
+list once an hour.
+
+Resolution moved into a free `read_policy`, which is deliberately pure: it runs
+with the engine lock held, while the yt-dlp probe it feeds spawns a process and
+the library check behind it touches the disk. Those run after the lock is
+dropped. The probe is also re-run only when the target set actually changes —
+an hourly reminder that yt-dlp is missing is noise, but a reload that *adds* a
+YouTube entry to a device without it should say so.
+
+`warn_about_missing_ytdlp` now takes the collected `(entry id, library)` pairs
+rather than the whole policy, which is what let it move outside the lock. It
+still covers media entries prefetch skips, because a missing yt-dlp breaks those
+when a child taps the tile, not only when this task would have downloaded them.
 
 ## Android
 

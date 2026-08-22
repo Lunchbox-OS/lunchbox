@@ -32,9 +32,11 @@
 //! writing to it, and the two would undo each other's trims. The lock is taken
 //! for the length of a clone, never across a download.
 //!
-//! The *targets* are still snapshotted: picking up an added or removed `media`
-//! entry means rebuilding the list, which is a restart-on-reload change rather
-//! than this one.
+//! The target list is rebuilt from the same read, so adding, removing, or
+//! retargeting a `media` entry takes effect on the next sweep too. That is also
+//! why this task is always spawned, even with no media entries configured:
+//! a prefetcher that only existed when the startup policy had work for it could
+//! never be handed any by a reload.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -63,6 +65,7 @@ const RESUME_DELAY: Duration = Duration::from_secs(30);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// One library to keep cached, resolved from a `media` entry.
+#[derive(Debug, PartialEq, Eq)]
 struct PrefetchTarget {
     entry_id: String,
     library: String,
@@ -72,73 +75,43 @@ struct PrefetchTarget {
     only_item: Option<String>,
 }
 
-/// The libraries to keep cached, and the service settings that govern how.
+/// Everything a sweep needs, as of the last time policy was read.
 ///
-/// The targets are resolved once: they come from the entry list, and picking up
-/// an added or removed `media` entry would mean rebuilding this task. The
-/// settings are not — see [`MediaPrefetcher::refreshed_settings`].
+/// Both halves are refreshed together before each sweep — see
+/// [`MediaPrefetcher::reread_policy`] — so a config reload reaches the libraries
+/// and the settings in the same pass.
 pub struct MediaPrefetcher {
     targets: Vec<PrefetchTarget>,
-    /// `[service.media]` as of the last sweep. Seeded at construction so the
-    /// startup sweep has something to run on before the first refresh.
     settings: MediaServiceConfig,
 }
 
+/// What one read of the policy yields. Assembled under the engine lock and used
+/// after it is dropped, so nothing that touches the disk or spawns a process
+/// happens while the engine is held.
+struct PolicyRead {
+    settings: MediaServiceConfig,
+    targets: Vec<PrefetchTarget>,
+    /// `(entry id, library source)` for **every** media entry, including ones
+    /// prefetch skips. The yt-dlp warning covers those too: a missing yt-dlp
+    /// breaks them when a child taps the tile, not only when this task would
+    /// have downloaded them.
+    media_entries: Vec<(String, String)>,
+}
+
 impl MediaPrefetcher {
-    /// Build a prefetcher for `policy`, or `None` when there is nothing to do:
-    /// no media entries, or prefetch switched off.
+    /// Build a prefetcher for `policy`.
     ///
-    /// Also the point where the yt-dlp warning is raised, because it is the
-    /// only place that knows both what is configured and what is installed.
-    pub fn from_policy(policy: &Policy) -> Option<Self> {
-        let mut targets = Vec::new();
-        for entry in &policy.entries {
-            let EntryKind::Media {
-                library,
-                mode,
-                item,
-                quality,
-                prefetch,
-                ..
-            } = &entry.kind
-            else {
-                continue;
-            };
-            // An entry the admin has switched off entirely should not be
-            // consuming disk on the child's behalf. Schedule is deliberately
-            // *not* consulted: an activity outside its window today is exactly
-            // the one worth having ready tomorrow.
-            if entry.disabled {
-                debug!(entry = %entry.id.as_str(), "skipping prefetch for a disabled entry");
-                continue;
-            }
-            if !prefetch.unwrap_or(policy.service.media.prefetch) {
-                debug!(entry = %entry.id.as_str(), "prefetch opted out for this entry");
-                continue;
-            }
-            targets.push(PrefetchTarget {
-                entry_id: entry.id.as_str().to_string(),
-                library: expand_tilde(library),
-                quality: *quality,
-                // A direct-play entry launches exactly one item; caching the
-                // rest of its library would download things this activity can
-                // never reach.
-                only_item: match mode {
-                    MediaMode::Play => item.clone(),
-                    MediaMode::Browse => None,
-                },
-            });
+    /// Always returns one, even when nothing is configured. A task that only
+    /// existed when the *startup* policy had media entries could never be
+    /// handed any by a reload, and an idle sweep is a lock, a clone, and a walk
+    /// of the entry list once an hour.
+    pub fn from_policy(policy: &Policy) -> Self {
+        let read = read_policy(policy);
+        warn_about_missing_ytdlp(&read.media_entries);
+        Self {
+            targets: read.targets,
+            settings: read.settings,
         }
-
-        warn_about_missing_ytdlp(policy);
-
-        if targets.is_empty() {
-            return None;
-        }
-        Some(Self {
-            targets,
-            settings: policy.service.media.clone(),
-        })
     }
 
     /// Run until shutdown, sweeping the configured libraries whenever the
@@ -156,6 +129,11 @@ impl MediaPrefetcher {
         let mut session_active = false;
         let mut online = true;
 
+        info!(
+            libraries = self.targets.len(),
+            "background media prefetch started"
+        );
+
         // Fires immediately, which is the startup sweep.
         let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -163,7 +141,7 @@ impl MediaPrefetcher {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    self.settings = Self::refreshed_settings(&engine).await;
+                    self.reread_policy(&engine).await;
                     if self.may_sweep(session_active, online) {
                         self.sweep().await;
                     }
@@ -193,7 +171,7 @@ impl MediaPrefetcher {
                             _ => false,
                         };
                         if resume {
-                            self.settings = Self::refreshed_settings(&engine).await;
+                            self.reread_policy(&engine).await;
                             if self.may_sweep(session_active, online) {
                                 self.sweep().await;
                                 ticker.reset();
@@ -215,13 +193,27 @@ impl MediaPrefetcher {
         }
     }
 
-    /// `[service.media]` as the engine currently holds it.
+    /// Re-read policy, replacing both the settings and the target list.
     ///
-    /// Cloned under the lock and returned by value: the settings are then used
-    /// for the whole sweep, which shells out to yt-dlp and blocks on downloads,
-    /// and none of that may happen with the engine held.
-    async fn refreshed_settings(engine: &Arc<Mutex<CoreEngine>>) -> MediaServiceConfig {
-        engine.lock().await.policy().service.media.clone()
+    /// The read happens under the lock and everything that could block happens
+    /// after it: [`read_policy`] is pure string work, while the yt-dlp probe it
+    /// feeds spawns a process and the library check behind it touches the disk.
+    /// A sweep then runs on the values this leaves behind.
+    async fn reread_policy(&mut self, engine: &Arc<Mutex<CoreEngine>>) {
+        let read = { read_policy(engine.lock().await.policy()) };
+
+        if read.targets != self.targets {
+            info!(
+                libraries = read.targets.len(),
+                "media prefetch targets changed"
+            );
+            // Re-warn on a change, not every sweep: an hourly reminder that
+            // yt-dlp is missing is noise, but a reload that *adds* a YouTube
+            // entry to a device without it should say so.
+            warn_about_missing_ytdlp(&read.media_entries);
+        }
+        self.targets = read.targets;
+        self.settings = read.settings;
     }
 
     fn may_sweep(&self, session_active: bool, online: bool) -> bool {
@@ -301,6 +293,59 @@ impl MediaPrefetcher {
             return false;
         }
         true
+    }
+}
+
+/// Resolve everything a sweep needs from `policy`.
+///
+/// Deliberately pure and cheap — no disk, no processes — because it runs with
+/// the engine lock held.
+fn read_policy(policy: &Policy) -> PolicyRead {
+    let mut targets = Vec::new();
+    let mut media_entries = Vec::new();
+    for entry in &policy.entries {
+        let EntryKind::Media {
+            library,
+            mode,
+            item,
+            quality,
+            prefetch,
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        media_entries.push((entry.id.as_str().to_string(), library.clone()));
+
+        // An entry the admin has switched off entirely should not be consuming
+        // disk on the child's behalf. Schedule is deliberately *not* consulted:
+        // an activity outside its window today is exactly the one worth having
+        // ready tomorrow.
+        if entry.disabled {
+            debug!(entry = %entry.id.as_str(), "skipping prefetch for a disabled entry");
+            continue;
+        }
+        if !prefetch.unwrap_or(policy.service.media.prefetch) {
+            debug!(entry = %entry.id.as_str(), "prefetch opted out for this entry");
+            continue;
+        }
+        targets.push(PrefetchTarget {
+            entry_id: entry.id.as_str().to_string(),
+            library: expand_tilde(library),
+            quality: *quality,
+            // A direct-play entry launches exactly one item; caching the rest of
+            // its library would download things this activity can never reach.
+            only_item: match mode {
+                MediaMode::Play => item.clone(),
+                MediaMode::Browse => None,
+            },
+        });
+    }
+
+    PolicyRead {
+        settings: policy.service.media.clone(),
+        targets,
+        media_entries,
     }
 }
 
@@ -384,17 +429,13 @@ fn load_prefetch_library(source: &str) -> Result<Library, String> {
 /// Without this the failure is invisible until a child taps a tile and the
 /// activity dies: the library loads, the grid paints, and every YouTube item in
 /// it is unplayable.
-fn warn_about_missing_ytdlp(policy: &Policy) {
-    let youtube_entries: Vec<&str> = policy
-        .entries
+fn warn_about_missing_ytdlp(media_entries: &[(String, String)]) {
+    let youtube_entries: Vec<&str> = media_entries
         .iter()
-        .filter(|e| match &e.kind {
-            EntryKind::Media { library, .. } => {
-                is_youtube_playlist_url(library) || library_references_youtube(library)
-            }
-            _ => false,
+        .filter(|(_, library)| {
+            is_youtube_playlist_url(library) || library_references_youtube(library)
         })
-        .map(|e| e.id.as_str())
+        .map(|(id, _)| id.as_str())
         .collect();
 
     if youtube_entries.is_empty() || ytdlp_available() {
@@ -539,6 +580,66 @@ mod tests {
             })
             .have_disk_headroom()
         );
+    }
+
+    /// A policy with one browse-mode `media` entry per id, built by parsing
+    /// real TOML rather than assembling structs — the resolution under test
+    /// reads fields a hand-built `Policy` could drift away from.
+    fn policy_with_media(entries: &[(&str, bool)]) -> Policy {
+        let mut toml = String::from("config_version = 1\n");
+        for (id, enabled) in entries {
+            toml.push_str(&format!(
+                r#"
+[[entries]]
+id = "{id}"
+label = "{id}"
+disabled = {disabled}
+[entries.kind]
+type = "media"
+library = "~/{id}.toml"
+mode = "browse"
+"#,
+                id = id,
+                disabled = !enabled,
+            ));
+        }
+        shepherd_config::parse_config(&toml).expect("test policy parses")
+    }
+
+    #[test]
+    fn a_prefetcher_exists_even_with_nothing_configured() {
+        // It has to: a task that only existed when the startup policy had media
+        // entries could never be handed any by a reload.
+        let prefetcher = MediaPrefetcher::from_policy(&policy_with_media(&[]));
+        assert!(prefetcher.targets.is_empty());
+    }
+
+    #[test]
+    fn re_reading_policy_picks_up_an_added_library() {
+        let before = read_policy(&policy_with_media(&[("movies", true)]));
+        let after = read_policy(&policy_with_media(&[("movies", true), ("shows", true)]));
+
+        assert_eq!(before.targets.len(), 1);
+        assert_eq!(after.targets.len(), 2);
+        assert_ne!(
+            before.targets, after.targets,
+            "the change has to be visible, or the re-warn and the log never fire"
+        );
+    }
+
+    #[test]
+    fn re_reading_policy_drops_a_removed_library() {
+        assert!(read_policy(&policy_with_media(&[])).targets.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_entry_is_not_a_target_but_is_still_a_media_entry() {
+        // The yt-dlp warning covers entries prefetch skips: a missing yt-dlp
+        // breaks them when a child taps the tile, not only when this task would
+        // have downloaded them.
+        let read = read_policy(&policy_with_media(&[("movies", false)]));
+        assert!(read.targets.is_empty());
+        assert_eq!(read.media_entries.len(), 1);
     }
 
     #[test]

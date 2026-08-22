@@ -86,7 +86,7 @@ struct Service {
     rate_limiter: RateLimiter,
     internet_monitor: Option<internet::InternetMonitor>,
     input_monitor: Option<input_devices::InputMonitor>,
-    media_prefetcher: Option<media::MediaPrefetcher>,
+    media_prefetcher: media::MediaPrefetcher,
 }
 
 impl Service {
@@ -171,9 +171,11 @@ impl Service {
         // Initialize input-device dependency monitor (issue #96). Only runs when
         // some entry declares `requires_input`.
         let input_monitor = input_devices::InputMonitor::from_policy(engine.policy());
-        // Background media prefetch (issue #127). Also where a missing yt-dlp
-        // is reported, since this is the only place that knows both what the
-        // policy references and what is installed.
+        // Background media prefetch (issue #127). Constructed unconditionally,
+        // including with no media entries configured: it re-reads policy each
+        // sweep, so a reload that adds a media entry has something to reach.
+        // Also where a missing yt-dlp is reported, since this is the only place
+        // that knows both what the policy references and what is installed.
         let media_prefetcher = media::MediaPrefetcher::from_policy(engine.policy());
 
         // Initialize IPC server
@@ -483,11 +485,12 @@ impl Service {
         }
 
         // Background media prefetch (issue #127). Session and connectivity
-        // state come off the event bus; it takes the engine only to re-read
-        // `[service.media]` before each sweep, so a config reload reaches the
-        // eviction grace the launch path is already handing to activities.
-        if let Some(prefetcher) = self.media_prefetcher {
-            info!("Media entries detected, starting background prefetch");
+        // state come off the event bus; it takes the engine to re-read the
+        // media settings and the library list before each sweep, so a config
+        // reload reaches both — including the eviction grace, which the launch
+        // path is already handing to activities from the live policy.
+        {
+            let prefetcher = self.media_prefetcher;
             let events = event_tx.subscribe();
             let engine_for_prefetch = engine.clone();
             tokio::spawn(async move { prefetcher.run(engine_for_prefetch, events).await });

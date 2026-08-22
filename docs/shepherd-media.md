@@ -115,19 +115,27 @@ the whole thing off, set `service.media.prefetch = false`.
 
 ### What a config reload reaches
 
-`[service.media]` is re-read before every sweep, so changes to `prefetch`,
-`prefetch_while_session_active`, `free_space_floor_bytes`, and
-`watched_grace_days` take effect within the hour without a restart. The grace in
-particular has to work this way: the launch path hands each spawned activity the
-*current* value, so a prefetcher still running on the value from startup would
-value the shared cache directory differently from the player writing to it.
+Policy is re-read before every sweep, so a reload takes effect within the hour
+without a restart. That covers both halves:
 
-The list of libraries is not. It comes from the entry list and is resolved once
-at startup, so **adding or removing a `media` entry needs a shepherdd restart**
-— including the per-entry `prefetch = false` opt-out. The *contents* of an
-already-configured library are read fresh on every sweep, so a video the parent
-adds to a library file is picked up within the hour; a playlist URL is refetched
-when its metadata cache expires, every 6 hours.
+- **`[service.media]`** — `prefetch`, `prefetch_while_session_active`,
+  `free_space_floor_bytes`, and `watched_grace_days`. The grace in particular
+  has to work this way: the launch path hands each spawned activity the
+  *current* value, so a prefetcher still running on the value from startup would
+  value the shared cache directory differently from the player writing to it.
+- **The set of libraries** — adding, removing, disabling, or retargeting a
+  `media` entry, and the per-entry `prefetch = false` opt-out. This is also why
+  the task is started even on a device with no media entries at all: a
+  prefetcher that only existed when the startup policy had work for it could
+  never be handed any by a reload.
+
+The *contents* of an already-configured library are read fresh on every sweep
+too, so a video the parent adds to a library file is picked up within the hour;
+a playlist URL is refetched when its metadata cache expires, every 6 hours.
+
+Nothing here reaches back and deletes what a removed entry had already cached.
+Those files stop being refreshed and age out of the cache on their own, which is
+also what happens if the entry is added back a week later.
 
 Prefetch order follows the library's own order, which is what browse shows.
 
