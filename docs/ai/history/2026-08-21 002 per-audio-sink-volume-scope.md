@@ -709,6 +709,13 @@ never emitted.
 
 ### Not verified
 
+> **Superseded 2026-08-22.** Both items below, and the two open questions about
+> them, were closed by a full end-to-end pass against two real devices, a real
+> browser and the phone. See
+> <docs/ai/history/2026-08-22 001 per-audio-sink-volume-e2e-validation.md>,
+> which also records one defect found and fixed (the web UI switch's accessible
+> name) and three smaller issues left open.
+
 - **The web UI card is not visually verified.** It typechecks and builds, and
   the payload it renders was confirmed live over HTTP, but the SPA is embedded
   into the binary at compile time and no working browser is available in the
@@ -725,9 +732,12 @@ never emitted.
 All blocking questions were resolved above. Remaining items are implementation
 details to settle in review, not decisions:
 
-- Compiling and exercising the companion rows on a real device.
-- Visual verification of the web UI card, which needs either a browser in the
-  headless session or a JS component-test harness.
+- ~~Compiling and exercising the companion rows on a real device.~~ Done
+  2026-08-22.
+- ~~Visual verification of the web UI card, which needs either a browser in the
+  headless session or a JS component-test harness.~~ Done 2026-08-22 — the
+  headless session's Firefox, driven over Marionette; no JS test harness was
+  needed. Recipe in the `headless-dev` skill.
 - Whether the 2s poll should become a `pw-mon` subscription. Only latency is at
   stake; correctness does not depend on it.
 - `min_volume` is stored and layered per output but not exposed in the UI, which
