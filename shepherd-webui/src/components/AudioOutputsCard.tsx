@@ -88,7 +88,12 @@ function OutputRow({
           checked={capped}
           disabled={busy}
           onChange={(e) => onSetLimit(record.output.key, e.target.checked ? draft : null)}
-          inputProps={{ "aria-label": `Limit volume for ${record.output.description}` }}
+          // `slotProps.input`, not the older `inputProps`: MUI dropped the latter
+          // in v7 and silently ignores it, so the switch shipped with no
+          // accessible name at all.
+          slotProps={{
+            input: { "aria-label": `Limit volume for ${record.output.description}` },
+          }}
         />
         <Slider
           min={0}
