@@ -26,10 +26,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -42,6 +44,9 @@ import com.armeafamily.shepherd.companion.ui.components.LinkBanner
 import com.armeafamily.shepherd.companion.ui.components.ReasonLines
 import com.armeafamily.shepherd.companion.ui.components.StatusBadge
 import com.armeafamily.shepherd.companion.util.Formatting
+
+/** How often the home banner re-reads the device's problems. */
+private const val HOME_DIAGNOSTIC_POLL_MS = 60_000L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,6 +61,22 @@ fun HomeScreen(
 ) {
     val state by vm.state.collectAsState()
     val health by vm.diagnostics.collectAsState()
+
+    // The banner has to fetch its own data. Reading `vm.diagnostics` is not
+    // enough: only the health screen refreshed it, so on a fresh launch the
+    // banner stayed invisible until the caregiver went looking for the very
+    // thing it exists to tell them about.
+    //
+    // Slower than the health screen's poll — these are conditions somebody has
+    // to go and fix, so a minute of staleness on a banner costs nothing, and
+    // this screen is composed almost the whole time the app is open.
+    LaunchedEffect(state.link) {
+        if (state.link != LinkStatus.Connected) return@LaunchedEffect
+        while (true) {
+            vm.refreshDiagnostics()
+            delay(HOME_DIAGNOSTIC_POLL_MS)
+        }
+    }
     val records by vm.repository.records.collectAsState()
     val activeId by vm.repository.activeId.collectAsState()
 
