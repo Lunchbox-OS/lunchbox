@@ -399,6 +399,14 @@ impl Service {
         // handed to HttpServer as the source of unified admin bearer
         // tokens. If BLE isn't configured, HTTP falls back to its
         // static-token-only auth.
+        // Observed diagnostics (issue #143) are raised on workers and in crates
+        // with no access to the engine or the IPC server, so they signal here
+        // and the main loop republishes. Created before the BLE server, which
+        // is one of those raise sites.
+        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
+        let diagnostic_publisher =
+            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
+
         let (ble_handle, admin_authority): (
             Option<tokio::task::JoinHandle<()>>,
             Option<Arc<dyn shepherd_management::AdminAuthority>>,
@@ -419,6 +427,9 @@ impl Service {
                 let display = Arc::new(pairing_display::SwayPairingDisplay::new());
                 match BleServer::new(bsc, svc.clone(), display) {
                     Ok(server) => {
+                        let server = server
+                            .with_diagnostics(Arc::new(diagnostic_publisher.clone())
+                                as Arc<dyn shepherd_api::DiagnosticSink>);
                         let authority =
                             server.claim_machine() as Arc<dyn shepherd_management::AdminAuthority>;
                         let rx = shutdown_rx.clone();
@@ -494,13 +505,6 @@ impl Service {
                     .await;
             });
         }
-
-        // Observed diagnostics (issue #143) are raised on workers with no access
-        // to the engine or the IPC server, so they signal here and the main loop
-        // republishes.
-        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
-        let diagnostic_publisher =
-            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
 
         // Background media prefetch (issue #127). Session and connectivity
         // state come off the event bus; it takes the engine to re-read the

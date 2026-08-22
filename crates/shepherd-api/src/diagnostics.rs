@@ -189,6 +189,22 @@ impl DiagnosticSet {
     }
 }
 
+/// Somewhere to report an administrator-facing condition from.
+///
+/// Exists because the code that notices a problem is usually not the code that
+/// can publish one: the BLE server, the host adapter, and the daemon's workers
+/// all sit in crates that know nothing about shepherdd's registry. They take
+/// one of these instead, and the daemon supplies the implementation.
+///
+/// Deliberately fire-and-forget. A raise site is reporting something it has
+/// already handled — it must not have to care whether anybody is listening, and
+/// a diagnostic that fails to publish must never fail the operation that
+/// noticed it.
+pub trait DiagnosticSink: Send + Sync {
+    fn raise(&self, diagnostic: Diagnostic);
+    fn clear(&self, code: DiagnosticCode, subject: &DiagnosticSubject);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

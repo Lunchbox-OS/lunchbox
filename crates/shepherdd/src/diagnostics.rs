@@ -448,6 +448,16 @@ impl DiagnosticPublisher {
     }
 }
 
+impl shepherd_api::DiagnosticSink for DiagnosticPublisher {
+    fn raise(&self, diagnostic: Diagnostic) {
+        DiagnosticPublisher::raise(self, diagnostic);
+    }
+
+    fn clear(&self, code: DiagnosticCode, subject: &DiagnosticSubject) {
+        DiagnosticPublisher::clear(self, code, subject);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

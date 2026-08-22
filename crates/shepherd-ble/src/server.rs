@@ -43,7 +43,9 @@ use bluer::gatt::local::{
 };
 use bluer::{AdapterEvent, AdapterProperty, Address, DeviceEvent, DeviceProperty};
 use futures_util::{FutureExt, StreamExt};
-use shepherd_api::EventPayload;
+use shepherd_api::{
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EventPayload,
+};
 use shepherd_management::ManagementService;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -258,6 +260,10 @@ pub struct BleServer {
     /// removing the bond — is retried on the next startup instead of
     /// stranding the peer bonded to an unclaimed device.
     pending_unbond: PendingUnbondStore,
+    /// Where to report administrator-facing conditions (issue #143). `None`
+    /// outside the daemon — the server runs in tests and tools that have no
+    /// registry, and a missing sink must not change its behaviour.
+    diagnostics: Option<Arc<dyn DiagnosticSink>>,
 }
 
 impl BleServer {
@@ -313,6 +319,7 @@ impl BleServer {
             claim,
             display,
             pending_unbond,
+            diagnostics: None,
         })
     }
 
@@ -323,6 +330,44 @@ impl BleServer {
     /// are visible to HTTP immediately.
     pub fn claim_machine(&self) -> Arc<ClaimMachine> {
         self.claim.clone()
+    }
+
+    /// Report administrator-facing conditions through `sink` (issue #143).
+    ///
+    /// Opt-in rather than a constructor argument: every other caller of
+    /// [`Self::new`] — tests, tools — has no registry to hand over, and
+    /// threading an `Option` through all of them would buy nothing.
+    pub fn with_diagnostics(mut self, sink: Arc<dyn DiagnosticSink>) -> Self {
+        self.diagnostics = Some(sink);
+        self
+    }
+
+    /// Report whether the pairing agent is registered.
+    ///
+    /// Both directions, from the same place: the agent is re-registered when
+    /// the adapter powers back on, so a failure that resolves on its own must
+    /// clear on its own too.
+    fn report_agent_status(&self, registered: bool) {
+        let Some(sink) = &self.diagnostics else {
+            return;
+        };
+        if registered {
+            sink.clear(
+                DiagnosticCode::BlePairingAgentUnavailable,
+                &DiagnosticSubject::Service,
+            );
+        } else {
+            sink.raise(Diagnostic {
+                code: DiagnosticCode::BlePairingAgentUnavailable,
+                subject: DiagnosticSubject::Service,
+                severity: DiagnosticSeverity::Warning,
+                message: "The Bluetooth pairing agent could not be registered, so pairing a \
+                          new phone will not show the confirmation code on the TV"
+                    .to_string(),
+                remedy: Some("Check that the daemon user is in the `bluetooth` group.".to_string()),
+                since: shepherd_util::now(),
+            });
+        }
     }
 
     /// Run the server until `shutdown_rx` flips to `true`. Sequence:
@@ -377,6 +422,7 @@ impl BleServer {
         drain_pending_unbonds(&adapter, &self.pending_unbond).await;
 
         let mut agent_handle = register_agent_with_retry(&session, &self.display).await;
+        self.report_agent_status(agent_handle.is_some());
 
         // Everything the GATT characteristics, the disconnect monitor
         // and the first-RPC watchdog share about the peer session: the
@@ -516,6 +562,7 @@ impl BleServer {
             // take every re-arm as another chance at one.
             if agent_handle.is_none() {
                 agent_handle = register_agent_with_retry(&session, &self.display).await;
+                self.report_agent_status(agent_handle.is_some());
             }
             // Drop first: the stale handles still own their D-Bus object
             // paths, and BlueZ rejects a second registration under a path
@@ -2088,6 +2135,77 @@ mod tests {
     /// to drain all of it at 512 bytes per GATT round trip before it can
     /// send its first RPC. That's what stalled `connect()` indefinitely
     /// in the first place.
+    /// A recording sink, to assert the pairing-agent condition is reported in
+    /// both directions rather than only raised.
+    #[derive(Default)]
+    struct RecordingSink {
+        events: std::sync::Mutex<Vec<(bool, DiagnosticCode)>>,
+    }
+
+    impl DiagnosticSink for RecordingSink {
+        fn raise(&self, diagnostic: Diagnostic) {
+            self.events.lock().unwrap().push((true, diagnostic.code));
+        }
+        fn clear(&self, code: DiagnosticCode, _subject: &DiagnosticSubject) {
+            self.events.lock().unwrap().push((false, code));
+        }
+    }
+
+    fn server_with(sink: Arc<RecordingSink>) -> BleServer {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BleServerConfig {
+            device_name: "test".into(),
+            firmware_version: "0".into(),
+            admin_record_path: dir.path().join("admin.json"),
+            reset_sentinel_path: dir.path().join("reset"),
+            adapter: None,
+        };
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
+        BleServer::new(config, svc, display)
+            .unwrap()
+            .with_diagnostics(sink as Arc<dyn DiagnosticSink>)
+    }
+
+    /// The agent is re-registered when the adapter powers back on, so a failure
+    /// that resolves on its own has to clear on its own — otherwise the panel
+    /// would show a pairing problem that fixed itself hours ago.
+    #[test]
+    fn the_pairing_agent_condition_is_reported_in_both_directions() {
+        let sink = Arc::new(RecordingSink::default());
+        let server = server_with(sink.clone());
+
+        server.report_agent_status(false);
+        server.report_agent_status(true);
+
+        assert_eq!(
+            *sink.events.lock().unwrap(),
+            vec![
+                (true, DiagnosticCode::BlePairingAgentUnavailable),
+                (false, DiagnosticCode::BlePairingAgentUnavailable),
+            ]
+        );
+    }
+
+    /// Every other caller of `BleServer::new` has no registry, and a missing
+    /// sink must not change what the server does.
+    #[test]
+    fn a_server_without_a_sink_reports_nothing_and_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BleServerConfig {
+            device_name: "test".into(),
+            firmware_version: "0".into(),
+            admin_record_path: dir.path().join("admin.json"),
+            reset_sentinel_path: dir.path().join("reset"),
+            adapter: None,
+        };
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
+        let server = BleServer::new(config, svc, display).unwrap();
+        server.report_agent_status(false);
+        server.report_agent_status(true);
+    }
+
     #[test]
     fn only_whole_state_snapshots_coalesce() {
         let snapshot = shepherd_api::ServiceStateSnapshot {
