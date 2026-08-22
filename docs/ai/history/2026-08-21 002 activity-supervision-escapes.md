@@ -542,6 +542,7 @@ shepherdd needing the *group* at runtime, not to the polkit check.
 2. **Unowned windows are reported, not closed.** See the reasoning above; this
    is a deliberate stopping point rather than an oversight. If it should become
    active, the hook is `report_unowned_windows`.
-3. **No admin UI for orphans.** `list_windows` / `act_on_window` exist over the
-   wire but only as debug methods. The audit log now records escapes, which
-   covers "was supervision lost?", but not "show me and let me close it".
+3. ~~**No admin UI for orphans.**~~ Closed by the follow-up in
+   `2026-08-21 003 orphaned-windows-admin-ui.md`: `WindowInfo` now carries an
+   `owner`, and both the web UI and the companion app lead their window list
+   with the ones nothing is supervising.
