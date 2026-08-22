@@ -36,6 +36,7 @@ export type RpcMethod =
   | "list_audio_outputs"
   | "set_audio_output_limits"
   | "forget_audio_output"
+  | "select_audio_output"
   | "get_brightness"
   | "set_brightness"
   | "brightness_up"

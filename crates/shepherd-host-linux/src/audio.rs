@@ -109,6 +109,23 @@ impl AudioTopology {
         let default = self.default_sink.as_deref()?;
         self.outputs.iter().find(|o| o.node_name == default)
     }
+
+    /// The output with this identity key, if it is present in this dump.
+    pub fn output_by_key(&self, key: &str) -> Option<&AudioOutput> {
+        self.outputs.iter().find(|o| o.key() == key)
+    }
+
+    /// The live node id for an output, for the one `wpctl` call that needs one.
+    ///
+    /// Resolved from the dump it is used with and never stored: PipeWire recycles
+    /// object ids across restarts and re-plugs, so an id kept across either
+    /// addresses a different node or nothing at all.
+    pub fn node_id_of(&self, output: &AudioOutput) -> Option<u32> {
+        self.sinks
+            .iter()
+            .find(|s| s.name == output.node_name)
+            .map(|s| s.id)
+    }
 }
 
 // ---------------------------------------------------------------- raw pw-dump
@@ -373,6 +390,17 @@ pub async fn dump() -> Option<AudioTopology> {
     out.status.success().then(|| parse_pw_dump(&out.stdout))
 }
 
+/// Point PipeWire's default sink at a node. `id` must come from the same dump it
+/// is used with — see [`AudioTopology::node_id_of`].
+pub async fn set_default_sink(id: u32) -> bool {
+    tokio::process::Command::new("wpctl")
+        .args(["set-default", &id.to_string()])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +480,25 @@ mod tests {
         assert_eq!(
             builtin.key(),
             "alsa_card.pci-0000_00_1b.0:output:analog-output-lineout"
+        );
+    }
+
+    #[test]
+    fn a_key_resolves_to_the_node_id_from_the_same_dump() {
+        let topo = parse_pw_dump(TWO_DEVICE_DUMP);
+        let builtin = topo
+            .output_by_key("alsa_card.pci-0000_00_1b.0:output:analog-output-lineout")
+            .expect("the built-in card is in this dump");
+        // The one place an object id is legitimate: resolved from the dump it is
+        // used with, for a single `wpctl set-default`, and never kept.
+        assert_eq!(topo.node_id_of(builtin), Some(52));
+
+        // Selecting is keyed on identity, so a device that is not in this dump
+        // simply is not there — which is what a remembered row for unplugged
+        // headphones looks like.
+        assert!(
+            topo.output_by_key("alsa_card.absent:output:analog-output")
+                .is_none()
         );
     }
 

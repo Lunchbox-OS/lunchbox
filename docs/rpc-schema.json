@@ -352,6 +352,19 @@
       }
     },
     {
+      "name": "select_audio_output",
+      "params": [
+        {
+          "name": "output_key",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "VolumeInfo"
+      }
+    },
+    {
       "name": "get_brightness",
       "params": [],
       "result": {

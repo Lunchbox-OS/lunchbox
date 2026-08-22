@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use shepherd_host_api::{
-    VolumeCapabilities, VolumeController, VolumeError, VolumeResult, VolumeStatus,
+    AudioSnapshot, VolumeCapabilities, VolumeController, VolumeError, VolumeResult, VolumeStatus,
 };
 
 use crate::audio;
@@ -376,28 +376,80 @@ impl VolumeController for LinuxVolumeController {
         topo.current_output().map(to_api_output)
     }
 
-    /// One `pw-dump` yields the active output *and* its volume, so the pair can
-    /// never disagree — and it costs one process spawn instead of two.
-    async fn observe(&self) -> VolumeResult<(VolumeStatus, Option<shepherd_api::AudioOutput>)> {
+    async fn select_output(&self, output_key: &str) -> VolumeResult<()> {
         if self.backend != Some(SoundBackend::PipeWire) {
-            let status = self.get_status().await?;
-            return Ok((status, None));
+            return Err(VolumeError::NotAvailable(
+                "choosing an output needs PipeWire".into(),
+            ));
         }
-        match audio::dump()
+        let topo = audio::dump()
             .await
-            .as_ref()
-            .and_then(|t| t.current_output())
-        {
-            Some(out) => Ok((
-                VolumeStatus {
+            .ok_or_else(|| VolumeError::Backend("pw-dump is unavailable".into()))?;
+        let output = topo.output_by_key(output_key).ok_or_else(|| {
+            // A remembered row for a device that is not plugged in right now
+            // lands here, which is the common case and not an internal error.
+            VolumeError::NotAvailable(format!("audio output is not connected: {output_key}"))
+        })?;
+        if !output.usable {
+            return Err(VolumeError::NotAvailable(format!(
+                "nothing is plugged into this output: {output_key}"
+            )));
+        }
+        let id = topo.node_id_of(output).ok_or_else(|| {
+            VolumeError::Backend(format!("no sink node named {}", output.node_name))
+        })?;
+        if audio::set_default_sink(id).await {
+            info!(output = %output_key, sink = %output.node_name, "Selected audio output");
+            Ok(())
+        } else {
+            Err(VolumeError::Backend(format!(
+                "wpctl set-default failed for {}",
+                output.node_name
+            )))
+        }
+    }
+
+    /// One `pw-dump` already describes the whole topology — every sink, its
+    /// volume, and which one is default — so the entire snapshot costs a single
+    /// process spawn and nothing in it can disagree with anything else.
+    async fn observe(&self) -> VolumeResult<AudioSnapshot> {
+        if self.backend != Some(SoundBackend::PipeWire) {
+            return Ok(AudioSnapshot {
+                status: self.get_status().await?,
+                ..Default::default()
+            });
+        }
+        let Some(topo) = audio::dump().await else {
+            return Ok(AudioSnapshot {
+                status: self.get_status().await?,
+                ..Default::default()
+            });
+        };
+        // `usable` is false only when jack detection explicitly says nothing is
+        // plugged into the port; cards without jack detection report "unknown",
+        // which has to count as usable or every output on such a host vanishes.
+        let outputs: Vec<_> = topo
+            .outputs
+            .iter()
+            .filter(|o| o.usable)
+            .map(to_api_output)
+            .collect();
+        match topo.current_output() {
+            Some(out) => Ok(AudioSnapshot {
+                status: VolumeStatus {
                     percent: out.volume_percent,
                     muted: out.muted,
                 },
-                Some(to_api_output(out)),
-            )),
+                active: Some(to_api_output(out)),
+                outputs,
+            }),
             // No default sink resolved (PipeWire still starting, or no sinks at
             // all) — fall back rather than reporting a bogus zero.
-            None => Ok((self.get_status().await?, None)),
+            None => Ok(AudioSnapshot {
+                status: self.get_status().await?,
+                active: None,
+                outputs,
+            }),
         }
     }
 }

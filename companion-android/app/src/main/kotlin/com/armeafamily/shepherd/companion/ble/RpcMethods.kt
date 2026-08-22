@@ -38,6 +38,7 @@ object RpcMethods {
     const val LIST_AUDIO_OUTPUTS: String = "list_audio_outputs"
     const val SET_AUDIO_OUTPUT_LIMITS: String = "set_audio_output_limits"
     const val FORGET_AUDIO_OUTPUT: String = "forget_audio_output"
+    const val SELECT_AUDIO_OUTPUT: String = "select_audio_output"
     const val GET_BRIGHTNESS: String = "get_brightness"
     const val SET_BRIGHTNESS: String = "set_brightness"
     const val BRIGHTNESS_UP: String = "brightness_up"

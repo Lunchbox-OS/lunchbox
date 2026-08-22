@@ -852,8 +852,9 @@ fn row_to_audio_output(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioOutputR
         last_seen: DateTime::parse_from_rfc3339(&last_seen)
             .map(|dt| dt.with_timezone(&Local))
             .unwrap_or_else(|_| shepherd_util::now()),
-        // Filled in by the service, which alone knows the live topology.
+        // Both filled in by the service, which alone knows the live topology.
         active: false,
+        available: false,
     })
 }
 

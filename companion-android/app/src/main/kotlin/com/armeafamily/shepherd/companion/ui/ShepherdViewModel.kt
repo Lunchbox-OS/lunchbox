@@ -647,6 +647,21 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Move sound to another output (issue #124). */
+    fun selectAudioOutput(outputKey: String) = action { c ->
+        _state.update { it.copy(audioBusy = true) }
+        try {
+            val volume = c.selectAudioOutput(outputKey)
+            // Name the device: the daemon refuses one it can no longer see, so a
+            // silent success would be indistinguishable from nothing happening.
+            _message.value = volume.output?.description
+                ?.let { "Now playing through $it." } ?: "Switched output."
+            joinAll(refreshAudioOutputs(), refreshVolume())
+        } finally {
+            _state.update { it.copy(audioBusy = false) }
+        }
+    }
+
     fun forgetAudioOutput(outputKey: String) = action { c ->
         _state.update { it.copy(audioBusy = true) }
         try {

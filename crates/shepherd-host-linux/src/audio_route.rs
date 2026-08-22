@@ -55,15 +55,6 @@ impl PipeWireAudioRouter {
             saved_default: Mutex::new(None),
         }
     }
-
-    async fn set_default(id: u32) -> bool {
-        tokio::process::Command::new("wpctl")
-            .args(["set-default", &id.to_string()])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
 }
 
 impl Default for PipeWireAudioRouter {
@@ -97,7 +88,7 @@ impl AudioRouter for PipeWireAudioRouter {
         if saved.is_none() {
             *saved = current_default_id;
         }
-        if Self::set_default(external.id).await {
+        if audio::set_default_sink(external.id).await {
             info!(sink = %external.name, "Routed audio to external display");
         } else {
             warn!(sink = %external.name, "Failed to set external audio sink as default");
@@ -108,7 +99,7 @@ impl AudioRouter for PipeWireAudioRouter {
         let Some(id) = self.saved_default.lock().await.take() else {
             return;
         };
-        if Self::set_default(id).await {
+        if audio::set_default_sink(id).await {
             info!(sink_id = id, "Restored default audio sink");
         } else {
             warn!(sink_id = id, "Failed to restore default audio sink");

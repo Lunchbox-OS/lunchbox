@@ -148,6 +148,12 @@ class ManagementClient(private val connection: ShepherdConnection) {
             put("output_key", JsonPrimitive(outputKey))
         }))
 
+    /** Move sound to this output. Returns the reading for the new one. */
+    suspend fun selectAudioOutput(outputKey: String): VolumeInfo =
+        decode(call("select_audio_output", buildJsonObject {
+            put("output_key", JsonPrimitive(outputKey))
+        }))
+
     suspend fun getBrightness(): BrightnessInfo = decode(call("get_brightness", empty()))
 
     suspend fun setBrightness(percent: Int): BrightnessInfo =

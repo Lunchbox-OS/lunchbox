@@ -5,6 +5,7 @@ import com.armeafamily.shepherd.companion.ble.RpcResponse
 import com.armeafamily.shepherd.companion.ble.ShepherdJson
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -370,6 +371,33 @@ class WireTest {
         val record = decode<AudioOutputRecord>(json)
         assertNull(record.maxVolume)
         assertEquals(AudioOutputKind.SPEAKERS, record.output.kind)
+    }
+
+    @Test
+    fun `an audio output row from a daemon without the available field is selectable`() {
+        // Older daemon, newer phone: `available` was added with the output
+        // picker. Defaulting it to false would grey out the button for every
+        // device the parent could actually switch to, so the default is true and
+        // a stale daemon simply refuses the call out loud.
+        val json = """
+            {"output":{"key":"k","description":"Speakers","kind":"speakers"},
+             "max_volume":null,"min_volume":null,
+             "last_seen":"2026-08-21T23:45:19-04:00","active":false}
+        """.trimIndent()
+        assertTrue(decode<AudioOutputRecord>(json).available)
+    }
+
+    @Test
+    fun `an audio output row can say the device is gone`() {
+        val json = """
+            {"output":{"key":"k","description":"Headphones","kind":"headphones"},
+             "max_volume":50,"min_volume":null,
+             "last_seen":"2026-08-21T23:45:19-04:00","active":false,"available":false}
+        """.trimIndent()
+        val record = decode<AudioOutputRecord>(json)
+        // The limit outlives the hardware; only the ability to switch to it goes.
+        assertEquals(50L, record.maxVolume)
+        assertFalse(record.available)
     }
 
     @Test

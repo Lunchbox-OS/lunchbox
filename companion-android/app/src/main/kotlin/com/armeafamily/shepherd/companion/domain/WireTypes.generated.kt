@@ -111,6 +111,16 @@ data class AudioOutputRecord(
      */
     val active: Boolean,
     /**
+     * Whether the device is plugged in right now, so it can be switched to.
+     *
+     * Rows outlive the hardware — that is the point, so a cap set on the
+     * headphones survives unplugging them — which means a row can name a device
+     * that is not here. Defaults to `true` so a client talking to a daemon that
+     * predates this field offers the choice and lets the attempt fail loudly,
+     * rather than greying out every device it could actually switch to.
+     */
+    val available: Boolean = true,
+    /**
      * When the device last observed this output. Lets the UI show recently used
      * devices first and lets a parent prune ones that are long gone.
      */

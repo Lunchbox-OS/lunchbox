@@ -13,7 +13,7 @@ use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
-    SpawnOptions, VolumeController,
+    SpawnOptions, VolumeController, VolumeError,
 };
 use shepherd_store::Store;
 use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
@@ -130,6 +130,7 @@ pub trait ManagementService: Send + Sync {
         min_volume: Option<u8>,
     ) -> ManagementResult<AudioOutputRecord>;
     async fn forget_audio_output(&self, output_key: String) -> ManagementResult<bool>;
+    async fn select_audio_output(&self, output_key: String) -> ManagementResult<VolumeInfo>;
 
     // Brightness
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo>;
@@ -197,6 +198,24 @@ pub struct ObservedAudioState {
     /// Identity key of the active output; `None` where outputs cannot be
     /// enumerated (any non-PipeWire host).
     pub output_key: Option<String>,
+    /// Keys of every output present, sorted so the comparison is about the set
+    /// and not about the order `pw-dump` happened to list them in. Lets a device
+    /// being plugged in or pulled out count as a change even when it is not the
+    /// one playing.
+    pub present_keys: Vec<String>,
+}
+
+impl ObservedAudioState {
+    fn from_snapshot(snap: &shepherd_host_api::AudioSnapshot) -> Self {
+        let mut present_keys: Vec<String> = snap.outputs.iter().map(|o| o.key.clone()).collect();
+        present_keys.sort();
+        Self {
+            percent: snap.status.percent,
+            muted: snap.status.muted,
+            output_key: snap.active.as_ref().map(|o| o.key.clone()),
+            present_keys,
+        }
+    }
 }
 
 /// Production implementation of [`ManagementService`]. Composes the
@@ -725,19 +744,21 @@ impl ManagementService for DefaultManagementService {
 
     // ---------------------------------------------------------------- volume
     async fn get_volume(&self) -> ManagementResult<VolumeInfo> {
-        let restrictions = self.volume_restrictions().await;
-        let status = self
+        // One snapshot, not a status read plus two separate identity reads: this
+        // is on the hot path — every client refetches it on every event — and
+        // the three reads could disagree with each other besides.
+        let snap = self
             .volume
-            .get_status()
+            .observe()
             .await
             .map_err(|e| ManagementError::Internal(e.to_string()))?;
         Ok(VolumeInfo {
-            percent: status.percent,
-            muted: status.muted,
+            percent: snap.status.percent,
+            muted: snap.status.muted,
             available: self.volume.capabilities().available,
             backend: self.volume.capabilities().backend.clone(),
-            restrictions,
-            output: self.volume.current_output().await,
+            restrictions: self.volume_restrictions_for(snap.active_key()).await,
+            output: snap.active,
         })
     }
 
@@ -801,20 +822,23 @@ impl ManagementService for DefaultManagementService {
     // -------------------------------------------------- per-output limits
 
     async fn list_audio_outputs(&self) -> ManagementResult<Vec<AudioOutputRecord>> {
-        // Refresh from the live topology first, so an output plugged in a moment
-        // ago is already on the list the parent is about to read.
-        if let Some(active) = self.volume.current_output().await
-            && let Err(e) = self.store.record_audio_output_seen(&active)
-        {
-            warn!(error = %e, "Failed to record the active audio output");
+        // Record everything that is plugged in, not just whatever is selected.
+        // A device has to be on this list before a parent can choose it, and
+        // waiting for it to become the default first would mean the one device
+        // you want to switch away from is the only one you can see.
+        let snap = self.volume.observe().await.unwrap_or_default();
+        for output in &snap.outputs {
+            if let Err(e) = self.store.record_audio_output_seen(output) {
+                warn!(error = %e, key = %output.key, "Failed to record an audio output");
+            }
         }
-        let active_key = self.volume.current_output().await.map(|o| o.key);
         let mut rows = self
             .store
             .list_audio_outputs()
             .map_err(|e| ManagementError::Internal(e.to_string()))?;
         for row in &mut rows {
-            row.active = Some(&row.output.key) == active_key.as_ref();
+            row.active = Some(row.output.key.as_str()) == snap.active_key();
+            row.available = snap.outputs.iter().any(|o| o.key == row.output.key);
         }
         Ok(rows)
     }
@@ -868,6 +892,58 @@ impl ManagementService for DefaultManagementService {
         row.active =
             self.volume.current_output().await.map(|o| o.key).as_deref() == Some(&output_key);
         Ok(row)
+    }
+
+    /// Move audio to another output.
+    ///
+    /// The parent's side of the same switch the daemon already watches for: it
+    /// lands on the identical code path as a jack insert or a dock, so the new
+    /// output's cap is applied on arrival exactly as it would be if the hardware
+    /// had made the choice.
+    async fn select_audio_output(&self, output_key: String) -> ManagementResult<VolumeInfo> {
+        if self
+            .volume
+            .observe()
+            .await
+            .ok()
+            .and_then(|s| s.active.map(|o| o.key))
+            .as_deref()
+            == Some(&output_key)
+        {
+            // Already there. Not an error — two parents on two phones can both
+            // tap the same row — but there is nothing to switch or clamp.
+            return self.get_volume().await;
+        }
+        self.volume
+            .select_output(&output_key)
+            .await
+            .map_err(|e| match e {
+                // "not available" from the host means *this output* cannot be
+                // switched to — usually because it is unplugged. Passing the
+                // Display text through unchanged would prefix it with "Volume
+                // control not available", which tells a parent the wrong thing:
+                // volume control is fine, the device is simply gone.
+                VolumeError::NotAvailable(why) => ManagementError::BadRequest(why),
+                other => ManagementError::Internal(other.to_string()),
+            })?;
+
+        if let Some(active) = self.volume.current_output().await {
+            if active.key != output_key {
+                // wpctl reported success but the default did not move — a
+                // higher-priority device grabbed it back, or the id we resolved
+                // named something else by the time the call landed.
+                return Err(ManagementError::Internal(format!(
+                    "asked for {output_key} but the active output is {}",
+                    active.key
+                )));
+            }
+            if let Err(e) = self.store.record_audio_output_seen(&active) {
+                warn!(error = %e, "Failed to record the selected audio output");
+            }
+        }
+        // Same two steps the watch loop takes on a switch it merely observed.
+        self.enforce_volume_ceiling().await;
+        self.broadcast_volume_change().await
     }
 
     async fn forget_audio_output(&self, output_key: String) -> ManagementResult<bool> {
@@ -1214,22 +1290,20 @@ impl DefaultManagementService {
     /// most of the point of a headphone limit. Called when the active output
     /// changes and when a cap is set.
     async fn enforce_volume_ceiling(&self) {
-        let Ok((status, output)) = self.volume.observe().await else {
+        let Ok(snap) = self.volume.observe().await else {
             return;
         };
-        let restrictions = self
-            .volume_restrictions_for(output.as_ref().map(|o| o.key.as_str()))
-            .await;
+        let restrictions = self.volume_restrictions_for(snap.active_key()).await;
         let Some(max) = restrictions.max_volume else {
             return;
         };
-        if status.percent <= max {
+        if snap.status.percent <= max {
             return;
         }
         info!(
-            from = status.percent,
+            from = snap.status.percent,
             to = max,
-            output = output.as_ref().map(|o| o.key.as_str()).unwrap_or("?"),
+            output = snap.active_key().unwrap_or("?"),
             "Volume above the limit for this output; turning it down"
         );
         if let Err(e) = self.volume.set_volume(max).await {
@@ -1251,17 +1325,12 @@ impl DefaultManagementService {
     ///
     /// Broadcasts only on an actual change, so a quiet host produces no events.
     pub async fn audio_watch_tick(&self) {
-        let Ok((status, output)) = self.volume.observe().await else {
+        let Ok(snap) = self.volume.observe().await else {
             return;
         };
-        let key = output.as_ref().map(|o| o.key.clone());
 
         let mut last = self.last_audio_state.lock().await;
-        let now = ObservedAudioState {
-            percent: status.percent,
-            muted: status.muted,
-            output_key: key,
-        };
+        let now = ObservedAudioState::from_snapshot(&snap);
         if last.as_ref() == Some(&now) {
             return;
         }
@@ -1274,12 +1343,14 @@ impl DefaultManagementService {
 
         // The first tick only establishes the baseline; broadcasting there would
         // emit a spurious event on every daemon start.
-        // Discovery: every output we see becomes a row the parent can set a
-        // limit on, so nobody has to dig a device name out of the logs.
-        if let Some(out) = output.as_ref()
-            && let Err(e) = self.store.record_audio_output_seen(out)
-        {
-            warn!(error = %e, "Failed to record the observed audio output");
+        // Discovery: every output present becomes a row the parent can set a
+        // limit on or switch to — not just the one playing, or the only device
+        // you could see would be the one you wanted to switch away from. The
+        // snapshot already lists them all, so this costs nothing beyond the poll.
+        for out in &snap.outputs {
+            if let Err(e) = self.store.record_audio_output_seen(out) {
+                warn!(error = %e, key = %out.key, "Failed to record the observed audio output");
+            }
         }
 
         if first_observation {
@@ -1291,6 +1362,11 @@ impl DefaultManagementService {
         if switched {
             self.enforce_volume_ceiling().await;
         }
+        // A device appearing or disappearing rides on `VolumeChanged` rather
+        // than an event of its own. Every client that renders the output list
+        // already refetches it on this event, and the payload is the whole audio
+        // state rather than just a number, so a new event type would add wire
+        // surface to all three clients and tell them nothing new.
         if let Err(e) = self.broadcast_volume_change().await {
             warn!(error = %e, "Failed to broadcast observed audio change");
         }

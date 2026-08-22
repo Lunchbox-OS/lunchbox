@@ -203,6 +203,8 @@ export const setAudioOutputLimits = (
 ) => call<AudioOutputRecord>("set_audio_output_limits", { output_key, max_volume });
 export const forgetAudioOutput = (output_key: string) =>
   call<boolean>("forget_audio_output", { output_key });
+export const selectAudioOutput = (output_key: string) =>
+  call<VolumeInfo>("select_audio_output", { output_key });
 
 // Brightness
 export const getBrightness = () => call<BrightnessInfo>("get_brightness");

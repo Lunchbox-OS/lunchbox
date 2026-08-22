@@ -18,6 +18,7 @@ import BrightnessHighIcon from "@mui/icons-material/BrightnessHigh";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   forgetAudioOutput,
+  selectAudioOutput,
   getBrightness,
   getVolume,
   listAudioOutputs,
@@ -72,6 +73,18 @@ export function AdminPage() {
       queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
       queryClient.invalidateQueries({ queryKey: ["volume"] });
       flash("Limit saved");
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const selectOutputMutation = useMutation({
+    mutationFn: selectAudioOutput,
+    onSuccess: (v) => {
+      queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
+      queryClient.invalidateQueries({ queryKey: ["volume"] });
+      // Naming the device confirms the switch landed where the parent meant,
+      // which matters because the daemon can refuse one it can no longer see.
+      flash(`Now playing through ${v.output?.description ?? "the chosen device"}`);
     },
     onError: (e) => flash(String(e), false),
   });
@@ -192,9 +205,14 @@ export function AdminPage() {
       {/* Per-device volume limits (issue #124) */}
       <AudioOutputsCard
         records={audioOutputs}
-        busy={setOutputLimitMutation.isPending || forgetOutputMutation.isPending}
+        busy={
+          setOutputLimitMutation.isPending ||
+          forgetOutputMutation.isPending ||
+          selectOutputMutation.isPending
+        }
         onSetLimit={(key, max) => setOutputLimitMutation.mutate({ key, max })}
         onForget={(key) => forgetOutputMutation.mutate(key)}
+        onSelect={(key) => selectOutputMutation.mutate(key)}
       />
 
       {/* Brightness */}

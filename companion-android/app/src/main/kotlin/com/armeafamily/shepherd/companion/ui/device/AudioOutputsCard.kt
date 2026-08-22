@@ -10,6 +10,7 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -57,8 +58,9 @@ fun AudioOutputsCard(outputs: List<AudioOutputRecord>, busy: Boolean, vm: Shephe
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                "Set a different maximum for headphones than for speakers. Devices " +
-                    "appear here once they have been used. The strictest limit always " +
+                "Choose which device sound plays through, and set a different " +
+                    "maximum for headphones than for speakers. Devices appear here " +
+                    "once they have been plugged in. The strictest limit always " +
                     "applies — a per-device limit can lower the overall limit but " +
                     "never raise it.",
                 style = MaterialTheme.typography.bodySmall,
@@ -109,7 +111,11 @@ private fun OutputRow(record: AudioOutputRecord, busy: Boolean, vm: ShepherdView
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    kindLabel(record.output.kind),
+                    if (record.available) {
+                        kindLabel(record.output.kind)
+                    } else {
+                        "${kindLabel(record.output.kind)} — not connected"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -123,6 +129,15 @@ private fun OutputRow(record: AudioOutputRecord, busy: Boolean, vm: ShepherdView
                         disabledLabelColor = MaterialTheme.colorScheme.primary,
                     ),
                 )
+            } else {
+                // A device that is not plugged in cannot be switched to, but its
+                // row stays so the limit is already set the next time it turns up.
+                OutlinedButton(
+                    onClick = { vm.selectAudioOutput(record.output.key) },
+                    enabled = record.available && !busy,
+                ) {
+                    Text(if (record.available) "Use this" else "Not connected")
+                }
             }
         }
 

@@ -68,11 +68,13 @@ function OutputRow({
   busy,
   onSetLimit,
   onForget,
+  onSelect,
 }: {
   record: AudioOutputRecord;
   busy: boolean;
   onSetLimit: (key: string, max: number | null) => void;
   onForget: (key: string) => void;
+  onSelect: (key: string) => void;
 }) {
   const capped = record.max_volume !== null;
   // Local slider state so dragging stays smooth; the commit happens on release.
@@ -90,7 +92,27 @@ function OutputRow({
         <Typography variant="body2" sx={{ fontWeight: 600, flex: 1 }}>
           {record.output.description || record.output.key}
         </Typography>
-        {record.active && <Chip label="In use now" size="small" color="primary" />}
+        {record.active ? (
+          <Chip label="In use now" size="small" color="primary" />
+        ) : (
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={busy || !record.available}
+            onClick={() => onSelect(record.output.key)}
+            // A device that isn't plugged in can't be switched to; the row stays
+            // so its limit is still settable for the next time it turns up. The
+            // label carries that, matching the companion, rather than leaving a
+            // greyed "Use this" for the reader to interpret.
+            title={
+              record.available
+                ? "Play sound through this device"
+                : "This device is not plugged in right now"
+            }
+          >
+            {record.available ? "Use this" : "Not connected"}
+          </Button>
+        )}
       </Box>
 
       <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1 }}>
@@ -147,11 +169,13 @@ export function AudioOutputsCard({
   busy,
   onSetLimit,
   onForget,
+  onSelect,
 }: {
   records: AudioOutputRecord[] | undefined;
   busy: boolean;
   onSetLimit: (key: string, max: number | null) => void;
   onForget: (key: string) => void;
+  onSelect: (key: string) => void;
 }) {
   return (
     <Card variant="outlined">
@@ -160,10 +184,10 @@ export function AudioOutputsCard({
           Volume limits per device
         </Typography>
         <Typography variant="body2" color="text.secondary">
-          Set a different maximum for headphones than for speakers. Devices appear
-          here once they have been used, so plug one in if you don't see it. The
-          strictest limit always applies — a per-device limit can lower the
-          overall limit but never raise it.
+          Choose which device sound plays through, and set a different maximum
+          for headphones than for speakers. Devices appear here once they have
+          been plugged in. The strictest limit always applies — a per-device
+          limit can lower the overall limit but never raise it.
         </Typography>
 
         {!records || records.length === 0 ? (
@@ -179,6 +203,7 @@ export function AudioOutputsCard({
                 busy={busy}
                 onSetLimit={onSetLimit}
                 onForget={onForget}
+                onSelect={onSelect}
               />
             ))}
           </Stack>

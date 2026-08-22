@@ -823,6 +823,19 @@ pub struct AudioOutputRecord {
     pub last_seen: DateTime<Local>,
     /// Whether this is the output currently selected. Runtime state, not stored.
     pub active: bool,
+    /// Whether the device is plugged in right now, so it can be switched to.
+    ///
+    /// Rows outlive the hardware — that is the point, so a cap set on the
+    /// headphones survives unplugging them — which means a row can name a device
+    /// that is not here. Defaults to `true` so a client talking to a daemon that
+    /// predates this field offers the choice and lets the attempt fail loudly,
+    /// rather than greying out every device it could actually switch to.
+    #[serde(default = "default_true")]
+    pub available: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Volume status information

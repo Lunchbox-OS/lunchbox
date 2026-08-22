@@ -166,6 +166,9 @@ impl ManagementService for MockSvc {
     async fn forget_audio_output(&self, _output_key: String) -> ManagementResult<bool> {
         Ok(false)
     }
+    async fn select_audio_output(&self, _output_key: String) -> ManagementResult<VolumeInfo> {
+        Err(ManagementError::NotFound("no".into()))
+    }
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Ok(BrightnessInfo {
             percent: 0,

@@ -218,6 +218,12 @@ export interface AudioOutputRecord {
   min_volume: number | null;
   last_seen: string;
   active: boolean;
+  /**
+   * Whether the device is plugged in right now. Rows outlive the hardware — a
+   * cap set on the headphones survives unplugging them — so a row can name a
+   * device that cannot currently be switched to.
+   */
+  available: boolean;
 }
 
 export interface VolumeInfo {
