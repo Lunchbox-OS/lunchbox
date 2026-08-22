@@ -32,26 +32,37 @@ a pass through this skill before they land.**
 2. **A phone on USB with debugging authorised.** `adb devices` must show
    `device`, not `unauthorized` — the phone shows an RSA-fingerprint
    prompt the first time and a human has to accept it.
-   It must also be **unlocked**: `uiautomator dump` on the lock screen
-   returns a tree with no app labels, so `pair.sh ui` prints nothing and
-   every `tap` reports "not found". Wake it and swipe from mid-screen
-   (`input keyevent KEYCODE_WAKEUP`, then
-   `input touchscreen swipe 540 1500 540 500 300`) to raise the PIN
-   bouncer — a swipe that starts near the bottom is eaten by gesture nav
-   and only opens the notification shade. The dev phone's PIN is
-   **314159** (deliberately guessable; it is a test device with no real
-   accounts on it), so unlock it yourself:
+
+   It must also be **usable**: `uiautomator dump` on a lock screen returns
+   a tree with no app labels, so `pair.sh ui` prints nothing and every
+   `tap` reports "not found".
+
+   **The dev phone has no lock screen.** It was deliberately cleared
+   (2026-08-22) so automation never needs a human:
 
    ```sh
-   adb shell input keyevent KEYCODE_WAKEUP
-   adb shell input touchscreen swipe 540 1500 540 500 300   # raise the bouncer
-   adb shell input text 314159 && adb shell input keyevent KEYCODE_ENTER
+   adb shell locksettings clear --old <pin>   # secure PIN -> Swipe
+   adb shell locksettings set-disabled true   # Swipe -> None
    ```
 
-   Confirm with `adb shell dumpsys window | grep mDreamingLockscreen`
-   (`false` once unlocked), and `adb shell input keyevent KEYCODE_SLEEP`
-   to lock it again when you're done. A phone that is *not* the dev
-   phone has none of this — ask its owner to unlock it.
+   Both are needed: `set-disabled` "can only change between Swipe and
+   None" by its own help, so clearing alone leaves a swipe screen. Waking
+   now lands straight on the launcher — `adb shell input keyevent
+   KEYCODE_WAKEUP`, then confirm with `dumpsys window | grep
+   mCurrentFocus` (expect `NexusLauncherActivity`, not
+   `NotificationShade`).
+
+   **If a lock ever gets set again, adb cannot remove it for you.**
+   On this build (Pixel 10a, SDK 37) injected input does not reach the
+   bouncer at all: a mid-screen swipe, `input text <pin>`, digit
+   keyevents, and `wm dismiss-keyguard` were each tried and
+   `deviceLocked` stayed `1` throughout. `locksettings verify --old <pin>`
+   *does* authenticate, but authenticating is not dismissing — there is no
+   supported "unlock over adb" for a secure lock. So either clear the
+   credential again with the commands above, or ask a human to unlock the
+   phone by hand. Do not burn time driving the bouncer; it does not work.
+
+   A phone that is *not* the dev phone has none of this — ask its owner.
 3. **`[service.ble_management] enabled = true`** in the config the
    session boots (true in `config.example.toml`).
 
