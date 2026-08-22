@@ -478,7 +478,10 @@ function EntryCard({
           <Typography
             key={d.code}
             variant="caption"
-            color={d.severity === "critical" ? "error" : "warning.main"}
+            component="div"
+            sx={{
+              color: d.severity === "critical" ? "error.main" : "warning.main",
+            }}
           >
             {d.message}
             {d.remedy ? ` — ${d.remedy}` : ""}
