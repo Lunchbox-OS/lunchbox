@@ -1,3 +1,12 @@
+//! Token gates on categories, and the self-unlock rules the editor's source
+//! picker encodes.
+//!
+//! The picker's exclusions live in
+//! `shepherd-webui/src/config/model/tokenSources.ts` and are tested there. These
+//! are the other half of that pairing: each one asserts the validator really
+//! does reject what the picker refuses to offer, so the two cannot drift apart
+//! into a picker that hides valid choices or offers invalid ones.
+
 use shepherd_config_wasm::{ConfigDoc, Patch};
 
 fn set(path: &str, value: serde_json::Value) -> Patch {
@@ -95,4 +104,91 @@ kind = { type = "process", command = "/bin/true" }
             .contains("member of this group"),
         "{report}"
     );
+}
+
+/// A config with two categories, members in each, and one ungrouped activity —
+/// the same shape the TypeScript test uses.
+fn config_with(gate_owner: &str, from: &str) -> String {
+    let (entry_gate, group_gate) = match gate_owner {
+        "entry" => (
+            format!("[entries.tokens]\nfrom = [\"{from}\"]\n"),
+            String::new(),
+        ),
+        "group" => (
+            String::new(),
+            format!("[groups.tokens]\nfrom = [\"{from}\"]\n"),
+        ),
+        other => panic!("unknown gate owner {other}"),
+    };
+    format!(
+        r#"
+config_version = 1
+
+[[groups]]
+id = "games"
+label = "Games"
+{group_gate}
+[[entries]]
+id = "celeste"
+label = "Celeste"
+group = "games"
+kind = {{ type = "process", command = "/bin/true" }}
+{entry_gate}
+[[entries]]
+id = "loose"
+label = "Loose"
+kind = {{ type = "process", command = "/bin/true" }}
+"#
+    )
+}
+
+/// The messages the validator produces for a rejected gate.
+fn rejections(toml_src: &str) -> Vec<String> {
+    let doc = ConfigDoc::open(toml_src).expect("config parses");
+    let report: serde_json::Value = serde_json::from_str(&doc.validate()).unwrap();
+    assert_eq!(report["kind"], "semantic", "{report}");
+    report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["message"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_activity_cannot_list_itself() {
+    let errors = rejections(&config_with("entry", "celeste"));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("cannot list the entry itself"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn an_activity_cannot_list_the_category_it_belongs_to() {
+    let errors = rejections(&config_with("entry", "group:games"));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("which this entry belongs to"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn a_category_cannot_list_itself() {
+    let errors = rejections(&config_with("group", "group:games"));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("cannot list the group itself"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn what_the_picker_does_offer_is_accepted() {
+    // The complement of the four exclusions: an ungrouped activity is a valid
+    // source for both a category gate and an activity in another category.
+    assert!(rejections(&config_with("group", "loose")).is_empty());
+    assert!(rejections(&config_with("entry", "loose")).is_empty());
 }

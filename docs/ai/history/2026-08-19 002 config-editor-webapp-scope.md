@@ -925,6 +925,46 @@ pure tests stay fast, and register `afterEach(cleanup)` explicitly, because
 Testing Library only self-registers when Vitest's `globals` are on and they are
 not.
 
+### Follow-up: the two gaps worth closing, and the bug in one of them
+
+An inventory of what the suites actually covered turned up several holes. Two
+were worth closing, and closing the first found a live bug.
+
+**The patch wire contract was never tested.** Every Rust test constructed
+`Patch` values directly; the TypeScript built JSON and never left the browser.
+A renamed serde tag would have left both suites green while the editor stopped
+being able to edit anything. Both sides now assert against one shared fixture,
+`crates/shepherd-config-wasm/tests/patch_shapes.json`: `patches.test.ts` checks
+the builders produce exactly those objects, `patch_contract.rs` checks each one
+deserializes *and* does what it claims. Each side also asserts it covers every
+shape in the fixture, so a shape added for one and not the other is a failure
+rather than a silent gap. Verified by renaming `unset` to `remove` in the
+builders and watching the TypeScript side fail.
+
+**`Patch::Move` never worked.** It had no test — it was on the untested list —
+and writing one showed it silently doing nothing. `toml_edit` renders an
+array-of-tables by each table's stored `position`, not by its index in the
+array, so rebuilding the vector in a new order rendered identically. `apply`
+then compared before and after, found them equal, and reported "no change". No
+error, no effect. Fixed by reassigning the same set of positions in the new
+order — a permutation, so it cannot collide with anything else in the document.
+`insert` turned out not to share the fault, which is now also covered at a
+non-zero index rather than assumed.
+
+**The source picker's exclusions were untested**, and they encode four rules
+from `validate_tokens`. Extracted to `src/config/model/tokenSources.ts` so a
+test need not render MUI, and paired: the TypeScript asserts what the picker
+excludes, and `tests/group_tokens.rs` asserts the validator rejects exactly
+that — including the complement, that what the picker *does* offer validates
+clean. Either drifting now breaks the other's test.
+
+Still uncovered, and named here so the next inventory starts from a list:
+`replace_text` (the raw pane's path, and the one operation that discards undo
+history), `blank()`, the wasm binding layer itself (it is
+`cfg(target_arch = "wasm32")`, so it compiles but never runs in CI), and most
+component interaction — grid dragging, slider-to-patch mapping, kind switching,
+`FileConfigSource`.
+
 ### Follow-up: `shepherd dev webui`
 
 Added after the phases landed, on the request *"add a command to just run the

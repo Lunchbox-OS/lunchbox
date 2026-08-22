@@ -634,12 +634,24 @@ fn move_within(slot: Slot<'_>, from: usize, to: usize) -> DocResult<bool> {
             if from >= aot.len() || to >= aot.len() {
                 return err("move index out of range");
             }
+            // Reordering the vector is not enough. Every table remembers the
+            // position it was parsed at, and that is what decides render order
+            // — so a rebuilt array whose tables kept their old positions comes
+            // back out in the old order, and the edit silently does nothing.
+            // Reassigning the same set of positions in the new sequence is a
+            // permutation, so it cannot collide with anything else in the
+            // document.
+            let positions: Vec<Option<usize>> = aot.iter().map(|t| t.position()).collect();
             let mut tables: Vec<Table> = aot.iter().cloned().collect();
             let t = tables.remove(from);
             tables.insert(to, t);
+
             let mut rebuilt = ArrayOfTables::new();
-            for t in tables {
-                rebuilt.push(t);
+            for (mut table, position) in tables.into_iter().zip(positions) {
+                if let Some(position) = position {
+                    table.set_position(position);
+                }
+                rebuilt.push(table);
             }
             *aot = rebuilt;
             Ok(true)

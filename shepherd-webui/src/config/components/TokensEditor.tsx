@@ -25,58 +25,10 @@ import Box from "@mui/material/Box";
 import { useFields } from "../doc/useFields";
 import { subjectPath, type Subject } from "../doc/patches";
 import type { RawConfig, RawTokens } from "../model/config.generated";
+import { tokenSources, type TokenSource } from "../model/tokenSources";
 import { DurationField } from "./DurationField";
 import { Section } from "./Section";
 import { TokenGraph } from "./TokenGraph";
-
-const GROUP_PREFIX = "group:";
-
-interface Option {
-  value: string;
-  label: string;
-  kind: "entry" | "group";
-}
-
-/**
- * Sources this subject is allowed to earn from.
- *
- * An activity cannot be unlocked by itself, nor by the category it belongs to
- * (its own time would count toward the group total). A category cannot be
- * unlocked by itself, nor by any of its members.
- */
-function sourceOptions(config: RawConfig, subject: Subject): Option[] {
-  const groups = config.groups ?? [];
-  const entries = config.entries ?? [];
-
-  if (subject.kind === "group") {
-    return [
-      ...groups
-        .filter((g) => g.id !== subject.id)
-        .map((g) => ({
-          value: `${GROUP_PREFIX}${g.id}`,
-          label: g.label,
-          kind: "group" as const,
-        })),
-      ...entries
-        .filter((e) => e.group !== subject.id)
-        .map((e) => ({ value: e.id, label: e.label, kind: "entry" as const })),
-    ];
-  }
-
-  const ownGroup = entries.find((e) => e.id === subject.id)?.group;
-  return [
-    ...groups
-      .filter((g) => g.id !== ownGroup)
-      .map((g) => ({
-        value: `${GROUP_PREFIX}${g.id}`,
-        label: g.label,
-        kind: "group" as const,
-      })),
-    ...entries
-      .filter((e) => e.id !== subject.id)
-      .map((e) => ({ value: e.id, label: e.label, kind: "entry" as const })),
-  ];
-}
 
 export function TokensEditor({
   subject,
@@ -89,15 +41,12 @@ export function TokensEditor({
 }) {
   const f = useFields(subjectPath(subject, "tokens"));
   const isGroup = subject.kind === "group";
-  const options = sourceOptions(config, subject);
+  const options = tokenSources(config, subject);
 
   const selected = (tokens?.from ?? []).map(
     (v) =>
-      options.find((o) => o.value === v) ?? {
-        value: v,
-        label: v,
-        kind: "entry" as const,
-      },
+      options.find((o) => o.value === v) ??
+      ({ value: v, label: v, kind: "entry" } satisfies TokenSource),
   );
 
   return (
@@ -124,7 +73,7 @@ export function TokensEditor({
           // after every pick makes choosing three of them four interactions
           // instead of one.
           disableCloseOnSelect
-          // `sourceOptions` returns categories first, which is what grouping
+          // `tokenSources` returns categories first, which is what grouping
           // requires — MUI groups consecutive runs rather than sorting.
           groupBy={(o) => (o.kind === "group" ? "Categories" : "Activities")}
           renderOption={(props, option, { selected: isSelected }) => {
