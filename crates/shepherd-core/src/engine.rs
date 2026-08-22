@@ -23,10 +23,20 @@ pub enum LaunchDecision {
     Denied { reasons: Vec<ReasonCode> },
 }
 
-/// Stop decision from the core engine
+/// Outcome of asking the core engine to begin a stop.
+///
+/// Teardown is two-phase — `begin_stop` then `finish_stop` — so the session
+/// stays current (and the launcher stays out of the way) for as long as the
+/// activity is actually still running. See issue #136.
 #[derive(Debug)]
-pub enum StopDecision {
-    Stopped(StopResult),
+pub enum BeginStopDecision {
+    Stopping {
+        /// The host handle to act on, if the activity was ever spawned.
+        handle: Option<HostSessionHandle>,
+        /// True when a stop was already in flight and this call changed
+        /// nothing — e.g. the close button pressed twice.
+        already_stopping: bool,
+    },
     NoActiveSession,
 }
 
@@ -1103,6 +1113,28 @@ impl CoreEngine {
         event
     }
 
+    /// Note that the current activity's first window has appeared.
+    ///
+    /// Matched by handle payload like every other host event, and latched: only
+    /// the *first* window counts, so an activity that opens more later does not
+    /// restart its billing clock.
+    pub fn notify_window_ready(&mut self, handle: &HostSessionHandle, now_mono: MonotonicInstant) {
+        let Some(session) = self.current_session.as_mut() else {
+            return;
+        };
+        if !session.owns_handle(handle) || session.window_ready_at_mono.is_some() {
+            return;
+        }
+        let waited = session.duration_so_far(now_mono);
+        session.window_ready_at_mono = Some(now_mono);
+        info!(
+            session_id = %session.plan.session_id,
+            entry_id = %session.plan.entry_id,
+            waited_secs = waited.as_secs(),
+            "Activity window appeared; billing starts here"
+        );
+    }
+
     /// Attach host handle to current session
     pub fn attach_host_handle(&mut self, handle: HostSessionHandle) {
         if let Some(session) = &mut self.current_session {
@@ -1201,8 +1233,42 @@ impl CoreEngine {
         events
     }
 
-    /// Notify that a session has exited
-    pub fn notify_session_exited(
+    /// Notify that the activity behind `handle` has exited.
+    ///
+    /// Returns `None` — leaving the current session untouched — when the exit
+    /// belongs to something else. The process monitor reports exits with a
+    /// fabricated session id and identifies the activity only by handle
+    /// payload, so without this check a late reap from a *previous* activity
+    /// ends whichever session happens to be current (issue #136: RetroArch's
+    /// SIGKILL exit arrived 24ms after Bitwig's session started and ended
+    /// Bitwig instead, at `duration 0s`).
+    pub fn notify_activity_exited(
+        &mut self,
+        handle: &HostSessionHandle,
+        exit_code: Option<i32>,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) -> Option<CoreEvent> {
+        match self.current_session.as_ref() {
+            Some(session) if session.owns_handle(handle) => {}
+            Some(session) => {
+                debug!(
+                    current_session = %session.plan.session_id,
+                    exited = ?handle.payload(),
+                    "Ignoring exit for an activity that is not the current session"
+                );
+                return None;
+            }
+            None => return None,
+        }
+        self.end_current_session(exit_code, now_mono, now)
+    }
+
+    /// End the current session without a host handle to match against.
+    ///
+    /// For paths where the engine itself knows the activity is gone — a spawn
+    /// that never produced a process, or a stop the host has confirmed.
+    pub fn end_current_session(
         &mut self,
         exit_code: Option<i32>,
         now_mono: MonotonicInstant,
@@ -1210,22 +1276,51 @@ impl CoreEngine {
     ) -> Option<CoreEvent> {
         let session = self.current_session.take()?;
 
-        let duration = session.duration_so_far(now_mono);
-        let reason = if session.state == shepherd_api::SessionState::Expiring {
+        // The child is charged for the time they could actually use, not for
+        // the spinner in front of it. Reported here too, so the audit log,
+        // the usage table and the broadcast all agree on one number.
+        let duration = session.billable_duration(now_mono);
+        let elapsed = session.duration_so_far(now_mono);
+        if duration != elapsed {
+            debug!(
+                session_id = %session.plan.session_id,
+                elapsed_secs = elapsed.as_secs(),
+                billed_secs = duration.as_secs(),
+                "Not billing the time before the activity's window appeared"
+            );
+        }
+        let reason = if let Some(requested) = session.stopping.clone() {
+            requested
+        } else if session.state == shepherd_api::SessionState::Expiring {
             SessionEndReason::Expired
         } else {
             SessionEndReason::ProcessExited { exit_code }
         };
 
-        // Update usage accounting
-        let today = now.date_naive();
-        let _ = self
-            .store
-            .add_usage(&session.plan.entry_id, today, duration);
+        // A launch that never produced a running activity is not play time.
+        // On `copernicus` two Stray launches timed out without the game ever
+        // starting and were still billed 60s each (issue #135); the child paid
+        // 120s of their budget for a spinner. The audit record is still
+        // written, so the attempt is visible.
+        let billable = !matches!(reason, SessionEndReason::LaunchFailed { .. });
 
-        // Settle token balances (issue #8) and cooldowns, on the entry and on
-        // its group (issue #5)
-        self.settle_session_end(&session.plan.entry_id, duration, now, today);
+        let today = now.date_naive();
+        if billable {
+            let _ = self
+                .store
+                .add_usage(&session.plan.entry_id, today, duration);
+
+            // Settle token balances (issue #8) and cooldowns, on the entry and
+            // on its group (issue #5)
+            self.settle_session_end(&session.plan.entry_id, duration, now, today);
+        } else {
+            info!(
+                session_id = %session.plan.session_id,
+                entry_id = %session.plan.entry_id,
+                duration_secs = duration.as_secs(),
+                "Launch never produced an activity; not charging usage or tokens"
+            );
+        }
 
         // Log to audit
         let _ = self
@@ -1253,52 +1348,98 @@ impl CoreEngine {
         })
     }
 
-    /// Stop the current session
-    pub fn stop_current(
+    /// End the current session because its launch never produced a running
+    /// activity. Skips usage and token settlement (see
+    /// [`Self::end_current_session`]).
+    ///
+    /// `handle` is matched against the session exactly as
+    /// [`Self::notify_activity_exited`] does, so a stale failure cannot end a
+    /// session that has since moved on. Pass `None` when the caller *is* the
+    /// launch path and no handle exists yet.
+    pub fn notify_launch_failed(
         &mut self,
-        reason: SessionEndReason,
+        handle: Option<&HostSessionHandle>,
+        error: String,
         now_mono: MonotonicInstant,
         now: DateTime<Local>,
-    ) -> StopDecision {
-        let session = match self.current_session.take() {
+    ) -> Option<CoreEvent> {
+        match (self.current_session.as_mut(), handle) {
+            (None, _) => return None,
+            (Some(session), Some(h)) if !session.owns_handle(h) => {
+                debug!(
+                    current_session = %session.plan.session_id,
+                    failed = ?h.payload(),
+                    "Ignoring launch failure for an activity that is not the current session"
+                );
+                return None;
+            }
+            (Some(session), _) => {
+                session.stopping = Some(SessionEndReason::LaunchFailed { error });
+            }
+        }
+        self.end_current_session(None, now_mono, now)
+    }
+
+    /// Begin tearing the current session down.
+    ///
+    /// Marks the session stopping and hands back the host handle to act on, but
+    /// deliberately **keeps it current**: the activity is still on screen until
+    /// the host says otherwise, so the launcher must stay out of the way and no
+    /// other entry may launch. Settle and clear with [`Self::finish_stop`] once
+    /// teardown is confirmed.
+    ///
+    /// Idempotent: asking twice — a child pressing close again because nothing
+    /// visibly happened — re-reports the same in-flight stop rather than
+    /// double-settling usage.
+    pub fn begin_stop(&mut self, reason: SessionEndReason) -> BeginStopDecision {
+        let session = match self.current_session.as_mut() {
             Some(s) => s,
-            None => return StopDecision::NoActiveSession,
+            None => return BeginStopDecision::NoActiveSession,
         };
 
-        let duration = session.duration_so_far(now_mono);
+        let already_stopping = session.stopping.is_some();
+        if !already_stopping {
+            session.stopping = Some(reason.clone());
+            info!(
+                session_id = %session.plan.session_id,
+                reason = ?reason,
+                "Session stopping; held current until teardown confirms"
+            );
+        }
 
-        // Update usage accounting
-        let today = now.date_naive();
-        let _ = self
-            .store
-            .add_usage(&session.plan.entry_id, today, duration);
+        BeginStopDecision::Stopping {
+            handle: session.host_handle.clone(),
+            already_stopping,
+        }
+    }
 
-        // Settle token balances (issue #8) and cooldowns, on the entry and on
-        // its group (issue #5)
-        self.settle_session_end(&session.plan.entry_id, duration, now, today);
+    /// Settle and clear a session previously marked by [`Self::begin_stop`].
+    ///
+    /// Returns `None` if the session already went away on its own — its exit
+    /// event can land while the host is still being asked to stop it.
+    pub fn finish_stop(
+        &mut self,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) -> Option<StopResult> {
+        let session = self.current_session.as_ref()?;
+        session.stopping.as_ref()?;
 
-        // Log to audit
-        let _ = self
-            .store
-            .append_audit(AuditEvent::new(AuditEventType::SessionEnded {
-                session_id: session.plan.session_id.clone(),
-                entry_id: session.plan.entry_id.clone(),
-                reason: reason.clone(),
+        let event = self.end_current_session(None, now_mono, now)?;
+        match event {
+            CoreEvent::SessionEnded {
+                session_id,
+                entry_id,
+                reason,
                 duration,
-            }));
-
-        info!(
-            session_id = %session.plan.session_id,
-            reason = ?reason,
-            "Session stopped"
-        );
-
-        StopDecision::Stopped(StopResult {
-            session_id: session.plan.session_id,
-            entry_id: session.plan.entry_id,
-            reason,
-            duration,
-        })
+            } => Some(StopResult {
+                session_id,
+                entry_id,
+                reason,
+                duration,
+            }),
+            _ => None,
+        }
     }
 
     /// Get current service state snapshot
@@ -1319,6 +1460,13 @@ impl CoreEngine {
             entries,
             internet_status: self.internet_status_views(),
         }
+    }
+
+    /// The audit/usage store, for callers that need to record something the
+    /// engine itself does not model (e.g. shepherdd auditing an escaped
+    /// activity reported by the host).
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
     }
 
     /// Get current session reference
@@ -2414,7 +2562,7 @@ mod tests {
         };
         let started = MonotonicInstant::now();
         engine.start_session(plan, now, started);
-        engine.notify_session_exited(Some(0), started + duration, now);
+        engine.end_current_session(Some(0), started + duration, now);
     }
 
     fn balance_of(engine: &CoreEngine, id: &str, now: DateTime<Local>) -> Duration {

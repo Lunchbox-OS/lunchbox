@@ -95,6 +95,8 @@ export type SessionState =
   | "running"
   | "warned"
   | "expiring"
+  /** Teardown requested; the activity is still up until the host confirms. */
+  | "stopping"
   | "ended";
 
 export interface SessionInfo {
@@ -227,6 +229,16 @@ export interface ServiceStateSnapshot {
   internet_status: InternetStatusView[];
 }
 
+/**
+ * What shepherd is supervising behind a window.
+ *
+ * The compositor only knows pids; shepherdd matches them against the
+ * processes it actually spawned. `escaped` and `unowned` are the two that
+ * mean "nothing is watching this" — an activity that outlived its teardown,
+ * and a surface that belongs to no session at all.
+ */
+export type WindowOwner = "shepherd" | "activity" | "escaped" | "unowned";
+
 export interface WindowInfo {
   id: number;
   name: string | null;
@@ -237,8 +249,6 @@ export interface WindowInfo {
   in_scratchpad: boolean;
   visible: boolean;
   focused: boolean;
+  owner: WindowOwner;
 }
 
-export interface WindowsResponse {
-  windows: WindowInfo[];
-}

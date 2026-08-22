@@ -282,8 +282,9 @@ fn test_usage_accounting() {
     let later_mono = now_mono + Duration::from_secs(5);
     let later = now + chrono::Duration::seconds(5);
 
-    // Session exits
-    engine.notify_session_exited(Some(0), later_mono, later);
+    // Session exits (no host handle in this test, so end it directly rather
+    // than going through the handle-matched `notify_activity_exited`).
+    engine.end_current_session(Some(0), later_mono, later);
 
     // Check usage was recorded
     let usage = store_check.get_usage(&entry_id, now.date_naive()).unwrap();

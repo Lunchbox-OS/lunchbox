@@ -190,6 +190,30 @@ When stopping a session:
 2. After timeout, SIGKILL is sent to the process group
 3. Orphaned children are cleaned up
 
+## Window attribution
+
+`list_windows` answers "what is on screen"; the compositor can only say which
+pid drew each surface. `LinuxHost::list_windows` fills in `WindowInfo::owner`
+by matching every window against what the host is actually supervising —
+tracked processes and their groups, Steam game pids found by app id, input
+sidecars, shepherd's own furniture, and the `escaped` registry:
+
+| `owner` | Meaning |
+| --- | --- |
+| `shepherd` | Our own UI or a background process we keep warm. |
+| `activity` | The session running right now. |
+| `escaped` | An activity that outlived teardown; the sweep is still killing it. |
+| `unowned` | Nothing we know about. |
+
+Attribution is computed per `list_windows` call rather than on the monitor's
+reconciliation sweep: resolving Steam game pids walks `/proc` reading every
+process's environment, which is fine on an admin screen someone has open and
+wrong on a loop that runs every two seconds regardless. The sweep keeps its own
+cheaper check (`report_unowned_windows`), which only knows about pids it
+spawned. Closing an `unowned` window stays a human's call:
+shepherd will not kill a surface it does not recognize, because a system
+dialog on a kiosk a child depends on is worse than the visibility gap.
+
 ## Log Capture
 
 stdout and stderr can be captured to session log files:
@@ -260,6 +284,23 @@ supported — a warning is logged and the browser policy ignored.
   happens in the host adapter, never inside Chrome.
 
 A failed policy write is logged and Chrome launches without the policy.
+
+## Running this crate's tests
+
+The tests here drive real processes, and some of the code under test kills by
+command name (`kill_by_command` runs `pkill -f <name>`). `pkill -f` matches
+against whole command lines, including your shell's.
+
+`test_spawn_and_kill` spawns `sleep 60` and stops it by the command name
+"sleep", so `pkill -f sleep` runs during the suite. **If the shell you launch
+`cargo test` from has "sleep" anywhere in its command line, that shell is
+killed too** (it exits 144, mid-command, with no obvious cause). The same
+applies to any wrapper script or CI step whose invocation contains the word.
+
+Keep the invocation free of the names the suite pkills, or run the tests from
+a command line you do not mind losing. The equivalent trap for headless
+fixtures — never give a fixture entry `command = "sleep"` — is documented in
+the `headless-dev` skill.
 
 ## Future Enhancements
 

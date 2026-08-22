@@ -911,14 +911,19 @@ impl Service {
                     "Host process exited - will end session"
                 );
 
+                // Matched against the current session by handle payload: the
+                // monitor cannot know the session id, so it reports a
+                // fabricated one. An unmatched exit belongs to a previous
+                // activity whose reap is only surfacing now, and must not end
+                // whatever session replaced it (issue #136).
                 let core_event = {
                     let mut engine = engine.lock().await;
-                    engine.notify_session_exited(status.code, now_mono, now)
+                    engine.notify_activity_exited(&handle, status.code, now_mono, now)
                 };
 
                 info!(
                     has_event = core_event.is_some(),
-                    "notify_session_exited result"
+                    "notify_activity_exited result"
                 );
 
                 if let Some(CoreEvent::SessionEnded {
@@ -962,6 +967,10 @@ impl Service {
 
             HostEvent::WindowReady { handle } => {
                 debug!(session_id = %handle.session_id, "Window ready");
+                // Usage is billed from here rather than from approval: until
+                // now the child was looking at a spinner (issue #135).
+                let mut engine = engine.lock().await;
+                engine.notify_window_ready(&handle, MonotonicInstant::now());
             }
 
             HostEvent::KindReadinessChanged { kind, ready } => {
@@ -983,6 +992,79 @@ impl Service {
 
             HostEvent::SpawnFailed { session_id, error } => {
                 error!(session_id = %session_id, error = %error, "Spawn failed");
+            }
+
+            HostEvent::LaunchFailed { handle, error } => {
+                let now_mono = MonotonicInstant::now();
+                let now = shepherd_util::now();
+                warn!(session_id = %handle.session_id, error = %error, "Launch never started");
+
+                let core_event = {
+                    let mut engine = engine.lock().await;
+                    engine.notify_launch_failed(Some(&handle), error, now_mono, now)
+                };
+
+                if let Some(CoreEvent::SessionEnded {
+                    session_id,
+                    entry_id,
+                    reason,
+                    duration,
+                }) = core_event
+                {
+                    Self::broadcast(
+                        ipc,
+                        event_tx,
+                        Event::new(EventPayload::SessionEnded {
+                            session_id,
+                            entry_id,
+                            reason,
+                            duration,
+                        }),
+                    );
+                    hidpi.restore().await;
+                    let state = {
+                        let engine = engine.lock().await;
+                        engine.get_state()
+                    };
+                    Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                }
+            }
+
+            HostEvent::ActivityEscaped {
+                session_id,
+                pid,
+                command,
+                resolved,
+            } => {
+                if resolved {
+                    info!(
+                        session_id = %session_id,
+                        pid, command = %command,
+                        "Escaped activity has been cleaned up"
+                    );
+                } else {
+                    error!(
+                        session_id = %session_id,
+                        pid, command = %command,
+                        "Activity outlived its session and every kill; supervision lost"
+                    );
+                }
+                // Audit it either way: a caregiver reading the log should be
+                // able to see that supervision was lost and when it came back.
+                let audited = {
+                    let engine = engine.lock().await;
+                    engine
+                        .store()
+                        .append_audit(AuditEvent::new(AuditEventType::ActivityEscaped {
+                            session_id,
+                            pid,
+                            command,
+                            resolved,
+                        }))
+                };
+                if let Err(e) = audited {
+                    warn!(error = %e, "Failed to audit escaped activity");
+                }
             }
         }
     }

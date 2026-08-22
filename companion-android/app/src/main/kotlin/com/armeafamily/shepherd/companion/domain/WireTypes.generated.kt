@@ -860,10 +860,36 @@ data class SessionInfo(
  */
 @Serializable
 enum class SessionState {
+    /**
+     * Approved and spawning; the activity has not mapped a window yet.
+     */
     @SerialName("launching") LAUNCHING,
+    /**
+     * The activity is running normally.
+     */
     @SerialName("running") RUNNING,
+    /**
+     * Running, and at least one time warning has been issued.
+     */
     @SerialName("warned") WARNED,
+    /**
+     * Past its deadline and being wound down.
+     */
     @SerialName("expiring") EXPIRING,
+    /**
+     * Teardown has been requested and the activity is being stopped.
+     *
+     * The session is still current: the activity is on screen until the host
+     * confirms otherwise, so nothing else may launch and shells must keep the
+     * launcher out of the way. Shells should render this as a
+     * non-interactive "closing" state — without it a child gets no feedback
+     * that their press registered, which is why they pressed again on
+     * 2026-08-20 (issue #136).
+     */
+    @SerialName("stopping") STOPPING,
+    /**
+     * Settled and cleared; no activity is running.
+     */
     @SerialName("ended") ENDED,
 }
 
@@ -1049,6 +1075,13 @@ data class WindowInfo(
      */
     val name: String? = null,
     /**
+     * What shepherd is supervising behind this window, if anything.
+     *
+     * A host that cannot attribute windows reports every one of them as
+     * unowned.
+     */
+    val owner: WindowOwner,
+    /**
      * Owning process id, if reported by the compositor.
      */
     val pid: Long? = null,
@@ -1066,6 +1099,43 @@ data class WindowInfo(
      */
     val workspace: String? = null,
 )
+
+/**
+ * Who shepherd believes a window belongs to.
+ *
+ * The compositor cannot answer this — it reports pids, not intent. The host
+ * fills it in by matching each window against what it is actually
+ * supervising, which is what lets an admin UI tell "the game the child is
+ * playing" apart from "something on the screen that no session owns".
+ */
+@Serializable
+enum class WindowOwner {
+    /**
+     * Shepherd's own furniture: the launcher, the HUD, the pairing UI, the
+     * mirror, and background processes it keeps warm (the preloaded Steam
+     * client). Expected to outlive every session.
+     */
+    @SerialName("shepherd") SHEPHERD,
+    /**
+     * A process shepherd is supervising for the current session — the
+     * activity itself, something in its process group, a Steam game
+     * launched on its behalf, or one of its input sidecars.
+     */
+    @SerialName("activity") ACTIVITY,
+    /**
+     * An activity that outlived its own teardown. Its session is over and
+     * the host is still working on killing it — the same condition that
+     * writes an `ActivityEscaped` audit record.
+     */
+    @SerialName("escaped") ESCAPED,
+    /**
+     * No process shepherd knows about. Either something started outside
+     * shepherd entirely, or an activity that got away without the host ever
+     * noticing — the case supervision cannot fix on its own, and the reason
+     * this field exists.
+     */
+    @SerialName("unowned") UNOWNED,
+}
 
 /**
  * Polymorphic defaults for every tagged enum above.

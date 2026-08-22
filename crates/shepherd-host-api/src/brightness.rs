@@ -100,6 +100,26 @@ pub trait BrightnessController: Send + Sync {
     async fn set_brightness(&self, percent: u8) -> BrightnessResult<()>;
 }
 
+/// No-op [`BrightnessController`] for tests and hosts with no backlight.
+/// Reports unavailable and accepts (ignores) every change.
+#[derive(Default)]
+pub struct NoOpBrightnessController {
+    capabilities: BrightnessCapabilities,
+}
+
+#[async_trait]
+impl BrightnessController for NoOpBrightnessController {
+    fn capabilities(&self) -> &BrightnessCapabilities {
+        &self.capabilities
+    }
+    async fn get_status(&self) -> BrightnessResult<BrightnessStatus> {
+        Ok(BrightnessStatus::default())
+    }
+    async fn set_brightness(&self, _percent: u8) -> BrightnessResult<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

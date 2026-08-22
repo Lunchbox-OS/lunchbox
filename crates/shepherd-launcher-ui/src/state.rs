@@ -20,6 +20,12 @@ pub enum LauncherState {
         #[allow(dead_code)]
         entry_id: String,
     },
+    /// The activity is being torn down. Shown so the child gets feedback that
+    /// their close registered — without it the screen looks unchanged for as
+    /// long as teardown takes, which is what made them press again on
+    /// 2026-08-20 (issue #136). Non-interactive: the grid is not reachable
+    /// from here, so a second press cannot launch anything.
+    Closing { entry_label: String },
     /// Session is running
     SessionActive {
         #[allow(dead_code)]
@@ -162,6 +168,12 @@ impl SharedState {
 
     fn apply_snapshot(&self, snapshot: ServiceStateSnapshot) {
         if let Some(session) = snapshot.current_session {
+            if session.state == shepherd_api::SessionState::Stopping {
+                self.set(LauncherState::Closing {
+                    entry_label: session.label,
+                });
+                return;
+            }
             let now = shepherd_util::now();
             // For unlimited sessions (deadline=None), time_remaining is None
             let time_remaining = session.deadline.and_then(|d| {

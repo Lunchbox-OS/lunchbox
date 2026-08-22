@@ -66,6 +66,23 @@ pub struct ActiveSession {
 
     /// Host session handle (for stopping)
     pub host_handle: Option<HostSessionHandle>,
+
+    /// Set once teardown has been requested, carrying the reason to settle
+    /// with. The session deliberately stays *current* while this is set: the
+    /// activity is still on screen until the host confirms otherwise, so
+    /// nothing else may launch and clients must keep seeing a session. See
+    /// issue #136 — announcing the end at request time handed an interactive
+    /// launcher back over a still-running activity.
+    pub stopping: Option<SessionEndReason>,
+
+    /// When the activity's first window actually appeared, if it has.
+    ///
+    /// Usage is billed from here rather than from approval. The session clock
+    /// starts when the launch is approved — which is right for the deadline,
+    /// since an activity that never maps a window must still expire — but the
+    /// child is looking at a spinner until this moment, and on `copernicus`
+    /// that was 60s of Steam shader precompile charged as play time.
+    pub window_ready_at_mono: Option<MonotonicInstant>,
 }
 
 impl ActiveSession {
@@ -89,7 +106,22 @@ impl ActiveSession {
             deadline_mono,
             warnings_issued: Vec::new(),
             host_handle: None,
+            stopping: None,
+            window_ready_at_mono: None,
         }
+    }
+
+    /// Whether this exit event describes *this* session's activity.
+    ///
+    /// The process monitor cannot know the session id, so it fabricates one
+    /// and identifies the activity by handle payload (pid/pgid on Linux).
+    /// Matching on the payload is therefore the only sound check — and not
+    /// doing it is what let a dead activity's late reap end the session that
+    /// had already replaced it (issue #136).
+    pub fn owns_handle(&self, handle: &HostSessionHandle) -> bool {
+        self.host_handle
+            .as_ref()
+            .is_some_and(|own| own.payload() == handle.payload())
     }
 
     /// Attach the host handle once spawn succeeds
@@ -162,13 +194,32 @@ impl ActiveSession {
         now_mono.duration_since(self.started_at_mono)
     }
 
+    /// How much of this session the child actually got: the time since the
+    /// activity's window appeared.
+    ///
+    /// Falls back to the whole session when no window was ever reported, so an
+    /// activity that draws nothing (or whose window we failed to spot) is
+    /// billed as before rather than becoming free.
+    pub fn billable_duration(&self, now_mono: MonotonicInstant) -> Duration {
+        match self.window_ready_at_mono {
+            Some(ready) => now_mono.duration_since(ready),
+            None => self.duration_so_far(now_mono),
+        }
+    }
+
     /// Get session info for API
     pub fn to_session_info(&self, now_mono: MonotonicInstant) -> shepherd_api::SessionInfo {
         shepherd_api::SessionInfo {
             session_id: self.plan.session_id.clone(),
             entry_id: self.plan.entry_id.clone(),
             label: self.plan.label.clone(),
-            state: self.state,
+            // Report the teardown, not the state the session was in when it
+            // was asked to stop: shells key their "closing" view off this.
+            state: if self.stopping.is_some() {
+                SessionState::Stopping
+            } else {
+                self.state
+            },
             started_at: self.started_at,
             deadline: self.deadline,
             time_remaining: self.time_remaining(now_mono),

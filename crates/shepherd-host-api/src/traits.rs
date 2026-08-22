@@ -170,6 +170,31 @@ pub enum HostEvent {
         session_id: SessionId,
         error: String,
     },
+
+    /// A launch was given up on before it ever produced a running activity.
+    ///
+    /// Distinct from [`Self::Exited`] because nothing ran: the session must be
+    /// ended without charging the child for the wait (issue #135, where two
+    /// Steam launches that never started were billed 60s each).
+    LaunchFailed {
+        handle: HostSessionHandle,
+        error: String,
+    },
+
+    /// An activity outlived every kill the adapter knows how to send, and its
+    /// session has already ended — so nothing is supervising it (issue #136).
+    ///
+    /// Emitted once when the adapter first gives up, and again with
+    /// `resolved: true` if the reconciliation sweep eventually gets rid of it.
+    /// Purely informational to the engine: the adapter keeps working on it.
+    ActivityEscaped {
+        session_id: SessionId,
+        pid: u32,
+        /// Human-readable name of the activity's command, for the audit log.
+        command: String,
+        /// True when a previously-escaped activity is finally gone.
+        resolved: bool,
+    },
 }
 
 /// Host adapter trait - implemented by platform-specific adapters

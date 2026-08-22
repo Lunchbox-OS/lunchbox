@@ -4447,6 +4447,7 @@ dependencies = [
  "shepherd-config",
  "shepherd-core",
  "shepherd-host-api",
+ "shepherd-ipc",
  "shepherd-management-macros",
  "shepherd-store",
  "shepherd-util",

@@ -11,7 +11,7 @@
 //! Steam client) live under that workspace's `floating_nodes`.
 
 use serde::Deserialize;
-use shepherd_api::{VideoMode, WindowAction, WindowInfo};
+use shepherd_api::{VideoMode, WindowAction, WindowInfo, WindowOwner};
 use shepherd_host_api::{HostError, HostResult};
 
 const SCRATCHPAD_WORKSPACE: &str = "__i3_scratch";
@@ -414,6 +414,11 @@ fn walk(node: &Node, workspace: Option<&str>, out: &mut Vec<WindowInfo>) {
             workspace: ws,
             visible: node.visible.unwrap_or(false),
             focused: node.focused,
+            // The compositor knows pids, not who is supervising them, so
+            // every window parses as unowned. `LinuxHost::list_windows`
+            // attributes them before they reach a client; the internal
+            // callers here match on pids and ignore this field.
+            owner: WindowOwner::Unowned,
         });
     }
 

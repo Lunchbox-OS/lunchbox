@@ -10,7 +10,7 @@ use shepherd_api::{
     WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
-use shepherd_core::{CoreEngine, LaunchDecision, StopDecision, TokenAdjustError};
+use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
     SpawnOptions, VolumeController,
@@ -331,7 +331,7 @@ impl ManagementService for DefaultManagementService {
 
         let Some(kind) = entry_kind else {
             let mut eng = self.engine.lock().await;
-            eng.notify_session_exited(Some(-1), now_mono, now);
+            eng.notify_launch_failed(None, "entry not found".into(), now_mono, now);
             return Err(ManagementError::NotFound("Entry not found".into()));
         };
 
@@ -370,7 +370,7 @@ impl ManagementService for DefaultManagementService {
                 self.hidpi.restore().await;
                 let snap = {
                     let mut eng = self.engine.lock().await;
-                    eng.notify_session_exited(Some(-1), now_mono, now);
+                    eng.notify_launch_failed(None, e.to_string(), now_mono, now);
                     eng.get_state()
                 };
                 (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
@@ -379,53 +379,100 @@ impl ManagementService for DefaultManagementService {
         }
     }
 
+    /// Stop the running activity, then report the session ended.
+    ///
+    /// Order matters and is the fix for issue #136. The session is marked
+    /// stopping but **stays current** while the host tears the activity down,
+    /// so for the whole (up to 5s) teardown window:
+    ///
+    /// - `request_launch` still sees an active session and denies anything
+    ///   else, which is what stops a stray button press from launching an
+    ///   unintended activity;
+    /// - clients keep rendering the session, so the launcher grid is not put
+    ///   back under the child's thumb while the old activity is still up;
+    /// - the compositor scale is left alone until the activity's window is
+    ///   actually gone.
+    ///
+    /// Only once the host confirms teardown is the session settled, announced
+    /// and cleared. A host that could not kill the activity is reported as an
+    /// error rather than silently swallowed.
     async fn stop_current(&self, mode: StopMode) -> ManagementResult<()> {
         let now = shepherd_util::now();
+        // Read the clock *here*, before the teardown below blocks for up to
+        // five seconds, and hand this instant to `finish_stop`. That is what
+        // keeps the child from being charged for the "Closing…" spinner.
+        // Moving this read below `host.stop().await` would silently start
+        // billing teardown.
         let now_mono = MonotonicInstant::now();
 
-        let (handle, decision) = {
-            let mut eng = self.engine.lock().await;
-            let handle = eng.current_session().and_then(|s| s.host_handle.clone());
-            let reason = match mode {
-                StopMode::Graceful => SessionEndReason::UserStop,
-                StopMode::Force => SessionEndReason::AdminStop,
-            };
-            let decision = eng.stop_current(reason, now_mono, now);
-            (handle, decision)
+        let reason = match mode {
+            StopMode::Graceful => SessionEndReason::UserStop,
+            StopMode::Force => SessionEndReason::AdminStop,
         };
 
-        match decision {
-            StopDecision::NoActiveSession => {
-                Err(ManagementError::NotFound("No active session".into()))
-            }
-            StopDecision::Stopped(result) => {
-                (self.broadcast_fn)(Event::new(EventPayload::SessionEnded {
-                    session_id: result.session_id,
-                    entry_id: result.entry_id,
-                    reason: result.reason,
-                    duration: result.duration,
-                }));
-                let snap = self.engine.lock().await.get_state();
-                (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
-
-                // Restore output scale / HUD factor before tearing down the
-                // process so the launcher reappears at its normal size;
-                // idempotent when no workaround was active.
-                self.hidpi.restore().await;
-
-                if let Some(h) = handle {
-                    let host_mode = match mode {
-                        StopMode::Graceful => shepherd_host_api::StopMode::Graceful {
-                            timeout: Duration::from_secs(5),
-                        },
-                        StopMode::Force => shepherd_host_api::StopMode::Force,
-                    };
-                    let _ = self.host.stop(&h, host_mode).await;
+        let handle = {
+            let mut eng = self.engine.lock().await;
+            match eng.begin_stop(reason) {
+                BeginStopDecision::NoActiveSession => {
+                    return Err(ManagementError::NotFound("No active session".into()));
                 }
-
-                Ok(())
+                BeginStopDecision::Stopping {
+                    handle,
+                    already_stopping,
+                } => {
+                    if already_stopping {
+                        debug!("Stop already in flight; not starting a second teardown");
+                    }
+                    handle
+                }
             }
+        };
+
+        // Tell everyone we are closing *before* the blocking teardown, so the
+        // launcher and HUD can show it. Without this the screen looks
+        // unchanged for the whole (up to 5s) wait, which is what made the
+        // child press again on 2026-08-20 (issue #136).
+        let snap = self.engine.lock().await.get_state();
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+
+        // Tear the activity down first — everything below assumes it is gone.
+        let stop_result = match handle {
+            Some(h) => {
+                let host_mode = match mode {
+                    StopMode::Graceful => shepherd_host_api::StopMode::Graceful {
+                        timeout: Duration::from_secs(5),
+                    },
+                    StopMode::Force => shepherd_host_api::StopMode::Force,
+                };
+                self.host.stop(&h, host_mode).await
+            }
+            None => Ok(()),
+        };
+
+        // Now that the window is down, hand the compositor back to the
+        // launcher; idempotent when no workaround was active.
+        self.hidpi.restore().await;
+
+        let settled = {
+            let mut eng = self.engine.lock().await;
+            eng.finish_stop(now_mono, now)
+        };
+
+        if let Some(result) = settled {
+            (self.broadcast_fn)(Event::new(EventPayload::SessionEnded {
+                session_id: result.session_id,
+                entry_id: result.entry_id,
+                reason: result.reason,
+                duration: result.duration,
+            }));
         }
+        let snap = self.engine.lock().await.get_state();
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+
+        stop_result.map_err(|e| {
+            warn!(error = %e, "Activity survived the stop request");
+            ManagementError::Internal(format!("Failed to stop activity: {e}"))
+        })
     }
 
     async fn extend_current(&self, seconds: i64) -> ManagementResult<Option<DateTime<Local>>> {

@@ -63,6 +63,17 @@ pub enum AuditEventType {
         new_deadline: DateTime<Local>,
     },
 
+    /// An activity outlived every kill and kept running after its session
+    /// ended (issue #136). Recorded so a caregiver reviewing the log can see
+    /// that supervision was lost, and for how long — `resolved` marks the
+    /// entry where the reconciliation sweep finally got rid of it.
+    ActivityEscaped {
+        session_id: SessionId,
+        pid: u32,
+        command: String,
+        resolved: bool,
+    },
+
     /// Config reload requested
     ConfigReloaded { success: bool },
 

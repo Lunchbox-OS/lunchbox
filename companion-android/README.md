@@ -53,7 +53,7 @@ sideload-friendly (`adb install`).
 | Typed client | `domain/ManagementClient.kt` | Mirrors the device's `ManagementService` trait. |
 | Persistence | `persistence/AdminRecordStore.kt`, `domain/ShepherdRepository.kt` | Per-device record + secret HTTP token, encrypted at rest. |
 | UI | `ui/**` | Jetpack Compose + Material 3, single activity, one shared `ShepherdViewModel`. |
-| Windows panel | `ui/windows/**` | Maintenance view over `list_windows`/`act_on_window`: close, hide to the scratchpad, show. Polls while open — nothing pushes window changes. |
+| Windows panel | `ui/windows/**` | Maintenance view over `list_windows`/`act_on_window`: close, hide to the scratchpad, show. Polls while open — nothing pushes window changes. Windows the device is not supervising (`owner` `escaped`/`unowned`) lead the list under their own heading and banner. |
 
 ### Decisions (spec §11 open questions)
 
