@@ -2,8 +2,9 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    API_VERSION, EntryKindTag, EntryView, GroupView, InputDeviceType, InternetStatusView,
-    ReasonCode, ServiceStateSnapshot, SessionEndReason, TokenStatus, WarningSeverity,
+    API_VERSION, DiagnosticSet, EntryKindTag, EntryView, GroupView, InputDeviceType,
+    InternetStatusView, ReasonCode, ServiceStateSnapshot, SessionEndReason, TokenStatus,
+    WarningSeverity,
 };
 use shepherd_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -73,6 +74,14 @@ pub struct CoreEngine {
     /// runs its first scan this becomes `Some(set)` and gating reflects the
     /// real hardware.
     connected_inputs: Option<HashSet<InputDeviceType>>,
+
+    /// Administrator-facing conditions currently true of this device (issue
+    /// #143). Owned here only because [`Self::get_state`] is, and every one of
+    /// the daemon's ~20 snapshot call sites would otherwise have to remember to
+    /// patch it in. The engine never raises one: the registry lives in
+    /// shepherdd, which pushes the current set through
+    /// [`Self::set_diagnostics`].
+    diagnostics: DiagnosticSet,
 }
 
 impl CoreEngine {
@@ -97,6 +106,7 @@ impl CoreEngine {
             internet_status: HashMap::new(),
             kind_readiness: HashMap::new(),
             connected_inputs: None,
+            diagnostics: DiagnosticSet::default(),
         }
     }
 
@@ -153,6 +163,18 @@ impl CoreEngine {
             return false;
         }
         self.connected_inputs = Some(connected);
+        true
+    }
+
+    /// Replace the administrator-facing diagnostic set (issue #143). Called by
+    /// shepherdd's registry whenever a condition is raised or cleared. Returns
+    /// true if the set changed, so callers can broadcast rather than
+    /// re-broadcasting an identical snapshot on every probe sweep.
+    pub fn set_diagnostics(&mut self, diagnostics: DiagnosticSet) -> bool {
+        if self.diagnostics == diagnostics {
+            return false;
+        }
+        self.diagnostics = diagnostics;
         true
     }
 
@@ -1459,6 +1481,7 @@ impl CoreEngine {
             entry_count: self.policy.entries.len(),
             entries,
             internet_status: self.internet_status_views(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 

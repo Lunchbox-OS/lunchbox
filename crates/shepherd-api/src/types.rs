@@ -694,6 +694,12 @@ pub struct ServiceStateSnapshot {
     /// Empty when no connectivity checks are configured.
     #[serde(default)]
     pub internet_status: Vec<InternetStatusView>,
+    /// Administrator-facing conditions currently true of this device (issue
+    /// #143) — a missing dependency, a protection that is not in effect. Rides
+    /// the snapshot so every client has the current set on subscribe; deltas
+    /// arrive as `EventPayload::DiagnosticsChanged`.
+    #[serde(default)]
+    pub diagnostics: crate::DiagnosticSet,
 }
 
 /// Role for authorization

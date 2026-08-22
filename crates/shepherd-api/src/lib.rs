@@ -7,10 +7,12 @@
 //! - Versioning
 
 mod commands;
+mod diagnostics;
 mod events;
 mod types;
 
 pub use commands::*;
+pub use diagnostics::*;
 pub use events::*;
 pub use types::*;
 

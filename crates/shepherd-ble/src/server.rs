@@ -58,7 +58,7 @@ use crate::admin::{AdminStore, PendingUnbondStore, check_reset_sentinel};
 use crate::agent::{PairingDisplay, build_agent};
 use crate::claim::{AuthDecision, ClaimMachine, PeerIdentity};
 use crate::framing::{FrameReader, encode_frame};
-use crate::outbox::{COALESCE_STATE_CHANGED, CoalesceKey, Outbox};
+use crate::outbox::{COALESCE_DIAGNOSTICS, COALESCE_STATE_CHANGED, CoalesceKey, Outbox};
 use crate::protocol::{
     ClaimStateTag, DeviceInfo, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, RpcRequest,
     RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID, SHEPHERD_EVENTS_CHAR_UUID,
@@ -658,15 +658,18 @@ async fn drain_pending_unbonds(adapter: &bluer::Adapter, store: &PendingUnbondSt
 
 /// The outbox key an event supersedes its predecessors under, if any.
 ///
-/// Only whole-state snapshots qualify: a newer `StateChanged` makes every
-/// queued older one redundant, so collapsing them costs nothing and keeps
-/// the events outbox — and therefore the companion's connect-time drain —
-/// small. Everything else is an incremental fact (a warning fired, a
-/// session ended) that the companion needs in order, so it queues
-/// normally.
+/// Only whole-state payloads qualify: a newer one makes every queued older
+/// one redundant, so collapsing them costs nothing and keeps the events
+/// outbox — and therefore the companion's connect-time drain — small.
+/// Everything else is an incremental fact (a warning fired, a session ended)
+/// that the companion needs in order, so it queues normally.
+///
+/// `DiagnosticsChanged` (issue #143) carries the whole diagnostic set rather
+/// than a raise/clear delta, which is what earns it a key here.
 fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
     match payload {
         EventPayload::StateChanged(_) => Some(COALESCE_STATE_CHANGED),
+        EventPayload::DiagnosticsChanged(_) => Some(COALESCE_DIAGNOSTICS),
         _ => None,
     }
 }
@@ -2094,11 +2097,20 @@ mod tests {
             entry_count: 0,
             entries: vec![],
             internet_status: vec![],
+            diagnostics: Default::default(),
         };
         assert_eq!(
             coalesce_key_for(&EventPayload::StateChanged(snapshot)),
             Some(COALESCE_STATE_CHANGED),
         );
+        // Diagnostics carry the whole set too, so they supersede their
+        // predecessors — but under their own key, not the snapshot's: a
+        // diagnostics update must not drop a queued state snapshot.
+        assert_eq!(
+            coalesce_key_for(&EventPayload::DiagnosticsChanged(Default::default())),
+            Some(COALESCE_DIAGNOSTICS),
+        );
+        assert_ne!(COALESCE_DIAGNOSTICS, COALESCE_STATE_CHANGED);
 
         // An incremental event the companion needs in order, not merged.
         assert_eq!(

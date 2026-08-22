@@ -47,6 +47,15 @@ pub type CoalesceKey = &'static str;
 /// which is idempotent — the newest one makes every older one redundant.
 pub const COALESCE_STATE_CHANGED: CoalesceKey = "state_changed";
 
+/// Coalesce key for `EventPayload::DiagnosticsChanged` (issue #143).
+///
+/// Qualifies for the same reason `StateChanged` does: the payload is the whole
+/// diagnostic set rather than a raise/clear delta, so a newer one makes every
+/// queued older one redundant. This is what keeps a probe sweep that flips
+/// several conditions at once from queueing several frames the companion has to
+/// drain before its first RPC.
+pub const COALESCE_DIAGNOSTICS: CoalesceKey = "diagnostics_changed";
+
 pub struct Outbox {
     name: &'static str,
     max_bytes: usize,
