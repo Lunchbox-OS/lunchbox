@@ -573,6 +573,54 @@ actionable instead of archaeological. It wants its own issue: it touches the
 wire schema, both UIs, and the question of what deserves to interrupt a parent
 versus sit in a list.
 
+## Converging the Android cache
+
+> Follow-up prompt:
+>
+> > commit roughly by phase, then update the Android behavior to match
+> > (refactoring if possible to share the ordering logic), then fix the Android
+> > hashing (again, refactoring if possible to share the hashing logic)
+
+The Android app keeps its own `video_cache.rs` — it downloads through Android
+APIs, not yt-dlp — so none of the above reached it. Two things were worth
+sharing rather than leaving divergent.
+
+**The eviction ordering.** `Recency` and the `.played` marker moved into
+`shepherd-media-app`, which both front-ends already depend on, as `lru::Recency`
+and `interest`. Only the *policy* is shared: each cache still walks its own
+directory with its own filters and bookkeeping. Android also stopped bumping
+mtime inside `cached_path` — inspecting a cache is not using it — and now
+records interest at the play site, and on an after-play `store`, for the same
+self-eviction reason the Linux worker does.
+
+The ordering is a no-op on Android today: `CacheMode::QueueAll` appears in the
+settings picker but nothing acts on it, so everything that cache holds was
+watched by construction. It stops being a no-op when that mode is wired, which
+is worth knowing before wiring it.
+
+**The naming.** Android named files by a `DefaultHasher` of the URL, commented
+as a "stable hash". It is not: the standard library documents the output as
+unspecified across releases, so a toolchain bump renames the whole cache at
+once — everything re-downloads silently, and the orphans keep occupying the
+size cap until eviction reaches them. This is the same trap the Linux side
+avoided in phase 2 by reaching for SHA-256, and it surfaced only from checking
+whether these changes affected Android at all.
+
+`content_key` / `interest_key` moved into `shepherd-media-app::cache_key`, with
+a test pinning the digests so a change to them is deliberate rather than an
+accidental global cache invalidation. Android passes an empty selector: it only
+caches direct HTTP, which involves no format selection, so it has one rendition
+per URL and its content key doubles as its interest key.
+
+Pre-existing files under the old naming are left alone on both platforms, on the
+same reasoning: they are ordinary eviction candidates that age out, and
+re-downloading them is what the next toolchain bump would have cost anyway.
+
+**Not verified locally:** the `cargo-ndk` cross-build needs the NDK, which this
+box does not have. `shepherd-media-app` was cargo-checked for
+`aarch64-linux-android` (the new `sha2` and `filetime` dependencies do
+cross-compile); the full cdylib link is left to CI's `android-media` job.
+
 ## Where issue #127 stands
 
 All three phases are built. The kind is real, the cache is shared and correctly
