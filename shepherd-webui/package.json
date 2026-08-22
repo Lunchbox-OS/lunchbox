@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "rsbuild dev",
     "build": "rsbuild build",
+    "typecheck": "tsc --noEmit",
     "preview": "rsbuild preview"
   },
   "dependencies": {

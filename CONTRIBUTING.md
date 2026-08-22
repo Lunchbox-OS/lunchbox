@@ -126,11 +126,17 @@ time from `shepherd-webui/dist/`. Build it before building the Rust code:
 
 ```sh
 cd shepherd-webui
-npm install      # once
-npm run build    # generates shepherd-webui/dist/
+npm install       # once
+npm run typecheck # tsc --noEmit; see below
+npm run build     # generates shepherd-webui/dist/
 cd ..
-cargo build      # dist/ is now embedded in the binary
+cargo build       # dist/ is now embedded in the binary
 ```
+
+`npm run build` goes through rsbuild, which **transpiles without checking
+types** — a genuine type error compiles and ships. `npm run typecheck` is the
+only thing that checks them, so run it alongside the build; CI runs it as its
+own job.
 
 During development, you can run the rsbuild dev server (which proxies API calls
 to `localhost:8080`) instead of embedding:
