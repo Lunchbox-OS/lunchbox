@@ -207,6 +207,19 @@ export interface AudioOutput {
   kind: AudioOutputKind;
 }
 
+/**
+ * An audio output the device has seen, with any per-output limit set for it.
+ * Rows appear by discovery — plug the device in and it shows up — so nobody has
+ * to work out how a device identifies itself.
+ */
+export interface AudioOutputRecord {
+  output: AudioOutput;
+  max_volume: number | null;
+  min_volume: number | null;
+  last_seen: string;
+  active: boolean;
+}
+
 export interface VolumeInfo {
   percent: number;
   muted: boolean;

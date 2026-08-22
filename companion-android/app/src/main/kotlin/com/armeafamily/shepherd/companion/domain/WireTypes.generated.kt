@@ -95,6 +95,42 @@ enum class AudioOutputKind {
 }
 
 /**
+ * An audio output the device has seen, together with any per-output volume
+ * limit the parent has set for it.
+ *
+ * These rows are how per-output limits are configured: shepherdd records every
+ * output it observes, the management UIs list them, and the parent sets a cap
+ * on the row they recognise. Nothing has to be predicted or hand-written —
+ * which matters because an output often cannot be classified at all (see
+ * [`AudioOutputKind`]).
+ */
+@Serializable
+data class AudioOutputRecord(
+    /**
+     * Whether this is the output currently selected. Runtime state, not stored.
+     */
+    val active: Boolean,
+    /**
+     * When the device last observed this output. Lets the UI show recently used
+     * devices first and lets a parent prune ones that are long gone.
+     */
+    val lastSeen: IsoTimestamp,
+    /**
+     * Cap for this output. `None` means no per-output cap; the global
+     * `[service.volume]` limit applies instead.
+     */
+    val maxVolume: Long? = null,
+    /**
+     * Floor for this output. `None` means no per-output floor.
+     */
+    val minVolume: Long? = null,
+    /**
+     * Identity, display label, and advisory kind.
+     */
+    val output: AudioOutput,
+)
+
+/**
  * Screen brightness status information
  */
 @Serializable

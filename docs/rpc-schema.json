@@ -309,6 +309,49 @@
       }
     },
     {
+      "name": "list_audio_outputs",
+      "params": [],
+      "result": {
+        "type": "Vec<AudioOutputRecord>"
+      }
+    },
+    {
+      "name": "set_audio_output_limits",
+      "params": [
+        {
+          "name": "output_key",
+          "required": true,
+          "type": "String"
+        },
+        {
+          "name": "max_volume",
+          "required": false,
+          "type": "Option<u8>"
+        },
+        {
+          "name": "min_volume",
+          "required": false,
+          "type": "Option<u8>"
+        }
+      ],
+      "result": {
+        "type": "AudioOutputRecord"
+      }
+    },
+    {
+      "name": "forget_audio_output",
+      "params": [
+        {
+          "name": "output_key",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "bool"
+      }
+    },
+    {
       "name": "get_brightness",
       "params": [],
       "result": {

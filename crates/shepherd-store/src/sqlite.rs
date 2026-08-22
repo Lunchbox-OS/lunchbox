@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use rusqlite::{Connection, OptionalExtension, params};
-use shepherd_api::DailyOverride;
+use shepherd_api::{AudioOutput, AudioOutputKind, AudioOutputRecord, DailyOverride};
 use shepherd_util::{EntryId, LimitSubject};
 use std::path::Path;
 use std::sync::Mutex;
@@ -232,6 +232,19 @@ impl SqliteStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (subject, date)
+            );
+
+            -- Audio outputs the device has seen, and any per-output volume
+            -- limit set for them (issue #124). Rows are created by discovery,
+            -- so the parent picks a device off a list instead of predicting
+            -- how it will identify itself.
+            CREATE TABLE IF NOT EXISTS audio_outputs (
+                output_key TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                max_volume INTEGER,
+                min_volume INTEGER,
+                last_seen TEXT NOT NULL
             );
 
             -- Small global key/value settings (runtime-toggled flags)
@@ -502,6 +515,81 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    // ------------------------------------------------------- audio outputs
+
+    fn record_audio_output_seen(&self, output: &AudioOutput) -> StoreResult<()> {
+        let conn = self.conn.lock().unwrap();
+        // Deliberately does not list max_volume/min_volume in the UPDATE: a
+        // device coming back must keep whatever cap the parent gave it.
+        conn.execute(
+            r#"
+            INSERT INTO audio_outputs (output_key, description, kind, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(output_key) DO UPDATE SET
+                description = excluded.description,
+                kind = excluded.kind,
+                last_seen = excluded.last_seen
+            "#,
+            params![
+                output.key,
+                output.description,
+                kind_to_str(output.kind),
+                shepherd_util::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn set_audio_output_limits(
+        &self,
+        output_key: &str,
+        max_volume: Option<u8>,
+        min_volume: Option<u8>,
+    ) -> StoreResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE audio_outputs SET max_volume = ?, min_volume = ? WHERE output_key = ?",
+            params![
+                max_volume.map(i64::from),
+                min_volume.map(i64::from),
+                output_key
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    fn get_audio_output(&self, output_key: &str) -> StoreResult<Option<AudioOutputRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let rec = conn
+            .query_row(
+                "SELECT output_key, description, kind, max_volume, min_volume, last_seen \
+                 FROM audio_outputs WHERE output_key = ?",
+                params![output_key],
+                row_to_audio_output,
+            )
+            .optional()?;
+        Ok(rec)
+    }
+
+    fn list_audio_outputs(&self) -> StoreResult<Vec<AudioOutputRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT output_key, description, kind, max_volume, min_volume, last_seen \
+             FROM audio_outputs ORDER BY last_seen DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_audio_output)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn forget_audio_output(&self, output_key: &str) -> StoreResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let removed = conn.execute(
+            "DELETE FROM audio_outputs WHERE output_key = ?",
+            params![output_key],
+        )?;
+        Ok(removed > 0)
+    }
+
     fn get_setting(&self, key: &str) -> StoreResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let value: Option<String> = conn
@@ -721,6 +809,52 @@ impl Store for SqliteStore {
 
         Ok(results)
     }
+}
+
+/// `AudioOutputKind` is persisted as its wire string so a stored row stays
+/// readable and survives the enum gaining variants.
+fn kind_to_str(kind: AudioOutputKind) -> &'static str {
+    match kind {
+        AudioOutputKind::Speakers => "speakers",
+        AudioOutputKind::Headphones => "headphones",
+        AudioOutputKind::Hdmi => "hdmi",
+        AudioOutputKind::Digital => "digital",
+        AudioOutputKind::LineOut => "line_out",
+        AudioOutputKind::Bluetooth => "bluetooth",
+        AudioOutputKind::Unknown => "unknown",
+    }
+}
+
+/// Unrecognised kinds decay to `Unknown` rather than failing the read: `kind` is
+/// advisory, so a row written by a newer build must still load.
+fn kind_from_str(s: &str) -> AudioOutputKind {
+    match s {
+        "speakers" => AudioOutputKind::Speakers,
+        "headphones" => AudioOutputKind::Headphones,
+        "hdmi" => AudioOutputKind::Hdmi,
+        "digital" => AudioOutputKind::Digital,
+        "line_out" => AudioOutputKind::LineOut,
+        "bluetooth" => AudioOutputKind::Bluetooth,
+        _ => AudioOutputKind::Unknown,
+    }
+}
+
+fn row_to_audio_output(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioOutputRecord> {
+    let last_seen: String = row.get(5)?;
+    Ok(AudioOutputRecord {
+        output: AudioOutput {
+            key: row.get(0)?,
+            description: row.get(1)?,
+            kind: kind_from_str(&row.get::<_, String>(2)?),
+        },
+        max_volume: row.get::<_, Option<i64>>(3)?.map(|v| v as u8),
+        min_volume: row.get::<_, Option<i64>>(4)?.map(|v| v as u8),
+        last_seen: DateTime::parse_from_rfc3339(&last_seen)
+            .map(|dt| dt.with_timezone(&Local))
+            .unwrap_or_else(|_| shepherd_util::now()),
+        // Filled in by the service, which alone knows the live topology.
+        active: false,
+    })
 }
 
 #[cfg(test)]
@@ -1112,5 +1246,137 @@ mod tests {
         // Load it back
         let loaded = store.load_snapshot().unwrap().unwrap();
         assert!(loaded.active_session.is_none());
+    }
+}
+
+#[cfg(test)]
+mod audio_output_tests {
+    use super::*;
+
+    fn out(key: &str, desc: &str, kind: AudioOutputKind) -> AudioOutput {
+        AudioOutput {
+            key: key.into(),
+            description: desc.into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn seeing_an_output_again_keeps_its_limits() {
+        let store = SqliteStore::in_memory().unwrap();
+        let cans = out(
+            "card:output:headphones",
+            "Cans",
+            AudioOutputKind::Headphones,
+        );
+        store.record_audio_output_seen(&cans).unwrap();
+        assert!(
+            store
+                .set_audio_output_limits("card:output:headphones", Some(50), None)
+                .unwrap()
+        );
+
+        // Unplug and replug: discovery must not wipe the cap a parent set.
+        store.record_audio_output_seen(&cans).unwrap();
+
+        let rec = store
+            .get_audio_output("card:output:headphones")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.max_volume, Some(50));
+    }
+
+    #[test]
+    fn seeing_an_output_refreshes_its_label_and_kind() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .record_audio_output_seen(&out("k", "Old name", AudioOutputKind::Unknown))
+            .unwrap();
+        store
+            .record_audio_output_seen(&out("k", "New name", AudioOutputKind::Headphones))
+            .unwrap();
+
+        let rec = store.get_audio_output("k").unwrap().unwrap();
+        assert_eq!(rec.output.description, "New name");
+        assert_eq!(rec.output.kind, AudioOutputKind::Headphones);
+    }
+
+    #[test]
+    fn limits_on_an_unknown_output_are_refused() {
+        let store = SqliteStore::in_memory().unwrap();
+        // The UI only offers keys it has listed, so an unknown key is a stale
+        // client — better to say so than to invent a row for it.
+        assert!(
+            !store
+                .set_audio_output_limits("never-seen", Some(50), None)
+                .unwrap()
+        );
+        assert!(store.get_audio_output("never-seen").unwrap().is_none());
+    }
+
+    #[test]
+    fn limits_can_be_cleared() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .record_audio_output_seen(&out("k", "d", AudioOutputKind::Unknown))
+            .unwrap();
+        store
+            .set_audio_output_limits("k", Some(50), Some(10))
+            .unwrap();
+        store.set_audio_output_limits("k", None, None).unwrap();
+
+        let rec = store.get_audio_output("k").unwrap().unwrap();
+        assert_eq!(rec.max_volume, None);
+        assert_eq!(rec.min_volume, None);
+    }
+
+    #[test]
+    fn listing_puts_the_most_recently_seen_first() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .record_audio_output_seen(&out("a", "A", AudioOutputKind::Unknown))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .record_audio_output_seen(&out("b", "B", AudioOutputKind::Unknown))
+            .unwrap();
+
+        let keys: Vec<_> = store
+            .list_audio_outputs()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.output.key)
+            .collect();
+        assert_eq!(keys, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn forgetting_an_output_removes_it() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .record_audio_output_seen(&out("k", "d", AudioOutputKind::Unknown))
+            .unwrap();
+        assert!(store.forget_audio_output("k").unwrap());
+        assert!(!store.forget_audio_output("k").unwrap());
+        assert!(store.list_audio_outputs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unrecognised_kind_loads_as_unknown() {
+        // A row written by a newer build must not fail the read; kind is
+        // advisory, so decaying to Unknown is the right degradation.
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .record_audio_output_seen(&out("k", "d", AudioOutputKind::Unknown))
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE audio_outputs SET kind = 'quantum-earbuds'", [])
+            .unwrap();
+
+        let rec = store.get_audio_output("k").unwrap().unwrap();
+        assert_eq!(rec.output.kind, AudioOutputKind::Unknown);
     }
 }

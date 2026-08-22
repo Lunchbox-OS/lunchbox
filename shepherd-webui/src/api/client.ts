@@ -9,6 +9,7 @@
 import axios from "axios";
 import type { RpcMethod } from "./rpc-methods.generated";
 import type {
+  AudioOutputRecord,
   BrightnessInfo,
   DailyOverride,
   DiagnosticSet,
@@ -192,6 +193,16 @@ export const setVolumePercent = (percent: number) =>
   call<VolumeInfo>("set_volume", { percent });
 export const setVolumeMuted = (muted: boolean) =>
   call<VolumeInfo>("set_mute", { muted });
+
+// Per-output volume limits
+export const listAudioOutputs = () =>
+  call<AudioOutputRecord[]>("list_audio_outputs");
+export const setAudioOutputLimits = (
+  output_key: string,
+  max_volume: number | null,
+) => call<AudioOutputRecord>("set_audio_output_limits", { output_key, max_volume });
+export const forgetAudioOutput = (output_key: string) =>
+  call<boolean>("forget_audio_output", { output_key });
 
 // Brightness
 export const getBrightness = () => call<BrightnessInfo>("get_brightness");

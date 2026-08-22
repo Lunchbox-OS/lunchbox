@@ -613,17 +613,93 @@ the headless session.
   depends on it.
 - PulseAudio and ALSA hosts get no output identity and no watch loop.
 
+## Change 2 as built (per-output limits)
+
+Landed 2026-08-21, on top of change 1.
+
+### Shape
+
+- `shepherd-store` — new `audio_outputs` table (`output_key` PK, description,
+  kind, `max_volume`, `min_volume`, `last_seen`) plus five trait methods.
+  `record_audio_output_seen` never writes the limit columns, so a device that
+  disappears and comes back keeps its cap.
+- `shepherd-api` — `AudioOutputRecord { output, max_volume, min_volume,
+  last_seen, active }`.
+- `shepherd-management` — `volume_restrictions_for(output_key)` layering,
+  `enforce_volume_ceiling()`, discovery inside the watch tick, and three RPC
+  methods: `list_audio_outputs`, `set_audio_output_limits`,
+  `forget_audio_output`.
+- `shepherd-webui` — a "Volume limits per device" card listing the rows, with a
+  per-row on/off switch, a max slider, an "In use now" chip, a last-used label,
+  and a Forget button (disabled for the active device, which would be
+  rediscovered immediately).
+- `config.example.toml` — a comment pointing at the admin UI, since there is
+  deliberately no TOML for this.
+
+### How the decisions came out in code
+
+**Discovery-driven, no new TOML.** `config.toml` is never written by the daemon,
+so UI-set caps live in the store, following the auto-brightness precedent
+(stored value wins, config is the default). The parent plugs the device in, sees
+the row, sets the cap.
+
+**Stricter-of-two layering.** `stricter_max` takes the lower of the policy and
+per-output ceilings; `stricter_min` takes the higher of the floors; a floor
+above the ceiling is clamped down to it. A per-output limit can therefore lower
+a cap but never raise one — pinned by
+`the_stricter_of_the_policy_and_output_caps_wins`, which checks both directions.
+
+**Clamp on switch, and on set.** `enforce_volume_ceiling` runs when the active
+output changes and when a cap is saved. The second case matters as much as the
+first: without it a parent sets a limit, hears nothing change, and concludes it
+did not work.
+
+**Unseen outputs inherit the global cap**, so a brand-new device is no louder
+than the machine's default and no quieter.
+
+### Verified
+
+685 workspace tests pass; `cargo clippy --all-targets -D warnings` clean;
+`config validate` passes. New coverage: seven store tests (limits survive
+replug, unknown keys refused, unrecognised kinds decay, ordering, clearing) and
+eleven service tests (discovery, per-output isolation, both directions of the
+stricter-of rule, inheritance, clamp on switch, clamp on set, no clamp when
+already quiet, survival across replug, forget, and validation).
+
+End-to-end on the headless session with two real devices:
+
+- Both were discovered automatically by being used; no log-digging.
+- Capping the built-in at 30%, leaving it at 100% while *unselected*, then
+  selecting it: volume dropped to 30% on arrival.
+- The Focusrite, uncapped per-output, still reported the global 80% and clamped
+  a 95% request to 80; the same request on the capped device clamped to 30.
+- The HUD slider's range followed the active output — pinned at maximum showing
+  30%.
+
+### Not verified
+
+- **The web UI card is not visually verified.** It typechecks and builds, and
+  the payload it renders was confirmed live over HTTP, but the SPA is embedded
+  into the binary at compile time and no working browser is available in the
+  headless session, so nothing rendered it. The project has no JS test harness
+  (no test script, no jsdom/testing-library), and standing one up is a larger
+  decision than this issue should make.
+- **The companion app was not touched.** No Android device or emulator is
+  attached, so a Compose screen could not be exercised. Its generated
+  `VolumeInfo` already carries `output`, so it shows correct numbers; the
+  per-device rows remain to do.
+
 ## Open questions
 
 All blocking questions were resolved above. Remaining items are implementation
 details to settle in review, not decisions:
 
-- Whether `kind` detection is worth building at all in change 2, given it is
-  advisory and classifies neither device on the dev host. It may be cheaper to
-  ship the rows with a generic icon and add `kind` when a self-describing
-  device (a Bluetooth headset) is actually available to test against.
-- Whether the companion needs the output rows in its first pass or can show
-  read-only state until the webui flow is proven.
-- Wire compatibility for an older companion against a newer daemon when
-  `VolumeChanged` grows fields — check `WireTest.kt` before choosing
-  nullability.
+- The companion's per-device rows (see "Not verified" above). Its generated
+  types already carry everything needed.
+- Visual verification of the web UI card, which needs either a browser in the
+  headless session or a JS component-test harness.
+- Whether the 2s poll should become a `pw-mon` subscription. Only latency is at
+  stake; correctness does not depend on it.
+- `min_volume` is stored and layered per output but not exposed in the UI, which
+  offers only a maximum. That is the limit the issue asked for; the floor can be
+  surfaced if a use case appears.

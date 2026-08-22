@@ -1,7 +1,7 @@
 //! Store trait definitions
 
 use chrono::{DateTime, Local, NaiveDate};
-use shepherd_api::DailyOverride;
+use shepherd_api::{AudioOutput, AudioOutputRecord, DailyOverride};
 use shepherd_util::{EntryId, LimitSubject, SessionId};
 use std::time::Duration;
 
@@ -127,6 +127,32 @@ pub trait Store: Send + Sync {
 
     /// List all daily overrides active on a given date
     fn list_daily_overrides(&self, date: NaiveDate) -> StoreResult<Vec<DailyOverride>>;
+
+    // Audio outputs (issue #124)
+
+    /// Record that an output was observed, refreshing its label, kind, and
+    /// `last_seen`. Never touches the limits: discovery and configuration are
+    /// separate concerns, and a device reappearing must not reset its cap.
+    fn record_audio_output_seen(&self, output: &AudioOutput) -> StoreResult<()>;
+
+    /// Set (or clear, with `None`) the per-output limits for a known output.
+    /// Returns false when no such row exists — the UI only offers keys it has
+    /// listed, so an unknown key means a stale client rather than a new device.
+    fn set_audio_output_limits(
+        &self,
+        output_key: &str,
+        max_volume: Option<u8>,
+        min_volume: Option<u8>,
+    ) -> StoreResult<bool>;
+
+    /// Fetch one output's record, if it has ever been seen.
+    fn get_audio_output(&self, output_key: &str) -> StoreResult<Option<AudioOutputRecord>>;
+
+    /// Every output ever seen, most recently seen first.
+    fn list_audio_outputs(&self) -> StoreResult<Vec<AudioOutputRecord>>;
+
+    /// Drop an output and its limits. Returns true if a row existed.
+    fn forget_audio_output(&self, output_key: &str) -> StoreResult<bool>;
 
     // Settings (small, global, runtime-toggled key/value flags)
 

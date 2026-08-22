@@ -37,6 +37,9 @@ struct WireTypes {
     usage_stat: shepherd_api::UsageStat,
     volume_info: shepherd_api::VolumeInfo,
     volume_restrictions: shepherd_api::VolumeRestrictions,
+    // Reachable only through `list_audio_outputs`, not from `VolumeInfo`, so it
+    // has to be rooted explicitly or the companion never gets the type.
+    audio_output_record: shepherd_api::AudioOutputRecord,
     brightness_info: shepherd_api::BrightnessInfo,
     brightness_restrictions: shepherd_api::BrightnessRestrictions,
     health_status: shepherd_api::HealthStatus,

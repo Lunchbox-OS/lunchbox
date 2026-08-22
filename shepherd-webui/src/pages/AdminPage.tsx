@@ -17,15 +17,19 @@ import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import BrightnessHighIcon from "@mui/icons-material/BrightnessHigh";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  forgetAudioOutput,
   getBrightness,
   getVolume,
+  listAudioOutputs,
   logoutUser,
   reloadConfig,
+  setAudioOutputLimits,
   setAutoBrightness,
   setBrightnessPercent,
   setVolumeMuted,
   setVolumePercent,
 } from "../api/client";
+import { AudioOutputsCard } from "../components/AudioOutputsCard";
 import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 import { ConnectionSettings } from "./ConnectionSettings";
@@ -39,6 +43,10 @@ export function AdminPage() {
   const { data: brightness, isPending: brightLoading } = useQuery({
     queryKey: ["brightness"],
     queryFn: getBrightness,
+  });
+  const { data: audioOutputs } = useQuery({
+    queryKey: ["audio-outputs"],
+    queryFn: listAudioOutputs,
   });
 
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -54,6 +62,27 @@ export function AdminPage() {
   const setPercentMutation = useMutation({
     mutationFn: setVolumePercent,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["volume"] }),
+    onError: (e) => flash(String(e), false),
+  });
+
+  const setOutputLimitMutation = useMutation({
+    mutationFn: ({ key, max }: { key: string; max: number | null }) =>
+      setAudioOutputLimits(key, max),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
+      queryClient.invalidateQueries({ queryKey: ["volume"] });
+      flash("Limit saved");
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const forgetOutputMutation = useMutation({
+    mutationFn: forgetAudioOutput,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
+      queryClient.invalidateQueries({ queryKey: ["volume"] });
+      flash("Device forgotten");
+    },
     onError: (e) => flash(String(e), false),
   });
 
@@ -159,6 +188,14 @@ export function AdminPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      {/* Per-device volume limits (issue #124) */}
+      <AudioOutputsCard
+        records={audioOutputs}
+        busy={setOutputLimitMutation.isPending || forgetOutputMutation.isPending}
+        onSetLimit={(key, max) => setOutputLimitMutation.mutate({ key, max })}
+        onForget={(key) => forgetOutputMutation.mutate(key)}
+      />
 
       {/* Brightness */}
       <Card variant="outlined">

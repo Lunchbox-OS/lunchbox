@@ -4,8 +4,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, DiagnosticSet, DisplayMode,
-    DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
+    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, DiagnosticSet,
+    DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
     ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat,
     VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, watch};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 use crate::error::{ManagementError, ManagementResult};
@@ -119,6 +119,17 @@ pub trait ManagementService: Send + Sync {
     async fn volume_up(&self, step: u8) -> ManagementResult<VolumeInfo>;
     async fn volume_down(&self, step: u8) -> ManagementResult<VolumeInfo>;
     async fn toggle_mute(&self) -> ManagementResult<VolumeInfo>;
+
+    // Per-output volume limits (issue #124)
+    async fn list_audio_outputs(&self) -> ManagementResult<Vec<AudioOutputRecord>>;
+    #[rpc(default(max_volume = "Default::default", min_volume = "Default::default"))]
+    async fn set_audio_output_limits(
+        &self,
+        output_key: String,
+        max_volume: Option<u8>,
+        min_volume: Option<u8>,
+    ) -> ManagementResult<AudioOutputRecord>;
+    async fn forget_audio_output(&self, output_key: String) -> ManagementResult<bool>;
 
     // Brightness
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo>;
@@ -787,6 +798,91 @@ impl ManagementService for DefaultManagementService {
         self.broadcast_volume_change().await
     }
 
+    // -------------------------------------------------- per-output limits
+
+    async fn list_audio_outputs(&self) -> ManagementResult<Vec<AudioOutputRecord>> {
+        // Refresh from the live topology first, so an output plugged in a moment
+        // ago is already on the list the parent is about to read.
+        if let Some(active) = self.volume.current_output().await
+            && let Err(e) = self.store.record_audio_output_seen(&active)
+        {
+            warn!(error = %e, "Failed to record the active audio output");
+        }
+        let active_key = self.volume.current_output().await.map(|o| o.key);
+        let mut rows = self
+            .store
+            .list_audio_outputs()
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        for row in &mut rows {
+            row.active = Some(&row.output.key) == active_key.as_ref();
+        }
+        Ok(rows)
+    }
+
+    async fn set_audio_output_limits(
+        &self,
+        output_key: String,
+        max_volume: Option<u8>,
+        min_volume: Option<u8>,
+    ) -> ManagementResult<AudioOutputRecord> {
+        for (name, v) in [("max_volume", max_volume), ("min_volume", min_volume)] {
+            if let Some(v) = v
+                && v > 100
+            {
+                return Err(ManagementError::BadRequest(format!(
+                    "{name} must be 0-100, got {v}"
+                )));
+            }
+        }
+        if let (Some(min), Some(max)) = (min_volume, max_volume)
+            && min > max
+        {
+            return Err(ManagementError::BadRequest(format!(
+                "min_volume ({min}) must not exceed max_volume ({max})"
+            )));
+        }
+
+        let known = self
+            .store
+            .set_audio_output_limits(&output_key, max_volume, min_volume)
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        if !known {
+            return Err(ManagementError::NotFound(format!(
+                "Unknown audio output: {output_key}"
+            )));
+        }
+
+        // A new cap has to bite immediately, including on the output that is
+        // playing right now — otherwise setting a headphone limit does nothing
+        // until the next time someone switches away and back.
+        self.enforce_volume_ceiling().await;
+        let _ = self.broadcast_volume_change().await;
+
+        let mut row = self
+            .store
+            .get_audio_output(&output_key)
+            .map_err(|e| ManagementError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ManagementError::NotFound(format!("Unknown audio output: {output_key}"))
+            })?;
+        row.active =
+            self.volume.current_output().await.map(|o| o.key).as_deref() == Some(&output_key);
+        Ok(row)
+    }
+
+    async fn forget_audio_output(&self, output_key: String) -> ManagementResult<bool> {
+        let removed = self
+            .store
+            .forget_audio_output(&output_key)
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        if removed {
+            // Dropping a row can only relax limits, but the clients still need
+            // to hear that the effective restrictions changed.
+            let _ = self.broadcast_volume_change().await;
+        }
+        Ok(removed)
+    }
+
     async fn toggle_mute(&self) -> ManagementResult<VolumeInfo> {
         let restrictions = self.volume_restrictions().await;
         if !restrictions.allow_mute {
@@ -943,7 +1039,9 @@ impl ManagementService for DefaultManagementService {
 }
 
 impl DefaultManagementService {
-    async fn volume_restrictions(&self) -> VolumeRestrictions {
+    /// Restrictions from config alone: the running activity's override if it has
+    /// one, otherwise the global `[service.volume]`.
+    async fn policy_volume_restrictions(&self) -> VolumeRestrictions {
         let eng = self.engine.lock().await;
         let policy = if let Some(session) = eng.current_session()
             && let Some(entry) = eng.policy().get_entry(&session.plan.entry_id)
@@ -954,6 +1052,42 @@ impl DefaultManagementService {
             eng.policy().volume.clone()
         };
         convert_volume_policy(&policy)
+    }
+
+    /// The restrictions actually in force for a given output: the config
+    /// restrictions above, combined with any per-output limits the parent set.
+    ///
+    /// The two are combined by taking the **stricter** of each bound rather than
+    /// letting one override the other, so the result always fails safe. Capping
+    /// gaming at 60 and headphones at 50 yields 50; neither setting can be used
+    /// to raise a limit the other imposed.
+    async fn volume_restrictions_for(&self, output_key: Option<&str>) -> VolumeRestrictions {
+        let mut r = self.policy_volume_restrictions().await;
+        let Some(key) = output_key else {
+            return r;
+        };
+        let Ok(Some(row)) = self.store.get_audio_output(key) else {
+            // Never seen, or the store is unavailable: the global limit stands.
+            // A new device is therefore no louder than the machine's default,
+            // and no quieter either.
+            return r;
+        };
+        r.max_volume = stricter_max(r.max_volume, row.max_volume);
+        r.min_volume = stricter_min(r.min_volume, row.min_volume);
+        // A floor above the ceiling is unsatisfiable; the ceiling is the safety
+        // bound, so it wins.
+        if let (Some(min), Some(max)) = (r.min_volume, r.max_volume)
+            && min > max
+        {
+            r.min_volume = Some(max);
+        }
+        r
+    }
+
+    /// Restrictions for whatever output is active right now.
+    async fn volume_restrictions(&self) -> VolumeRestrictions {
+        let key = self.volume.current_output().await.map(|o| o.key);
+        self.volume_restrictions_for(key.as_deref()).await
     }
 
     async fn brightness_restrictions(&self) -> BrightnessRestrictions {
@@ -1073,6 +1207,36 @@ impl DefaultManagementService {
         Ok(info)
     }
 
+    /// Pull the volume down if it sits above the ceiling now in force.
+    ///
+    /// Limits used to apply only to changes routed through us, so an output
+    /// whose remembered volume already exceeded its cap stayed loud — which is
+    /// most of the point of a headphone limit. Called when the active output
+    /// changes and when a cap is set.
+    async fn enforce_volume_ceiling(&self) {
+        let Ok((status, output)) = self.volume.observe().await else {
+            return;
+        };
+        let restrictions = self
+            .volume_restrictions_for(output.as_ref().map(|o| o.key.as_str()))
+            .await;
+        let Some(max) = restrictions.max_volume else {
+            return;
+        };
+        if status.percent <= max {
+            return;
+        }
+        info!(
+            from = status.percent,
+            to = max,
+            output = output.as_ref().map(|o| o.key.as_str()).unwrap_or("?"),
+            "Volume above the limit for this output; turning it down"
+        );
+        if let Err(e) = self.volume.set_volume(max).await {
+            warn!(error = %e, "Failed to enforce the volume limit");
+        }
+    }
+
     /// One pass of the audio-output watch loop (issue #124).
     ///
     /// The default sink can change with no involvement from us — a headset is
@@ -1102,13 +1266,30 @@ impl DefaultManagementService {
             return;
         }
         let first_observation = last.is_none();
+        let switched = last
+            .as_ref()
+            .is_some_and(|prev| prev.output_key != now.output_key);
         *last = Some(now);
         drop(last);
 
         // The first tick only establishes the baseline; broadcasting there would
         // emit a spurious event on every daemon start.
+        // Discovery: every output we see becomes a row the parent can set a
+        // limit on, so nobody has to dig a device name out of the logs.
+        if let Some(out) = output.as_ref()
+            && let Err(e) = self.store.record_audio_output_seen(out)
+        {
+            warn!(error = %e, "Failed to record the observed audio output");
+        }
+
         if first_observation {
+            // Still enforce on the first tick: shepherdd may have just started
+            // onto an output that is already too loud.
+            self.enforce_volume_ceiling().await;
             return;
+        }
+        if switched {
+            self.enforce_volume_ceiling().await;
         }
         if let Err(e) = self.broadcast_volume_change().await {
             warn!(error = %e, "Failed to broadcast observed audio change");
@@ -1151,6 +1332,22 @@ fn resolve_brightness_restrictions(eng: &CoreEngine) -> BrightnessRestrictions {
         eng.policy().brightness.clone()
     };
     convert_brightness_policy(&policy)
+}
+
+/// The lower of two ceilings; `None` means "no ceiling from this source".
+fn stricter_max(a: Option<u8>, b: Option<u8>) -> Option<u8> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (x, None) | (None, x) => x,
+    }
+}
+
+/// The higher of two floors; `None` means "no floor from this source".
+fn stricter_min(a: Option<u8>, b: Option<u8>) -> Option<u8> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (x, None) | (None, x) => x,
+    }
 }
 
 fn convert_volume_policy(p: &VolumePolicy) -> VolumeRestrictions {

@@ -1139,3 +1139,236 @@ async fn get_volume_reports_the_active_output() {
     );
     assert_eq!(body["output"]["description"], "Scarlett");
 }
+
+// ---------------------------------------------------------------------------
+// Per-output volume limits (issue #124)
+// ---------------------------------------------------------------------------
+
+/// Put the service on a named output and let the watcher discover it, which is
+/// how a row comes to exist at all.
+async fn on_output(svc: &DefaultManagementService, vol: &Arc<MockVolume>, key: &str, desc: &str) {
+    *vol.output.lock().unwrap() = Some(output(key, desc));
+    svc.audio_watch_tick().await;
+}
+
+#[tokio::test]
+async fn outputs_are_discovered_by_being_used() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+
+    let body = ok(&svc, "list_audio_outputs", json!({})).await;
+    let rows = body.as_array().expect("a list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["output"]["key"], "card:output:headphones");
+    assert_eq!(rows[0]["output"]["description"], "Cans");
+    // No cap until a parent sets one.
+    assert!(rows[0]["max_volume"].is_null());
+    assert_eq!(rows[0]["active"], true);
+}
+
+#[tokio::test]
+async fn a_per_output_cap_applies_to_that_output_only() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "card:output:headphones", "max_volume": 50 }),
+    )
+    .await;
+
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    let speakers = ok(&svc, "get_volume", json!({})).await;
+    assert!(speakers["restrictions"]["max_volume"].is_null());
+
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    let cans = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(cans["restrictions"]["max_volume"], 50);
+}
+
+#[tokio::test]
+async fn the_stricter_of_the_policy_and_output_caps_wins() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(60),
+        min_volume: None,
+        allow_mute: true,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+
+    // Output cap lower than the policy cap: the output wins.
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 50 }),
+    )
+    .await;
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 50);
+
+    // Output cap higher than the policy cap: the policy still wins. A
+    // per-output limit must never be usable to raise a limit set elsewhere.
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 90 }),
+    )
+    .await;
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 60);
+}
+
+#[tokio::test]
+async fn an_unseen_output_inherits_the_global_cap() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(80),
+        min_volume: None,
+        allow_mute: true,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+    *vol.output.lock().unwrap() = Some(output("brand-new", "Just plugged in"));
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 80);
+}
+
+#[tokio::test]
+async fn switching_to_a_capped_output_turns_the_volume_down() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "card:output:headphones", "max_volume": 50 }),
+    )
+    .await;
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.status.lock().unwrap().percent = 100;
+
+    // Headphones are plugged back in while the speakers were at 100. Bounding
+    // only future changes would leave them at 100 — the whole point of the
+    // limit is that it bites now.
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+
+    assert_eq!(vol.status.lock().unwrap().percent, 50);
+}
+
+#[tokio::test]
+async fn setting_a_cap_bites_on_the_output_already_playing() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    vol.status.lock().unwrap().percent = 90;
+
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 40 }),
+    )
+    .await;
+
+    // Otherwise a parent sets a limit, hears no change, and concludes it did
+    // not work.
+    assert_eq!(vol.status.lock().unwrap().percent, 40);
+}
+
+#[tokio::test]
+async fn a_quiet_output_is_left_alone_when_a_cap_is_set() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    vol.status.lock().unwrap().percent = 30;
+
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 40 }),
+    )
+    .await;
+
+    assert_eq!(vol.status.lock().unwrap().percent, 30);
+}
+
+#[tokio::test]
+async fn limits_survive_the_device_going_away_and_coming_back() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 50 }),
+    )
+    .await;
+
+    on_output(&svc, &vol, "other", "Something else").await;
+    on_output(&svc, &vol, "k", "Cans").await; // unplug, replug
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 50);
+}
+
+#[tokio::test]
+async fn forgetting_an_output_drops_its_cap() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 50 }),
+    )
+    .await;
+
+    let removed = ok(&svc, "forget_audio_output", json!({ "output_key": "k" })).await;
+    assert_eq!(removed, json!(true));
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert!(body["restrictions"]["max_volume"].is_null());
+}
+
+#[tokio::test]
+async fn limits_on_an_unknown_output_are_rejected() {
+    let cfg = temp_config();
+    let (svc, _vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let err = rpc(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "never-seen", "max_volume": 50 }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("Unknown audio output"),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn nonsensical_limits_are_rejected() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+
+    for params in [
+        json!({ "output_key": "k", "max_volume": 150 }),
+        json!({ "output_key": "k", "max_volume": 40, "min_volume": 60 }),
+    ] {
+        assert!(
+            rpc(&svc, "set_audio_output_limits", params.clone())
+                .await
+                .is_err(),
+            "should have rejected {params}"
+        );
+    }
+}

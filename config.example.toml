@@ -30,7 +30,16 @@ default_max_run_seconds = 3600
 # cooldown_min_session_seconds = 120
 
 # Global volume restrictions (optional)
-# These apply when no entry-specific restrictions are defined
+# These apply when no entry-specific restrictions are defined.
+#
+# Per-device limits (e.g. a lower cap for headphones than for speakers) are NOT
+# configured here. Devices identify themselves in ways that cannot be predicted
+# from a config file, so shepherdd records each audio output it sees and you set
+# a limit on it from the admin web UI ("Volume limits per device"). Plug the
+# device in once and it appears in that list.
+#
+# The strictest limit always wins: a per-device limit can lower the caps below,
+# never raise them.
 [service.volume]
 max_volume = 80      # Maximum volume percentage (0-100)
 # min_volume = 20    # Minimum volume percentage (0-100)
