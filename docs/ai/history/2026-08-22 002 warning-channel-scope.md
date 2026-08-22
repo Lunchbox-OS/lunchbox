@@ -252,15 +252,24 @@ twice and makes the bounded-size problem worse.
 4. **Web UI** — a panel modelled on `WindowsPage.tsx`, plus the entry badge.
 5. **Companion** — the same, modelled on `WindowsScreen.kt`.
 
-Phases 1–3 are useful on their own: `shepherd-admin`-style inspection over the
-existing RPC beats journald even before either UI lands.
+**Phases 1–3 are not observable on their own**, which argues for shipping 4 with
+them. There is no RPC-capable CLI to inspect the registry with:
+`scripts/shepherd-admin` is a host-setup shell script (`setup-user`, `apps`,
+`power-key`, `harden`, `bluetooth`) with no client for the management API, so
+giving it a `diagnostics` subcommand means building that path first. Until a UI
+consumes it, the registry is only reachable from a test.
 
 ## Open questions
 
 - **`Diagnostic` vs `Notice`** (above). Needs deciding first; it is pervasive.
-- **Does the companion push?** "Critical deserves to interrupt" assumes a
-  notification path exists on the phone. If it doesn't, Critical degrades to a
-  banner and the interrupt question moves to its own issue.
+- ~~**Does the companion push?**~~ **Settled: it cannot.** There is no
+  `NotificationManager`/`NotificationCompat` use anywhere in
+  `companion-android/app/src/main/`, and the manifest declares only the two
+  Bluetooth permissions — no `POST_NOTIFICATIONS`. Interrupting would mean a
+  notification channel, a runtime permission, and a decision about a transport
+  that only reaches the phone while it is BLE-connected anyway. So Critical is
+  an in-app banner in both UIs for now, and "notify the parent when a
+  protection stops working" is its own issue with its own transport question.
 - **Does anything go in the audit log too?** A protection silently not applied
   seems worth an audit row, distinct from the current-state registry. Probably
   yes for Critical, but it is a second write path and can wait.
