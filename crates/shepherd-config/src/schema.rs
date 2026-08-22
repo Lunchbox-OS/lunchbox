@@ -112,6 +112,10 @@ pub struct RawServiceConfig {
     /// External monitor / docking behaviour (issue #87).
     #[serde(default)]
     pub display: Option<RawDisplayConfig>,
+
+    /// Background media prefetch (issue #127).
+    #[serde(default)]
+    pub media: Option<RawMediaServiceConfig>,
 }
 
 /// Raw entry definition
@@ -403,6 +407,44 @@ where
     }
 }
 
+/// How a `media` entry opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawMediaMode {
+    /// Open the poster grid over the whole library.
+    #[default]
+    Browse,
+    /// Play a single item end to end.
+    Play,
+}
+
+/// Maximum video quality for a `media` entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum RawMediaQuality {
+    #[serde(rename = "best")]
+    Best,
+    #[default]
+    #[serde(rename = "1080p")]
+    Q1080,
+    #[serde(rename = "720p")]
+    Q720,
+    #[serde(rename = "480p")]
+    Q480,
+}
+
+/// Item ordering for a `media` entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawMediaSortBy {
+    #[default]
+    Library,
+    Title,
+    Id,
+    Kind,
+    Category,
+    Duration,
+}
+
 /// Raw entry kind
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -457,10 +499,43 @@ pub enum RawEntryKind {
         #[serde(default)]
         args: HashMap<String, serde_json::Value>,
     },
+    /// A `shepherd-media` library activity (issue #127).
+    ///
+    /// The fields mirror the flags `shepherd-media` accepts, so shepherdd
+    /// builds the invocation itself. The connectivity check is not among them:
+    /// it is inherited from `[entries.internet]` / `[service.internet]` — see
+    /// [`RawEntryInternet::forward_check`].
     Media {
-        library_id: String,
+        /// Path to a library `.toml`, `.m3u`, or `.m3u8`, or a YouTube
+        /// playlist URL. `~` is expanded at launch for paths.
+        library: String,
+        /// `"browse"` (default) opens the poster grid; `"play"` plays a
+        /// single `item` end to end.
         #[serde(default)]
-        args: HashMap<String, serde_json::Value>,
+        mode: RawMediaMode,
+        /// The item id to play. Required by, and only valid with,
+        /// `mode = "play"`.
+        item: Option<String>,
+        /// Maximum video quality: `best`, `1080p` (default), `720p`, `480p`.
+        #[serde(default)]
+        quality: RawMediaQuality,
+        /// Item ordering: `library` (default), `title`, `id`, `kind`,
+        /// `category`, `duration`.
+        #[serde(default)]
+        sort_by: RawMediaSortBy,
+        /// Reverse the final item order. Combines with `sort_by`.
+        #[serde(default)]
+        reverse: bool,
+        /// Remember playback positions for this library, so a re-opened item
+        /// picks up where it stopped. Off by default: with it off nothing
+        /// about what was watched is written to disk.
+        #[serde(default)]
+        resume: bool,
+        /// Let shepherdd download this library's remote items in the
+        /// background (issue #127). Defaults to `service.media.prefetch`; set
+        /// `false` to exclude just this library — e.g. a live stream, or a
+        /// playlist too large to be worth the disk.
+        prefetch: Option<bool>,
     },
     Custom {
         type_name: String,
@@ -574,6 +649,47 @@ pub struct RawInternetConfig {
     pub timeout_ms: Option<u64>,
 }
 
+/// Service-wide media behaviour (issue #127).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawMediaServiceConfig {
+    /// Download remote library items in the background, so a video the child
+    /// opens later plays from disk instead of buffering. On by default when any
+    /// `media` entry is configured.
+    ///
+    /// This is the global off switch; individual entries can opt out on their
+    /// own with `prefetch = false` under `[entries.kind]`.
+    #[serde(default = "default_true")]
+    pub prefetch: bool,
+
+    /// Keep prefetching while an activity is running. Off by default: a
+    /// download competing with a game — or with the video the child is
+    /// watching right now — costs them CPU and bandwidth for content nobody
+    /// has asked for yet.
+    #[serde(default)]
+    pub prefetch_while_session_active: bool,
+
+    /// Stop prefetching when the cache filesystem has less than this much free
+    /// space, in bytes, and warn. Guards the small disks these devices use,
+    /// where the cache cap alone can still fill the volume. 0 disables the
+    /// check.
+    #[serde(default = "default_free_space_floor")]
+    pub free_space_floor_bytes: u64,
+}
+
+impl Default for RawMediaServiceConfig {
+    fn default() -> Self {
+        Self {
+            prefetch: true,
+            prefetch_while_session_active: false,
+            free_space_floor_bytes: default_free_space_floor(),
+        }
+    }
+}
+
+fn default_free_space_floor() -> u64 {
+    2 * 1024 * 1024 * 1024 // 2 GiB
+}
+
 /// Steam-specific service configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawSteamConfig {
@@ -607,6 +723,18 @@ pub struct RawEntryInternet {
 
     /// Override connectivity check target for this entry
     pub check: Option<String>,
+
+    /// Whether shepherdd tells the activity itself about the connectivity
+    /// check, in addition to using it for availability. Today only the
+    /// `media` kind consumes it: browse mode polls the target and hides
+    /// library items that have no local source while it fails, instead of
+    /// leaving the child a grid of tiles that error on tap.
+    ///
+    /// On by default whenever a check resolves (this entry's, else
+    /// `service.internet.check`). Set `false` to launch the activity without
+    /// one — the grid then shows every item regardless of connectivity.
+    #[serde(default = "default_true")]
+    pub forward_check: bool,
 }
 
 fn default_severity() -> String {

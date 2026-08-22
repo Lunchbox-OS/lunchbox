@@ -85,6 +85,20 @@ check = "https://connectivitycheck.gstatic.com/generate_204"
 interval_seconds = 300  # Keep this high to avoid excessive network requests
 timeout_ms = 1500
 
+# Background media prefetch (optional) — issue #127
+# shepherdd downloads the remote items of `type = "media"` libraries ahead of
+# time, so a video the child opens later plays from disk instead of buffering,
+# and the library keeps working offline. Downloads pause while an activity is
+# running and while the internet is down, and a speculative download will never
+# displace a video that has actually been watched.
+#
+# The cache itself is capped by the SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES
+# environment variable (default 10 GiB); see docs/shepherd-media.md.
+[service.media]
+# prefetch = true                        # global off switch
+# prefetch_while_session_active = false  # true spends CPU/bandwidth during play
+# free_space_floor_bytes = 2147483648    # 2 GiB; stop and warn below this. 0 disables
+
 # Steam-specific behaviour (optional)
 # Steam can block a game launch behind an "interstitial" — a modal it shows
 # between the launch request and the game starting (e.g. the offline "Unable to
@@ -613,6 +627,11 @@ end = "20:00"
 [entries.internet]
 required = true
 check = "http://www.msftconnecttest.com/connecttest.txt"  # Use Microsoft's test URL (Minecraft is owned by Microsoft)
+# forward_check = false
+#   By default shepherdd also hands the resolved check (this one, else
+#   `service.internet.check`) to the activity itself, for kinds that can act
+#   on it — today `type = "media"`, whose browse grid hides items with no
+#   local source while the check fails. Set false to launch without one.
 
 [entries.limits]
 max_run_seconds = 1800  # 30 minutes (roughly 3 in-game days)
@@ -760,6 +779,10 @@ daily_quota_seconds = 7200   # 2 hours per day
 # `shepherd-media validate <library.toml>` checks a file before you wire it
 # up here.
 #
+# Entries use `type = "media"`: shepherdd builds the `shepherd-media` command
+# line itself, so a bad item id or an unknown quality is caught by
+# `shepherd-admin config validate` rather than on the child's screen.
+#
 # Most entries below reference `~/.config/shepherd/movies.toml`. A starter
 # library that defines `big-buck-bunny`, `sintel`, `tears-of-steel`, and
 # `lofi-beats` is checked in at `movies-library.example.toml`; copy it and
@@ -782,13 +805,10 @@ label = "Big Buck Bunny"
 icon = "mpv"
 
 [entries.kind]
-type = "process"
-command = "shepherd-media"
-args = [
-    "play",
-    "--library", "~/.config/shepherd/movies.toml",
-    "--item", "big-buck-bunny",
-]
+type = "media"
+library = "~/.config/shepherd/movies.toml"
+mode = "play"
+item = "big-buck-bunny"
 
 [entries.availability]
 
@@ -805,9 +825,9 @@ end = "20:00"
 # A whole library exposed as a single browse-mode activity. The user picks
 # items from a poster grid; each playback is internal to the process.
 #
-# Add "--resume" to the args to remember where each item was left off (and
-# offer to continue the last one watched when the library re-opens). It is off
-# by default: without it nothing about what was watched is written to disk.
+# Set `resume = true` to remember where each item was left off (and offer to
+# continue the last one watched when the library re-opens). It is off by
+# default: without it nothing about what was watched is written to disk.
 # See docs/shepherd-media.md#resuming-playback.
 [[entries]]
 id = "movies-library"
@@ -815,9 +835,14 @@ label = "Movies"
 icon = "folder-videos"
 
 [entries.kind]
-type = "process"
-command = "shepherd-media"
-args = ["browse", "--library", "~/.config/shepherd/movies.toml"]
+type = "media"
+library = "~/.config/shepherd/movies.toml"
+# mode = "browse"   # the default; opens the poster grid over the whole library
+# resume = true
+# quality = "1080p" # best | 1080p | 720p | 480p
+# sort_by = "title" # library (default) | title | id | kind | category | duration
+# reverse = true
+# prefetch = false  # exclude just this library from background downloads
 
 [entries.availability]
 
@@ -838,13 +863,13 @@ label = "Lofi Beats"
 icon = "mpv"
 
 [entries.kind]
-type = "process"
-command = "shepherd-media"
-args = [
-    "play",
-    "--library", "~/.config/shepherd/movies.toml",
-    "--item", "lofi-beats",
-]
+type = "media"
+library = "~/.config/shepherd/movies.toml"
+mode = "play"
+item = "lofi-beats"
+# A 24/7 live stream has no end to download; prefetching it would spend the
+# whole cache on a file that never completes.
+prefetch = false
 
 [entries.availability]
 always = true
@@ -861,29 +886,26 @@ cooldown_seconds = 0  # No cooldown
 # trust. See docs/shepherd-media.md for caching behavior and the rationale
 # for the recommended flags below.
 #
-# Recommended flags:
-# - `--connectivity-check`: every source is a YouTube URL, so the grid is
-#   unreachable when offline. The check empties the grid gracefully
-#   instead of failing on the first click. Any reachable HTTPS or
-#   `tcp://host:port` probe works.
-# - `--reverse`: a channel's "uploads" playlist (`UU…`) is returned
-#   newest-first by YouTube; reversing yields chronological viewing.
-#   Omit for hand-curated `PL…` playlists where the owner's order is
-#   already what you want.
+# Every source here is a YouTube URL, so the grid is unreachable when
+# offline. shepherdd hands the activity the connectivity check from
+# `[entries.internet]`, or `service.internet.check` above when the entry sets
+# none — as here. Browse mode then polls it and empties the grid gracefully
+# instead of failing on the first click. Set `forward_check = false` under
+# `[entries.internet]` to launch without one.
+#
+# `reverse = true` is recommended for a channel's "uploads" playlist (`UU…`),
+# which YouTube returns newest-first; reversing yields chronological viewing.
+# Omit it for hand-curated `PL…` playlists where the owner's order is already
+# what you want.
 [[entries]]
 id = "youtube-channel"
 label = "Family YouTube Channel"
 icon = "folder-videos"
 
 [entries.kind]
-type = "process"
-command = "shepherd-media"
-args = [
-    "browse",
-    "--library", "https://www.youtube.com/playlist?list=PLREPLACE_WITH_YOUR_PLAYLIST_ID",
-    "--connectivity-check", "https://connectivitycheck.gstatic.com/generate_204",
-    "--reverse",
-]
+type = "media"
+library = "https://www.youtube.com/playlist?list=PLREPLACE_WITH_YOUR_PLAYLIST_ID"
+reverse = true
 
 [entries.availability]
 

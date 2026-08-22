@@ -145,8 +145,21 @@ impl InternetConfig {
 }
 
 /// Entry-level internet requirement.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EntryInternetPolicy {
     pub required: bool,
     pub check: Option<InternetCheckTarget>,
+    /// Whether the resolved check target is handed to the activity itself, not
+    /// just used for availability. See `RawEntryInternet::forward_check`.
+    pub forward_check: bool,
+}
+
+impl Default for EntryInternetPolicy {
+    fn default() -> Self {
+        Self {
+            required: false,
+            check: None,
+            forward_check: true,
+        }
+    }
 }

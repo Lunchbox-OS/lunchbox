@@ -299,6 +299,20 @@ impl ManagementService for DefaultManagementService {
                     });
             let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
             let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
+            // Hand the activity the same check that gates its availability, so
+            // (e.g.) a media grid hides online-only items instead of leaving
+            // tiles that error on tap. The entry's own target wins over the
+            // service's; `forward_check = false` suppresses both.
+            let connectivity_check = entry.and_then(|e| {
+                if !e.internet.forward_check {
+                    return None;
+                }
+                e.internet
+                    .check
+                    .as_ref()
+                    .or(eng.policy().service.internet.check.as_ref())
+                    .map(|t| t.original.clone())
+            });
             let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
             let opts = if eng.policy().service.capture_child_output {
                 let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
@@ -315,6 +329,7 @@ impl ManagementService for DefaultManagementService {
                     browser,
                     input_compat,
                     input_compat_options,
+                    connectivity_check,
                     ..Default::default()
                 }
             } else {
@@ -323,6 +338,7 @@ impl ManagementService for DefaultManagementService {
                     browser,
                     input_compat,
                     input_compat_options,
+                    connectivity_check,
                     ..Default::default()
                 }
             };

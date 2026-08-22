@@ -69,9 +69,17 @@ fn main() -> ExitCode {
                         EntryKind::Vm { driver, .. } => {
                             format!("vm ({})", driver)
                         }
-                        EntryKind::Media { library_id, .. } => {
-                            format!("media ({})", library_id)
-                        }
+                        EntryKind::Media {
+                            library,
+                            mode,
+                            item,
+                            ..
+                        } => match item {
+                            Some(item) => {
+                                format!("media {} ({}: {})", mode.subcommand(), library, item)
+                            }
+                            None => format!("media {} ({})", mode.subcommand(), library),
+                        },
                         EntryKind::Custom { type_name, .. } => {
                             format!("custom ({})", type_name)
                         }

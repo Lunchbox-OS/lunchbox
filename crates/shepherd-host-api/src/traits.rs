@@ -92,6 +92,13 @@ pub struct SpawnOptions {
     /// speeds, etc.). Sidecars use built-in defaults for any field left
     /// `None`.
     pub input_compat_options: InputCompatOptions,
+
+    /// Connectivity check target to hand to the activity itself, resolved
+    /// from the entry's `internet` policy (falling back to the service's) and
+    /// suppressed by `forward_check = false`. Activity kinds that can act on
+    /// it do; the rest ignore it. Today only `media` uses it, to hide
+    /// online-only library items while the check fails.
+    pub connectivity_check: Option<String>,
 }
 
 /// Network firewall specification for a session.

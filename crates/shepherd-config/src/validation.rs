@@ -3,7 +3,7 @@
 use crate::internet::InternetCheckTarget;
 use crate::schema::{
     RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawGroup,
-    RawTimeWindow, RawTokens,
+    RawMediaMode, RawTimeWindow, RawTokens,
 };
 use shepherd_util::GROUP_SUBJECT_PREFIX;
 use std::collections::HashSet;
@@ -260,12 +260,39 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
                 });
             }
         }
-        RawEntryKind::Media { library_id, .. } => {
-            if library_id.is_empty() {
+        RawEntryKind::Media {
+            library,
+            mode,
+            item,
+            ..
+        } => {
+            if library.trim().is_empty() {
                 errors.push(ValidationError::EntryError {
                     entry_id: entry.id.clone(),
-                    message: "library_id cannot be empty".into(),
+                    message: "media library cannot be empty".into(),
                 });
+            }
+            // The item id is what `mode = "play"` plays; without it there is
+            // nothing to launch, and with `mode = "browse"` it is silently
+            // ignored — both are worth catching here rather than on the
+            // child's screen.
+            match mode {
+                RawMediaMode::Play => {
+                    if item.as_ref().is_none_or(|i| i.trim().is_empty()) {
+                        errors.push(ValidationError::EntryError {
+                            entry_id: entry.id.clone(),
+                            message: "media mode = \"play\" requires an item".into(),
+                        });
+                    }
+                }
+                RawMediaMode::Browse => {
+                    if item.is_some() {
+                        errors.push(ValidationError::EntryError {
+                            entry_id: entry.id.clone(),
+                            message: "media item is only valid with mode = \"play\"".into(),
+                        });
+                    }
+                }
             }
         }
         RawEntryKind::Custom { type_name, .. } => {
@@ -1373,5 +1400,134 @@ mod tests {
             errors.iter().any(|e| e.contains("member of this group")),
             "expected a member-source error, got: {errors:?}"
         );
+    }
+
+    // --- media kind (issue #127) ---
+
+    fn media_config(kind_block: &str) -> RawConfig {
+        let toml = format!(
+            r#"
+            config_version = 1
+
+            [[entries]]
+            id = "movies"
+            label = "Movies"
+            [entries.kind]
+            {kind_block}
+            "#
+        );
+        toml::from_str(&toml).expect("test config should parse")
+    }
+
+    fn media_errors(kind_block: &str) -> Vec<String> {
+        validate_config(&media_config(kind_block))
+            .iter()
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn media_browse_needs_only_a_library() {
+        assert!(
+            media_errors("type = \"media\"\nlibrary = \"/etc/shepherd/movies.toml\"").is_empty()
+        );
+    }
+
+    #[test]
+    fn media_accepts_a_playlist_url_as_the_library() {
+        let errors = media_errors(
+            "type = \"media\"\nlibrary = \"https://www.youtube.com/playlist?list=PL1\"",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn media_library_cannot_be_blank() {
+        let errors = media_errors("type = \"media\"\nlibrary = \"   \"");
+        assert!(
+            errors.iter().any(|e| e.contains("library cannot be empty")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn media_play_requires_an_item() {
+        let errors = media_errors("type = \"media\"\nlibrary = \"/l.toml\"\nmode = \"play\"");
+        assert!(
+            errors.iter().any(|e| e.contains("requires an item")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn media_browse_rejects_an_item() {
+        let errors =
+            media_errors("type = \"media\"\nlibrary = \"/l.toml\"\nitem = \"big-buck-bunny\"");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("only valid with mode = \"play\"")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn media_play_with_an_item_passes() {
+        let errors = media_errors(
+            "type = \"media\"\nlibrary = \"/l.toml\"\nmode = \"play\"\nitem = \"bbb\"",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn media_rejects_an_unknown_quality_at_parse_time() {
+        // serde, not `validate_config`: a typo in an enum field is a parse
+        // error, so it can never reach the launch path as a silent default.
+        let toml = r#"
+            config_version = 1
+            [[entries]]
+            id = "movies"
+            label = "Movies"
+            [entries.kind]
+            type = "media"
+            library = "/l.toml"
+            quality = "4k"
+        "#;
+        assert!(toml::from_str::<RawConfig>(toml).is_err());
+    }
+
+    #[test]
+    fn entry_internet_forwards_its_check_by_default() {
+        let toml = r#"
+            config_version = 1
+            [[entries]]
+            id = "movies"
+            label = "Movies"
+            [entries.kind]
+            type = "media"
+            library = "/l.toml"
+            [entries.internet]
+            check = "https://example.com"
+        "#;
+        let cfg: RawConfig = toml::from_str(toml).expect("parses");
+        assert!(cfg.entries[0].internet.as_ref().unwrap().forward_check);
+    }
+
+    #[test]
+    fn entry_internet_can_opt_out_of_forwarding() {
+        let toml = r#"
+            config_version = 1
+            [[entries]]
+            id = "movies"
+            label = "Movies"
+            [entries.kind]
+            type = "media"
+            library = "/l.toml"
+            [entries.internet]
+            check = "https://example.com"
+            forward_check = false
+        "#;
+        let cfg: RawConfig = toml::from_str(toml).expect("parses");
+        assert!(!cfg.entries[0].internet.as_ref().unwrap().forward_check);
     }
 }

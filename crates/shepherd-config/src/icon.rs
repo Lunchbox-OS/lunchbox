@@ -1,6 +1,6 @@
 //! Icon autodetection for entry kinds
 
-use shepherd_api::EntryKind;
+use shepherd_api::{EntryKind, MediaMode};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -33,7 +33,17 @@ pub(crate) fn autodetect_icon(kind: &EntryKind) -> Option<String> {
             }
             icon
         }
-        EntryKind::Vm { .. } | EntryKind::Media { .. } | EntryKind::Custom { .. } => None,
+        // A media activity has no on-disk app to look up, but its mode says
+        // which of the two stock theme icons fits: a collection to browse, or
+        // one video to play.
+        EntryKind::Media { mode, .. } => Some(
+            match mode {
+                MediaMode::Browse => "folder-videos",
+                MediaMode::Play => "video-x-generic",
+            }
+            .to_string(),
+        ),
+        EntryKind::Vm { .. } | EntryKind::Custom { .. } => None,
     }
 }
 
@@ -268,13 +278,29 @@ mod tests {
         assert_eq!(autodetect_icon(&kind), None);
     }
 
+    fn media_kind(mode: MediaMode) -> EntryKind {
+        EntryKind::Media {
+            library: "/etc/shepherd/movies.toml".to_string(),
+            mode,
+            item: None,
+            quality: Default::default(),
+            sort_by: Default::default(),
+            reverse: false,
+            resume: false,
+            prefetch: None,
+        }
+    }
+
     #[test]
-    fn media_autodetect_returns_none() {
-        let kind = EntryKind::Media {
-            library_id: "lib1".to_string(),
-            args: Default::default(),
-        };
-        assert_eq!(autodetect_icon(&kind), None);
+    fn media_autodetect_follows_mode() {
+        assert_eq!(
+            autodetect_icon(&media_kind(MediaMode::Browse)).as_deref(),
+            Some("folder-videos")
+        );
+        assert_eq!(
+            autodetect_icon(&media_kind(MediaMode::Play)).as_deref(),
+            Some("video-x-generic")
+        );
     }
 
     #[test]
