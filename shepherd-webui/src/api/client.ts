@@ -18,7 +18,7 @@ import type {
   SessionInfo,
   UsageStat,
   VolumeInfo,
-  WindowsResponse,
+  WindowInfo,
 } from "./types";
 
 export class ApiError extends Error {
@@ -207,7 +207,9 @@ export const reloadConfig = () =>
 export const logoutUser = () => call<null>("logout");
 
 // Debug
-export const listWindows = () => call<WindowsResponse>("list_windows");
+// `list_windows` has no `wrap_result`, so the daemon answers with a bare
+// array rather than `{windows: [...]}`.
+export const listWindows = () => call<WindowInfo[]>("list_windows");
 export const closeWindow = (id: number) =>
   call<null>("act_on_window", { id, action: "close" });
 export const hideWindow = (id: number) =>
