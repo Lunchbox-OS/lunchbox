@@ -487,6 +487,38 @@ async fn a_second_window_does_not_restart_the_billing_clock() {
     );
 }
 
+/// The teardown wait is not charged either. This held before only because
+/// `stop_current` happens to read the clock before blocking; the test pins it.
+#[tokio::test]
+async fn the_closing_wait_is_not_charged() {
+    let mut h = harness();
+    // Over a second, so the assertion can tell 0s from 1s: usage is recorded
+    // in whole seconds.
+    h.host
+        .set_late_reap(Duration::from_millis(1200), Duration::ZERO);
+
+    launch(&h.svc, "tetris").await;
+    let handle = {
+        let eng = h.svc.engine.lock().await;
+        eng.current_session()
+            .and_then(|s| s.host_handle.clone())
+            .unwrap()
+    };
+    {
+        let mut eng = h.svc.engine.lock().await;
+        eng.notify_window_ready(&handle, shepherd_util::MonotonicInstant::now());
+    }
+
+    h.svc.stop_current(StopMode::Graceful).await.unwrap();
+
+    assert_eq!(
+        charged_seconds(&h.svc, "tetris").await,
+        0,
+        "the 1.2s spent tearing down must not be billed"
+    );
+    let _ = drained(&mut h.events);
+}
+
 /// A stop that did not actually stop anything must be reported as a failure,
 /// not swallowed.
 ///

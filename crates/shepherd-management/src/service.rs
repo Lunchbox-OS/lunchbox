@@ -398,6 +398,11 @@ impl ManagementService for DefaultManagementService {
     /// error rather than silently swallowed.
     async fn stop_current(&self, mode: StopMode) -> ManagementResult<()> {
         let now = shepherd_util::now();
+        // Read the clock *here*, before the teardown below blocks for up to
+        // five seconds, and hand this instant to `finish_stop`. That is what
+        // keeps the child from being charged for the "Closing…" spinner.
+        // Moving this read below `host.stop().await` would silently start
+        // billing teardown.
         let now_mono = MonotonicInstant::now();
 
         let reason = match mode {
