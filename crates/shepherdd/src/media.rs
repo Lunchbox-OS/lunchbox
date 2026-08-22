@@ -23,18 +23,32 @@
 //! - **Fill the disk.** Below `service.media.free_space_floor_bytes` it warns
 //!   and stops. The cache's own cap bounds the cache, not the volume it sits
 //!   on, and these devices have small ones.
+//!
+//! `[service.media]` is re-read from the engine at the top of every sweep
+//! rather than snapshotted at construction. The eviction grace is the reason:
+//! the launch path hands each spawned activity the *current*
+//! `watched_grace_days`, so a prefetcher still running on the value from
+//! startup would value the shared cache directory differently from the player
+//! writing to it, and the two would undo each other's trims. The lock is taken
+//! for the length of a clone, never across a download.
+//!
+//! The *targets* are still snapshotted: picking up an added or removed `media`
+//! entry means rebuilding the list, which is a restart-on-reload change rather
+//! than this one.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use shepherd_api::{EntryKind, Event, EventPayload, MediaMode, MediaQuality};
-use shepherd_config::Policy;
+use shepherd_config::{MediaServiceConfig, Policy};
+use shepherd_core::CoreEngine;
 use shepherd_media_app::Quality;
 use shepherd_media_cache::{VideoCache, fetch_playlist, ytdlp_available};
 use shepherd_media_core::{
     Library, PlatformInfo, build_library_from_entries, is_youtube_playlist_url, load_library,
     resolve_source,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
@@ -58,16 +72,16 @@ struct PrefetchTarget {
     only_item: Option<String>,
 }
 
-/// Everything the task needs from policy, snapshotted at construction so the
-/// engine lock isn't held across downloads.
+/// The libraries to keep cached, and the service settings that govern how.
+///
+/// The targets are resolved once: they come from the entry list, and picking up
+/// an added or removed `media` entry would mean rebuilding this task. The
+/// settings are not — see [`MediaPrefetcher::refreshed_settings`].
 pub struct MediaPrefetcher {
     targets: Vec<PrefetchTarget>,
-    prefetch_while_session_active: bool,
-    free_space_floor_bytes: u64,
-    /// How long a play protects a file from being displaced by a guess. Handed
-    /// to the cache the sweep builds, and to every media activity spawned, so
-    /// the two processes sharing the directory agree.
-    watched_grace: Duration,
+    /// `[service.media]` as of the last sweep. Seeded at construction so the
+    /// startup sweep has something to run on before the first refresh.
+    settings: MediaServiceConfig,
 }
 
 impl MediaPrefetcher {
@@ -123,11 +137,7 @@ impl MediaPrefetcher {
         }
         Some(Self {
             targets,
-            prefetch_while_session_active: policy.service.media.prefetch_while_session_active,
-            free_space_floor_bytes: policy.service.media.free_space_floor_bytes,
-            watched_grace: shepherd_media_cache::grace_from_days(
-                policy.service.media.watched_grace_days,
-            ),
+            settings: policy.service.media.clone(),
         })
     }
 
@@ -138,7 +148,11 @@ impl MediaPrefetcher {
     /// routine traffic (state snapshots, volume, availability), so sweeping on
     /// every event would walk every library several times a second — which is
     /// exactly what an earlier version of this did.
-    pub async fn run(self, mut events: broadcast::Receiver<Event>) {
+    pub async fn run(
+        mut self,
+        engine: Arc<Mutex<CoreEngine>>,
+        mut events: broadcast::Receiver<Event>,
+    ) {
         let mut session_active = false;
         let mut online = true;
 
@@ -149,6 +163,7 @@ impl MediaPrefetcher {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    self.settings = Self::refreshed_settings(&engine).await;
                     if self.may_sweep(session_active, online) {
                         self.sweep().await;
                     }
@@ -177,9 +192,12 @@ impl MediaPrefetcher {
                             }
                             _ => false,
                         };
-                        if resume && self.may_sweep(session_active, online) {
-                            self.sweep().await;
-                            ticker.reset();
+                        if resume {
+                            self.settings = Self::refreshed_settings(&engine).await;
+                            if self.may_sweep(session_active, online) {
+                                self.sweep().await;
+                                ticker.reset();
+                            }
                         }
                     }
                     // Lagged: our view of session/online state may be stale.
@@ -197,11 +215,25 @@ impl MediaPrefetcher {
         }
     }
 
+    /// `[service.media]` as the engine currently holds it.
+    ///
+    /// Cloned under the lock and returned by value: the settings are then used
+    /// for the whole sweep, which shells out to yt-dlp and blocks on downloads,
+    /// and none of that may happen with the engine held.
+    async fn refreshed_settings(engine: &Arc<Mutex<CoreEngine>>) -> MediaServiceConfig {
+        engine.lock().await.policy().service.media.clone()
+    }
+
     fn may_sweep(&self, session_active: bool, online: bool) -> bool {
+        // A reload that switches prefetch off has to be able to stop a task
+        // that is already running, not just prevent the next one starting.
+        if !self.settings.prefetch {
+            return false;
+        }
         if !online {
             return false;
         }
-        !session_active || self.prefetch_while_session_active
+        !session_active || self.settings.prefetch_while_session_active
     }
 
     /// One pass over every configured library.
@@ -214,7 +246,8 @@ impl MediaPrefetcher {
             let library_source = target.library.clone();
             let ytdl_format = ytdl_format_for(target.quality).to_string();
             let only_item = target.only_item.clone();
-            let watched_grace = self.watched_grace;
+            let watched_grace =
+                shepherd_media_cache::grace_from_days(self.settings.watched_grace_days);
 
             // Library loading shells out to yt-dlp for playlists and reads
             // files otherwise; queueing hands work to the cache's own thread.
@@ -248,7 +281,7 @@ impl MediaPrefetcher {
     /// when it does not — a full disk on a kiosk is a support call, and the
     /// cache cap alone does not prevent one.
     fn have_disk_headroom(&self) -> bool {
-        if self.free_space_floor_bytes == 0 {
+        if self.settings.free_space_floor_bytes == 0 {
             return true;
         }
         let Some(dir) = shepherd_media_cache::media_cache_dir("videos") else {
@@ -258,10 +291,10 @@ impl MediaPrefetcher {
             // Unknown is not a reason to stop; the cache cap still applies.
             return true;
         };
-        if free < self.free_space_floor_bytes {
+        if free < self.settings.free_space_floor_bytes {
             warn!(
                 free_mb = free / (1024 * 1024),
-                floor_mb = self.free_space_floor_bytes / (1024 * 1024),
+                floor_mb = self.settings.free_space_floor_bytes / (1024 * 1024),
                 path = %dir.display(),
                 "media prefetch paused: free disk space is below the configured floor"
             );
@@ -439,6 +472,73 @@ mod tests {
         // A URL has no leading `~/`, so it passes through untouched.
         let url = "https://www.youtube.com/playlist?list=PL1";
         assert_eq!(expand_tilde(url), url);
+    }
+
+    /// A prefetcher with no targets, carrying `settings`. Enough to exercise
+    /// the gates, which is where refreshed settings have to take effect.
+    fn prefetcher_with(settings: MediaServiceConfig) -> MediaPrefetcher {
+        MediaPrefetcher {
+            targets: Vec::new(),
+            settings,
+        }
+    }
+
+    #[test]
+    fn the_sweep_gates_read_the_current_settings_not_the_startup_ones() {
+        // The whole point of refreshing per sweep: a reload has to be able to
+        // stop or unblock a task that is already running.
+        let mut settings = MediaServiceConfig::default();
+        assert!(prefetcher_with(settings.clone()).may_sweep(false, true));
+
+        settings.prefetch = false;
+        assert!(
+            !prefetcher_with(settings.clone()).may_sweep(false, true),
+            "switching prefetch off must stop a running prefetcher, not just prevent the next one"
+        );
+
+        settings.prefetch = true;
+        assert!(!prefetcher_with(settings.clone()).may_sweep(true, true));
+        settings.prefetch_while_session_active = true;
+        assert!(prefetcher_with(settings.clone()).may_sweep(true, true));
+
+        // Offline is not overridable: there is nothing to download.
+        assert!(!prefetcher_with(settings).may_sweep(false, false));
+    }
+
+    #[test]
+    fn the_grace_a_sweep_spends_comes_from_the_current_settings() {
+        // The divergence this refresh exists to close: the launch path hands
+        // each spawned activity the *current* `watched_grace_days`, so a
+        // prefetcher still on the startup value would value the shared cache
+        // directory differently from the player writing to it.
+        let prefetcher = prefetcher_with(MediaServiceConfig {
+            watched_grace_days: 90,
+            ..Default::default()
+        });
+        assert_eq!(
+            shepherd_media_cache::grace_from_days(prefetcher.settings.watched_grace_days),
+            Duration::from_secs(90 * 24 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn the_disk_floor_is_read_from_the_current_settings_too() {
+        assert!(
+            prefetcher_with(MediaServiceConfig {
+                free_space_floor_bytes: 0,
+                ..Default::default()
+            })
+            .have_disk_headroom(),
+            "a zero floor disables the check"
+        );
+        // A floor no real volume can satisfy must block the sweep.
+        assert!(
+            !prefetcher_with(MediaServiceConfig {
+                free_space_floor_bytes: u64::MAX,
+                ..Default::default()
+            })
+            .have_disk_headroom()
+        );
     }
 
     #[test]

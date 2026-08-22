@@ -482,13 +482,15 @@ impl Service {
             });
         }
 
-        // Background media prefetch (issue #127). Driven entirely off the
-        // event bus: it pauses for sessions and for a dropped connection
-        // without reaching into the engine.
+        // Background media prefetch (issue #127). Session and connectivity
+        // state come off the event bus; it takes the engine only to re-read
+        // `[service.media]` before each sweep, so a config reload reaches the
+        // eviction grace the launch path is already handing to activities.
         if let Some(prefetcher) = self.media_prefetcher {
             info!("Media entries detected, starting background prefetch");
             let events = event_tx.subscribe();
-            tokio::spawn(async move { prefetcher.run(events).await });
+            let engine_for_prefetch = engine.clone();
+            tokio::spawn(async move { prefetcher.run(engine_for_prefetch, events).await });
         }
 
         {

@@ -148,6 +148,28 @@ works that way (`media_argv` passes every setting explicitly). An env var would
 have meant giving the lean host adapter a dependency on `shepherd-media-cache`
 just to name a constant.
 
+## Making the two agree across a reload
+
+Handing the grace to activities at launch introduced a divergence the first
+version missed. `MediaPrefetcher` snapshotted policy at construction — the
+comment said so, and the reason was sound: the engine lock must not be held
+across a download. But the launch path reads `eng.policy()` live, so after a
+reload that changed `watched_grace_days` a spawned player would use the new
+value while the prefetcher kept the old one, and the two would spend the shared
+directory by different rules until shepherdd restarted.
+
+`[service.media]` is now cloned from the engine at the top of every sweep and
+used for that sweep. The lock is held for the length of a clone, which keeps the
+property the snapshot existed to protect. It also makes the other three settings
+reload-responsive, and `may_sweep` now consults `prefetch`, so switching prefetch
+off stops a task that is already running rather than only preventing the next
+one from starting.
+
+The targets stay snapshotted. Picking up an added or removed `media` entry means
+rebuilding the task, which is a different change; it is written down in
+`docs/shepherd-media.md` as a restart-on-reload limitation rather than left for
+someone to discover.
+
 ## Android
 
 `lru.rs` and `interest.rs` are shared with the Android cache, so the policy had
