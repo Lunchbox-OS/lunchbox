@@ -53,6 +53,7 @@ sideload-friendly (`adb install`).
 | Typed client | `domain/ManagementClient.kt` | Mirrors the device's `ManagementService` trait. |
 | Persistence | `persistence/AdminRecordStore.kt`, `domain/ShepherdRepository.kt` | Per-device record + secret HTTP token, encrypted at rest. |
 | UI | `ui/**` | Jetpack Compose + Material 3, single activity, one shared `ShepherdViewModel`. |
+| Windows panel | `ui/windows/**` | Maintenance view over `list_windows`/`act_on_window`: close, hide to the scratchpad, show. Polls while open — nothing pushes window changes. |
 
 ### Decisions (spec §11 open questions)
 
@@ -86,8 +87,9 @@ sideload-friendly (`adb install`).
 ## Verification
 
 Unit tests cover the load-bearing, hardware-independent layers: the
-framing codec (`FramingTest`) and the wire decode of every sampled
-payload in the spec (`WireTest`).
+framing codec (`FramingTest`), the wire decode of every sampled payload
+in the spec (`WireTest`), and the window-row naming rules
+(`WindowPresentationTest`).
 
 Everything that has actually broken in production lives below that line —
 implicit bonding, link encryption, and the connect-time drain are all in

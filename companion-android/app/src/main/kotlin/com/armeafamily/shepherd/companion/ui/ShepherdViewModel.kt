@@ -21,6 +21,8 @@ import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.domain.ShepherdRecord
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.domain.VolumeInfo
+import com.armeafamily.shepherd.companion.domain.WindowAction
+import com.armeafamily.shepherd.companion.domain.WindowInfo
 import com.armeafamily.shepherd.companion.ble.Protocol
 import com.armeafamily.shepherd.companion.util.Formatting
 import com.armeafamily.shepherd.companion.util.ReasonText
@@ -77,6 +79,27 @@ data class DeviceUiState(
         entry.group?.let { id -> groups.firstOrNull { it.groupId == id } }
 }
 
+/**
+ * The compositor's window list, as the windows screen renders it.
+ *
+ * Kept out of [DeviceUiState] because nothing fetches it unless that
+ * screen is open: it is a maintenance view, and a list of Sway
+ * containers is not worth an RPC on every connect.
+ */
+data class WindowsUiState(
+    val windows: List<WindowInfo> = emptyList(),
+    val loading: Boolean = false,
+    /** True once a list has arrived — distinguishes "empty" from "not asked yet". */
+    val loaded: Boolean = false,
+    /** Last refresh failure, shown alongside whatever list we still hold. */
+    val error: String? = null,
+    /** Window with an action in flight; its row's buttons are disabled. */
+    val busyId: Long? = null,
+) {
+    val onScreen: List<WindowInfo> get() = windows.filterNot { it.inScratchpad }
+    val scratchpad: List<WindowInfo> get() = windows.filter { it.inScratchpad }
+}
+
 /** Phases of the pairing flow surfaced to the pairing screen. */
 sealed interface PairingPhase {
     data object Idle : PairingPhase
@@ -113,6 +136,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
+    private val _windows = MutableStateFlow(WindowsUiState())
+    val windows: StateFlow<WindowsUiState> = _windows
+
     /** Default name to claim under — the phone's model. */
     val defaultPhoneName: String = Build.MODEL ?: "Android phone"
 
@@ -121,6 +147,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private var sessionJob: Job? = null
     private var eventsJob: Job? = null
     private var pairingJob: Job? = null
+    private var windowsJob: Job? = null
     private var bound = false
 
     init {
@@ -177,13 +204,17 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // retrying once a minute. Switching devices still starts clean:
         // showing one box's activities under another box's name would be
         // worse than showing nothing.
+        val sameDevice = _state.value.record?.androidIdentifier == record.androidIdentifier
         _state.update { prev ->
-            if (prev.record?.androidIdentifier == record.androidIdentifier) {
+            if (sameDevice) {
                 prev.copy(record = record, link = LinkStatus.Connecting)
             } else {
                 DeviceUiState(record = record, link = LinkStatus.Connecting)
             }
         }
+        // Window ids are per-compositor: acting on another box's id would
+        // hit whatever container happens to hold it there.
+        if (!sameDevice) _windows.value = WindowsUiState()
         conn.start()
         eventsJob = viewModelScope.launch {
             conn.events.collect { event -> applyEvent(event.payload) }
@@ -372,6 +403,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         pairingJob?.cancel(); pairingJob = null
         sessionJob?.cancel(); sessionJob = null
         eventsJob?.cancel(); eventsJob = null
+        windowsJob?.cancel(); windowsJob = null
         connection?.close(); connection = null
         client = null
     }
@@ -535,6 +567,72 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     fun logoutDevice() = action { c ->
         c.logout()
         _message.value = "Logged out the device session."
+    }
+
+    // --- windows (issue #140) ------------------------------------------
+
+    /**
+     * Re-read the compositor's window list.
+     *
+     * The device pushes no event when a window opens, closes, or is
+     * stashed on the scratchpad, so the windows screen polls this while
+     * it is open. Concurrent calls collapse onto the in-flight one: the
+     * poll ticks faster than a BLE round trip on a busy link, and
+     * queueing them would just spend the link on a list nobody is
+     * waiting for any more.
+     *
+     * A failure keeps the previous list and rides alongside it. Blanking
+     * the screen on a refresh that lands mid-reconnect would drop the
+     * rows out from under a finger already reaching for "Close".
+     */
+    fun refreshWindows() {
+        if (windowsJob?.isActive == true) return
+        val c = client ?: run {
+            _windows.update { it.copy(loading = false, error = "Not connected.") }
+            return
+        }
+        _windows.update { it.copy(loading = true) }
+        windowsJob = viewModelScope.launch {
+            try {
+                val list = c.listWindows()
+                _windows.update {
+                    it.copy(windows = list, loading = false, loaded = true, error = null)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _windows.update {
+                    it.copy(loading = false, error = why ?: "Couldn't list the windows.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Close, hide, or show one window.
+     *
+     * [act] is spelled short because `action` is the private RPC-error
+     * wrapper this delegates to.
+     */
+    fun actOnWindow(id: Long, act: WindowAction) = action { c ->
+        _windows.update { it.copy(busyId = id) }
+        try {
+            c.actOnWindow(id, act)
+            _message.value = when (act) {
+                WindowAction.CLOSE -> "Asked the window to close."
+                WindowAction.HIDE -> "Moved to the scratchpad."
+                WindowAction.SHOW -> "Pulled off the scratchpad."
+            }
+        } finally {
+            _windows.update { it.copy(busyId = null) }
+        }
+        // Sway applies the action out of band — an app can even refuse to
+        // close — so re-read the tree rather than predicting it. Cancel
+        // any refresh already running so this one isn't dropped as a
+        // duplicate and leaves the list a beat stale.
+        windowsJob?.cancel()
+        refreshWindows()
     }
 
     fun upsertOverride(

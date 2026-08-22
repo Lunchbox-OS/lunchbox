@@ -322,4 +322,34 @@ class WireTest {
         assertEquals(80, volume.restrictions.maxVolume)
         assertNull(volume.restrictions.minVolume)
     }
+
+    @Test
+    fun `window list decodes both wayland and xwayland shapes`() {
+        // Straight from `swaymsg -t get_tree` as the daemon flattens it:
+        // a Wayland window names itself with app_id, an XWayland one only
+        // has a class, and the scratchpad entry sits on __i3_scratch.
+        val json = """
+            [
+              {"id":10,"name":"Firefox","app_id":"firefox","window_class":null,"pid":1234,
+               "in_scratchpad":false,"workspace":"1","visible":true,"focused":true},
+              {"id":20,"name":"Steam","app_id":null,"window_class":"Steam","pid":5678,
+               "in_scratchpad":true,"workspace":"__i3_scratch","visible":false,"focused":false}
+            ]
+        """.trimIndent()
+        val windows = decode<List<WindowInfo>>(json)
+        assertEquals(2, windows.size)
+        assertEquals("firefox", windows[0].appId)
+        assertNull(windows[0].windowClass)
+        assertTrue(windows[0].focused)
+        assertEquals("Steam", windows[1].windowClass)
+        assertTrue(windows[1].inScratchpad)
+        assertEquals(5678, windows[1].pid)
+    }
+
+    @Test
+    fun `window action serialises to the wire spelling act_on_window expects`() {
+        assertEquals("\"close\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.CLOSE))
+        assertEquals("\"hide\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.HIDE))
+        assertEquals("\"show\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.SHOW))
+    }
 }

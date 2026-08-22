@@ -37,7 +37,11 @@ import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceControlsScreen(vm: ShepherdViewModel, onBack: () -> Unit) {
+fun DeviceControlsScreen(
+    vm: ShepherdViewModel,
+    onBack: () -> Unit,
+    onOpenWindows: () -> Unit,
+) {
     val state by vm.state.collectAsState()
 
     Scaffold(
@@ -65,6 +69,13 @@ fun DeviceControlsScreen(vm: ShepherdViewModel, onBack: () -> Unit) {
                     Button(onClick = vm::reloadConfig, modifier = Modifier.fillMaxWidth()) { Text("Reload config") }
                     OutlinedButton(onClick = vm::logoutDevice, modifier = Modifier.fillMaxWidth()) {
                         Text("Log out device session")
+                    }
+                    // Below "log out the session" on purpose: ending the
+                    // session is the blunt fix for a stuck window, and
+                    // reaching for individual windows should be the step
+                    // taken after it isn't enough (issue #140).
+                    OutlinedButton(onClick = onOpenWindows, modifier = Modifier.fillMaxWidth()) {
+                        Text("Windows…")
                     }
                 }
             }

@@ -36,11 +36,13 @@ import com.armeafamily.shepherd.companion.ui.group.GroupDetailScreen
 import com.armeafamily.shepherd.companion.ui.home.HomeScreen
 import com.armeafamily.shepherd.companion.ui.pairing.PairingScreen
 import com.armeafamily.shepherd.companion.ui.settings.SettingsScreen
+import com.armeafamily.shepherd.companion.ui.windows.WindowsScreen
 
 object Routes {
     const val HOME = "home"
     const val PAIR = "pair"
     const val CONTROLS = "controls"
+    const val WINDOWS = "windows"
     const val SETTINGS = "settings"
     const val ENTRY = "entry"
     fun entry(id: String) = "$ENTRY/$id"
@@ -130,7 +132,14 @@ fun App() {
                 )
             }
             composable(Routes.CONTROLS) {
-                DeviceControlsScreen(vm = vm, onBack = { navController.popBackStack() })
+                DeviceControlsScreen(
+                    vm = vm,
+                    onBack = { navController.popBackStack() },
+                    onOpenWindows = { navController.navigate(Routes.WINDOWS) },
+                )
+            }
+            composable(Routes.WINDOWS) {
+                WindowsScreen(vm = vm, onBack = { navController.popBackStack() })
             }
             composable(Routes.SETTINGS) {
                 SettingsScreen(
