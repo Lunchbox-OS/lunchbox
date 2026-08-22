@@ -143,6 +143,15 @@ export function AdminPage() {
                   {volume.muted ? "Muted" : `${volume.percent}%`}
                 </Typography>
               </Box>
+              {/* Name the output the reading applies to. The active output can
+                  change with no user action (a headset is plugged in, a dock
+                  switches sinks), so without this the volume appears to move on
+                  its own. */}
+              {volume.output && (
+                <Typography variant="caption" color="text.secondary">
+                  Output: {volume.output.description || volume.output.key}
+                </Typography>
+              )}
               {volume.backend && (
                 <Typography variant="caption" color="text.disabled">Backend: {volume.backend}</Typography>
               )}

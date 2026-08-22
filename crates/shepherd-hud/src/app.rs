@@ -918,10 +918,24 @@ fn build_hud_content(
             }
         }
 
-        // Update volume from cached state (updated via events, no polling needed)
+        // Update volume from cached state (updated via events, no polling needed).
+        // Since `VolumeChanged` carries the whole snapshot, the slider bounds
+        // below follow the active output's restrictions rather than whichever
+        // ones happened to be in effect at connect time (issue #124).
         if let Some(volume) = state.volume_info() {
             volume_icon_clone.set_icon_name(Some(volume.icon_name()));
             volume_label_clone.set_text(&format!("{}%", volume.percent));
+
+            // Name the active output in the tooltip only. This is the
+            // child-facing surface, so the bar itself stays uncluttered; device
+            // names are long and mean nothing to the person using it.
+            let tooltip = match volume.output.as_ref() {
+                Some(o) if !o.description.is_empty() => {
+                    format!("Toggle mute \u{2014} {}", o.description)
+                }
+                _ => "Toggle mute".to_string(),
+            };
+            volume_button_clone.set_tooltip_text(Some(&tooltip));
 
             // Only update slider if user is not actively dragging it
             if !slider_changing_for_update.get() {

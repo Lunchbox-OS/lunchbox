@@ -134,6 +134,7 @@ impl ManagementService for MockSvc {
                 allow_mute: true,
                 allow_change: true,
             },
+            output: None,
         })
     }
     async fn set_volume(&self, _percent: u8) -> ManagementResult<VolumeInfo> {

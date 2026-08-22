@@ -55,6 +55,46 @@ enum class AdminRole {
 }
 
 /**
+ * The audio output a volume reading applies to.
+ *
+ * `key` is `<device.name>:output:<route.name>` — the same key WirePlumber uses
+ * to persist per-route volume, so our notion of "an output" cannot drift from
+ * the volume PipeWire remembers for it. It is stable across reboots and, for
+ * USB devices, across being moved to a different port.
+ */
+@Serializable
+data class AudioOutput(
+    /**
+     * Human-readable label for display. Localized and mutable.
+     */
+    val description: String,
+    /**
+     * Stable identity. Use this to correlate, never the description.
+     */
+    val key: String,
+    val kind: AudioOutputKind,
+)
+
+/**
+ * What kind of thing an audio output is.
+ *
+ * Advisory only: it drives presentation (an icon, a label) and never policy.
+ * It cannot be determined for every device — a generic USB interface reports a
+ * nondescript `analog-output` route and no udev form-factor — so `Unknown` is a
+ * routine outcome, not a failure.
+ */
+@Serializable
+enum class AudioOutputKind {
+    @SerialName("speakers") SPEAKERS,
+    @SerialName("headphones") HEADPHONES,
+    @SerialName("hdmi") HDMI,
+    @SerialName("digital") DIGITAL,
+    @SerialName("line_out") LINE_OUT,
+    @SerialName("bluetooth") BLUETOOTH,
+    @SerialName("unknown") UNKNOWN,
+}
+
+/**
  * Screen brightness status information
  */
 @Serializable
@@ -1263,6 +1303,11 @@ data class VolumeInfo(
      * Whether audio is muted
      */
     val muted: Boolean,
+    /**
+     * The output this reading applies to. `None` on hosts without PipeWire, or
+     * when the default sink cannot be resolved to a known output.
+     */
+    val output: AudioOutput? = null,
     /**
      * Volume percentage (0-100)
      */

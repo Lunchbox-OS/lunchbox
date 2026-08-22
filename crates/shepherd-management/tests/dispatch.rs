@@ -43,6 +43,8 @@ use tokio::sync::{Mutex, broadcast, watch};
 struct MockVolume {
     capabilities: VolumeCapabilities,
     status: std::sync::Mutex<VolumeStatus>,
+    /// The active output, swappable so tests can simulate a sink switch.
+    output: std::sync::Mutex<Option<shepherd_api::AudioOutput>>,
 }
 
 impl MockVolume {
@@ -58,6 +60,7 @@ impl MockVolume {
                 percent: 50,
                 muted: false,
             }),
+            output: std::sync::Mutex::new(None),
         }
     }
 }
@@ -98,6 +101,18 @@ impl VolumeController for MockVolume {
     async fn set_mute(&self, muted: bool) -> VolumeResult<()> {
         self.status.lock().unwrap().muted = muted;
         Ok(())
+    }
+
+    async fn current_output(&self) -> Option<shepherd_api::AudioOutput> {
+        self.output.lock().unwrap().clone()
+    }
+}
+
+fn output(key: &str, description: &str) -> shepherd_api::AudioOutput {
+    shepherd_api::AudioOutput {
+        key: key.into(),
+        description: description.into(),
+        kind: shepherd_api::AudioOutputKind::Unknown,
     }
 }
 
@@ -236,9 +251,28 @@ fn make_svc_opts(
     config_path: PathBuf,
     sensor_lux: Option<f32>,
 ) -> DefaultManagementService {
+    make_svc_full(policy, config_path, sensor_lux, Arc::new(MockVolume::new()))
+}
+
+/// Like [`make_svc`], but hands back the volume mock so a test can drive the
+/// host-side state the service only observes.
+fn make_svc_with_volume(
+    policy: Policy,
+    config_path: PathBuf,
+) -> (DefaultManagementService, Arc<MockVolume>) {
+    let volume = Arc::new(MockVolume::new());
+    let svc = make_svc_full(policy, config_path, Some(1000.0), volume.clone());
+    (svc, volume)
+}
+
+fn make_svc_full(
+    policy: Policy,
+    config_path: PathBuf,
+    sensor_lux: Option<f32>,
+    volume: Arc<MockVolume>,
+) -> DefaultManagementService {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
-    let volume = Arc::new(MockVolume::new());
     let brightness = Arc::new(MockBrightness::new());
     let light_sensor: Option<Arc<dyn LightSensor>> =
         sensor_lux.map(|lux| Arc::new(MockLightSensor::new(lux)) as Arc<dyn LightSensor>);
@@ -266,6 +300,7 @@ fn make_svc_opts(
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
         display: Arc::new(NoOpDisplayController),
+        last_audio_state: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -966,4 +1001,141 @@ async fn enable_entry_outside_time_window_via_override() {
 
     let body = ok(&svc, "get_entry", json!({ "id": "test-game" })).await;
     assert_eq!(body["enabled"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Audio-output watch loop (issue #124)
+// ---------------------------------------------------------------------------
+
+/// Read one `VolumeChanged` if the service emitted one, else `None`.
+fn next_volume_event(rx: &mut broadcast::Receiver<Event>) -> Option<(u8, bool, Option<String>)> {
+    while let Ok(ev) = rx.try_recv() {
+        if let shepherd_api::EventPayload::VolumeChanged {
+            percent,
+            muted,
+            output,
+            ..
+        } = ev.payload
+        {
+            return Some((percent, muted, output.map(|o| o.key)));
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn audio_watch_first_tick_only_establishes_a_baseline() {
+    let cfg = temp_config();
+    let (svc, _vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let mut rx = svc.event_tx.subscribe();
+
+    svc.audio_watch_tick().await;
+
+    // Broadcasting on the first observation would emit a spurious event on every
+    // daemon start, when nothing has actually changed.
+    assert_eq!(next_volume_event(&mut rx), None);
+}
+
+#[tokio::test]
+async fn audio_watch_is_silent_while_nothing_changes() {
+    let cfg = temp_config();
+    let (svc, _vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let mut rx = svc.event_tx.subscribe();
+
+    for _ in 0..5 {
+        svc.audio_watch_tick().await;
+    }
+
+    // A quiet host must not produce a 2-second event stream.
+    assert_eq!(next_volume_event(&mut rx), None);
+}
+
+#[tokio::test]
+async fn audio_watch_reports_a_volume_change_made_behind_our_back() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    // Something outside shepherdd moved the volume — a bare `wpctl` call, or a
+    // desktop hotkey. Nothing else in the daemon would notice.
+    vol.status.lock().unwrap().percent = 77;
+    svc.audio_watch_tick().await;
+
+    assert_eq!(next_volume_event(&mut rx), Some((77, false, None)));
+}
+
+#[tokio::test]
+async fn audio_watch_reports_a_sink_switch_at_an_unchanged_volume() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    *vol.output.lock().unwrap() = Some(output(
+        "alsa_card.pci-0000_00_1b.0:output:speaker",
+        "Speakers",
+    ));
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    // Headphones are plugged in. The percentage happens to be identical, so a
+    // watcher keyed only on the reading would stay silent and every client would
+    // keep displaying the speakers' state.
+    *vol.output.lock().unwrap() = Some(output(
+        "alsa_card.pci-0000_00_1b.0:output:analog-output-headphones",
+        "Headphones",
+    ));
+    svc.audio_watch_tick().await;
+
+    assert_eq!(
+        next_volume_event(&mut rx),
+        Some((
+            50,
+            false,
+            Some("alsa_card.pci-0000_00_1b.0:output:analog-output-headphones".into())
+        ))
+    );
+}
+
+#[tokio::test]
+async fn volume_event_carries_the_restrictions_in_force() {
+    // Regression test for the bug this change exists to fix: subscribers used to
+    // receive only `percent`/`muted` and had to keep the restrictions from their
+    // initial fetch, so a client could not learn that the applicable limits had
+    // changed.
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(60),
+        min_volume: Some(10),
+        allow_mute: false,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    vol.status.lock().unwrap().percent = 42;
+    svc.audio_watch_tick().await;
+
+    let ev = rx.try_recv().expect("an event was broadcast");
+    let shepherd_api::EventPayload::VolumeChanged { restrictions, .. } = ev.payload else {
+        panic!("expected VolumeChanged");
+    };
+    assert_eq!(restrictions.max_volume, Some(60));
+    assert_eq!(restrictions.min_volume, Some(10));
+    assert!(!restrictions.allow_mute);
+}
+
+#[tokio::test]
+async fn get_volume_reports_the_active_output() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    *vol.output.lock().unwrap() = Some(output("alsa_card.usb-x:output:analog-output", "Scarlett"));
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+
+    assert_eq!(
+        body["output"]["key"],
+        "alsa_card.usb-x:output:analog-output"
+    );
+    assert_eq!(body["output"]["description"], "Scarlett");
 }

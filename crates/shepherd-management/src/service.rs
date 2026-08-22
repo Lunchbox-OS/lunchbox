@@ -177,6 +177,17 @@ fn today() -> NaiveDate {
     shepherd_util::now().date_naive()
 }
 
+/// A snapshot of what the audio watch loop last saw. Compared field-for-field to
+/// decide whether anything actually changed since the previous tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedAudioState {
+    pub percent: u8,
+    pub muted: bool,
+    /// Identity key of the active output; `None` where outputs cannot be
+    /// enumerated (any non-PipeWire host).
+    pub output_key: Option<String>,
+}
+
 /// Production implementation of [`ManagementService`]. Composes the
 /// daemon's existing collaborators; constructed once by `shepherdd` and
 /// shared via `Arc<dyn ManagementService>` to all transports.
@@ -202,6 +213,10 @@ pub struct DefaultManagementService {
     pub shutdown_tx: watch::Sender<bool>,
     pub hidpi: Arc<dyn HidpiController>,
     pub display: Arc<dyn DisplayController>,
+    /// What [`Self::audio_watch_tick`] last observed, so the poll loop only
+    /// broadcasts on a real change. `None` until the first tick establishes a
+    /// baseline.
+    pub last_audio_state: Arc<Mutex<Option<ObservedAudioState>>>,
 }
 
 #[async_trait]
@@ -711,6 +726,7 @@ impl ManagementService for DefaultManagementService {
             available: self.volume.capabilities().available,
             backend: self.volume.capabilities().backend.clone(),
             restrictions,
+            output: self.volume.current_output().await,
         })
     }
 
@@ -1047,22 +1063,56 @@ impl DefaultManagementService {
     }
 
     async fn broadcast_volume_change(&self) -> ManagementResult<VolumeInfo> {
-        let status = self
-            .volume
-            .get_status()
-            .await
-            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        let info = self.get_volume().await?;
         (self.broadcast_fn)(Event::new(EventPayload::VolumeChanged {
-            percent: status.percent,
-            muted: status.muted,
+            percent: info.percent,
+            muted: info.muted,
+            restrictions: info.restrictions.clone(),
+            output: info.output.clone(),
         }));
-        Ok(VolumeInfo {
+        Ok(info)
+    }
+
+    /// One pass of the audio-output watch loop (issue #124).
+    ///
+    /// The default sink can change with no involvement from us — a headset is
+    /// plugged in, WirePlumber auto-switches to a higher-priority device, the
+    /// dock router diverts to HDMI — and because PipeWire remembers volume per
+    /// route, the reading genuinely changes with it. Nothing else in the daemon
+    /// observes that, so without this poll every client keeps displaying the
+    /// previous output's volume until someone happens to change it.
+    ///
+    /// Also catches volume changed behind our back (a bare `wpctl` call), which
+    /// is the same staleness with a different cause.
+    ///
+    /// Broadcasts only on an actual change, so a quiet host produces no events.
+    pub async fn audio_watch_tick(&self) {
+        let Ok((status, output)) = self.volume.observe().await else {
+            return;
+        };
+        let key = output.as_ref().map(|o| o.key.clone());
+
+        let mut last = self.last_audio_state.lock().await;
+        let now = ObservedAudioState {
             percent: status.percent,
             muted: status.muted,
-            available: self.volume.capabilities().available,
-            backend: self.volume.capabilities().backend.clone(),
-            restrictions: self.volume_restrictions().await,
-        })
+            output_key: key,
+        };
+        if last.as_ref() == Some(&now) {
+            return;
+        }
+        let first_observation = last.is_none();
+        *last = Some(now);
+        drop(last);
+
+        // The first tick only establishes the baseline; broadcasting there would
+        // emit a spurious event on every daemon start.
+        if first_observation {
+            return;
+        }
+        if let Err(e) = self.broadcast_volume_change().await {
+            warn!(error = %e, "Failed to broadcast observed audio change");
+        }
     }
 
     async fn broadcast_brightness_change(&self) -> ManagementResult<BrightnessInfo> {

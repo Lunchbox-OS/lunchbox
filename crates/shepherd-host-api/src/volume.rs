@@ -117,6 +117,27 @@ pub trait VolumeController: Send + Sync {
 
     /// Set mute state explicitly
     async fn set_mute(&self, muted: bool) -> VolumeResult<()>;
+
+    /// The audio output the current reading applies to.
+    ///
+    /// Defaults to `None`: hosts with no way to enumerate outputs (PulseAudio,
+    /// ALSA, no sound backend at all) keep their existing single-output
+    /// behaviour rather than being forced to invent an identity.
+    async fn current_output(&self) -> Option<shepherd_api::AudioOutput> {
+        None
+    }
+
+    /// Read the status and the active output as one consistent pair.
+    ///
+    /// The default performs two independent reads, which can tear if the output
+    /// changes between them — briefly reporting one output's volume against
+    /// another's identity. Backends that can read both at once should override
+    /// this; the watch loop relies on it to avoid publishing a mismatched pair
+    /// on exactly the sink switch it exists to report.
+    async fn observe(&self) -> VolumeResult<(VolumeStatus, Option<shepherd_api::AudioOutput>)> {
+        let status = self.get_status().await?;
+        Ok((status, self.current_output().await))
+    }
 }
 
 /// No-op [`VolumeController`] for tests and hosts with no sound backend.

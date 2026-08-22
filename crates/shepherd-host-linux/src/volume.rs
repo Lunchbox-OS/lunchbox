@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use shepherd_host_api::{
     VolumeCapabilities, VolumeController, VolumeError, VolumeResult, VolumeStatus,
 };
+
+use crate::audio;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
@@ -362,6 +364,60 @@ impl VolumeController for LinuxVolumeController {
                 "No sound backend available".into(),
             )),
         }
+    }
+
+    /// Only PipeWire can name its outputs. PulseAudio and ALSA fall through to
+    /// the trait default and keep behaving as a single anonymous output.
+    async fn current_output(&self) -> Option<shepherd_api::AudioOutput> {
+        if self.backend != Some(SoundBackend::PipeWire) {
+            return None;
+        }
+        let topo = audio::dump().await?;
+        topo.current_output().map(to_api_output)
+    }
+
+    /// One `pw-dump` yields the active output *and* its volume, so the pair can
+    /// never disagree — and it costs one process spawn instead of two.
+    async fn observe(&self) -> VolumeResult<(VolumeStatus, Option<shepherd_api::AudioOutput>)> {
+        if self.backend != Some(SoundBackend::PipeWire) {
+            let status = self.get_status().await?;
+            return Ok((status, None));
+        }
+        match audio::dump()
+            .await
+            .as_ref()
+            .and_then(|t| t.current_output())
+        {
+            Some(out) => Ok((
+                VolumeStatus {
+                    percent: out.volume_percent,
+                    muted: out.muted,
+                },
+                Some(to_api_output(out)),
+            )),
+            // No default sink resolved (PipeWire still starting, or no sinks at
+            // all) — fall back rather than reporting a bogus zero.
+            None => Ok((self.get_status().await?, None)),
+        }
+    }
+}
+
+/// Project the host-side topology entry onto the wire type. Only the stable key,
+/// a display label, and the advisory kind cross the boundary; node names and
+/// object ids stay inside the host adapter.
+pub(crate) fn to_api_output(o: &audio::AudioOutput) -> shepherd_api::AudioOutput {
+    shepherd_api::AudioOutput {
+        key: o.key(),
+        description: o.description.clone(),
+        kind: match o.kind {
+            audio::AudioOutputKind::Speakers => shepherd_api::AudioOutputKind::Speakers,
+            audio::AudioOutputKind::Headphones => shepherd_api::AudioOutputKind::Headphones,
+            audio::AudioOutputKind::Hdmi => shepherd_api::AudioOutputKind::Hdmi,
+            audio::AudioOutputKind::Digital => shepherd_api::AudioOutputKind::Digital,
+            audio::AudioOutputKind::LineOut => shepherd_api::AudioOutputKind::LineOut,
+            audio::AudioOutputKind::Bluetooth => shepherd_api::AudioOutputKind::Bluetooth,
+            audio::AudioOutputKind::Unknown => shepherd_api::AudioOutputKind::Unknown,
+        },
     }
 }
 

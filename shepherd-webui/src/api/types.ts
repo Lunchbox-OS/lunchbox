@@ -188,12 +188,32 @@ export interface VolumeRestrictions {
   allow_change: boolean;
 }
 
+export type AudioOutputKind =
+  | "speakers"
+  | "headphones"
+  | "hdmi"
+  | "digital"
+  | "line_out"
+  | "bluetooth"
+  | "unknown";
+
+/**
+ * The audio output a volume reading applies to. `key` is stable across reboots
+ * (`<device.name>:output:<route.name>`); `description` is for display only.
+ */
+export interface AudioOutput {
+  key: string;
+  description: string;
+  kind: AudioOutputKind;
+}
+
 export interface VolumeInfo {
   percent: number;
   muted: boolean;
   available: boolean;
   backend: string | null;
   restrictions: VolumeRestrictions;
+  output: AudioOutput | null;
 }
 
 export interface BrightnessRestrictions {

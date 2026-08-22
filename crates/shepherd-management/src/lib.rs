@@ -12,7 +12,7 @@ pub use auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 pub use dispatch::RpcDispatchError;
 pub use error::{ManagementError, ManagementResult};
 pub use service::{
-    AUTO_BRIGHTNESS_SETTING_KEY, DefaultManagementService, ManagementService, RPC_SCHEMA_JSON,
-    dispatch_json,
+    AUTO_BRIGHTNESS_SETTING_KEY, DefaultManagementService, ManagementService, ObservedAudioState,
+    RPC_SCHEMA_JSON, dispatch_json,
 };
 pub use types::LaunchOutcome;

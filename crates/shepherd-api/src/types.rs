@@ -764,6 +764,42 @@ pub struct HealthStatus {
     pub store_ok: bool,
 }
 
+/// What kind of thing an audio output is.
+///
+/// Advisory only: it drives presentation (an icon, a label) and never policy.
+/// It cannot be determined for every device — a generic USB interface reports a
+/// nondescript `analog-output` route and no udev form-factor — so `Unknown` is a
+/// routine outcome, not a failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AudioOutputKind {
+    Speakers,
+    Headphones,
+    Hdmi,
+    Digital,
+    LineOut,
+    Bluetooth,
+    #[default]
+    Unknown,
+}
+
+/// The audio output a volume reading applies to.
+///
+/// `key` is `<device.name>:output:<route.name>` — the same key WirePlumber uses
+/// to persist per-route volume, so our notion of "an output" cannot drift from
+/// the volume PipeWire remembers for it. It is stable across reboots and, for
+/// USB devices, across being moved to a different port.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AudioOutput {
+    /// Stable identity. Use this to correlate, never the description.
+    pub key: String,
+    /// Human-readable label for display. Localized and mutable.
+    pub description: String,
+    pub kind: AudioOutputKind,
+}
+
 /// Volume status information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -778,6 +814,10 @@ pub struct VolumeInfo {
     pub backend: Option<String>,
     /// Current restrictions on volume
     pub restrictions: VolumeRestrictions,
+    /// The output this reading applies to. `None` on hosts without PipeWire, or
+    /// when the default sink cannot be resolved to a known output.
+    #[serde(default)]
+    pub output: Option<AudioOutput>,
 }
 
 /// Volume restrictions that are currently in effect

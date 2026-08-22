@@ -76,6 +76,7 @@ mod tests {
             available: true,
             backend: Some("test".into()),
             restrictions: VolumeRestrictions::unrestricted(),
+            output: None,
         };
         assert_eq!(info.icon_name(), "audio-volume-muted-symbolic");
 
@@ -85,6 +86,7 @@ mod tests {
             available: true,
             backend: Some("test".into()),
             restrictions: VolumeRestrictions::unrestricted(),
+            output: None,
         };
         assert_eq!(info.icon_name(), "audio-volume-medium-symbolic");
 
@@ -94,6 +96,7 @@ mod tests {
             available: true,
             backend: Some("test".into()),
             restrictions: VolumeRestrictions::unrestricted(),
+            output: None,
         };
         assert_eq!(info.icon_name(), "audio-volume-muted-symbolic");
     }

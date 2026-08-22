@@ -58,6 +58,14 @@ mod system_events;
 use display::{DisplayManager, WlMirrorLauncher};
 use hidpi::XwaylandHidpi;
 
+/// How often to re-read the PipeWire audio topology (issue #124).
+///
+/// Fast enough that plugging in headphones updates the HUD before the user
+/// reaches for the volume slider, slow enough that an idle machine spends
+/// nothing noticeable on it — a `pw-dump` costs a few milliseconds and the tick
+/// broadcasts only when something actually changed.
+const AUDIO_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// shepherdd - Policy enforcement service for child-focused computing
 #[derive(Parser, Debug)]
 #[command(name = "shepherdd")]
@@ -368,9 +376,44 @@ impl Service {
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
                 display: display_svc.clone(),
+                last_audio_state: Arc::new(tokio::sync::Mutex::new(None)),
             })
         };
         let svc: Arc<dyn ManagementService> = svc_concrete.clone();
+
+        // Audio-output watch loop (issue #124). PipeWire can change the default
+        // sink with no involvement from us — a headset is plugged in, a
+        // higher-priority USB device appears, the dock router diverts to HDMI —
+        // and since volume is remembered per route, the reading changes with it.
+        // Polling is enough here and reuses the existing `pw-dump` parser; a
+        // `pw-mon` subscription would only buy lower latency.
+        //
+        // Only runs where outputs can be enumerated at all: on PulseAudio/ALSA
+        // hosts `current_output` is always `None`, so a tick could still notice
+        // an external volume change, but the sink-switch case it exists for
+        // cannot arise.
+        if volume.capabilities().backend.as_deref() == Some("pipewire") {
+            let svc_for_audio = svc_concrete.clone();
+            let mut audio_shutdown_rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(AUDIO_WATCH_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => svc_for_audio.audio_watch_tick().await,
+                        _ = audio_shutdown_rx.changed() => {
+                            if *audio_shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            info!(
+                poll_secs = AUDIO_WATCH_INTERVAL.as_secs_f32(),
+                "Audio-output watch loop started"
+            );
+        }
 
         // Automatic-brightness poll loop: sample the light sensor on a timer
         // and let the service decide whether to nudge the backlight. Runs only

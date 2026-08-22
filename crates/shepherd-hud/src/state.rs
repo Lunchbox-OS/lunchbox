@@ -3,8 +3,8 @@
 //! The HUD subscribes to events from shepherdd and tracks session state.
 
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DisplayState, Event, EventPayload, InternetStatusView,
-    VolumeInfo, VolumeRestrictions, WarningSeverity,
+    AudioOutput, BrightnessInfo, BrightnessRestrictions, DisplayState, Event, EventPayload,
+    InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
 };
 use shepherd_util::{EntryId, SessionId};
 use std::sync::Arc;
@@ -246,22 +246,35 @@ impl SharedState {
         let _ = self.volume_tx.send(Some(info));
     }
 
-    /// Update volume from VolumeChanged event (preserves restrictions from initial fetch)
-    fn update_volume(&self, percent: u8, muted: bool) {
+    /// Apply a `VolumeChanged` event.
+    ///
+    /// The event carries the whole snapshot, so this replaces rather than merges.
+    /// It used to splice in only `percent`/`muted` and keep the restrictions from
+    /// the initial fetch, which went wrong as soon as the active output could
+    /// change underneath us: the slider would keep enforcing the previous
+    /// output's limits (issue #124).
+    fn update_volume(
+        &self,
+        percent: u8,
+        muted: bool,
+        restrictions: VolumeRestrictions,
+        output: Option<AudioOutput>,
+    ) {
         self.volume_tx.send_modify(|vol| {
-            if let Some(v) = vol {
-                v.percent = percent;
-                v.muted = muted;
-            } else {
-                // If we don't have initial volume yet, create a basic one
-                *vol = Some(VolumeInfo {
-                    percent,
-                    muted,
-                    available: true,
-                    backend: None,
-                    restrictions: VolumeRestrictions::unrestricted(),
-                });
-            }
+            // `available`/`backend` are host capabilities, not per-reading state,
+            // and the event does not carry them; keep what the initial fetch saw.
+            let (available, backend) = vol
+                .as_ref()
+                .map(|v| (v.available, v.backend.clone()))
+                .unwrap_or((true, None));
+            *vol = Some(VolumeInfo {
+                percent,
+                muted,
+                available,
+                backend,
+                restrictions,
+                output,
+            });
         });
     }
 
@@ -449,8 +462,13 @@ impl SharedState {
                 }
             }
 
-            EventPayload::VolumeChanged { percent, muted } => {
-                self.update_volume(*percent, *muted);
+            EventPayload::VolumeChanged {
+                percent,
+                muted,
+                restrictions,
+                output,
+            } => {
+                self.update_volume(*percent, *muted, restrictions.clone(), output.clone());
             }
 
             EventPayload::BrightnessChanged {
