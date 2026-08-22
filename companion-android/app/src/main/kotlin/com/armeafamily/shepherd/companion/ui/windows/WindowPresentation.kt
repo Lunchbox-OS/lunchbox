@@ -1,6 +1,7 @@
 package com.armeafamily.shepherd.companion.ui.windows
 
 import com.armeafamily.shepherd.companion.domain.WindowInfo
+import com.armeafamily.shepherd.companion.domain.WindowOwner
 
 /**
  * How a [WindowInfo] reads on the windows screen.
@@ -59,5 +60,39 @@ object WindowPresentation {
 
         /** On a workspace that isn't showing (another one is focused). */
         HIDDEN("Hidden"),
+    }
+
+    /**
+     * Whether nothing on the device is supervising this window.
+     *
+     * The two owners that mean it are different failures with the same
+     * consequence: an activity that outlived its own teardown, and a surface
+     * belonging to no session at all. Either way the child is looking at
+     * something no time limit will end and no usage record will count, which
+     * is the entire reason this screen can be reached from a phone.
+     */
+    fun isOrphan(w: WindowInfo): Boolean =
+        w.owner == WindowOwner.ESCAPED || w.owner == WindowOwner.UNOWNED
+
+    /** The chip naming who the device thinks is behind the window. */
+    fun ownerLabel(w: WindowInfo): String = when (w.owner) {
+        WindowOwner.SHEPHERD -> "Shepherd"
+        WindowOwner.ACTIVITY -> "Activity"
+        WindowOwner.ESCAPED -> "Escaped"
+        WindowOwner.UNOWNED -> "Unowned"
+    }
+
+    /**
+     * What went wrong, for the owners where something did — and null for the
+     * ones where nothing did, so an ordinary row stays a single line.
+     */
+    fun ownerDetail(w: WindowInfo): String? = when (w.owner) {
+        WindowOwner.ESCAPED ->
+            "This activity outlived its own teardown. Its session is over and " +
+                "the device is still trying to close it."
+        WindowOwner.UNOWNED ->
+            "No process the device knows about. Either it was started outside " +
+                "shepherd, or an activity got away without being noticed."
+        WindowOwner.SHEPHERD, WindowOwner.ACTIVITY -> null
     }
 }

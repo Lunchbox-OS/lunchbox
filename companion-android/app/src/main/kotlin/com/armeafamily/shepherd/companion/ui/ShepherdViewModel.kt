@@ -23,6 +23,7 @@ import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.domain.VolumeInfo
 import com.armeafamily.shepherd.companion.domain.WindowAction
 import com.armeafamily.shepherd.companion.domain.WindowInfo
+import com.armeafamily.shepherd.companion.ui.windows.WindowPresentation
 import com.armeafamily.shepherd.companion.ble.Protocol
 import com.armeafamily.shepherd.companion.util.Formatting
 import com.armeafamily.shepherd.companion.util.ReasonText
@@ -96,7 +97,19 @@ data class WindowsUiState(
     /** Window with an action in flight; its row's buttons are disabled. */
     val busyId: Long? = null,
 ) {
-    val onScreen: List<WindowInfo> get() = windows.filterNot { it.inScratchpad }
+    /**
+     * Windows on the child's screen that nothing is supervising.
+     *
+     * Split out and rendered first because they are the only rows on this
+     * screen that are a problem rather than a fact. An orphan stashed on the
+     * scratchpad stays under the scratchpad heading: it is hidden rather than
+     * loose, which is the same line the device's own reconciliation sweep
+     * draws before it warns about one.
+     */
+    val orphaned: List<WindowInfo>
+        get() = windows.filter { !it.inScratchpad && WindowPresentation.isOrphan(it) }
+    val onScreen: List<WindowInfo>
+        get() = windows.filter { !it.inScratchpad && !WindowPresentation.isOrphan(it) }
     val scratchpad: List<WindowInfo> get() = windows.filter { it.inScratchpad }
 }
 

@@ -1,7 +1,12 @@
 package com.armeafamily.shepherd.companion.ui.windows
 
 import com.armeafamily.shepherd.companion.domain.WindowInfo
+import com.armeafamily.shepherd.companion.domain.WindowOwner
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -22,12 +27,14 @@ class WindowPresentationTest {
         visible: Boolean = true,
         focused: Boolean = false,
         workspace: String? = "1",
+        owner: WindowOwner = WindowOwner.ACTIVITY,
     ) = WindowInfo(
         appId = appId,
         focused = focused,
         id = id,
         inScratchpad = inScratchpad,
         name = name,
+        owner = owner,
         pid = pid,
         visible = visible,
         windowClass = windowClass,
@@ -83,5 +90,35 @@ class WindowPresentationTest {
             WindowPresentation.Placement.HIDDEN,
             WindowPresentation.placement(window(visible = false, workspace = "2")),
         )
+    }
+
+    @Test
+    fun `only escaped and unowned windows count as orphans`() {
+        // The two that mean nothing is supervising the window. Shepherd's own
+        // furniture and the running activity are not problems, and treating
+        // them as such would put the launcher itself under a "close this"
+        // banner on every visit.
+        assertTrue(WindowPresentation.isOrphan(window(owner = WindowOwner.ESCAPED)))
+        assertTrue(WindowPresentation.isOrphan(window(owner = WindowOwner.UNOWNED)))
+        assertFalse(WindowPresentation.isOrphan(window(owner = WindowOwner.ACTIVITY)))
+        assertFalse(WindowPresentation.isOrphan(window(owner = WindowOwner.SHEPHERD)))
+    }
+
+    @Test
+    fun `every owner has a chip label`() {
+        assertEquals("Shepherd", WindowPresentation.ownerLabel(window(owner = WindowOwner.SHEPHERD)))
+        assertEquals("Activity", WindowPresentation.ownerLabel(window(owner = WindowOwner.ACTIVITY)))
+        assertEquals("Escaped", WindowPresentation.ownerLabel(window(owner = WindowOwner.ESCAPED)))
+        assertEquals("Unowned", WindowPresentation.ownerLabel(window(owner = WindowOwner.UNOWNED)))
+    }
+
+    @Test
+    fun `only the owners that are a problem explain themselves`() {
+        // An explanation on every row would be four lines of noise for the
+        // three-quarters of the list that is working as intended.
+        assertNotNull(WindowPresentation.ownerDetail(window(owner = WindowOwner.ESCAPED)))
+        assertNotNull(WindowPresentation.ownerDetail(window(owner = WindowOwner.UNOWNED)))
+        assertNull(WindowPresentation.ownerDetail(window(owner = WindowOwner.ACTIVITY)))
+        assertNull(WindowPresentation.ownerDetail(window(owner = WindowOwner.SHEPHERD)))
     }
 }
