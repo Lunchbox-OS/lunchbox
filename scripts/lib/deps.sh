@@ -59,10 +59,16 @@ CARGO_NDK_VERSION="4.1.2"
 
 # wasm-pack builds crates/shepherd-config-wasm into the browser artifact the
 # web config editor loads. Pinned for the same reason as the tools above: an
-# unpinned installer silently adopts whatever upstream published last, and the
+# unpinned install silently adopts whatever upstream published last, and the
 # generated JS glue has to match the `wasm-bindgen` version the crate compiles
-# against. Installed from the upstream release binary rather than
-# `cargo install`, which takes minutes to build from source.
+# against.
+#
+# Installed with `cargo install`, not the upstream `init.sh`: that script has
+# its version baked in and ignores any argument you pass it, so pinning through
+# it does not work — it would install whatever is current and then fail this
+# file's own version check on every run. Building from source also keeps the
+# install arch-neutral, which a hardcoded release-tarball URL would not be
+# (see scripts/ci/check-arch-neutral.sh).
 WASM_PACK_VERSION="0.13.1"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
@@ -191,10 +197,12 @@ install_wasm_toolchain() {
     if [[ "$installed" == "$WASM_PACK_VERSION" ]]; then
         info "wasm-pack $WASM_PACK_VERSION already installed"
     else
-        info "Installing wasm-pack $WASM_PACK_VERSION..."
-        curl --proto '=https' --tlsv1.2 -sSf \
-            "https://rustwasm.github.io/wasm-pack/installer/init.sh" \
-            | sh -s -- --version "$WASM_PACK_VERSION"
+        if [[ -n "$installed" ]]; then
+            info "Replacing wasm-pack $installed with pinned $WASM_PACK_VERSION..."
+        else
+            info "Installing wasm-pack $WASM_PACK_VERSION (cargo install, ~1-2 min on first build)..."
+        fi
+        cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
     fi
 }
 

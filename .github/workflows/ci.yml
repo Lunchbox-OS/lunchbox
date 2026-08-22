@@ -215,8 +215,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-target-clippy-v1-
 
+      # `--workspace` for the same reason the test job uses it: the crates kept
+      # out of `default-members` still have to lint, and naming them here would
+      # be one more list to forget to update.
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
     name: Rustfmt
@@ -588,11 +591,17 @@ jobs:
 
   webui:
     name: Web UI
-    # Runs on the default node:20-bookworm container: npm, tsc, vitest and the
-    # boundary check need nothing else. The config editor's wasm validator is
-    # *not* built here — that needs the Rust image and is covered by the
-    # `config-editor` job below, which also builds the standalone bundle.
+    # npm, vitest and the static guards need nothing but Node — but jsdom 30,
+    # which backs the DOM tests, requires ^22.22.2 || ^24.15.0 || >=26, and the
+    # runner's default container is node:20-bookworm. Pinned to a supported
+    # major rather than downgrading jsdom.
+    #
+    # The config editor's wasm validator is *not* built here; that needs the
+    # Rust image and is covered by the `config-editor` job below, which also
+    # builds the standalone bundle and typechecks against it.
     runs-on: ubuntu-latest
+    container:
+      image: node:22-bookworm
     defaults:
       run:
         working-directory: shepherd-webui
