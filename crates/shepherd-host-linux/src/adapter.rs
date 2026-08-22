@@ -95,12 +95,19 @@ fn expand_args(args: &[String]) -> Vec<String> {
 /// a launched activity should not change behavior because the CLI's default
 /// moved underneath it.
 ///
-/// `connectivity_check` is resolved by the caller from the entry's internet
-/// policy — see `SpawnOptions::connectivity_check`. `shepherd-media` only acts
-/// on it in browse mode, but accepts it in both.
+/// `connectivity_check` and `watched_grace_days` are resolved by the caller
+/// rather than read from the entry — see `SpawnOptions`. The first gates which
+/// items browse shows; the second is the video cache's eviction policy, which
+/// has to travel with the launch because the activity writes to the same cache
+/// directory shepherdd prefetches into, and two processes valuing its contents
+/// differently would undo each other's trims.
 ///
 /// Panics on a non-`Media` kind; callers match before calling.
-fn media_argv(kind: &EntryKind, connectivity_check: Option<&str>) -> Vec<String> {
+fn media_argv(
+    kind: &EntryKind,
+    connectivity_check: Option<&str>,
+    watched_grace_days: Option<u64>,
+) -> Vec<String> {
     let EntryKind::Media {
         library,
         mode,
@@ -147,6 +154,10 @@ fn media_argv(kind: &EntryKind, connectivity_check: Option<&str>) -> Vec<String>
     if let Some(check) = connectivity_check {
         argv.push("--connectivity-check".to_string());
         argv.push(check.to_string());
+    }
+    if let Some(days) = watched_grace_days {
+        argv.push("--watched-grace-days".to_string());
+        argv.push(days.to_string());
     }
 
     argv
@@ -1315,7 +1326,11 @@ impl HostAdapter for LinuxHost {
                 (argv, HashMap::new(), None, None, None, None)
             }
             EntryKind::Media { .. } => (
-                media_argv(entry_kind, options.connectivity_check.as_deref()),
+                media_argv(
+                    entry_kind,
+                    options.connectivity_check.as_deref(),
+                    options.media_watched_grace_days,
+                ),
                 HashMap::new(),
                 None,
                 None,
@@ -1888,7 +1903,7 @@ mod tests {
     #[test]
     fn media_argv_browse_defaults() {
         assert_eq!(
-            media_argv(&media(MediaMode::Browse, None), None),
+            media_argv(&media(MediaMode::Browse, None), None, None),
             vec![
                 "shepherd-media",
                 "browse",
@@ -1904,7 +1919,7 @@ mod tests {
 
     #[test]
     fn media_argv_play_passes_the_item() {
-        let argv = media_argv(&media(MediaMode::Play, Some("big-buck-bunny")), None);
+        let argv = media_argv(&media(MediaMode::Play, Some("big-buck-bunny")), None, None);
         assert_eq!(argv[1], "play");
         assert!(
             argv.windows(2)
@@ -1934,7 +1949,7 @@ mod tests {
             resume: true,
             prefetch: None,
         };
-        let argv = media_argv(&kind, Some("https://example.com"));
+        let argv = media_argv(&kind, Some("https://example.com"), None);
         assert!(argv.contains(&"--reverse".to_string()), "{argv:?}");
         assert!(argv.contains(&"--resume".to_string()), "{argv:?}");
         assert!(
@@ -1955,10 +1970,34 @@ mod tests {
     }
 
     #[test]
+    fn media_argv_forwards_the_watched_grace() {
+        // The activity writes to the same video cache shepherdd prefetches
+        // into, so the eviction policy has to travel with the launch or the two
+        // processes would undo each other's trims.
+        let argv = media_argv(&media(MediaMode::Browse, None), None, Some(90));
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--watched-grace-days", "90"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_omits_the_watched_grace_for_a_non_media_launch_path() {
+        // `None` is what every other kind resolves to; the player then falls
+        // back to the shared default rather than being told a wrong number.
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None);
+        assert!(
+            !argv.iter().any(|a| a == "--watched-grace-days"),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
     fn media_argv_omits_the_check_when_not_forwarded() {
         // `forward_check = false` reaches the adapter as `None`, and browse
         // mode then shows every item regardless of connectivity.
-        let argv = media_argv(&media(MediaMode::Browse, None), None);
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None);
         assert!(
             !argv.iter().any(|a| a == "--connectivity-check"),
             "{argv:?}"
@@ -1981,7 +2020,7 @@ mod tests {
             resume: false,
             prefetch: None,
         };
-        assert_eq!(media_argv(&kind, None)[3], url);
+        assert_eq!(media_argv(&kind, None, None)[3], url);
 
         let kind = EntryKind::Media {
             library: "~/.config/shepherd/movies.toml".into(),
@@ -1993,7 +2032,7 @@ mod tests {
             resume: false,
             prefetch: None,
         };
-        let expanded = &media_argv(&kind, None)[3];
+        let expanded = &media_argv(&kind, None, None)[3];
         assert!(!expanded.starts_with('~'), "{expanded}");
         assert!(
             expanded.ends_with("/.config/shepherd/movies.toml"),

@@ -674,6 +674,19 @@ pub struct RawMediaServiceConfig {
     /// check.
     #[serde(default = "default_free_space_floor")]
     pub free_space_floor_bytes: u64,
+
+    /// How long, in days, watching a video protects its cached copy from being
+    /// displaced by a speculative download.
+    ///
+    /// This is the whole eviction policy in one number. Inside the window a
+    /// guess can never cost the child something they chose; past it, the file
+    /// competes on age like anything else, so a film watched once last spring
+    /// eventually yields to a video added to the library this week. Raise it
+    /// for a household that goes offline for long stretches and wants what it
+    /// has watched to stay put; 0 drops the protection entirely and orders
+    /// purely by age.
+    #[serde(default = "default_watched_grace_days")]
+    pub watched_grace_days: u64,
 }
 
 impl Default for RawMediaServiceConfig {
@@ -682,12 +695,17 @@ impl Default for RawMediaServiceConfig {
             prefetch: true,
             prefetch_while_session_active: false,
             free_space_floor_bytes: default_free_space_floor(),
+            watched_grace_days: default_watched_grace_days(),
         }
     }
 }
 
 fn default_free_space_floor() -> u64 {
     2 * 1024 * 1024 * 1024 // 2 GiB
+}
+
+fn default_watched_grace_days() -> u64 {
+    30
 }
 
 /// Steam-specific service configuration

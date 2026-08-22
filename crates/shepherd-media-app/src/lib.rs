@@ -24,7 +24,7 @@ pub mod settings;
 
 pub use cache::{Freshness, Resolution};
 pub use cache_key::{content_key, interest_key};
-pub use lru::Recency;
+pub use lru::{Score, ScoreWeights, Standing};
 pub use poster_cache::RemotePosterCache;
 pub use quality::{CacheMode, PosterPolicy, Quality};
 pub use resume::{ItemPosition, RESUME_SCHEMA_VERSION, ResumeState, ResumeStore, ResumeTracker};

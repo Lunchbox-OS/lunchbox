@@ -58,6 +58,22 @@ pub struct Cli {
     /// connectivity.
     #[arg(long, global = true)]
     pub connectivity_check: Option<String>,
+
+    /// How long, in days, watching a video protects its cached copy from being
+    /// displaced by a speculative download.
+    ///
+    /// Inside the window a background download can never cost the viewer
+    /// something they chose; past it, the file competes on age like anything
+    /// else, so a video watched once months ago eventually yields to one added
+    /// to the library this week. 0 drops the protection and orders purely by
+    /// age.
+    ///
+    /// shepherdd passes its `service.media.watched_grace_days` here, because
+    /// the cache directory this writes to is the one shepherdd prefetches into:
+    /// two processes valuing its contents differently would undo each other's
+    /// trims.
+    #[arg(long, default_value_t = shepherd_media_cache::DEFAULT_WATCHED_GRACE_DAYS, global = true)]
+    pub watched_grace_days: u64,
 }
 
 /// How to order library items before display or lookup.

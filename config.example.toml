@@ -90,7 +90,7 @@ timeout_ms = 1500
 # time, so a video the child opens later plays from disk instead of buffering,
 # and the library keeps working offline. Downloads pause while an activity is
 # running and while the internet is down, and a speculative download will never
-# displace a video that has actually been watched.
+# displace a video watched within `watched_grace_days`.
 #
 # The cache itself is capped by the SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES
 # environment variable (default 10 GiB); see docs/shepherd-media.md.
@@ -98,6 +98,15 @@ timeout_ms = 1500
 # prefetch = true                        # global off switch
 # prefetch_while_session_active = false  # true spends CPU/bandwidth during play
 # free_space_floor_bytes = 2147483648    # 2 GiB; stop and warn below this. 0 disables
+#
+# How long watching a video protects its cached copy from being displaced by a
+# speculative download. Inside the window a guess can never cost the child
+# something they chose; past it the file competes on age like anything else, so
+# a film watched once last spring eventually yields to a video added this week
+# — which is also what keeps a full cache from freezing on old content. Raise it
+# for a household that goes offline for long stretches; 0 removes the protection
+# and orders purely by age.
+# watched_grace_days = 30
 
 # Steam-specific behaviour (optional)
 # Steam can block a game launch behind an "interstitial" — a modal it shows

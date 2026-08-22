@@ -31,10 +31,11 @@ One flat directory, four kinds of file per entry:
 | File | Meaning |
 |---|---|
 | `<key>.<ext>` | the video |
-| `<key>.done` | commit sentinel; records the interest key and the selector |
+| `<key>.done` | commit sentinel; records the interest key, selector, and library position |
 | `<key>.part` | an in-flight direct-HTTP download |
 | `<key>.lock` | download claim |
 | `<ikey>.played` | the video has been watched (keyed by *interest*, not content) |
+| `<ikey>.seen` | when the item was first offered to this device |
 
 A video counts as cached only when its `.done` sentinel exists, so a reader
 never picks up a half-written file — yt-dlp in particular leaves unmerged
@@ -63,10 +64,11 @@ different `quality` settings. Before, they shared a filename and each launch
 saw the other's file as the wrong codec, deleted it, and re-downloaded — a loop
 that never converged. Now the two renditions are two files.
 
-**Interest key** — the SHA-256 of the URL alone. It names one file,
-`<ikey>.played`, and it exists because a child who watches a video has shown
-interest in the *video*, not in a particular rendition of it: watching at 1080p
-protects the 480p copy too.
+**Interest key** — the SHA-256 of the URL alone. It names the two marker files,
+`<ikey>.played` and `<ikey>.seen`, and it exists because a child who watches a
+video has shown interest in the *video*, not in a particular rendition of it:
+watching at 1080p protects the 480p copy too. The same goes for how old an item
+is — that is a fact about the item, not about one download of it.
 
 Files written before this change are named after item ids, so nothing will ever
 ask for them again. They are left where they are: they carry valid sentinels,
@@ -92,43 +94,95 @@ while another process held it open would leave the next claimant locking a fresh
 inode, and the mutual exclusion would quietly stop working. They are empty, so
 the cost is one directory entry per distinct URL ever downloaded.
 
-## Eviction: watched beats guessed
+## Eviction: one score, and the grace that erodes
 
-The ordering itself is `shepherd_media_app::Recency`, and the played marker
-behind it is `shepherd_media_app::interest` — both shared with the Android
-cache, so the two front-ends spend disk the same way.
+The scoring is `shepherd_media_app::lru` and the markers behind it are
+`shepherd_media_app::interest` — both shared with the Android cache, so the two
+front-ends spend disk the same way.
 
-The cap is 10 GiB, or `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES`. What goes first is
-a **two-class** ordering, and the classes matter more than the timestamps:
+The cap is 10 GiB, or `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES`. Every committed
+file is scored on one time axis and the lowest score is evicted first:
 
-1. **Unwatched** — downloaded speculatively, never played. All of these go
-   before any watched file does.
-2. **Watched** — has a `.played` marker, ordered by when playback last started.
+```
+watched    score = played_at  + watched_grace
+unwatched  score = first_seen - min(ordinal, 168) * 1h
+```
 
-Plain mtime ordering got this backwards: a prefetch that landed a minute ago
-looked "recently used" and outranked a film the child watched last week. A guess
-must never cost someone content they chose.
+**Watching buys a grace, not a permanent claim.** `watched_grace` defaults to 30
+days (`service.media.watched_grace_days`), and because it is a fixed head start
+on a moving axis it erodes at one day per day. Inside the window nothing
+speculative can touch the file. Past it, a film watched once last spring
+competes on age like anything else and will lose to a video the parent added
+this week.
 
-Within the unwatched class, download time is **inverted** — the newest arrival
-goes first. Prefetch walks a library in display order, so the newest file is the
-one furthest down the list and least likely to be reached next. Evicting the
-head instead would have the next prefetch pass immediately re-download it.
+This replaced a strict two-class ordering, where every unwatched file sorted
+below every watched one. That guarantee was absolute, and absolute was too
+strong in two directions: a single play protected a file forever, and once every
+byte of a full cache had been watched at least once, prefetch had nothing left
+it was allowed to spend and went permanently inert.
+
+The unwatched side takes two terms because it is answering two questions.
+`first_seen` is when the item entered the library, so something newly added gets
+a real chance at the disk; it is a marker rather than the file's mtime because
+mtime resets every time an item churns through the cache, and an item
+re-downloaded twice is not a new item. `ordinal` is where the item sits in its
+library, which is a proxy for how soon anyone will reach it: prefetch fills in
+display order, so within one sweep the tail goes first and the head — the file a
+browsing child reaches first — stays. The old model had one axis serving both,
+so it inverted download time (newest first) to avoid re-downloading the head
+every sweep, and in doing so made every freshly added item the first thing
+thrown away.
+
+Position deliberately cannot outweigh age: the step is an hour and it caps at
+168, so a whole library spans at most a week, while the ages it competes against
+run to months.
+
+Nothing here needs a hysteresis deadband, because none of the inputs drift.
+`first_seen` is write-once and `ordinal` comes from the library, so a file that
+loses a comparison today loses it again tomorrow rather than trading places with
+whatever replaced it. The one input that moves is `played_at`, and it moves
+because somebody watched something.
 
 `.played` is written when playback actually starts from a cached file, and by
 the after-play download path (that download exists *because* the video was
-watched — without the marker it would arrive unwatched and be the first thing
-the following trim discarded, evicting itself). It is never removed, including
-when the video is evicted: interest in a video outlives the file.
+watched — without the marker it would arrive scored as a guess and be the first
+thing the following trim discarded, evicting itself). `.seen` is written for
+every item a prefetch pass walks, including ones it does not download: an item
+the cache had no room for still has to be correctly aged when room appears.
+Neither is ever removed, including when the video is evicted.
 
-The two queue paths differ in what they may spend:
+### What a download may spend
 
-- `queue_prefetch` may recycle space held by **other guesses** and nothing else.
-  If everything cached has been watched, the guess is dropped rather than made
-  to cost the child a file. This is also what stops the cache going inert once
-  it fills: speculative content is always replaceable by more speculative
-  content.
-- `queue_after_play` follows a video watched to the end, so it is allowed to
-  displace the least-recently-watched file.
+One rule covers both callers — **a download may only evict what it outranks** —
+and they differ only in what the download is worth:
+
+- `queue_prefetch` scores as a guess at its library position. It recycles space
+  held by other guesses and by content whose grace has expired, and is dropped
+  rather than displace a file it does not outrank. If nothing is cheap enough,
+  the prefetch is skipped.
+- `queue_after_play` scores as a play at the current moment, which is the
+  maximum, so it may displace anything — except a file watched equally recently,
+  which is how it avoids evicting the file it just wrote.
+
+Equality is not enough to displace, and that is what makes the self-eviction
+case work: a download and the file it just committed score identically.
 
 `cached_path` is a pure lookup and records nothing — enumerating the cache,
 which the prefetcher does, must not make every guess look watched.
+
+### Two processes, one policy
+
+The grace has to be the same on both sides of the directory or the daemon and
+the player would undo each other's trims. shepherdd resolves
+`service.media.watched_grace_days` once and hands it to both: to the cache its
+own prefetcher builds, and to each media activity it spawns, as
+`--watched-grace-days`.
+
+### On upgrade
+
+Files cached before the markers existed get `.seen` stamped on the first sweep
+that walks them. Taking that stamp at face value would present the whole
+existing cache as freshly added, so the file's own mtime is a floor on
+`first_seen` — whichever is older wins. Sentinels with no recorded ordinal read
+as the tail of a list nothing is walking, and pre-hash leftovers, which have no
+interest key at all, read as never watched and age out on their own.

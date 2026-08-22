@@ -19,9 +19,17 @@
 //! candidates that age out on their own, and re-downloading them is what the
 //! next toolchain bump would have cost anyway.
 //!
-//! Eviction spends files nobody has watched before it touches one somebody
-//! did; see [`shepherd_media_app::Recency`]. That matters once the `All` cache
-//! mode actually prefetches, which it does not yet.
+//! Eviction scores each file by what it is worth and spends the cheapest first;
+//! see [`shepherd_media_app::Score`]. Watching something buys it a grace period
+//! against being displaced, which erodes with time, so a file watched once long
+//! ago eventually yields to newer content rather than holding its place
+//! forever. That matters once the `All` cache mode actually prefetches, which
+//! it does not yet — until then every file here is either watched or a leftover.
+//!
+//! Two of the three inputs the shared policy takes are degenerate here. There
+//! is no library ordinal, because nothing prefetches in display order, so every
+//! file scores as the tail of a list nothing is walking. And with one rendition
+//! per URL, the content key doubles as the interest key both markers hang off.
 //!
 //! Download and eviction are blocking and run off the UI thread.
 
@@ -30,18 +38,25 @@ use std::path::{Path, PathBuf};
 
 use shepherd_media_app::content_key;
 use shepherd_media_app::interest;
-use shepherd_media_app::lru::{self, LruEntry, Recency};
+use shepherd_media_app::lru::{self, LruEntry, Score, ScoreWeights, Standing};
 
 /// A per-library video cache rooted at `dir` with a `max_bytes` budget.
 #[derive(Clone)]
 pub struct VideoCache {
     dir: PathBuf,
     max_bytes: u64,
+    weights: ScoreWeights,
 }
 
 impl VideoCache {
     pub fn new(dir: PathBuf, max_bytes: u64) -> Self {
-        Self { dir, max_bytes }
+        Self {
+            dir,
+            max_bytes,
+            // There is no per-library caching setting for this yet, and the
+            // shared default is the policy the Linux side ships with.
+            weights: ScoreWeights::default(),
+        }
     }
 
     /// The cache key for a URL. Direct HTTP picks no format, so the selector
@@ -77,6 +92,18 @@ impl VideoCache {
         }
     }
 
+    /// Record that `url` has been offered, so eviction can tell a recent
+    /// addition from something that has been sitting here unwatched.
+    ///
+    /// Write-once — see [`interest::mark_seen`].
+    pub fn mark_seen(&self, url: &str) {
+        if std::fs::create_dir_all(&self.dir).is_ok()
+            && let Err(e) = interest::mark_seen(&self.dir, &Self::key_for(url))
+        {
+            log::warn!("could not record first sighting of a cached video: {e}");
+        }
+    }
+
     /// Download `url` into the cache (blocking) and evict LRU files to stay
     /// within the cap. A no-op returning the existing path if already cached.
     pub fn store(&self, url: &str) -> io::Result<PathBuf> {
@@ -88,6 +115,7 @@ impl VideoCache {
         let tmp = path.with_extension("part");
         download(url, &tmp)?;
         std::fs::rename(&tmp, &path)?;
+        self.mark_seen(url);
         // This download exists because the item was just watched. Recording
         // that before evicting is what stops it being the first thing the trim
         // below discards — it would otherwise arrive unwatched and evict
@@ -103,11 +131,10 @@ impl VideoCache {
         lru::evict_to_cap(self.entries(), self.max_bytes, |_| {});
     }
 
-    /// All committed cache files as LRU entries, classified by whether anyone
-    /// has watched them. In-flight downloads and played markers are skipped:
-    /// neither is cached content, so neither counts toward the cap nor is
-    /// eligible for eviction.
-    fn entries(&self) -> Vec<LruEntry<Recency>> {
+    /// All committed cache files as LRU entries, scored by what each is worth.
+    /// In-flight downloads and markers are skipped: neither is cached content,
+    /// so neither counts toward the cap nor is eligible for eviction.
+    fn entries(&self) -> Vec<LruEntry<Score>> {
         let Ok(rd) = std::fs::read_dir(&self.dir) else {
             return Vec::new();
         };
@@ -125,9 +152,22 @@ impl VideoCache {
                 }
                 let key = path.file_stem()?.to_str()?;
                 let downloaded_at = meta.modified().ok()?;
+                // The marker wins, but the file's own mtime is a floor: a cache
+                // that predates the marker gets stamped on first use, and
+                // taking that at face value would present all of it as newly
+                // added.
+                let first_seen = interest::first_seen_at(&self.dir, key)
+                    .map_or(downloaded_at, |seen| seen.min(downloaded_at));
+                let standing = Standing {
+                    first_seen,
+                    played_at: interest::played_at(&self.dir, key),
+                    // Nothing here prefetches in library order, so no file has
+                    // a position for the others to be measured against.
+                    ordinal: None,
+                };
                 Some(LruEntry {
                     size: meta.len(),
-                    recency: Recency::classify(downloaded_at, interest::played_at(&self.dir, key)),
+                    score: Score::of(&standing, self.weights),
                     path,
                 })
             })
@@ -204,30 +244,30 @@ mod tests {
     }
 
     #[test]
-    fn among_unwatched_files_the_newest_download_is_evicted_first() {
-        // Cap 250 bytes; three unwatched 100-byte files. The newest goes:
-        // a cache fills in the order items are listed, so the newest arrival is
-        // the furthest down the list and the least likely to be reached next.
+    fn among_unwatched_files_the_oldest_arrival_is_evicted_first() {
+        // Cap 250 bytes; three unwatched 100-byte files. Nothing here prefetches
+        // in library order, so no file has a position to be judged on and age
+        // is all that separates them.
         let cache = VideoCache::new(unique_dir("evict"), 250);
-        seed(&cache, "https://x/old.mp4", 100, 1_000);
+        seed(&cache, "https://x/old.mp4", 100, 1_000); // oldest
         seed(&cache, "https://x/mid.mp4", 100, 2_000);
-        seed(&cache, "https://x/new.mp4", 100, 3_000); // newest
+        seed(&cache, "https://x/new.mp4", 100, 3_000);
         cache.evict_to_cap();
 
         assert!(
-            !cache.path_for("https://x/new.mp4").exists(),
-            "the newest guess is evicted"
+            !cache.path_for("https://x/old.mp4").exists(),
+            "the oldest arrival is evicted"
         );
-        assert!(cache.path_for("https://x/old.mp4").exists());
         assert!(cache.path_for("https://x/mid.mp4").exists());
+        assert!(cache.path_for("https://x/new.mp4").exists());
         let total: u64 = cache.entries().iter().map(|e| e.size).sum();
         assert!(total <= 250);
     }
 
     #[test]
-    fn a_watched_file_survives_every_unwatched_one() {
-        // The headline of the shared ordering: something the user chose to
-        // watch outranks a speculative download however recent.
+    fn a_recently_watched_file_survives_every_unwatched_one() {
+        // Something the user chose to watch outranks a speculative download,
+        // however recent, for as long as its grace lasts.
         let cache = VideoCache::new(unique_dir("watched"), 100);
         seed(&cache, "https://x/watched.mp4", 100, 1_000); // oldest by mtime
         seed(&cache, "https://x/guess.mp4", 100, 3_000);
@@ -243,30 +283,81 @@ mod tests {
     }
 
     #[test]
+    fn a_play_old_enough_to_have_lost_its_grace_stops_protecting_the_file() {
+        // The other half of the shared policy: protection erodes, so a file
+        // watched once long ago does not hold its place against newer content
+        // forever.
+        let cache = VideoCache::new(unique_dir("expired"), 100);
+        let stale = "https://x/stale.mp4";
+        let recent = "https://x/recent.mp4";
+        // Both arrivals are dated relative to now, not to the epoch: the point
+        // here is a grace measured in days, so the ages have to be real ones.
+        seed(&cache, stale, 100, FileTime::now().unix_seconds());
+        seed(&cache, recent, 100, FileTime::now().unix_seconds());
+        cache.mark_played(stale);
+        // Push the play well past the default 30-day grace.
+        filetime::set_file_mtime(
+            interest::marker_path(&cache.dir, &VideoCache::key_for(stale)),
+            FileTime::from_unix_time(FileTime::now().unix_seconds() - 90 * 24 * 60 * 60, 0),
+        )
+        .unwrap();
+
+        cache.evict_to_cap();
+
+        assert!(!cache.path_for(stale).exists());
+        assert!(cache.path_for(recent).exists());
+    }
+
+    #[test]
+    fn a_re_download_is_not_a_fresh_arrival() {
+        // The first-seen marker outlives the file, so an item that has churned
+        // through the cache keeps competing on its real age.
+        let cache = VideoCache::new(unique_dir("reseen"), 1_000);
+        let url = "https://x/clip.mp4";
+        cache.mark_seen(url);
+        filetime::set_file_mtime(
+            interest::seen_path(&cache.dir, &VideoCache::key_for(url)),
+            FileTime::from_unix_time(1_000, 0),
+        )
+        .unwrap();
+        // The file itself is written fresh, as a re-download would be.
+        seed(&cache, url, 10, 9_000);
+
+        let older = VideoCache::new(unique_dir("reseen-2"), 1_000);
+        seed(&older, url, 10, 9_000);
+
+        assert!(
+            cache.entries()[0].score < older.entries()[0].score,
+            "the marker, not the file, says how old the item is"
+        );
+    }
+
+    #[test]
     fn a_lookup_does_not_count_as_a_play() {
         let cache = VideoCache::new(unique_dir("lookup"), 1_000);
         let url = "https://x/clip.mp4";
         seed(&cache, url, 10, 1_000);
 
         let _ = cache.cached_path(url);
-        assert!(
-            cache.entries()[0].recency.is_unwatched(),
-            "inspecting the cache must not make a guess look watched"
-        );
+        let before = cache.entries()[0].score;
 
         cache.mark_played(url);
-        assert!(!cache.entries()[0].recency.is_unwatched());
+        assert!(
+            cache.entries()[0].score > before,
+            "inspecting the cache must not count as a play; marking one must"
+        );
     }
 
     #[test]
-    fn a_played_marker_is_not_cached_content() {
+    fn markers_are_not_cached_content() {
         let cache = VideoCache::new(unique_dir("marker"), 1_000);
         let url = "https://x/clip.mp4";
         seed(&cache, url, 10, 1_000);
         cache.mark_played(url);
+        cache.mark_seen(url);
 
         let entries = cache.entries();
-        assert_eq!(entries.len(), 1, "the marker must not be counted as a file");
+        assert_eq!(entries.len(), 1, "markers must not be counted as files");
         assert_eq!(entries[0].size, 10);
     }
 

@@ -15,8 +15,10 @@
 //!   `service.media.prefetch_while_session_active`.
 //! - **Run while the internet is down**, which it learns from the connectivity
 //!   checks shepherdd already performs rather than probing again.
-//! - **Displace anything watched.** The cache lets a speculative download
-//!   recycle space held by other speculative downloads and nothing else; see
+//! - **Displace anything recently watched.** A speculative download is scored
+//!   as the guess it is, so it can recycle space held by other guesses and by
+//!   content watched long enough ago to have lost its grace
+//!   (`service.media.watched_grace_days`) — never a film watched last week. See
 //!   `shepherd-media-cache`.
 //! - **Fill the disk.** Below `service.media.free_space_floor_bytes` it warns
 //!   and stops. The cache's own cap bounds the cache, not the volume it sits
@@ -62,6 +64,10 @@ pub struct MediaPrefetcher {
     targets: Vec<PrefetchTarget>,
     prefetch_while_session_active: bool,
     free_space_floor_bytes: u64,
+    /// How long a play protects a file from being displaced by a guess. Handed
+    /// to the cache the sweep builds, and to every media activity spawned, so
+    /// the two processes sharing the directory agree.
+    watched_grace: Duration,
 }
 
 impl MediaPrefetcher {
@@ -119,6 +125,9 @@ impl MediaPrefetcher {
             targets,
             prefetch_while_session_active: policy.service.media.prefetch_while_session_active,
             free_space_floor_bytes: policy.service.media.free_space_floor_bytes,
+            watched_grace: shepherd_media_cache::grace_from_days(
+                policy.service.media.watched_grace_days,
+            ),
         })
     }
 
@@ -205,6 +214,7 @@ impl MediaPrefetcher {
             let library_source = target.library.clone();
             let ytdl_format = ytdl_format_for(target.quality).to_string();
             let only_item = target.only_item.clone();
+            let watched_grace = self.watched_grace;
 
             // Library loading shells out to yt-dlp for playlists and reads
             // files otherwise; queueing hands work to the cache's own thread.
@@ -215,6 +225,7 @@ impl MediaPrefetcher {
                     &library_source,
                     &ytdl_format,
                     only_item.as_deref(),
+                    watched_grace,
                 )
             })
             .await;
@@ -283,6 +294,7 @@ fn queue_library(
     library_source: &str,
     ytdl_format: &str,
     only_item: Option<&str>,
+    watched_grace: Duration,
 ) -> Option<usize> {
     let library = match load_prefetch_library(library_source) {
         Ok(l) => l,
@@ -294,18 +306,23 @@ fn queue_library(
 
     // One cache per format selector: the selector is part of the content key,
     // so two entries at different qualities cache side by side.
-    let cache = VideoCache::new(ytdl_format)?;
+    let cache = VideoCache::new(ytdl_format, watched_grace)?;
 
     let platform_info = PlatformInfo::current();
     let mut queued = 0;
-    for item in &library.items {
+    // The ordinal is the item's place in the library as browse would show it,
+    // which is how eviction orders one sweep's guesses against each other — a
+    // file further down the list is one nothing is about to reach. It comes
+    // from the full walk, not from the filtered count, so a `mode = "play"`
+    // entry's single item keeps the position it actually holds.
+    for (ordinal, item) in library.items.iter().enumerate() {
         if only_item.is_some_and(|wanted| wanted != item.id) {
             continue;
         }
         if let Some(source) = resolve_source(item, &platform_info)
             && shepherd_media_cache::source_url(source).is_some()
         {
-            cache.queue_prefetch(&item.id, source);
+            cache.queue_prefetch(&item.id, source, ordinal as u32);
             queued += 1;
         }
     }

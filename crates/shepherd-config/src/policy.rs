@@ -254,6 +254,9 @@ pub struct MediaServiceConfig {
     /// Free-space floor on the cache filesystem, in bytes. 0 disables the
     /// check.
     pub free_space_floor_bytes: u64,
+    /// How long, in days, a play protects a cached video from being displaced
+    /// by a speculative download.
+    pub watched_grace_days: u64,
 }
 
 impl Default for MediaServiceConfig {
@@ -262,6 +265,7 @@ impl Default for MediaServiceConfig {
             prefetch: true,
             prefetch_while_session_active: false,
             free_space_floor_bytes: 2 * 1024 * 1024 * 1024,
+            watched_grace_days: 30,
         }
     }
 }
@@ -323,6 +327,7 @@ impl ServiceConfig {
                 prefetch: m.prefetch,
                 prefetch_while_session_active: m.prefetch_while_session_active,
                 free_space_floor_bytes: m.free_space_floor_bytes,
+                watched_grace_days: m.watched_grace_days,
             })
             .unwrap_or_default();
         Self {

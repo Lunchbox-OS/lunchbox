@@ -56,11 +56,29 @@ shepherdd also fills this cache in the background, so a library is ready before
 anyone opens it — see [Background prefetch](#background-prefetch).
 
 The cache is capped at 10 GiB, overridable with
-`SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` (a byte count). When it is full, files
-nobody has watched are evicted first — all of them, before any watched file is
-touched. A speculative download can recycle space held by other speculative
-downloads; it can never cost the child a video they actually chose. Among
-watched files the least recently played goes first.
+`SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` (a byte count).
+
+When it is full, every file is scored and the lowest goes first. **Watching
+something protects it for `service.media.watched_grace_days` (30 by default),
+not forever.** Inside that window a speculative download can never cost the
+child a video they chose; past it, the file competes on age like anything else,
+so a film watched once months ago will eventually yield to a video added to the
+library this week. That expiry is also what keeps a full cache from freezing:
+without it, a cache whose every byte had been watched at least once had nothing
+prefetch was allowed to spend and stopped taking new content altogether.
+
+Among files nobody has watched, the ordering is by when the item entered the
+library — an item the parent just added outranks one that has been sitting there
+unwatched since spring — with the item's position in its library breaking ties,
+so within one prefetch sweep the tail of the list goes before the head. Position
+cannot outweigh age: a whole library spans at most a week of the scale, while
+the ages it competes against run to months.
+
+Among watched files, the least recently played goes first.
+
+Raise `watched_grace_days` for a household that goes offline for long stretches
+and wants what it has watched to stay put; set it to 0 to drop the protection
+entirely and order purely by age.
 
 Files are named after a hash of their source URL *and* the quality selector, not
 the library item id. Item ids are unique only within a library and one directory
@@ -83,7 +101,9 @@ It holds off while:
 - **the internet is down**, per the connectivity checks shepherdd already runs;
 - **the disk is nearly full** — below `service.media.free_space_floor_bytes`
   (2 GiB by default) it logs a warning and stops. The cache cap bounds the
-  cache, not the volume it sits on.
+  cache, not the volume it sits on;
+- **there is nothing in the cache cheap enough to replace** — a guess is dropped
+  rather than displace a file it does not outrank.
 
 Availability windows are deliberately ignored: an activity outside its window
 today is exactly the one worth having ready for tomorrow. An entry that is

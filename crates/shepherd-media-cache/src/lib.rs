@@ -10,13 +10,15 @@
 //! (issue #127). Everything here is therefore free of the player: no libmpv, no
 //! egui, nothing a daemon should not link.
 //!
-//! Two caching behaviors are exposed:
+//! Two caching behaviors are exposed, and they differ only in what the download
+//! is judged to be worth (see `shepherd_media_app::lru`):
 //!
-//! - [`VideoCache::queue_prefetch`] — speculative. The worker **skips** if the
-//!   cache is already at capacity, so nothing the user has watched is displaced
-//!   for something they have not asked for.
-//! - [`VideoCache::queue_after_play`] — the user just watched this to the end.
-//!   The worker downloads and then evicts LRU files to come back under the cap.
+//! - [`VideoCache::queue_prefetch`] — speculative, and scored as a guess. It
+//!   may recycle space held by other guesses and by content watched long enough
+//!   ago to have lost its grace; it **skips** rather than displace a file it
+//!   does not outrank.
+//! - [`VideoCache::queue_after_play`] — the user just watched this to the end,
+//!   so it is scored as a play and may displace almost anything.
 //!
 //! See [`key`] for why files are named after their source URL, [`lock`] for how
 //! two processes stay off each other's downloads, and [`store`] for the on-disk
@@ -24,7 +26,9 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
+use shepherd_media_app::lru::ScoreWeights;
 use shepherd_media_core::resolver::resolve_source;
 use shepherd_media_core::{ClassifiedUri, Library, Source};
 use tracing::{debug, warn};
@@ -40,9 +44,9 @@ pub use download::DownloadKind;
 pub use key::{content_key, interest_key, source_url};
 pub use paths::media_cache_dir;
 pub use playlist::{fetch_playlist, ytdlp_available};
-// `Recency` is the shared eviction ordering; re-exported so callers of this
-// crate need not reach into `shepherd-media-app` for it.
-pub use shepherd_media_app::lru::Recency;
+// The shared eviction scoring; re-exported so callers of this crate need not
+// reach into `shepherd-media-app` for it.
+pub use shepherd_media_app::lru::{DEFAULT_WATCHED_GRACE, Score, ScoreWeights as CacheWeights};
 pub use store::{CacheState, cache_total};
 
 use download::{DownloadRequest, download_worker};
@@ -53,6 +57,9 @@ pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 /// Environment variable that overrides [`DEFAULT_MAX_CACHE_BYTES`].
 pub const MAX_BYTES_ENV: &str = "SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES";
 
+/// Default watched grace, in whole days — the unit the config and the CLI use.
+pub const DEFAULT_WATCHED_GRACE_DAYS: u64 = 30;
+
 /// The configured cache cap: [`MAX_BYTES_ENV`] if set and parseable, else
 /// [`DEFAULT_MAX_CACHE_BYTES`].
 pub fn max_cache_bytes() -> u64 {
@@ -60,6 +67,11 @@ pub fn max_cache_bytes() -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_CACHE_BYTES)
+}
+
+/// A grace expressed in whole days, as the config and the CLI carry it.
+pub fn grace_from_days(days: u64) -> Duration {
+    Duration::from_secs(days * 24 * 60 * 60)
 }
 
 /// Where a [`VideoCache`] stores things and how much it may use.
@@ -70,23 +82,34 @@ pub struct VideoCacheConfig {
     /// sentinel, so a file downloaded under a different one can be spotted and
     /// replaced.
     pub ytdl_format: String,
+    /// How eviction values what it holds. Two processes sharing a directory
+    /// must agree on this; see [`watched_grace`].
+    pub weights: ScoreWeights,
 }
 
 pub struct VideoCache {
     cache_dir: PathBuf,
     download_tx: mpsc::Sender<DownloadRequest>,
     ytdl_format: String,
+    weights: ScoreWeights,
 }
 
 impl VideoCache {
     /// Construct a `VideoCache` over the standard cache directory, with the cap
     /// from [`max_cache_bytes`]. Returns `None` if the directory cannot be
     /// determined or created; the caller then skips caching entirely.
-    pub fn new(ytdl_format: &str) -> Option<Arc<Self>> {
+    ///
+    /// `watched_grace` has to be passed in rather than defaulted here: this
+    /// directory is shared with shepherdd's prefetcher, and two processes that
+    /// valued its contents differently would spend the same disk by different
+    /// rules and undo each other's trims. shepherdd resolves it once from
+    /// policy and hands it to both.
+    pub fn new(ytdl_format: &str, watched_grace: Duration) -> Option<Arc<Self>> {
         Self::with_config(VideoCacheConfig {
             cache_dir: media_cache_dir("videos")?,
             max_bytes: max_cache_bytes(),
             ytdl_format: ytdl_format.to_string(),
+            weights: ScoreWeights { watched_grace },
         })
     }
 
@@ -97,6 +120,7 @@ impl VideoCache {
             cache_dir,
             max_bytes,
             ytdl_format,
+            weights,
         } = config;
 
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
@@ -112,13 +136,14 @@ impl VideoCache {
         let format = ytdl_format.clone();
         std::thread::Builder::new()
             .name("video-cache-worker".into())
-            .spawn(move || download_worker(dir, rx, max_bytes, format))
+            .spawn(move || download_worker(dir, rx, max_bytes, format, weights))
             .ok()?;
 
         Some(Arc::new(VideoCache {
             cache_dir,
             download_tx: tx,
             ytdl_format,
+            weights,
         }))
     }
 
@@ -158,51 +183,74 @@ impl VideoCache {
         }
     }
 
-    /// Queue a speculative background download for `source`. The worker skips
-    /// it if the cache is at capacity, so cached content is never displaced for
-    /// something the user has not watched.
+    /// How this cache values what it holds.
+    pub fn weights(&self) -> ScoreWeights {
+        self.weights
+    }
+
+    /// Queue a speculative background download for `source`, which sits at
+    /// position `ordinal` in its library.
+    ///
+    /// The download is scored as a guess, so it recycles space held by other
+    /// guesses and by content watched long enough ago to have lost its grace,
+    /// and is dropped rather than displace a file it does not outrank.
+    ///
+    /// The ordinal is how eviction orders one sweep's guesses against each
+    /// other: prefetch fills in display order, so a file further down the list
+    /// is one nothing is about to reach. It has to be passed in because the
+    /// cache directory is shared by every library on the device and has no idea
+    /// where a file came from.
     ///
     /// `label` names the item in logs only; the file is named by cache key.
-    pub fn queue_prefetch(&self, label: &str, source: &Source) {
-        self.enqueue(label, source, false);
+    pub fn queue_prefetch(&self, label: &str, source: &Source, ordinal: u32) {
+        self.enqueue(label, source, Some(ordinal), false);
     }
 
-    /// Queue a download because `source` was just played to completion. The
-    /// worker evicts LRU files afterwards to keep the cache within the cap.
+    /// Queue a download because `source` was just played to completion. Scored
+    /// as a play, so it may displace almost anything; the worker trims back to
+    /// the cap afterwards.
     pub fn queue_after_play(&self, label: &str, source: &Source) {
-        self.enqueue(label, source, true);
+        self.enqueue(label, source, None, true);
     }
 
-    /// Queue speculative downloads for every remote item in `library`.
+    /// Queue speculative downloads for every remote item in `library`, in
+    /// display order.
     pub fn queue_all(&self, library: &Library) {
         let platform_info = shepherd_media_core::PlatformInfo::current();
-        for item in &library.items {
+        for (ordinal, item) in library.items.iter().enumerate() {
             if let Some(source) = resolve_source(item, &platform_info) {
-                self.queue_prefetch(&item.id, source);
+                self.queue_prefetch(&item.id, source, ordinal as u32);
             }
         }
     }
 
-    fn enqueue(&self, label: &str, source: &Source, evict_after: bool) {
+    fn enqueue(&self, label: &str, source: &Source, ordinal: Option<u32>, earned: bool) {
         let (url, kind) = match &source.uri {
             ClassifiedUri::YouTube(url) => (url.to_string(), DownloadKind::YouTube),
             ClassifiedUri::DirectHttp(url) => (url.to_string(), DownloadKind::Http),
             _ => return,
         };
         let key = content_key(&url, kind.selector(&self.ytdl_format));
+        let interest_key = interest_key(&url);
 
         if store::cache_state(&self.cache_dir, &key) == CacheState::Present {
             debug!("video cache hit for {label}, skipping queue");
+            // Still record that the item was offered. A library the cache is
+            // already full of would otherwise never have its first sightings
+            // written, and every item in it would read as brand new the day one
+            // of them finally gets evicted.
+            store::mark_seen(&self.cache_dir, &interest_key);
             return;
         }
 
         let _ = self.download_tx.send(DownloadRequest {
             key,
-            interest_key: interest_key(&url),
+            interest_key,
             label: label.to_string(),
             url,
             kind,
-            evict_after,
+            ordinal,
+            earned,
         });
     }
 }
@@ -211,6 +259,7 @@ impl VideoCache {
 mod tests {
     use super::*;
     use shepherd_media_core::{PlayerHint, Source};
+    use std::time::Duration as StdDuration;
 
     fn http_source(url: &str) -> Source {
         Source {
@@ -233,6 +282,7 @@ mod tests {
             cache_dir: dir.to_path_buf(),
             max_bytes: 1024,
             ytdl_format: "test-selector".into(),
+            weights: ScoreWeights::default(),
         })
         .expect("cache constructs over a temp dir")
     }
@@ -243,8 +293,22 @@ mod tests {
         let ikey = interest_key(&source_url(source).unwrap());
         let path = dir.join(format!("{key}.mp4"));
         std::fs::write(&path, b"video").unwrap();
-        store::write_done_sentinel(dir, &key, &ikey, "").unwrap();
+        store::write_done_sentinel(dir, &key, &ikey, "", Some(0)).unwrap();
         path
+    }
+
+    #[test]
+    fn the_day_and_duration_spellings_of_the_default_grace_agree() {
+        // The config, the CLI flag, and the policy default all carry days; the
+        // scoring carries a `Duration`. They must describe the same window.
+        assert_eq!(
+            grace_from_days(DEFAULT_WATCHED_GRACE_DAYS),
+            DEFAULT_WATCHED_GRACE
+        );
+        assert_eq!(
+            DEFAULT_WATCHED_GRACE,
+            StdDuration::from_secs(30 * 24 * 60 * 60)
+        );
     }
 
     #[test]
@@ -301,6 +365,22 @@ mod tests {
         assert!(dir.path().join(format!("{ikey}.played")).exists());
     }
 
+    #[test]
+    fn queueing_an_already_cached_item_still_records_the_sighting() {
+        // Otherwise a library the cache is already full of never gets its first
+        // sightings written, and every item in it reads as brand new the day
+        // one of them is finally evicted.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let source = http_source("https://example.com/a.mp4");
+        commit(&cache, dir.path(), &source);
+
+        cache.queue_prefetch("a", &source, 0);
+
+        let ikey = interest_key(&source_url(&source).unwrap());
+        assert!(dir.path().join(format!("{ikey}.seen")).exists());
+    }
+
     /// Interest is in the video, so watching it at one quality protects the
     /// copy cached at another — the two are separate files but one interest.
     #[test]
@@ -313,6 +393,7 @@ mod tests {
             cache_dir: dir.path().to_path_buf(),
             max_bytes: 1024,
             ytdl_format: "hd".into(),
+            weights: ScoreWeights::default(),
         })
         .unwrap();
         // Direct-HTTP sources carry no selector, so force the YouTube path by

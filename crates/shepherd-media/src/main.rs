@@ -50,6 +50,7 @@ fn main() -> ExitCode {
     let ytdl_format = cli.quality.ytdl_format();
     let sort_by = cli.sort_by;
     let reverse = cli.reverse;
+    let watched_grace = shepherd_media_cache::grace_from_days(cli.watched_grace_days);
     let result = match &cli.command {
         Command::Validate { library } => run_validate(library, sort_by, reverse),
         Command::Play { library, item } => run_play(
@@ -60,6 +61,7 @@ fn main() -> ExitCode {
             sort_by,
             reverse,
             cli.resume,
+            watched_grace,
         ),
         Command::Browse { library } => run_browse(
             library,
@@ -69,6 +71,7 @@ fn main() -> ExitCode {
             sort_by,
             reverse,
             cli.resume,
+            watched_grace,
         ),
     };
 
@@ -150,6 +153,7 @@ fn run_play(
     sort_by: SortBy,
     reverse: bool,
     resume: bool,
+    watched_grace: Duration,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -174,7 +178,7 @@ fn run_play(
 
     // Direct-play mode shares the eframe shell with browse mode; the UI
     // opens straight into the playback view instead of the grid.
-    let cache = VideoCache::new(ytdl_format);
+    let cache = VideoCache::new(ytdl_format, watched_grace);
     let resume = open_resume(resume, &library);
     let session = build_session(library, no_protocol, ytdl_format, cache.clone());
     let session = match session {
@@ -212,6 +216,7 @@ fn run_browse(
     sort_by: SortBy,
     reverse: bool,
     resume: bool,
+    watched_grace: Duration,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -221,7 +226,7 @@ fn run_browse(
         }
     };
 
-    let cache = VideoCache::new(ytdl_format);
+    let cache = VideoCache::new(ytdl_format, watched_grace);
     if let Some(ref c) = cache {
         c.queue_all(&library);
     }

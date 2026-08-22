@@ -12,7 +12,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shepherd_media_cache::{VideoCache, VideoCacheConfig, content_key};
+use filetime::FileTime;
+
+use shepherd_media_cache::{
+    CacheWeights, VideoCache, VideoCacheConfig, content_key, interest_key, source_url,
+};
 use shepherd_media_core::{ClassifiedUri, PlayerHint, Source};
 
 const BODY: &[u8] = b"not really a video, but it is bytes";
@@ -59,9 +63,29 @@ fn cache_in(dir: &Path, max_bytes: u64) -> Arc<VideoCache> {
         cache_dir: dir.to_path_buf(),
         max_bytes,
         ytdl_format: "test-selector".into(),
+        weights: CacheWeights::default(),
     })
     .expect("cache constructs")
 }
+
+/// Backdate a source's bookkeeping so it reads as genuinely old rather than as
+/// something this test wrote a moment ago. `.seen` is what ages an unwatched
+/// file; the video's own mtime is a floor on it, so both have to move.
+fn backdate(dir: &Path, source: &Source, secs_ago: i64, cache: &VideoCache) {
+    let when = FileTime::from_unix_time(FileTime::now().unix_seconds() - secs_ago, 0);
+    let ikey = interest_key(&source_url(source).unwrap());
+    for name in [format!("{ikey}.seen"), format!("{ikey}.played")] {
+        let path = dir.join(name);
+        if path.exists() {
+            filetime::set_file_mtime(&path, when).unwrap();
+        }
+    }
+    if let Some(path) = cache.cached_path(source) {
+        filetime::set_file_mtime(path, when).unwrap();
+    }
+}
+
+const DAY: i64 = 24 * 60 * 60;
 
 /// Wait for `f` to hold, up to 10s. The worker runs on its own thread, so
 /// every assertion about its output has to be a poll rather than a read.
@@ -89,7 +113,7 @@ fn a_prefetched_video_lands_under_its_url_hash_and_is_then_a_cache_hit() {
         "nothing is cached before the prefetch"
     );
 
-    cache.queue_prefetch("clip", &source);
+    cache.queue_prefetch("clip", &source, 0);
     wait_for("the download to commit", || {
         cache.cached_path(&source).is_some()
     });
@@ -119,7 +143,7 @@ fn a_second_queue_of_a_cached_item_does_not_refetch_it() {
     let source = http_source(&url);
 
     let cache = cache_in(dir.path(), 1024 * 1024);
-    cache.queue_prefetch("clip", &source);
+    cache.queue_prefetch("clip", &source, 0);
     wait_for("the first download", || {
         cache.cached_path(&source).is_some()
     });
@@ -127,7 +151,7 @@ fn a_second_queue_of_a_cached_item_does_not_refetch_it() {
     let path = cache.cached_path(&source).unwrap();
     let first = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-    cache.queue_prefetch("clip", &source);
+    cache.queue_prefetch("clip", &source, 0);
     std::thread::sleep(Duration::from_millis(200));
 
     assert_eq!(
@@ -148,8 +172,8 @@ fn two_libraries_with_the_same_item_id_get_two_files() {
     let two = http_source(&format!("{base}/two/intro.mp4"));
 
     let cache = cache_in(dir.path(), 1024 * 1024);
-    cache.queue_prefetch("intro", &one);
-    cache.queue_prefetch("intro", &two);
+    cache.queue_prefetch("intro", &one, 0);
+    cache.queue_prefetch("intro", &two, 1);
 
     wait_for("both downloads", || {
         cache.cached_path(&one).is_some() && cache.cached_path(&two).is_some()
@@ -161,46 +185,74 @@ fn two_libraries_with_the_same_item_id_get_two_files() {
     );
 }
 
-/// A speculative prefetch may recycle space held by *other* guesses — this is
-/// what stops the cache going inert once it fills with prefetched content.
+/// An item the parent added recently may recycle space held by a guess that has
+/// been sitting there since long before it — this is what stops a full cache
+/// going inert on content nobody has touched.
 #[test]
-fn a_prefetch_at_capacity_recycles_unwatched_space() {
+fn a_new_arrival_recycles_space_held_by_a_stale_guess() {
     let dir = tempfile::tempdir().unwrap();
     let base = serve(2);
-    let first = http_source(&format!("{base}/first.mp4"));
-    let second = http_source(&format!("{base}/second.mp4"));
+    let stale = http_source(&format!("{base}/stale.mp4"));
+    let added = http_source(&format!("{base}/added.mp4"));
 
     // Room for one download at a time.
     let cache = cache_in(dir.path(), BODY.len() as u64);
-    cache.queue_prefetch("first", &first);
-    wait_for("the first download", || cache.cached_path(&first).is_some());
+    cache.queue_prefetch("stale", &stale, 0);
+    wait_for("the first download", || cache.cached_path(&stale).is_some());
+    backdate(dir.path(), &stale, 60 * DAY, &cache);
 
-    cache.queue_prefetch("second", &second);
-    wait_for("the second download", || {
-        cache.cached_path(&second).is_some()
+    // Deliberately further down the library than the file it displaces:
+    // position breaks ties, it does not outweigh two months of age.
+    cache.queue_prefetch("added", &added, 40);
+    wait_for("the new arrival to be downloaded", || {
+        cache.cached_path(&added).is_some()
     });
-    wait_for("the unwatched first item to be recycled", || {
-        cache.cached_path(&first).is_none()
+    wait_for("the stale guess to be recycled", || {
+        cache.cached_path(&stale).is_none()
     });
 }
 
-/// ...but it must never displace something the child actually watched. A guess
-/// is dropped rather than made to cost them a film they chose.
+/// Within one sweep, though, a guess must not displace a guess nearer the head
+/// of the same library: that file is the one a browsing child reaches first,
+/// and evicting it would have the next pass immediately re-download it.
 #[test]
-fn a_prefetch_will_not_displace_a_watched_video() {
+fn a_prefetch_will_not_displace_a_guess_nearer_the_head_of_its_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = serve(2);
+    let head = http_source(&format!("{base}/head.mp4"));
+    let tail = http_source(&format!("{base}/tail.mp4"));
+
+    let cache = cache_in(dir.path(), BODY.len() as u64);
+    cache.queue_prefetch("head", &head, 0);
+    wait_for("the first download", || cache.cached_path(&head).is_some());
+
+    cache.queue_prefetch("tail", &tail, 12);
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert!(cache.cached_path(&head).is_some());
+    assert!(
+        cache.cached_path(&tail).is_none(),
+        "the tail of the list must be dropped, not swapped for the head"
+    );
+}
+
+/// A guess must never displace something the child watched recently. It is
+/// dropped rather than made to cost them a film they chose.
+#[test]
+fn a_prefetch_will_not_displace_a_recently_watched_video() {
     let dir = tempfile::tempdir().unwrap();
     let base = serve(2);
     let watched = http_source(&format!("{base}/watched.mp4"));
     let guess = http_source(&format!("{base}/guess.mp4"));
 
     let cache = cache_in(dir.path(), BODY.len() as u64);
-    cache.queue_prefetch("watched", &watched);
+    cache.queue_prefetch("watched", &watched, 0);
     wait_for("the first download", || {
         cache.cached_path(&watched).is_some()
     });
     cache.mark_played(&watched);
 
-    cache.queue_prefetch("guess", &guess);
+    cache.queue_prefetch("guess", &guess, 1);
     std::thread::sleep(Duration::from_millis(300));
 
     assert!(
@@ -211,6 +263,34 @@ fn a_prefetch_will_not_displace_a_watched_video() {
         cache.cached_path(&guess).is_none(),
         "the guess must be dropped rather than made to cost the watched file"
     );
+}
+
+/// ...but that protection expires. Once a play is old enough to have lost its
+/// grace the file competes on age like anything else, which is what keeps a
+/// cache full of watched content from freezing forever.
+#[test]
+fn a_prefetch_may_displace_a_video_watched_long_ago() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = serve(2);
+    let watched = http_source(&format!("{base}/watched.mp4"));
+    let guess = http_source(&format!("{base}/guess.mp4"));
+
+    let cache = cache_in(dir.path(), BODY.len() as u64);
+    cache.queue_prefetch("watched", &watched, 0);
+    wait_for("the first download", || {
+        cache.cached_path(&watched).is_some()
+    });
+    cache.mark_played(&watched);
+    // Well past the default 30-day grace.
+    backdate(dir.path(), &watched, 90 * DAY, &cache);
+
+    cache.queue_prefetch("guess", &guess, 1);
+    wait_for("the guess to be downloaded", || {
+        cache.cached_path(&guess).is_some()
+    });
+    wait_for("the long-unwatched film to be recycled", || {
+        cache.cached_path(&watched).is_none()
+    });
 }
 
 /// The after-play path is the one allowed to spend watched space: the user just
@@ -224,9 +304,13 @@ fn an_after_play_download_evicts_to_make_room() {
     let watched = http_source(&format!("{base}/watched.mp4"));
 
     let cache = cache_in(dir.path(), BODY.len() as u64);
-    cache.queue_prefetch("old", &old);
+    cache.queue_prefetch("old", &old, 0);
     wait_for("the first download", || cache.cached_path(&old).is_some());
     cache.mark_played(&old);
+    // Watched, but a while back: an earned download outranks everything except
+    // an equally recent play, and this makes "equally recent" unambiguous
+    // rather than a matter of filesystem timestamp granularity.
+    backdate(dir.path(), &old, 3 * DAY, &cache);
 
     cache.queue_after_play("watched", &watched);
     wait_for("the after-play download", || {

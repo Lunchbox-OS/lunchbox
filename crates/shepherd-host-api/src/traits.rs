@@ -99,6 +99,16 @@ pub struct SpawnOptions {
     /// it do; the rest ignore it. Today only `media` uses it, to hide
     /// online-only library items while the check fails.
     pub connectivity_check: Option<String>,
+
+    /// How long, in days, a play protects a cached video from being displaced
+    /// by a speculative download (`service.media.watched_grace_days`).
+    ///
+    /// Resolved by the caller, for the same reason as `connectivity_check`:
+    /// shepherdd already knows it, and the activity must not have to be told
+    /// twice. A media activity and shepherdd's prefetcher write to one cache
+    /// directory, so if they disagreed on this they would spend the same disk
+    /// by different rules. `None` for every other kind.
+    pub media_watched_grace_days: Option<u64>,
 }
 
 /// Network firewall specification for a session.

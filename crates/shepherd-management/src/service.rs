@@ -4,10 +4,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot, SessionEndReason,
-    SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction,
-    WindowInfo,
+    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryKind,
+    EntryView, Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot,
+    SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo,
+    VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
@@ -313,6 +313,10 @@ impl ManagementService for DefaultManagementService {
                     .or(eng.policy().service.internet.check.as_ref())
                     .map(|t| t.original.clone())
             });
+            // The cache the activity writes to is the one shepherdd prefetches
+            // into, so the eviction policy has to travel with the launch.
+            let media_watched_grace_days = matches!(kind, Some(EntryKind::Media { .. }))
+                .then(|| eng.policy().service.media.watched_grace_days);
             let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
             let opts = if eng.policy().service.capture_child_output {
                 let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
@@ -330,6 +334,7 @@ impl ManagementService for DefaultManagementService {
                     input_compat,
                     input_compat_options,
                     connectivity_check,
+                    media_watched_grace_days,
                     ..Default::default()
                 }
             } else {
@@ -339,6 +344,7 @@ impl ManagementService for DefaultManagementService {
                     input_compat,
                     input_compat_options,
                     connectivity_check,
+                    media_watched_grace_days,
                     ..Default::default()
                 }
             };
