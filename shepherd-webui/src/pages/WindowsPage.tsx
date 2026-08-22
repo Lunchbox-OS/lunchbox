@@ -1,5 +1,6 @@
 import { useState } from "react";
 import Alert from "@mui/material/Alert";
+import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -12,6 +13,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   closeWindow,
@@ -19,7 +21,7 @@ import {
   listWindows,
   showWindow,
 } from "../api/client";
-import type { WindowInfo } from "../api/types";
+import type { WindowInfo, WindowOwner } from "../api/types";
 import { Spinner } from "../components/Spinner";
 
 function windowTitle(w: WindowInfo): string {
@@ -35,6 +37,51 @@ function windowSubtitle(w: WindowInfo): string {
   return parts.join(" · ");
 }
 
+/**
+ * A window nobody is supervising: an activity that survived its own teardown,
+ * or a surface belonging to no session at all. These are the ones this page
+ * exists for — shepherdd reports them but deliberately will not close an
+ * unrecognized one by itself, so a caregiver has to make that call.
+ */
+function isOrphan(w: WindowInfo): boolean {
+  return w.owner === "escaped" || w.owner === "unowned";
+}
+
+const OWNER_LABEL: Record<WindowOwner, string> = {
+  shepherd: "Shepherd",
+  activity: "Activity",
+  escaped: "Escaped",
+  unowned: "Unowned",
+};
+
+const OWNER_HELP: Record<WindowOwner, string> = {
+  shepherd: "Part of shepherd itself — the launcher, the HUD, or a background helper.",
+  activity: "Belongs to the session running right now.",
+  escaped:
+    "This activity outlived its own teardown. Its session is over and shepherd is still trying to kill it.",
+  unowned:
+    "No process shepherd knows about. Either it was started outside shepherd, or an activity got away without shepherd noticing.",
+};
+
+function OwnerChip({ owner }: { owner: WindowOwner }) {
+  const label = OWNER_LABEL[owner];
+  if (owner === "escaped") {
+    return <Chip size="small" label={label} color="error" title={OWNER_HELP[owner]} />;
+  }
+  if (owner === "unowned") {
+    return <Chip size="small" label={label} color="warning" title={OWNER_HELP[owner]} />;
+  }
+  return (
+    <Chip
+      size="small"
+      label={label}
+      variant="outlined"
+      color="default"
+      title={OWNER_HELP[owner]}
+    />
+  );
+}
+
 interface WindowCardProps {
   w: WindowInfo;
   busy: boolean;
@@ -44,8 +91,18 @@ interface WindowCardProps {
 }
 
 function WindowCard({ w, busy, onClose, onHide, onShow }: WindowCardProps) {
+  const orphan = isOrphan(w);
   return (
-    <Card variant="outlined">
+    <Card
+      variant="outlined"
+      sx={
+        orphan
+          ? {
+              borderColor: w.owner === "escaped" ? "error.main" : "warning.main",
+            }
+          : undefined
+      }
+    >
       <CardContent sx={{ "&:last-child": { pb: 2 } }}>
         <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 1 }}>
           <Box sx={{ minWidth: 0, flex: 1 }}>
@@ -57,6 +114,7 @@ function WindowCard({ w, busy, onClose, onHide, onShow }: WindowCardProps) {
             </Typography>
           </Box>
           <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", justifyContent: "flex-end", rowGap: 0.5 }}>
+            <OwnerChip owner={w.owner} />
             {w.focused && <Chip size="small" label="Focused" color="primary" />}
             {w.in_scratchpad ? (
               <Chip size="small" label="Scratchpad" color="warning" variant="outlined" />
@@ -70,6 +128,11 @@ function WindowCard({ w, busy, onClose, onHide, onShow }: WindowCardProps) {
         {w.workspace && !w.in_scratchpad && (
           <Typography variant="caption" color="text.disabled" sx={{ display: "block", mt: 0.5 }}>
             Workspace: {w.workspace}
+          </Typography>
+        )}
+        {orphan && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+            {OWNER_HELP[w.owner]}
           </Typography>
         )}
         <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: "wrap", rowGap: 1 }}>
@@ -96,7 +159,10 @@ function WindowCard({ w, busy, onClose, onHide, onShow }: WindowCardProps) {
           )}
           <Button
             size="small"
-            variant="outlined"
+            // The whole point of the orphan section is that closing is the
+            // action being asked for, so it leads there rather than sitting
+            // among equals.
+            variant={orphan ? "contained" : "outlined"}
             color="error"
             startIcon={<CloseIcon />}
             onClick={() => onClose(w.id)}
@@ -155,8 +221,12 @@ export function WindowsPage() {
   const busy =
     closeMutation.isPending || hideMutation.isPending || showMutation.isPending;
 
-  const windows = data?.windows ?? [];
-  const onScreen = windows.filter((w) => !w.in_scratchpad);
+  const windows = data ?? [];
+  // Orphans on the scratchpad stay under the scratchpad heading: they are
+  // stashed rather than loose on the child's screen, which is the same line
+  // shepherdd's own reconciliation sweep draws before it warns.
+  const orphaned = windows.filter((w) => !w.in_scratchpad && isOrphan(w));
+  const onScreen = windows.filter((w) => !w.in_scratchpad && !isOrphan(w));
   const scratchpad = windows.filter((w) => w.in_scratchpad);
 
   const handlers = {
@@ -204,6 +274,29 @@ export function WindowsPage() {
         <Typography color="text.secondary" sx={{ textAlign: "center", py: 4 }}>
           No windows reported
         </Typography>
+      )}
+
+      {orphaned.length > 0 && (
+        <Box>
+          <Alert severity="warning" icon={<WarningAmberIcon />} sx={{ mb: 1 }}>
+            <AlertTitle>
+              {orphaned.length === 1
+                ? "1 window on screen has no session behind it"
+                : `${orphaned.length} windows on screen have no session behind them`}
+            </AlertTitle>
+            Time spent in these is not metered and no time limit will end them.
+            Shepherd reports them but will not close a window it does not
+            recognize on its own — that call is yours.
+          </Alert>
+          <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+            Unsupervised ({orphaned.length})
+          </Typography>
+          <Stack spacing={1}>
+            {orphaned.map((w) => (
+              <WindowCard key={w.id} w={w} busy={busy} {...handlers} />
+            ))}
+          </Stack>
+        </Box>
       )}
 
       {onScreen.length > 0 && (
