@@ -14,6 +14,7 @@
 //! finished, what is too early to remember, and how often to write.
 
 pub mod cache;
+pub mod cache_key;
 pub mod interest;
 pub mod lru;
 pub mod poster_cache;
@@ -22,6 +23,7 @@ pub mod resume;
 pub mod settings;
 
 pub use cache::{Freshness, Resolution};
+pub use cache_key::{content_key, interest_key};
 pub use lru::Recency;
 pub use poster_cache::RemotePosterCache;
 pub use quality::{CacheMode, PosterPolicy, Quality};

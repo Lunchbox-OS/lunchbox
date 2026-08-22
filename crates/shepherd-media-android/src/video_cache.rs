@@ -6,19 +6,29 @@
 //! consults the cache first; with a non-`Off` cache mode the just-watched item
 //! is downloaded afterward so the next play is local.
 //!
-//! Eviction policy is shared with the Linux cache (`shepherd-media-cache`)
-//! through `shepherd-media-app`: files nobody has watched are spent before any
-//! file somebody did, see [`shepherd_media_app::Recency`]. That matters once
-//! the `All` cache mode actually prefetches, which it does not yet.
+//! Naming and eviction policy are shared with the Linux cache
+//! (`shepherd-media-cache`) through `shepherd-media-app`, so the two behave the
+//! same way where they can. Files are named by
+//! [`shepherd_media_app::content_key`] — a truncated SHA-256, *not* the
+//! `DefaultHasher` this used to use, whose output is unspecified across Rust
+//! releases and would rename the whole cache on a toolchain bump. Direct HTTP
+//! involves no format selection, so the selector is empty here.
+//!
+//! Files written under the old naming are orphaned by that change — nothing
+//! will ask for them again — and are left in place: they are ordinary eviction
+//! candidates that age out on their own, and re-downloading them is what the
+//! next toolchain bump would have cost anyway.
+//!
+//! Eviction spends files nobody has watched before it touches one somebody
+//! did; see [`shepherd_media_app::Recency`]. That matters once the `All` cache
+//! mode actually prefetches, which it does not yet.
 //!
 //! Download and eviction are blocking and run off the UI thread.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
+use shepherd_media_app::content_key;
 use shepherd_media_app::interest;
 use shepherd_media_app::lru::{self, LruEntry, Recency};
 
@@ -34,12 +44,11 @@ impl VideoCache {
         Self { dir, max_bytes }
     }
 
-    /// The cache key for a URL. One rendition per URL, so this doubles as the
-    /// key for the played marker.
+    /// The cache key for a URL. Direct HTTP picks no format, so the selector
+    /// is empty; one rendition per URL means this doubles as the key for the
+    /// played marker.
     fn key_for(url: &str) -> String {
-        let mut h = DefaultHasher::new();
-        url.hash(&mut h);
-        format!("{:016x}", h.finish())
+        content_key(url, "")
     }
 
     /// Cache file path for a URL (stable hash + the URL's media extension).

@@ -42,6 +42,10 @@ per-format files around mid-download.
 
 ## Two keys
 
+Derived by `shepherd_media_app::cache_key`, shared with the Android cache so the
+two agree on what a cached file is called — and, more to the point, on not using
+a hash whose output changes between Rust releases.
+
 **Content key** — the first 128 bits of the SHA-256 of the source URL *and* the
 yt-dlp format selector. It names the video, its sentinel, its part file, and its
 lock.

@@ -25,6 +25,11 @@ desktop and reused by any platform binary.
 - **Caching policy** (`quality.rs`) — [`CacheMode`] (mirrors the two
   `VideoCache` strategies in `shepherd-media`, plus `off`), [`PosterPolicy`],
   and [`Quality`] (mirrors the `--quality` presets, including `ytdl_format`).
+- **Cache-file naming** (`cache_key.rs`) — [`content_key`] and
+  [`interest_key`], the truncated SHA-256 names both front-ends' video caches
+  give their files. Deliberately not `DefaultHasher`, whose output is
+  unspecified across Rust releases: a toolchain bump would rename every file in
+  every cache, silently re-downloading everything.
 - **Video-cache eviction policy** (`lru.rs`, `interest.rs`) — [`Recency`], the
   two-class ordering both front-ends' video caches evict by (every file nobody
   has watched goes before any file somebody did, and among the unwatched the
