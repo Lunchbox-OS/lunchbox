@@ -168,7 +168,14 @@ npm run check:coverage
 
 Most tests are pure logic — day masks, window merging, duration parsing — and
 run in plain node. A few need a DOM and opt in with `// @vitest-environment
-jsdom` at the top of the file, so the pure ones stay fast. Those cover
+jsdom` at the top of the file, so the pure ones stay fast.
+
+**Those need Node 22 or newer** (`engines` in `package.json` says so, and CI
+pins its container accordingly). jsdom loads undici, which needs
+`worker_threads.markAsUncloneable`; on an older Node the DOM test files fail to
+load with `TypeError: webidl.util.markAsUncloneable is not a function`, while
+every pure test still passes — so the run reports a smaller number of passing
+files rather than anything that looks like a version problem. Those cover
 behaviour that only appears *across a mount*, which no static check can see:
 the editor's pages are conditionally rendered, so switching tabs unmounts one
 and returning mounts it fresh, and a mount runs every effect regardless of its

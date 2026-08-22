@@ -965,6 +965,40 @@ history), `blank()`, the wasm binding layer itself (it is
 component interaction — grid dragging, slider-to-patch mapping, kind switching,
 `FileConfigSource`.
 
+### Follow-up: what CI caught that local runs could not
+
+Opening the PR surfaced three problems, none of which a local run would ever
+have shown, because all three were about the environment rather than the code.
+
+**jsdom would not load on the runner's Node.** The DOM tests failed with
+`TypeError: webidl.util.markAsUncloneable is not a function` — jsdom loads
+undici, which needs `worker_threads.markAsUncloneable`, absent on the
+node:20-bookworm container the `webui` job inherited. The `webui` job now pins
+node:22-bookworm, `package.json` declares `engines.node >= 22`, and
+`CONTRIBUTING.md` names the error text, because the failure mode is nastier
+than it looks: the pure tests all still pass and the run simply reports *fewer
+test files*, which reads as nothing being wrong.
+
+**The wasm-pack pin pinned nothing.** `rustwasm.github.io/.../init.sh` has its
+version baked in and ignores arguments, so `sh -s -- --version 0.13.1` was
+installing whatever upstream currently ships (0.15.0 by then) and would have
+failed this repo's own version check on every subsequent run. Now installed
+with `cargo install --version --locked --force`, matching bpf-linker and
+cargo-ndk — which also keeps it architecture-neutral, since
+`scripts/ci/check-arch-neutral.sh` scans `deps.sh` and a release-tarball URL
+would have had to name a target triple.
+
+**The new crate's tests were not running at all.** `cargo test --all-targets`,
+which is what the `test` job runs, covers only *default members* — and
+`shepherd-config-wasm` is deliberately not one, since that is what keeps
+`wasm-bindgen` out of the shipped binaries. So the whole
+comment-preservation suite, the entire justification for the crate, would have
+gone green by not existing. The same was true of `shepherd-wire-codegen`, which
+means the codegen drift test had never run in CI at all — predating this branch,
+but newly load-bearing now that a generated file depends on it. Both jobs gained
+an explicit `-p` step rather than switching to `--workspace`, so the default
+build stays the thing that decides what ships.
+
 ### Follow-up: `shepherd dev webui`
 
 Added after the phases landed, on the request *"add a command to just run the

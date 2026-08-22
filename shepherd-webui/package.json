@@ -2,6 +2,9 @@
   "name": "shepherd-webui",
   "version": "0.3.7",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "rsbuild dev",
     "dev:standalone": "SHEPHERD_UI_TARGET=standalone rsbuild dev",
