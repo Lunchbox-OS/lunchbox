@@ -36,6 +36,7 @@ import com.armeafamily.shepherd.companion.ui.group.GroupDetailScreen
 import com.armeafamily.shepherd.companion.ui.home.HomeScreen
 import com.armeafamily.shepherd.companion.ui.pairing.PairingScreen
 import com.armeafamily.shepherd.companion.ui.settings.SettingsScreen
+import com.armeafamily.shepherd.companion.ui.health.HealthScreen
 import com.armeafamily.shepherd.companion.ui.windows.WindowsScreen
 
 object Routes {
@@ -43,6 +44,7 @@ object Routes {
     const val PAIR = "pair"
     const val CONTROLS = "controls"
     const val WINDOWS = "windows"
+    const val HEALTH = "health"
     const val SETTINGS = "settings"
     const val ENTRY = "entry"
     fun entry(id: String) = "$ENTRY/$id"
@@ -105,6 +107,7 @@ fun App() {
                     onOpenGroup = { id -> navController.navigate(Routes.group(id)) },
                     onOpenControls = { navController.navigate(Routes.CONTROLS) },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    onOpenHealth = { navController.navigate(Routes.HEALTH) },
                 )
             }
             composable(Routes.PAIR) {
@@ -136,7 +139,11 @@ fun App() {
                     vm = vm,
                     onBack = { navController.popBackStack() },
                     onOpenWindows = { navController.navigate(Routes.WINDOWS) },
+                    onOpenHealth = { navController.navigate(Routes.HEALTH) },
                 )
+            }
+            composable(Routes.HEALTH) {
+                HealthScreen(vm = vm, onBack = { navController.popBackStack() })
             }
             composable(Routes.WINDOWS) {
                 WindowsScreen(vm = vm, onBack = { navController.popBackStack() })

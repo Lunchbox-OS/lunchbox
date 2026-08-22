@@ -41,6 +41,7 @@ fun DeviceControlsScreen(
     vm: ShepherdViewModel,
     onBack: () -> Unit,
     onOpenWindows: () -> Unit,
+    onOpenHealth: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
 
@@ -76,6 +77,12 @@ fun DeviceControlsScreen(
                     // taken after it isn't enough (issue #140).
                     OutlinedButton(onClick = onOpenWindows, modifier = Modifier.fillMaxWidth()) {
                         Text("Windows…")
+                    }
+                    // Reachable even when nothing is wrong, so a caregiver can
+                    // confirm the device is healthy rather than only ever
+                    // seeing this when it isn't (issue #143).
+                    OutlinedButton(onClick = onOpenHealth, modifier = Modifier.fillMaxWidth()) {
+                        Text("Device health…")
                     }
                 }
             }

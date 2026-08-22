@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -22,6 +23,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -50,8 +52,10 @@ fun HomeScreen(
     onOpenGroup: (String) -> Unit,
     onOpenControls: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenHealth: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
+    val health by vm.diagnostics.collectAsState()
     val records by vm.repository.records.collectAsState()
     val activeId by vm.repository.activeId.collectAsState()
 
@@ -79,6 +83,15 @@ fun HomeScreen(
             if (records.isEmpty()) {
                 EmptyDevices(onAddDevice)
                 return@Column
+            }
+
+            // Critical means the configuration promises a protection the
+            // device is not providing — an activity that should be firewalled
+            // and is not, so it no longer launches. Worth interrupting the
+            // main screen for; everything milder waits on the health screen
+            // (issue #143).
+            if (health.critical.isNotEmpty()) {
+                CriticalBanner(count = health.critical.size, first = health.critical.first().message, onOpen = onOpenHealth)
             }
 
             if (records.size > 1) {
@@ -269,6 +282,34 @@ private fun EntryRow(
             if (!entry.enabled && !inSession) {
                 ReasonLines(entry.reasons)
             }
+        }
+    }
+}
+
+/**
+ * The critical-only banner (issue #143).
+ *
+ * One problem shows its message; several show a count, because three stacked
+ * messages on a phone would push the thing the caregiver actually opened the
+ * app for off the screen. Either way the detail is one tap away.
+ */
+@Composable
+private fun CriticalBanner(count: Int, first: String, onOpen: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+        ),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                if (count == 1) first else "$count problems need attention on this device",
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
+            )
+            TextButton(onClick = onOpen) { Text("Details") }
         }
     }
 }
