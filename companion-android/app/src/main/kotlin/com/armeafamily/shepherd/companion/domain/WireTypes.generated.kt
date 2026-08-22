@@ -962,6 +962,20 @@ sealed interface ReasonCode {
     ) : ReasonCode
 
     /**
+     * A protection this entry's configuration requires cannot be applied on
+     * this host, so the entry does not launch (issue #143) — today, an
+     * `[entries.firewall]` on a host where enforcement is unavailable.
+     *
+     * Carries no detail on purpose. This is the child-facing half: to them the
+     * activity is simply unavailable, and nothing they can do changes it. The
+     * administrator-facing half — which protection, why, and how to fix it —
+     * is the matching `Diagnostic`.
+     */
+    @Serializable
+    @SerialName("protection_unavailable")
+    data object ProtectionUnavailable : ReasonCode
+
+    /**
      * Not enough time banked on this entry's token gate (issue #8): the
      * activity has to be earned by spending time on its source activities.
      */

@@ -245,6 +245,9 @@ fn reason_to_message(reason: &ReasonCode) -> &'static str {
         ReasonCode::InternetUnavailable { .. } => "Internet connection unavailable",
         ReasonCode::ManuallyDisabled { .. } => "Disabled by parent for today",
         ReasonCode::RequiredInputUnavailable { .. } => "Requires an input device",
+        // Deliberately vague to the child: nothing they can do fixes it, and
+        // the detail is in the administrator's diagnostic (issue #143).
+        ReasonCode::ProtectionUnavailable => "Unavailable until set up",
         ReasonCode::TokensInsufficient { .. } => "Not enough time earned yet",
         // The group's restriction is what actually blocks the entry, so report
         // it; `reason_tooltip` names the group.

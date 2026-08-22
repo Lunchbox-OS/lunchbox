@@ -493,6 +493,31 @@ fn library_references_youtube(library_source: &str) -> bool {
 
 /// Free bytes on the filesystem holding `path`, walking up to the nearest
 /// existing ancestor when the cache directory has not been created yet.
+/// Free bytes on the filesystem holding `path`, for the diagnostic registry
+/// (issue #143). Blocking; call from `spawn_blocking`.
+pub fn free_space(path: &Path) -> Option<u64> {
+    free_space_bytes(path)
+}
+
+/// Ids of every media entry that references YouTube, by playlist URL or by a
+/// source inside its library.
+///
+/// Shared with the diagnostic registry (issue #143) so "which activities does a
+/// missing yt-dlp break" has one answer rather than two that can disagree.
+pub fn youtube_entry_ids(policy: &Policy) -> Vec<shepherd_util::EntryId> {
+    policy
+        .entries
+        .iter()
+        .filter(|e| match &e.kind {
+            EntryKind::Media { library, .. } => {
+                is_youtube_playlist_url(library) || library_references_youtube(library)
+            }
+            _ => false,
+        })
+        .map(|e| e.id.clone())
+        .collect()
+}
+
 fn free_space_bytes(path: &Path) -> Option<u64> {
     let mut probe = path;
     loop {

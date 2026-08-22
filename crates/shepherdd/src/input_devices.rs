@@ -47,6 +47,14 @@ const FALLBACK_RESCAN: Duration = Duration::from_secs(30);
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Background monitor that tracks which input device *types* are connected.
+/// Whether anything under `/dev/input` can be read at all.
+///
+/// The same scan the monitor runs, reduced to the one bit the diagnostic
+/// registry needs (issue #143). Blocking; call from `spawn_blocking`.
+pub fn inputs_readable() -> bool {
+    scan_connected_inputs().is_some()
+}
+
 pub struct InputMonitor {
     /// Whether we've already logged that detection is unavailable, so the
     /// periodic fallback re-scan doesn't spam the log every cycle.
