@@ -870,6 +870,35 @@ pub enum WindowAction {
     Show,
 }
 
+/// Who shepherd believes a window belongs to.
+///
+/// The compositor cannot answer this — it reports pids, not intent. The host
+/// fills it in by matching each window against what it is actually
+/// supervising, which is what lets an admin UI tell "the game the child is
+/// playing" apart from "something on the screen that no session owns".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WindowOwner {
+    /// Shepherd's own furniture: the launcher, the HUD, the pairing UI, the
+    /// mirror, and background processes it keeps warm (the preloaded Steam
+    /// client). Expected to outlive every session.
+    Shepherd,
+    /// A process shepherd is supervising for the current session — the
+    /// activity itself, something in its process group, a Steam game
+    /// launched on its behalf, or one of its input sidecars.
+    Activity,
+    /// An activity that outlived its own teardown. Its session is over and
+    /// the host is still working on killing it — the same condition that
+    /// writes an `ActivityEscaped` audit record.
+    Escaped,
+    /// No process shepherd knows about. Either something started outside
+    /// shepherd entirely, or an activity that got away without the host ever
+    /// noticing — the case supervision cannot fix on its own, and the reason
+    /// this field exists.
+    Unowned,
+}
+
 /// Debug snapshot of a single window known to the host's compositor.
 ///
 /// Currently surfaced via the management API for debugging the Sway tree —
@@ -897,11 +926,33 @@ pub struct WindowInfo {
     pub visible: bool,
     /// True if the window has keyboard focus.
     pub focused: bool,
+    /// What shepherd is supervising behind this window, if anything.
+    ///
+    /// A host that cannot attribute windows reports every one of them as
+    /// unowned.
+    pub owner: WindowOwner,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire spellings the web UI and the companion app switch on. Both
+    /// clients hard-code these strings, and a silent rename here would
+    /// downgrade every orphan to an ordinary row rather than failing.
+    #[test]
+    fn window_owner_wire_spelling() {
+        let spellings = [
+            (WindowOwner::Shepherd, "\"shepherd\""),
+            (WindowOwner::Activity, "\"activity\""),
+            (WindowOwner::Escaped, "\"escaped\""),
+            (WindowOwner::Unowned, "\"unowned\""),
+        ];
+        for (owner, json) in spellings {
+            assert_eq!(serde_json::to_string(&owner).unwrap(), json);
+            assert_eq!(serde_json::from_str::<WindowOwner>(json).unwrap(), owner);
+        }
+    }
 
     #[test]
     fn entry_kind_serialization() {

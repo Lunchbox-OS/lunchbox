@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use shepherd_api::{
     EntryKind, EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo,
+    WindowOwner,
 };
 use shepherd_host_api::{
     ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
@@ -175,6 +176,78 @@ struct EscapedActivity {
     attempts: u32,
     /// Whether we have already told the daemon about this one.
     reported: bool,
+}
+
+/// Every pid shepherd is accountable for, snapshotted so a window can be
+/// attributed to whatever is (or is not) supervising it.
+///
+/// The compositor only knows which process drew a surface. Turning that into
+/// "the child's game" or "nothing we know about" needs the host's own books,
+/// and it needs all of them at once — an activity's window is very often owned
+/// by a descendant, and a Steam game is not in our process tree at all.
+#[derive(Debug, Default)]
+struct SupervisedPids {
+    /// Processes we spawned for a live session, as `(pid, pgid)`.
+    activities: Vec<(u32, u32)>,
+    /// Steam game pids for live Steam sessions, found by app id because they
+    /// are children of the Steam client rather than of anything we spawned.
+    activity_steam: Vec<u32>,
+    /// Per-activity input sidecars (touch bridge and friends).
+    sidecars: HashSet<u32>,
+    /// Shepherd's own background processes — today, the preloaded Steam
+    /// client that sits on the scratchpad between launches.
+    shepherd: HashSet<u32>,
+    /// Activities that outlived teardown, as `(pid, pgid)`.
+    escaped: Vec<(u32, u32)>,
+    /// Steam game pids belonging to an escaped Steam session.
+    escaped_steam: Vec<u32>,
+}
+
+impl SupervisedPids {
+    /// Who a window belongs to, as far as the host can tell.
+    ///
+    /// Escape is checked before ordinary supervision because the two overlap:
+    /// a stop that fails leaves the activity in `processes` *and* in
+    /// `escaped`, and "this got away from us" is the more urgent truth.
+    fn owner_of(&self, w: &WindowInfo) -> WindowOwner {
+        if LinuxHost::is_infrastructure(w) {
+            return WindowOwner::Shepherd;
+        }
+        // Nothing to match on. Reported as unowned rather than assumed
+        // harmless: a surface we cannot attribute is exactly what this field
+        // exists to surface.
+        let Some(pid) = w.pid else {
+            return WindowOwner::Unowned;
+        };
+        if in_any_group(pid, &self.escaped) || self.escaped_steam.contains(&pid) {
+            return WindowOwner::Escaped;
+        }
+        if in_any_group(pid, &self.activities)
+            || self.activity_steam.contains(&pid)
+            || self.sidecars.contains(&pid)
+        {
+            return WindowOwner::Activity;
+        }
+        if self.shepherd.contains(&pid) {
+            return WindowOwner::Shepherd;
+        }
+        WindowOwner::Unowned
+    }
+
+    /// Stamp [`WindowInfo::owner`] on a freshly parsed window list.
+    fn attribute(&self, windows: &mut [WindowInfo]) {
+        for w in windows.iter_mut() {
+            w.owner = self.owner_of(w);
+        }
+    }
+}
+
+/// Whether `pid` is one of `group`'s pids or shares one of their process
+/// groups.
+fn in_any_group(pid: u32, group: &[(u32, u32)]) -> bool {
+    group
+        .iter()
+        .any(|&(p, pgid)| p == pid || pid_in_group(pid, pgid))
 }
 
 impl LinuxHost {
@@ -537,6 +610,76 @@ impl LinuxHost {
         // again rather than silently ignored forever.
         reported.retain(|pid| windows.iter().any(|w| w.pid == Some(*pid)));
         fresh
+    }
+
+    /// Snapshot everything the host is supervising, so windows can be
+    /// attributed to it.
+    ///
+    /// Built per [`HostAdapter::list_windows`] call — i.e. only when a client
+    /// is actually asking — because resolving Steam game pids means walking
+    /// `/proc` and reading every process's environment. That is fine on an
+    /// admin screen someone has open; it is not something to put on the
+    /// monitor's reconciliation sweep, which runs every two seconds whether
+    /// anyone is looking or not.
+    fn supervised_pids(
+        processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
+        sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+        session_info: &Arc<Mutex<HashMap<SessionId, SessionInfo>>>,
+        steam_preload_pids: &Arc<Mutex<HashSet<u32>>>,
+        escaped: &Arc<Mutex<HashMap<u32, EscapedActivity>>>,
+    ) -> SupervisedPids {
+        let escaped_snapshot: Vec<(u32, EscapedActivity)> = escaped
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(pid, a)| (*pid, a.clone()))
+            .collect();
+        let gone: HashSet<SessionId> = escaped_snapshot
+            .iter()
+            .map(|(_, a)| a.session_id.clone())
+            .collect();
+
+        let mut pids = SupervisedPids {
+            activities: processes
+                .lock()
+                .unwrap()
+                .values()
+                .map(|p| (p.pid, p.pgid))
+                .collect(),
+            sidecars: sidecars
+                .lock()
+                .unwrap()
+                .values()
+                .flatten()
+                .map(|c| c.id())
+                .collect(),
+            shepherd: steam_preload_pids.lock().unwrap().clone(),
+            escaped: escaped_snapshot
+                .iter()
+                .map(|(pid, a)| (*pid, a.pgid))
+                .collect(),
+            ..SupervisedPids::default()
+        };
+
+        // A Steam game is a child of the long-lived Steam client, so neither
+        // its pid nor its group is anything we spawned. Find it by app id.
+        for (_, a) in &escaped_snapshot {
+            if let Some(app_id) = a.info.as_ref().and_then(|i| i.steam_app_id) {
+                pids.escaped_steam
+                    .extend(find_steam_game_pids(app_id).into_iter().map(|p| p as u32));
+            }
+        }
+        for (session_id, info) in session_info.lock().unwrap().iter() {
+            if gone.contains(session_id) {
+                continue;
+            }
+            if let Some(app_id) = info.steam_app_id {
+                pids.activity_steam
+                    .extend(find_steam_game_pids(app_id).into_iter().map(|p| p as u32));
+            }
+        }
+
+        pids
     }
 
     /// Send every kill we have at an activity, hardest first. Shared by the
@@ -1566,7 +1709,19 @@ impl HostAdapter for LinuxHost {
     }
 
     async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
-        crate::sway::list_windows().await
+        let mut windows = crate::sway::list_windows().await?;
+        // Attribute before handing the list out: an admin UI's whole job here
+        // is to separate the child's activity from a window nothing owns, and
+        // only the host knows which is which.
+        Self::supervised_pids(
+            &self.processes,
+            &self.sidecars,
+            &self.session_info,
+            &self.steam_preload_pids,
+            &self.escaped,
+        )
+        .attribute(&mut windows);
+        Ok(windows)
     }
 
     async fn act_on_window(&self, window_id: u64, action: WindowAction) -> HostResult<()> {
@@ -1672,6 +1827,7 @@ mod tests {
             in_scratchpad: false,
             visible: true,
             focused: false,
+            owner: WindowOwner::Unowned,
         }
     }
 
@@ -1851,6 +2007,77 @@ mod tests {
             host.escaped.lock().unwrap()[&KTHREADD].attempts,
             3,
             "but every sweep must try again rather than giving up"
+        );
+    }
+
+    /// The attribution the admin UIs render, and the log warns on.
+    ///
+    /// Pure: `pid_in_group` fails closed on pids that do not exist, so the
+    /// fabricated pids here only ever match by identity.
+    #[test]
+    fn windows_are_attributed_to_what_is_supervising_them() {
+        let pids = SupervisedPids {
+            activities: vec![(100, 100)],
+            sidecars: [103].into_iter().collect(),
+            shepherd: [104].into_iter().collect(),
+            escaped: vec![(105, 105)],
+            activity_steam: vec![106],
+            escaped_steam: vec![107],
+        };
+
+        let owners = |w: WindowInfo| pids.owner_of(&w);
+
+        assert_eq!(
+            owners(window(100, "org.example.Game")),
+            WindowOwner::Activity
+        );
+        assert_eq!(
+            owners(window(101, "org.shepherd.launcher")),
+            WindowOwner::Shepherd,
+            "our own furniture is recognised by app_id, whatever its pid"
+        );
+        assert_eq!(
+            owners(window(102, "org.example.Orphan")),
+            WindowOwner::Unowned
+        );
+        assert_eq!(
+            owners(window(103, "org.example.Bridge")),
+            WindowOwner::Activity
+        );
+        assert_eq!(owners(window(104, "steam")), WindowOwner::Shepherd);
+        assert_eq!(
+            owners(window(105, "org.example.Stubborn")),
+            WindowOwner::Escaped
+        );
+        assert_eq!(
+            owners(window(106, "steam_app_504230")),
+            WindowOwner::Activity
+        );
+        assert_eq!(
+            owners(window(107, "steam_app_504230")),
+            WindowOwner::Escaped
+        );
+
+        // A surface the compositor reported no pid for cannot be tied to
+        // anything, and saying so is the point of the field.
+        let mut anonymous = window(108, "org.example.Nameless");
+        anonymous.pid = None;
+        assert_eq!(pids.owner_of(&anonymous), WindowOwner::Unowned);
+    }
+
+    /// An activity that escapes stays in `processes` — the failed stop never
+    /// got far enough to drop it — so the two overlap, and the escape has to
+    /// win or the UI would show a loose activity as normally supervised.
+    #[test]
+    fn an_escaped_activity_outranks_its_stale_process_entry() {
+        let pids = SupervisedPids {
+            activities: vec![(200, 200)],
+            escaped: vec![(200, 200)],
+            ..SupervisedPids::default()
+        };
+        assert_eq!(
+            pids.owner_of(&window(200, "org.example.Stubborn")),
+            WindowOwner::Escaped
         );
     }
 

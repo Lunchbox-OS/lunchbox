@@ -331,9 +331,11 @@ class WireTest {
         val json = """
             [
               {"id":10,"name":"Firefox","app_id":"firefox","window_class":null,"pid":1234,
-               "in_scratchpad":false,"workspace":"1","visible":true,"focused":true},
+               "in_scratchpad":false,"workspace":"1","visible":true,"focused":true,
+               "owner":"activity"},
               {"id":20,"name":"Steam","app_id":null,"window_class":"Steam","pid":5678,
-               "in_scratchpad":true,"workspace":"__i3_scratch","visible":false,"focused":false}
+               "in_scratchpad":true,"workspace":"__i3_scratch","visible":false,"focused":false,
+               "owner":"shepherd"}
             ]
         """.trimIndent()
         val windows = decode<List<WindowInfo>>(json)
@@ -341,9 +343,34 @@ class WireTest {
         assertEquals("firefox", windows[0].appId)
         assertNull(windows[0].windowClass)
         assertTrue(windows[0].focused)
+        assertEquals(WindowOwner.ACTIVITY, windows[0].owner)
         assertEquals("Steam", windows[1].windowClass)
         assertTrue(windows[1].inScratchpad)
         assertEquals(5678, windows[1].pid)
+        assertEquals(WindowOwner.SHEPHERD, windows[1].owner)
+    }
+
+    /**
+     * The two owners the windows screen exists for. Their spellings are what
+     * separates "the child is playing a game" from "something is on screen
+     * that no session owns", so a rename on the daemon side has to fail here
+     * rather than quietly downgrade every orphan to an ordinary row.
+     */
+    @Test
+    fun `window owner decodes the unsupervised spellings`() {
+        val json = """
+            [
+              {"id":30,"name":"Stubborn","app_id":"org.example.Stubborn","window_class":null,
+               "pid":9001,"in_scratchpad":false,"workspace":"1","visible":true,"focused":false,
+               "owner":"escaped"},
+              {"id":40,"name":"Victim","app_id":"org.example.Victim","window_class":null,
+               "pid":9002,"in_scratchpad":false,"workspace":"1","visible":true,"focused":false,
+               "owner":"unowned"}
+            ]
+        """.trimIndent()
+        val windows = decode<List<WindowInfo>>(json)
+        assertEquals(WindowOwner.ESCAPED, windows[0].owner)
+        assertEquals(WindowOwner.UNOWNED, windows[1].owner)
     }
 
     @Test

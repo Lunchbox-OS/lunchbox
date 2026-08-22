@@ -190,6 +190,30 @@ When stopping a session:
 2. After timeout, SIGKILL is sent to the process group
 3. Orphaned children are cleaned up
 
+## Window attribution
+
+`list_windows` answers "what is on screen"; the compositor can only say which
+pid drew each surface. `LinuxHost::list_windows` fills in `WindowInfo::owner`
+by matching every window against what the host is actually supervising —
+tracked processes and their groups, Steam game pids found by app id, input
+sidecars, shepherd's own furniture, and the `escaped` registry:
+
+| `owner` | Meaning |
+| --- | --- |
+| `shepherd` | Our own UI or a background process we keep warm. |
+| `activity` | The session running right now. |
+| `escaped` | An activity that outlived teardown; the sweep is still killing it. |
+| `unowned` | Nothing we know about. |
+
+Attribution is computed per `list_windows` call rather than on the monitor's
+reconciliation sweep: resolving Steam game pids walks `/proc` reading every
+process's environment, which is fine on an admin screen someone has open and
+wrong on a loop that runs every two seconds regardless. The sweep keeps its own
+cheaper check (`report_unowned_windows`), which only knows about pids it
+spawned. Closing an `unowned` window stays a human's call:
+shepherd will not kill a surface it does not recognize, because a system
+dialog on a kiosk a child depends on is worse than the visibility gap.
+
 ## Log Capture
 
 stdout and stderr can be captured to session log files:
