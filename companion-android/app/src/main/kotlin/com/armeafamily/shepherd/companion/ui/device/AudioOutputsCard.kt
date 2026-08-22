@@ -15,7 +15,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -27,7 +29,13 @@ import com.armeafamily.shepherd.companion.domain.AudioOutputKind
 import com.armeafamily.shepherd.companion.domain.AudioOutputRecord
 import com.armeafamily.shepherd.companion.ui.ShepherdViewModel
 
-/** Default cap offered when a limit is first switched on. */
+/**
+ * Cap offered when a limit is first switched on, before the parent has touched
+ * the slider. Deliberately the same number as the web UI's `DEFAULT_CAP`
+ * (`components/AudioOutputsCard.tsx`): this is one control that happens to be
+ * rendered twice, and it used to hand out 50 here and 80 in the browser for the
+ * same tap on the same device.
+ */
 private const val DEFAULT_CAP = 50f
 
 /**
@@ -40,7 +48,7 @@ private const val DEFAULT_CAP = 50f
  * they recognise.
  */
 @Composable
-fun AudioOutputsCard(outputs: List<AudioOutputRecord>, vm: ShepherdViewModel) {
+fun AudioOutputsCard(outputs: List<AudioOutputRecord>, busy: Boolean, vm: ShepherdViewModel) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -66,7 +74,11 @@ fun AudioOutputsCard(outputs: List<AudioOutputRecord>, vm: ShepherdViewModel) {
             } else {
                 outputs.forEachIndexed { index, record ->
                     if (index > 0) HorizontalDivider()
-                    OutputRow(record, vm)
+                    // Identity, not slot position: the device sorts the active
+                    // output first, so rows reorder under us. Without a key the
+                    // remembered slider position would stay with the slot and
+                    // end up describing a different device.
+                    key(record.output.key) { OutputRow(record, busy, vm) }
                 }
             }
         }
@@ -74,11 +86,18 @@ fun AudioOutputsCard(outputs: List<AudioOutputRecord>, vm: ShepherdViewModel) {
 }
 
 @Composable
-private fun OutputRow(record: AudioOutputRecord, vm: ShepherdViewModel) {
+private fun OutputRow(record: AudioOutputRecord, busy: Boolean, vm: ShepherdViewModel) {
     val capped = record.maxVolume != null
-    // Local slider state so dragging is smooth; committed on release.
-    var draft by remember(record.maxVolume) {
-        mutableFloatStateOf(record.maxVolume?.toFloat() ?: DEFAULT_CAP)
+    // Local slider state so dragging is smooth; committed on release. Seeded
+    // once per row — the `key` above gives the row its identity — and then
+    // synced only *while a cap exists*, so switching a limit off and back on
+    // restores the number the parent last chose instead of jumping to the
+    // default. Keying the state on `maxVolume` instead would throw it away the
+    // moment the cap cleared, which is what the browser and the phone used to
+    // disagree about.
+    var draft by remember { mutableFloatStateOf(record.maxVolume?.toFloat() ?: DEFAULT_CAP) }
+    LaunchedEffect(record.maxVolume) {
+        record.maxVolume?.let { draft = it.toFloat() }
     }
 
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -110,6 +129,7 @@ private fun OutputRow(record: AudioOutputRecord, vm: ShepherdViewModel) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = capped,
+                enabled = !busy,
                 onCheckedChange = { on ->
                     vm.setAudioOutputLimit(record.output.key, if (on) draft.toInt() else null)
                 },
@@ -121,7 +141,7 @@ private fun OutputRow(record: AudioOutputRecord, vm: ShepherdViewModel) {
                     vm.setAudioOutputLimit(record.output.key, draft.toInt())
                 },
                 valueRange = 0f..100f,
-                enabled = capped,
+                enabled = capped && !busy,
                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             )
             Text(
@@ -137,7 +157,7 @@ private fun OutputRow(record: AudioOutputRecord, vm: ShepherdViewModel) {
 
         // Forgetting the device in use would only rediscover it on the next tick.
         if (!record.active) {
-            TextButton(onClick = { vm.forgetAudioOutput(record.output.key) }) {
+            TextButton(enabled = !busy, onClick = { vm.forgetAudioOutput(record.output.key) }) {
                 Text("Forget this device")
             }
         }

@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -78,6 +79,12 @@ data class DeviceUiState(
      * of real hardware rather than anything configured ahead of time.
      */
     val audioOutputs: List<AudioOutputRecord> = emptyList(),
+    /**
+     * A per-output limit or forget is in flight. Disables the whole card while
+     * it lands, so a second drag cannot race the refresh that follows the
+     * first — the same gate the web UI applies.
+     */
+    val audioBusy: Boolean = false,
     /**
      * Categories sharing a schedule and budget (issue #5). Fetched separately
      * from the snapshot, which only carries entries.
@@ -624,17 +631,30 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
     /** `maxVolume = null` clears this output's cap. */
     fun setAudioOutputLimit(outputKey: String, maxVolume: Int?) = action { c ->
-        c.setAudioOutputLimits(outputKey, maxVolume)
-        // The device may have turned the volume down to obey a new cap, so the
-        // volume card has to be refetched alongside the row list.
-        refreshAudioOutputs()
-        refreshVolume()
+        _state.update { it.copy(audioBusy = true) }
+        try {
+            c.setAudioOutputLimits(outputKey, maxVolume)
+            // The device may have turned the volume down to obey a new cap, so
+            // the volume card has to be refetched alongside the row list.
+            //
+            // The busy window spans the refreshes too, not just the write: a
+            // row re-syncs its slider from the record that comes back, so a
+            // second drag begun after the write resolved but before the list
+            // arrived would be snapped out from under the finger.
+            joinAll(refreshAudioOutputs(), refreshVolume())
+        } finally {
+            _state.update { it.copy(audioBusy = false) }
+        }
     }
 
     fun forgetAudioOutput(outputKey: String) = action { c ->
-        c.forgetAudioOutput(outputKey)
-        refreshAudioOutputs()
-        refreshVolume()
+        _state.update { it.copy(audioBusy = true) }
+        try {
+            c.forgetAudioOutput(outputKey)
+            joinAll(refreshAudioOutputs(), refreshVolume())
+        } finally {
+            _state.update { it.copy(audioBusy = false) }
+        }
     }
 
     fun setBrightness(percent: Int) = action { c -> _state.update { it.copy(brightness = c.setBrightness(percent)) } }

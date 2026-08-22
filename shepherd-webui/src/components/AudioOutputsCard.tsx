@@ -17,6 +17,19 @@ import AudioFileIcon from "@mui/icons-material/AudioFile";
 import type { AudioOutputRecord } from "../api/types";
 
 /**
+ * Cap offered when a limit is first switched on, before the parent has touched
+ * the slider. Deliberately the same number as the companion's `DEFAULT_CAP`
+ * (`ui/device/AudioOutputsCard.kt`): this is one control that happens to be
+ * rendered twice, and it used to hand out 80 here and 50 on the phone for the
+ * same tap on the same device.
+ *
+ * Switching a limit on clamps immediately, so the value is chosen to be
+ * protective rather than to be a no-op — flipping the switch should visibly do
+ * something, and switching it back off undoes it.
+ */
+const DEFAULT_CAP = 50;
+
+/**
  * The icon is chosen from the advisory `kind`, which is frequently `unknown`
  * (a plain USB interface tells us nothing about itself). That is expected —
  * the description and the "In use now" marker are what the parent actually
@@ -63,7 +76,9 @@ function OutputRow({
 }) {
   const capped = record.max_volume !== null;
   // Local slider state so dragging stays smooth; the commit happens on release.
-  const [draft, setDraft] = useState(record.max_volume ?? 80);
+  // Synced only while a cap exists, so switching a limit off and back on
+  // restores the number the parent last chose rather than the default.
+  const [draft, setDraft] = useState(record.max_volume ?? DEFAULT_CAP);
   useEffect(() => {
     if (record.max_volume !== null) setDraft(record.max_volume);
   }, [record.max_volume]);
