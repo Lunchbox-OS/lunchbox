@@ -10,7 +10,12 @@ import Typography from "@mui/material/Typography";
 import StopIcon from "@mui/icons-material/Stop";
 import { styled } from "@mui/material/styles";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { extendSession, getCurrentSession, stopSession } from "../api/client";
+import {
+  extendSession,
+  getCurrentSession,
+  listDiagnostics,
+  stopSession,
+} from "../api/client";
 import { formatDuration, type SessionInfo } from "../api/types";
 import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
@@ -31,7 +36,43 @@ const CountdownText = styled(Typography)(({ theme }) => ({
   [theme.breakpoints.up("sm")]: { fontSize: "4rem" },
 }));
 
-export function DashboardPage() {
+/**
+ * The critical-only banner (issue #143).
+ *
+ * Critical means the configuration promises a protection the device is not
+ * providing — an activity that should be firewalled and is not, so it no longer
+ * launches at all. That is worth interrupting the main screen for; everything
+ * milder belongs on the Health page rather than in front of someone who came
+ * here to see what their child is doing.
+ */
+function CriticalBanner({ onShowHealth }: { onShowHealth?: () => void }) {
+  const { data } = useQuery({
+    queryKey: ["diagnostics"],
+    queryFn: listDiagnostics,
+  });
+
+  const critical = (data?.items ?? []).filter((d) => d.severity === "critical");
+  if (critical.length === 0) return null;
+
+  return (
+    <Alert
+      severity="error"
+      action={
+        onShowHealth && (
+          <Button color="inherit" size="small" onClick={onShowHealth}>
+            Details
+          </Button>
+        )
+      }
+    >
+      {critical.length === 1
+        ? critical[0].message
+        : `${critical.length} problems need attention on this device`}
+    </Alert>
+  );
+}
+
+export function DashboardPage({ onShowHealth }: { onShowHealth?: () => void }) {
   const queryClient = useQueryClient();
   const { data: session, isPending: loading } = useQuery({
     queryKey: ["session", "current"],
@@ -69,6 +110,8 @@ export function DashboardPage() {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
       <Typography variant="h6" sx={{ fontWeight: 700 }}>Now Playing</Typography>
+
+      <CriticalBanner onShowHealth={onShowHealth} />
 
       <Snackbar open={!!msg} message={msg?.text} autoHideDuration={3000} onClose={() => setMsg(null)}>
         <Alert severity={msg?.ok ? "success" : "error"} onClose={() => setMsg(null)} sx={{ width: "100%" }}>

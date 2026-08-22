@@ -189,6 +189,14 @@ impl CoreEngine {
         true
     }
 
+    /// The current administrator-facing diagnostic set (issue #143).
+    ///
+    /// A direct accessor rather than reading `get_state().diagnostics`, which
+    /// rebuilds every `EntryView` to answer a question about none of them.
+    pub fn diagnostics(&self) -> DiagnosticSet {
+        self.diagnostics.clone()
+    }
+
     /// Record whether per-entry firewall enforcement works on this host (issue
     /// #143). Returns true if the answer changed, so the caller can broadcast.
     pub fn set_firewall_enforceable(&mut self, enforceable: bool) -> bool {

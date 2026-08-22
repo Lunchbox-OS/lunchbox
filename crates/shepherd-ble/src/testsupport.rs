@@ -199,6 +199,10 @@ impl ManagementService for MockSvc {
     }
     async fn logout(&self) {}
     async fn ping(&self) {}
+    async fn list_diagnostics(&self) -> shepherd_api::DiagnosticSet {
+        Default::default()
+    }
+
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {
         Ok(vec![])
     }

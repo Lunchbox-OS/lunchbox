@@ -11,6 +11,7 @@ import type { RpcMethod } from "./rpc-methods.generated";
 import type {
   BrightnessInfo,
   DailyOverride,
+  DiagnosticSet,
   GroupView,
   TokenStatus,
   EntryView,
@@ -209,6 +210,15 @@ export const logoutUser = () => call<null>("logout");
 // Debug
 // `list_windows` has no `wrap_result`, so the daemon answers with a bare
 // array rather than `{windows: [...]}`.
+/**
+ * Administrator-facing conditions currently true of the device (issue #143).
+ *
+ * A call of its own rather than reading them off a state snapshot: this UI
+ * queries per page and never fetches a whole snapshot, so the set would
+ * otherwise be unreachable from the browser.
+ */
+export const listDiagnostics = () => call<DiagnosticSet>("list_diagnostics");
+
 export const listWindows = () => call<WindowInfo[]>("list_windows");
 export const closeWindow = (id: number) =>
   call<null>("act_on_window", { id, action: "close" });

@@ -4,10 +4,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryKind,
-    EntryView, Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot,
-    SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo,
-    VolumeRestrictions, WindowAction, WindowInfo,
+    BrightnessInfo, BrightnessRestrictions, DailyOverride, DiagnosticSet, DisplayMode,
+    DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
+    ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat,
+    VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
@@ -152,6 +152,14 @@ pub trait ManagementService: Send + Sync {
 
     // User
     async fn logout(&self);
+
+    /// Administrator-facing conditions currently true of this device (issue
+    /// #143).
+    ///
+    /// Also carried on `service_state`, but the web UI never fetches a whole
+    /// snapshot — it queries per page — so the set needs a call of its own to
+    /// be reachable from a browser at all.
+    async fn list_diagnostics(&self) -> DiagnosticSet;
 
     // Debug windows
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>>;
@@ -894,6 +902,10 @@ impl ManagementService for DefaultManagementService {
     async fn ping(&self) {}
 
     // --------------------------------------------------------------- windows
+    async fn list_diagnostics(&self) -> DiagnosticSet {
+        self.engine.lock().await.diagnostics()
+    }
+
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {
         self.host
             .list_windows()
