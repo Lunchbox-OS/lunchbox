@@ -1,15 +1,16 @@
 //! Generic least-recently-used eviction for an on-disk file cache.
 //!
-//! Shared by both media front-ends' video caches, which otherwise have almost
-//! nothing in common. The Android cache names files by a `DefaultHasher` of the
-//! URL and orders them by plain mtime; `shepherd-media-cache` names them by a
-//! SHA-256 of the URL *and* the yt-dlp selector, tracks completion with `.done`
-//! sentinels and download claims with `.lock` files, and orders them by whether
-//! anyone has watched them. So only the eviction *policy* is shared here: given
-//! the cached files with their sizes and a recency key, delete the oldest until
-//! the total is within a byte cap. Each caller scans its own directory
-//! (applying its own filters, building its own recency key) and supplies an
-//! `on_evict` hook for any paired bookkeeping (deleting a sentinel, logging).
+//! Shared by both media front-ends' video caches, which agree on naming (see
+//! [`crate::cache_key`]) and on this ordering but little else. The Android
+//! cache downloads direct HTTP into one directory per library, so it has one
+//! rendition per URL and no sentinels; `shepherd-media-cache` runs yt-dlp,
+//! keys on the URL *and* the format selector, and tracks completion with
+//! `.done` sentinels and download claims with `.lock` files. So only the
+//! eviction *policy* is shared here: given the cached files with their sizes
+//! and a recency key, delete the oldest until the total is within a byte cap.
+//! Each caller scans its own directory (applying its own filters, building its
+//! own recency key) and supplies an `on_evict` hook for any paired bookkeeping
+//! (deleting a sentinel, logging).
 //!
 //! Deliberately std-only: no networking or image work, so it stays reusable and
 //! cross-compiles for Android like the rest of this crate.

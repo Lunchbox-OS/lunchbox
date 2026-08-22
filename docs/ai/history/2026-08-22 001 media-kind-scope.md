@@ -616,10 +616,68 @@ Pre-existing files under the old naming are left alone on both platforms, on the
 same reasoning: they are ordinary eviction candidates that age out, and
 re-downloading them is what the next toolchain bump would have cost anyway.
 
-**Not verified locally:** the `cargo-ndk` cross-build needs the NDK, which this
-box does not have. `shepherd-media-app` was cargo-checked for
-`aarch64-linux-android` (the new `sha2` and `filetime` dependencies do
-cross-compile); the full cdylib link is left to CI's `android-media` job.
+**Verified on hardware (2026-08-22).** The commits above left the Android side
+checked only by `cargo check`; it has since been validated on a Pixel 10a
+(arm64-v8a, SDK 37) attached over USB.
+
+*Build.* `cargo ndk -t arm64-v8a build -p shepherd-media-android` links the
+cdylib (the `android-media` CI gate), `cargo ndk clippy` is clean under
+`-D warnings`, and a full Gradle `assembleDebug` packages
+`libshepherd_media_android.so` for **both** `arm64-v8a` and `armeabi-v7a` — the
+32-bit ABI matters, the Fire TV stick is `armeabi-v7a` only.
+
+*Unit tests on the device itself.* A cargo-ndk-built test binary runs straight
+off `/data/local/tmp` — no APK, no signing, no emulator:
+
+```sh
+cargo ndk -t arm64-v8a test -p shepherd-media-app --no-run   # then push the
+adb push target/aarch64-linux-android/debug/deps/<bin> /data/local/tmp/t
+adb shell "mkdir -p /data/local/tmp/tt && TMPDIR=/data/local/tmp/tt /data/local/tmp/t"
+```
+
+**`TMPDIR` is not optional:** `std::env::temp_dir()` falls back to `/tmp`, which
+does not exist on Android, so every test using `tempfile` or `temp_dir` fails
+without it. For `shepherd-media-android` the binary also links the vendored
+libmpv, so push `vendor/libmpv/<abi>/*.so` and set `LD_LIBRARY_PATH` to it.
+81/81 `shepherd-media-app` and 8/8 `video_cache` tests pass this way — including
+`cache_key::keys_are_pinned_to_known_values`, which is what proves the SHA-256
+naming is identical on bionic/aarch64 and on the host.
+
+One test had to be gated for this to work. The old
+`youtube_is_unsupported_for_now` in `resolve.rs` passed on the host, where
+`youtube::provider()` is `cfg`'d out and returns `None`, but compiled for
+Android `provider()` returns the JNI binding, so `resolve` really ran it and
+panicked in `ndk_context` ("android context was not
+initialized") — a bare executable has no JVM and no Activity. The assertion was only ever about a platform *without* a provider, so
+it is now `#[cfg(not(target_os = "android"))]` and renamed
+`youtube_is_unsupported_without_a_provider`; the on-device suite is 28/28.
+
+Nothing was changed in `run_jni` itself: android-activity initializes the
+context at startup, so the app can never reach that panic, and `ndk-context`
+0.1.1 offers no non-panicking accessor to guard with. Note also that no CI job
+runs this crate's tests for Android — `android-media` only builds the cdylib —
+so this was latent until the on-device workflow above exercised it.
+
+*End-to-end in the app.* Driven against a loopback library over
+`adb reverse tcp:8099 tcp:8099` (the app's `ureq` reaches the host at
+`127.0.0.1`), with `settings.toml` written directly into
+`/data/data/<pkg>/files` via `run-as` — which needs a **debug** build; the
+release-signed APK is not debuggable, and its signature does not match the local
+debug keystore, so swapping builds costs an `adb uninstall` and the user's
+configured libraries with it. On a `queue-after-play` library:
+
+| Step | Observed |
+| --- | --- |
+| First play (uncached) | streams; after EOF `store()` writes `629e0ed5eea189ecdce564b5d51ee9aa.mp4`, the exact host-computed `content_key(url, "")`, plus a `.played` marker under the same key |
+| Replay | **zero** further HTTP requests — served from the cache file |
+| Replay, `.mp4` mtime | unchanged — `cached_path` is a pure lookup, the 9a9ee36 fix, confirmed on real storage |
+| Replay, `.played` mtime | moved forward — `mark_played` fires at the play site |
+| Second video over a 160 KB cap | the older-played file is evicted; the newer stays; the cache lands within the cap |
+| After that eviction | **both** `.played` markers survive, including the evicted file's — interest outliving any copy of the video, as documented |
+
+The two-class ordering itself still cannot be exercised through the app, because
+nothing on Android produces an unwatched file until `CacheMode::QueueAll` is
+wired; it is covered by the on-device unit tests instead.
 
 ## Where issue #127 stands
 

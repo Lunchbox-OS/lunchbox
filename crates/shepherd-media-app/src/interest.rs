@@ -6,7 +6,7 @@
 //! Without a marker, both look identical on disk — an mtime says when a file
 //! arrived, not whether it mattered to anyone.
 //!
-//! The marker is an empty `<key>.marked` file whose mtime is when playback last
+//! The marker is an empty `<key>.played` file whose mtime is when playback last
 //! started. It is deliberately **never removed**, including when the video it
 //! names is evicted: interest in a video outlives any particular copy of it, so
 //! a re-download later starts out protected rather than as a fresh guess.
