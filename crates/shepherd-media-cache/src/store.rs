@@ -20,12 +20,11 @@
 //! on their own. Migrating them would mean keeping a rename map forever to save
 //! a download that is, by definition, re-downloadable.
 
-use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use filetime::FileTime;
-use shepherd_media_app::lru::{self, LruEntry};
+use shepherd_media_app::interest;
+use shepherd_media_app::lru::{self, LruEntry, Recency};
 use tracing::{info, warn};
 
 use crate::lock::is_lock_file;
@@ -43,39 +42,11 @@ pub enum CacheState {
     Present,
 }
 
-/// How much a cached file has earned its place, least-deserving first.
-///
-/// The ordering is the point, and it is deliberately **two-class**: every file
-/// nobody has watched sorts below every file somebody has, so eviction spends
-/// unwatched space before it touches anything a child actually chose. A guessed
-/// download must never cost someone the film they watched last week.
-///
-/// Within the unwatched class the download time is *inverted*, so the most
-/// recently fetched speculative file is the first to go. Prefetch works through
-/// a library in display order, so the newest arrival is the one furthest down
-/// the list — the least likely to be reached next. Ordering it the other way
-/// would evict the head of the list, which the next prefetch pass would
-/// immediately re-download.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Recency {
-    /// Downloaded speculatively and never played. Ordered newest-first.
-    Unwatched(Reverse<SystemTime>),
-    /// Played at least once, ordered by when it was last started.
-    Watched(SystemTime),
-}
-
-impl Recency {
-    /// Whether this file is fair game for a speculative prefetch to displace.
-    pub fn is_unwatched(&self) -> bool {
-        matches!(self, Recency::Unwatched(_))
-    }
-}
-
 /// Whether `name` is bookkeeping rather than a cached video.
 fn is_sidecar(name: &str) -> bool {
     name.ends_with(".part")
         || name.ends_with(".done")
-        || name.ends_with(".played")
+        || interest::is_marker(name)
         || is_lock_file(name)
 }
 
@@ -149,14 +120,9 @@ pub fn cache_state(cache_dir: &Path, key: &str) -> CacheState {
 /// The marker is never removed, including when the video is evicted: a child
 /// who watched something has shown an interest in it that survives the file.
 pub fn mark_played(cache_dir: &Path, interest_key: &str) {
-    let path = cache_dir.join(format!("{interest_key}.played"));
-    if let Err(e) = std::fs::write(&path, b"") {
+    if let Err(e) = interest::mark_played(cache_dir, interest_key) {
         warn!("could not record playback of {interest_key}: {e}");
-        return;
     }
-    // Rewriting an existing marker leaves its mtime at "now", which is the
-    // recency eviction orders watched files by.
-    let _ = filetime::set_file_mtime(&path, FileTime::now());
 }
 
 /// Delete every committed file for `key` plus its sentinel.
@@ -217,13 +183,9 @@ fn collect_cache_entries(cache_dir: &Path) -> Option<Vec<CacheEntry>> {
         // playback last started. Otherwise the file's own mtime is when the
         // download completed.
         let played_at = sentinel_interest_key(cache_dir, &key)
-            .map(|ikey| cache_dir.join(format!("{ikey}.played")))
-            .and_then(|p| p.metadata().ok())
-            .and_then(|m| m.modified().ok());
-        let recency = match played_at {
-            Some(at) => Recency::Watched(at),
-            None => Recency::Unwatched(Reverse(meta.modified().unwrap_or(SystemTime::UNIX_EPOCH))),
-        };
+            .and_then(|ikey| interest::played_at(cache_dir, &ikey));
+        let recency =
+            Recency::classify(meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), played_at);
 
         entries.push(CacheEntry {
             path: de.path(),
@@ -294,6 +256,7 @@ pub fn evict_unwatched_to(cache_dir: &Path, target_bytes: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::FileTime;
 
     const H264: &str = "bv*[vcodec^=avc1][height<=?1080]+ba/b";
 

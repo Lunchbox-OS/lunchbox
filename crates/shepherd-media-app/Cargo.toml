@@ -7,6 +7,9 @@ description = "Platform-agnostic application layer for shepherd-media: persisten
 
 [dependencies]
 serde = { workspace = true }
+# The played-marker mtime, which both front-ends' video caches read to order
+# eviction — so the policy lives here rather than in either platform crate.
+filetime = "0.2"
 toml = { workspace = true }
 thiserror = { workspace = true }
 # The `log` facade, not a subscriber: this crate only needs to report a failed

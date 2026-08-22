@@ -90,6 +90,10 @@ the cost is one directory entry per distinct URL ever downloaded.
 
 ## Eviction: watched beats guessed
 
+The ordering itself is `shepherd_media_app::Recency`, and the played marker
+behind it is `shepherd_media_app::interest` — both shared with the Android
+cache, so the two front-ends spend disk the same way.
+
 The cap is 10 GiB, or `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES`. What goes first is
 a **two-class** ordering, and the classes matter more than the timestamps:
 

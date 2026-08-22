@@ -1385,6 +1385,9 @@ impl MediaApp {
                 caching.max_bytes,
             );
             if let Some(path) = cache.cached_path(&url) {
+                // Playing from cache is the moment interest is recorded, so
+                // eviction stops treating this file as a replaceable guess.
+                cache.mark_played(&url);
                 play_source = Source {
                     platforms: source.platforms.clone(),
                     uri: ClassifiedUri::Local(path),

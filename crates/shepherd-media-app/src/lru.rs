@@ -14,7 +14,49 @@
 //! Deliberately std-only: no networking or image work, so it stays reusable and
 //! cross-compiles for Android like the rest of this crate.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// How much a cached file has earned its place, least-deserving first.
+///
+/// The ordering is the point, and it is deliberately **two-class**: every file
+/// nobody has watched sorts below every file somebody has, so eviction spends
+/// guesses before it touches anything a person chose. Plain mtime got this
+/// backwards — a speculative download that landed a minute ago looked
+/// "recently used" and outranked a film watched last week.
+///
+/// Within the unwatched class the download time is *inverted*, so the most
+/// recently fetched speculative file is the first to go. Prefetch works through
+/// a library in display order, so the newest arrival is the one furthest down
+/// the list — the least likely to be reached next. Ordering it the other way
+/// would evict the head of the list, which the next prefetch pass would
+/// immediately re-download.
+///
+/// Watched-ness comes from the marker in [`crate::interest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Recency {
+    /// Downloaded speculatively and never played. Ordered newest-first.
+    Unwatched(Reverse<SystemTime>),
+    /// Played at least once, ordered by when it was last started.
+    Watched(SystemTime),
+}
+
+impl Recency {
+    /// Classify a file from when it was downloaded and when, if ever, it was
+    /// played.
+    pub fn classify(downloaded_at: SystemTime, played_at: Option<SystemTime>) -> Self {
+        match played_at {
+            Some(at) => Recency::Watched(at),
+            None => Recency::Unwatched(Reverse(downloaded_at)),
+        }
+    }
+
+    /// Whether this file is fair game for a speculative download to displace.
+    pub fn is_unwatched(&self) -> bool {
+        matches!(self, Recency::Unwatched(_))
+    }
+}
 
 /// A cached file eligible for eviction: its path, size in bytes, and a recency
 /// key that orders least- to most-recently-used (the smallest is evicted
@@ -77,6 +119,7 @@ pub fn evict_to_cap_where<K: Ord>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn seed(dir: &Path, name: &str, size: usize) -> PathBuf {
         let p = dir.join(name);
@@ -166,5 +209,36 @@ mod tests {
         );
         assert!(protected.exists(), "protected file survives");
         assert!(!spare.exists(), "the eligible file is still reclaimed");
+    }
+
+    #[test]
+    fn unwatched_files_are_evicted_before_watched_ones_however_old() {
+        let now = SystemTime::now();
+        let month = Duration::from_secs(30 * 24 * 3600);
+        let watched_long_ago = Recency::classify(now, Some(now - month));
+        let guessed_just_now = Recency::classify(now, None);
+        assert!(
+            guessed_just_now < watched_long_ago,
+            "a guess must be spent before a film somebody chose"
+        );
+    }
+
+    #[test]
+    fn the_newest_guess_is_the_first_to_go() {
+        let now = SystemTime::now();
+        let older = Recency::classify(now - Duration::from_secs(3600), None);
+        let newer = Recency::classify(now, None);
+        assert!(
+            newer < older,
+            "prefetch fills in display order, so the newest file is the furthest down the list"
+        );
+    }
+
+    #[test]
+    fn among_watched_the_least_recently_played_goes_first() {
+        let now = SystemTime::now();
+        let stale = Recency::classify(now, Some(now - Duration::from_secs(3600)));
+        let fresh = Recency::classify(now, Some(now));
+        assert!(stale < fresh);
     }
 }

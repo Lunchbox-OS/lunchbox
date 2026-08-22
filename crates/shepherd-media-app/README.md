@@ -25,6 +25,12 @@ desktop and reused by any platform binary.
 - **Caching policy** (`quality.rs`) — [`CacheMode`] (mirrors the two
   `VideoCache` strategies in `shepherd-media`, plus `off`), [`PosterPolicy`],
   and [`Quality`] (mirrors the `--quality` presets, including `ytdl_format`).
+- **Video-cache eviction policy** (`lru.rs`, `interest.rs`) — [`Recency`], the
+  two-class ordering both front-ends' video caches evict by (every file nobody
+  has watched goes before any file somebody did, and among the unwatched the
+  newest download goes first), plus the `.played` marker that distinguishes the
+  two. Only the *policy* is shared: each cache scans its own directory, applies
+  its own filters, and does its own bookkeeping.
 - **Persistence** — load/save the settings as TOML to app-private storage
   (e.g. Android `Context.filesDir`). Writes are atomic (temp file + rename).
 - **Resume state** (`resume.rs`) — [`ResumeState`] (a position per item plus the
