@@ -131,6 +131,29 @@ class ManagementClient(private val connection: ShepherdConnection) {
     suspend fun setMute(muted: Boolean): VolumeInfo =
         decode(call("set_mute", buildJsonObject { put("muted", JsonPrimitive(muted)) }))
 
+    // --- per-output volume limits (issue #124) --------------------------
+
+    suspend fun listAudioOutputs(): List<AudioOutputRecord> =
+        decode(call("list_audio_outputs", empty()))
+
+    /** `maxVolume = null` clears the cap and lets the global limit apply. */
+    suspend fun setAudioOutputLimits(outputKey: String, maxVolume: Int?): AudioOutputRecord =
+        decode(call("set_audio_output_limits", buildJsonObject {
+            put("output_key", JsonPrimitive(outputKey))
+            put("max_volume", maxVolume?.let { JsonPrimitive(it) } ?: JsonNull)
+        }))
+
+    suspend fun forgetAudioOutput(outputKey: String): Boolean =
+        decode(call("forget_audio_output", buildJsonObject {
+            put("output_key", JsonPrimitive(outputKey))
+        }))
+
+    /** Move sound to this output. Returns the reading for the new one. */
+    suspend fun selectAudioOutput(outputKey: String): VolumeInfo =
+        decode(call("select_audio_output", buildJsonObject {
+            put("output_key", JsonPrimitive(outputKey))
+        }))
+
     suspend fun getBrightness(): BrightnessInfo = decode(call("get_brightness", empty()))
 
     suspend fun setBrightness(percent: Int): BrightnessInfo =

@@ -9,6 +9,7 @@ import com.armeafamily.shepherd.companion.ble.ConnectTimeoutException
 import com.armeafamily.shepherd.companion.ble.RpcException
 import com.armeafamily.shepherd.companion.ble.ShepherdConnection
 import com.armeafamily.shepherd.companion.domain.AdminRecord
+import com.armeafamily.shepherd.companion.domain.AudioOutputRecord
 import com.armeafamily.shepherd.companion.domain.BrightnessInfo
 import com.armeafamily.shepherd.companion.domain.ClaimStateTag
 import com.armeafamily.shepherd.companion.domain.DailyOverride
@@ -40,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -71,6 +73,18 @@ data class DeviceUiState(
     val currentSession: SessionInfo? = null,
     val volume: VolumeInfo? = null,
     val brightness: BrightnessInfo? = null,
+    /**
+     * Audio outputs the device has seen, with any per-output volume limit
+     * (issue #124). Populated by discovery on the device, so this is the list
+     * of real hardware rather than anything configured ahead of time.
+     */
+    val audioOutputs: List<AudioOutputRecord> = emptyList(),
+    /**
+     * A per-output limit or forget is in flight. Disables the whole card while
+     * it lands, so a second drag cannot race the refresh that follows the
+     * first — the same gate the web UI applies.
+     */
+    val audioBusy: Boolean = false,
     /**
      * Categories sharing a schedule and budget (issue #5). Fetched separately
      * from the snapshot, which only carries entries.
@@ -511,6 +525,8 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { c.listGroups() }.onSuccess { g -> _state.update { it.copy(groups = g) } }
         runCatching { c.getVolume() }.onSuccess { v -> _state.update { it.copy(volume = v) } }
         runCatching { c.getBrightness() }.onSuccess { b -> _state.update { it.copy(brightness = b) } }
+        runCatching { c.listAudioOutputs() }
+            .onSuccess { o -> _state.update { it.copy(audioOutputs = o) } }
     }
 
     private fun applyEvent(payload: EventPayload) {
@@ -536,7 +552,13 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
             is EventPayload.EntryAvailabilityChanged,
             is EventPayload.InternetStatusChanged,
             -> refreshSnapshot()
-            is EventPayload.VolumeChanged -> refreshVolume()
+            is EventPayload.VolumeChanged -> {
+                refreshVolume()
+                // A VolumeChanged can mean the active output changed, which
+                // moves the "In use now" marker and can surface a device the
+                // list has never seen.
+                refreshAudioOutputs()
+            }
             is EventPayload.BrightnessChanged -> refreshBrightness()
             else -> Unit
         }
@@ -559,6 +581,13 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshVolume() = viewModelScope.launch {
         client?.let { c -> runCatching { c.getVolume() }.onSuccess { v -> _state.update { it.copy(volume = v) } } }
+    }
+
+    private fun refreshAudioOutputs() = viewModelScope.launch {
+        client?.let { c ->
+            runCatching { c.listAudioOutputs() }
+                .onSuccess { o -> _state.update { it.copy(audioOutputs = o) } }
+        }
     }
 
     private fun refreshBrightness() = viewModelScope.launch {
@@ -599,6 +628,49 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     fun setVolume(percent: Int) = action { c -> _state.update { it.copy(volume = c.setVolume(percent)) } }
 
     fun setMute(muted: Boolean) = action { c -> _state.update { it.copy(volume = c.setMute(muted)) } }
+
+    /** `maxVolume = null` clears this output's cap. */
+    fun setAudioOutputLimit(outputKey: String, maxVolume: Int?) = action { c ->
+        _state.update { it.copy(audioBusy = true) }
+        try {
+            c.setAudioOutputLimits(outputKey, maxVolume)
+            // The device may have turned the volume down to obey a new cap, so
+            // the volume card has to be refetched alongside the row list.
+            //
+            // The busy window spans the refreshes too, not just the write: a
+            // row re-syncs its slider from the record that comes back, so a
+            // second drag begun after the write resolved but before the list
+            // arrived would be snapped out from under the finger.
+            joinAll(refreshAudioOutputs(), refreshVolume())
+        } finally {
+            _state.update { it.copy(audioBusy = false) }
+        }
+    }
+
+    /** Move sound to another output (issue #124). */
+    fun selectAudioOutput(outputKey: String) = action { c ->
+        _state.update { it.copy(audioBusy = true) }
+        try {
+            val volume = c.selectAudioOutput(outputKey)
+            // Name the device: the daemon refuses one it can no longer see, so a
+            // silent success would be indistinguishable from nothing happening.
+            _message.value = volume.output?.description
+                ?.let { "Now playing through $it." } ?: "Switched output."
+            joinAll(refreshAudioOutputs(), refreshVolume())
+        } finally {
+            _state.update { it.copy(audioBusy = false) }
+        }
+    }
+
+    fun forgetAudioOutput(outputKey: String) = action { c ->
+        _state.update { it.copy(audioBusy = true) }
+        try {
+            c.forgetAudioOutput(outputKey)
+            joinAll(refreshAudioOutputs(), refreshVolume())
+        } finally {
+            _state.update { it.copy(audioBusy = false) }
+        }
+    }
 
     fun setBrightness(percent: Int) = action { c -> _state.update { it.copy(brightness = c.setBrightness(percent)) } }
 

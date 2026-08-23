@@ -94,6 +94,32 @@ impl VolumeRestrictions {
     }
 }
 
+/// Everything one read of the sound system says.
+///
+/// The reading, the output it applies to, and every output that could be
+/// switched to all come from the same read, so they can never describe two
+/// different moments. That mattered before this type existed: reading the status
+/// and the identity separately published a torn pair on exactly the sink switch
+/// the watcher exists to report.
+#[derive(Debug, Clone, Default)]
+pub struct AudioSnapshot {
+    pub status: VolumeStatus,
+    /// The output currently selected. `None` on hosts that cannot enumerate
+    /// outputs, or when no default sink resolves.
+    pub active: Option<shepherd_api::AudioOutput>,
+    /// Every output present and usable right now, including `active`. Empty on
+    /// hosts that cannot enumerate — not a claim that there is no sound, only
+    /// that there is nothing to choose between.
+    pub outputs: Vec<shepherd_api::AudioOutput>,
+}
+
+impl AudioSnapshot {
+    /// Identity key of the selected output.
+    pub fn active_key(&self) -> Option<&str> {
+        self.active.as_ref().map(|o| o.key.as_str())
+    }
+}
+
 /// Volume controller trait - implemented by platform-specific adapters
 #[async_trait]
 pub trait VolumeController: Send + Sync {
@@ -117,6 +143,48 @@ pub trait VolumeController: Send + Sync {
 
     /// Set mute state explicitly
     async fn set_mute(&self, muted: bool) -> VolumeResult<()>;
+
+    /// The audio output the current reading applies to.
+    ///
+    /// Defaults to `None`: hosts with no way to enumerate outputs (PulseAudio,
+    /// ALSA, no sound backend at all) keep their existing single-output
+    /// behaviour rather than being forced to invent an identity.
+    async fn current_output(&self) -> Option<shepherd_api::AudioOutput> {
+        None
+    }
+
+    /// Make `output_key` the output sound plays out of.
+    ///
+    /// Errors by default rather than silently doing nothing: a caller that asked
+    /// to move the audio and got `Ok` back would have no way to learn that it
+    /// never moved.
+    async fn select_output(&self, output_key: &str) -> VolumeResult<()> {
+        let _ = output_key;
+        Err(VolumeError::NotAvailable(
+            "this sound backend has no selectable outputs".into(),
+        ))
+    }
+
+    /// Read the whole audio picture as one consistent snapshot.
+    ///
+    /// This is the only read the daemon should use when it cares about more than
+    /// the bare percentage: everything in an [`AudioSnapshot`] comes from one
+    /// look at the system, so no two fields can describe different moments.
+    ///
+    /// The default composes two independent reads and reports only the active
+    /// output, which is all a backend that cannot enumerate has to offer.
+    /// Backends that can read everything at once should override it — the watch
+    /// loop leans on the single read both for consistency and so that noticing a
+    /// device being plugged in costs nothing beyond the poll it already does.
+    async fn observe(&self) -> VolumeResult<AudioSnapshot> {
+        let status = self.get_status().await?;
+        let active = self.current_output().await;
+        Ok(AudioSnapshot {
+            status,
+            outputs: active.iter().cloned().collect(),
+            active,
+        })
+    }
 }
 
 /// No-op [`VolumeController`] for tests and hosts with no sound backend.

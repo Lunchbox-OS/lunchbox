@@ -224,7 +224,27 @@ CREATE TABLE snapshot (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     data TEXT NOT NULL  -- JSON
 );
+
+-- Audio outputs seen, and any per-output volume limit (issue #124).
+-- Rows are created by discovery: shepherdd records each output it observes so
+-- the admin UI can list real devices for the parent to pick from. `kind` is the
+-- advisory classification and is stored as its wire string; an unrecognised
+-- value loads as `unknown` rather than failing the read.
+CREATE TABLE audio_outputs (
+    output_key TEXT PRIMARY KEY,  -- <device.name>:output:<route.name>
+    description TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    max_volume INTEGER,           -- NULL = no per-output cap
+    min_volume INTEGER,
+    last_seen TEXT NOT NULL
+);
 ```
+
+`record_audio_output_seen` deliberately does not write the limit columns: a
+device disappearing and coming back must keep whatever cap the parent gave it.
+Setting limits is a separate call, and it refuses an output that has never been
+seen — the UI only offers keys it has listed, so an unknown key means a stale
+client rather than a new device.
 
 ## Schema Migration
 

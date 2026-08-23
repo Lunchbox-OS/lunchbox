@@ -62,6 +62,11 @@ fun DeviceControlsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             state.volume?.let { VolumeCard(it, vm) }
+            // Gated the same way as VolumeCard: on a device with no sound
+            // backend the per-device list is noise, not an empty state.
+            if (state.volume?.available == true) {
+                AudioOutputsCard(state.audioOutputs, state.audioBusy, vm)
+            }
             state.brightness?.let { BrightnessCard(it, vm) }
 
             Card(Modifier.fillMaxWidth()) {

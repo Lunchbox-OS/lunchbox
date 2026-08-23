@@ -5,6 +5,7 @@ import com.armeafamily.shepherd.companion.ble.RpcResponse
 import com.armeafamily.shepherd.companion.ble.ShepherdJson
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -321,6 +322,82 @@ class WireTest {
         assertEquals(42, volume.percent)
         assertEquals(80, volume.restrictions.maxVolume)
         assertNull(volume.restrictions.minVolume)
+        // The payload above predates per-output support, so a device running an
+        // older build must still decode — `output` simply stays absent.
+        assertNull(volume.output)
+    }
+
+    @Test
+    fun `volume info names the active output`() {
+        val json = """
+            {"percent":40,"muted":false,"available":true,"backend":"pipewire",
+             "restrictions":{"max_volume":80,"min_volume":null,"allow_mute":true,"allow_change":true},
+             "output":{"key":"alsa_card.pci-0000_00_1b.0:output:analog-output-headphones",
+                       "description":"Built-in Audio Analog Stereo","kind":"headphones"}}
+        """.trimIndent()
+        val volume = decode<VolumeInfo>(json)
+        val output = volume.output
+        assertEquals(
+            "alsa_card.pci-0000_00_1b.0:output:analog-output-headphones",
+            output?.key,
+        )
+        assertEquals(AudioOutputKind.HEADPHONES, output?.kind)
+    }
+
+    @Test
+    fun `audio output record carries its limit and active flag`() {
+        val json = """
+            {"output":{"key":"alsa_card.usb-Focusrite_Scarlett_2i2_USB-00:output:analog-output",
+                       "description":"Focusrite Scarlett 2i2 Analog Stereo","kind":"unknown"},
+             "max_volume":50,"min_volume":null,
+             "last_seen":"2026-08-21T23:45:19.599464680-04:00","active":true}
+        """.trimIndent()
+        val record = decode<AudioOutputRecord>(json)
+        assertEquals(50L, record.maxVolume)
+        assertNull(record.minVolume)
+        assertTrue(record.active)
+        // A generic USB interface classifies as nothing, which is routine and
+        // must not be mistaken for a decode failure.
+        assertEquals(AudioOutputKind.UNKNOWN, record.output.kind)
+    }
+
+    @Test
+    fun `an uncapped audio output decodes with no limit`() {
+        val json = """
+            {"output":{"key":"k","description":"Speakers","kind":"speakers"},
+             "max_volume":null,"min_volume":null,
+             "last_seen":"2026-08-21T23:45:19-04:00","active":false}
+        """.trimIndent()
+        val record = decode<AudioOutputRecord>(json)
+        assertNull(record.maxVolume)
+        assertEquals(AudioOutputKind.SPEAKERS, record.output.kind)
+    }
+
+    @Test
+    fun `an audio output row from a daemon without the available field is selectable`() {
+        // Older daemon, newer phone: `available` was added with the output
+        // picker. Defaulting it to false would grey out the button for every
+        // device the parent could actually switch to, so the default is true and
+        // a stale daemon simply refuses the call out loud.
+        val json = """
+            {"output":{"key":"k","description":"Speakers","kind":"speakers"},
+             "max_volume":null,"min_volume":null,
+             "last_seen":"2026-08-21T23:45:19-04:00","active":false}
+        """.trimIndent()
+        assertTrue(decode<AudioOutputRecord>(json).available)
+    }
+
+    @Test
+    fun `an audio output row can say the device is gone`() {
+        val json = """
+            {"output":{"key":"k","description":"Headphones","kind":"headphones"},
+             "max_volume":50,"min_volume":null,
+             "last_seen":"2026-08-21T23:45:19-04:00","active":false,"available":false}
+        """.trimIndent()
+        val record = decode<AudioOutputRecord>(json)
+        // The limit outlives the hardware; only the ability to switch to it goes.
+        assertEquals(50L, record.maxVolume)
+        assertFalse(record.available)
     }
 
     @Test

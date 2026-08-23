@@ -134,6 +134,7 @@ impl ManagementService for MockSvc {
                 allow_mute: true,
                 allow_change: true,
             },
+            output: None,
         })
     }
     async fn set_volume(&self, _percent: u8) -> ManagementResult<VolumeInfo> {
@@ -150,6 +151,23 @@ impl ManagementService for MockSvc {
     }
     async fn toggle_mute(&self) -> ManagementResult<VolumeInfo> {
         Err(ManagementError::Forbidden("no".into()))
+    }
+    async fn list_audio_outputs(&self) -> ManagementResult<Vec<shepherd_api::AudioOutputRecord>> {
+        Ok(vec![])
+    }
+    async fn set_audio_output_limits(
+        &self,
+        _output_key: String,
+        _max_volume: Option<u8>,
+        _min_volume: Option<u8>,
+    ) -> ManagementResult<shepherd_api::AudioOutputRecord> {
+        Err(ManagementError::NotFound("no".into()))
+    }
+    async fn forget_audio_output(&self, _output_key: String) -> ManagementResult<bool> {
+        Ok(false)
+    }
+    async fn select_audio_output(&self, _output_key: String) -> ManagementResult<VolumeInfo> {
+        Err(ManagementError::NotFound("no".into()))
     }
     async fn get_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Ok(BrightnessInfo {

@@ -176,7 +176,10 @@ Example (bedtime restriction):
   lines, so `pgrep -f sway.headless.conf` matches *the shell running the pgrep*,
   which contains that string as an argument. It therefore always "finds" a
   session, and reports a different pid every time — which reads exactly like a
-  stack respawning itself in a loop. Use a listing you can eyeball instead:
+  stack respawning itself in a loop. `pkill -f` has the same blind spot with
+  teeth: it matches your own `bash -c` and kills the shell you are typing in,
+  which surfaces only as a silent exit 144. Use a listing you can eyeball
+  instead, and kill the pids it names:
 
   ```sh
   ps -eo pid,cmd | grep -E "sway.*headless|shepherdd|shepherd-media" | grep -v grep
@@ -190,6 +193,63 @@ Example (bedtime restriction):
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
   `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
+
+## Seeing the web UI (not just the native surfaces)
+
+The management SPA is embedded into `shepherdd` and served on
+`http://127.0.0.1:8080`, and the session has **Firefox**, so the web UI can be
+rendered and driven here — it does not need a JS component-test harness.
+
+`dev click` **cannot** drive it: the headless seat has no pointer device, so
+Firefox never binds `wl_pointer` and synthetic `swaymsg ... cursor press` events
+land nowhere (same root cause as the `dev key` note above, and adding motion and
+delays does not help). Drive it over **Marionette** instead, which is built into
+Firefox and needs no extra packages:
+
+```sh
+# Profile must live under $HOME — Firefox is a snap and cannot read /tmp/claude-*.
+PROF=$HOME/ff-test; mkdir -p $PROF
+printf 'user_pref("marionette.port", 2828);\nuser_pref("browser.aboutwelcome.enabled", false);\n' > $PROF/user.js
+set -a; . dev-runtime/headless/session.env; set +a
+MOZ_ENABLE_WAYLAND=1 setsid firefox --profile $PROF --marionette --new-window http://127.0.0.1:8080/ &
+```
+
+Then speak the wire protocol (length-prefixed JSON on TCP 2828): connect, read
+the handshake, `WebDriver:NewSession`, then `WebDriver:ExecuteScript` /
+`WebDriver:FindElement` / `WebDriver:ElementSendKeys`. Only **one** session at a
+time, so do a whole scenario in one script. `ExecuteScript` is enough to seed
+`localStorage` (`apiToken` — the API is authenticated; the dev token is
+`http_token` in `dev-runtime/data/admin.toml`), click MUI controls, and read
+`innerText` back for assertions. `dev shot` still gets you the pixels.
+
+Gotchas here:
+
+- **`npm run build` alone does not reach the running daemon.** `rust_embed`
+  embeds `shepherd-webui/dist/` at compile time but does not make cargo consider
+  `shepherdd` dirty when only `dist/` changed, so `dev headless` cheerfully
+  reboots the *old* SPA. Touch the embedding source first:
+  `touch crates/shepherd-http/src/web_assets.rs && cargo build -p shepherdd`.
+- **A fullscreen window freezes the HUD's pixels.** The compositor stops sending
+  frame callbacks to an occluded layer surface, so GTK stops repainting and
+  `grim` captures whatever the HUD last drew — a *stale* clock and a stale
+  volume, minutes old, which reads exactly like a missed-event bug. Verify HUD
+  state with the window closed (or non-fullscreen), and sanity-check the HUD
+  clock against `date` before believing a HUD screenshot taken over another app.
+- **A session that is up but unreachable: check the socket.** If the launcher and
+  HUD loop on `Failed to connect to shepherdd: No such file or directory` while
+  `[OK] Headless session up` and `pgrep shepherdd` both say everything is fine,
+  look at `ls dev-runtime/shepherd.sock`. Two overlapping daemons used to end
+  this way — the outgoing one deleted the path the incoming one had bound — which
+  `IpcServer::shutdown()` now guards against by only removing the socket file it
+  bound itself. If you see it anyway, kill every `shepherdd` and
+  `sway.headless.conf` process, remove `session.env`, and boot again.
+- **Real pointer input works through Marionette, unlike `swaymsg`.**
+  `WebDriver:PerformActions` with a `pointer` source delivers genuine
+  pointerdown/move/up to the page, so drag-to-commit controls (an MUI slider)
+  can be driven properly. Keyboard via `WebDriver:ElementSendKeys` also works,
+  but a control that disables itself while a mutation is in flight swallows most
+  of a key burst — prefer a pointer drag when one gesture should produce one
+  commit.
 
 ## Under the hood
 

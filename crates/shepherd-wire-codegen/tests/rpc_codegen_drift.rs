@@ -59,6 +59,14 @@ fn codegen_outputs_match_checked_in() {
             "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt",
             "WireTypes.generated.kt",
         ),
+        // The web UI's half of the same story. Its types were hand-written for
+        // as long as the companion's were, with the same exposure and none of
+        // the detection: `tsc` checks TypeScript against TypeScript and cannot
+        // see the Rust shape at all.
+        (
+            "shepherd-webui/src/api/wire-types.generated.ts",
+            "wire-types.generated.ts",
+        ),
     ];
 
     for (checked_in, temp_name) in files {

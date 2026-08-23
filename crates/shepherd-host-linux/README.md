@@ -24,6 +24,9 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
   set modes and scales, and pick a mirror mode; behind the `OutputBackend`
   trait so the docking state machine in `shepherdd` is unit-testable. Used for
   external monitor / docking support (issue #87).
+- **Audio topology** (`audio.rs`) — parse `pw-dump` into the list of selectable
+  audio outputs, identify which one is active, and read its volume. Shared by
+  the two consumers below.
 - **Audio routing** (`audio_route.rs`) — switch the PipeWire default sink to an
   HDMI/DisplayPort output while docked, via `pw-dump` + `wpctl set-default`.
 
@@ -175,6 +178,28 @@ controller.set_muted(true).await?;
 1. **PipeWire** (`wpctl` or `pw-cli`) - Modern default on Ubuntu 22.04+, Fedora
 2. **PulseAudio** (`pactl`) - Legacy but widely available
 3. **ALSA** (`amixer`) - Fallback for systems without a sound server
+
+### Audio Outputs
+
+On PipeWire, `current_output()` names the output a reading applies to and
+`observe()` returns the volume and that identity from a single `pw-dump`, so the
+pair can never describe two different moments. Other backends fall back to the
+trait defaults and behave as one anonymous output.
+
+An output is keyed `<device.name>:output:<route.name>` — deliberately the same
+key WirePlumber uses in its `default-routes` state file, so our notion of "an
+output" cannot drift from the volume PipeWire remembers for it. `device.name`
+rather than `node.name` because the node name embeds the card profile; the route
+is what separates headphones from speakers, which share one sink node on an
+analog jack. Numeric object ids are never identity — PipeWire recycles them.
+
+Volume in `pw-dump` is stored cubed: `channelVolumes` of `0.015625` is 25%,
+matching `wpctl get-volume`'s `cbrt`.
+
+The `kind` classification (headphones, speakers, HDMI, ...) is advisory and
+drives presentation only. It is often `Unknown`: a generic USB interface reports
+the uninformative `analog-output` route and udev sets no `device.form-factor`.
+Nothing in policy may depend on it.
 
 ## Process Group Handling
 

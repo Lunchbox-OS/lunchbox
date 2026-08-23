@@ -764,6 +764,80 @@ pub struct HealthStatus {
     pub store_ok: bool,
 }
 
+/// What kind of thing an audio output is.
+///
+/// Advisory only: it drives presentation (an icon, a label) and never policy.
+/// It cannot be determined for every device — a generic USB interface reports a
+/// nondescript `analog-output` route and no udev form-factor — so `Unknown` is a
+/// routine outcome, not a failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AudioOutputKind {
+    Speakers,
+    Headphones,
+    Hdmi,
+    Digital,
+    LineOut,
+    Bluetooth,
+    #[default]
+    Unknown,
+}
+
+/// The audio output a volume reading applies to.
+///
+/// `key` is `<device.name>:output:<route.name>` — the same key WirePlumber uses
+/// to persist per-route volume, so our notion of "an output" cannot drift from
+/// the volume PipeWire remembers for it. It is stable across reboots and, for
+/// USB devices, across being moved to a different port.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AudioOutput {
+    /// Stable identity. Use this to correlate, never the description.
+    pub key: String,
+    /// Human-readable label for display. Localized and mutable.
+    pub description: String,
+    pub kind: AudioOutputKind,
+}
+
+/// An audio output the device has seen, together with any per-output volume
+/// limit the parent has set for it.
+///
+/// These rows are how per-output limits are configured: shepherdd records every
+/// output it observes, the management UIs list them, and the parent sets a cap
+/// on the row they recognise. Nothing has to be predicted or hand-written —
+/// which matters because an output often cannot be classified at all (see
+/// [`AudioOutputKind`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AudioOutputRecord {
+    /// Identity, display label, and advisory kind.
+    pub output: AudioOutput,
+    /// Cap for this output. `None` means no per-output cap; the global
+    /// `[service.volume]` limit applies instead.
+    pub max_volume: Option<u8>,
+    /// Floor for this output. `None` means no per-output floor.
+    pub min_volume: Option<u8>,
+    /// When the device last observed this output. Lets the UI show recently used
+    /// devices first and lets a parent prune ones that are long gone.
+    pub last_seen: DateTime<Local>,
+    /// Whether this is the output currently selected. Runtime state, not stored.
+    pub active: bool,
+    /// Whether the device is plugged in right now, so it can be switched to.
+    ///
+    /// Rows outlive the hardware — that is the point, so a cap set on the
+    /// headphones survives unplugging them — which means a row can name a device
+    /// that is not here. Defaults to `true` so a client talking to a daemon that
+    /// predates this field offers the choice and lets the attempt fail loudly,
+    /// rather than greying out every device it could actually switch to.
+    #[serde(default = "default_true")]
+    pub available: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Volume status information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -778,6 +852,10 @@ pub struct VolumeInfo {
     pub backend: Option<String>,
     /// Current restrictions on volume
     pub restrictions: VolumeRestrictions,
+    /// The output this reading applies to. `None` on hosts without PipeWire, or
+    /// when the default sink cannot be resolved to a known output.
+    #[serde(default)]
+    pub output: Option<AudioOutput>,
 }
 
 /// Volume restrictions that are currently in effect

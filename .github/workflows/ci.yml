@@ -141,8 +141,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-target-test-v1-
 
+      # `--workspace`, not the bare default-members set: the codegen crate is
+      # excluded from `default-members` so `cargo build` never compiles schemars
+      # into the shipped binaries, and the side effect was that its tests — the
+      # drift check that is supposed to fail CI when a generated client mirror
+      # goes stale — were never running here at all.
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
 
   e2e:
     name: E2E
@@ -227,6 +232,29 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  webui:
+    name: Web UI (typecheck)
+    # No custom image needed: the default job container (node:20-bookworm) has
+    # node + npm, which is all this needs.
+    #
+    # Types are checked here and nowhere else. `shepherd build` runs the SPA
+    # through rsbuild, which transpiles without type-checking, so a genuine type
+    # error compiles and ships — a `Switch` prop that does not exist on MUI v9
+    # reached a release that way, silently dropping the control's accessible
+    # name. Building the bundle is already covered by the jobs that build the
+    # daemon (rust-embed needs dist/), so this job only has to typecheck.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        working-directory: shepherd-webui
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: shepherd-webui
+        run: npm run typecheck
 
   package:
     name: Package (.deb smoke build)

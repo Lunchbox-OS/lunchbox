@@ -126,11 +126,17 @@ time from `shepherd-webui/dist/`. Build it before building the Rust code:
 
 ```sh
 cd shepherd-webui
-npm install      # once
-npm run build    # generates shepherd-webui/dist/
+npm install       # once
+npm run typecheck # tsc --noEmit; see below
+npm run build     # generates shepherd-webui/dist/
 cd ..
-cargo build      # dist/ is now embedded in the binary
+cargo build       # dist/ is now embedded in the binary
 ```
+
+`npm run build` goes through rsbuild, which **transpiles without checking
+types** — a genuine type error compiles and ships. `npm run typecheck` is the
+only thing that checks them, so run it alongside the build; CI runs it as its
+own job.
 
 During development, you can run the rsbuild dev server (which proxies API calls
 to `localhost:8080`) instead of embedding:
@@ -144,6 +150,39 @@ The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
 
+### Generated client types
+
+The payload types both clients use are **generated** from the Rust definitions,
+not hand-written. Change `crates/shepherd-api/src/types.rs` (adding a type to
+`WireTypes` in `crates/shepherd-wire-codegen/src/wire_schema.rs` if it is only
+reachable as an RPC parameter), then:
+
+```sh
+cargo run -p shepherd-wire-codegen --bin rpc-codegen
+```
+
+That rewrites five checked-in files: `docs/rpc-schema.json`, the two method-name
+mirrors, and the payload mirrors for each client —
+`companion-android/.../WireTypes.generated.kt` and
+`shepherd-webui/src/api/wire-types.generated.ts`. Editing any of them by hand is
+pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs` fails
+until the regenerated output is committed.
+
+The mirrors were hand-written once and drifted: four `ReasonCode` variants went
+missing from the companion, and a renamed `DailyOverride` field went unnoticed
+until it broke every override lookup on the phone. Neither was catchable from
+the method schema alone, and neither compiler could see it — `tsc` checks
+TypeScript against TypeScript, and Kotlin against Kotlin.
+
+Note that the codegen crate is deliberately outside `default-members`, so
+`cargo build` never compiles `schemars` into the shipped binaries. Reaching its
+tests therefore needs `cargo test --workspace` (which is what CI runs); a bare
+`cargo test` silently skips the drift check.
+
+`shepherd-webui/src/api/types.ts` re-exports the generated types and keeps only
+the presentation helpers, so the rest of the UI still imports wire shapes from
+one place.
+
 ### Android companion app
 
 The BLE management companion app lives in [`companion-android/`](companion-android/)
@@ -153,9 +192,20 @@ NDK into `/opt/android-sdk`) with the dedicated deps set, then build:
 ```sh
 ./scripts/shepherd deps install android   # JDK 21 + Android SDK + NDK
 cd companion-android
+export ANDROID_SDK_ROOT=/opt/android-sdk   # see below
 ./gradlew :app:assembleDebug               # debug APK (sideload-friendly)
 ./gradlew :app:testDebugUnitTest           # unit tests
 ```
+
+Gradle does not find the SDK on its own here: `deps install android` puts it in
+`/opt/android-sdk` rather than the `~/Android/Sdk` the toolchain probes by
+default, and this repo has no checked-in `companion-android/local.properties`
+(it is git-ignored). Without `ANDROID_SDK_ROOT` — or `ANDROID_HOME`, or an
+`sdk.dir` line in that `local.properties` — every Gradle task fails in a few
+seconds with `SDK location not found`. CI does not hit this because the Android
+job runs in a container image that already exports it, so a green CI run is no
+evidence that a bare `./gradlew` works in your shell. The `./scripts/shepherd`
+wrappers set it for you; invoking `./gradlew` directly is what needs the export.
 
 To build *and* push it to a phone/tablet/Fire TV attached over `adb` in one
 step (from a checkout this builds; from an installed `.deb` the same command

@@ -6,7 +6,10 @@ use shepherd_util::{EntryId, SessionId};
 use std::time::Duration;
 
 use crate::types::default_confirm_on_close;
-use crate::{API_VERSION, ServiceStateSnapshot, SessionEndReason, WarningSeverity};
+use crate::{
+    API_VERSION, AudioOutput, ServiceStateSnapshot, SessionEndReason, VolumeRestrictions,
+    WarningSeverity,
+};
 
 /// Event envelope
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,8 +77,23 @@ pub enum EventPayload {
     /// Entry availability changed (for UI updates)
     EntryAvailabilityChanged { entry_id: EntryId, enabled: bool },
 
-    /// Volume status changed
-    VolumeChanged { percent: u8, muted: bool },
+    /// Volume status changed.
+    ///
+    /// Carries the full state rather than just the reading. The active output can
+    /// change without anyone touching the volume (a headset is plugged in, a dock
+    /// switches sinks), and that changes both the effective volume *and* which
+    /// restrictions apply — so a subscriber that merged only `percent`/`muted`
+    /// into a cached snapshot would keep showing the previous output's limits.
+    /// `percent` and `muted` stay at the top level for wire compatibility with
+    /// clients built before the other fields existed.
+    VolumeChanged {
+        percent: u8,
+        muted: bool,
+        #[serde(default)]
+        restrictions: VolumeRestrictions,
+        #[serde(default)]
+        output: Option<AudioOutput>,
+    },
 
     /// Screen brightness changed. `auto_enabled` reports whether automatic
     /// (ambient-light) brightness is currently on, so subscribers can keep an

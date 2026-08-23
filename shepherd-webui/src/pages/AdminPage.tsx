@@ -17,15 +17,20 @@ import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import BrightnessHighIcon from "@mui/icons-material/BrightnessHigh";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  forgetAudioOutput,
+  selectAudioOutput,
   getBrightness,
   getVolume,
+  listAudioOutputs,
   logoutUser,
   reloadConfig,
+  setAudioOutputLimits,
   setAutoBrightness,
   setBrightnessPercent,
   setVolumeMuted,
   setVolumePercent,
 } from "../api/client";
+import { AudioOutputsCard } from "../components/AudioOutputsCard";
 import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 import { ConnectionSettings } from "./ConnectionSettings";
@@ -39,6 +44,10 @@ export function AdminPage() {
   const { data: brightness, isPending: brightLoading } = useQuery({
     queryKey: ["brightness"],
     queryFn: getBrightness,
+  });
+  const { data: audioOutputs } = useQuery({
+    queryKey: ["audio-outputs"],
+    queryFn: listAudioOutputs,
   });
 
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -54,6 +63,39 @@ export function AdminPage() {
   const setPercentMutation = useMutation({
     mutationFn: setVolumePercent,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["volume"] }),
+    onError: (e) => flash(String(e), false),
+  });
+
+  const setOutputLimitMutation = useMutation({
+    mutationFn: ({ key, max }: { key: string; max: number | null }) =>
+      setAudioOutputLimits(key, max),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
+      queryClient.invalidateQueries({ queryKey: ["volume"] });
+      flash("Limit saved");
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const selectOutputMutation = useMutation({
+    mutationFn: selectAudioOutput,
+    onSuccess: (v) => {
+      queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
+      queryClient.invalidateQueries({ queryKey: ["volume"] });
+      // Naming the device confirms the switch landed where the parent meant,
+      // which matters because the daemon can refuse one it can no longer see.
+      flash(`Now playing through ${v.output?.description ?? "the chosen device"}`);
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const forgetOutputMutation = useMutation({
+    mutationFn: forgetAudioOutput,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["audio-outputs"] });
+      queryClient.invalidateQueries({ queryKey: ["volume"] });
+      flash("Device forgotten");
+    },
     onError: (e) => flash(String(e), false),
   });
 
@@ -143,6 +185,15 @@ export function AdminPage() {
                   {volume.muted ? "Muted" : `${volume.percent}%`}
                 </Typography>
               </Box>
+              {/* Name the output the reading applies to. The active output can
+                  change with no user action (a headset is plugged in, a dock
+                  switches sinks), so without this the volume appears to move on
+                  its own. */}
+              {volume.output && (
+                <Typography variant="caption" color="text.secondary">
+                  Output: {volume.output.description || volume.output.key}
+                </Typography>
+              )}
               {volume.backend && (
                 <Typography variant="caption" color="text.disabled">Backend: {volume.backend}</Typography>
               )}
@@ -150,6 +201,19 @@ export function AdminPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      {/* Per-device volume limits (issue #124) */}
+      <AudioOutputsCard
+        records={audioOutputs}
+        busy={
+          setOutputLimitMutation.isPending ||
+          forgetOutputMutation.isPending ||
+          selectOutputMutation.isPending
+        }
+        onSetLimit={(key, max) => setOutputLimitMutation.mutate({ key, max })}
+        onForget={(key) => forgetOutputMutation.mutate(key)}
+        onSelect={(key) => selectOutputMutation.mutate(key)}
+      />
 
       {/* Brightness */}
       <Card variant="outlined">

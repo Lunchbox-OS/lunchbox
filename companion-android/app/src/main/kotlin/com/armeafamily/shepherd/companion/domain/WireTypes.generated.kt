@@ -55,6 +55,92 @@ enum class AdminRole {
 }
 
 /**
+ * The audio output a volume reading applies to.
+ *
+ * `key` is `<device.name>:output:<route.name>` — the same key WirePlumber uses
+ * to persist per-route volume, so our notion of "an output" cannot drift from
+ * the volume PipeWire remembers for it. It is stable across reboots and, for
+ * USB devices, across being moved to a different port.
+ */
+@Serializable
+data class AudioOutput(
+    /**
+     * Human-readable label for display. Localized and mutable.
+     */
+    val description: String,
+    /**
+     * Stable identity. Use this to correlate, never the description.
+     */
+    val key: String,
+    val kind: AudioOutputKind,
+)
+
+/**
+ * What kind of thing an audio output is.
+ *
+ * Advisory only: it drives presentation (an icon, a label) and never policy.
+ * It cannot be determined for every device — a generic USB interface reports a
+ * nondescript `analog-output` route and no udev form-factor — so `Unknown` is a
+ * routine outcome, not a failure.
+ */
+@Serializable
+enum class AudioOutputKind {
+    @SerialName("speakers") SPEAKERS,
+    @SerialName("headphones") HEADPHONES,
+    @SerialName("hdmi") HDMI,
+    @SerialName("digital") DIGITAL,
+    @SerialName("line_out") LINE_OUT,
+    @SerialName("bluetooth") BLUETOOTH,
+    @SerialName("unknown") UNKNOWN,
+}
+
+/**
+ * An audio output the device has seen, together with any per-output volume
+ * limit the parent has set for it.
+ *
+ * These rows are how per-output limits are configured: shepherdd records every
+ * output it observes, the management UIs list them, and the parent sets a cap
+ * on the row they recognise. Nothing has to be predicted or hand-written —
+ * which matters because an output often cannot be classified at all (see
+ * [`AudioOutputKind`]).
+ */
+@Serializable
+data class AudioOutputRecord(
+    /**
+     * Whether this is the output currently selected. Runtime state, not stored.
+     */
+    val active: Boolean,
+    /**
+     * Whether the device is plugged in right now, so it can be switched to.
+     *
+     * Rows outlive the hardware — that is the point, so a cap set on the
+     * headphones survives unplugging them — which means a row can name a device
+     * that is not here. Defaults to `true` so a client talking to a daemon that
+     * predates this field offers the choice and lets the attempt fail loudly,
+     * rather than greying out every device it could actually switch to.
+     */
+    val available: Boolean = true,
+    /**
+     * When the device last observed this output. Lets the UI show recently used
+     * devices first and lets a parent prune ones that are long gone.
+     */
+    val lastSeen: IsoTimestamp,
+    /**
+     * Cap for this output. `None` means no per-output cap; the global
+     * `[service.volume]` limit applies instead.
+     */
+    val maxVolume: Long? = null,
+    /**
+     * Floor for this output. `None` means no per-output floor.
+     */
+    val minVolume: Long? = null,
+    /**
+     * Identity, display label, and advisory kind.
+     */
+    val output: AudioOutput,
+)
+
+/**
  * Screen brightness status information
  */
 @Serializable
@@ -219,6 +305,14 @@ enum class DiagnosticCode {
      * No sound backend was detected; volume control does nothing.
      */
     @SerialName("no_sound_backend") NO_SOUND_BACKEND,
+    /**
+     * The sound backend is present but its device topology could not be read,
+     * so which output is selected and which are plugged in are both unknown.
+     * Distinct from [`Self::NoSoundBackend`]: there *is* a backend, and the
+     * per-output volume limits are running on the last state seen rather than
+     * on what is true now.
+     */
+    @SerialName("audio_topology_unreadable") AUDIO_TOPOLOGY_UNREADABLE,
     /**
      * No readable input devices, so input-gated entries cannot be evaluated.
      */
@@ -1263,6 +1357,11 @@ data class VolumeInfo(
      * Whether audio is muted
      */
     val muted: Boolean,
+    /**
+     * The output this reading applies to. `None` on hosts without PipeWire, or
+     * when the default sink cannot be resolved to a known output.
+     */
+    val output: AudioOutput? = null,
     /**
      * Volume percentage (0-100)
      */

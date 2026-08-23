@@ -25,7 +25,7 @@ use shepherd_host_api::{
 };
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
-    RpcDispatchError, dispatch_json,
+    ManagementService, RpcDispatchError, dispatch_json,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
@@ -43,6 +43,15 @@ use tokio::sync::{Mutex, broadcast, watch};
 struct MockVolume {
     capabilities: VolumeCapabilities,
     status: std::sync::Mutex<VolumeStatus>,
+    /// The active output, swappable so tests can simulate a sink switch.
+    output: std::sync::Mutex<Option<shepherd_api::AudioOutput>>,
+    /// Outputs that are plugged in right now: what `list_outputs` reports, and
+    /// the only things `select_output` will move to. Distinct from the rows the
+    /// store remembers, which outlive the hardware.
+    present: std::sync::Mutex<Vec<shepherd_api::AudioOutput>>,
+    /// When false, reads fail the way a `pw-dump` that will not run fails.
+    /// Distinct from having no devices — which is the whole point.
+    readable: std::sync::Mutex<bool>,
 }
 
 impl MockVolume {
@@ -58,7 +67,31 @@ impl MockVolume {
                 percent: 50,
                 muted: false,
             }),
+            output: std::sync::Mutex::new(None),
+            present: std::sync::Mutex::new(Vec::new()),
+            readable: std::sync::Mutex::new(true),
         }
+    }
+
+    /// Make topology reads fail, leaving the devices themselves untouched.
+    fn break_topology(&self) {
+        *self.readable.lock().unwrap() = false;
+    }
+
+    fn fix_topology(&self) {
+        *self.readable.lock().unwrap() = true;
+    }
+
+    /// Connect a device without selecting it.
+    fn plug_in(&self, o: shepherd_api::AudioOutput) {
+        let mut present = self.present.lock().unwrap();
+        if !present.iter().any(|p| p.key == o.key) {
+            present.push(o);
+        }
+    }
+
+    fn unplug(&self, key: &str) {
+        self.present.lock().unwrap().retain(|p| p.key != key);
     }
 }
 
@@ -98,6 +131,56 @@ impl VolumeController for MockVolume {
     async fn set_mute(&self, muted: bool) -> VolumeResult<()> {
         self.status.lock().unwrap().muted = muted;
         Ok(())
+    }
+
+    async fn current_output(&self) -> Option<shepherd_api::AudioOutput> {
+        if !*self.readable.lock().unwrap() {
+            return None;
+        }
+        self.output.lock().unwrap().clone()
+    }
+
+    /// The mock's whole point: one read that reports the reading, what is
+    /// selected, and everything plugged in — the shape a real backend gets from
+    /// a single `pw-dump`.
+    async fn observe(&self) -> VolumeResult<shepherd_host_api::AudioSnapshot> {
+        if !*self.readable.lock().unwrap() {
+            return Err(shepherd_host_api::VolumeError::Backend(
+                "could not read the audio topology".into(),
+            ));
+        }
+        Ok(shepherd_host_api::AudioSnapshot {
+            status: self.status.lock().unwrap().clone(),
+            active: self.output.lock().unwrap().clone(),
+            outputs: self.present.lock().unwrap().clone(),
+        })
+    }
+
+    async fn select_output(&self, output_key: &str) -> VolumeResult<()> {
+        let found = self
+            .present
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|o| o.key == output_key)
+            .cloned();
+        match found {
+            Some(o) => {
+                *self.output.lock().unwrap() = Some(o);
+                Ok(())
+            }
+            None => Err(shepherd_host_api::VolumeError::NotAvailable(format!(
+                "not connected: {output_key}"
+            ))),
+        }
+    }
+}
+
+fn output(key: &str, description: &str) -> shepherd_api::AudioOutput {
+    shepherd_api::AudioOutput {
+        key: key.into(),
+        description: description.into(),
+        kind: shepherd_api::AudioOutputKind::Unknown,
     }
 }
 
@@ -236,9 +319,28 @@ fn make_svc_opts(
     config_path: PathBuf,
     sensor_lux: Option<f32>,
 ) -> DefaultManagementService {
+    make_svc_full(policy, config_path, sensor_lux, Arc::new(MockVolume::new()))
+}
+
+/// Like [`make_svc`], but hands back the volume mock so a test can drive the
+/// host-side state the service only observes.
+fn make_svc_with_volume(
+    policy: Policy,
+    config_path: PathBuf,
+) -> (DefaultManagementService, Arc<MockVolume>) {
+    let volume = Arc::new(MockVolume::new());
+    let svc = make_svc_full(policy, config_path, Some(1000.0), volume.clone());
+    (svc, volume)
+}
+
+fn make_svc_full(
+    policy: Policy,
+    config_path: PathBuf,
+    sensor_lux: Option<f32>,
+    volume: Arc<MockVolume>,
+) -> DefaultManagementService {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
-    let volume = Arc::new(MockVolume::new());
     let brightness = Arc::new(MockBrightness::new());
     let light_sensor: Option<Arc<dyn LightSensor>> =
         sensor_lux.map(|lux| Arc::new(MockLightSensor::new(lux)) as Arc<dyn LightSensor>);
@@ -266,6 +368,8 @@ fn make_svc_opts(
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
         display: Arc::new(NoOpDisplayController),
+        last_audio_state: Arc::new(Mutex::new(None)),
+        diagnostics: None,
     }
 }
 
@@ -966,4 +1070,744 @@ async fn enable_entry_outside_time_window_via_override() {
 
     let body = ok(&svc, "get_entry", json!({ "id": "test-game" })).await;
     assert_eq!(body["enabled"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Audio-output watch loop (issue #124)
+// ---------------------------------------------------------------------------
+
+/// Read one `VolumeChanged` if the service emitted one, else `None`.
+fn next_volume_event(rx: &mut broadcast::Receiver<Event>) -> Option<(u8, bool, Option<String>)> {
+    while let Ok(ev) = rx.try_recv() {
+        if let shepherd_api::EventPayload::VolumeChanged {
+            percent,
+            muted,
+            output,
+            ..
+        } = ev.payload
+        {
+            return Some((percent, muted, output.map(|o| o.key)));
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn audio_watch_first_tick_only_establishes_a_baseline() {
+    let cfg = temp_config();
+    let (svc, _vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let mut rx = svc.event_tx.subscribe();
+
+    svc.audio_watch_tick().await;
+
+    // Broadcasting on the first observation would emit a spurious event on every
+    // daemon start, when nothing has actually changed.
+    assert_eq!(next_volume_event(&mut rx), None);
+}
+
+#[tokio::test]
+async fn audio_watch_is_silent_while_nothing_changes() {
+    let cfg = temp_config();
+    let (svc, _vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let mut rx = svc.event_tx.subscribe();
+
+    for _ in 0..5 {
+        svc.audio_watch_tick().await;
+    }
+
+    // A quiet host must not produce a 2-second event stream.
+    assert_eq!(next_volume_event(&mut rx), None);
+}
+
+#[tokio::test]
+async fn audio_watch_reports_a_volume_change_made_behind_our_back() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    // Something outside shepherdd moved the volume — a bare `wpctl` call, or a
+    // desktop hotkey. Nothing else in the daemon would notice.
+    vol.status.lock().unwrap().percent = 77;
+    svc.audio_watch_tick().await;
+
+    assert_eq!(next_volume_event(&mut rx), Some((77, false, None)));
+}
+
+#[tokio::test]
+async fn audio_watch_reports_a_sink_switch_at_an_unchanged_volume() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    *vol.output.lock().unwrap() = Some(output(
+        "alsa_card.pci-0000_00_1b.0:output:speaker",
+        "Speakers",
+    ));
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    // Headphones are plugged in. The percentage happens to be identical, so a
+    // watcher keyed only on the reading would stay silent and every client would
+    // keep displaying the speakers' state.
+    *vol.output.lock().unwrap() = Some(output(
+        "alsa_card.pci-0000_00_1b.0:output:analog-output-headphones",
+        "Headphones",
+    ));
+    svc.audio_watch_tick().await;
+
+    assert_eq!(
+        next_volume_event(&mut rx),
+        Some((
+            50,
+            false,
+            Some("alsa_card.pci-0000_00_1b.0:output:analog-output-headphones".into())
+        ))
+    );
+}
+
+/// Records raised/cleared diagnostics so a test can assert on the condition a
+/// parent would actually see.
+#[derive(Default)]
+struct RecordingSink {
+    raised: std::sync::Mutex<Vec<shepherd_api::DiagnosticCode>>,
+    cleared: std::sync::Mutex<Vec<shepherd_api::DiagnosticCode>>,
+}
+
+impl shepherd_api::DiagnosticSink for RecordingSink {
+    fn raise(&self, diagnostic: shepherd_api::Diagnostic) {
+        self.raised.lock().unwrap().push(diagnostic.code);
+    }
+    fn clear(&self, code: shepherd_api::DiagnosticCode, _s: &shepherd_api::DiagnosticSubject) {
+        self.cleared.lock().unwrap().push(code);
+    }
+}
+
+/// A cap must not relax itself because we briefly could not see.
+///
+/// `volume_restrictions_for(None)` answers with the global limit, so before this
+/// fix a failed `pw-dump` dropped the active output's own ceiling and let the
+/// volume go to the global maximum for as long as the fault lasted.
+#[tokio::test]
+async fn a_failed_topology_read_does_not_relax_a_per_output_cap() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(80),
+        min_volume: None,
+        allow_mute: true,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+
+    let cans = output("card:output:analog-output-headphones", "Headphones");
+    vol.plug_in(cans.clone());
+    *vol.output.lock().unwrap() = Some(cans.clone());
+    svc.audio_watch_tick().await; // establishes what we last saw
+    svc.set_audio_output_limits(cans.key.clone(), Some(30), None)
+        .await
+        .expect("cap accepted");
+
+    vol.break_topology();
+    let info = svc.set_volume(80).await.expect("set_volume answered");
+
+    assert_eq!(
+        info.percent, 30,
+        "a failed read must not raise the headphones' ceiling to the global 80"
+    );
+    assert_eq!(vol.status.lock().unwrap().percent, 30);
+}
+
+/// The parent's device list must not turn into "nothing is plugged in" because
+/// one read failed — that is the screen they would use to fix it.
+#[tokio::test]
+async fn a_failed_topology_read_does_not_report_every_device_as_disconnected() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+
+    let speakers = output("card:output:speaker", "Speakers");
+    let cans = output("card:output:analog-output-headphones", "Headphones");
+    vol.plug_in(speakers.clone());
+    vol.plug_in(cans.clone());
+    *vol.output.lock().unwrap() = Some(cans.clone());
+    svc.audio_watch_tick().await;
+    svc.list_audio_outputs().await.expect("rows recorded");
+
+    vol.break_topology();
+    let rows = svc.list_audio_outputs().await.expect("rows still answered");
+
+    assert_eq!(rows.len(), 2, "the stored rows survive a failed read");
+    assert!(
+        rows.iter().all(|r| r.available),
+        "a transient read failure must not render as every device being unplugged"
+    );
+    let active: Vec<_> = rows
+        .iter()
+        .filter(|r| r.active)
+        .map(|r| &r.output.key)
+        .collect();
+    assert_eq!(
+        active,
+        vec![&cans.key],
+        "the last output known to be in use stays marked, rather than nothing being in use"
+    );
+}
+
+/// A failed read must not become a baseline, or recovery looks like a change.
+#[tokio::test]
+async fn a_failed_topology_read_is_not_mistaken_for_an_empty_topology() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    vol.plug_in(output("card:output:speaker", "Speakers"));
+    *vol.output.lock().unwrap() = Some(output("card:output:speaker", "Speakers"));
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    vol.break_topology();
+    svc.audio_watch_tick().await;
+    assert_eq!(
+        next_volume_event(&mut rx),
+        None,
+        "a failed read is not news about the devices"
+    );
+
+    // Nothing actually changed while we could not see, so coming back must be
+    // silent too. Baselining the empty snapshot would make this a change.
+    vol.fix_topology();
+    svc.audio_watch_tick().await;
+    assert_eq!(
+        next_volume_event(&mut rx),
+        None,
+        "recovering from a failed read is not a device change either"
+    );
+}
+
+/// The condition is reported while it holds and withdrawn as soon as it does not.
+#[tokio::test]
+async fn a_failed_topology_read_is_reported_to_the_parent_and_clears_itself() {
+    let cfg = temp_config();
+    let (mut svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let sink = Arc::new(RecordingSink::default());
+    svc.diagnostics = Some(sink.clone() as Arc<dyn shepherd_api::DiagnosticSink>);
+
+    vol.break_topology();
+    svc.audio_watch_tick().await;
+    assert!(
+        sink.raised
+            .lock()
+            .unwrap()
+            .contains(&shepherd_api::DiagnosticCode::AudioTopologyUnreadable),
+        "the parent is told the audio devices cannot be read"
+    );
+
+    vol.fix_topology();
+    svc.audio_watch_tick().await;
+    assert!(
+        sink.cleared
+            .lock()
+            .unwrap()
+            .contains(&shepherd_api::DiagnosticCode::AudioTopologyUnreadable),
+        "and the condition withdraws itself once a read succeeds"
+    );
+}
+
+#[tokio::test]
+async fn volume_event_carries_the_restrictions_in_force() {
+    // Regression test for the bug this change exists to fix: subscribers used to
+    // receive only `percent`/`muted` and had to keep the restrictions from their
+    // initial fetch, so a client could not learn that the applicable limits had
+    // changed.
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(60),
+        min_volume: Some(10),
+        allow_mute: false,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    vol.status.lock().unwrap().percent = 42;
+    svc.audio_watch_tick().await;
+
+    let ev = rx.try_recv().expect("an event was broadcast");
+    let shepherd_api::EventPayload::VolumeChanged { restrictions, .. } = ev.payload else {
+        panic!("expected VolumeChanged");
+    };
+    assert_eq!(restrictions.max_volume, Some(60));
+    assert_eq!(restrictions.min_volume, Some(10));
+    assert!(!restrictions.allow_mute);
+}
+
+#[tokio::test]
+async fn get_volume_reports_the_active_output() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    *vol.output.lock().unwrap() = Some(output("alsa_card.usb-x:output:analog-output", "Scarlett"));
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+
+    assert_eq!(
+        body["output"]["key"],
+        "alsa_card.usb-x:output:analog-output"
+    );
+    assert_eq!(body["output"]["description"], "Scarlett");
+}
+
+// ---------------------------------------------------------------------------
+// Per-output volume limits (issue #124)
+// ---------------------------------------------------------------------------
+
+/// Put the service on a named output and let the watcher discover it, which is
+/// how a row comes to exist at all.
+async fn on_output(svc: &DefaultManagementService, vol: &Arc<MockVolume>, key: &str, desc: &str) {
+    let o = output(key, desc);
+    vol.plug_in(o.clone());
+    *vol.output.lock().unwrap() = Some(o);
+    svc.audio_watch_tick().await;
+}
+
+#[tokio::test]
+async fn outputs_are_discovered_by_being_used() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+
+    let body = ok(&svc, "list_audio_outputs", json!({})).await;
+    let rows = body.as_array().expect("a list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["output"]["key"], "card:output:headphones");
+    assert_eq!(rows[0]["output"]["description"], "Cans");
+    // No cap until a parent sets one.
+    assert!(rows[0]["max_volume"].is_null());
+    assert_eq!(rows[0]["active"], true);
+}
+
+#[tokio::test]
+async fn a_per_output_cap_applies_to_that_output_only() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "card:output:headphones", "max_volume": 50 }),
+    )
+    .await;
+
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    let speakers = ok(&svc, "get_volume", json!({})).await;
+    assert!(speakers["restrictions"]["max_volume"].is_null());
+
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    let cans = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(cans["restrictions"]["max_volume"], 50);
+}
+
+#[tokio::test]
+async fn the_stricter_of_the_policy_and_output_caps_wins() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(60),
+        min_volume: None,
+        allow_mute: true,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+
+    // Output cap lower than the policy cap: the output wins.
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 50 }),
+    )
+    .await;
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 50);
+
+    // Output cap higher than the policy cap: the policy still wins. A
+    // per-output limit must never be usable to raise a limit set elsewhere.
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 90 }),
+    )
+    .await;
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 60);
+}
+
+#[tokio::test]
+async fn an_unseen_output_inherits_the_global_cap() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(80),
+        min_volume: None,
+        allow_mute: true,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+    *vol.output.lock().unwrap() = Some(output("brand-new", "Just plugged in"));
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 80);
+}
+
+#[tokio::test]
+async fn switching_to_a_capped_output_turns_the_volume_down() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "card:output:headphones", "max_volume": 50 }),
+    )
+    .await;
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.status.lock().unwrap().percent = 100;
+
+    // Headphones are plugged back in while the speakers were at 100. Bounding
+    // only future changes would leave them at 100 — the whole point of the
+    // limit is that it bites now.
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+
+    assert_eq!(vol.status.lock().unwrap().percent, 50);
+}
+
+#[tokio::test]
+async fn setting_a_cap_bites_on_the_output_already_playing() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    vol.status.lock().unwrap().percent = 90;
+
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 40 }),
+    )
+    .await;
+
+    // Otherwise a parent sets a limit, hears no change, and concludes it did
+    // not work.
+    assert_eq!(vol.status.lock().unwrap().percent, 40);
+}
+
+#[tokio::test]
+async fn a_quiet_output_is_left_alone_when_a_cap_is_set() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    vol.status.lock().unwrap().percent = 30;
+
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 40 }),
+    )
+    .await;
+
+    assert_eq!(vol.status.lock().unwrap().percent, 30);
+}
+
+#[tokio::test]
+async fn limits_survive_the_device_going_away_and_coming_back() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 50 }),
+    )
+    .await;
+
+    on_output(&svc, &vol, "other", "Something else").await;
+    on_output(&svc, &vol, "k", "Cans").await; // unplug, replug
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert_eq!(body["restrictions"]["max_volume"], 50);
+}
+
+#[tokio::test]
+async fn forgetting_an_output_drops_its_cap() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "k", "max_volume": 50 }),
+    )
+    .await;
+
+    let removed = ok(&svc, "forget_audio_output", json!({ "output_key": "k" })).await;
+    assert_eq!(removed, json!(true));
+
+    let body = ok(&svc, "get_volume", json!({})).await;
+    assert!(body["restrictions"]["max_volume"].is_null());
+}
+
+#[tokio::test]
+async fn limits_on_an_unknown_output_are_rejected() {
+    let cfg = temp_config();
+    let (svc, _vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let err = rpc(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "never-seen", "max_volume": 50 }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("Unknown audio output"),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn nonsensical_limits_are_rejected() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "k", "Cans").await;
+
+    for params in [
+        json!({ "output_key": "k", "max_volume": 150 }),
+        json!({ "output_key": "k", "max_volume": 40, "min_volume": 60 }),
+    ] {
+        assert!(
+            rpc(&svc, "set_audio_output_limits", params.clone())
+                .await
+                .is_err(),
+            "should have rejected {params}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Choosing the active output (issue #124)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_connected_output_can_be_listed_before_it_is_ever_selected() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    // Plugged in, never selected. Discovery used to run only off the active
+    // output, so this device could not be seen — and a device you cannot see is
+    // one you cannot choose.
+    vol.plug_in(output("usb:output:analog-output", "USB interface"));
+
+    let rows = ok(&svc, "list_audio_outputs", json!({})).await;
+    let rows = rows.as_array().expect("a list");
+    assert_eq!(rows.len(), 2);
+    let usb = rows
+        .iter()
+        .find(|r| r["output"]["key"] == "usb:output:analog-output")
+        .expect("the unselected device is listed");
+    assert_eq!(usb["active"], false);
+    assert_eq!(usb["available"], true);
+}
+
+#[tokio::test]
+async fn rows_report_whether_the_device_is_still_connected() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    on_output(&svc, &vol, "usb:output:analog-output", "USB interface").await;
+    // Unplug the USB device and land back on the built-in, as WirePlumber would.
+    vol.unplug("usb:output:analog-output");
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+
+    let rows = ok(&svc, "list_audio_outputs", json!({})).await;
+    let rows = rows.as_array().expect("a list");
+    let by_key = |k: &str| {
+        rows.iter()
+            .find(|r| r["output"]["key"] == k)
+            .expect("row present")
+            .clone()
+    };
+    // The row survives so its cap can still be set, but it cannot be chosen.
+    assert_eq!(by_key("usb:output:analog-output")["available"], false);
+    assert_eq!(by_key("card:output:speaker")["available"], true);
+}
+
+#[tokio::test]
+async fn choosing_an_output_moves_the_audio_to_it() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.plug_in(output("usb:output:analog-output", "USB interface"));
+
+    let body = ok(
+        &svc,
+        "select_audio_output",
+        json!({ "output_key": "usb:output:analog-output" }),
+    )
+    .await;
+    assert_eq!(body["output"]["key"], "usb:output:analog-output");
+    assert_eq!(
+        vol.output.lock().unwrap().as_ref().map(|o| o.key.clone()),
+        Some("usb:output:analog-output".into())
+    );
+
+    let rows = ok(&svc, "list_audio_outputs", json!({})).await;
+    let active: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["active"] == true)
+        .map(|r| r["output"]["key"].clone())
+        .collect();
+    assert_eq!(active, vec!["usb:output:analog-output"]);
+}
+
+#[tokio::test]
+async fn choosing_a_capped_output_turns_the_volume_down_on_arrival() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:headphones", "Cans").await;
+    ok(
+        &svc,
+        "set_audio_output_limits",
+        json!({ "output_key": "card:output:headphones", "max_volume": 30 }),
+    )
+    .await;
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.status.lock().unwrap().percent = 100;
+
+    // Choosing an output has to be the same event as the hardware choosing it:
+    // the cap applies on arrival, not on the next change someone makes.
+    let body = ok(
+        &svc,
+        "select_audio_output",
+        json!({ "output_key": "card:output:headphones" }),
+    )
+    .await;
+    assert_eq!(body["percent"], 30);
+    assert_eq!(body["restrictions"]["max_volume"], 30);
+    assert_eq!(vol.status.lock().unwrap().percent, 30);
+}
+
+#[tokio::test]
+async fn choosing_the_output_already_in_use_changes_nothing() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.status.lock().unwrap().percent = 55;
+
+    // Two parents on two phones can tap the same row; the second one is not an
+    // error and must not disturb the volume.
+    let body = ok(
+        &svc,
+        "select_audio_output",
+        json!({ "output_key": "card:output:speaker" }),
+    )
+    .await;
+    assert_eq!(body["output"]["key"], "card:output:speaker");
+    assert_eq!(body["percent"], 55);
+}
+
+#[tokio::test]
+async fn an_output_that_is_not_connected_cannot_be_chosen() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    on_output(&svc, &vol, "usb:output:analog-output", "USB interface").await;
+    vol.unplug("usb:output:analog-output");
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+
+    let err = rpc(
+        &svc,
+        "select_audio_output",
+        json!({ "output_key": "usb:output:analog-output" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::BadRequest(_))
+        ),
+        "expected BadRequest, got {err:?}"
+    );
+    // And the audio stayed where it was.
+    assert_eq!(
+        vol.output.lock().unwrap().as_ref().map(|o| o.key.clone()),
+        Some("card:output:speaker".into())
+    );
+}
+
+#[tokio::test]
+async fn the_watcher_notices_a_device_that_never_becomes_the_default() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    let mut rx = svc.event_tx.subscribe();
+
+    // A second device is plugged in but does not win the default sink — a lower
+    // priority interface, or one the user had already pinned away from. Watching
+    // only the selected output would miss it entirely, and the row a parent
+    // needs in order to switch to it would never appear.
+    vol.plug_in(output("usb:output:analog-output", "USB interface"));
+    svc.audio_watch_tick().await;
+
+    assert!(
+        next_volume_event(&mut rx).is_some(),
+        "a device appearing is a change worth telling the clients about"
+    );
+    let rows = ok(&svc, "list_audio_outputs", json!({})).await;
+    let rows = rows.as_array().expect("a list");
+    assert_eq!(rows.len(), 2);
+    let usb = rows
+        .iter()
+        .find(|r| r["output"]["key"] == "usb:output:analog-output")
+        .expect("the new device was recorded by the watcher, not by the listing");
+    assert_eq!(usb["active"], false);
+    assert_eq!(usb["available"], true);
+}
+
+#[tokio::test]
+async fn the_watcher_notices_a_device_being_unplugged() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.plug_in(output("usb:output:analog-output", "USB interface"));
+    svc.audio_watch_tick().await;
+    let mut rx = svc.event_tx.subscribe();
+
+    vol.unplug("usb:output:analog-output");
+    svc.audio_watch_tick().await;
+
+    assert!(next_volume_event(&mut rx).is_some());
+    let rows = ok(&svc, "list_audio_outputs", json!({})).await;
+    let usb = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["output"]["key"] == "usb:output:analog-output")
+        .expect("the row outlives the hardware so its cap survives");
+    assert_eq!(usb["available"], false);
+}
+
+#[tokio::test]
+async fn a_reordered_output_list_is_not_a_change() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    on_output(&svc, &vol, "card:output:speaker", "Speakers").await;
+    vol.plug_in(output("usb:output:analog-output", "USB interface"));
+    svc.audio_watch_tick().await;
+    let mut rx = svc.event_tx.subscribe();
+
+    // `pw-dump` lists objects in whatever order it walks them; the same set in a
+    // different order must not read as a plug event every two seconds.
+    vol.present.lock().unwrap().reverse();
+    svc.audio_watch_tick().await;
+
+    assert_eq!(next_volume_event(&mut rx), None);
 }
