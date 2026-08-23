@@ -159,9 +159,20 @@ NDK into `/opt/android-sdk`) with the dedicated deps set, then build:
 ```sh
 ./scripts/shepherd deps install android   # JDK 21 + Android SDK + NDK
 cd companion-android
+export ANDROID_SDK_ROOT=/opt/android-sdk   # see below
 ./gradlew :app:assembleDebug               # debug APK (sideload-friendly)
 ./gradlew :app:testDebugUnitTest           # unit tests
 ```
+
+Gradle does not find the SDK on its own here: `deps install android` puts it in
+`/opt/android-sdk` rather than the `~/Android/Sdk` the toolchain probes by
+default, and this repo has no checked-in `companion-android/local.properties`
+(it is git-ignored). Without `ANDROID_SDK_ROOT` — or `ANDROID_HOME`, or an
+`sdk.dir` line in that `local.properties` — every Gradle task fails in a few
+seconds with `SDK location not found`. CI does not hit this because the Android
+job runs in a container image that already exports it, so a green CI run is no
+evidence that a bare `./gradlew` works in your shell. The `./scripts/shepherd`
+wrappers set it for you; invoking `./gradlew` directly is what needs the export.
 
 To build *and* push it to a phone/tablet/Fire TV attached over `adb` in one
 step (from a checkout this builds; from an installed `.deb` the same command
