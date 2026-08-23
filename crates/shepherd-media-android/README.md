@@ -91,9 +91,9 @@ the full design and roadmap.
   yt-dlp (bundled as `youtubedl-android`, called over JNI). Verified on hardware:
   playlist + stream resolution and video playback work, at the per-library
   quality. Two requirements are handled in `src/youtube.rs`: the player clients
-  — `android_vr` serves the DASH ladder without a PO token, and `android` is
-  listed alongside it so DRM-protected "full episode" uploads (which `android_vr`
-  reports as "not available") fall back to the legacy progressive itag 18; this
+  — yt-dlp's default clients serve the DASH ladder, and `android` is listed
+  alongside them so DRM-protected "full episode" uploads (which the defaults
+  report as "not available") fall back to the legacy progressive itag 18; this
   client selection is shared with the Linux build as
   `shepherd_media_core::YOUTUBE_EXTRACTOR_ARGS`. The other is an in-app refresh
   of the AAR's stale bundled yt-dlp to the latest release on first launch

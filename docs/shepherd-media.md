@@ -103,7 +103,22 @@ It holds off while:
   (2 GiB by default) it logs a warning and stops. The cache cap bounds the
   cache, not the volume it sits on;
 - **there is nothing in the cache cheap enough to replace** — a guess is dropped
-  rather than displace a file it does not outrank.
+  rather than displace a file it does not outrank;
+- **the item failed recently** — a speculative download that fails records a
+  `<key>.failed` marker and is left alone for 6 hours. Without it, a library
+  whose videos have become unavailable produces an hourly burst of doomed
+  fetches and one warning per item, forever. A download earned by watching the
+  previous video ignores the cooldown: someone is waiting on it.
+
+Downloads are paced 5 seconds apart. Nothing observed has been attributed to
+hitting a provider too fast, but prefetch is speculative work on somebody else's
+servers and has an hour before the next sweep. Items that are skipped — already
+cached, in cooldown, claimed by another process — cost nothing; the wait only
+follows an attempt that reached the network.
+
+When a download does fail, yt-dlp's stderr is captured and its last lines go
+into the warning. Everything that goes wrong happens inside yt-dlp and comes
+back as exit status 1, so without that the log can only say "exited with 1".
 
 Availability windows are deliberately ignored: an activity outside its window
 today is exactly the one worth having ready for tomorrow. An entry that is

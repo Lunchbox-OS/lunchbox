@@ -9,6 +9,7 @@
 //! | `<key>.done` | commit sentinel; records the interest key, selector, ordinal |
 //! | `<key>.part` | an in-flight direct-HTTP download |
 //! | `<key>.lock` | download claim (see [`crate::lock`]) |
+//! | `<key>.failed` | when the last download attempt failed |
 //!
 //! plus, per *interest* key, `<ikey>.played` — written the first time the video
 //! is played from cache, and never removed. It is what separates "the child
@@ -23,7 +24,7 @@
 //! a download that is, by definition, re-downloadable.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use shepherd_media_app::interest;
 use shepherd_media_app::lru::{self, LruEntry, Score, ScoreWeights, Standing};
@@ -44,12 +45,56 @@ pub enum CacheState {
     Present,
 }
 
+/// Extension of the failure marker. Keyed by *content*, not interest: a
+/// rendition that will not download says nothing about the others.
+const FAILED_EXT: &str = "failed";
+
 /// Whether `name` is bookkeeping rather than a cached video.
 fn is_sidecar(name: &str) -> bool {
     name.ends_with(".part")
         || name.ends_with(".done")
+        || name.ends_with(".failed")
         || interest::is_marker(name)
         || is_lock_file(name)
+}
+
+/// Record that downloading `key` just failed.
+///
+/// Without this a permanently broken item is retried on every sweep, forever,
+/// at full speed: a library whose videos have all become unavailable turns into
+/// an hourly burst of doomed yt-dlp invocations and a screenful of warnings. The
+/// marker's mtime is when it last failed, which is all [`retry_blocked`] needs.
+pub fn mark_failed(cache_dir: &Path, key: &str) {
+    let path = cache_dir.join(format!("{key}.{FAILED_EXT}"));
+    if let Err(e) = std::fs::write(&path, b"") {
+        warn!("could not record download failure for {key}: {e}");
+    }
+}
+
+/// Forget any recorded failure for `key`. Called on a successful download, so
+/// an item that recovers is not held back by the last time it did not.
+pub fn clear_failed(cache_dir: &Path, key: &str) {
+    let _ = std::fs::remove_file(cache_dir.join(format!("{key}.{FAILED_EXT}")));
+}
+
+/// Whether `key` failed too recently to be worth trying again.
+///
+/// Applies to speculative downloads only. A download the user earned by
+/// watching the previous video is always attempted: they are waiting on it, and
+/// a stale marker must not be why they get nothing.
+pub fn retry_blocked(cache_dir: &Path, key: &str, cooldown: Duration) -> bool {
+    let Ok(meta) = cache_dir.join(format!("{key}.{FAILED_EXT}")).metadata() else {
+        return false;
+    };
+    let Ok(failed_at) = meta.modified() else {
+        return false;
+    };
+    // A marker dated in the future (a clock that stepped back) reads as "just
+    // failed" rather than blocking the item until the clock catches up.
+    failed_at
+        .elapsed()
+        .map(|since| since < cooldown)
+        .unwrap_or(true)
 }
 
 /// Scan `cache_dir` for a completed download named `<key>.<ext>`.
@@ -167,11 +212,20 @@ fn first_seen(
         .map_or(downloaded_at, |seen| seen.min(downloaded_at))
 }
 
-/// Delete every committed file for `key` plus its sentinel.
+/// Whether a file under a content key is bookkeeping that outlives the content.
 ///
-/// The `.lock` file is deliberately spared. Removing it while the caller holds
-/// it would leave the next claimant locking a *different* inode, and the mutual
-/// exclusion it exists for would silently stop working.
+/// The `.lock` file is spared because removing it while the caller holds it
+/// would leave the next claimant locking a *different* inode, and the mutual
+/// exclusion it exists for would silently stop working. The `.failed` marker is
+/// spared because clearing the content is exactly what happens on the way into
+/// and out of a failed attempt — deleting the record of that failure in the
+/// same breath would make the cooldown a no-op.
+fn is_bookkeeping(name: &str) -> bool {
+    is_lock_file(name) || name.ends_with(".failed")
+}
+
+/// Delete every committed file for `key` plus its sentinel, leaving the
+/// bookkeeping beside it alone (see [`is_bookkeeping`]).
 pub fn remove_cached_item(cache_dir: &Path, key: &str) {
     let prefix = format!("{key}.");
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
@@ -181,7 +235,7 @@ pub fn remove_cached_item(cache_dir: &Path, key: &str) {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.starts_with(&prefix)
-            && !is_lock_file(&name_str)
+            && !is_bookkeeping(&name_str)
             && let Err(e) = std::fs::remove_file(entry.path())
         {
             warn!("could not remove stale cache file {:?}: {e}", entry.path());
@@ -666,6 +720,78 @@ mod tests {
             entries[0].standing.first_seen
                 < SystemTime::now() - Duration::from_secs(44 * DAY as u64),
             "an old file must not be aged from the day it was first stamped"
+        );
+    }
+
+    // --- failure marking ---
+
+    #[test]
+    fn a_key_with_no_failure_is_not_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!retry_blocked(
+            dir.path(),
+            "clip",
+            Duration::from_secs(3600)
+        ));
+    }
+
+    #[test]
+    fn a_recent_failure_blocks_a_retry_and_an_old_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_failed(dir.path(), "clip");
+        assert!(retry_blocked(dir.path(), "clip", Duration::from_secs(3600)));
+
+        age(dir.path(), "clip.failed", 2 * 3600);
+        assert!(!retry_blocked(
+            dir.path(),
+            "clip",
+            Duration::from_secs(3600)
+        ));
+    }
+
+    #[test]
+    fn a_success_forgets_the_failure() {
+        // An item that recovers must not stay blocked by the last time it did
+        // not work.
+        let dir = tempfile::tempdir().unwrap();
+        mark_failed(dir.path(), "clip");
+        clear_failed(dir.path(), "clip");
+        assert!(!retry_blocked(
+            dir.path(),
+            "clip",
+            Duration::from_secs(3600)
+        ));
+    }
+
+    #[test]
+    fn clearing_an_item_does_not_clear_its_failure_record() {
+        // The worker clears the half-written debris of a failed attempt right
+        // after recording the failure. If that took the record with it the
+        // cooldown would never hold and the retry storm would be back.
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "ikey", "mp4");
+        mark_failed(dir.path(), "clip");
+
+        remove_cached_item(dir.path(), "clip");
+
+        assert_eq!(cache_state(dir.path(), "clip"), CacheState::Absent);
+        assert!(retry_blocked(dir.path(), "clip", Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn a_failure_marker_is_not_content() {
+        let dir = tempfile::tempdir().unwrap();
+        commit(dir.path(), "clip", "ikey", "mp4");
+        mark_failed(dir.path(), "clip");
+        assert_eq!(
+            cache_total(dir.path()),
+            ONE_VIDEO,
+            "the marker must not count toward the cap"
+        );
+        assert_eq!(
+            find_cached_file(dir.path(), "clip").unwrap().extension(),
+            Some("mp4".as_ref()),
+            "and must not be served as the video"
         );
     }
 

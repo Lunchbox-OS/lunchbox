@@ -40,6 +40,26 @@ fn serve(count: usize) -> String {
     url
 }
 
+/// Serve `count` failures on an ephemeral loopback port, then stop.
+fn serve_failing(count: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for _ in 0..count {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    url
+}
+
 fn write_response(stream: &mut TcpStream) -> std::io::Result<()> {
     write!(
         stream,
@@ -64,6 +84,8 @@ fn cache_in(dir: &Path, max_bytes: u64) -> Arc<VideoCache> {
         max_bytes,
         ytdl_format: "test-selector".into(),
         weights: CacheWeights::default(),
+        // No pacing: these tests poll for the worker's output on a deadline.
+        download_interval: Duration::ZERO,
     })
     .expect("cache constructs")
 }
@@ -319,4 +341,83 @@ fn an_after_play_download_evicts_to_make_room() {
     wait_for("the eviction that follows it", || {
         cache.cached_path(&old).is_none()
     });
+}
+
+/// A speculative download that fails is recorded, so the next sweep does not
+/// retry it at full speed. Before this, a library whose videos had all become
+/// unavailable produced an hourly burst of doomed fetches and one warning per
+/// item, forever.
+#[test]
+fn a_failed_prefetch_is_not_retried_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    // Exactly one request is served. A retry would hang on accept, then fail —
+    // so if the cooldown does not hold, the second `cached_path` still shows
+    // nothing and the marker's mtime is what proves no second attempt happened.
+    let base = serve_failing(1);
+    let source = http_source(&format!("{base}/clip.mp4"));
+
+    let cache = cache_in(dir.path(), 1024 * 1024);
+    cache.queue_prefetch("clip", &source, 0);
+
+    let key = content_key(&source_url(&source).unwrap(), "");
+    let marker = dir.path().join(format!("{key}.failed"));
+    wait_for("the failure to be recorded", || marker.exists());
+    let first = std::fs::metadata(&marker).unwrap().modified().unwrap();
+
+    cache.queue_prefetch("clip", &source, 0);
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().modified().unwrap(),
+        first,
+        "a recent failure must suppress the retry, not re-record it"
+    );
+    assert!(cache.cached_path(&source).is_none());
+}
+
+/// ...but a download the user earned by watching is always attempted. They are
+/// waiting on it, and a stale marker must not be why they get nothing.
+#[test]
+fn an_earned_download_ignores_the_failure_cooldown() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two requests: the failing prefetch, then the earned retry that succeeds.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut served = 0;
+        while let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            if served == 0 {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            } else {
+                let _ = write_response(&mut stream);
+            }
+            served += 1;
+            if served >= 2 {
+                return;
+            }
+        }
+    });
+    let source = http_source(&format!("{base}/clip.mp4"));
+
+    let cache = cache_in(dir.path(), 1024 * 1024);
+    cache.queue_prefetch("clip", &source, 0);
+
+    let key = content_key(&source_url(&source).unwrap(), "");
+    wait_for("the failure to be recorded", || {
+        dir.path().join(format!("{key}.failed")).exists()
+    });
+
+    cache.queue_after_play("clip", &source);
+    wait_for("the earned download to succeed", || {
+        cache.cached_path(&source).is_some()
+    });
+    assert!(
+        !dir.path().join(format!("{key}.failed")).exists(),
+        "a success must forget the failure"
+    );
 }

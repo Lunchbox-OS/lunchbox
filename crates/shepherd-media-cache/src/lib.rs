@@ -40,7 +40,7 @@ pub mod paths;
 pub mod playlist;
 pub mod store;
 
-pub use download::DownloadKind;
+pub use download::{DEFAULT_DOWNLOAD_INTERVAL, DownloadKind, RETRY_COOLDOWN};
 pub use key::{content_key, interest_key, source_url};
 pub use paths::media_cache_dir;
 pub use playlist::{fetch_playlist, ytdlp_available};
@@ -83,8 +83,11 @@ pub struct VideoCacheConfig {
     /// replaced.
     pub ytdl_format: String,
     /// How eviction values what it holds. Two processes sharing a directory
-    /// must agree on this; see [`watched_grace`].
+    /// must agree on this; see [`grace_from_days`].
     pub weights: ScoreWeights,
+    /// How long the worker waits between downloads that reached the network.
+    /// Zero disables the pacing, which is what tests want.
+    pub download_interval: Duration,
 }
 
 pub struct VideoCache {
@@ -110,6 +113,7 @@ impl VideoCache {
             max_bytes: max_cache_bytes(),
             ytdl_format: ytdl_format.to_string(),
             weights: ScoreWeights { watched_grace },
+            download_interval: DEFAULT_DOWNLOAD_INTERVAL,
         })
     }
 
@@ -121,6 +125,7 @@ impl VideoCache {
             max_bytes,
             ytdl_format,
             weights,
+            download_interval,
         } = config;
 
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
@@ -136,7 +141,7 @@ impl VideoCache {
         let format = ytdl_format.clone();
         std::thread::Builder::new()
             .name("video-cache-worker".into())
-            .spawn(move || download_worker(dir, rx, max_bytes, format, weights))
+            .spawn(move || download_worker(dir, rx, max_bytes, format, weights, download_interval))
             .ok()?;
 
         Some(Arc::new(VideoCache {
@@ -283,6 +288,7 @@ mod tests {
             max_bytes: 1024,
             ytdl_format: "test-selector".into(),
             weights: ScoreWeights::default(),
+            download_interval: StdDuration::ZERO,
         })
         .expect("cache constructs over a temp dir")
     }
@@ -394,6 +400,7 @@ mod tests {
             max_bytes: 1024,
             ytdl_format: "hd".into(),
             weights: ScoreWeights::default(),
+            download_interval: StdDuration::ZERO,
         })
         .unwrap();
         // Direct-HTTP sources carry no selector, so force the YouTube path by
