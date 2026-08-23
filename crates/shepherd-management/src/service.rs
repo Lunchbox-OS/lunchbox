@@ -4,10 +4,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot, SessionEndReason,
-    SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction,
-    WindowInfo,
+    BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryKind,
+    EntryView, Event, EventPayload, GroupView, HealthStatus, ServiceStateSnapshot,
+    SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo,
+    VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
@@ -299,6 +299,27 @@ impl ManagementService for DefaultManagementService {
                     });
             let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
             let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
+            // Hand the activity the same check that gates its availability, so
+            // (e.g.) a media grid hides online-only items instead of leaving
+            // tiles that error on tap. The entry's own target wins over the
+            // service's; `forward_check = false` suppresses both.
+            let connectivity_check = entry.and_then(|e| {
+                if !e.internet.forward_check {
+                    return None;
+                }
+                e.internet
+                    .check
+                    .as_ref()
+                    .or(eng.policy().service.internet.check.as_ref())
+                    .map(|t| t.original.clone())
+            });
+            // The cache the activity writes to is the one shepherdd prefetches
+            // into, so the eviction policy has to travel with the launch.
+            let is_media = matches!(kind, Some(EntryKind::Media { .. }));
+            let media_watched_grace_days =
+                is_media.then(|| eng.policy().service.media.watched_grace_days);
+            let media_cache_max_bytes =
+                is_media.then(|| eng.policy().service.media.cache_max_bytes);
             let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
             let opts = if eng.policy().service.capture_child_output {
                 let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
@@ -315,6 +336,9 @@ impl ManagementService for DefaultManagementService {
                     browser,
                     input_compat,
                     input_compat_options,
+                    connectivity_check,
+                    media_watched_grace_days,
+                    media_cache_max_bytes,
                     ..Default::default()
                 }
             } else {
@@ -323,6 +347,9 @@ impl ManagementService for DefaultManagementService {
                     browser,
                     input_compat,
                     input_compat_options,
+                    connectivity_check,
+                    media_watched_grace_days,
+                    media_cache_max_bytes,
                     ..Default::default()
                 }
             };

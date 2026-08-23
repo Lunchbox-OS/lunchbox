@@ -91,9 +91,9 @@ the full design and roadmap.
   yt-dlp (bundled as `youtubedl-android`, called over JNI). Verified on hardware:
   playlist + stream resolution and video playback work, at the per-library
   quality. Two requirements are handled in `src/youtube.rs`: the player clients
-  — `android_vr` serves the DASH ladder without a PO token, and `android` is
-  listed alongside it so DRM-protected "full episode" uploads (which `android_vr`
-  reports as "not available") fall back to the legacy progressive itag 18; this
+  — yt-dlp's default clients serve the DASH ladder, and `android` is listed
+  alongside them so DRM-protected "full episode" uploads (which the defaults
+  report as "not available") fall back to the legacy progressive itag 18; this
   client selection is shared with the Linux build as
   `shepherd_media_core::YOUTUBE_EXTRACTOR_ARGS`. The other is an in-app refresh
   of the AAR's stale bundled yt-dlp to the latest release on first launch
@@ -147,6 +147,34 @@ cargo run -p shepherd-media-android --example desktop_preview
 ```
 
 Settings persist under `<tmp>/shepherd-media-preview/settings.toml`.
+
+## Run the tests on a device
+
+CI only builds the cdylib for Android; nothing runs this crate's tests there. A
+`cargo-ndk`-built test binary runs straight off `/data/local/tmp` — no APK, no
+signing, no emulator:
+
+```sh
+cargo ndk -t arm64-v8a test -p shepherd-media-android --no-run
+adb push target/aarch64-linux-android/debug/deps/<bin> /data/local/tmp/t
+adb push vendor/libmpv/arm64-v8a/. /data/local/tmp/lib
+adb shell "mkdir -p /data/local/tmp/tt && TMPDIR=/data/local/tmp/tt \
+    LD_LIBRARY_PATH=/data/local/tmp/lib /data/local/tmp/t"
+```
+
+Three things are not optional:
+
+- **`TMPDIR`.** `std::env::temp_dir()` falls back to `/tmp`, which Android does
+  not have, so every test using `tempfile` fails without it.
+- **`LD_LIBRARY_PATH`** at the pushed [vendored libmpv](#vendored-libmpv), for
+  any binary that links it.
+- **`RUSTFLAGS="-L $PWD/vendor/libmpv/<abi>"`** when testing
+  `shepherd-media-core`, which also links `-lmpv` but has no `build.rs` adding
+  the vendored directory to the search path.
+
+`shepherd-media-app` and `shepherd-media-core` are worth running this way too —
+they are shared with the Linux front-end, and the on-device pass is what proves
+the cache naming and eviction behave identically on bionic.
 
 ## Build the Android library
 

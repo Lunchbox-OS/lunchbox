@@ -17,7 +17,7 @@ use shepherd_media_core::{
 use shepherd_util::gamepad_nav::{NavDir, StickNav};
 
 use crate::posters::{self, PosterCache};
-use crate::video_cache::VideoCache;
+use shepherd_media_cache::VideoCache;
 
 /// How long the "continue watching" offer waits for its item to show up in the
 /// grid before lapsing.
@@ -245,7 +245,7 @@ impl App {
                     _ => self
                         .cache
                         .as_deref()
-                        .map(|c| c.cached_path(&item.id).is_some())
+                        .map(|c| c.cached_path(source).is_some())
                         .unwrap_or(false),
                 }
             })

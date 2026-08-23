@@ -7,6 +7,10 @@ description = "Platform-agnostic application layer for shepherd-media: persisten
 
 [dependencies]
 serde = { workspace = true }
+# Cache-file naming and the played-marker mtime. Both front-ends' video caches
+# share these, so they live here rather than in either platform crate.
+sha2 = "0.10"
+filetime = "0.2"
 toml = { workspace = true }
 thiserror = { workspace = true }
 # The `log` facade, not a subscriber: this crate only needs to report a failed

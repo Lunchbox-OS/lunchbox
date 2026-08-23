@@ -14,6 +14,8 @@
 //! finished, what is too early to remember, and how often to write.
 
 pub mod cache;
+pub mod cache_key;
+pub mod interest;
 pub mod lru;
 pub mod poster_cache;
 pub mod quality;
@@ -21,6 +23,8 @@ pub mod resume;
 pub mod settings;
 
 pub use cache::{Freshness, Resolution};
+pub use cache_key::{content_key, interest_key};
+pub use lru::{Score, ScoreWeights, Standing};
 pub use poster_cache::RemotePosterCache;
 pub use quality::{CacheMode, PosterPolicy, Quality};
 pub use resume::{ItemPosition, RESUME_SCHEMA_VERSION, ResumeState, ResumeStore, ResumeTracker};

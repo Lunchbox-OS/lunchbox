@@ -1,13 +1,12 @@
 //! Linux entry point for the `shepherd-media` library launcher.
 
+mod caching_player;
 mod cli;
 mod connectivity;
 mod ordering;
 mod paths;
 mod posters;
 mod ui;
-mod video_cache;
-mod youtube;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -24,10 +23,11 @@ use shepherd_media_core::{
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::caching_player::CachingPlayer;
 use crate::cli::{Cli, Command, SortBy};
 use crate::ordering::apply_ordering;
 use crate::ui::StartMode;
-use crate::video_cache::{CachingPlayer, VideoCache};
+use shepherd_media_cache::VideoCache;
 
 /// Exit codes per the spec; keep in sync with `docs/shepherd-media.md`.
 const EXIT_OK: u8 = 0;
@@ -50,6 +50,8 @@ fn main() -> ExitCode {
     let ytdl_format = cli.quality.ytdl_format();
     let sort_by = cli.sort_by;
     let reverse = cli.reverse;
+    let watched_grace = shepherd_media_cache::grace_from_days(cli.watched_grace_days);
+    let cache_max_bytes = cli.cache_max_bytes;
     let result = match &cli.command {
         Command::Validate { library } => run_validate(library, sort_by, reverse),
         Command::Play { library, item } => run_play(
@@ -60,6 +62,8 @@ fn main() -> ExitCode {
             sort_by,
             reverse,
             cli.resume,
+            watched_grace,
+            cache_max_bytes,
         ),
         Command::Browse { library } => run_browse(
             library,
@@ -69,6 +73,8 @@ fn main() -> ExitCode {
             sort_by,
             reverse,
             cli.resume,
+            watched_grace,
+            cache_max_bytes,
         ),
     };
 
@@ -83,7 +89,8 @@ fn load_library_from_source(
     reverse: bool,
 ) -> Result<Library, (u8, String)> {
     let mut library = if is_youtube_playlist_url(source) {
-        let info = youtube::fetch_playlist(source).map_err(|e| (EXIT_VALIDATION, e))?;
+        let info =
+            shepherd_media_cache::fetch_playlist(source).map_err(|e| (EXIT_VALIDATION, e))?;
         build_library_from_entries(
             source,
             info.title,
@@ -149,6 +156,8 @@ fn run_play(
     sort_by: SortBy,
     reverse: bool,
     resume: bool,
+    watched_grace: Duration,
+    cache_max_bytes: u64,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -173,7 +182,7 @@ fn run_play(
 
     // Direct-play mode shares the eframe shell with browse mode; the UI
     // opens straight into the playback view instead of the grid.
-    let cache = VideoCache::new(ytdl_format);
+    let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes);
     let resume = open_resume(resume, &library);
     let session = build_session(library, no_protocol, ytdl_format, cache.clone());
     let session = match session {
@@ -211,6 +220,8 @@ fn run_browse(
     sort_by: SortBy,
     reverse: bool,
     resume: bool,
+    watched_grace: Duration,
+    cache_max_bytes: u64,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -220,7 +231,7 @@ fn run_browse(
         }
     };
 
-    let cache = VideoCache::new(ytdl_format);
+    let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes);
     if let Some(ref c) = cache {
         c.queue_all(&library);
     }

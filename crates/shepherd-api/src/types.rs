@@ -92,6 +92,100 @@ impl InterstitialKind {
     }
 }
 
+/// How a [`EntryKind::Media`] activity opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MediaMode {
+    /// Open the poster grid over the whole library; the user picks items.
+    #[default]
+    Browse,
+    /// Play a single item end to end; the grid is never shown.
+    Play,
+}
+
+impl MediaMode {
+    /// The `shepherd-media` subcommand for this mode.
+    pub fn subcommand(self) -> &'static str {
+        match self {
+            MediaMode::Browse => "browse",
+            MediaMode::Play => "play",
+        }
+    }
+}
+
+/// Maximum video quality for a [`EntryKind::Media`] activity.
+///
+/// Mirrors `shepherd_media_app::Quality`; kept here so the wire schema and the
+/// config layer don't depend on the media crates. `shepherd-media`'s `cli`
+/// module holds the test that keeps the two spellings in agreement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum MediaQuality {
+    /// No height restriction — the best available.
+    #[serde(rename = "best")]
+    Best,
+    /// Up to 1080p (default).
+    #[default]
+    #[serde(rename = "1080p")]
+    Q1080,
+    /// Up to 720p.
+    #[serde(rename = "720p")]
+    Q720,
+    /// Up to 480p.
+    #[serde(rename = "480p")]
+    Q480,
+}
+
+impl MediaQuality {
+    /// The `--quality` value for this preset.
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            MediaQuality::Best => "best",
+            MediaQuality::Q1080 => "1080p",
+            MediaQuality::Q720 => "720p",
+            MediaQuality::Q480 => "480p",
+        }
+    }
+}
+
+/// How a [`EntryKind::Media`] activity orders its library.
+///
+/// Mirrors `shepherd-media`'s `--sort-by` values; see [`MediaQuality`] for
+/// where that agreement is tested.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MediaSortBy {
+    /// Preserve the order from the library file or playlist (default).
+    #[default]
+    Library,
+    /// Display title, case-insensitive.
+    Title,
+    /// Stable item id.
+    Id,
+    /// Item kind (audio before video).
+    Kind,
+    /// Optional category string, case-insensitive.
+    Category,
+    /// Optional duration in seconds, ascending.
+    Duration,
+}
+
+impl MediaSortBy {
+    /// The `--sort-by` value for this ordering.
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            MediaSortBy::Library => "library",
+            MediaSortBy::Title => "title",
+            MediaSortBy::Id => "id",
+            MediaSortBy::Kind => "kind",
+            MediaSortBy::Category => "category",
+            MediaSortBy::Duration => "duration",
+        }
+    }
+}
+
 /// Entry kind with launch details
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -148,10 +242,40 @@ pub enum EntryKind {
         #[serde(default)]
         args: HashMap<String, serde_json::Value>,
     },
+    /// A `shepherd-media` library activity (issue #127).
+    ///
+    /// The fields mirror the flags `shepherd-media` accepts, so shepherdd can
+    /// build the invocation itself instead of an admin restating it as a
+    /// `Process` argv. `connectivity_check` is not among them: it is resolved
+    /// from the entry's `internet` policy at spawn time and reaches the host
+    /// adapter through `SpawnOptions`.
     Media {
-        library_id: String,
+        /// Library source: a path to a `.toml`/`.m3u`/`.m3u8` file, or a
+        /// YouTube playlist URL. `~` is expanded for paths at spawn time.
+        library: String,
+        /// Whether to open the poster grid or play a single item.
         #[serde(default)]
-        args: HashMap<String, serde_json::Value>,
+        mode: MediaMode,
+        /// The item to play. Required by (and only meaningful for)
+        /// [`MediaMode::Play`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        /// Maximum video quality for playback and background downloads.
+        #[serde(default)]
+        quality: MediaQuality,
+        /// Field used to order library items before display or lookup.
+        #[serde(default)]
+        sort_by: MediaSortBy,
+        /// Reverse the final item order. Combines with `sort_by`.
+        #[serde(default)]
+        reverse: bool,
+        /// Remember playback positions for this library across sessions.
+        #[serde(default)]
+        resume: bool,
+        /// Whether shepherdd may prefetch this library's remote items in the
+        /// background. `None` inherits `service.media.prefetch`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefetch: Option<bool>,
     },
     Custom {
         type_name: String,

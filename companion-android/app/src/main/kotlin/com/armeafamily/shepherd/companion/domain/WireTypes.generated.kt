@@ -300,11 +300,53 @@ sealed interface EntryKind {
         val driver: String,
     ) : EntryKind
 
+    /**
+     * A `shepherd-media` library activity (issue #127).
+     *
+     * The fields mirror the flags `shepherd-media` accepts, so shepherdd can
+     * build the invocation itself instead of an admin restating it as a
+     * `Process` argv. `connectivity_check` is not among them: it is resolved
+     * from the entry's `internet` policy at spawn time and reaches the host
+     * adapter through `SpawnOptions`.
+     */
     @Serializable
     @SerialName("media")
     data class Media(
-        val args: JsonElement? = null,
-        val libraryId: String,
+        /**
+         * The item to play. Required by (and only meaningful for)
+         * [`MediaMode::Play`].
+         */
+        val item: String? = null,
+        /**
+         * Library source: a path to a `.toml`/`.m3u`/`.m3u8` file, or a
+         * YouTube playlist URL. `~` is expanded for paths at spawn time.
+         */
+        val library: String,
+        /**
+         * Whether to open the poster grid or play a single item.
+         */
+        val mode: MediaMode? = null,
+        /**
+         * Whether shepherdd may prefetch this library's remote items in the
+         * background. `None` inherits `service.media.prefetch`.
+         */
+        val prefetch: Boolean? = null,
+        /**
+         * Maximum video quality for playback and background downloads.
+         */
+        val quality: MediaQuality? = null,
+        /**
+         * Remember playback positions for this library across sessions.
+         */
+        val resume: Boolean = false,
+        /**
+         * Reverse the final item order. Combines with `sort_by`.
+         */
+        val reverse: Boolean = false,
+        /**
+         * Field used to order library items before display or lookup.
+         */
+        val sortBy: MediaSortBy? = null,
     ) : EntryKind
 
     @Serializable
@@ -581,6 +623,82 @@ enum class InterstitialKind {
  * from starting with `group:` at config-validation time.
  */
 typealias LimitSubject = String
+
+/**
+ * How a [`EntryKind::Media`] activity opens.
+ */
+@Serializable
+enum class MediaMode {
+    /**
+     * Open the poster grid over the whole library; the user picks items.
+     */
+    @SerialName("browse") BROWSE,
+    /**
+     * Play a single item end to end; the grid is never shown.
+     */
+    @SerialName("play") PLAY,
+}
+
+/**
+ * Maximum video quality for a [`EntryKind::Media`] activity.
+ *
+ * Mirrors `shepherd_media_app::Quality`; kept here so the wire schema and the
+ * config layer don't depend on the media crates. `shepherd-media`'s `cli`
+ * module holds the test that keeps the two spellings in agreement.
+ */
+@Serializable
+enum class MediaQuality {
+    /**
+     * No height restriction — the best available.
+     */
+    @SerialName("best") BEST,
+    /**
+     * Up to 1080p (default).
+     */
+    @SerialName("1080p") Q_1080P,
+    /**
+     * Up to 720p.
+     */
+    @SerialName("720p") Q_720P,
+    /**
+     * Up to 480p.
+     */
+    @SerialName("480p") Q_480P,
+}
+
+/**
+ * How a [`EntryKind::Media`] activity orders its library.
+ *
+ * Mirrors `shepherd-media`'s `--sort-by` values; see [`MediaQuality`] for
+ * where that agreement is tested.
+ */
+@Serializable
+enum class MediaSortBy {
+    /**
+     * Preserve the order from the library file or playlist (default).
+     */
+    @SerialName("library") LIBRARY,
+    /**
+     * Display title, case-insensitive.
+     */
+    @SerialName("title") TITLE,
+    /**
+     * Stable item id.
+     */
+    @SerialName("id") ID,
+    /**
+     * Item kind (audio before video).
+     */
+    @SerialName("kind") KIND,
+    /**
+     * Optional category string, case-insensitive.
+     */
+    @SerialName("category") CATEGORY,
+    /**
+     * Optional duration in seconds, ascending.
+     */
+    @SerialName("duration") DURATION,
+}
 
 /**
  * Structured reason codes for why an entry is unavailable

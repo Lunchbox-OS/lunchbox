@@ -9,6 +9,10 @@ Linux binary for the `shepherd-media` library-launcher. Wraps
   into the same window via `libmpv2`'s OpenGL render context, so a
   single surface owns all input (touch, mouse, keyboard, gamepad).
 - An asynchronous poster prefetcher that keeps the network out of the core.
+- `CachingPlayer`, the player-side half of the video cache: it substitutes a
+  cached file for a remote source at play time and queues an uncached item for
+  download once it is watched to the end. The cache itself lives in
+  `shepherd-media-cache`, which shepherdd shares.
 - The `--resume` option (default off): per-library playback positions kept under
   `$XDG_STATE_HOME/shepherd/media/resume/`, so an item re-opens where it stopped
   and browse mode offers to continue the last one watched. The state model is

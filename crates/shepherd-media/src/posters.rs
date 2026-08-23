@@ -55,8 +55,8 @@ pub fn prefetch(library: &Library) -> PosterCache {
     // The shared disk cache. `None` only when no cache home can be determined
     // (no `$XDG_CACHE_HOME` and no `$HOME`), in which case posters are fetched
     // every launch without caching.
-    let disk =
-        crate::paths::media_cache_dir("posters").map(|d| RemotePosterCache::new(d, DEFAULT_TTL));
+    let disk = shepherd_media_cache::media_cache_dir("posters")
+        .map(|d| RemotePosterCache::new(d, DEFAULT_TTL));
 
     for item in &library.items {
         let Some(poster) = &item.poster else { continue };

@@ -14,6 +14,8 @@ shepherd-media-core = { path = "../shepherd-media-core" }
 shepherd-media-ui = { path = "../shepherd-media-ui" }
 # `clap` feature exposes the shared `Quality` enum as a `--quality` value type.
 shepherd-media-app = { path = "../shepherd-media-app", features = ["clap"] }
+# The on-disk video cache, shared with shepherdd (issue #127).
+shepherd-media-cache = { path = "../shepherd-media-cache" }
 shepherd-util = { workspace = true }
 
 clap = { workspace = true }
@@ -34,7 +36,9 @@ gilrs = "0.11"
 raw-window-handle = "0.6"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 url = "2.5"
-filetime = "0.2"
 
 [dev-dependencies]
+# Only for the test that pins this CLI's flag spellings to the mirrors in
+# `shepherd_api::EntryKind::Media`, which shepherdd builds argv from (#127).
+shepherd-api = { workspace = true }
 tempfile = { workspace = true }

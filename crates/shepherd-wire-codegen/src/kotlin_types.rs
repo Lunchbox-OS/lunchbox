@@ -294,8 +294,21 @@ fn render_plain_enum(name: &str, values: &[Value], schema: &Value) -> String {
 }
 
 /// Kotlin enum-constant name for a snake_case wire value.
+///
+/// A wire value may start with a digit (`MediaQuality`'s `1080p`), which is not
+/// a legal Kotlin identifier, so those are prefixed with `Q_` — the value
+/// itself still travels verbatim in `@SerialName`. Non-alphanumerics become
+/// underscores for the same reason.
 fn constant_name(wire: &str) -> String {
-    wire.to_uppercase()
+    let mut out: String = wire
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .to_uppercase();
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert_str(0, "Q_");
+    }
+    out
 }
 
 fn render_sealed(name: &str, variants: &[Value], tag: &str, schema: &Value) -> String {

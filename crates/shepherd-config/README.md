@@ -135,8 +135,9 @@ kind = { type = "steam", app_id = 504230 }
 # Virtual machine (future)
 kind = { type = "vm", driver = "qemu", args = { disk = "game.qcow2" } }
 
-# Media playback (future)
-kind = { type = "media", library_id = "movies" }
+# Media library, played by `shepherd-media` (docs/shepherd-media.md)
+kind = { type = "media", library = "~/.config/shepherd/movies.toml" }
+kind = { type = "media", library = "~/.config/shepherd/movies.toml", mode = "play", item = "big-buck-bunny" }
 
 # Custom type
 kind = { type = "custom", type_name = "my-launcher", payload = { ... } }

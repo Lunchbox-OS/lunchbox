@@ -410,7 +410,7 @@ mod libmpv_backend {
                 init.set_property("ytdl", "yes")?;
                 init.set_property("ytdl-format", ytdl_format)?;
                 // Route mpv's ytdl_hook (the Linux path — Android pre-resolves
-                // its streams) through the shared android_vr + android player
+                // its streams) through the shared default + android player
                 // clients so DRM-protected uploads fall back to the progressive
                 // itag 18 instead of failing as "not available". The value is
                 // length-prefix quoted (`%<len>%<value>`) so mpv's key/value list

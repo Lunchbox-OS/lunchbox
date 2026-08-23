@@ -4475,7 +4475,6 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
- "filetime",
  "gilrs",
  "glow",
  "image",
@@ -4483,7 +4482,9 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "shepherd-api",
  "shepherd-media-app",
+ "shepherd-media-cache",
  "shepherd-media-core",
  "shepherd-media-ui",
  "shepherd-util",
@@ -4528,11 +4529,30 @@ name = "shepherd-media-app"
 version = "0.3.7"
 dependencies = [
  "clap",
+ "filetime",
  "log",
  "serde",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "shepherd-media-cache"
+version = "0.3.7"
+dependencies = [
+ "filetime",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shepherd-media-app",
+ "shepherd-media-core",
+ "tempfile",
+ "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]
@@ -4650,6 +4670,7 @@ dependencies = [
  "chrono",
  "clap",
  "evdev",
+ "nix 0.29.0",
  "notify",
  "serde",
  "serde_json",
@@ -4662,6 +4683,9 @@ dependencies = [
  "shepherd-http",
  "shepherd-ipc",
  "shepherd-management",
+ "shepherd-media-app",
+ "shepherd-media-cache",
+ "shepherd-media-core",
  "shepherd-store",
  "shepherd-util",
  "tempfile",

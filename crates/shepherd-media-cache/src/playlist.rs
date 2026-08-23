@@ -1,5 +1,9 @@
 //! Fetch YouTube playlist metadata via `yt-dlp`, with an on-disk cache.
 //!
+//! Lives beside the video cache because shepherdd needs it too: to prefetch a
+//! playlist-backed library it must first know what is in the playlist, and it
+//! cannot link the player binary that used to own this (issue #127).
+//!
 //! `yt-dlp` is an external runtime dependency, not a Rust crate dependency.
 //! It is invoked as a subprocess. If it is absent, a clear, actionable error
 //! is returned rather than a panic.
@@ -99,7 +103,7 @@ fn playlist_cache_path(url: &str) -> Option<PathBuf> {
         .take(128)
         .collect();
 
-    Some(crate::paths::media_cache_dir("playlists")?.join(format!("{safe}.json")))
+    Some(crate::media_cache_dir("playlists")?.join(format!("{safe}.json")))
 }
 
 /// Try to load playlist metadata from the on-disk cache.
@@ -241,6 +245,15 @@ fn fetch_playlist_live(url: &str) -> Result<PlaylistInfo, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_flat_playlist(&stdout, url)
+}
+
+/// Whether `yt-dlp` is installed and runnable.
+///
+/// shepherdd checks this at startup to warn when a library references YouTube
+/// but nothing can fetch it — otherwise the failure only shows up as a tile
+/// that dies on the child's screen.
+pub fn ytdlp_available() -> bool {
+    ensure_ytdlp_available().is_ok()
 }
 
 fn ensure_ytdlp_available() -> Result<(), String> {

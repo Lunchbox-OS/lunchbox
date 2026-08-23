@@ -25,6 +25,19 @@ desktop and reused by any platform binary.
 - **Caching policy** (`quality.rs`) — [`CacheMode`] (mirrors the two
   `VideoCache` strategies in `shepherd-media`, plus `off`), [`PosterPolicy`],
   and [`Quality`] (mirrors the `--quality` presets, including `ytdl_format`).
+- **Cache-file naming** (`cache_key.rs`) — [`content_key`] and
+  [`interest_key`], the truncated SHA-256 names both front-ends' video caches
+  give their files. Deliberately not `DefaultHasher`, whose output is
+  unspecified across Rust releases: a toolchain bump would rename every file in
+  every cache, silently re-downloading everything.
+- **Video-cache eviction policy** (`lru.rs`, `interest.rs`) — [`Score`], the
+  single value both front-ends' video caches evict by, plus the `.played` and
+  `.seen` markers it is computed from. Watching a file buys it a grace period
+  against being displaced, which erodes at one day per day, so protection is
+  real but not permanent; unwatched files are ordered by when the item entered
+  the library, with its position in that library breaking ties. Only the
+  *policy* is shared: each cache scans its own directory, applies its own
+  filters, and does its own bookkeeping.
 - **Persistence** — load/save the settings as TOML to app-private storage
   (e.g. Android `Context.filesDir`). Writes are atomic (temp file + rename).
 - **Resume state** (`resume.rs`) — [`ResumeState`] (a position per item plus the

@@ -21,6 +21,11 @@ shepherd-ipc = { workspace = true }
 shepherd-http = { workspace = true }
 shepherd-management = { workspace = true }
 shepherd-ble = { workspace = true }
+# Background media prefetch (issue #127). `default-features = false` on the
+# core keeps libmpv out of the daemon — it reads libraries, it never plays them.
+shepherd-media-app = { path = "../shepherd-media-app" }
+shepherd-media-cache = { path = "../shepherd-media-cache" }
+shepherd-media-core = { path = "../shepherd-media-core", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -33,6 +38,7 @@ anyhow = { workspace = true }
 clap = { version = "4.5", features = ["derive", "env"] }
 notify = { workspace = true }
 evdev = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
 async-trait = "0.1"
 zbus = { workspace = true }
 

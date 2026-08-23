@@ -8,13 +8,13 @@ use crate::internet::{
 use crate::schema::{
     RawAutoBrightnessConfig, RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig,
     RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
-    RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawServiceConfig, RawSteamConfig,
-    RawVolumeConfig, RawWarningThreshold,
+    RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawMediaMode, RawMediaQuality,
+    RawMediaSortBy, RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
     BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InputDeviceType, InterstitialKind,
-    WarningSeverity, WarningThreshold,
+    MediaMode, MediaQuality, MediaSortBy, WarningSeverity, WarningThreshold,
 };
 use shepherd_util::{
     DaysOfWeek, EntryId, GroupId, LimitSubject, TimeWindow, WallClock, default_data_dir,
@@ -240,6 +240,37 @@ pub struct ServiceConfig {
     pub ble_management: Option<BleManagementConfig>,
     /// External monitor / docking behaviour (issue #87).
     pub display: DisplayConfig,
+    /// Background media prefetch (issue #127).
+    pub media: MediaServiceConfig,
+}
+
+/// Validated service-wide media behaviour (issue #127).
+#[derive(Debug, Clone)]
+pub struct MediaServiceConfig {
+    /// Master switch for shepherdd's background prefetch.
+    pub prefetch: bool,
+    /// Whether prefetch continues while an activity is running.
+    pub prefetch_while_session_active: bool,
+    /// Free-space floor on the cache filesystem, in bytes. 0 disables the
+    /// check.
+    pub free_space_floor_bytes: u64,
+    /// How long, in days, a play protects a cached video from being displaced
+    /// by a speculative download.
+    pub watched_grace_days: u64,
+    /// Maximum total size of the on-disk video cache, in bytes.
+    pub cache_max_bytes: u64,
+}
+
+impl Default for MediaServiceConfig {
+    fn default() -> Self {
+        Self {
+            prefetch: true,
+            prefetch_while_session_active: false,
+            free_space_floor_bytes: 2 * 1024 * 1024 * 1024,
+            watched_grace_days: 30,
+            cache_max_bytes: 10 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 /// Validated external monitor / docking configuration (issue #87).
@@ -292,6 +323,17 @@ impl ServiceConfig {
             .filter(|c| c.enabled)
             .map(|c| BleManagementConfig::from_raw(c, &data_dir));
         let display = DisplayConfig::from_raw(raw.display.as_ref());
+        let media = raw
+            .media
+            .as_ref()
+            .map(|m| MediaServiceConfig {
+                prefetch: m.prefetch,
+                prefetch_while_session_active: m.prefetch_while_session_active,
+                free_space_floor_bytes: m.free_space_floor_bytes,
+                watched_grace_days: m.watched_grace_days,
+                cache_max_bytes: m.cache_max_bytes,
+            })
+            .unwrap_or_default();
         Self {
             socket_path: raw.socket_path.unwrap_or_else(socket_path_without_env),
             log_dir,
@@ -303,6 +345,7 @@ impl ServiceConfig {
             management_api,
             ble_management,
             display,
+            media,
         }
     }
 }
@@ -438,6 +481,7 @@ impl Default for ServiceConfig {
             management_api: None,
             ble_management: None,
             display: DisplayConfig::default(),
+            media: MediaServiceConfig::default(),
         }
     }
 }
@@ -857,7 +901,40 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
         RawEntryKind::Steam { app_id, args, env } => EntryKind::Steam { app_id, args, env },
         RawEntryKind::Flatpak { app_id, args, env } => EntryKind::Flatpak { app_id, args, env },
         RawEntryKind::Vm { driver, args } => EntryKind::Vm { driver, args },
-        RawEntryKind::Media { library_id, args } => EntryKind::Media { library_id, args },
+        RawEntryKind::Media {
+            library,
+            mode,
+            item,
+            quality,
+            sort_by,
+            reverse,
+            resume,
+            prefetch,
+        } => EntryKind::Media {
+            library,
+            mode: match mode {
+                RawMediaMode::Browse => MediaMode::Browse,
+                RawMediaMode::Play => MediaMode::Play,
+            },
+            item,
+            quality: match quality {
+                RawMediaQuality::Best => MediaQuality::Best,
+                RawMediaQuality::Q1080 => MediaQuality::Q1080,
+                RawMediaQuality::Q720 => MediaQuality::Q720,
+                RawMediaQuality::Q480 => MediaQuality::Q480,
+            },
+            sort_by: match sort_by {
+                RawMediaSortBy::Library => MediaSortBy::Library,
+                RawMediaSortBy::Title => MediaSortBy::Title,
+                RawMediaSortBy::Id => MediaSortBy::Id,
+                RawMediaSortBy::Kind => MediaSortBy::Kind,
+                RawMediaSortBy::Category => MediaSortBy::Category,
+                RawMediaSortBy::Duration => MediaSortBy::Duration,
+            },
+            reverse,
+            resume,
+            prefetch,
+        },
         RawEntryKind::Custom { type_name, payload } => EntryKind::Custom {
             type_name,
             payload: payload.unwrap_or(serde_json::Value::Null),
@@ -1005,8 +1082,15 @@ fn convert_entry_internet(raw: Option<&crate::schema::RawEntryInternet>) -> Entr
     let check = raw
         .and_then(|cfg| cfg.check.as_ref())
         .and_then(|value| InternetCheckTarget::parse(value).ok());
+    // Absent `[entries.internet]` means "inherit and forward", same as the
+    // block being present with everything left at its default.
+    let forward_check = raw.map(|cfg| cfg.forward_check).unwrap_or(true);
 
-    EntryInternetPolicy { required, check }
+    EntryInternetPolicy {
+        required,
+        check,
+        forward_check,
+    }
 }
 
 fn convert_time_window(raw: crate::schema::RawTimeWindow) -> TimeWindow {

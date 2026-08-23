@@ -78,10 +78,11 @@ pub fn resolve_stream_url(
         &[
             "-f",
             stream_format(quality),
-            // The android_vr + android player clients (shared with the Linux
-            // build); see YOUTUBE_EXTRACTOR_ARGS for why. The `stream_format`
-            // muxed fallback (`/b`) then selects the progressive itag 18 for the
-            // DRM-protected uploads android_vr alone reports as "not available".
+            // yt-dlp's default player clients plus `android` (shared with the
+            // Linux build); see YOUTUBE_EXTRACTOR_ARGS for why. The
+            // `stream_format` muxed fallback (`/b`) then selects the progressive
+            // itag 18 for the DRM-protected uploads the default clients alone
+            // report as "not available".
             "--extractor-args",
             shepherd_media_core::YOUTUBE_EXTRACTOR_ARGS,
             "-g",

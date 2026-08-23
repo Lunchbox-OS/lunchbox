@@ -68,6 +68,34 @@ pub const CURRENT_CONFIG_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {
+    /// The video cache's size is configuration, not just an environment
+    /// variable: shepherdd has to be able to hand the same number to the
+    /// activities it launches, which share the cache directory with it.
+    #[test]
+    fn media_cache_size_and_grace_are_configurable() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+[service.media]
+cache_max_bytes = 5000000000
+watched_grace_days = 90
+"#,
+        )
+        .unwrap();
+        assert_eq!(policy.service.media.cache_max_bytes, 5_000_000_000);
+        assert_eq!(policy.service.media.watched_grace_days, 90);
+    }
+
+    #[test]
+    fn media_cache_size_and_grace_have_defaults() {
+        let policy = parse_config("config_version = 1\n").unwrap();
+        assert_eq!(
+            policy.service.media.cache_max_bytes,
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(policy.service.media.watched_grace_days, 30);
+    }
+
     use super::*;
     use std::time::Duration;
 

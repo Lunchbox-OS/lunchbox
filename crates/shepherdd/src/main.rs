@@ -44,6 +44,7 @@ mod display_watch;
 mod hidpi;
 mod input_devices;
 mod internet;
+mod media;
 mod pairing_display;
 mod system_events;
 
@@ -85,6 +86,7 @@ struct Service {
     rate_limiter: RateLimiter,
     internet_monitor: Option<internet::InternetMonitor>,
     input_monitor: Option<input_devices::InputMonitor>,
+    media_prefetcher: media::MediaPrefetcher,
 }
 
 impl Service {
@@ -169,6 +171,12 @@ impl Service {
         // Initialize input-device dependency monitor (issue #96). Only runs when
         // some entry declares `requires_input`.
         let input_monitor = input_devices::InputMonitor::from_policy(engine.policy());
+        // Background media prefetch (issue #127). Constructed unconditionally,
+        // including with no media entries configured: it re-reads policy each
+        // sweep, so a reload that adds a media entry has something to reach.
+        // Also where a missing yt-dlp is reported, since this is the only place
+        // that knows both what the policy references and what is installed.
+        let media_prefetcher = media::MediaPrefetcher::from_policy(engine.policy());
 
         // Initialize IPC server
         let mut ipc = IpcServer::new(&socket_path);
@@ -191,6 +199,7 @@ impl Service {
             rate_limiter,
             internet_monitor,
             input_monitor,
+            media_prefetcher,
         })
     }
 
@@ -473,6 +482,18 @@ impl Service {
                     .run(engine_ref, ipc_for_monitor, event_tx_for_monitor)
                     .await;
             });
+        }
+
+        // Background media prefetch (issue #127). Session and connectivity
+        // state come off the event bus; it takes the engine to re-read the
+        // media settings and the library list before each sweep, so a config
+        // reload reaches both — including the eviction grace, which the launch
+        // path is already handing to activities from the live policy.
+        {
+            let prefetcher = self.media_prefetcher;
+            let events = event_tx.subscribe();
+            let engine_for_prefetch = engine.clone();
+            tokio::spawn(async move { prefetcher.run(engine_for_prefetch, events).await });
         }
 
         {

@@ -87,6 +87,88 @@ fn expand_args(args: &[String]) -> Vec<String> {
     args.iter().map(|arg| expand_tilde(arg)).collect()
 }
 
+/// Build the `shepherd-media` command line for an [`EntryKind::Media`] entry
+/// (issue #127).
+///
+/// Every flag is passed explicitly rather than relying on `shepherd-media`'s
+/// own defaults: the config layer already has a defined default for each, and
+/// a launched activity should not change behavior because the CLI's default
+/// moved underneath it.
+///
+/// `connectivity_check`, `watched_grace_days` and `cache_max_bytes` are resolved
+/// by the caller rather than read from the entry — see `SpawnOptions`. The first
+/// gates which items browse shows; the other two are the video cache's eviction
+/// policy and its size, which have to travel with the launch because the
+/// activity writes to the same cache directory shepherdd prefetches into, and
+/// two processes disagreeing about how much it may hold or what is worth
+/// keeping would undo each other's trims.
+///
+/// Panics on a non-`Media` kind; callers match before calling.
+fn media_argv(
+    kind: &EntryKind,
+    connectivity_check: Option<&str>,
+    watched_grace_days: Option<u64>,
+    cache_max_bytes: Option<u64>,
+) -> Vec<String> {
+    let EntryKind::Media {
+        library,
+        mode,
+        item,
+        quality,
+        sort_by,
+        reverse,
+        resume,
+        // Prefetch is shepherdd's business, not the player's: it never reaches
+        // the command line.
+        prefetch: _,
+    } = kind
+    else {
+        unreachable!("media_argv called with a non-media kind");
+    };
+
+    let mut argv = vec![
+        "shepherd-media".to_string(),
+        mode.subcommand().to_string(),
+        "--library".to_string(),
+        // A YouTube playlist URL must survive untouched; `expand_tilde` only
+        // rewrites a leading `~/`, which no URL has.
+        expand_tilde(library),
+    ];
+
+    if let Some(item) = item {
+        // Validation rejects an item in browse mode, so passing it whenever it
+        // is set can't produce an invocation `shepherd-media` would refuse.
+        argv.push("--item".to_string());
+        argv.push(item.clone());
+    }
+
+    argv.push("--quality".to_string());
+    argv.push(quality.as_flag().to_string());
+    argv.push("--sort-by".to_string());
+    argv.push(sort_by.as_flag().to_string());
+
+    if *reverse {
+        argv.push("--reverse".to_string());
+    }
+    if *resume {
+        argv.push("--resume".to_string());
+    }
+    if let Some(check) = connectivity_check {
+        argv.push("--connectivity-check".to_string());
+        argv.push(check.to_string());
+    }
+    if let Some(days) = watched_grace_days {
+        argv.push("--watched-grace-days".to_string());
+        argv.push(days.to_string());
+    }
+    if let Some(bytes) = cache_max_bytes {
+        argv.push("--cache-max-bytes".to_string());
+        argv.push(bytes.to_string());
+    }
+
+    argv
+}
+
 /// Resolve the base directory under which browser policy/profile dirs are
 /// materialized. Honors `SHEPHERD_BROWSER_ROOT` (used by tests to redirect
 /// writes away from the real `~/.var/app/...`), otherwise the user's home.
@@ -1249,15 +1331,19 @@ impl HostAdapter for LinuxHost {
                 }
                 (argv, HashMap::new(), None, None, None, None)
             }
-            EntryKind::Media {
-                library_id,
-                args: _,
-            } => {
-                // For media, we'd typically launch a media player
-                // This is a placeholder - real implementation would integrate with a player
-                let argv = vec!["xdg-open".to_string(), expand_tilde(library_id)];
-                (argv, HashMap::new(), None, None, None, None)
-            }
+            EntryKind::Media { .. } => (
+                media_argv(
+                    entry_kind,
+                    options.connectivity_check.as_deref(),
+                    options.media_watched_grace_days,
+                    options.media_cache_max_bytes,
+                ),
+                HashMap::new(),
+                None,
+                None,
+                None,
+                None,
+            ),
             EntryKind::Custom {
                 type_name: _,
                 payload: _,
@@ -1744,6 +1830,7 @@ impl HostAdapter for LinuxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shepherd_api::{MediaMode, MediaQuality, MediaSortBy};
 
     #[tokio::test]
     async fn test_spawn_and_exit() {
@@ -1805,6 +1892,181 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    fn media(mode: MediaMode, item: Option<&str>) -> EntryKind {
+        EntryKind::Media {
+            library: "/etc/shepherd/movies.toml".into(),
+            mode,
+            item: item.map(str::to_string),
+            quality: MediaQuality::Q1080,
+            sort_by: MediaSortBy::Library,
+            reverse: false,
+            resume: false,
+            prefetch: None,
+        }
+    }
+
+    #[test]
+    fn media_argv_browse_defaults() {
+        assert_eq!(
+            media_argv(&media(MediaMode::Browse, None), None, None, None),
+            vec![
+                "shepherd-media",
+                "browse",
+                "--library",
+                "/etc/shepherd/movies.toml",
+                "--quality",
+                "1080p",
+                "--sort-by",
+                "library",
+            ]
+        );
+    }
+
+    #[test]
+    fn media_argv_play_passes_the_item() {
+        let argv = media_argv(
+            &media(MediaMode::Play, Some("big-buck-bunny")),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv[1], "play");
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--item", "big-buck-bunny"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_flags_follow_the_kind() {
+        let EntryKind::Media {
+            library,
+            mode,
+            item,
+            ..
+        } = media(MediaMode::Browse, None)
+        else {
+            unreachable!()
+        };
+        let kind = EntryKind::Media {
+            library,
+            mode,
+            item,
+            quality: MediaQuality::Q480,
+            sort_by: MediaSortBy::Title,
+            reverse: true,
+            resume: true,
+            prefetch: None,
+        };
+        let argv = media_argv(&kind, Some("https://example.com"), None, None);
+        assert!(argv.contains(&"--reverse".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--resume".to_string()), "{argv:?}");
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--quality", "480p"].map(String::from)),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--sort-by", "title"].map(String::from)),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--connectivity-check", "https://example.com"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_forwards_the_watched_grace() {
+        // The activity writes to the same video cache shepherdd prefetches
+        // into, so the eviction policy has to travel with the launch or the two
+        // processes would undo each other's trims.
+        let argv = media_argv(&media(MediaMode::Browse, None), None, Some(90), None);
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--watched-grace-days", "90"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_forwards_the_cache_cap() {
+        // Same reason as the grace: the activity trims the cache shepherdd
+        // prefetches into, so the two must agree on how big it may be.
+        let argv = media_argv(
+            &media(MediaMode::Browse, None),
+            None,
+            None,
+            Some(5_000_000_000),
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--cache-max-bytes", "5000000000"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_omits_the_watched_grace_for_a_non_media_launch_path() {
+        // `None` is what every other kind resolves to; the player then falls
+        // back to the shared default rather than being told a wrong number.
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None);
+        assert!(
+            !argv.iter().any(|a| a == "--watched-grace-days"),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_omits_the_check_when_not_forwarded() {
+        // `forward_check = false` reaches the adapter as `None`, and browse
+        // mode then shows every item regardless of connectivity.
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None);
+        assert!(
+            !argv.iter().any(|a| a == "--connectivity-check"),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn media_argv_expands_tilde_but_leaves_urls_alone() {
+        let url = "https://www.youtube.com/playlist?list=PL123";
+        let EntryKind::Media { mode, item, .. } = media(MediaMode::Browse, None) else {
+            unreachable!()
+        };
+        let kind = EntryKind::Media {
+            library: url.into(),
+            mode,
+            item,
+            quality: MediaQuality::Q1080,
+            sort_by: MediaSortBy::Library,
+            reverse: false,
+            resume: false,
+            prefetch: None,
+        };
+        assert_eq!(media_argv(&kind, None, None, None)[3], url);
+
+        let kind = EntryKind::Media {
+            library: "~/.config/shepherd/movies.toml".into(),
+            mode: MediaMode::Browse,
+            item: None,
+            quality: MediaQuality::Q1080,
+            sort_by: MediaSortBy::Library,
+            reverse: false,
+            resume: false,
+            prefetch: None,
+        };
+        let expanded = &media_argv(&kind, None, None, None)[3];
+        assert!(!expanded.starts_with('~'), "{expanded}");
+        assert!(
+            expanded.ends_with("/.config/shepherd/movies.toml"),
+            "{expanded}"
+        );
     }
 
     // -----------------------------------------------------------------------

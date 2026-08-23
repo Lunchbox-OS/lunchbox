@@ -207,8 +207,15 @@ mod tests {
         assert!(matches!(resolve(&src), Err(ResolveError::Unsupported(_))));
     }
 
+    /// Only a platform with no yt-dlp provider reports YouTube as unsupported,
+    /// so this is gated to one. Compiled for Android, `youtube::provider()`
+    /// returns the JNI binding and `resolve` really runs it — which panics in
+    /// `ndk_context` under a bare test binary, since that has no JVM and no
+    /// Activity. The app itself always does (android-activity initializes the
+    /// context at startup), so there is nothing to guard against there.
+    #[cfg(not(target_os = "android"))]
     #[test]
-    fn youtube_is_unsupported_for_now() {
+    fn youtube_is_unsupported_without_a_provider() {
         let src = LibrarySource::YoutubePlaylist {
             url: "https://www.youtube.com/playlist?list=PL".to_string(),
         };

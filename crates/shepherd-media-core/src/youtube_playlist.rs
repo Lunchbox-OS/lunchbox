@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use tracing::debug;
 use url::Url;
 
 use crate::library::{ClassifiedUri, Item, ItemKind, Library, Platform, PosterRef, Source};
@@ -74,7 +75,12 @@ pub struct PlaylistInfo {
 #[derive(Debug, Deserialize)]
 struct YtDlpEntry {
     id: String,
-    title: String,
+    /// yt-dlp emits `null` here for a video that has been deleted or made
+    /// private since it was added to the playlist, so this cannot be a bare
+    /// `String` — serde would reject the whole line, and with it the whole
+    /// playlist. Such an entry is skipped; see [`parse_flat_playlist`].
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     duration: Option<f64>,
     #[serde(default)]
@@ -89,18 +95,31 @@ struct YtDlpEntry {
 /// into a [`PlaylistInfo`]. Pure: no network or subprocess. `url` is only used
 /// in the "empty playlist" error message. Returns an error string suitable for
 /// printing directly to the user.
+///
+/// **One unusable entry does not fail the playlist.** A line that will not
+/// parse, or a video with no title — which is what yt-dlp reports for one
+/// deleted or made private since it was added — is skipped and the rest are
+/// kept. A family playlist accumulates dead videos as a matter of course, and
+/// failing the whole library over one of them takes away the other eighty-eight
+/// that are fine. Only a playlist with *nothing* usable in it is an error.
 pub fn parse_flat_playlist(stdout: &str, url: &str) -> Result<PlaylistInfo, String> {
     let mut entries: Vec<YoutubePlaylistEntry> = Vec::new();
     let mut playlist_title: Option<String> = None;
     let mut playlist_id: Option<String> = None;
+    let mut skipped: Vec<String> = Vec::new();
 
     for (line_no, line) in stdout.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let entry: YtDlpEntry = serde_json::from_str(line)
-            .map_err(|e| format!("failed to parse yt-dlp output (line {line_no}): {e}"))?;
+        let entry: YtDlpEntry = match serde_json::from_str(line) {
+            Ok(entry) => entry,
+            Err(e) => {
+                skipped.push(format!("line {line_no}: {e}"));
+                continue;
+            }
+        };
 
         if playlist_title.is_none() {
             playlist_title = entry.playlist_title;
@@ -108,10 +127,17 @@ pub fn parse_flat_playlist(stdout: &str, url: &str) -> Result<PlaylistInfo, Stri
         if playlist_id.is_none() {
             playlist_id = entry.playlist_id;
         }
+        // A titleless entry is a deleted or private video. It has no name to
+        // show and no stream to play, so there is nothing to put in the grid.
+        let Some(title) = entry.title else {
+            skipped.push(format!("line {line_no}: {} has no title", entry.id));
+            continue;
+        };
+
         let thumbnail_url = entry.thumbnail.as_deref().and_then(|t| Url::parse(t).ok());
         entries.push(YoutubePlaylistEntry {
             video_id: entry.id,
-            title: entry.title,
+            title,
             duration_seconds: entry.duration.map(|d| d as u64),
             thumbnail_url,
         });
@@ -121,6 +147,16 @@ pub fn parse_flat_playlist(stdout: &str, url: &str) -> Result<PlaylistInfo, Stri
         return Err(format!(
             "no videos found in playlist — check the URL and that the playlist is public: {url}"
         ));
+    }
+
+    if !skipped.is_empty() {
+        // Not a warning: videos disappearing out of a playlist is normal, and
+        // there is nothing for anyone to do about it.
+        debug!(
+            "skipped {} unusable playlist entries in {url}: {}",
+            skipped.len(),
+            skipped.join("; ")
+        );
     }
 
     Ok(PlaylistInfo {
@@ -252,6 +288,47 @@ fn sanitize_to_id(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A playlist that has accumulated a deleted video must still load. yt-dlp
+    /// reports one as `"title": null`, and rejecting the line took the other
+    /// eighty-eight videos down with it.
+    #[test]
+    fn a_deleted_video_does_not_fail_the_playlist() {
+        let stdout = concat!(
+            r#"{"id":"aaa","title":"Good One","playlist_id":"PL1"}"#,
+            "\n",
+            r#"{"id":"bbb","title":null}"#,
+            "\n",
+            r#"{"id":"ccc","title":"Another"}"#,
+            "\n",
+        );
+        let info = parse_flat_playlist(stdout, "https://example.com").expect("playlist parses");
+        assert_eq!(info.entries.len(), 2);
+        assert_eq!(info.entries[0].video_id, "aaa");
+        assert_eq!(info.entries[1].video_id, "ccc");
+        assert_eq!(info.playlist_id.as_deref(), Some("PL1"));
+    }
+
+    #[test]
+    fn an_unparseable_line_is_skipped_not_fatal() {
+        let stdout = concat!(
+            r#"{"id":"aaa","title":"Good One"}"#,
+            "\n",
+            "{ this is not json",
+            "\n",
+            r#"{"id":"ccc","title":"Another"}"#,
+            "\n",
+        );
+        let info = parse_flat_playlist(stdout, "https://example.com").expect("playlist parses");
+        assert_eq!(info.entries.len(), 2);
+    }
+
+    /// Skipping is not the same as tolerating a playlist with nothing in it.
+    #[test]
+    fn a_playlist_of_only_dead_videos_is_still_an_error() {
+        let stdout = concat!(r#"{"id":"bbb","title":null}"#, "\n");
+        assert!(parse_flat_playlist(stdout, "https://example.com").is_err());
+    }
+
     use super::*;
 
     // --- parse_flat_playlist ---
