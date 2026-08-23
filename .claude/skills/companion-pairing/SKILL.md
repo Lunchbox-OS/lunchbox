@@ -180,14 +180,32 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   networks but leaves cellular alone). Clearing the Bluetooth package's
   storage is *not* a safe reset — prefer the settings reset if you need
   to clear phone-side Bluetooth state at all.
-- **`default_adapter()` takes the lowest-indexed adapter**, so with two
-  radios present shepherdd binds whichever sorts first regardless of
-  which one you meant, and there is no config knob. Downing the other one
-  does not redirect it — BlueZ still exposes a downed adapter and
-  registration just fails. To actually change adapters, unbind the one
-  you don't want from `btusb` so BlueZ stops seeing it:
-  `ls -l /sys/class/bluetooth/hci*` gives the USB id, then
-  `echo -n 3-6:1.0 | sudo tee /sys/bus/usb/drivers/btusb/unbind`
+- **With two radios present, shepherdd serves whichever BlueZ lists
+  first** — not the one you meant, and not necessarily the one the phone
+  is bonded to. Symptom: the app sits on "Connecting…" forever while the
+  daemon logs `BLE management advertising started` and looks perfectly
+  healthy, because the phone's GATT connects are going to the *other*
+  controller's address. Compare the peer address in the phone's logcat
+  (`btif_gattc_open_impl: … address=xx:xx:xx:xx:02:dc`) against the
+  adapter in the daemon log (`BLE management server starting adapter=hciN`)
+  and `bluetoothctl list`.
+  **Pin it in config** — `[service.ble_management]` takes an `adapter`
+  key, and it wants the controller *address*, not the `hciN` name (the
+  index tracks USB probe order and renumbers across boots):
+
+  ```toml
+  [service.ble_management]
+  adapter = "8C:68:8B:41:02:DC"
+  ```
+
+  An adapter that isn't present is a startup error listing the ones that
+  are, rather than a silent fallback. Copy `config.example.toml`, set the
+  key, and boot with `dev headless --config <copy>`.
+  Downing the other radio does *not* redirect it — BlueZ still exposes a
+  downed adapter and registration just fails. If you are on a build that
+  predates the `adapter` key, unbind the one you don't want from `btusb`
+  so BlueZ stops seeing it: `ls -l /sys/class/bluetooth/hci*` gives the
+  USB id, then `echo -n 3-6:1.0 | sudo tee /sys/bus/usb/drivers/btusb/unbind`
   (`…/bind` to restore — note it may come back under a *different* hci
   index, which changes which adapter is "first").
 - **A controller can be individually broken, and it looks like a code
