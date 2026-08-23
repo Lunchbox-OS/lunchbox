@@ -159,3 +159,47 @@ GitHub at startup. Confirmed on a Pixel 10a — the ordinary upload and the DRM
 "full episode" from the table above both resolve and play, and a live playlist
 fetch exercised `parse_flat_playlist` on-device. See
 `2026-08-22 004 android-on-device-validation-of-the-scored-cache.md`.
+
+
+## Postscript: a false alarm the logging invited
+
+A later test — log in, let the library download, log out mid-way, log back in —
+looked like prefetch had died on the second login: no yt-dlp, no new files,
+nothing after `queued media items for background download entry=youtube
+items=92`.
+
+It had not. The capture settled it in one line each way:
+
+- 92 `.done` sentinels and 92 video files, 8.6 GiB, mtimes running 21:00→21:17
+- **zero** `.failed` markers, and zero media warnings in the entire journal
+- login 2 at 21:32, fifteen minutes after the last file landed
+
+The library had finished. The second login correctly had nothing to do. (The
+extra sweep at 21:09 was the `SessionEnded` resume path — an unrelated activity
+stopped at 21:08:47, plus `RESUME_DELAY`.)
+
+The first hypothesis was wrong in an instructive way: that the new `.failed`
+cooldown had cascaded at logout, marking every remaining item and suppressing it
+for six hours. Plausible from the code, and refuted by the absence of a single
+`.failed` file. Worth writing down because the reasoning was sound and the
+conclusion was not — the cache directory was the arbiter, not the argument.
+
+What actually failed here was the log line. `queued` counted items *offered* to
+`queue_prefetch`, not downloads started, and `enqueue` returns early for a cache
+hit — so "items=92" printed identically whether 92 downloads were about to begin
+or the library had been complete for a quarter of an hour. Every skip is
+`debug!`, so INFO went silent either way. Two people read it as a failure.
+
+`queue_prefetch` now returns a `QueueOutcome` (`Queued`, `AlreadyCached`,
+`FailedRecently`, `NotCacheable`), the sweep tallies them, and the line says
+what it did:
+
+```
+media prefetch sweep entry=youtube total=92 queued=0 cached=92 cooling=0
+```
+
+It is logged on every sweep now, including the empty ones, because "nothing to
+do" is exactly the state that was impossible to distinguish from "broken". The
+cooldown check moved into `enqueue` alongside the worker's, so a skipped item is
+counted as skipped rather than as work that was started — the worker still
+re-checks, since a cooldown can expire while a request sits in the queue.

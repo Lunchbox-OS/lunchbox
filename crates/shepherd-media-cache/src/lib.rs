@@ -84,6 +84,27 @@ pub fn grace_from_days(days: u64) -> Duration {
     Duration::from_secs(days * 24 * 60 * 60)
 }
 
+/// What [`VideoCache::queue_prefetch`] did with an item.
+///
+/// Returned so a caller sweeping a library can report what the sweep actually
+/// amounted to. "Queued 92 items" reads the same whether 92 downloads are about
+/// to start or the library has been complete for an hour, and those are the two
+/// states an operator most needs to tell apart — the second looks exactly like a
+/// prefetcher that has silently stopped working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueueOutcome {
+    /// Handed to the download worker.
+    #[default]
+    Queued,
+    /// Already in the cache, complete.
+    AlreadyCached,
+    /// Skipped: it failed recently and is inside [`RETRY_COOLDOWN`].
+    FailedRecently,
+    /// Nothing to cache — a local file, or a URI scheme this cache does not
+    /// fetch.
+    NotCacheable,
+}
+
 /// Where a [`VideoCache`] stores things and how much it may use.
 pub struct VideoCacheConfig {
     pub cache_dir: PathBuf,
@@ -218,8 +239,8 @@ impl VideoCache {
     /// where a file came from.
     ///
     /// `label` names the item in logs only; the file is named by cache key.
-    pub fn queue_prefetch(&self, label: &str, source: &Source, ordinal: u32) {
-        self.enqueue(label, source, Some(ordinal), false);
+    pub fn queue_prefetch(&self, label: &str, source: &Source, ordinal: u32) -> QueueOutcome {
+        self.enqueue(label, source, Some(ordinal), false)
     }
 
     /// Queue a download because `source` was just played to completion. Scored
@@ -229,22 +250,34 @@ impl VideoCache {
         self.enqueue(label, source, None, true);
     }
 
+    /// The cooldown a speculative download observes after a failure. Exposed so
+    /// callers can report a skip without re-deriving it.
+    pub fn retry_cooldown() -> Duration {
+        RETRY_COOLDOWN
+    }
+
     /// Queue speculative downloads for every remote item in `library`, in
     /// display order.
     pub fn queue_all(&self, library: &Library) {
         let platform_info = shepherd_media_core::PlatformInfo::current();
         for (ordinal, item) in library.items.iter().enumerate() {
             if let Some(source) = resolve_source(item, &platform_info) {
-                self.queue_prefetch(&item.id, source, ordinal as u32);
+                let _ = self.queue_prefetch(&item.id, source, ordinal as u32);
             }
         }
     }
 
-    fn enqueue(&self, label: &str, source: &Source, ordinal: Option<u32>, earned: bool) {
+    fn enqueue(
+        &self,
+        label: &str,
+        source: &Source,
+        ordinal: Option<u32>,
+        earned: bool,
+    ) -> QueueOutcome {
         let (url, kind) = match &source.uri {
             ClassifiedUri::YouTube(url) => (url.to_string(), DownloadKind::YouTube),
             ClassifiedUri::DirectHttp(url) => (url.to_string(), DownloadKind::Http),
-            _ => return,
+            _ => return QueueOutcome::NotCacheable,
         };
         let key = content_key(&url, kind.selector(&self.ytdl_format));
         let interest_key = interest_key(&url);
@@ -256,7 +289,16 @@ impl VideoCache {
             // written, and every item in it would read as brand new the day one
             // of them finally gets evicted.
             store::mark_seen(&self.cache_dir, &interest_key);
-            return;
+            return QueueOutcome::AlreadyCached;
+        }
+
+        // The worker checks this too, since the cooldown can expire while a
+        // request sits in the queue. Checking here as well is what lets the
+        // sweep report the skip rather than counting it as work it started.
+        if !earned && store::retry_blocked(&self.cache_dir, &key, RETRY_COOLDOWN) {
+            debug!("{label} failed recently; not queueing yet");
+            store::mark_seen(&self.cache_dir, &interest_key);
+            return QueueOutcome::FailedRecently;
         }
 
         let _ = self.download_tx.send(DownloadRequest {
@@ -268,6 +310,7 @@ impl VideoCache {
             ordinal,
             earned,
         });
+        QueueOutcome::Queued
     }
 }
 
@@ -388,6 +431,50 @@ mod tests {
 
         cache.mark_played(&source);
         assert!(dir.path().join(format!("{ikey}.played")).exists());
+    }
+
+    /// The distinction the sweep log exists to make: a library that is already
+    /// complete must not report the same thing as one that just queued 92
+    /// downloads.
+    #[test]
+    fn queueing_reports_what_it_actually_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let source = http_source("https://example.com/a.mp4");
+
+        assert_eq!(
+            cache.queue_prefetch("a", &source, 0),
+            QueueOutcome::Queued,
+            "an uncached item is work"
+        );
+
+        commit(&cache, dir.path(), &source);
+        assert_eq!(
+            cache.queue_prefetch("a", &source, 0),
+            QueueOutcome::AlreadyCached,
+            "a complete one is not"
+        );
+
+        assert_eq!(
+            cache.queue_prefetch("local", &local_source("/movies/a.mp4"), 0),
+            QueueOutcome::NotCacheable
+        );
+    }
+
+    #[test]
+    fn an_item_in_its_failure_cooldown_reports_the_skip() {
+        // Counting this as queued would hide a library that has stopped working
+        // behind a log line claiming it started downloading.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(dir.path());
+        let source = http_source("https://example.com/a.mp4");
+        let key = content_key(&source_url(&source).unwrap(), "");
+        store::mark_failed(dir.path(), &key);
+
+        assert_eq!(
+            cache.queue_prefetch("a", &source, 0),
+            QueueOutcome::FailedRecently
+        );
     }
 
     #[test]

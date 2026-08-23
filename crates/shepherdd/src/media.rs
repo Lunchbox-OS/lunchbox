@@ -45,7 +45,7 @@ use shepherd_api::{EntryKind, Event, EventPayload, MediaMode, MediaQuality};
 use shepherd_config::{MediaServiceConfig, Policy};
 use shepherd_core::CoreEngine;
 use shepherd_media_app::Quality;
-use shepherd_media_cache::{VideoCache, fetch_playlist, ytdlp_available};
+use shepherd_media_cache::{QueueOutcome, VideoCache, fetch_playlist, ytdlp_available};
 use shepherd_media_core::{
     Library, PlatformInfo, build_library_from_entries, is_youtube_playlist_url, load_library,
     resolve_source,
@@ -257,15 +257,24 @@ impl MediaPrefetcher {
             })
             .await;
 
+            // Logged whatever the outcome, including "nothing to do". A sweep
+            // that queues nothing because the library is already complete is
+            // indistinguishable, from the outside, from a prefetcher that has
+            // silently stopped working — and the old line said "queued 92
+            // items" in both cases, because it counted items *offered* rather
+            // than downloads actually started.
             match queued {
-                Ok(Some(count)) if count > 0 => {
+                Ok(Some(tally)) => {
                     info!(
                         entry = %target.entry_id,
-                        items = count,
-                        "queued media items for background download"
+                        total = tally.total,
+                        queued = tally.queued,
+                        cached = tally.cached,
+                        cooling = tally.cooling,
+                        "media prefetch sweep"
                     );
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(e) => warn!(entry = %target.entry_id, error = %e, "media prefetch task failed"),
             }
         }
@@ -367,8 +376,21 @@ fn ytdl_format_for(quality: MediaQuality) -> &'static str {
     .ytdl_format()
 }
 
-/// Load `library_source` and queue every remote item in it. Returns the number
-/// of items queued, or `None` if the library could not be read.
+/// What one library's sweep amounted to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SweepTally {
+    /// Items handed to the download worker.
+    queued: usize,
+    /// Items already complete in the cache.
+    cached: usize,
+    /// Items skipped because a recent download failed.
+    cooling: usize,
+    /// Items in the library, including ones with nothing to cache.
+    total: usize,
+}
+
+/// Load `library_source` and queue every remote item in it. Returns what the
+/// sweep amounted to, or `None` if the library could not be read.
 fn queue_library(
     entry_id: &str,
     library_source: &str,
@@ -376,7 +398,7 @@ fn queue_library(
     only_item: Option<&str>,
     watched_grace: Duration,
     cache_max_bytes: u64,
-) -> Option<usize> {
+) -> Option<SweepTally> {
     let library = match load_prefetch_library(library_source) {
         Ok(l) => l,
         Err(e) => {
@@ -390,7 +412,7 @@ fn queue_library(
     let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes)?;
 
     let platform_info = PlatformInfo::current();
-    let mut queued = 0;
+    let mut tally = SweepTally::default();
     // The ordinal is the item's place in the library as browse would show it,
     // which is how eviction orders one sweep's guesses against each other — a
     // file further down the list is one nothing is about to reach. It comes
@@ -400,14 +422,19 @@ fn queue_library(
         if only_item.is_some_and(|wanted| wanted != item.id) {
             continue;
         }
+        tally.total += 1;
         if let Some(source) = resolve_source(item, &platform_info)
             && shepherd_media_cache::source_url(source).is_some()
         {
-            cache.queue_prefetch(&item.id, source, ordinal as u32);
-            queued += 1;
+            match cache.queue_prefetch(&item.id, source, ordinal as u32) {
+                QueueOutcome::Queued => tally.queued += 1,
+                QueueOutcome::AlreadyCached => tally.cached += 1,
+                QueueOutcome::FailedRecently => tally.cooling += 1,
+                QueueOutcome::NotCacheable => {}
+            }
         }
     }
-    Some(queued)
+    Some(tally)
 }
 
 /// Load a library from either a file path or a YouTube playlist URL. Mirrors

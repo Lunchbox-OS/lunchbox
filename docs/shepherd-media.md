@@ -140,6 +140,23 @@ To exclude one library, set `prefetch = false` under its `[entries.kind]` — a
 24/7 live stream is the obvious case, since it has no end to download. To turn
 the whole thing off, set `service.media.prefetch = false`.
 
+### Reading the sweep log
+
+Each sweep logs one line per library at INFO, whatever it found:
+
+```
+media prefetch sweep entry=youtube total=92 queued=0 cached=92 cooling=0
+```
+
+`queued` is downloads actually started; `cached` is items already complete;
+`cooling` is items skipped because a recent download failed. A line with
+`queued=0 cached=92` means the library is fully cached and there is nothing to
+do — which is worth being able to see, because from the outside it is otherwise
+indistinguishable from a prefetcher that has quietly stopped working.
+
+Per-item detail (which item was a cache hit, which was skipped and why) is at
+debug: `RUST_LOG=shepherd_media_cache=debug,shepherdd=debug`.
+
 ### What a config reload reaches
 
 Policy is re-read before every sweep, so a reload takes effect within the hour
