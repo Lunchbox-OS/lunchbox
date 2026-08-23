@@ -119,14 +119,31 @@ install_sway_config() {
     local prefix="${1:-$DEFAULT_PREFIX}"
     local bindir="$prefix/$DEFAULT_BINDIR"
     
-    # Copy and modify the config for production use
+    # Copy and modify the config for production use.
+    #
+    # `--harden-sway-ipc` is added here rather than defaulted in shepherdd
+    # (issue #144): sway's IPC hands any process running as shepherdd's uid —
+    # which is every activity — `exec`, which starts a process outside
+    # supervision *and* outside the cgroup the per-entry firewall is attached
+    # to. Once shepherdd has connected it unlinks the socket, and nothing else
+    # can reach the compositor for the rest of the session.
+    #
+    # It is opt-in because the flag is destructive by design: a shepherdd run by
+    # hand inside a developer's own sway session would delete their desktop's
+    # socket. An installed kiosk is exactly the case where that cannot happen,
+    # so this is where it gets turned on.
     sed \
         -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
         -e "s|./target/debug/shepherd-hud|$bindir/shepherd-hud|g" \
         -e "s|./target/debug/shepherdd|$bindir/shepherdd|g" \
         -e "s|./config.example.toml|~/.config/shepherd/config.toml|g" \
         -e "s|-c ./sway.conf|-c $dst_config|g" \
+        -e "s|\(shepherdd -c [^ ]*\)|\1 --harden-sway-ipc|g" \
         "$src_config" > "$dst_config"
+
+    if ! grep -qF -- "--harden-sway-ipc" "$dst_config"; then
+        die "Failed to add --harden-sway-ipc to $dst_config (sway.conf's shepherdd exec line may have changed; expected 'shepherdd -c <path>')"
+    fi
     
     chmod 0644 "$dst_config"
     

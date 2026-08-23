@@ -407,6 +407,38 @@ EOF
 
 See `man 5 sway-output` for the full set of `output` directives.
 
+### The compositor socket is closed after startup (issue #144)
+
+The installed `/etc/sway/shepherd.conf` starts `shepherdd` with
+`--harden-sway-ipc`. Once shepherdd has connected to sway it **unlinks the
+compositor's IPC socket**, so no other process can reach it for the rest of the
+session.
+
+This is not a micro-optimisation. Sway's IPC grants every process running as
+shepherdd's own uid — which is every activity — the whole compositor:
+`exec` starts a process outside shepherd's supervision *and* outside the cgroup
+the per-entry firewall is attached to, so an activity configured `default_deny`
+could ask sway to make its network requests for it. `exit` ends the kiosk
+session; `kill` closes the HUD. Sway has no access control to turn on, and file
+permissions cannot help while activities share shepherdd's uid.
+
+Consequences worth knowing before you debug a device:
+
+- **`swaymsg` does not work in a kiosk session.** Neither does anything else
+  that speaks sway IPC. `$SWAYSOCK` still points at the path, but there is
+  nothing there.
+- **shepherdd cannot be restarted inside a session.** A second one would have
+  no socket to connect to. Log out and back in, or reboot.
+- To get a socket back for one session, add a drop-in that passes
+  `--sway-ipc-alias <path>` (a second name for the socket, created *before* the
+  original is removed; it must be inside `$XDG_RUNTIME_DIR`, because it is a
+  hard link) or drop `--harden-sway-ipc` altogether. Both weaken the device for
+  as long as they are in place.
+
+`shepherdd` never does this unless asked: a `shepherdd` run by hand inside your
+own sway session would otherwise delete your desktop's socket. The installer is
+the only thing that turns it on.
+
 ### External monitor / docking (issue #87)
 
 If you use external-monitor mirroring, the Sway session must be started with

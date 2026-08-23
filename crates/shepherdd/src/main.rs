@@ -86,6 +86,28 @@ struct Args {
     /// Log level
     #[arg(short, long, default_value = "info")]
     log_level: String,
+
+    /// Give sway's IPC socket a second name at this path before hardening
+    /// removes the first (or set SHEPHERD_SWAY_IPC_ALIAS).
+    ///
+    /// Must be on the same filesystem as the socket — i.e. inside
+    /// `$XDG_RUNTIME_DIR` — because the alias is a hard link. Without this,
+    /// `--harden-sway-ipc` leaves nothing able to reach the compositor except
+    /// shepherdd itself, which is the point in production and unusable in dev.
+    #[arg(long, env = "SHEPHERD_SWAY_IPC_ALIAS")]
+    sway_ipc_alias: Option<PathBuf>,
+
+    /// Unlink sway's IPC socket once shepherdd has connected, so nothing else
+    /// can reach the compositor (or set SHEPHERD_HARDEN_SWAY_IPC).
+    ///
+    /// Opt-in, and deliberately not the default: sway's IPC hands any process
+    /// running as this uid `exec`, which starts a process outside shepherd's
+    /// supervision *and* outside the cgroup the per-entry firewall is attached
+    /// to (issue #144). But a shepherdd run by hand inside a developer's own
+    /// sway session would delete their desktop's socket, so the safe default is
+    /// off and the installer turns it on.
+    #[arg(long, env = "SHEPHERD_HARDEN_SWAY_IPC")]
+    harden_sway_ipc: bool,
 }
 
 /// Main service state
@@ -105,6 +127,11 @@ struct Service {
     /// What is currently wrong with this device, for an administrator (issue
     /// #143). Swept periodically and on config reload.
     diagnostics: Arc<diagnostics::DiagnosticRegistry>,
+    /// Where to give sway's IPC socket a second name, if anywhere.
+    sway_ipc_alias: Option<PathBuf>,
+    /// Whether to take sway's IPC socket away from everything else once we
+    /// have connected (issue #144).
+    harden_sway_ipc: bool,
 }
 
 impl Service {
@@ -219,10 +246,74 @@ impl Service {
             input_monitor,
             media_prefetcher,
             diagnostics: Arc::new(diagnostics::DiagnosticRegistry::new()),
+            sway_ipc_alias: args.sway_ipc_alias.clone(),
+            harden_sway_ipc: args.harden_sway_ipc,
         })
     }
 
+    /// Take sway's IPC socket away from everything except this daemon.
+    ///
+    /// Sway's IPC grants any process running as shepherdd's own uid — which is
+    /// every activity — the whole compositor: `exec` starts a process outside
+    /// shepherd's supervision *and* outside the cgroup the per-entry firewall
+    /// is attached to, `exit` ends the kiosk session, and `kill` closes the HUD.
+    /// Sway has no access control to turn on (its `ipc` permission blocks went
+    /// away in 1.0), and no permission or path scheme can help while everything
+    /// shares a uid: `/proc/net/unix` lists every bound socket path, and
+    /// `/proc/<pid>/environ` is readable at the same uid.
+    ///
+    /// What does work is removing the name. Sway keeps its listening socket
+    /// open and connections already established keep working, but nothing can
+    /// connect by path afterwards. That is only possible because the adapter
+    /// holds a persistent connection now (issue #147) — while every call
+    /// re-exec'd `swaymsg`, the path had to exist forever.
+    ///
+    /// Order matters and is load-bearing: connect, then alias, then unlink. An
+    /// alias that was asked for and could not be made aborts the unlink, because
+    /// a session that is still drivable beats one that is hardened and inert.
+    async fn harden_compositor_socket(alias: Option<&Path>, harden: bool) {
+        if !harden && alias.is_none() {
+            return;
+        }
+
+        // The subscriptions are already up, but the request connection is lazy.
+        // Unlinking before it exists would leave it permanently unable to
+        // connect.
+        if let Err(e) = shepherd_host_linux::sway_ipc::client().connect_now().await {
+            warn!(error = %e, "Not hardening the sway IPC socket: no connection to keep alive");
+            return;
+        }
+
+        if let Some(alias) = alias {
+            match shepherd_host_linux::sway_ipc::alias_socket(alias) {
+                Ok(()) => info!(alias = %alias.display(), "Sway IPC socket aliased"),
+                Err(e) => {
+                    warn!(error = %e, alias = %alias.display(),
+                        "Could not alias the sway IPC socket; leaving it reachable rather than \
+                         stranding the session");
+                    return;
+                }
+            }
+        }
+
+        if !harden {
+            return;
+        }
+
+        match shepherd_host_linux::sway_ipc::unlink_socket() {
+            Ok(()) => info!(
+                "Sway IPC socket unlinked; the compositor is no longer reachable by anything else"
+            ),
+            Err(e) => warn!(error = %e, "Could not unlink the sway IPC socket"),
+        }
+    }
+
     async fn run(mut self) -> Result<()> {
+        // Copied out before anything moves out of `self`; the hardening step
+        // runs late, once every sway connection is established.
+        let sway_ipc_alias = self.sway_ipc_alias.clone();
+        let harden_sway_ipc = self.harden_sway_ipc;
+
         let config_path = self.config_path.clone();
 
         // Broadcast channel shared by IPC and HTTP SSE
@@ -612,6 +703,10 @@ impl Service {
             tokio::spawn(async move { init_mgr.initialize().await });
             display_watch::spawn(mgr, shutdown_rx.clone()).await;
         }
+
+        // Every sway connection this daemon needs is now open, so the socket's
+        // name in the filesystem has done its job (issue #144).
+        Self::harden_compositor_socket(sway_ipc_alias.as_deref(), harden_sway_ipc).await;
 
         // Set up config file watcher
         let (config_change_tx, mut config_change_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
