@@ -16,7 +16,7 @@ use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -65,15 +65,32 @@ const STEAM_ORPHAN_WATCH: Duration = Duration::from_secs(180);
 /// session, so erring long is the safe direction.
 const WINDOW_READY_WATCH: Duration = Duration::from_secs(300);
 
-/// How often to look for that window. Polls `list_windows` rather than
-/// subscribing to sway, because the poll only runs while an activity is
-/// starting and reuses a code path that is already covered by tests.
-const WINDOW_READY_POLL: Duration = Duration::from_millis(500);
+/// How often the first-window watch re-checks in the absence of any event.
+///
+/// The window itself now arrives as a `window::new` event, so this is no longer
+/// how the window is found — it only bounds the liveness and deadline checks,
+/// and catches a window that was already mapped before the watch subscribed.
+/// It was 500ms of polling `list_windows`, i.e. up to 600 compositor round
+/// trips per launch (issue #147).
+const WINDOW_READY_TICK: Duration = Duration::from_secs(5);
 
-/// Monitor ticks (100ms each) between reconciliation sweeps for escaped
-/// activities. The sweep talks to the compositor, so it is deliberately much
-/// slower than the process poll it rides on.
-const RECONCILE_EVERY_TICKS: u64 = 20;
+/// Monitor ticks (100ms each) between *unprompted* reconciliation sweeps.
+///
+/// Reconciliation is event-driven now — a `window` event nudges the monitor,
+/// which sweeps on its next tick — so this is only the safety net for anything
+/// the event stream missed, including a bug in the event handling itself. That
+/// is worth keeping and worth running rarely: it used to fire every 2s for the
+/// daemon's whole uptime whether or not anything had happened.
+const RECONCILE_SAFETY_NET_TICKS: u64 = 600;
+
+/// The `window` event change types that can alter what is on screen, and so
+/// are worth a sweep.
+///
+/// `title` and `focus` are deliberately absent: a browser or a game retitles
+/// constantly, and reconciling on those would make more compositor traffic than
+/// the 2s poll this replaces. `move` and `floating` are what a scratchpad
+/// transition looks like, which is how the Steam client is parked.
+const RECONCILE_CHANGES: &[&str] = &["new", "close", "move", "floating"];
 
 /// Expand `~` at the beginning of a path to the user's home directory
 pub(crate) fn expand_tilde(path: &str) -> String {
@@ -296,6 +313,17 @@ pub struct LinuxHost {
     /// (issue #143). `None` until the daemon supplies one, and in tests, so a
     /// host built without a registry simply reports nothing.
     diagnostics: Arc<Mutex<Option<Arc<dyn DiagnosticSink>>>>,
+    /// Signals the monitor that something on screen changed, so it sweeps on
+    /// its next tick instead of waiting for the safety net. Unbounded and
+    /// drained rather than counted: a burst of events collapsing into one
+    /// sweep is the behaviour reconciliation's idempotence already relies on,
+    /// and the 100ms tick is the debounce.
+    window_nudge_tx: mpsc::UnboundedSender<()>,
+    window_nudge_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<()>>>>,
+    /// Broadcast to every in-flight first-window watch when a window is
+    /// created. Broadcast rather than a channel per watch because several
+    /// activities can be starting at once and each needs the same event.
+    window_created_tx: broadcast::Sender<()>,
 }
 
 /// An activity that survived teardown and is still on the machine.
@@ -385,6 +413,7 @@ fn in_any_group(pid: u32, group: &[(u32, u32)]) -> bool {
 impl LinuxHost {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
 
         // Initialize process management
         init();
@@ -404,6 +433,11 @@ impl LinuxHost {
             steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
             escaped: Arc::new(Mutex::new(HashMap::new())),
             diagnostics: Arc::new(Mutex::new(None)),
+            window_nudge_tx: nudge_tx,
+            window_nudge_rx: Arc::new(Mutex::new(Some(nudge_rx))),
+            // Capacity is generous only so a slow watcher lags rather than
+            // stalls the subscription; a lagged watcher re-checks anyway.
+            window_created_tx: broadcast::channel(64).0,
         }
     }
 
@@ -968,6 +1002,71 @@ impl LinuxHost {
             .collect()
     }
 
+    /// Subscribe to sway's `window` events and turn them into sweeps.
+    ///
+    /// Reconciliation used to be a sampling detector: a 2s sweep asking "is
+    /// there a surface on screen that shepherd does not own?". For a problem
+    /// whose entire symptom is an unexpected window, sampling is the wrong
+    /// shape — an orphan went unnoticed for up to 2s, and one that mapped and
+    /// unmapped inside a single sweep was never noticed at all (issue #147).
+    ///
+    /// The event is only a trigger, never the data. A `window` event's
+    /// `container` carries `pid` and `app_id` but **no workspace**, so
+    /// `in_scratchpad` cannot be derived from it — and both consumers filter on
+    /// that. So this nudges the monitor, which re-reads the whole tree, exactly
+    /// as `display_watch` does for outputs. That also leaves `walk`,
+    /// `report_unowned_windows` and [`Self::is_infrastructure`] untouched and
+    /// still tested.
+    ///
+    /// The subscription is opened before this returns, so a failure is the
+    /// caller's to report and the connection exists before anything downstream
+    /// (including the socket hardening) depends on it.
+    pub async fn start_window_watch(&self) -> HostResult<tokio::task::JoinHandle<()>> {
+        let mut subscription = crate::sway_ipc::Subscription::open(&["window"]).await?;
+        let nudge = self.window_nudge_tx.clone();
+        let created = self.window_created_tx.clone();
+        info!("Watching sway window events for supervision escapes");
+
+        Ok(tokio::spawn(async move {
+            loop {
+                let (_, body) = match subscription.next_event().await {
+                    Ok(event) => event,
+                    Err(e) => {
+                        // shepherdd is exec'd by sway and dies with it, so a
+                        // stream that ends means the session is ending.
+                        warn!(error = %e, "Sway window event stream ended");
+                        return;
+                    }
+                };
+                let Some(change) = Self::window_event_change(&body) else {
+                    continue;
+                };
+                if change == "new" {
+                    // A watcher that has already gone away is the normal case.
+                    let _ = created.send(());
+                }
+                if RECONCILE_CHANGES.contains(&change.as_str()) {
+                    let _ = nudge.send(());
+                }
+            }
+        }))
+    }
+
+    /// Pull the `change` field out of a `window` event payload.
+    fn window_event_change(body: &[u8]) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct WindowEvent {
+            change: String,
+        }
+        match serde_json::from_slice::<WindowEvent>(body) {
+            Ok(event) => Some(event.change),
+            Err(e) => {
+                debug!(error = %e, "Unparsable sway window event");
+                None
+            }
+        }
+    }
+
     /// Read the window list for a sweep, and say so when we cannot.
     ///
     /// `list_windows()` returning `Err` used to be flattened to an empty list
@@ -1011,7 +1110,7 @@ impl LinuxHost {
                              SWAYSOCK is set in its environment."
                                 .to_string(),
                         ),
-                        since: chrono::Local::now(),
+                        since: shepherd_util::now(),
                     });
                 }
                 warn!(error = %e, "Could not read the window list from the compositor");
@@ -1139,6 +1238,16 @@ impl LinuxHost {
     /// The window is often owned by a descendant rather than the process we
     /// spawned, and for Steam by a process that is not in our tree at all, so
     /// match on the group and on the game's own pids as well as the pid.
+    ///
+    /// Woken by `window::new` rather than by a 500ms poll, so the first window
+    /// is now billed exactly rather than to within half a second. The slow tick
+    /// remains for two jobs the event stream cannot do: bounding the liveness
+    /// and deadline checks, and catching a window that was already mapped
+    /// before this task subscribed.
+    ///
+    /// The event is a trigger, not the answer — the tree is re-read and the
+    /// same predicate applied, because `window::new` carries no workspace and
+    /// so cannot say whether the surface went straight to the scratchpad.
     fn spawn_window_watch(
         &self,
         handle: HostSessionHandle,
@@ -1147,11 +1256,24 @@ impl LinuxHost {
         steam_app_id: Option<u32>,
     ) {
         let event_tx = self.event_tx.clone();
+        let mut created = self.window_created_tx.subscribe();
 
         tokio::spawn(async move {
             let deadline = Instant::now() + WINDOW_READY_WATCH;
+            // Cleared if the broadcast ever closes — awaiting a closed
+            // receiver returns immediately, which would spin this loop.
+            let mut watching_events = true;
             loop {
-                tokio::time::sleep(WINDOW_READY_POLL).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(WINDOW_READY_TICK) => {}
+                    // A lagged receiver missed events but still wants to look;
+                    // a closed one leaves only the tick.
+                    result = created.recv(), if watching_events => {
+                        if matches!(result, Err(broadcast::error::RecvError::Closed)) {
+                            watching_events = false;
+                        }
+                    }
+                }
 
                 // A non-Steam activity that is already gone will never map a
                 // window. Steam's launch process exits immediately, so it has
@@ -1162,6 +1284,11 @@ impl LinuxHost {
 
                 let steam_pids: Vec<i32> =
                     steam_app_id.map(find_steam_game_pids).unwrap_or_default();
+                // Unlike the sweep, a failed query here is genuinely harmless:
+                // it costs at most one `WindowReady`, and billing then falls
+                // back to the whole session — the documented safe direction.
+                // The sweep's version of this was the actual defect; see
+                // [`Self::windows_for_sweep`].
                 let windows = crate::sway::list_windows().await.unwrap_or_default();
                 let found = windows.iter().find(|w| {
                     let Some(wpid) = w.pid else { return false };
@@ -1352,6 +1479,7 @@ impl LinuxHost {
         let escaped = self.escaped.clone();
         let session_info = self.session_info.clone();
         let diagnostics = self.diagnostics.clone();
+        let mut window_nudge_rx = self.window_nudge_rx.lock().unwrap().take();
 
         tokio::spawn(async move {
             let mut ticks: u64 = 0;
@@ -1363,10 +1491,23 @@ impl LinuxHost {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 ticks += 1;
 
-                // Reconciliation is a rescue path, not a hot loop: it asks the
-                // compositor for the whole tree, so run it every ~2s rather
-                // than on every poll. Cheap no-op when nothing has escaped.
-                if ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
+                // Sweep when the compositor says something changed, and
+                // otherwise only on the slow safety net. Draining the channel
+                // rather than sweeping per event is the debounce: sway emits a
+                // burst for one user-visible change, and reconciliation is
+                // idempotent, so the whole burst collapses into this tick.
+                let nudged = match window_nudge_rx.as_mut() {
+                    Some(rx) => {
+                        let mut any = false;
+                        while rx.try_recv().is_ok() {
+                            any = true;
+                        }
+                        any
+                    }
+                    None => false,
+                };
+
+                if nudged || ticks.is_multiple_of(RECONCILE_SAFETY_NET_TICKS) {
                     let windows = Self::windows_for_sweep(&diagnostics).await;
                     Self::reconcile_escaped(
                         &escaped,
@@ -2865,6 +3006,42 @@ mod tests {
             vec![102],
             "a window that comes back must be reported again"
         );
+    }
+
+    /// A `window` subscription is noisy: one terminal's life emits
+    /// `new, title, focus, floating, move, close, move`, and `title`/`focus`
+    /// fire constantly under a browser or a game. Reconciling on those would
+    /// make more compositor traffic than the 2s poll this replaces.
+    #[test]
+    fn only_change_types_that_alter_the_screen_trigger_a_sweep() {
+        for change in ["new", "close", "move", "floating"] {
+            assert!(
+                RECONCILE_CHANGES.contains(&change),
+                "{change} changes what is on screen and must sweep"
+            );
+        }
+        for change in ["title", "focus", "urgent", "mark", "fullscreen_mode"] {
+            assert!(
+                !RECONCILE_CHANGES.contains(&change),
+                "{change} is noise and must not sweep"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_change_off_a_window_event() {
+        // Shape taken from sway-ipc(7): a `change` plus the full container.
+        // Note the container carries a pid but no workspace, which is why the
+        // event is only ever a trigger to re-read the tree.
+        let payload = br#"{"change":"new","container":{"id":12,"name":null,
+            "type":"con","pid":19787,"app_id":null,
+            "window_properties":{"class":"URxvt"}}}"#;
+        assert_eq!(
+            LinuxHost::window_event_change(payload).as_deref(),
+            Some("new")
+        );
+        assert_eq!(LinuxHost::window_event_change(b"not json"), None);
+        assert_eq!(LinuxHost::window_event_change(b"{}"), None);
     }
 
     /// The defect at the centre of issue #147: `list_windows()` returning an

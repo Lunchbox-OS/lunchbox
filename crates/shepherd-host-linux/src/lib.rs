@@ -20,7 +20,7 @@ mod retroarch;
 mod sidecar;
 mod steam_interstitial;
 mod sway;
-mod sway_ipc;
+pub mod sway_ipc;
 mod volume;
 
 pub use adapter::*;

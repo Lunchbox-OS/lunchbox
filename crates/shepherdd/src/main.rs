@@ -248,6 +248,19 @@ impl Service {
         self.host
             .set_diagnostics(Arc::new(diagnostic_publisher.clone()));
 
+        // Watch sway's window events, so an escaped or orphaned surface is
+        // noticed when it maps rather than up to two seconds later — or not at
+        // all, if it maps and unmaps inside one sweep (issue #147).
+        let _window_watch_handle = match self.host.start_window_watch().await {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                // Not fatal: the monitor's safety-net sweep still runs, just
+                // slowly. `windows_for_sweep` will raise the diagnostic.
+                warn!(error = %e, "Could not watch sway window events; escape detection falls back to the slow sweep");
+                None
+            }
+        };
+
         // Start host process monitor
         let _monitor_handle = self.host.start_monitor();
 
@@ -597,7 +610,7 @@ impl Service {
         if let Some(mgr) = display_manager {
             let init_mgr = mgr.clone();
             tokio::spawn(async move { init_mgr.initialize().await });
-            display_watch::spawn(mgr, shutdown_rx.clone());
+            display_watch::spawn(mgr, shutdown_rx.clone()).await;
         }
 
         // Set up config file watcher

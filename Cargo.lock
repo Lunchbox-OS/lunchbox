@@ -4349,7 +4349,6 @@ name = "shepherd-host-linux"
 version = "0.4.1"
 dependencies = [
  "async-trait",
- "chrono",
  "dirs",
  "futures-util",
  "nix 0.29.0",
