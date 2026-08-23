@@ -92,12 +92,12 @@ timeout_ms = 1500
 # running and while the internet is down, and a speculative download will never
 # displace a video watched within `watched_grace_days`.
 #
-# The cache itself is capped by the SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES
-# environment variable (default 10 GiB); see docs/shepherd-media.md.
+# See docs/shepherd-media.md for the cache's eviction policy.
 [service.media]
 # prefetch = true                        # global off switch
 # prefetch_while_session_active = false  # true spends CPU/bandwidth during play
 # free_space_floor_bytes = 2147483648    # 2 GiB; stop and warn below this. 0 disables
+# cache_max_bytes = 10737418240          # 10 GiB; total size of the video cache
 #
 # How long watching a video protects its cached copy from being displaced by a
 # speculative download. Inside the window a guess can never cost the child
@@ -107,6 +107,14 @@ timeout_ms = 1500
 # for a household that goes offline for long stretches; 0 removes the protection
 # and orders purely by age.
 # watched_grace_days = 30
+#
+# `cache_max_bytes` bounds the cache; `free_space_floor_bytes` bounds the volume
+# it sits on. Both are needed: a 10 GiB cache on a 16 GiB device fills the disk
+# long before it fills the cache. shepherdd hands the cap to every media
+# activity it launches, so the daemon filling the cache and the player trimming
+# it agree on its size — which is why this is config and not only the
+# SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES environment variable, which remains as a
+# local debugging override.
 
 # Steam-specific behaviour (optional)
 # Steam can block a game launch behind an "interstitial" — a modal it shows

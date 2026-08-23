@@ -55,8 +55,20 @@ after playback.
 shepherdd also fills this cache in the background, so a library is ready before
 anyone opens it — see [Background prefetch](#background-prefetch).
 
-The cache is capped at 10 GiB, overridable with
-`SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` (a byte count).
+The cache is capped by `service.media.cache_max_bytes`, 10 GiB by default.
+shepherdd hands that value to every media activity it launches (as
+`--cache-max-bytes`), so the daemon filling the cache and the player trimming it
+agree on how big it may be — a disagreement would have the two undoing each
+other's work on one directory.
+
+`SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` (a byte count) still overrides it, as a
+local escape hatch for debugging and for `shepherd-media` run by hand. Setting
+it on only one of the two processes is exactly the divergence the config key
+exists to avoid.
+
+Note the difference from `free_space_floor_bytes`: this bounds the cache, that
+bounds the volume the cache sits on. Both matter, because a 10 GiB cache on a
+16 GiB device fills the disk long before it fills the cache.
 
 When it is full, every file is scored and the lowest goes first. **Watching
 something protects it for `service.media.watched_grace_days` (30 by default),

@@ -185,6 +185,28 @@ rather than the whole policy, which is what let it move outside the lock. It
 still covers media entries prefetch skips, because a missing yt-dlp breaks those
 when a child taps the tile, not only when this task would have downloaded them.
 
+## The cap followed the grace
+
+The size cap had the same shape of problem the grace did, and it predated the
+mechanism that fixes it. It was reachable only through
+`SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES`, which each process reads from its own
+environment — and `build_inherited_env` forwards a fixed allowlist that does not
+include it, while `type = "media"` has no `env` map to override with. So setting
+it on shepherdd raised the cap for the prefetcher only, and the player went on
+trimming the same directory to 10 GiB.
+
+`service.media.cache_max_bytes` now travels the same road as the grace:
+resolved by shepherdd, handed to each activity through
+`SpawnOptions::media_cache_max_bytes` as `--cache-max-bytes`. The environment
+variable is kept as a local override that still wins, for debugging and for a
+`shepherd-media` run by hand, and is documented as the thing not to use for
+deployment.
+
+It is worth keeping distinct from `free_space_floor_bytes`, which the docs now
+say plainly: this bounds the cache, that bounds the volume the cache sits on,
+and a 10 GiB cache on a 16 GiB device fills the disk long before it fills the
+cache.
+
 ## Android
 
 `lru.rs` and `interest.rs` are shared with the Android cache, so the policy had

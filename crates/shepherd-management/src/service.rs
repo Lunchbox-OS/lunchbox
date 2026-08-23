@@ -315,8 +315,11 @@ impl ManagementService for DefaultManagementService {
             });
             // The cache the activity writes to is the one shepherdd prefetches
             // into, so the eviction policy has to travel with the launch.
-            let media_watched_grace_days = matches!(kind, Some(EntryKind::Media { .. }))
-                .then(|| eng.policy().service.media.watched_grace_days);
+            let is_media = matches!(kind, Some(EntryKind::Media { .. }));
+            let media_watched_grace_days =
+                is_media.then(|| eng.policy().service.media.watched_grace_days);
+            let media_cache_max_bytes =
+                is_media.then(|| eng.policy().service.media.cache_max_bytes);
             let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
             let opts = if eng.policy().service.capture_child_output {
                 let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
@@ -335,6 +338,7 @@ impl ManagementService for DefaultManagementService {
                     input_compat_options,
                     connectivity_check,
                     media_watched_grace_days,
+                    media_cache_max_bytes,
                     ..Default::default()
                 }
             } else {
@@ -345,6 +349,7 @@ impl ManagementService for DefaultManagementService {
                     input_compat_options,
                     connectivity_check,
                     media_watched_grace_days,
+                    media_cache_max_bytes,
                     ..Default::default()
                 }
             };

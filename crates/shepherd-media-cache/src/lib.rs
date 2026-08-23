@@ -54,19 +54,29 @@ use download::{DownloadRequest, download_worker};
 /// Default maximum total size of the video cache.
 pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 
-/// Environment variable that overrides [`DEFAULT_MAX_CACHE_BYTES`].
+/// Environment variable that overrides the configured cap.
+///
+/// A local override for debugging and for a `shepherd-media` run by hand — the
+/// deployment mechanism is `service.media.cache_max_bytes`, which shepherdd
+/// hands to both its own prefetcher and every media activity it launches.
+/// Setting this on only one of the two processes sharing a cache directory will
+/// have them trimming it to different sizes.
 pub const MAX_BYTES_ENV: &str = "SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES";
 
 /// Default watched grace, in whole days — the unit the config and the CLI use.
 pub const DEFAULT_WATCHED_GRACE_DAYS: u64 = 30;
 
-/// The configured cache cap: [`MAX_BYTES_ENV`] if set and parseable, else
-/// [`DEFAULT_MAX_CACHE_BYTES`].
-pub fn max_cache_bytes() -> u64 {
+/// The cache cap to use: [`MAX_BYTES_ENV`] if set and parseable, else
+/// `configured`.
+///
+/// An unparseable value falls back rather than failing — a cache is
+/// best-effort, and refusing to start over a malformed debugging variable would
+/// be a worse outcome than ignoring it.
+pub fn max_cache_bytes(configured: u64) -> u64 {
     std::env::var(MAX_BYTES_ENV)
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_CACHE_BYTES)
+        .unwrap_or(configured)
 }
 
 /// A grace expressed in whole days, as the config and the CLI carry it.
@@ -102,15 +112,16 @@ impl VideoCache {
     /// from [`max_cache_bytes`]. Returns `None` if the directory cannot be
     /// determined or created; the caller then skips caching entirely.
     ///
-    /// `watched_grace` has to be passed in rather than defaulted here: this
-    /// directory is shared with shepherdd's prefetcher, and two processes that
-    /// valued its contents differently would spend the same disk by different
-    /// rules and undo each other's trims. shepherdd resolves it once from
-    /// policy and hands it to both.
-    pub fn new(ytdl_format: &str, watched_grace: Duration) -> Option<Arc<Self>> {
+    /// `watched_grace` and `max_bytes` have to be passed in rather than
+    /// defaulted here: this directory is shared with shepherdd's prefetcher, and
+    /// two processes that disagreed about how big it may be or what is worth
+    /// keeping would spend the same disk by different rules and undo each
+    /// other's trims. shepherdd resolves both from policy and hands them to
+    /// both. [`MAX_BYTES_ENV`] still overrides the cap locally.
+    pub fn new(ytdl_format: &str, watched_grace: Duration, max_bytes: u64) -> Option<Arc<Self>> {
         Self::with_config(VideoCacheConfig {
             cache_dir: media_cache_dir("videos")?,
-            max_bytes: max_cache_bytes(),
+            max_bytes: max_cache_bytes(max_bytes),
             ytdl_format: ytdl_format.to_string(),
             weights: ScoreWeights { watched_grace },
             download_interval: DEFAULT_DOWNLOAD_INTERVAL,
@@ -301,6 +312,14 @@ mod tests {
         std::fs::write(&path, b"video").unwrap();
         store::write_done_sentinel(dir, &key, &ikey, "", Some(0)).unwrap();
         path
+    }
+
+    #[test]
+    fn the_configured_cap_is_used_when_the_override_is_unset() {
+        // Deliberately not touching the environment: these run in one process
+        // with other tests, and a set-then-unset would race them.
+        assert_eq!(max_cache_bytes(123), 123);
+        assert_eq!(DEFAULT_MAX_CACHE_BYTES, 10 * 1024 * 1024 * 1024);
     }
 
     #[test]

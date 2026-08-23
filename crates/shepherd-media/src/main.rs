@@ -51,6 +51,7 @@ fn main() -> ExitCode {
     let sort_by = cli.sort_by;
     let reverse = cli.reverse;
     let watched_grace = shepherd_media_cache::grace_from_days(cli.watched_grace_days);
+    let cache_max_bytes = cli.cache_max_bytes;
     let result = match &cli.command {
         Command::Validate { library } => run_validate(library, sort_by, reverse),
         Command::Play { library, item } => run_play(
@@ -62,6 +63,7 @@ fn main() -> ExitCode {
             reverse,
             cli.resume,
             watched_grace,
+            cache_max_bytes,
         ),
         Command::Browse { library } => run_browse(
             library,
@@ -72,6 +74,7 @@ fn main() -> ExitCode {
             reverse,
             cli.resume,
             watched_grace,
+            cache_max_bytes,
         ),
     };
 
@@ -154,6 +157,7 @@ fn run_play(
     reverse: bool,
     resume: bool,
     watched_grace: Duration,
+    cache_max_bytes: u64,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -178,7 +182,7 @@ fn run_play(
 
     // Direct-play mode shares the eframe shell with browse mode; the UI
     // opens straight into the playback view instead of the grid.
-    let cache = VideoCache::new(ytdl_format, watched_grace);
+    let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes);
     let resume = open_resume(resume, &library);
     let session = build_session(library, no_protocol, ytdl_format, cache.clone());
     let session = match session {
@@ -217,6 +221,7 @@ fn run_browse(
     reverse: bool,
     resume: bool,
     watched_grace: Duration,
+    cache_max_bytes: u64,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -226,7 +231,7 @@ fn run_browse(
         }
     };
 
-    let cache = VideoCache::new(ytdl_format, watched_grace);
+    let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes);
     if let Some(ref c) = cache {
         c.queue_all(&library);
     }

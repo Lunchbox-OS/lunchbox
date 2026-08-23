@@ -257,6 +257,8 @@ pub struct MediaServiceConfig {
     /// How long, in days, a play protects a cached video from being displaced
     /// by a speculative download.
     pub watched_grace_days: u64,
+    /// Maximum total size of the on-disk video cache, in bytes.
+    pub cache_max_bytes: u64,
 }
 
 impl Default for MediaServiceConfig {
@@ -266,6 +268,7 @@ impl Default for MediaServiceConfig {
             prefetch_while_session_active: false,
             free_space_floor_bytes: 2 * 1024 * 1024 * 1024,
             watched_grace_days: 30,
+            cache_max_bytes: 10 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -328,6 +331,7 @@ impl ServiceConfig {
                 prefetch_while_session_active: m.prefetch_while_session_active,
                 free_space_floor_bytes: m.free_space_floor_bytes,
                 watched_grace_days: m.watched_grace_days,
+                cache_max_bytes: m.cache_max_bytes,
             })
             .unwrap_or_default();
         Self {

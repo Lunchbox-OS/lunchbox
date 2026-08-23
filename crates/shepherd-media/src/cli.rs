@@ -74,6 +74,16 @@ pub struct Cli {
     /// trims.
     #[arg(long, default_value_t = shepherd_media_cache::DEFAULT_WATCHED_GRACE_DAYS, global = true)]
     pub watched_grace_days: u64,
+
+    /// Maximum total size of the on-disk video cache, in bytes.
+    ///
+    /// shepherdd passes its `service.media.cache_max_bytes` here, because the
+    /// cache directory this trims is the one shepherdd prefetches into: two
+    /// processes disagreeing about how big it may be would undo each other's
+    /// trims. `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` still overrides it, as a
+    /// local debugging escape hatch.
+    #[arg(long, default_value_t = shepherd_media_cache::DEFAULT_MAX_CACHE_BYTES, global = true)]
+    pub cache_max_bytes: u64,
 }
 
 /// How to order library items before display or lookup.

@@ -240,6 +240,7 @@ impl MediaPrefetcher {
             let only_item = target.only_item.clone();
             let watched_grace =
                 shepherd_media_cache::grace_from_days(self.settings.watched_grace_days);
+            let cache_max_bytes = self.settings.cache_max_bytes;
 
             // Library loading shells out to yt-dlp for playlists and reads
             // files otherwise; queueing hands work to the cache's own thread.
@@ -251,6 +252,7 @@ impl MediaPrefetcher {
                     &ytdl_format,
                     only_item.as_deref(),
                     watched_grace,
+                    cache_max_bytes,
                 )
             })
             .await;
@@ -373,6 +375,7 @@ fn queue_library(
     ytdl_format: &str,
     only_item: Option<&str>,
     watched_grace: Duration,
+    cache_max_bytes: u64,
 ) -> Option<usize> {
     let library = match load_prefetch_library(library_source) {
         Ok(l) => l,
@@ -384,7 +387,7 @@ fn queue_library(
 
     // One cache per format selector: the selector is part of the content key,
     // so two entries at different qualities cache side by side.
-    let cache = VideoCache::new(ytdl_format, watched_grace)?;
+    let cache = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes)?;
 
     let platform_info = PlatformInfo::current();
     let mut queued = 0;

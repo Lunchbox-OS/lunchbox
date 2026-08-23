@@ -687,6 +687,15 @@ pub struct RawMediaServiceConfig {
     /// purely by age.
     #[serde(default = "default_watched_grace_days")]
     pub watched_grace_days: u64,
+
+    /// Maximum total size of the on-disk video cache, in bytes.
+    ///
+    /// Bounds the cache, not the volume it sits on — see
+    /// `free_space_floor_bytes` for that. shepherdd hands this to every media
+    /// activity it launches, so the daemon prefetching into the cache and the
+    /// player trimming it agree on how big it may be.
+    #[serde(default = "default_cache_max_bytes")]
+    pub cache_max_bytes: u64,
 }
 
 impl Default for RawMediaServiceConfig {
@@ -696,6 +705,7 @@ impl Default for RawMediaServiceConfig {
             prefetch_while_session_active: false,
             free_space_floor_bytes: default_free_space_floor(),
             watched_grace_days: default_watched_grace_days(),
+            cache_max_bytes: default_cache_max_bytes(),
         }
     }
 }
@@ -706,6 +716,10 @@ fn default_free_space_floor() -> u64 {
 
 fn default_watched_grace_days() -> u64 {
     30
+}
+
+fn default_cache_max_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024 // 10 GiB
 }
 
 /// Steam-specific service configuration

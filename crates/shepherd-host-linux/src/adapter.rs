@@ -95,18 +95,20 @@ fn expand_args(args: &[String]) -> Vec<String> {
 /// a launched activity should not change behavior because the CLI's default
 /// moved underneath it.
 ///
-/// `connectivity_check` and `watched_grace_days` are resolved by the caller
-/// rather than read from the entry — see `SpawnOptions`. The first gates which
-/// items browse shows; the second is the video cache's eviction policy, which
-/// has to travel with the launch because the activity writes to the same cache
-/// directory shepherdd prefetches into, and two processes valuing its contents
-/// differently would undo each other's trims.
+/// `connectivity_check`, `watched_grace_days` and `cache_max_bytes` are resolved
+/// by the caller rather than read from the entry — see `SpawnOptions`. The first
+/// gates which items browse shows; the other two are the video cache's eviction
+/// policy and its size, which have to travel with the launch because the
+/// activity writes to the same cache directory shepherdd prefetches into, and
+/// two processes disagreeing about how much it may hold or what is worth
+/// keeping would undo each other's trims.
 ///
 /// Panics on a non-`Media` kind; callers match before calling.
 fn media_argv(
     kind: &EntryKind,
     connectivity_check: Option<&str>,
     watched_grace_days: Option<u64>,
+    cache_max_bytes: Option<u64>,
 ) -> Vec<String> {
     let EntryKind::Media {
         library,
@@ -158,6 +160,10 @@ fn media_argv(
     if let Some(days) = watched_grace_days {
         argv.push("--watched-grace-days".to_string());
         argv.push(days.to_string());
+    }
+    if let Some(bytes) = cache_max_bytes {
+        argv.push("--cache-max-bytes".to_string());
+        argv.push(bytes.to_string());
     }
 
     argv
@@ -1330,6 +1336,7 @@ impl HostAdapter for LinuxHost {
                     entry_kind,
                     options.connectivity_check.as_deref(),
                     options.media_watched_grace_days,
+                    options.media_cache_max_bytes,
                 ),
                 HashMap::new(),
                 None,
@@ -1903,7 +1910,7 @@ mod tests {
     #[test]
     fn media_argv_browse_defaults() {
         assert_eq!(
-            media_argv(&media(MediaMode::Browse, None), None, None),
+            media_argv(&media(MediaMode::Browse, None), None, None, None),
             vec![
                 "shepherd-media",
                 "browse",
@@ -1919,7 +1926,12 @@ mod tests {
 
     #[test]
     fn media_argv_play_passes_the_item() {
-        let argv = media_argv(&media(MediaMode::Play, Some("big-buck-bunny")), None, None);
+        let argv = media_argv(
+            &media(MediaMode::Play, Some("big-buck-bunny")),
+            None,
+            None,
+            None,
+        );
         assert_eq!(argv[1], "play");
         assert!(
             argv.windows(2)
@@ -1949,7 +1961,7 @@ mod tests {
             resume: true,
             prefetch: None,
         };
-        let argv = media_argv(&kind, Some("https://example.com"), None);
+        let argv = media_argv(&kind, Some("https://example.com"), None, None);
         assert!(argv.contains(&"--reverse".to_string()), "{argv:?}");
         assert!(argv.contains(&"--resume".to_string()), "{argv:?}");
         assert!(
@@ -1974,7 +1986,7 @@ mod tests {
         // The activity writes to the same video cache shepherdd prefetches
         // into, so the eviction policy has to travel with the launch or the two
         // processes would undo each other's trims.
-        let argv = media_argv(&media(MediaMode::Browse, None), None, Some(90));
+        let argv = media_argv(&media(MediaMode::Browse, None), None, Some(90), None);
         assert!(
             argv.windows(2)
                 .any(|w| w == ["--watched-grace-days", "90"].map(String::from)),
@@ -1983,10 +1995,27 @@ mod tests {
     }
 
     #[test]
+    fn media_argv_forwards_the_cache_cap() {
+        // Same reason as the grace: the activity trims the cache shepherdd
+        // prefetches into, so the two must agree on how big it may be.
+        let argv = media_argv(
+            &media(MediaMode::Browse, None),
+            None,
+            None,
+            Some(5_000_000_000),
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--cache-max-bytes", "5000000000"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
     fn media_argv_omits_the_watched_grace_for_a_non_media_launch_path() {
         // `None` is what every other kind resolves to; the player then falls
         // back to the shared default rather than being told a wrong number.
-        let argv = media_argv(&media(MediaMode::Browse, None), None, None);
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None);
         assert!(
             !argv.iter().any(|a| a == "--watched-grace-days"),
             "{argv:?}"
@@ -1997,7 +2026,7 @@ mod tests {
     fn media_argv_omits_the_check_when_not_forwarded() {
         // `forward_check = false` reaches the adapter as `None`, and browse
         // mode then shows every item regardless of connectivity.
-        let argv = media_argv(&media(MediaMode::Browse, None), None, None);
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None);
         assert!(
             !argv.iter().any(|a| a == "--connectivity-check"),
             "{argv:?}"
@@ -2020,7 +2049,7 @@ mod tests {
             resume: false,
             prefetch: None,
         };
-        assert_eq!(media_argv(&kind, None, None)[3], url);
+        assert_eq!(media_argv(&kind, None, None, None)[3], url);
 
         let kind = EntryKind::Media {
             library: "~/.config/shepherd/movies.toml".into(),
@@ -2032,7 +2061,7 @@ mod tests {
             resume: false,
             prefetch: None,
         };
-        let expanded = &media_argv(&kind, None, None)[3];
+        let expanded = &media_argv(&kind, None, None, None)[3];
         assert!(!expanded.starts_with('~'), "{expanded}");
         assert!(
             expanded.ends_with("/.config/shepherd/movies.toml"),

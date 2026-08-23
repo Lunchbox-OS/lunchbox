@@ -109,6 +109,15 @@ pub struct SpawnOptions {
     /// directory, so if they disagreed on this they would spend the same disk
     /// by different rules. `None` for every other kind.
     pub media_watched_grace_days: Option<u64>,
+
+    /// Maximum total size of the video cache, in bytes
+    /// (`service.media.cache_max_bytes`).
+    ///
+    /// Resolved by the caller for the same reason as
+    /// `media_watched_grace_days`: the activity trims the cache shepherdd
+    /// prefetches into, so a disagreement about how big it may be has the two
+    /// undoing each other's work. `None` for every other kind.
+    pub media_cache_max_bytes: Option<u64>,
 }
 
 /// Network firewall specification for a session.
