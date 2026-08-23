@@ -115,6 +115,15 @@ pub enum EventPayload {
     /// content.
     SystemResumed,
 
+    /// The set of administrator-facing conditions changed (issue #143): one
+    /// was raised, cleared, or updated.
+    ///
+    /// Carries the whole set rather than a delta. The set is small and capped,
+    /// and a client that missed an event would otherwise need reconciliation
+    /// logic to work out what it now holds — for a payload this size that is
+    /// cost with no benefit.
+    DiagnosticsChanged(crate::DiagnosticSet),
+
     /// Service is shutting down
     Shutdown,
 

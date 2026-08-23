@@ -7,7 +7,7 @@ use std::fs::File;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use shepherd_host_api::{ExitStatus, FirewallSpec, HostError, HostResult};
@@ -45,12 +45,31 @@ impl FirewallEnforcementStatus {
     }
 }
 
-static FW_STATUS: OnceLock<FirewallEnforcementStatus> = OnceLock::new();
+static FW_STATUS: RwLock<Option<FirewallEnforcementStatus>> = RwLock::new(None);
 
 /// Cached probe of whether per-cgroup IP filters can be enforced from this
 /// process. Checks for the helper binary and a non-prompted polkit grant.
-pub fn firewall_enforcement_status() -> &'static FirewallEnforcementStatus {
-    FW_STATUS.get_or_init(probe_firewall_enforcement)
+///
+/// Cached because the launch path consults it on every spawn and the probe
+/// execs `pkcheck`. Refreshable because it used to be a `OnceLock`, which meant
+/// an administrator who installed the helper stayed "unsupported" until the
+/// daemon restarted — and, now that this gates launches and raises a diagnostic
+/// (issue #143), that a fixed host would keep losing activities and keep
+/// showing a stale problem.
+pub fn firewall_enforcement_status() -> FirewallEnforcementStatus {
+    if let Some(cached) = FW_STATUS.read().expect("fw status lock").clone() {
+        return cached;
+    }
+    refresh_firewall_enforcement()
+}
+
+/// Re-run the probe and replace the cached value. Called by the daemon's
+/// diagnostic sweep, so installing the helper takes effect within the sweep
+/// interval rather than at the next restart.
+pub fn refresh_firewall_enforcement() -> FirewallEnforcementStatus {
+    let fresh = probe_firewall_enforcement();
+    *FW_STATUS.write().expect("fw status lock") = Some(fresh.clone());
+    fresh
 }
 
 fn probe_firewall_enforcement() -> FirewallEnforcementStatus {

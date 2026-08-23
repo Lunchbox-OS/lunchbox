@@ -2,8 +2,9 @@
 
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    API_VERSION, EntryKindTag, EntryView, GroupView, InputDeviceType, InternetStatusView,
-    ReasonCode, ServiceStateSnapshot, SessionEndReason, TokenStatus, WarningSeverity,
+    API_VERSION, DiagnosticSet, EntryKindTag, EntryView, GroupView, InputDeviceType,
+    InternetStatusView, ReasonCode, ServiceStateSnapshot, SessionEndReason, TokenStatus,
+    WarningSeverity,
 };
 use shepherd_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use shepherd_host_api::{HostCapabilities, HostSessionHandle};
@@ -73,6 +74,24 @@ pub struct CoreEngine {
     /// runs its first scan this becomes `Some(set)` and gating reflects the
     /// real hardware.
     connected_inputs: Option<HashSet<InputDeviceType>>,
+
+    /// Administrator-facing conditions currently true of this device (issue
+    /// #143). Owned here only because [`Self::get_state`] is, and every one of
+    /// the daemon's ~20 snapshot call sites would otherwise have to remember to
+    /// patch it in. The engine never raises one: the registry lives in
+    /// shepherdd, which pushes the current set through
+    /// [`Self::set_diagnostics`].
+    diagnostics: DiagnosticSet,
+
+    /// Whether per-entry firewall enforcement works on this host (issue #143),
+    /// pushed in by the daemon's diagnostic sweep.
+    ///
+    /// `None` means "not probed yet" and **fails open**, exactly as
+    /// `connected_inputs` does above: a probe that has not answered must not
+    /// blank every firewalled activity during boot. Once it answers, an entry
+    /// whose configured firewall cannot be applied stops launching rather than
+    /// launching unprotected.
+    firewall_enforceable: Option<bool>,
 }
 
 impl CoreEngine {
@@ -97,6 +116,8 @@ impl CoreEngine {
             internet_status: HashMap::new(),
             kind_readiness: HashMap::new(),
             connected_inputs: None,
+            diagnostics: DiagnosticSet::default(),
+            firewall_enforceable: None,
         }
     }
 
@@ -154,6 +175,49 @@ impl CoreEngine {
         }
         self.connected_inputs = Some(connected);
         true
+    }
+
+    /// Replace the administrator-facing diagnostic set (issue #143). Called by
+    /// shepherdd's registry whenever a condition is raised or cleared. Returns
+    /// true if the set changed, so callers can broadcast rather than
+    /// re-broadcasting an identical snapshot on every probe sweep.
+    pub fn set_diagnostics(&mut self, diagnostics: DiagnosticSet) -> bool {
+        if self.diagnostics == diagnostics {
+            return false;
+        }
+        self.diagnostics = diagnostics;
+        true
+    }
+
+    /// The current administrator-facing diagnostic set (issue #143).
+    ///
+    /// A direct accessor rather than reading `get_state().diagnostics`, which
+    /// rebuilds every `EntryView` to answer a question about none of them.
+    pub fn diagnostics(&self) -> DiagnosticSet {
+        self.diagnostics.clone()
+    }
+
+    /// Record whether per-entry firewall enforcement works on this host (issue
+    /// #143). Returns true if the answer changed, so the caller can broadcast.
+    pub fn set_firewall_enforceable(&mut self, enforceable: bool) -> bool {
+        if self.firewall_enforceable == Some(enforceable) {
+            return false;
+        }
+        self.firewall_enforceable = Some(enforceable);
+        true
+    }
+
+    /// Whether this entry configures a protection that cannot currently be
+    /// applied, and so must not launch.
+    ///
+    /// Steam entries are excluded: the adapter cannot firewall a Steam-launched
+    /// process whatever the host supports, so blocking one would remove the
+    /// activity permanently for a configuration mistake no host change could
+    /// fix. Config validation rejects that combination instead.
+    fn protection_unavailable(&self, entry: &Entry) -> bool {
+        entry.firewall.is_some()
+            && !matches!(entry.kind, shepherd_api::EntryKind::Steam { .. })
+            && self.firewall_enforceable == Some(false)
     }
 
     /// Device types an entry requires that are not currently connected, sorted
@@ -427,6 +491,15 @@ impl CoreEngine {
         if !missing.is_empty() {
             enabled = false;
             reasons.push(ReasonCode::RequiredInputUnavailable { devices: missing });
+        }
+
+        // A configured protection that cannot be applied (issue #143). The
+        // config promises this activity is firewalled; if we cannot keep that
+        // promise we do not run it, rather than running it unprotected and
+        // logging about it.
+        if self.protection_unavailable(entry) {
+            enabled = false;
+            reasons.push(ReasonCode::ProtectionUnavailable);
         }
 
         // Check if another session is active
@@ -1459,6 +1532,7 @@ impl CoreEngine {
             entry_count: self.policy.entries.len(),
             entries,
             internet_status: self.internet_status_views(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 
@@ -1644,6 +1718,101 @@ mod tests {
         let entries = engine.list_entries(shepherd_util::now());
         assert_eq!(entries.len(), 1);
         assert!(entries[0].enabled);
+    }
+
+    /// A firewalled entry on a host where enforcement is unavailable must not
+    /// launch — the config promises the activity is filtered, and running it
+    /// unfiltered would break that promise silently (issue #143).
+    #[test]
+    fn an_unenforceable_firewall_gates_the_entry_it_was_configured_on() {
+        use shepherd_api::ReasonCode;
+        use shepherd_config::FirewallPolicy;
+
+        let mut policy = make_test_policy();
+        policy.entries[0].firewall = Some(FirewallPolicy {
+            default_deny: true,
+            allow: vec![],
+            deny: vec![],
+        });
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let entry_id = EntryId::new("test-game");
+        let now = shepherd_util::now();
+
+        // Before the probe answers the gate fails open, so a device still
+        // booting does not blank every firewalled tile.
+        assert!(
+            engine.list_entries(now)[0].enabled,
+            "an unprobed host must not hide activities"
+        );
+
+        assert!(engine.set_firewall_enforceable(false));
+        let entries = engine.list_entries(now);
+        assert!(!entries[0].enabled);
+        assert!(
+            entries[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ReasonCode::ProtectionUnavailable)),
+            "expected ProtectionUnavailable, got: {:?}",
+            entries[0].reasons
+        );
+        assert!(matches!(
+            engine.request_launch(&entry_id, now),
+            LaunchDecision::Denied { .. }
+        ));
+
+        // Fixing the host un-gates it without a restart, which is the whole
+        // point of the probe being refreshable.
+        assert!(engine.set_firewall_enforceable(true));
+        assert!(engine.list_entries(now)[0].enabled);
+        assert!(!engine.set_firewall_enforceable(true), "no spurious change");
+    }
+
+    /// An entry with no firewall configured is unaffected by a host that
+    /// cannot enforce one.
+    #[test]
+    fn an_unfirewalled_entry_is_untouched_by_an_unenforceable_host() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_test_policy(), store, HostCapabilities::minimal());
+        engine.set_firewall_enforceable(false);
+        assert!(engine.list_entries(shepherd_util::now())[0].enabled);
+    }
+
+    /// A firewall on a Steam entry is ignored whatever the host supports, so
+    /// gating it would remove the activity permanently for a config mistake no
+    /// host change could fix. Config validation rejects that combination
+    /// instead.
+    #[test]
+    fn a_steam_entry_is_not_gated_by_firewall_enforceability() {
+        use shepherd_config::FirewallPolicy;
+
+        let mut policy = make_test_policy();
+        policy.entries[0].kind = EntryKind::Steam {
+            app_id: 504230,
+            args: vec![],
+            env: HashMap::new(),
+        };
+        policy.entries[0].firewall = Some(FirewallPolicy {
+            default_deny: true,
+            allow: vec![],
+            deny: vec![],
+        });
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        engine.set_firewall_enforceable(false);
+
+        // Asserted on the reason rather than on `enabled`: a minimal host does
+        // not support the Steam kind at all, so the entry is gated for that
+        // reason regardless. What matters here is that the firewall gate is not
+        // one of the reasons.
+        assert!(
+            !engine.list_entries(shepherd_util::now())[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, shepherd_api::ReasonCode::ProtectionUnavailable)),
+            "a Steam entry must not be gated by firewall enforceability"
+        );
     }
 
     #[test]

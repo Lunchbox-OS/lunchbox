@@ -369,6 +369,21 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
     // Validate firewall rules
     if let Some(firewall) = &entry.firewall {
         errors.extend(validate_firewall(firewall, &entry.id));
+
+        // A firewall on a Steam entry is accepted and then quietly ignored:
+        // the adapter has no way to apply one to a Steam-launched process,
+        // whatever the host supports. Rejecting it here is the only honest
+        // answer — an admin who writes it believes the activity is filtered
+        // and it is not. It cannot be a runtime diagnostic either, because
+        // blocking the launch (issue #143) would remove the activity
+        // permanently for a mistake no host change could ever fix.
+        if matches!(entry.kind, RawEntryKind::Steam { .. }) {
+            errors.push(ValidationError::EntryError {
+                entry_id: entry.id.clone(),
+                message: "[entries.firewall] is not supported for steam entries; the filter                           cannot be applied to a Steam-launched process. Remove it, or use a                           process/flatpak entry."
+                    .into(),
+            });
+        }
     }
 
     // Validate browser policy
@@ -1037,6 +1052,89 @@ mod tests {
                     .iter()
                     .any(|e| matches!(e, ValidationError::EntryError { message, .. } if message.contains("url_allowlist"))),
                 "expected url_allowlist error for {bad:?}"
+            );
+        }
+    }
+
+    fn firewalled_entry(kind: RawEntryKind) -> RawConfig {
+        RawConfig {
+            config_version: 1,
+            service: Default::default(),
+            groups: vec![],
+            entries: vec![RawEntry {
+                id: "thing".into(),
+                label: "Thing".into(),
+                icon: None,
+                kind,
+                availability: None,
+                limits: None,
+                warnings: None,
+                volume: None,
+                brightness: None,
+                disabled: false,
+                disabled_reason: None,
+                internet: None,
+                firewall: Some(RawFirewallConfig {
+                    default: "deny".into(),
+                    allow: vec![],
+                    deny: vec![],
+                }),
+                browser: None,
+                input_compat: vec![],
+                input_compat_options: None,
+                requires_input: vec![],
+                tokens: None,
+                group: None,
+                xwayland_native_resolution: false,
+                confirm_on_close: true,
+            }],
+        }
+    }
+
+    /// A firewall on a Steam entry is silently ignored at runtime, so an admin
+    /// who writes one believes the activity is filtered when it is not. It has
+    /// to be caught here: it is a static property of the config, and blocking
+    /// the launch instead (issue #143) would remove the activity permanently
+    /// for a mistake no host change could fix.
+    #[test]
+    fn a_firewall_on_a_steam_entry_is_rejected() {
+        let config = firewalled_entry(RawEntryKind::Steam {
+            app_id: 504230,
+            args: vec![],
+            env: Default::default(),
+        });
+        let errors = validate_config(&config);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::EntryError { entry_id, message }
+                    if entry_id == "thing" && message.contains("not supported for steam")
+            )),
+            "expected a steam-firewall rejection, got: {errors:?}"
+        );
+    }
+
+    /// The kinds that can actually be firewalled must stay accepted, or this
+    /// check would break the working configurations it is meant to protect.
+    #[test]
+    fn a_firewall_on_a_supported_kind_is_accepted() {
+        for kind in [
+            RawEntryKind::Process {
+                command: "browser".into(),
+                args: vec![],
+                env: Default::default(),
+                cwd: None,
+            },
+            RawEntryKind::Flatpak {
+                app_id: "com.google.Chrome".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+        ] {
+            let errors = validate_config(&firewalled_entry(kind));
+            assert!(
+                errors.is_empty(),
+                "a firewallable kind must validate, got: {errors:?}"
             );
         }
     }

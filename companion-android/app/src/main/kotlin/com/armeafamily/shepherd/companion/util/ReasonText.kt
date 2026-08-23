@@ -54,6 +54,13 @@ object ReasonText {
         is ReasonCode.GroupRestricted ->
             "${reason.label}: ${describe(reason.reason)}"
 
+        // Deliberately vague, matching the launcher and the web UI: this is the
+        // child-facing half and nothing they can do fixes it. Which protection
+        // and how to repair it is the administrator's diagnostic, on the
+        // health screen (issue #143).
+        is ReasonCode.ProtectionUnavailable ->
+            "Unavailable until set up"
+
         is ReasonCode.Unknown ->
             "Unavailable"
     }

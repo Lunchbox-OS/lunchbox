@@ -145,6 +145,12 @@ impl SharedState {
             EventPayload::AuditEntry { .. } => {
                 // Audit events are for admin clients, ignore
             }
+            EventPayload::DiagnosticsChanged(_) => {
+                // Administrator-facing (issue #143); the child's launcher has
+                // nothing to do with them. What the child *does* see is the
+                // `ReasonCode` on a tile a diagnostic caused to be unavailable,
+                // which arrives on the snapshot like every other reason.
+            }
             EventPayload::VolumeChanged { .. } => {
                 // Volume events are handled by HUD
             }

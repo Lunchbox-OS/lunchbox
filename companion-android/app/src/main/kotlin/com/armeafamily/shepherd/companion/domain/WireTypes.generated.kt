@@ -156,6 +156,160 @@ data class DeviceInfo(
 )
 
 /**
+ * One condition that is currently true.
+ */
+@Serializable
+data class Diagnostic(
+    val code: DiagnosticCode,
+    /**
+     * One line, for a person. Most of these already exist verbatim as the log
+     * message the diagnostic replaces.
+     */
+    val message: String,
+    /**
+     * What to do about it, when there is a concrete answer — a command to run,
+     * a group to join. `None` when the fix is not something we can name.
+     */
+    val remedy: String? = null,
+    val severity: DiagnosticSeverity,
+    /**
+     * When this condition was first observed. Preserved across a re-raise, so
+     * "since" means since it started, not since it was last checked.
+     */
+    val since: IsoTimestamp,
+    val subject: DiagnosticSubject,
+)
+
+/**
+ * What is wrong. An enum rather than a string so the UIs can special-case
+ * presentation and the wire drift test covers the variant set.
+ */
+@Serializable
+enum class DiagnosticCode {
+    /**
+     * Per-entry firewall enforcement is unavailable on this host — the helper
+     * is not installed, or polkit denies it.
+     */
+    @SerialName("firewall_unenforceable") FIREWALL_UNENFORCEABLE,
+    /**
+     * This entry configures a firewall that cannot be applied, so it will not
+     * launch. Distinct from [`Self::FirewallUnenforceable`], which is the
+     * host-wide cause: this one names an activity the child has lost.
+     */
+    @SerialName("firewall_not_applied") FIREWALL_NOT_APPLIED,
+    /**
+     * This entry sets a browser policy that its kind does not support, so the
+     * policy is ignored.
+     */
+    @SerialName("browser_policy_ignored") BROWSER_POLICY_IGNORED,
+    /**
+     * A media activity references YouTube but `yt-dlp` is not installed.
+     */
+    @SerialName("yt_dlp_missing") YT_DLP_MISSING,
+    /**
+     * Free space on the media cache volume is below the configured floor, so
+     * prefetch has stopped.
+     */
+    @SerialName("media_cache_disk_low") MEDIA_CACHE_DISK_LOW,
+    /**
+     * A media library could not be read or parsed.
+     */
+    @SerialName("media_library_unreadable") MEDIA_LIBRARY_UNREADABLE,
+    /**
+     * No sound backend was detected; volume control does nothing.
+     */
+    @SerialName("no_sound_backend") NO_SOUND_BACKEND,
+    /**
+     * No readable input devices, so input-gated entries cannot be evaluated.
+     */
+    @SerialName("input_devices_unavailable") INPUT_DEVICES_UNAVAILABLE,
+    /**
+     * The BlueZ pairing agent could not be registered; a new phone will not be
+     * shown a pairing code.
+     */
+    @SerialName("ble_pairing_agent_unavailable") BLE_PAIRING_AGENT_UNAVAILABLE,
+}
+
+/**
+ * The current set, as clients see it.
+ *
+ * A struct rather than a bare `Vec` so the cap can report itself: a client
+ * showing 32 of 40 problems while implying it is showing all of them would be
+ * worse than showing none.
+ */
+@Serializable
+data class DiagnosticSet(
+    /**
+     * Sorted most severe first, then by subject, then by code — a stable
+     * order, so a client diffing two snapshots sees real changes rather than
+     * reordering.
+     */
+    val items: List<Diagnostic>,
+    /**
+     * Whether [`MAX_DIAGNOSTICS`] hid anything. UIs must say so.
+     */
+    val truncated: Boolean,
+)
+
+/**
+ * How bad it is. Declaration order is the sort order: `Critical` first.
+ */
+@Serializable
+enum class DiagnosticSeverity {
+    /**
+     * The configuration claims a protection the device is not providing.
+     * Unmissable in both UIs.
+     */
+    @SerialName("critical") CRITICAL,
+    /**
+     * A feature is unavailable or degraded.
+     */
+    @SerialName("warning") WARNING,
+    /**
+     * Worth knowing; nothing is broken.
+     */
+    @SerialName("info") INFO,
+}
+
+/**
+ * What a diagnostic is about.
+ *
+ * The split exists so a UI can render a per-entry problem on the entry itself,
+ * next to the availability reasons already there, instead of only in a global
+ * list.
+ */
+@Serializable
+@JsonClassDiscriminator("type")
+sealed interface DiagnosticSubject {
+    /**
+     * The device as a whole.
+     */
+    @Serializable
+    @SerialName("service")
+    data object Service : DiagnosticSubject
+
+    /**
+     * One configured activity.
+     */
+    @Serializable
+    @SerialName("entry")
+    data class Entry(
+        val entryId: EntryId,
+    ) : DiagnosticSubject
+
+    /**
+     * A [DiagnosticSubject] this build doesn't know about.
+     *
+     * Registered as the polymorphic default in `ShepherdWireModule`, so a
+     * newer device degrades this one value instead of failing the decode of
+     * everything around it.
+     */
+    @Serializable
+    @SerialName("__unknown")
+    data class Unknown(val type: String? = null) : DiagnosticSubject
+}
+
+/**
  * How the kiosk drives displays when an external monitor is docked (issue #87).
  *
  * Exactly one logical output is ever active in every variant, so the
@@ -808,6 +962,20 @@ sealed interface ReasonCode {
     ) : ReasonCode
 
     /**
+     * A protection this entry's configuration requires cannot be applied on
+     * this host, so the entry does not launch (issue #143) — today, an
+     * `[entries.firewall]` on a host where enforcement is unavailable.
+     *
+     * Carries no detail on purpose. This is the child-facing half: to them the
+     * activity is simply unavailable, and nothing they can do changes it. The
+     * administrator-facing half — which protection, why, and how to fix it —
+     * is the matching `Diagnostic`.
+     */
+    @Serializable
+    @SerialName("protection_unavailable")
+    data object ProtectionUnavailable : ReasonCode
+
+    /**
      * Not enough time banked on this entry's token gate (issue #8): the
      * activity has to be earned by spending time on its source activities.
      */
@@ -857,6 +1025,13 @@ sealed interface ReasonCode {
 data class ServiceStateSnapshot(
     val apiVersion: Long,
     val currentSession: SessionInfo? = null,
+    /**
+     * Administrator-facing conditions currently true of this device (issue
+     * #143) — a missing dependency, a protection that is not in effect. Rides
+     * the snapshot so every client has the current set on subscribe; deltas
+     * arrive as `EventPayload::DiagnosticsChanged`.
+     */
+    val diagnostics: DiagnosticSet? = null,
     /**
      * Available entries for UI display
      */
@@ -1262,6 +1437,7 @@ enum class WindowOwner {
  * throws and fails the decode of the entire enclosing response.
  */
 val ShepherdWireModule: SerializersModule = SerializersModule {
+    polymorphic(DiagnosticSubject::class) { defaultDeserializer { DiagnosticSubject.Unknown.serializer() } }
     polymorphic(EntryKind::class) { defaultDeserializer { EntryKind.Unknown.serializer() } }
     polymorphic(ReasonCode::class) { defaultDeserializer { ReasonCode.Unknown.serializer() } }
     polymorphic(SessionEndReason::class) { defaultDeserializer { SessionEndReason.Unknown.serializer() } }

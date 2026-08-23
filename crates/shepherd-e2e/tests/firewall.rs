@@ -4,11 +4,12 @@
 //! `CAP_NET_ADMIN`, the *system* systemd manager, and a real polkit), so
 //! these tests target the *wiring* that `shepherdd` does on top:
 //!
-//! 1. `firewall_unsupported_path_runs_activity` — when the helper isn't
+//! 1. `firewall_unsupported_path_gates_activity` — when the helper isn't
 //!    installed, `firewall_enforcement_status()` reports `Unsupported` and
-//!    activities with `[entries.firewall]` configured must still launch
-//!    (the daemon logs an explicit `WARN` and falls through, instead of
-//!    silently no-op'ing through `systemd-run --user --scope`).
+//!    activities with `[entries.firewall]` configured must *not* launch
+//!    (issue #143). The config promises the activity is filtered, so if that
+//!    promise cannot be kept it does not run, rather than running unfiltered
+//!    behind a log line nobody reads.
 //!
 //! 2. `firewall_supported_path_invokes_helper_with_expected_argv` — when
 //!    the helper *is* available, the daemon spawns the activity through
@@ -77,13 +78,23 @@ async fn wait_for_file(path: &Path, timeout: Duration) -> Result<()> {
     anyhow::bail!("file not present after {:?}: {}", timeout, path.display())
 }
 
-/// Probe reports `Unsupported` when the helper isn't installed → the daemon
-/// logs a `WARN` and spawns the activity directly. The activity must still
-/// run; this is the regression guard against the silent-no-op bug that the
-/// "Make firewall enforcement failures explicit" change fixed.
+/// Probe reports `Unsupported` when the helper isn't installed → the entry is
+/// gated and does not launch (issue #143).
+///
+/// This tightens, rather than replaces, the guard the "Make firewall
+/// enforcement failures explicit" change added. That change stopped the daemon
+/// silently no-op'ing through `systemd-run --user --scope` and made it warn and
+/// run anyway; the remaining hole was that the activity still ran *unfiltered*
+/// while the configuration said it was filtered. Now it does not run at all,
+/// and the administrator gets a `Critical` diagnostic naming the host problem
+/// and the activity it costs.
+///
+/// Asserted on the child process as well as on the API, because "launch was
+/// denied" and "launch was approved and then failed to spawn" are different
+/// bugs that would both fail the API assertion alone.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn firewall_unsupported_path_runs_activity() -> Result<()> {
+async fn firewall_unsupported_path_gates_activity() -> Result<()> {
     let h = TestHarness::builder()
         .config_toml(FIREWALL_CONFIG)
         // Force "Unsupported": probe checks file existence first, and this
@@ -96,34 +107,73 @@ async fn firewall_unsupported_path_runs_activity() -> Result<()> {
         .await?;
     let http = h.http();
 
-    let resp = http
-        .rpc("get_entry", json!({ "id": "filtered-sleeper" }))
-        .await?;
-    assert_eq!(resp.status, 200);
-    assert_eq!(json_body(&resp)?["enabled"], json!(true));
+    // The gate is fed by the daemon's diagnostic sweep, which runs at startup
+    // but not necessarily before the harness's first request lands.
+    let mut entry = json_body(
+        &http
+            .rpc("get_entry", json!({ "id": "filtered-sleeper" }))
+            .await?,
+    )?;
+    for _ in 0..40 {
+        if entry["enabled"] == json!(false) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        entry = json_body(
+            &http
+                .rpc("get_entry", json!({ "id": "filtered-sleeper" }))
+                .await?,
+        )?;
+    }
 
+    assert_eq!(
+        entry["enabled"],
+        json!(false),
+        "an entry whose configured firewall cannot be applied must not be available: {entry}"
+    );
+    let reasons = entry["reasons"].as_array().cloned().unwrap_or_default();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r["code"] == json!("protection_unavailable")),
+        "expected a protection_unavailable reason, got: {reasons:?}"
+    );
+
+    // Denied, and nothing spawned. Checking only the API would not
+    // distinguish a refused launch from an approved one that never ran.
     let resp = http
         .rpc("launch", json!({ "id": "filtered-sleeper" }))
         .await?;
     assert_eq!(resp.status, 200, "launch body: {}", resp.body);
-    assert!(json_body(&resp)?["Approved"].is_object());
-
-    let mut found = false;
-    for _ in 0..30 {
-        if proc_inspect::any_process_matching("sleep") {
-            found = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let body = json_body(&resp)?;
     assert!(
-        found,
-        "sleep child did not appear — Unsupported branch must still launch the activity"
+        body["Denied"].is_object(),
+        "launch must be denied while the firewall cannot be enforced: {body}"
     );
 
-    let resp = http.rpc("stop_current", json!({})).await?;
-    assert_eq!(resp.status, 200);
-    proc_inspect::wait_until_no_process("sleep", Duration::from_secs(5)).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !proc_inspect::any_process_matching("sleep"),
+        "no activity may spawn when its configured firewall cannot be applied"
+    );
+
+    // The administrator-facing half: the host cause and the activity it costs.
+    let diagnostics = json_body(&http.rpc("list_diagnostics", json!({})).await?)?;
+    let codes: Vec<_> = diagnostics["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|d| d["code"].clone())
+        .collect();
+    assert!(
+        codes.contains(&json!("firewall_unenforceable")),
+        "expected the host-wide diagnostic, got: {codes:?}"
+    );
+    assert!(
+        codes.contains(&json!("firewall_not_applied")),
+        "expected the per-activity diagnostic, got: {codes:?}"
+    );
 
     h.shutdown().await?;
     Ok(())

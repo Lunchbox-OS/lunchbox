@@ -16,6 +16,7 @@ import LinearProgress from "@mui/material/LinearProgress";
 import {
   deleteOverride,
   launchSession,
+  listDiagnostics,
   listEntries,
   listGroups,
   listOverrides,
@@ -23,10 +24,12 @@ import {
   adjustTokens,
 } from "../api/client";
 import {
+  diagnosticEntryId,
   durationToSecs,
   formatDurationHuman,
   reasonLabel,
   type DailyOverride,
+  type Diagnostic,
   type EntryView,
   type GroupView,
   type TokenStatus,
@@ -206,6 +209,19 @@ export function EntriesPage() {
   // below still works, and group overrides simply don't match an entry.
   const overrideMap = new Map((overrides ?? []).map((ov) => [ov.subject, ov]));
 
+  // Per-activity problems (issue #143), indexed so each card can show its own.
+  // Fetched once for the page rather than per card.
+  const { data: diagnosticSet } = useQuery({
+    queryKey: ["diagnostics"],
+    queryFn: listDiagnostics,
+  });
+  const diagnosticsByEntry = new Map<string, Diagnostic[]>();
+  for (const d of diagnosticSet?.items ?? []) {
+    const id = diagnosticEntryId(d);
+    if (!id) continue;
+    diagnosticsByEntry.set(id, [...(diagnosticsByEntry.get(id) ?? []), d]);
+  }
+
   const groupLabels = new Map((groups ?? []).map((g) => [g.group_id, g.label]));
 
   return (
@@ -285,6 +301,7 @@ export function EntriesPage() {
             <EntryCard
               key={entry.entry_id}
               entry={entry}
+              diagnostics={diagnosticsByEntry.get(entry.entry_id) ?? []}
               groupLabel={entry.group ? groupLabels.get(entry.group) : undefined}
               override={override}
               busy={busyId === entry.entry_id}
@@ -380,6 +397,7 @@ function TokenRow({
 
 function EntryCard({
   entry,
+  diagnostics,
   groupLabel,
   override,
   busy,
@@ -391,6 +409,8 @@ function EntryCard({
   onAdjustTokens,
 }: {
   entry: EntryView;
+  /** Administrator-facing problems with this activity (issue #143). */
+  diagnostics: Diagnostic[];
   groupLabel: string | undefined;
   override: DailyOverride | undefined;
   busy: boolean;
@@ -449,6 +469,24 @@ function EntryCard({
             {entry.reasons.map(reasonLabel).join(" · ")}
           </Typography>
         )}
+
+        {/* A misconfiguration on this activity (issue #143), shown next to the
+            availability reasons rather than only on the Health page: the
+            reason line says the activity is unavailable, this says why in a
+            way somebody can act on. */}
+        {diagnostics.map((d) => (
+          <Typography
+            key={d.code}
+            variant="caption"
+            component="div"
+            sx={{
+              color: d.severity === "critical" ? "error.main" : "warning.main",
+            }}
+          >
+            {d.message}
+            {d.remedy ? ` — ${d.remedy}` : ""}
+          </Typography>
+        ))}
 
         {entry.enabled && maxRunSecs > 0 && (
           <Typography variant="caption" color="text.secondary">

@@ -147,6 +147,13 @@ class ManagementClient(private val connection: ShepherdConnection) {
         call("logout", empty())
     }
 
+    /**
+     * Administrator-facing conditions currently true of the device (issue #143)
+     * — a missing dependency, a protection that is not in effect.
+     */
+    suspend fun listDiagnostics(): DiagnosticSet =
+        decode(call("list_diagnostics", empty()))
+
     suspend fun listWindows(): List<WindowInfo> = decode(call("list_windows", empty()))
 
     suspend fun actOnWindow(id: Long, action: WindowAction) {

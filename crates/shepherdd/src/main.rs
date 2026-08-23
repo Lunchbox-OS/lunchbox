@@ -35,10 +35,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+/// How often to recompute the probed diagnostics (issue #143). Hourly: these
+/// are conditions somebody has to go and fix rather than fast-moving state, and
+/// the firewall probe execs a subprocess. A config reload sweeps too, so an
+/// admin editing the file does not wait for the timer.
+const DIAGNOSTIC_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+
+mod diagnostics;
 mod display;
 mod display_watch;
 mod hidpi;
@@ -87,6 +94,9 @@ struct Service {
     internet_monitor: Option<internet::InternetMonitor>,
     input_monitor: Option<input_devices::InputMonitor>,
     media_prefetcher: media::MediaPrefetcher,
+    /// What is currently wrong with this device, for an administrator (issue
+    /// #143). Swept periodically and on config reload.
+    diagnostics: Arc<diagnostics::DiagnosticRegistry>,
 }
 
 impl Service {
@@ -200,6 +210,7 @@ impl Service {
             internet_monitor,
             input_monitor,
             media_prefetcher,
+            diagnostics: Arc::new(diagnostics::DiagnosticRegistry::new()),
         })
     }
 
@@ -388,6 +399,14 @@ impl Service {
         // handed to HttpServer as the source of unified admin bearer
         // tokens. If BLE isn't configured, HTTP falls back to its
         // static-token-only auth.
+        // Observed diagnostics (issue #143) are raised on workers and in crates
+        // with no access to the engine or the IPC server, so they signal here
+        // and the main loop republishes. Created before the BLE server, which
+        // is one of those raise sites.
+        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
+        let diagnostic_publisher =
+            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
+
         let (ble_handle, admin_authority): (
             Option<tokio::task::JoinHandle<()>>,
             Option<Arc<dyn shepherd_management::AdminAuthority>>,
@@ -408,6 +427,9 @@ impl Service {
                 let display = Arc::new(pairing_display::SwayPairingDisplay::new());
                 match BleServer::new(bsc, svc.clone(), display) {
                     Ok(server) => {
+                        let server = server
+                            .with_diagnostics(Arc::new(diagnostic_publisher.clone())
+                                as Arc<dyn shepherd_api::DiagnosticSink>);
                         let authority =
                             server.claim_machine() as Arc<dyn shepherd_management::AdminAuthority>;
                         let rx = shutdown_rx.clone();
@@ -493,7 +515,10 @@ impl Service {
             let prefetcher = self.media_prefetcher;
             let events = event_tx.subscribe();
             let engine_for_prefetch = engine.clone();
-            tokio::spawn(async move { prefetcher.run(engine_for_prefetch, events).await });
+            let publisher = diagnostic_publisher.clone();
+            tokio::spawn(
+                async move { prefetcher.run(engine_for_prefetch, events, publisher).await },
+            );
         }
 
         {
@@ -590,6 +615,14 @@ impl Service {
         let tick_interval = Duration::from_millis(100);
         let mut tick_timer = tokio::time::interval(tick_interval);
 
+        // Diagnostic sweep (issue #143). `interval` fires immediately, so the
+        // first tick is the startup sweep and there is no separate call for it.
+        // Hourly afterwards: these are conditions somebody has to go and fix,
+        // not fast-moving state, and the firewall probe execs `pkcheck`.
+        let mut diagnostic_timer = tokio::time::interval(DIAGNOSTIC_SWEEP_INTERVAL);
+        let diagnostics = self.diagnostics.clone();
+        let sound_backend_available = volume.capabilities().available;
+
         info!("Service running");
 
         loop {
@@ -616,6 +649,23 @@ impl Service {
                     }
                 }
 
+                // Diagnostic sweep: recompute every probed condition (issue
+                // #143). This is what makes an installed dependency or a freed
+                // disk clear itself without a daemon restart.
+                _ = diagnostic_timer.tick() => {
+                    Self::sweep_diagnostics(
+                        &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
+                    ).await;
+                }
+
+                // An observed diagnostic was raised or cleared on a worker.
+                Some(()) = diagnostics_changed_rx.recv() => {
+                    // Coalesce a burst — one prefetch sweep can raise several —
+                    // so a run of changes publishes once.
+                    while diagnostics_changed_rx.try_recv().is_ok() {}
+                    Self::publish_diagnostics(&engine, &diagnostics, &ipc_ref, &event_tx).await;
+                }
+
                 // Host events (process exit)
                 Some(host_event) = host_events.recv() => {
                     Self::handle_host_event(&engine, &ipc_ref, &event_tx, &hidpi, host_event).await;
@@ -636,6 +686,13 @@ impl Service {
                     // Drain any additional buffered events to debounce rapid saves
                     while config_change_rx.try_recv().is_ok() {}
                     Self::handle_config_reload(&engine, &ipc_ref, &event_tx, &config_path).await;
+                    // Re-probe against the new policy. Without this an admin who
+                    // adds a YouTube entry sees no missing-yt-dlp diagnostic
+                    // until the next restart, and one who removes the entry
+                    // keeps a diagnostic about an activity that is gone.
+                    Self::sweep_diagnostics(
+                        &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
+                    ).await;
                 }
 
                 // IPC messages
@@ -760,6 +817,77 @@ impl Service {
                 warn!(error = %e, "Failed to reload config, keeping existing policy");
             }
         }
+    }
+
+    /// Recompute every probed diagnostic and publish the result (issue #143).
+    ///
+    /// Broadcasts only when the set actually changed, so an hourly sweep over a
+    /// healthy device is silent rather than pushing an identical snapshot to
+    /// every connected client once an hour.
+    async fn sweep_diagnostics(
+        engine: &Arc<Mutex<CoreEngine>>,
+        diagnostics: &Arc<diagnostics::DiagnosticRegistry>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+        sound_backend_available: bool,
+    ) {
+        let policy = { engine.lock().await.policy().clone() };
+        let facts = diagnostics::gather_facts(&policy, sound_backend_available).await;
+        let fresh = diagnostics::evaluate(&facts, shepherd_util::now());
+
+        // Feed the firewall answer to the availability gate before publishing.
+        // An entry whose configured firewall cannot be applied stops launching,
+        // and the child sees `ReasonCode::ProtectionUnavailable` rather than
+        // getting an activity the config promised would be filtered.
+        let gate_changed = match &facts.firewall {
+            Some(diagnostics::FirewallFact::Enforceable) => {
+                engine.lock().await.set_firewall_enforceable(true)
+            }
+            Some(diagnostics::FirewallFact::Unenforceable { .. }) => {
+                engine.lock().await.set_firewall_enforceable(false)
+            }
+            // Probe failed to run at all: leave the gate as it was rather than
+            // guessing, so a transient failure cannot blank the grid.
+            None => false,
+        };
+
+        if !diagnostics.replace_probed(fresh) && !gate_changed {
+            return;
+        }
+
+        Self::publish_diagnostics(engine, diagnostics, ipc, event_tx).await;
+    }
+
+    /// Push the current diagnostic set onto the snapshot and out to clients.
+    ///
+    /// Shared by the probed sweep and the observed-change path, so the two
+    /// cannot drift into publishing differently.
+    async fn publish_diagnostics(
+        engine: &Arc<Mutex<CoreEngine>>,
+        diagnostics: &Arc<diagnostics::DiagnosticRegistry>,
+        ipc: &Arc<IpcServer>,
+        event_tx: &broadcast::Sender<Event>,
+    ) {
+        let set = diagnostics.current();
+        debug!(
+            count = set.items.len(),
+            critical = set.has_critical(),
+            "Diagnostics changed"
+        );
+
+        // Both: the snapshot so a client connecting later is correct, the event
+        // so one already connected does not wait for the next state change.
+        let state = {
+            let mut engine = engine.lock().await;
+            engine.set_diagnostics(set.clone());
+            engine.get_state()
+        };
+        Self::broadcast(
+            ipc,
+            event_tx,
+            Event::new(EventPayload::DiagnosticsChanged(set)),
+        );
+        Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
     }
 
     #[allow(clippy::too_many_arguments)]

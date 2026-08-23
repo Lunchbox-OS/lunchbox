@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -22,12 +23,15 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -41,6 +45,9 @@ import com.armeafamily.shepherd.companion.ui.components.ReasonLines
 import com.armeafamily.shepherd.companion.ui.components.StatusBadge
 import com.armeafamily.shepherd.companion.util.Formatting
 
+/** How often the home banner re-reads the device's problems. */
+private const val HOME_DIAGNOSTIC_POLL_MS = 60_000L
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -50,8 +57,26 @@ fun HomeScreen(
     onOpenGroup: (String) -> Unit,
     onOpenControls: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenHealth: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
+    val health by vm.diagnostics.collectAsState()
+
+    // The banner has to fetch its own data. Reading `vm.diagnostics` is not
+    // enough: only the health screen refreshed it, so on a fresh launch the
+    // banner stayed invisible until the caregiver went looking for the very
+    // thing it exists to tell them about.
+    //
+    // Slower than the health screen's poll — these are conditions somebody has
+    // to go and fix, so a minute of staleness on a banner costs nothing, and
+    // this screen is composed almost the whole time the app is open.
+    LaunchedEffect(state.link) {
+        if (state.link != LinkStatus.Connected) return@LaunchedEffect
+        while (true) {
+            vm.refreshDiagnostics()
+            delay(HOME_DIAGNOSTIC_POLL_MS)
+        }
+    }
     val records by vm.repository.records.collectAsState()
     val activeId by vm.repository.activeId.collectAsState()
 
@@ -79,6 +104,15 @@ fun HomeScreen(
             if (records.isEmpty()) {
                 EmptyDevices(onAddDevice)
                 return@Column
+            }
+
+            // Critical means the configuration promises a protection the
+            // device is not providing — an activity that should be firewalled
+            // and is not, so it no longer launches. Worth interrupting the
+            // main screen for; everything milder waits on the health screen
+            // (issue #143).
+            if (health.critical.isNotEmpty()) {
+                CriticalBanner(count = health.critical.size, first = health.critical.first().message, onOpen = onOpenHealth)
             }
 
             if (records.size > 1) {
@@ -269,6 +303,34 @@ private fun EntryRow(
             if (!entry.enabled && !inSession) {
                 ReasonLines(entry.reasons)
             }
+        }
+    }
+}
+
+/**
+ * The critical-only banner (issue #143).
+ *
+ * One problem shows its message; several show a count, because three stacked
+ * messages on a phone would push the thing the caregiver actually opened the
+ * app for off the screen. Either way the detail is one tap away.
+ */
+@Composable
+private fun CriticalBanner(count: Int, first: String, onOpen: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+        ),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                if (count == 1) first else "$count problems need attention on this device",
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
+            )
+            TextButton(onClick = onOpen) { Text("Details") }
         }
     }
 }

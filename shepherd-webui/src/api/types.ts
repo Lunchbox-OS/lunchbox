@@ -50,6 +50,7 @@ export type ReasonCode =
   | { code: "manually_disabled"; until: string }
   | { code: "required_input_unavailable"; devices: string[] }
   | { code: "tokens_insufficient"; balance: Duration; required: Duration }
+  | { code: "protection_unavailable" }
   | {
       code: "group_restricted";
       group: string;
@@ -83,6 +84,10 @@ export function reasonLabel(r: ReasonCode): string {
         : "Requires an input device";
     case "tokens_insufficient":
       return "Not enough time earned yet";
+    // Deliberately vague: this is the child-facing half, and nothing they can
+    // do fixes it. The detail is the matching diagnostic on the admin side.
+    case "protection_unavailable":
+      return "Unavailable until set up";
     // Name the category, so it's clear the limit is shared rather than
     // specific to this activity.
     case "group_restricted":
@@ -220,6 +225,60 @@ export interface InternetStatusView {
   available: boolean;
 }
 
+/**
+ * An administrator-facing condition that is currently true of the device
+ * (issue #143) — a missing dependency, a protection that is not in effect.
+ *
+ * Distinct from the time-limit warnings shown to the child: those are about
+ * their session, these are about the device being misconfigured or missing
+ * something. A diagnostic is state, not an event — it is raised while the
+ * condition holds and disappears when it stops.
+ */
+export type DiagnosticCode =
+  | "firewall_unenforceable"
+  | "firewall_not_applied"
+  | "browser_policy_ignored"
+  | "yt_dlp_missing"
+  | "media_cache_disk_low"
+  | "media_library_unreadable"
+  | "no_sound_backend"
+  | "input_devices_unavailable"
+  | "ble_pairing_agent_unavailable";
+
+/** Critical means the config promises a protection the device is not providing. */
+export type DiagnosticSeverity = "critical" | "warning" | "info";
+
+/** What a diagnostic is about: the device, or one configured activity. */
+export type DiagnosticSubject =
+  | { type: "service" }
+  | { type: "entry"; entry_id: string };
+
+export interface Diagnostic {
+  code: DiagnosticCode;
+  subject: DiagnosticSubject;
+  severity: DiagnosticSeverity;
+  message: string;
+  /** What to do about it, when there is a concrete answer. */
+  remedy: string | null;
+  /** When the condition started — not when it was last checked. */
+  since: string;
+}
+
+export interface DiagnosticSet {
+  /** Sorted most severe first, then by subject, then by code. */
+  items: Diagnostic[];
+  /**
+   * Whether the daemon's cap hid anything. Must be surfaced: showing part of
+   * the problems while implying it is all of them is worse than showing none.
+   */
+  truncated: boolean;
+}
+
+/** The activity a diagnostic concerns, or null if it concerns the device. */
+export function diagnosticEntryId(d: Diagnostic): string | null {
+  return d.subject.type === "entry" ? d.subject.entry_id : null;
+}
+
 export interface ServiceStateSnapshot {
   api_version: number;
   policy_loaded: boolean;
@@ -227,6 +286,7 @@ export interface ServiceStateSnapshot {
   entry_count: number;
   entries: EntryView[];
   internet_status: InternetStatusView[];
+  diagnostics: DiagnosticSet;
 }
 
 /**

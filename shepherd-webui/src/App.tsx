@@ -18,19 +18,22 @@ import AppsIcon from "@mui/icons-material/Apps";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import SettingsIcon from "@mui/icons-material/Settings";
 import BugReportIcon from "@mui/icons-material/BugReport";
+import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EntriesPage } from "./pages/EntriesPage";
 import { UsagePage } from "./pages/UsagePage";
 import { AdminPage } from "./pages/AdminPage";
 import { WindowsPage } from "./pages/WindowsPage";
+import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 
-type Page = "dashboard" | "entries" | "usage" | "admin" | "windows";
+type Page = "dashboard" | "entries" | "usage" | "admin" | "health" | "windows";
 
 const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [
   { id: "dashboard", label: "Now", Icon: PlayArrowIcon },
   { id: "entries", label: "Activities", Icon: AppsIcon },
   { id: "usage", label: "Usage", Icon: BarChartIcon },
   { id: "admin", label: "Admin", Icon: SettingsIcon },
+  { id: "health", label: "Health", Icon: HealthAndSafetyIcon },
   { id: "windows", label: "Windows", Icon: BugReportIcon },
 ];
 
@@ -43,10 +46,13 @@ export function App() {
 
   const content = (
     <>
-      {page === "dashboard" && <DashboardPage />}
+      {page === "dashboard" && (
+        <DashboardPage onShowHealth={() => setPage("health")} />
+      )}
       {page === "entries" && <EntriesPage />}
       {page === "usage" && <UsagePage />}
       {page === "admin" && <AdminPage />}
+      {page === "health" && <DiagnosticsPage />}
       {page === "windows" && <WindowsPage />}
     </>
   );

@@ -45,6 +45,7 @@ export type RpcMethod =
   | "ping"
   | "reload_config"
   | "logout"
+  | "list_diagnostics"
   | "list_windows"
   | "act_on_window";
 

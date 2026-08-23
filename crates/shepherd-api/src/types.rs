@@ -556,6 +556,15 @@ pub enum ReasonCode {
     /// connected. `devices` lists the missing device types, sorted and
     /// deduplicated.
     RequiredInputUnavailable { devices: Vec<InputDeviceType> },
+    /// A protection this entry's configuration requires cannot be applied on
+    /// this host, so the entry does not launch (issue #143) — today, an
+    /// `[entries.firewall]` on a host where enforcement is unavailable.
+    ///
+    /// Carries no detail on purpose. This is the child-facing half: to them the
+    /// activity is simply unavailable, and nothing they can do changes it. The
+    /// administrator-facing half — which protection, why, and how to fix it —
+    /// is the matching `Diagnostic`.
+    ProtectionUnavailable,
     /// Not enough time banked on this entry's token gate (issue #8): the
     /// activity has to be earned by spending time on its source activities.
     TokensInsufficient {
@@ -694,6 +703,12 @@ pub struct ServiceStateSnapshot {
     /// Empty when no connectivity checks are configured.
     #[serde(default)]
     pub internet_status: Vec<InternetStatusView>,
+    /// Administrator-facing conditions currently true of this device (issue
+    /// #143) — a missing dependency, a protection that is not in effect. Rides
+    /// the snapshot so every client has the current set on subscribe; deltas
+    /// arrive as `EventPayload::DiagnosticsChanged`.
+    #[serde(default)]
+    pub diagnostics: crate::DiagnosticSet,
 }
 
 /// Role for authorization

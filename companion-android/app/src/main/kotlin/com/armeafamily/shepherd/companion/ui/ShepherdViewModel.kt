@@ -12,6 +12,10 @@ import com.armeafamily.shepherd.companion.domain.AdminRecord
 import com.armeafamily.shepherd.companion.domain.BrightnessInfo
 import com.armeafamily.shepherd.companion.domain.ClaimStateTag
 import com.armeafamily.shepherd.companion.domain.DailyOverride
+import com.armeafamily.shepherd.companion.domain.Diagnostic
+import com.armeafamily.shepherd.companion.domain.DiagnosticSet
+import com.armeafamily.shepherd.companion.domain.DiagnosticSeverity
+import com.armeafamily.shepherd.companion.domain.DiagnosticSubject
 import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.EventPayload
 import com.armeafamily.shepherd.companion.domain.GroupView
@@ -87,6 +91,31 @@ data class DeviceUiState(
  * screen is open: it is a maintenance view, and a list of Sway
  * containers is not worth an RPC on every connect.
  */
+/**
+ * Administrator-facing conditions on the device (issue #143).
+ *
+ * Kept apart from the entry list even though some diagnostics name an entry:
+ * an activity can be perfectly available while something about it is
+ * misconfigured, and the two answer different questions.
+ */
+data class DiagnosticsUiState(
+    val set: DiagnosticSet = DiagnosticSet(items = emptyList(), truncated = false),
+    val loading: Boolean = false,
+    /** True once a set has arrived — distinguishes "healthy" from "not asked yet". */
+    val loaded: Boolean = false,
+    val error: String? = null,
+) {
+    val items: List<Diagnostic> get() = set.items
+
+    /** Conditions where the config promises something the device is not doing. */
+    val critical: List<Diagnostic>
+        get() = set.items.filter { it.severity == DiagnosticSeverity.CRITICAL }
+
+    /** Problems belonging to one activity, for that activity's own screen. */
+    fun forEntry(entryId: String): List<Diagnostic> =
+        set.items.filter { (it.subject as? DiagnosticSubject.Entry)?.entryId == entryId }
+}
+
 data class WindowsUiState(
     val windows: List<WindowInfo> = emptyList(),
     val loading: Boolean = false,
@@ -152,6 +181,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private val _windows = MutableStateFlow(WindowsUiState())
     val windows: StateFlow<WindowsUiState> = _windows
 
+    private val _diagnostics = MutableStateFlow(DiagnosticsUiState())
+    val diagnostics: StateFlow<DiagnosticsUiState> = _diagnostics
+
     /** Default name to claim under — the phone's model. */
     val defaultPhoneName: String = Build.MODEL ?: "Android phone"
 
@@ -161,6 +193,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private var eventsJob: Job? = null
     private var pairingJob: Job? = null
     private var windowsJob: Job? = null
+    private var diagnosticsJob: Job? = null
     private var bound = false
 
     init {
@@ -228,6 +261,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // Window ids are per-compositor: acting on another box's id would
         // hit whatever container happens to hold it there.
         if (!sameDevice) _windows.value = WindowsUiState()
+        if (!sameDevice) _diagnostics.value = DiagnosticsUiState()
         conn.start()
         eventsJob = viewModelScope.launch {
             conn.events.collect { event -> applyEvent(event.payload) }
@@ -598,6 +632,38 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
      * the screen on a refresh that lands mid-reconnect would drop the
      * rows out from under a finger already reaching for "Close".
      */
+    /**
+     * Re-read what is currently wrong with the device (issue #143).
+     *
+     * A plain refresh rather than a subscription: the daemon does emit a
+     * `DiagnosticsChanged` event, but these are conditions somebody has to go
+     * and fix, so the phone showing them a few seconds late costs nothing and a
+     * poll needs no reconnect handling.
+     */
+    fun refreshDiagnostics() {
+        if (diagnosticsJob?.isActive == true) return
+        val c = client ?: run {
+            _diagnostics.update { it.copy(loading = false, error = "Not connected.") }
+            return
+        }
+        _diagnostics.update { it.copy(loading = true) }
+        diagnosticsJob = viewModelScope.launch {
+            try {
+                val set = c.listDiagnostics()
+                _diagnostics.update {
+                    it.copy(set = set, loading = false, loaded = true, error = null)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _diagnostics.update {
+                    it.copy(loading = false, error = why ?: "Couldn't read device health.")
+                }
+            }
+        }
+    }
+
     fun refreshWindows() {
         if (windowsJob?.isActive == true) return
         val c = client ?: run {
