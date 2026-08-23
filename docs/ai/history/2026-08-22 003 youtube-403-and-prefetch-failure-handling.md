@@ -149,3 +149,13 @@ videos disappearing is normal and there is nothing anyone can do about it.
 
 Checked against the real playlist from the report: 93 lines, one null title,
 92 entries parsed, where before it was a hard failure.
+
+## On Android
+
+Both changes are shared with `shepherd-media-android`, which is a separate
+check: it neither uses mpv's `ytdl_hook` nor the host's yt-dlp, but passes
+`YOUTUBE_EXTRACTOR_ARGS` to youtubedl-android's own bundled copy, refreshed from
+GitHub at startup. Confirmed on a Pixel 10a — the ordinary upload and the DRM
+"full episode" from the table above both resolve and play, and a live playlist
+fetch exercised `parse_flat_playlist` on-device. See
+`2026-08-22 004 android-on-device-validation-of-the-scored-cache.md`.

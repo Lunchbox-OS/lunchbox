@@ -679,6 +679,10 @@ The two-class ordering itself still cannot be exercised through the app, because
 nothing on Android produces an unwatched file until `CacheMode::QueueAll` is
 wired; it is covered by the on-device unit tests instead.
 
+The commits after this pass replaced that two-class ordering with a score and
+added a second marker; they were validated the same way in
+`2026-08-22 004 android-on-device-validation-of-the-scored-cache.md`.
+
 ## Where issue #127 stands
 
 All three phases are built. The kind is real, the cache is shared and correctly

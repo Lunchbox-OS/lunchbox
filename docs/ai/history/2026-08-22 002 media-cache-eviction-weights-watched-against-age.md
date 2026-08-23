@@ -216,3 +216,9 @@ list nothing is walking; `first_seen` falls back to the file's mtime with the
 same floor rule. Its "newest unwatched evicted first" test became "oldest
 arrival first", which is the correct behaviour for a cache that does not
 prefetch and was only ever inherited from the shared ordering.
+
+Validated on hardware afterwards — see
+`2026-08-22 004 android-on-device-validation-of-the-scored-cache.md`. The
+erosion itself is only reachable from the on-device unit tests: the app cannot
+produce an unwatched file to compete against a long-ago-watched one until
+`CacheMode::QueueAll` prefetches.
