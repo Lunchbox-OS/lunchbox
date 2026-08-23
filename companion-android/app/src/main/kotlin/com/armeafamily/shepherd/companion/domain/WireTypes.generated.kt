@@ -306,6 +306,14 @@ enum class DiagnosticCode {
      */
     @SerialName("no_sound_backend") NO_SOUND_BACKEND,
     /**
+     * The sound backend is present but its device topology could not be read,
+     * so which output is selected and which are plugged in are both unknown.
+     * Distinct from [`Self::NoSoundBackend`]: there *is* a backend, and the
+     * per-output volume limits are running on the last state seen rather than
+     * on what is true now.
+     */
+    @SerialName("audio_topology_unreadable") AUDIO_TOPOLOGY_UNREADABLE,
+    /**
      * No readable input devices, so input-gated entries cannot be evaluated.
      */
     @SerialName("input_devices_unavailable") INPUT_DEVICES_UNAVAILABLE,

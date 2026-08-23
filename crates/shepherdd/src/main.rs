@@ -356,6 +356,14 @@ impl Service {
         // auto-brightness poll loop can call the inherent
         // `auto_brightness_tick`, then shared with the transports as
         // `Arc<dyn ManagementService>`.
+        // Observed diagnostics (issue #143) are raised on workers and in crates
+        // with no access to the engine or the IPC server, so they signal here
+        // and the main loop republishes. Created before the management service
+        // and the BLE server, both of which are raise sites.
+        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
+        let diagnostic_publisher =
+            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
+
         let svc_concrete = {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();
@@ -377,6 +385,9 @@ impl Service {
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
                 display: display_svc.clone(),
                 last_audio_state: Arc::new(tokio::sync::Mutex::new(None)),
+                diagnostics: Some(
+                    Arc::new(diagnostic_publisher.clone()) as Arc<dyn shepherd_api::DiagnosticSink>
+                ),
             })
         };
         let svc: Arc<dyn ManagementService> = svc_concrete.clone();
@@ -442,14 +453,6 @@ impl Service {
         // handed to HttpServer as the source of unified admin bearer
         // tokens. If BLE isn't configured, HTTP falls back to its
         // static-token-only auth.
-        // Observed diagnostics (issue #143) are raised on workers and in crates
-        // with no access to the engine or the IPC server, so they signal here
-        // and the main loop republishes. Created before the BLE server, which
-        // is one of those raise sites.
-        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
-        let diagnostic_publisher =
-            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
-
         let (ble_handle, admin_authority): (
             Option<tokio::task::JoinHandle<()>>,
             Option<Arc<dyn shepherd_management::AdminAuthority>>,

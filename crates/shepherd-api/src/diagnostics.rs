@@ -58,6 +58,12 @@ pub enum DiagnosticCode {
     MediaLibraryUnreadable,
     /// No sound backend was detected; volume control does nothing.
     NoSoundBackend,
+    /// The sound backend is present but its device topology could not be read,
+    /// so which output is selected and which are plugged in are both unknown.
+    /// Distinct from [`Self::NoSoundBackend`]: there *is* a backend, and the
+    /// per-output volume limits are running on the last state seen rather than
+    /// on what is true now.
+    AudioTopologyUnreadable,
     /// No readable input devices, so input-gated entries cannot be evaluated.
     InputDevicesUnavailable,
     /// The BlueZ pairing agent could not be registered; a new phone will not be

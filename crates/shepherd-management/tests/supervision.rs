@@ -146,6 +146,7 @@ fn harness() -> Harness {
         hidpi,
         display: Arc::new(NoOpDisplayController),
         last_audio_state: Arc::new(Mutex::new(None)),
+        diagnostics: None,
     };
 
     Harness {

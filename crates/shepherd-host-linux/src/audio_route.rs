@@ -66,9 +66,15 @@ impl Default for PipeWireAudioRouter {
 #[async_trait]
 impl AudioRouter for PipeWireAudioRouter {
     async fn route_to_external(&self) {
-        let Some(topo) = audio::dump().await else {
-            warn!("pw-dump unavailable; skipping audio routing");
-            return;
+        // Routing is best-effort by design, so both failure modes end the same
+        // way here — but say which one it was, since "not installed" and "the
+        // read failed" call for very different follow-up.
+        let topo = match audio::dump().await {
+            Ok(topo) => topo,
+            Err(e) => {
+                warn!(error = %e, "Could not read the audio topology; skipping audio routing");
+                return;
+            }
         };
         let (sinks, default_name) = (topo.sinks, topo.default_sink);
         let Some(external) = select_external_sink(&sinks) else {

@@ -253,6 +253,7 @@ fn make_app_with_admin_and_policy(
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
         display: Arc::new(shepherd_host_api::NoOpDisplayController),
         last_audio_state: Arc::new(tokio::sync::Mutex::new(None)),
+        diagnostics: None,
     });
     let state = AppState { svc };
     handlers::router(

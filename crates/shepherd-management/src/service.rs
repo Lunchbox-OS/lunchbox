@@ -4,7 +4,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, DiagnosticSet,
+    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, Diagnostic,
+    DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject,
     DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
     ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat,
     VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
@@ -247,6 +248,10 @@ pub struct DefaultManagementService {
     /// broadcasts on a real change. `None` until the first tick establishes a
     /// baseline.
     pub last_audio_state: Arc<Mutex<Option<ObservedAudioState>>>,
+    /// Where to report conditions a parent should see. `None` in tests and on
+    /// any embedding that does not surface diagnostics; raising must never be
+    /// load-bearing for the operation that noticed the problem.
+    pub diagnostics: Option<Arc<dyn DiagnosticSink>>,
 }
 
 #[async_trait]
@@ -747,18 +752,33 @@ impl ManagementService for DefaultManagementService {
         // One snapshot, not a status read plus two separate identity reads: this
         // is on the hot path — every client refetches it on every event — and
         // the three reads could disagree with each other besides.
-        let snap = self
-            .volume
-            .observe()
-            .await
-            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        let (status, active) = match self.volume.observe().await {
+            Ok(snap) => (snap.status, snap.active),
+            // The topology could not be read, but the reading itself still can
+            // be and is still true. Failing the whole call would blank the
+            // volume on every surface — including the HUD — which is a worse
+            // answer than the right number attributed to the output that was
+            // selected a moment ago. Naming that output also keeps the
+            // restriction lookup below off the global-limit fallback.
+            Err(e) => {
+                warn!(error = %e, "Could not read the audio topology; reporting the last output seen");
+                let status = self
+                    .volume
+                    .get_status()
+                    .await
+                    .map_err(|e| ManagementError::Internal(e.to_string()))?;
+                (status, self.last_seen_active_output().await)
+            }
+        };
         Ok(VolumeInfo {
-            percent: snap.status.percent,
-            muted: snap.status.muted,
+            percent: status.percent,
+            muted: status.muted,
             available: self.volume.capabilities().available,
             backend: self.volume.capabilities().backend.clone(),
-            restrictions: self.volume_restrictions_for(snap.active_key()).await,
-            output: snap.active,
+            restrictions: self
+                .volume_restrictions_for(active.as_ref().map(|o| o.key.as_str()))
+                .await,
+            output: active,
         })
     }
 
@@ -822,23 +842,55 @@ impl ManagementService for DefaultManagementService {
     // -------------------------------------------------- per-output limits
 
     async fn list_audio_outputs(&self) -> ManagementResult<Vec<AudioOutputRecord>> {
+        let observed = self.volume.observe().await;
         // Record everything that is plugged in, not just whatever is selected.
         // A device has to be on this list before a parent can choose it, and
         // waiting for it to become the default first would mean the one device
         // you want to switch away from is the only one you can see.
-        let snap = self.volume.observe().await.unwrap_or_default();
-        for output in &snap.outputs {
-            if let Err(e) = self.store.record_audio_output_seen(output) {
-                warn!(error = %e, key = %output.key, "Failed to record an audio output");
+        if let Ok(snap) = &observed {
+            for output in &snap.outputs {
+                if let Err(e) = self.store.record_audio_output_seen(output) {
+                    warn!(error = %e, key = %output.key, "Failed to record an audio output");
+                }
             }
         }
         let mut rows = self
             .store
             .list_audio_outputs()
             .map_err(|e| ManagementError::Internal(e.to_string()))?;
-        for row in &mut rows {
-            row.active = Some(row.output.key.as_str()) == snap.active_key();
-            row.available = snap.outputs.iter().any(|o| o.key == row.output.key);
+        match &observed {
+            Ok(snap) => {
+                for row in &mut rows {
+                    row.active = Some(row.output.key.as_str()) == snap.active_key();
+                    row.available = snap.outputs.iter().any(|o| o.key == row.output.key);
+                }
+            }
+            // The read failed. Answering with the empty topology would mark
+            // every row `available: false`, which both UIs render as "Not
+            // connected" with the switch disabled — a transient fault shown to
+            // the parent as a hardware fact, on the one screen they would use
+            // to fix it. Report the last liveness actually observed instead.
+            Err(e) => {
+                warn!(error = %e, "Could not read the audio topology; reporting the last liveness seen");
+                let last = self.last_audio_state.lock().await;
+                for row in &mut rows {
+                    match last.as_ref() {
+                        Some(seen) => {
+                            row.active =
+                                seen.output_key.as_deref() == Some(row.output.key.as_str());
+                            row.available = seen.present_keys.iter().any(|k| k == &row.output.key);
+                        }
+                        // No successful read has ever happened. Offer the choice
+                        // and let the attempt fail loudly rather than greying out
+                        // every device, which is what `available` documents as
+                        // the reason for its default.
+                        None => {
+                            row.active = false;
+                            row.available = true;
+                        }
+                    }
+                }
+            }
         }
         Ok(rows)
     }
@@ -1161,8 +1213,27 @@ impl DefaultManagementService {
     }
 
     /// Restrictions for whatever output is active right now.
+    ///
+    /// A failed read must not collapse to `None` here.
+    /// [`Self::volume_restrictions_for`] answers `None` with the *global* limit,
+    /// so a transient `pw-dump` failure would quietly raise the ceiling on an
+    /// output the parent had capped lower — headphones pinned at 30 would accept
+    /// 80 for as long as the fault lasted. A cap that relaxes itself under a
+    /// fault is worse than no cap, so fall back to the last output actually
+    /// observed: stale, but never more permissive than what was true while we
+    /// could still see.
     async fn volume_restrictions(&self) -> VolumeRestrictions {
-        let key = self.volume.current_output().await.map(|o| o.key);
+        let key = match self.volume.observe().await {
+            Ok(snap) => snap.active.map(|o| o.key),
+            Err(e) => {
+                warn!(error = %e, "Could not read the active audio output; keeping the last one seen");
+                self.last_audio_state
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|seen| seen.output_key.clone())
+            }
+        };
         self.volume_restrictions_for(key.as_deref()).await
     }
 
@@ -1290,20 +1361,36 @@ impl DefaultManagementService {
     /// most of the point of a headphone limit. Called when the active output
     /// changes and when a cap is set.
     async fn enforce_volume_ceiling(&self) {
-        let Ok(snap) = self.volume.observe().await else {
-            return;
+        // Enforcement is the last place that should give up on a failed read:
+        // "I cannot see which output this is" must not become "so leave it
+        // loud". The reading is still available, and the last output seen is a
+        // better guess than none — it can only make the ceiling stricter.
+        let (percent, key) = match self.volume.observe().await {
+            Ok(snap) => (snap.status.percent, snap.active_key().map(str::to_owned)),
+            Err(_) => {
+                let Ok(status) = self.volume.get_status().await else {
+                    return;
+                };
+                let key = self
+                    .last_audio_state
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|seen| seen.output_key.clone());
+                (status.percent, key)
+            }
         };
-        let restrictions = self.volume_restrictions_for(snap.active_key()).await;
+        let restrictions = self.volume_restrictions_for(key.as_deref()).await;
         let Some(max) = restrictions.max_volume else {
             return;
         };
-        if snap.status.percent <= max {
+        if percent <= max {
             return;
         }
         info!(
-            from = snap.status.percent,
+            from = percent,
             to = max,
-            output = snap.active_key().unwrap_or("?"),
+            output = key.as_deref().unwrap_or("?"),
             "Volume above the limit for this output; turning it down"
         );
         if let Err(e) = self.volume.set_volume(max).await {
@@ -1325,8 +1412,33 @@ impl DefaultManagementService {
     ///
     /// Broadcasts only on an actual change, so a quiet host produces no events.
     pub async fn audio_watch_tick(&self) {
-        let Ok(snap) = self.volume.observe().await else {
-            return;
+        let snap = match self.volume.observe().await {
+            Ok(snap) => {
+                self.clear_diagnostic(DiagnosticCode::AudioTopologyUnreadable);
+                snap
+            }
+            // Skip the tick rather than baseline an empty topology, and say so
+            // where a parent can see it: while this holds, the per-output caps
+            // and both device lists are running on the last state observed.
+            // Clears itself on the next tick that reads successfully.
+            Err(e) => {
+                warn!(error = %e, "Could not read the audio topology");
+                self.raise_diagnostic(Diagnostic {
+                    code: DiagnosticCode::AudioTopologyUnreadable,
+                    subject: DiagnosticSubject::Service,
+                    severity: DiagnosticSeverity::Warning,
+                    // A sentence for a parent, not an error chain: the raw
+                    // cause is already on the log line above.
+                    message: "The audio devices could not be read, so volume limits are \
+                              using the last state seen"
+                        .to_string(),
+                    remedy: Some(
+                        "Check that PipeWire is running: systemctl --user status pipewire".into(),
+                    ),
+                    since: shepherd_util::now(),
+                });
+                return;
+            }
         };
 
         let mut last = self.last_audio_state.lock().await;
@@ -1369,6 +1481,41 @@ impl DefaultManagementService {
         // surface to all three clients and tell them nothing new.
         if let Err(e) = self.broadcast_volume_change().await {
             warn!(error = %e, "Failed to broadcast observed audio change");
+        }
+    }
+
+    /// The output we last saw in use, rebuilt from the store's row for it.
+    ///
+    /// Used when the topology cannot be read, so an answer names the output that
+    /// was selected a moment ago instead of claiming there is none. The row is
+    /// where the description and kind already live, so nothing has to be
+    /// remembered twice.
+    async fn last_seen_active_output(&self) -> Option<shepherd_api::AudioOutput> {
+        let key = self
+            .last_audio_state
+            .lock()
+            .await
+            .as_ref()?
+            .output_key
+            .clone()?;
+        self.store
+            .get_audio_output(&key)
+            .ok()
+            .flatten()
+            .map(|row| row.output)
+    }
+
+    /// Report a condition, if anything is listening. Never fails the caller.
+    fn raise_diagnostic(&self, diagnostic: Diagnostic) {
+        if let Some(sink) = &self.diagnostics {
+            sink.raise(diagnostic);
+        }
+    }
+
+    /// Withdraw a service-scoped condition. Cheap enough to call every tick.
+    fn clear_diagnostic(&self, code: DiagnosticCode) {
+        if let Some(sink) = &self.diagnostics {
+            sink.clear(code, &DiagnosticSubject::Service);
         }
     }
 

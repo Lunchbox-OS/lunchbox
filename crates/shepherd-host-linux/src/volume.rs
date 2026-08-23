@@ -372,7 +372,13 @@ impl VolumeController for LinuxVolumeController {
         if self.backend != Some(SoundBackend::PipeWire) {
             return None;
         }
-        let topo = audio::dump().await?;
+        // This returns `Option`, so a failed read cannot be told apart from "no
+        // active output" by the caller. Anything that must not confuse the two
+        // (the restriction lookup, above all) goes through `observe` instead.
+        let topo = audio::dump()
+            .await
+            .inspect_err(|e| warn!(error = %e, "Could not read the audio topology"))
+            .ok()?;
         topo.current_output().map(to_api_output)
     }
 
@@ -384,7 +390,7 @@ impl VolumeController for LinuxVolumeController {
         }
         let topo = audio::dump()
             .await
-            .ok_or_else(|| VolumeError::Backend("pw-dump is unavailable".into()))?;
+            .map_err(|e| VolumeError::Backend(format!("could not read the audio topology: {e}")))?;
         let output = topo.output_by_key(output_key).ok_or_else(|| {
             // A remembered row for a device that is not plugged in right now
             // lands here, which is the common case and not an internal error.
@@ -419,12 +425,15 @@ impl VolumeController for LinuxVolumeController {
                 ..Default::default()
             });
         }
-        let Some(topo) = audio::dump().await else {
-            return Ok(AudioSnapshot {
-                status: self.get_status().await?,
-                ..Default::default()
-            });
-        };
+        // The backend was detected as PipeWire, so a read that fails is a
+        // failure, not a machine with no sinks. Reporting the empty snapshot
+        // here is what made a transient `pw-dump` failure indistinguishable
+        // from "every device was unplugged at once": it relaxed the active
+        // output's cap back to the global one and greyed out every row in both
+        // UIs. Fail instead, and let each caller decide what it knows.
+        let topo = audio::dump()
+            .await
+            .map_err(|e| VolumeError::Backend(format!("could not read the audio topology: {e}")))?;
         // `usable` is false only when jack detection explicitly says nothing is
         // plugged into the port; cards without jack detection report "unknown",
         // which has to count as usable or every output on such a host vanishes.

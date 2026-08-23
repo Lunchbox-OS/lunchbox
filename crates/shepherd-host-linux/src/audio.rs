@@ -380,14 +380,44 @@ pub fn parse_pw_dump(raw: &[u8]) -> AudioTopology {
     }
 }
 
-/// Run `pw-dump` and parse it. `None` when the tool is missing or fails, which is
-/// the normal case on a non-PipeWire host.
-pub async fn dump() -> Option<AudioTopology> {
+/// Why a `pw-dump` read produced no topology.
+///
+/// The two cases have to stay apart. Collapsing them is what let a failed read
+/// look exactly like a host with no sinks: the caller cannot tell "there is no
+/// PipeWire here" from "PipeWire is here and I could not read it", and the
+/// second one must never be answered with an empty device list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpError {
+    /// `pw-dump` could not be spawned — it is not installed. Expected on a
+    /// non-PipeWire host, where it says nothing is wrong.
+    Unavailable,
+    /// `pw-dump` ran and exited non-zero. On a host already detected as
+    /// PipeWire this is a real failure to read, not an absence of devices.
+    Failed,
+}
+
+impl std::fmt::Display for DumpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(f, "pw-dump is not installed"),
+            Self::Failed => write!(f, "pw-dump exited non-zero"),
+        }
+    }
+}
+
+/// Run `pw-dump` and parse it.
+///
+/// Returns [`DumpError`] rather than `None` so a caller on a PipeWire host can
+/// refuse to treat a failed read as an empty topology.
+pub async fn dump() -> Result<AudioTopology, DumpError> {
     let out = tokio::process::Command::new("pw-dump")
         .output()
         .await
-        .ok()?;
-    out.status.success().then(|| parse_pw_dump(&out.stdout))
+        .map_err(|_| DumpError::Unavailable)?;
+    if !out.status.success() {
+        return Err(DumpError::Failed);
+    }
+    Ok(parse_pw_dump(&out.stdout))
 }
 
 /// Point PipeWire's default sink at a node. `id` must come from the same dump it
@@ -651,8 +681,9 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a running PipeWire"]
     async fn live_pw_dump_enumerates_outputs() {
-        let Some(topo) = dump().await else {
-            panic!("pw-dump unavailable");
+        let topo = match dump().await {
+            Ok(topo) => topo,
+            Err(e) => panic!("could not read the audio topology: {e}"),
         };
         assert!(!topo.outputs.is_empty(), "no outputs found");
         for o in &topo.outputs {

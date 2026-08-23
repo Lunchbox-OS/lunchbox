@@ -281,6 +281,7 @@ export type DiagnosticCode =
   | "media_cache_disk_low"
   | "media_library_unreadable"
   | "no_sound_backend"
+  | "audio_topology_unreadable"
   | "input_devices_unavailable"
   | "ble_pairing_agent_unavailable";
 

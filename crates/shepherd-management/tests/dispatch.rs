@@ -25,7 +25,7 @@ use shepherd_host_api::{
 };
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
-    RpcDispatchError, dispatch_json,
+    ManagementService, RpcDispatchError, dispatch_json,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
@@ -49,6 +49,9 @@ struct MockVolume {
     /// the only things `select_output` will move to. Distinct from the rows the
     /// store remembers, which outlive the hardware.
     present: std::sync::Mutex<Vec<shepherd_api::AudioOutput>>,
+    /// When false, reads fail the way a `pw-dump` that will not run fails.
+    /// Distinct from having no devices — which is the whole point.
+    readable: std::sync::Mutex<bool>,
 }
 
 impl MockVolume {
@@ -66,7 +69,17 @@ impl MockVolume {
             }),
             output: std::sync::Mutex::new(None),
             present: std::sync::Mutex::new(Vec::new()),
+            readable: std::sync::Mutex::new(true),
         }
+    }
+
+    /// Make topology reads fail, leaving the devices themselves untouched.
+    fn break_topology(&self) {
+        *self.readable.lock().unwrap() = false;
+    }
+
+    fn fix_topology(&self) {
+        *self.readable.lock().unwrap() = true;
     }
 
     /// Connect a device without selecting it.
@@ -121,6 +134,9 @@ impl VolumeController for MockVolume {
     }
 
     async fn current_output(&self) -> Option<shepherd_api::AudioOutput> {
+        if !*self.readable.lock().unwrap() {
+            return None;
+        }
         self.output.lock().unwrap().clone()
     }
 
@@ -128,6 +144,11 @@ impl VolumeController for MockVolume {
     /// selected, and everything plugged in — the shape a real backend gets from
     /// a single `pw-dump`.
     async fn observe(&self) -> VolumeResult<shepherd_host_api::AudioSnapshot> {
+        if !*self.readable.lock().unwrap() {
+            return Err(shepherd_host_api::VolumeError::Backend(
+                "could not read the audio topology".into(),
+            ));
+        }
         Ok(shepherd_host_api::AudioSnapshot {
             status: self.status.lock().unwrap().clone(),
             active: self.output.lock().unwrap().clone(),
@@ -348,6 +369,7 @@ fn make_svc_full(
         hidpi: Arc::new(NoOpHidpiController),
         display: Arc::new(NoOpDisplayController),
         last_audio_state: Arc::new(Mutex::new(None)),
+        diagnostics: None,
     }
 }
 
@@ -1139,6 +1161,151 @@ async fn audio_watch_reports_a_sink_switch_at_an_unchanged_volume() {
             false,
             Some("alsa_card.pci-0000_00_1b.0:output:analog-output-headphones".into())
         ))
+    );
+}
+
+/// Records raised/cleared diagnostics so a test can assert on the condition a
+/// parent would actually see.
+#[derive(Default)]
+struct RecordingSink {
+    raised: std::sync::Mutex<Vec<shepherd_api::DiagnosticCode>>,
+    cleared: std::sync::Mutex<Vec<shepherd_api::DiagnosticCode>>,
+}
+
+impl shepherd_api::DiagnosticSink for RecordingSink {
+    fn raise(&self, diagnostic: shepherd_api::Diagnostic) {
+        self.raised.lock().unwrap().push(diagnostic.code);
+    }
+    fn clear(&self, code: shepherd_api::DiagnosticCode, _s: &shepherd_api::DiagnosticSubject) {
+        self.cleared.lock().unwrap().push(code);
+    }
+}
+
+/// A cap must not relax itself because we briefly could not see.
+///
+/// `volume_restrictions_for(None)` answers with the global limit, so before this
+/// fix a failed `pw-dump` dropped the active output's own ceiling and let the
+/// volume go to the global maximum for as long as the fault lasted.
+#[tokio::test]
+async fn a_failed_topology_read_does_not_relax_a_per_output_cap() {
+    let cfg = temp_config();
+    let mut policy = test_policy();
+    policy.volume = VolumePolicy {
+        max_volume: Some(80),
+        min_volume: None,
+        allow_mute: true,
+        allow_change: true,
+    };
+    let (svc, vol) = make_svc_with_volume(policy, cfg.path().to_path_buf());
+
+    let cans = output("card:output:analog-output-headphones", "Headphones");
+    vol.plug_in(cans.clone());
+    *vol.output.lock().unwrap() = Some(cans.clone());
+    svc.audio_watch_tick().await; // establishes what we last saw
+    svc.set_audio_output_limits(cans.key.clone(), Some(30), None)
+        .await
+        .expect("cap accepted");
+
+    vol.break_topology();
+    let info = svc.set_volume(80).await.expect("set_volume answered");
+
+    assert_eq!(
+        info.percent, 30,
+        "a failed read must not raise the headphones' ceiling to the global 80"
+    );
+    assert_eq!(vol.status.lock().unwrap().percent, 30);
+}
+
+/// The parent's device list must not turn into "nothing is plugged in" because
+/// one read failed — that is the screen they would use to fix it.
+#[tokio::test]
+async fn a_failed_topology_read_does_not_report_every_device_as_disconnected() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+
+    let speakers = output("card:output:speaker", "Speakers");
+    let cans = output("card:output:analog-output-headphones", "Headphones");
+    vol.plug_in(speakers.clone());
+    vol.plug_in(cans.clone());
+    *vol.output.lock().unwrap() = Some(cans.clone());
+    svc.audio_watch_tick().await;
+    svc.list_audio_outputs().await.expect("rows recorded");
+
+    vol.break_topology();
+    let rows = svc.list_audio_outputs().await.expect("rows still answered");
+
+    assert_eq!(rows.len(), 2, "the stored rows survive a failed read");
+    assert!(
+        rows.iter().all(|r| r.available),
+        "a transient read failure must not render as every device being unplugged"
+    );
+    let active: Vec<_> = rows
+        .iter()
+        .filter(|r| r.active)
+        .map(|r| &r.output.key)
+        .collect();
+    assert_eq!(
+        active,
+        vec![&cans.key],
+        "the last output known to be in use stays marked, rather than nothing being in use"
+    );
+}
+
+/// A failed read must not become a baseline, or recovery looks like a change.
+#[tokio::test]
+async fn a_failed_topology_read_is_not_mistaken_for_an_empty_topology() {
+    let cfg = temp_config();
+    let (svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    vol.plug_in(output("card:output:speaker", "Speakers"));
+    *vol.output.lock().unwrap() = Some(output("card:output:speaker", "Speakers"));
+    svc.audio_watch_tick().await; // baseline
+    let mut rx = svc.event_tx.subscribe();
+
+    vol.break_topology();
+    svc.audio_watch_tick().await;
+    assert_eq!(
+        next_volume_event(&mut rx),
+        None,
+        "a failed read is not news about the devices"
+    );
+
+    // Nothing actually changed while we could not see, so coming back must be
+    // silent too. Baselining the empty snapshot would make this a change.
+    vol.fix_topology();
+    svc.audio_watch_tick().await;
+    assert_eq!(
+        next_volume_event(&mut rx),
+        None,
+        "recovering from a failed read is not a device change either"
+    );
+}
+
+/// The condition is reported while it holds and withdrawn as soon as it does not.
+#[tokio::test]
+async fn a_failed_topology_read_is_reported_to_the_parent_and_clears_itself() {
+    let cfg = temp_config();
+    let (mut svc, vol) = make_svc_with_volume(test_policy(), cfg.path().to_path_buf());
+    let sink = Arc::new(RecordingSink::default());
+    svc.diagnostics = Some(sink.clone() as Arc<dyn shepherd_api::DiagnosticSink>);
+
+    vol.break_topology();
+    svc.audio_watch_tick().await;
+    assert!(
+        sink.raised
+            .lock()
+            .unwrap()
+            .contains(&shepherd_api::DiagnosticCode::AudioTopologyUnreadable),
+        "the parent is told the audio devices cannot be read"
+    );
+
+    vol.fix_topology();
+    svc.audio_watch_tick().await;
+    assert!(
+        sink.cleared
+            .lock()
+            .unwrap()
+            .contains(&shepherd_api::DiagnosticCode::AudioTopologyUnreadable),
+        "and the condition withdraws itself once a read succeeds"
     );
 }
 
