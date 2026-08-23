@@ -52,8 +52,7 @@ media URLs with HTTP 403 partway through the transfer. The setting inverted:
 
 So it preserved only the edge case it was added for and broke everything else.
 Pre-existing on `main`, and shared with mpv's `ytdl_hook` and the Android stream
-resolver, so playback of ordinary YouTube videos was very likely broken too —
-not something this branch introduced, but something it surfaced.
+resolver — not something this branch introduced, but something it surfaced.
 
 Updating yt-dlp (2026.07.04 → 2026.08.19) was worth doing and was **not** the
 fix; the 403 reproduced on the new version.
@@ -76,6 +75,26 @@ Verified on both, resolution and full download:
 The general lesson is in the constant's doc comment now: pinning a single
 non-default player client bets the common case on one client's continued good
 behaviour. Adding to the defaults keeps the fallback without taking that bet.
+
+### Playback was broken too, and is fixed
+
+The download path and mpv's `ytdl_hook` share the constant, so the streaming
+path — what plays when an item is *not* cached — was checked in the headless dev
+session against a fixture with `prefetch = false` and an empty cache, on an
+ordinary (non-DRM) YouTube upload.
+
+- **New value:** `STARTED_PLAYBACK item=… source=youtube`, decoded frames on the
+  virtual output, audio confirmed by the user, and the cache directory still
+  holding no video — so it genuinely streamed rather than quietly playing a
+  cached file.
+- **Old value, same fixture:** `STARTED_PLAYBACK` followed immediately by
+  `ERROR item=… message=Raw(-16)` and `RETURNED_TO_MENU reason=error`.
+
+So the same 403 that failed every prefetch also killed playback of any video
+that was not already cached, which on a fresh device is all of them. mpv's
+length-prefix quoting of the value (`%<len>%<value>`, so its key/value parser
+does not split on the comma between clients) computes the length from the
+constant, so the shorter value needed no change there.
 
 ## Three defects the incident exposed
 
