@@ -22,7 +22,7 @@ use shepherd_host_api::{
 };
 use shepherd_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxVolumeController,
-    PipeWireAudioRouter, SwaymsgBackend,
+    PipeWireAudioRouter, SwayIpcBackend,
 };
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
@@ -233,6 +233,21 @@ impl Service {
         // and the OS-signal listener task all observe it.
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
+        // Observed diagnostics (issue #143) are raised on workers and in crates
+        // with no access to the engine or the IPC server, so they signal here
+        // and the main loop republishes. Created before every raise site: the
+        // host adapter's monitor below, and the management service and BLE
+        // server further down.
+        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
+        let diagnostic_publisher =
+            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
+
+        // The host's sweep raises `CompositorUnreachable` when it cannot read
+        // the window list, which would otherwise look exactly like an empty
+        // screen (issue #147).
+        self.host
+            .set_diagnostics(Arc::new(diagnostic_publisher.clone()));
+
         // Start host process monitor
         let _monitor_handle = self.host.start_monitor();
 
@@ -282,7 +297,7 @@ impl Service {
             Option<Arc<DisplayManager>>,
         ) = if display_cfg.docking_enabled {
             let mgr = Arc::new(DisplayManager::new(
-                Arc::new(SwaymsgBackend),
+                Arc::new(SwayIpcBackend),
                 Arc::new(WlMirrorLauncher::new()),
                 Arc::new(PipeWireAudioRouter::new()),
                 display_cfg.mirror_audio,
@@ -356,14 +371,6 @@ impl Service {
         // auto-brightness poll loop can call the inherent
         // `auto_brightness_tick`, then shared with the transports as
         // `Arc<dyn ManagementService>`.
-        // Observed diagnostics (issue #143) are raised on workers and in crates
-        // with no access to the engine or the IPC server, so they signal here
-        // and the main loop republishes. Created before the management service
-        // and the BLE server, both of which are raise sites.
-        let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
-        let diagnostic_publisher =
-            diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
-
         let svc_concrete = {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();

@@ -1,10 +1,14 @@
 //! Sway compositor helpers
 //!
-//! Today this is a thin wrapper around `swaymsg -t get_tree` that flattens
-//! the tree into a list of [`WindowInfo`] for the debug endpoint. We shell
-//! out to `swaymsg` rather than speak the IPC socket directly because the
-//! rest of the adapter already does this (`swaymsg exit` in `logout`) and
-//! the tree query happens infrequently and off the hot path.
+//! Queries and commands over the compositor's IPC socket, via
+//! [`crate::sway_ipc`]. This used to spawn a `swaymsg` subprocess per call,
+//! which stopped being defensible once `list_windows` moved onto the
+//! supervision path: the escape and orphan sweeps read the tree every two
+//! seconds for the whole uptime of the daemon (issue #147).
+//!
+//! The parsing below (`parse_outputs`, `parse_displays`, `walk`) is
+//! deliberately separate from the transport and takes bytes, so it stays
+//! testable against literals without a compositor.
 //!
 //! The scratchpad in sway is a hidden pseudo-workspace named `__i3_scratch`.
 //! Windows moved there with `move scratchpad` (see `sway.conf` for the
@@ -92,9 +96,9 @@ impl DisplayInfo {
     }
 }
 
-/// Sway returns a JSON array of `{success, error?}` objects for run_command
-/// requests. Exit status is 0 even when the command failed against the tree,
-/// so we have to inspect the response.
+/// Sway returns a JSON array of `{success, error?}` objects for `RUN_COMMAND`
+/// requests. A command that failed against the tree is reported here and
+/// nowhere else, so every reply is inspected — see [`run_command`].
 #[derive(Debug, Deserialize)]
 struct CommandReply {
     success: bool,
@@ -131,31 +135,53 @@ struct WindowProperties {
     class: Option<String>,
 }
 
-/// Run a single `swaymsg <cmd>` and check its JSON reply. Sway exits 0 even
-/// when a command fails against the tree, so we have to inspect each reply.
+/// Run one sway command and check its reply.
+///
+/// A `RUN_COMMAND` reply is an array of `{success, error?}` — sway reports a
+/// command that failed against the tree in the payload, not in any status. This
+/// is the single place that checks it, which is what the `swaymsg` era could
+/// not have: there, every caller had to remember to re-inspect stdout.
 async fn run_command(cmd: &str) -> HostResult<()> {
-    let output = tokio::process::Command::new("swaymsg")
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HostError::Internal(format!(
-            "swaymsg exited non-zero: {stderr}"
-        )));
-    }
-    let replies: Vec<CommandReply> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg reply: {e}")))?;
+    let body = crate::sway_ipc::client()
+        .request(crate::sway_ipc::RUN_COMMAND, cmd.as_bytes())
+        .await?;
+    check_command_replies(cmd, &body)
+}
+
+/// Inspect a `RUN_COMMAND` reply array and turn any failure into an error.
+fn check_command_replies(cmd: &str, body: &[u8]) -> HostResult<()> {
+    let replies: Vec<CommandReply> = serde_json::from_slice(body)
+        .map_err(|e| HostError::Internal(format!("failed to parse sway's command reply: {e}")))?;
     for reply in replies {
         if !reply.success {
             let err = reply.error.unwrap_or_else(|| "unknown sway error".into());
-            return Err(HostError::Internal(format!(
-                "swaymsg `{cmd}` failed: {err}"
-            )));
+            return Err(HostError::Internal(format!("sway `{cmd}` failed: {err}")));
         }
     }
     Ok(())
+}
+
+/// Ask sway for the current output list, as raw JSON.
+async fn get_outputs_raw() -> HostResult<Vec<u8>> {
+    crate::sway_ipc::client()
+        .request(crate::sway_ipc::GET_OUTPUTS, b"")
+        .await
+}
+
+/// End the compositor session (`swaymsg exit`, as was).
+///
+/// A connection that dies without replying counts as success: sway may tear
+/// the socket down before it gets round to answering, and either way the
+/// session is over. A reply that says the command *failed* is a real error —
+/// sway is still up and still refusing.
+pub async fn exit() -> HostResult<()> {
+    let Some(body) = crate::sway_ipc::client()
+        .request_tolerating_disconnect(crate::sway_ipc::RUN_COMMAND, b"exit")
+        .await?
+    else {
+        return Ok(());
+    };
+    check_command_replies("exit", &body)
 }
 
 /// Perform a debug action on the window with the given sway con_id.
@@ -168,27 +194,15 @@ pub async fn act_on_window(window_id: u64, action: WindowAction) -> HostResult<(
     run_command(&format!("[con_id={window_id}] {verb}")).await
 }
 
-/// Run `swaymsg -t get_outputs` and return one [`OutputScale`] per active
-/// output. Inactive outputs (disconnected, off) are skipped because we have
-/// nothing to restore for them.
+/// Return one [`OutputScale`] per active output. Inactive outputs
+/// (disconnected, off) are skipped because we have nothing to restore for them.
 pub async fn get_outputs() -> HostResult<Vec<OutputScale>> {
-    let output = tokio::process::Command::new("swaymsg")
-        .args(["-t", "get_outputs", "--raw"])
-        .output()
-        .await
-        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HostError::Internal(format!(
-            "swaymsg get_outputs failed: {stderr}"
-        )));
-    }
-    parse_outputs(&output.stdout)
+    parse_outputs(&get_outputs_raw().await?)
 }
 
 fn parse_outputs(raw: &[u8]) -> HostResult<Vec<OutputScale>> {
     let raws: Vec<RawOutput> = serde_json::from_slice(raw)
-        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg outputs: {e}")))?;
+        .map_err(|e| HostError::Internal(format!("failed to parse sway's outputs: {e}")))?;
     Ok(raws
         .into_iter()
         .filter(|o| o.active)
@@ -199,34 +213,23 @@ fn parse_outputs(raw: &[u8]) -> HostResult<Vec<OutputScale>> {
         .collect())
 }
 
-/// Set the scale on a named output via `swaymsg output <name> scale <s>`.
+/// Set the scale on a named output via `output <name> scale <s>`.
 /// Sway accepts fractional scales like 1.25; passing 1.0 disables scaling.
 pub async fn set_output_scale(name: &str, scale: f64) -> HostResult<()> {
     run_command(&format!("output {name} scale {scale}")).await
 }
 
-/// Run `swaymsg -t get_outputs` and return one [`DisplayInfo`] per output,
-/// including disabled/disconnected ones (unlike [`get_outputs`], which filters
-/// to active). Order matches sway's enumeration, which is what issue #87's
-/// "primary is first-enumerated" rule keys off of.
+/// Return one [`DisplayInfo`] per output, including disabled/disconnected ones
+/// (unlike [`get_outputs`], which filters to active). Order matches sway's
+/// enumeration, which is what issue #87's "primary is first-enumerated" rule
+/// keys off of.
 pub async fn get_displays() -> HostResult<Vec<DisplayInfo>> {
-    let output = tokio::process::Command::new("swaymsg")
-        .args(["-t", "get_outputs", "--raw"])
-        .output()
-        .await
-        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HostError::Internal(format!(
-            "swaymsg get_outputs failed: {stderr}"
-        )));
-    }
-    parse_displays(&output.stdout)
+    parse_displays(&get_outputs_raw().await?)
 }
 
 fn parse_displays(raw: &[u8]) -> HostResult<Vec<DisplayInfo>> {
     let raws: Vec<RawOutput> = serde_json::from_slice(raw)
-        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg outputs: {e}")))?;
+        .map_err(|e| HostError::Internal(format!("failed to parse sway's outputs: {e}")))?;
     Ok(raws
         .into_iter()
         .map(|o| DisplayInfo {
@@ -241,7 +244,7 @@ fn parse_displays(raw: &[u8]) -> HostResult<Vec<DisplayInfo>> {
         .collect())
 }
 
-/// Set an output's video mode via `swaymsg output <name> mode <WxH@RHz>`.
+/// Set an output's video mode via `output <name> mode <WxH@RHz>`.
 /// A `refresh_mhz` of 0 (unknown) omits the refresh so sway picks a default
 /// for the resolution.
 pub async fn set_output_mode(name: &str, mode: VideoMode) -> HostResult<()> {
@@ -259,7 +262,7 @@ pub async fn set_output_mode(name: &str, mode: VideoMode) -> HostResult<()> {
 }
 
 /// Confine the seat's relative pointer(s) to a single output via
-/// `swaymsg input type:pointer map_to_output <name>`, or pass `"*"` to release
+/// `input type:pointer map_to_output <name>`, or pass `"*"` to release
 /// the confinement back to the whole layout. Used in mirror mode to keep the
 /// cursor on the interactive primary so it can't wander onto the uninteractive
 /// wl-mirror surface (issue #87). `map_to_output` is documented to apply to
@@ -268,12 +271,12 @@ pub async fn map_pointer_to_output(output: &str) -> HostResult<()> {
     run_command(&format!("input type:pointer map_to_output {output}")).await
 }
 
-/// Enable an output via `swaymsg output <name> enable`.
+/// Enable an output via `output <name> enable`.
 pub async fn enable_output(name: &str) -> HostResult<()> {
     run_command(&format!("output {name} enable")).await
 }
 
-/// Disable an output via `swaymsg output <name> disable`. Sway migrates any
+/// Disable an output via `output <name> disable`. Sway migrates any
 /// workspace on the output to a remaining active output, so the single kiosk
 /// workspace (and its activity) is never lost.
 pub async fn disable_output(name: &str) -> HostResult<()> {
@@ -331,7 +334,7 @@ pub fn pick_mirror_mode(primary: &DisplayInfo, secondary: &DisplayInfo) -> Optio
 
 /// Compositor output operations behind a trait so the docking state machine in
 /// `shepherdd` can be unit-tested against a mock without a live sway. The
-/// production implementation is [`SwaymsgBackend`].
+/// production implementation is [`SwayIpcBackend`].
 #[async_trait::async_trait]
 pub trait OutputBackend: Send + Sync {
     async fn get_displays(&self) -> HostResult<Vec<DisplayInfo>>;
@@ -344,11 +347,11 @@ pub trait OutputBackend: Send + Sync {
     async fn map_pointer_to_output(&self, output: &str) -> HostResult<()>;
 }
 
-/// Production [`OutputBackend`] that shells out to `swaymsg`.
-pub struct SwaymsgBackend;
+/// Production [`OutputBackend`], talking to sway over its IPC socket.
+pub struct SwayIpcBackend;
 
 #[async_trait::async_trait]
-impl OutputBackend for SwaymsgBackend {
+impl OutputBackend for SwayIpcBackend {
     async fn get_displays(&self) -> HostResult<Vec<DisplayInfo>> {
         get_displays().await
     }
@@ -372,21 +375,17 @@ impl OutputBackend for SwaymsgBackend {
     }
 }
 
-/// Run `swaymsg -t get_tree` and return a flattened window list.
+/// Read sway's node tree and return a flattened window list.
+///
+/// `Err` means the compositor could not be asked, which is emphatically not the
+/// same as an empty screen — see [`crate::LinuxHost::start_monitor`], where the
+/// difference decides whether an escaped activity gets its window closed.
 pub async fn list_windows() -> HostResult<Vec<WindowInfo>> {
-    let output = tokio::process::Command::new("swaymsg")
-        .args(["-t", "get_tree", "--raw"])
-        .output()
-        .await
-        .map_err(|e| HostError::Internal(format!("failed to invoke swaymsg: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HostError::Internal(format!(
-            "swaymsg get_tree failed: {stderr}"
-        )));
-    }
-    let root: Node = serde_json::from_slice(&output.stdout)
-        .map_err(|e| HostError::Internal(format!("failed to parse swaymsg output: {e}")))?;
+    let body = crate::sway_ipc::client()
+        .request(crate::sway_ipc::GET_TREE, b"")
+        .await?;
+    let root: Node = serde_json::from_slice(&body)
+        .map_err(|e| HostError::Internal(format!("failed to parse sway's tree: {e}")))?;
     let mut out = Vec::new();
     walk(&root, None, &mut out);
     Ok(out)

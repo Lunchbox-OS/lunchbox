@@ -9,6 +9,7 @@ description = "Linux host adapter for shepherdd: process groups, spawn/kill, exi
 shepherd-util = { workspace = true }
 shepherd-api = { workspace = true }
 shepherd-host-api = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

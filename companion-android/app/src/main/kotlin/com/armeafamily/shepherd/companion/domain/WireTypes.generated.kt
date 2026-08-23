@@ -284,6 +284,13 @@ enum class DiagnosticCode {
      */
     @SerialName("firewall_not_applied") FIREWALL_NOT_APPLIED,
     /**
+     * shepherd cannot talk to the compositor, so it cannot see what is on
+     * screen. The escape sweep closes nothing and no orphaned window is
+     * reported, which is indistinguishable from a clear screen unless it is
+     * said out loud (issue #147).
+     */
+    @SerialName("compositor_unreachable") COMPOSITOR_UNREACHABLE,
+    /**
      * This entry sets a browser policy that its kind does not support, so the
      * policy is ignored.
      */

@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use shepherd_api::{
-    EntryKind, EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo,
-    WindowOwner,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
+    EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo, WindowOwner,
 };
 use shepherd_host_api::{
     ExitStatus, FirewallSpec, HostAdapter, HostCapabilities, HostError, HostEvent,
@@ -292,6 +292,10 @@ pub struct LinuxHost {
     /// is already over, so nothing else is watching them — the monitor keeps
     /// working on these rather than letting them run unsupervised (issue #136).
     escaped: Arc<Mutex<HashMap<u32, EscapedActivity>>>,
+    /// Where to report administrator-facing conditions the host notices
+    /// (issue #143). `None` until the daemon supplies one, and in tests, so a
+    /// host built without a registry simply reports nothing.
+    diagnostics: Arc<Mutex<Option<Arc<dyn DiagnosticSink>>>>,
 }
 
 /// An activity that survived teardown and is still on the machine.
@@ -399,7 +403,17 @@ impl LinuxHost {
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
             steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
             escaped: Arc::new(Mutex::new(HashMap::new())),
+            diagnostics: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Give the host somewhere to report administrator-facing conditions.
+    ///
+    /// A setter rather than a constructor argument because the daemon builds
+    /// the adapter before the diagnostic registry exists, the same way
+    /// [`Self::configure_steam`] arrives after construction.
+    pub fn set_diagnostics(&self, sink: Arc<dyn DiagnosticSink>) {
+        *self.diagnostics.lock().unwrap() = Some(sink);
     }
 
     /// Apply `[service.steam]` config. Call before [`preload_steam`] so the CEF
@@ -954,6 +968,58 @@ impl LinuxHost {
             .collect()
     }
 
+    /// Read the window list for a sweep, and say so when we cannot.
+    ///
+    /// `list_windows()` returning `Err` used to be flattened to an empty list
+    /// (`unwrap_or_default`), which made "the compositor did not answer"
+    /// indistinguishable from "nothing is on screen" — so the escape sweep
+    /// closed nothing, `report_unowned_windows` reported nothing, and the
+    /// daemon concluded the screen was clear. Nothing was logged, because the
+    /// error had already been discarded (issue #147).
+    ///
+    /// Now the failure is a `None` the sweep can act on, and an
+    /// administrator-facing condition that clears itself the moment the
+    /// compositor answers again.
+    async fn windows_for_sweep(
+        diagnostics: &Arc<Mutex<Option<Arc<dyn DiagnosticSink>>>>,
+    ) -> Option<Vec<WindowInfo>> {
+        let sink = diagnostics.lock().unwrap().clone();
+        match crate::sway::list_windows().await {
+            Ok(windows) => {
+                if let Some(sink) = sink {
+                    sink.clear(
+                        DiagnosticCode::CompositorUnreachable,
+                        &DiagnosticSubject::Service,
+                    );
+                }
+                Some(windows)
+            }
+            Err(e) => {
+                // `raise` is idempotent on `(code, subject)` and preserves the
+                // original `since`, so a compositor that stays unreachable
+                // says so once rather than every two seconds.
+                if let Some(sink) = sink {
+                    sink.raise(Diagnostic {
+                        code: DiagnosticCode::CompositorUnreachable,
+                        subject: DiagnosticSubject::Service,
+                        severity: DiagnosticSeverity::Critical,
+                        message: "shepherd cannot see the compositor, so it cannot tell what is \
+                                  on screen or close a window that escaped supervision"
+                            .to_string(),
+                        remedy: Some(
+                            "Check that shepherdd is running inside the sway session and that \
+                             SWAYSOCK is set in its environment."
+                                .to_string(),
+                        ),
+                        since: chrono::Local::now(),
+                    });
+                }
+                warn!(error = %e, "Could not read the window list from the compositor");
+                None
+            }
+        }
+    }
+
     /// Keep working on activities that survived teardown, and close any window
     /// they still have.
     ///
@@ -967,6 +1033,7 @@ impl LinuxHost {
         session_info: &Arc<Mutex<HashMap<SessionId, SessionInfo>>>,
         processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
         sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+        windows: Option<&[WindowInfo]>,
         unowned_reported: &mut HashSet<u32>,
         event_tx: &mpsc::UnboundedSender<HostEvent>,
     ) {
@@ -975,17 +1042,21 @@ impl LinuxHost {
             map.iter().map(|(pid, a)| (*pid, a.clone())).collect()
         };
 
-        // Windows still on screen: both to close activities we cannot kill,
-        // and to notice surfaces that belong to nothing we know about.
-        let windows = crate::sway::list_windows().await.unwrap_or_default();
-
-        let known: HashSet<u32> = {
-            let mut k: HashSet<u32> = processes.lock().unwrap().keys().copied().collect();
-            k.extend(sidecars.lock().unwrap().keys().copied());
-            k.extend(snapshot.iter().map(|(pid, _)| *pid));
-            k
-        };
-        let _ = Self::report_unowned_windows(&windows, &known, unowned_reported);
+        // `None` means the compositor could not be asked. That is emphatically
+        // not an empty screen: reporting "no orphans" from a failed query is
+        // the false negative this whole change exists to remove, and pruning
+        // `unowned_reported` against a list we do not have would forget
+        // orphans we already know about. So skip the window half entirely and
+        // still work the kills — the caller has raised a diagnostic.
+        if let Some(windows) = windows {
+            let known: HashSet<u32> = {
+                let mut k: HashSet<u32> = processes.lock().unwrap().keys().copied().collect();
+                k.extend(sidecars.lock().unwrap().keys().copied());
+                k.extend(snapshot.iter().map(|(pid, _)| *pid));
+                k
+            };
+            let _ = Self::report_unowned_windows(windows, &known, unowned_reported);
+        }
 
         if snapshot.is_empty() {
             return;
@@ -1034,8 +1105,10 @@ impl LinuxHost {
 
             // Close any surface it is still showing. A window we can close is
             // the difference between "unsupervised activity on the child's
-            // screen" and "gone from view while we keep killing it".
-            for w in windows.iter().filter(|w| w.pid == Some(pid)) {
+            // screen" and "gone from view while we keep killing it". With no
+            // window list there is nothing to close — the kills above are all
+            // this sweep can do until the compositor answers again.
+            for w in windows.unwrap_or(&[]).iter().filter(|w| w.pid == Some(pid)) {
                 if let Err(e) = crate::sway::act_on_window(w.id, WindowAction::Close).await {
                     debug!(pid, window = w.id, error = %e, "Could not close escaped window");
                 }
@@ -1278,6 +1351,7 @@ impl LinuxHost {
         let event_tx = self.event_tx.clone();
         let escaped = self.escaped.clone();
         let session_info = self.session_info.clone();
+        let diagnostics = self.diagnostics.clone();
 
         tokio::spawn(async move {
             let mut ticks: u64 = 0;
@@ -1289,15 +1363,17 @@ impl LinuxHost {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 ticks += 1;
 
-                // Reconciliation is a rescue path, not a hot loop: it shells
-                // out to the compositor, so run it every ~2s rather than on
-                // every poll. Cheap no-op when nothing has escaped.
+                // Reconciliation is a rescue path, not a hot loop: it asks the
+                // compositor for the whole tree, so run it every ~2s rather
+                // than on every poll. Cheap no-op when nothing has escaped.
                 if ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
+                    let windows = Self::windows_for_sweep(&diagnostics).await;
                     Self::reconcile_escaped(
                         &escaped,
                         &session_info,
                         &processes,
                         &sidecars,
+                        windows.as_deref(),
                         &mut unowned_reported,
                         &event_tx,
                     )
@@ -2076,14 +2152,7 @@ impl HostAdapter for LinuxHost {
     }
 
     async fn logout(&self) -> HostResult<()> {
-        match tokio::process::Command::new("swaymsg")
-            .arg("exit")
-            .status()
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(HostError::Internal(format!("swaymsg exit failed: {e}"))),
-        }
+        crate::sway::exit().await
     }
 
     async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
@@ -2575,6 +2644,9 @@ mod tests {
             &host.session_info,
             &host.processes,
             &host.sidecars,
+            // The compositor answered and there is nothing on screen — these
+            // tests are about the kill path, not the window path.
+            Some(&[]),
             &mut unowned,
             &host.event_tx,
         )
@@ -2608,6 +2680,9 @@ mod tests {
             &host.session_info,
             &host.processes,
             &host.sidecars,
+            // The compositor answered and there is nothing on screen — these
+            // tests are about the kill path, not the window path.
+            Some(&[]),
             &mut unowned,
             &host.event_tx,
         )
@@ -2671,6 +2746,7 @@ mod tests {
                 &host.session_info,
                 &host.processes,
                 &host.sidecars,
+                Some(&[]),
                 &mut unowned,
                 &host.event_tx,
             )
@@ -2788,6 +2864,47 @@ mod tests {
             LinuxHost::report_unowned_windows(&windows, &known, &mut reported),
             vec![102],
             "a window that comes back must be reported again"
+        );
+    }
+
+    /// The defect at the centre of issue #147: `list_windows()` returning an
+    /// error used to be flattened to an empty list, which the sweep read as a
+    /// clear screen. Now the sweep is told the difference.
+    #[tokio::test]
+    async fn an_unreadable_compositor_does_not_read_as_a_clear_screen() {
+        let host = LinuxHost::new();
+        let mut unowned: HashSet<u32> = [4242].into_iter().collect();
+
+        LinuxHost::reconcile_escaped(
+            &host.escaped,
+            &host.session_info,
+            &host.processes,
+            &host.sidecars,
+            None, // the compositor could not be asked
+            &mut unowned,
+            &host.event_tx,
+        )
+        .await;
+        assert!(
+            unowned.contains(&4242),
+            "a failed query must not retire an orphan we already know about"
+        );
+
+        // With an answer — genuinely nothing on screen — the same orphan is
+        // correctly forgotten, so it will be announced again if it returns.
+        LinuxHost::reconcile_escaped(
+            &host.escaped,
+            &host.session_info,
+            &host.processes,
+            &host.sidecars,
+            Some(&[]),
+            &mut unowned,
+            &host.event_tx,
+        )
+        .await;
+        assert!(
+            unowned.is_empty(),
+            "an empty screen really is empty and should retire the orphan"
         );
     }
 

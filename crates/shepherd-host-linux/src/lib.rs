@@ -20,6 +20,7 @@ mod retroarch;
 mod sidecar;
 mod steam_interstitial;
 mod sway;
+mod sway_ipc;
 mod volume;
 
 pub use adapter::*;
@@ -31,7 +32,7 @@ pub use light::*;
 pub use process::*;
 pub use retroarch::{MissingCore, missing_content, missing_core};
 pub use sway::{
-    DisplayInfo, OutputBackend, OutputScale, SwaymsgBackend, disable_output, enable_output,
+    DisplayInfo, OutputBackend, OutputScale, SwayIpcBackend, disable_output, enable_output,
     get_displays, get_outputs, map_pointer_to_output, move_to_output_fullscreen, pick_mirror_mode,
     select_primary, set_output_mode, set_output_scale,
 };

@@ -46,6 +46,11 @@ pub enum DiagnosticCode {
     /// launch. Distinct from [`Self::FirewallUnenforceable`], which is the
     /// host-wide cause: this one names an activity the child has lost.
     FirewallNotApplied,
+    /// shepherd cannot talk to the compositor, so it cannot see what is on
+    /// screen. The escape sweep closes nothing and no orphaned window is
+    /// reported, which is indistinguishable from a clear screen unless it is
+    /// said out loud (issue #147).
+    CompositorUnreachable,
     /// This entry sets a browser policy that its kind does not support, so the
     /// policy is ignored.
     BrowserPolicyIgnored,
