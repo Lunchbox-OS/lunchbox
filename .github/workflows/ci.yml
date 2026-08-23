@@ -141,8 +141,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-target-test-v1-
 
+      # `--workspace`, not the bare default-members set: the codegen crate is
+      # excluded from `default-members` so `cargo build` never compiles schemars
+      # into the shipped binaries, and the side effect was that its tests — the
+      # drift check that is supposed to fail CI when a generated client mirror
+      # goes stale — were never running here at all.
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
 
   e2e:
     name: E2E

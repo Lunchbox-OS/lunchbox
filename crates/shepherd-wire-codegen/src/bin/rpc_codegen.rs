@@ -11,8 +11,10 @@
 //!   `ManagementClient.kt`.
 //! - `shepherd-webui/src/api/rpc-methods.generated.ts` — the same
 //!   for the TypeScript web UI: a union type of all method names
-//!   plus a per-method result-type helper (only string-level today,
-//!   full type mapping is a follow-on).
+//!   plus a per-method result-type helper.
+//! - `shepherd-webui/src/api/wire-types.generated.ts` — the payload
+//!   types for the web UI, the TypeScript counterpart of
+//!   `WireTypes.generated.kt`.
 //!
 //! Run as `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 //! from the repo root. The binary is deterministic: same schema in,
@@ -61,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 4] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 5] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
@@ -69,6 +71,7 @@ fn main() -> anyhow::Result<()> {
             (base.join("RpcMethods.kt"), render_kotlin(&schema)),
             (base.join("rpc-methods.generated.ts"), render_ts(&schema)),
             (base.join("WireTypes.generated.kt"), render_wire_types()),
+            (base.join("wire-types.generated.ts"), render_wire_types_ts()),
         ]
     } else {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -94,6 +97,10 @@ fn main() -> anyhow::Result<()> {
                 repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt"),
                 render_wire_types(),
             ),
+            (
+                repo.join("shepherd-webui/src/api/wire-types.generated.ts"),
+                render_wire_types_ts(),
+            ),
         ]
     };
 
@@ -103,6 +110,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// TypeScript mirrors of the payload types, from the same wire JSON Schema.
+fn render_wire_types_ts() -> String {
+    let schema = shepherd_wire_codegen::wire_schema::wire_schema();
+    shepherd_wire_codegen::ts_types::render(&schema)
 }
 
 /// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.

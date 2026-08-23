@@ -150,6 +150,39 @@ The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
 
+### Generated client types
+
+The payload types both clients use are **generated** from the Rust definitions,
+not hand-written. Change `crates/shepherd-api/src/types.rs` (adding a type to
+`WireTypes` in `crates/shepherd-wire-codegen/src/wire_schema.rs` if it is only
+reachable as an RPC parameter), then:
+
+```sh
+cargo run -p shepherd-wire-codegen --bin rpc-codegen
+```
+
+That rewrites five checked-in files: `docs/rpc-schema.json`, the two method-name
+mirrors, and the payload mirrors for each client —
+`companion-android/.../WireTypes.generated.kt` and
+`shepherd-webui/src/api/wire-types.generated.ts`. Editing any of them by hand is
+pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs` fails
+until the regenerated output is committed.
+
+The mirrors were hand-written once and drifted: four `ReasonCode` variants went
+missing from the companion, and a renamed `DailyOverride` field went unnoticed
+until it broke every override lookup on the phone. Neither was catchable from
+the method schema alone, and neither compiler could see it — `tsc` checks
+TypeScript against TypeScript, and Kotlin against Kotlin.
+
+Note that the codegen crate is deliberately outside `default-members`, so
+`cargo build` never compiles `schemars` into the shipped binaries. Reaching its
+tests therefore needs `cargo test --workspace` (which is what CI runs); a bare
+`cargo test` silently skips the drift check.
+
+`shepherd-webui/src/api/types.ts` re-exports the generated types and keeps only
+the presentation helpers, so the rest of the UI still imports wire shapes from
+one place.
+
 ### Android companion app
 
 The BLE management companion app lives in [`companion-android/`](companion-android/)

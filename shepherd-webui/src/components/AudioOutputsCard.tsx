@@ -76,13 +76,16 @@ function OutputRow({
   onForget: (key: string) => void;
   onSelect: (key: string) => void;
 }) {
-  const capped = record.max_volume !== null;
+  // `!= null` rather than `!== null`: the field is optional on the wire, so an
+  // absent one arrives as `undefined` and a strict comparison would read it as
+  // a cap that is set.
+  const capped = record.max_volume != null;
   // Local slider state so dragging stays smooth; the commit happens on release.
   // Synced only while a cap exists, so switching a limit off and back on
   // restores the number the parent last chose rather than the default.
   const [draft, setDraft] = useState(record.max_volume ?? DEFAULT_CAP);
   useEffect(() => {
-    if (record.max_volume !== null) setDraft(record.max_volume);
+    if (record.max_volume != null) setDraft(record.max_volume);
   }, [record.max_volume]);
 
   return (
