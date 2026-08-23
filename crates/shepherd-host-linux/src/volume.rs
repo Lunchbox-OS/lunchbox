@@ -112,93 +112,28 @@ impl LinuxVolumeController {
 
     /// Get volume status via PipeWire
     fn get_status_pipewire() -> VolumeResult<VolumeStatus> {
-        // Get volume: wpctl get-volume @DEFAULT_AUDIO_SINK@
-        // Output: "Volume: 0.50" or "Volume: 0.50 [MUTED]"
-        let output = Command::new("wpctl")
-            .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
-            .output()
-            .map_err(|e| VolumeError::Backend(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        debug!("wpctl get-volume output: {}", stdout.trim());
-
-        let muted = stdout.contains("[MUTED]");
-
-        // Parse "Volume: 0.50" -> 50%
-        let percent = stdout
-            .split(':')
-            .nth(1)
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|s| s.parse::<f32>().ok())
-            .map(|v| (v * 100.0).round() as u8)
-            .unwrap_or(0);
-
-        Ok(VolumeStatus { percent, muted })
+        let stdout = run_reading("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])?;
+        parse_wpctl_volume(&stdout).ok_or_else(|| unreadable("wpctl get-volume", &stdout))
     }
 
     /// Get volume status via PulseAudio
     fn get_status_pulseaudio() -> VolumeResult<VolumeStatus> {
-        let mut status = VolumeStatus::default();
-
-        // Get default sink info
-        if let Ok(output) = Command::new("pactl")
-            .args(["get-sink-volume", "@DEFAULT_SINK@"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            debug!("pactl get-sink-volume output: {}", stdout.trim());
-
-            // Output: "Volume: front-left: 65536 / 100% / -0.00 dB, front-right: ..."
-            if let Some(percent_str) = stdout.split('/').nth(1)
-                && let Ok(percent) = percent_str.trim().trim_end_matches('%').parse::<u8>()
-            {
-                status.percent = percent;
-            }
-        }
-
-        // Check mute status
-        if let Ok(output) = Command::new("pactl")
-            .args(["get-sink-mute", "@DEFAULT_SINK@"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            debug!("pactl get-sink-mute output: {}", stdout.trim());
-            status.muted = stdout.contains("yes");
-        }
-
-        Ok(status)
+        // Two commands, and both have to answer: a mute state we could not read
+        // is not "not muted". Reporting sound as on when it is off is the wrong
+        // way round to be wrong.
+        let vol = run_reading("pactl", &["get-sink-volume", "@DEFAULT_SINK@"])?;
+        let percent =
+            parse_pactl_volume(&vol).ok_or_else(|| unreadable("pactl get-sink-volume", &vol))?;
+        let mute = run_reading("pactl", &["get-sink-mute", "@DEFAULT_SINK@"])?;
+        let muted =
+            parse_pactl_mute(&mute).ok_or_else(|| unreadable("pactl get-sink-mute", &mute))?;
+        Ok(VolumeStatus { percent, muted })
     }
 
     /// Get volume status via ALSA
     fn get_status_alsa() -> VolumeResult<VolumeStatus> {
-        // amixer sget Master
-        // Output includes: "Front Left: Playback 65536 [100%] [on]"
-        let output = Command::new("amixer")
-            .args(["sget", "Master"])
-            .output()
-            .map_err(|e| VolumeError::Backend(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        debug!("amixer sget Master output: {}", stdout);
-
-        let mut status = VolumeStatus::default();
-
-        for line in stdout.lines() {
-            if line.contains("Playback") && line.contains('%') {
-                // Extract percentage: [100%]
-                if let Some(start) = line.find('[')
-                    && let Some(end) = line[start..].find('%')
-                    && let Ok(percent) = line[start + 1..start + end].parse::<u8>()
-                {
-                    status.percent = percent;
-                }
-                // Check mute status: [on] or [off]
-                status.muted = line.contains("[off]");
-                break;
-            }
-        }
-
-        Ok(status)
+        let stdout = run_reading("amixer", &["sget", "Master"])?;
+        parse_amixer_status(&stdout).ok_or_else(|| unreadable("amixer sget Master", &stdout))
     }
 
     /// Set volume via PipeWire
@@ -463,6 +398,98 @@ impl VolumeController for LinuxVolumeController {
     }
 }
 
+/// Run a reading command and hand back its stdout, refusing anything that did
+/// not actually run.
+///
+/// The exit status used to be ignored on all three backends, so a command that
+/// failed contributed an empty string to a parser that answered `0` — reported
+/// as 0 %, which is indistinguishable from genuine silence and is a perfectly
+/// plausible reading to act on.
+fn run_reading(program: &str, args: &[&str]) -> VolumeResult<String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| VolumeError::Backend(format!("{program}: {e}")))?;
+    if !output.status.success() {
+        return Err(VolumeError::Backend(format!(
+            "{program} {} exited {}",
+            args.join(" "),
+            output.status
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    debug!(%program, output = stdout.trim(), "read volume status");
+    Ok(stdout)
+}
+
+/// The error for output that ran but did not say anything we understand.
+///
+/// Separate from a failed spawn on purpose: this one means the tool changed its
+/// format under us, which is the standing risk of reading a CLI meant for people.
+fn unreadable(what: &str, stdout: &str) -> VolumeError {
+    VolumeError::Backend(format!(
+        "could not read the volume from `{what}` output: {:?}",
+        stdout.trim()
+    ))
+}
+
+/// `"Volume: 0.50"` / `"Volume: 0.50 [MUTED]"` -> 50 %, muted.
+///
+/// `None` when the line is not that shape at all, so the caller reports a
+/// failure to read rather than a reading of zero.
+pub(crate) fn parse_wpctl_volume(stdout: &str) -> Option<VolumeStatus> {
+    let percent = stdout
+        .split(':')
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse::<f32>()
+        .ok()?;
+    if !percent.is_finite() || percent < 0.0 {
+        return None;
+    }
+    Some(VolumeStatus {
+        percent: (percent * 100.0).round().min(u8::MAX as f32) as u8,
+        muted: stdout.contains("[MUTED]"),
+    })
+}
+
+/// `"Volume: front-left: 65536 / 100% / -0.00 dB, ..."` -> 100 %.
+pub(crate) fn parse_pactl_volume(stdout: &str) -> Option<u8> {
+    stdout
+        .split('/')
+        .nth(1)?
+        .trim()
+        .trim_end_matches('%')
+        .parse::<u8>()
+        .ok()
+}
+
+/// `"Mute: yes"` / `"Mute: no"` -> muted. Anything else is unreadable, rather
+/// than "not muted" — the absence of the word `yes` is not evidence.
+pub(crate) fn parse_pactl_mute(stdout: &str) -> Option<bool> {
+    let value = stdout.split(':').nth(1)?.trim();
+    match value {
+        v if v.starts_with("yes") => Some(true),
+        v if v.starts_with("no") => Some(false),
+        _ => None,
+    }
+}
+
+/// `"Front Left: Playback 65536 [100%] [on]"` -> 100 %, unmuted.
+pub(crate) fn parse_amixer_status(stdout: &str) -> Option<VolumeStatus> {
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("Playback") && l.contains('%'))?;
+    let start = line.find('[')?;
+    let end = line[start..].find('%')?;
+    let percent = line[start + 1..start + end].parse::<u8>().ok()?;
+    Some(VolumeStatus {
+        percent,
+        muted: line.contains("[off]"),
+    })
+}
+
 /// Project the host-side topology entry onto the wire type. Only the stable key,
 /// a display label, and the advisory kind cross the boundary; node names and
 /// object ids stay inside the host adapter.
@@ -491,5 +518,107 @@ mod tests {
         assert_eq!(SoundBackend::PipeWire.name(), "pipewire");
         assert_eq!(SoundBackend::PulseAudio.name(), "pulseaudio");
         assert_eq!(SoundBackend::Alsa.name(), "alsa");
+    }
+
+    #[test]
+    fn wpctl_output_is_read() {
+        assert_eq!(
+            parse_wpctl_volume("Volume: 0.50\n"),
+            Some(VolumeStatus {
+                percent: 50,
+                muted: false
+            })
+        );
+        assert_eq!(
+            parse_wpctl_volume("Volume: 0.30 [MUTED]\n"),
+            Some(VolumeStatus {
+                percent: 30,
+                muted: true
+            })
+        );
+        // Over-unity volumes are real; PipeWire allows boosting past 1.0.
+        assert_eq!(parse_wpctl_volume("Volume: 1.40\n").unwrap().percent, 140);
+    }
+
+    /// The whole point: output we cannot read must not become a reading.
+    ///
+    /// Every one of these used to answer `0%, not muted` — a plausible value a
+    /// parent could act on, produced by a command that told us nothing. An empty
+    /// string is what a failed `wpctl` actually contributed, because the exit
+    /// status was not checked either.
+    #[test]
+    fn unreadable_wpctl_output_is_not_a_reading_of_zero() {
+        for junk in [
+            "",
+            "\n",
+            "wpctl: command not found\n",
+            "Volume:\n",
+            "Volume: not-a-number\n",
+            "Node 52 not found\n",
+        ] {
+            assert_eq!(
+                parse_wpctl_volume(junk),
+                None,
+                "{junk:?} must read as unreadable, not as 0%"
+            );
+        }
+    }
+
+    #[test]
+    fn pactl_output_is_read() {
+        assert_eq!(
+            parse_pactl_volume(
+                "Volume: front-left: 65536 /  100% / -0.00 dB,   front-right: 65536 /  100%\n"
+            ),
+            Some(100)
+        );
+        assert_eq!(parse_pactl_mute("Mute: yes\n"), Some(true));
+        assert_eq!(parse_pactl_mute("Mute: no\n"), Some(false));
+    }
+
+    /// A mute state we could not read is not "not muted": that reports sound as
+    /// on when it may be off, which is the wrong way round to be wrong.
+    #[test]
+    fn unreadable_pactl_output_is_not_a_reading() {
+        for junk in ["", "\n", "Failure: No such entity\n"] {
+            assert_eq!(parse_pactl_volume(junk), None, "{junk:?} volume");
+            assert_eq!(parse_pactl_mute(junk), None, "{junk:?} mute");
+        }
+        // Absence of the word "yes" used to be taken as evidence of not-muted.
+        assert_eq!(parse_pactl_mute("Mute: unknown\n"), None);
+    }
+
+    #[test]
+    fn amixer_output_is_read() {
+        let out = "Simple mixer control 'Master',0\n  Capabilities: pvolume pswitch\n  \
+                   Front Left: Playback 65536 [100%] [0.00dB] [on]\n";
+        assert_eq!(
+            parse_amixer_status(out),
+            Some(VolumeStatus {
+                percent: 100,
+                muted: false
+            })
+        );
+        let muted = "  Front Left: Playback 0 [0%] [-99.99dB] [off]\n";
+        assert_eq!(
+            parse_amixer_status(muted),
+            Some(VolumeStatus {
+                percent: 0,
+                muted: true
+            })
+        );
+    }
+
+    /// A genuine 0% must still read as 0% — the fix is about telling the two
+    /// apart, not about treating zero as suspicious.
+    #[test]
+    fn unreadable_amixer_output_is_not_a_reading_of_zero() {
+        for junk in [
+            "",
+            "amixer: Unable to find simple control 'Master',0\n",
+            "  Capabilities: pvolume pswitch\n",
+        ] {
+            assert_eq!(parse_amixer_status(junk), None, "{junk:?}");
+        }
     }
 }
