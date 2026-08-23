@@ -166,11 +166,27 @@ Example (bedtime restriction):
   headless session to stop", and exits — so the orphaned stack keeps running and
   the *next* boot fails the same way, this time as a bare
   "[ERROR] Failed to start headless session" with a fully working daemon behind
-  it. If `dev stop` denies there is a session while `pgrep -f sway.headless.conf`
-  finds one, kill that pid directly, `rm dev-runtime/headless/session.env`, and
-  boot again. Also note that killing shepherdd runs `kill_by_command` on the way
-  down, which kills every `sleep` you own — a driver command containing one dies
-  with exit 144 alongside it.
+  it. If `dev stop` denies there is a session while one is actually running, kill
+  the survivors directly, `rm dev-runtime/headless/session.env`, and boot again.
+  Also note that killing shepherdd runs `kill_by_command` on the way down, which
+  kills every `sleep` you own — a driver command containing one dies with exit
+  144 alongside it, and that is one of the ways you end up orphaned here in the
+  first place.
+- **Do not look for survivors with `pgrep -f`.** `-f` matches whole command
+  lines, so `pgrep -f sway.headless.conf` matches *the shell running the pgrep*,
+  which contains that string as an argument. It therefore always "finds" a
+  session, and reports a different pid every time — which reads exactly like a
+  stack respawning itself in a loop. Use a listing you can eyeball instead:
+
+  ```sh
+  ps -eo pid,cmd | grep -E "sway.*headless|shepherdd|shepherd-media" | grep -v grep
+  ```
+
+  Also check for more than sway: `dev stop` can report "Headless session
+  stopped" and leave the `shepherdd` it spawned (and its two `sh -c` wrappers)
+  running against your fixture config. Those keep the socket alive, so the next
+  boot's launch requests land in the *old* daemon. Kill every pid that listing
+  shows before booting again.
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
   `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
