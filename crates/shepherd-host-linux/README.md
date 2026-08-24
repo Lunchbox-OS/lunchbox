@@ -257,11 +257,12 @@ save-state directory, save-state-on-close/restore-on-open, a periodic in-game
 save flush, kiosk mode, the native Wayland context (so the picture is the
 panel's own pixel grid rather than an upscaled XWayland one), and
 `config_save_on_exit = "false"` so none of it leaks back into the user's own
-`retroarch.cfg`. The in-game save (`.srm`) is
-deliberately left at RetroArch's own default location, so a game has one save
-however it was launched and a save predating the entry is still found. Those sessions also get a
-longer graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown
-has to unload the core and write both kinds of save.
+`retroarch.cfg`. The in-game save (`.srm`) is deliberately left wherever the
+user's own `savefile_directory` puts it — which is *not* beside the content on
+a default install — so a game has one save however it was launched and a save
+predating the entry is still found. Those sessions also get a longer
+graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown has to
+unload the core and write both kinds of save.
 
 The fragment is *appended* to the user's own `retroarch.cfg`, so controller
 bindings, video settings and per-core options configured outside shepherd carry

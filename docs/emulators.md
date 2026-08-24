@@ -198,6 +198,24 @@ desktop session, and a save made before the entry existed is found without any
 migration. Back it up by copying `~/.config/retroarch/saves/`, the same
 directory you would back up for RetroArch on its own.
 
+Note that it is *not* beside the ROM, which is where people tend to look first.
+Two RetroArch defaults put it where it is, and both are yours to change:
+`savefile_directory`, and `sort_savefiles_enable` (on by default), which files
+saves under a subdirectory named for the core's *display* name — `mGBA`,
+`bsnes-mercury Accuracy` — rather than the name an entry's `core =` uses. On
+Ubuntu there is a wrinkle worth knowing when a save seems to be missing: the
+package writes `savefile_directory = "~/.local/share/retroarch/saves"` into
+`retroarch.cfg` without creating that directory, and RetroArch then logs
+
+```
+[WARN] [Config] "savefile_directory" is not a directory, ignoring...
+[INFO] [Override] Redirecting save file to "…/.config/retroarch/saves/mGBA/game.srm".
+```
+
+and falls back to the path above — so look in both places. With
+`service.capture_child_output` on, that `Redirecting save file to` line names
+the exact path for the session you are looking at.
+
 **The resume state is shepherd's**, since nothing outside a supervised session
 produces one:
 

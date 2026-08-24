@@ -20,9 +20,11 @@
 //!   itself writes — the file a child would call "my save". RetroArch flushes
 //!   it when content unloads, and `autosave_interval` makes it flush
 //!   periodically too, so a crash or a `SIGKILL` costs seconds rather than an
-//!   afternoon. Shepherd does **not** relocate it: it stays beside the content
-//!   where RetroArch puts it, so one game has one save however it was
-//!   launched, and a save made before the entry existed is still found.
+//!   afternoon. Shepherd does **not** relocate it: it lands wherever the user's
+//!   own `savefile_directory` and sort settings send it — by default
+//!   `~/.config/retroarch/saves/<Core display name>/<content>.srm`, *not*
+//!   beside the content — so one game has one save however it was launched,
+//!   and a save made before the entry existed is still found.
 //! - The **save state** (`.state.auto`) is a snapshot of the whole emulator.
 //!   With [`RetroarchSaveState::Auto`] closing the activity writes one and
 //!   opening restores it, so the child resumes mid-battle rather than at the
@@ -391,9 +393,9 @@ pub fn render_append_config(paths: &Paths, save_state: RetroarchSaveState, kiosk
     out.push_str(
         "# The save *state* is shepherd's own mechanism, so it lives in the\n\
          # activity's own directory. The in-game save is deliberately left\n\
-         # where RetroArch would put it (beside the content), so a game keeps\n\
-         # one save whether it was launched from here or from a desktop\n\
-         # session -- and so a save made before this entry existed is found.\n",
+         # alone -- savefile_directory is yours -- so a game keeps one save\n\
+         # whether it was launched from here or from a desktop session, and a\n\
+         # save made before this entry existed is found.\n",
     );
     out.push_str(&format!(
         "savestate_directory = {}\n\n",
@@ -470,9 +472,10 @@ const AUTO_STATE_SUFFIXES: [&str; 2] = [".state.auto", ".state.auto.png"];
 /// Delete the auto save state, so the next launch boots the content from its
 /// power-on screen instead of resuming.
 ///
-/// Only the save *state* — the in-game save (`.srm`) beside it is the child's
-/// actual progress and is deliberately left alone. Resetting a console returns
-/// it to the title screen; it does not wipe the cartridge.
+/// Only the save *state*. The in-game save (`.srm`) is the child's actual
+/// progress, lives under the user's own `savefile_directory` rather than in
+/// here, and is deliberately left alone: resetting a console returns it to the
+/// title screen; it does not wipe the cartridge.
 ///
 /// RetroArch files states under a per-core subdirectory of the one we hand it,
 /// so this walks one level down rather than assuming a flat layout. Returns
@@ -1014,12 +1017,16 @@ mod tests {
             "savestate_directory = \"{}\"",
             paths.states.display()
         )));
-        // The in-game save stays where RetroArch puts it: beside the content.
-        // Relocating it would strand a save made before the entry existed, and
-        // would give the same game two saves -- one for desktop play, one for
-        // shepherd.
+        // The in-game save stays wherever the user's own `savefile_directory`
+        // sends it. Relocating it would strand a save made before the entry
+        // existed, and would give the same game two saves -- one for desktop
+        // play, one for shepherd.
+        //
+        // By line, not by substring: the fragment *names* the setting in a
+        // comment, to tell an operator reading it which knob is still theirs.
         assert!(
-            !cfg.contains("savefile_directory"),
+            !cfg.lines()
+                .any(|l| l.trim_start().starts_with("savefile_directory")),
             "shepherd must not relocate the in-game save:\n{cfg}"
         );
     }
@@ -1111,8 +1118,8 @@ mod tests {
         std::fs::write(core_dir.join("game.state.auto.png"), b"thumb").unwrap();
         std::fs::write(paths.states.join("flat.state.auto"), b"state").unwrap();
         // A numbered manual state is not resume state and must survive. The
-        // in-game save lives beside the content, nowhere near this directory,
-        // so a reset cannot reach it at all.
+        // in-game save lives under the user's own savefile_directory, nowhere
+        // near this one, so a reset cannot reach it at all.
         std::fs::write(core_dir.join("game.state1"), b"slot").unwrap();
 
         assert_eq!(discard_auto_state(&paths).unwrap(), 3);
