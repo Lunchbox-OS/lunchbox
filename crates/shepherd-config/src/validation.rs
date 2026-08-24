@@ -1301,7 +1301,6 @@ mod tests {
         );
     }
 
-    /// Build a two-entry config where "minecraft" is gated on "scratch", with
     /// Validate one `type = "retroarch"` entry whose kind body is `kind_toml`.
     fn retroarch_errors(kind_toml: &str) -> Vec<String> {
         let toml = format!(
@@ -1398,6 +1397,7 @@ mod tests {
         );
     }
 
+    /// Build a two-entry config where "minecraft" is gated on "scratch", with
     /// `tokens_toml` supplying the gate body.
     fn config_with_token_gate(tokens_toml: &str) -> RawConfig {
         let toml = format!(
