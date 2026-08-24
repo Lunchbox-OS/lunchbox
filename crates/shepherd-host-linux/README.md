@@ -212,19 +212,29 @@ All spawned processes are placed in their own process group:
 
 When stopping a session:
 1. **Exactly one** SIGTERM is sent to the process group (`-pgid`)
-2. After timeout, SIGKILL is sent to the process group, plus a `pkill` by
-   command name to sweep up anything that escaped it
+2. After timeout, SIGKILL is sent to the process group, plus a by-name sweep
+   for anything that escaped it — scoped to spare other live sessions
 3. Orphaned children are cleaned up
 
-The "exactly one" matters. The graceful path used to send three SIGTERMs — a
-`pkill -f` by command name, the process-group kill, and one per descendant —
-and an app whose handler *counts* signals reads the second as "the user is
-impatient". RetroArch's calls `exit(1)` on it, which skips flushing the
-in-game save and writing the save state, so no emulator session could close
-without losing progress. Sandboxed kinds (snap, flatpak, Steam) still get
-their cgroup- or app-id-based delivery, because the real process is not in our
-child's process group; `GracefulSignal` in `adapter.rs` is the single place
-that decision is made.
+The "exactly one" matters, and it is easy to lose. The graceful path once sent
+three SIGTERMs — a `pkill -f` by command name, the process-group kill, and one
+per descendant — and an app whose handler *counts* signals reads the second as
+"the user is impatient". RetroArch's calls `exit(1)` on it, which skips
+flushing the in-game save and writing the save state. It regressed once
+afterwards, to two signals, when a fix elsewhere added a second group kill
+beside `ManagedProcess::terminate` (the same syscall); that cost about a fifth
+of save states until it was measured. Sandboxed kinds (snap, flatpak, Steam)
+still get their cgroup- or app-id-based delivery, because the real process is
+not in our child's process group; `GracefulSignal` in `adapter.rs` is the
+single place that decision is made.
+
+The by-name sweep in step 2 is scoped for a related reason. `pkill -f
+retroarch` cannot tell which RetroArch it is looking at, so it would also kill
+a game the child started afterwards in a different session — and a `SIGKILL`
+runs no shutdown path, so that loses the save outright. `kill_by_command`
+therefore matches with `pgrep`, resolves each candidate's process group, and
+skips every group belonging to a session the host is still tracking
+(`LinuxHost::tracked_pgids`).
 
 ## Window attribution
 

@@ -724,43 +724,72 @@ pub fn signal_group(pgid: u32, signal: Signal) {
     }
 }
 
-/// Kill processes by command name using pkill
-pub fn kill_by_command(command_name: &str, signal: Signal) -> bool {
-    let signal_name = match signal {
-        Signal::SIGTERM => "TERM",
-        Signal::SIGKILL => "KILL",
-        _ => "TERM",
+/// Signal every process whose command line matches `command_name`, except
+/// those belonging to a process group in `protected_pgids`.
+///
+/// The last resort for an activity that left its own process group, where
+/// there is nothing left to signal but a name. Matching by name is blunt: it
+/// reaches *every* copy of that program the user is running, which for
+/// `retroarch` includes the game a child started seconds ago in a different
+/// session. Killing that one costs the child their save — a `SIGKILL` runs no
+/// shutdown path at all — so a session shepherd is still tracking is spared,
+/// identified by its process group (every descendant shares it, courtesy of
+/// `setsid` at spawn).
+///
+/// Deliberately `pgrep` + per-pid `kill` rather than `pkill`: `pkill` has no
+/// way to exclude, so the filter has to happen between finding and signalling.
+///
+/// Returns whether anything was signalled.
+pub fn kill_by_command(
+    command_name: &str,
+    signal: Signal,
+    protected_pgids: &std::collections::HashSet<u32>,
+) -> bool {
+    let output = match Command::new("pgrep").args(["-f", command_name]).output() {
+        Ok(output) => output,
+        Err(e) => {
+            warn!(command = command_name, error = %e, "Failed to run pgrep");
+            return false;
+        }
     };
 
-    // Use pkill to find and kill processes by command name
-    let result = Command::new("pkill")
-        .args([&format!("-{}", signal_name), "-f", command_name])
-        .output();
-
-    match result {
-        Ok(output) => {
-            // pkill returns 0 if processes were found and signaled
-            if output.status.success() {
-                info!(
-                    command = command_name,
-                    signal = signal_name,
-                    "Killed processes by command name"
-                );
-                true
-            } else {
-                // No processes found is not an error
-                debug!(
-                    command = command_name,
-                    "No processes found matching command name"
-                );
-                false
-            }
+    let self_pid = std::process::id();
+    let mut signalled = 0;
+    let mut spared = 0;
+    for pid in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != self_pid)
+    {
+        let pgid = nix::unistd::getpgid(Some(Pid::from_raw(pid as i32)))
+            .map(|g| g.as_raw() as u32)
+            .unwrap_or(pid);
+        if protected_pgids.contains(&pgid) {
+            spared += 1;
+            continue;
         }
-        Err(e) => {
-            warn!(command = command_name, error = %e, "Failed to run pkill");
-            false
+        match signal::kill(Pid::from_raw(pid as i32), signal) {
+            Ok(()) => signalled += 1,
+            Err(nix::errno::Errno::ESRCH) => {}
+            Err(e) => debug!(pid, ?signal, error = %e, "Failed to signal matched process"),
         }
     }
+
+    if signalled > 0 {
+        info!(
+            command = command_name,
+            ?signal,
+            signalled,
+            spared,
+            "Signalled processes by command name"
+        );
+    } else {
+        debug!(
+            command = command_name,
+            spared, "No unprotected processes matched command name"
+        );
+    }
+    signalled > 0
 }
 
 impl ManagedProcess {
@@ -1014,15 +1043,14 @@ impl ManagedProcess {
         Ok(())
     }
 
-    /// Send SIGKILL to all processes in this session
+    /// Send SIGKILL to this session's process group and to any descendant that
+    /// left it.
+    ///
+    /// Precise by construction: everything signalled here is either in the
+    /// group this process leads or a descendant of it. The by-name last resort
+    /// belongs to the adapter, which is the only caller that knows which other
+    /// sessions must be spared — see [`kill_by_command`].
     pub fn kill(&self) -> HostResult<()> {
-        // For snap apps, we rely on cgroup-based killing in the adapter, not pkill
-        // Using pkill with broad patterns like "snap" would kill unrelated processes
-        if self.snap_name.is_none() {
-            kill_by_command(&self.command_name, Signal::SIGKILL);
-        }
-
-        // Also try to kill the process group
         let pgid = Pid::from_raw(-(self.pgid as i32));
 
         match signal::kill(pgid, Signal::SIGKILL) {
@@ -1245,6 +1273,49 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Process should be gone or terminating
+    }
+
+    /// The by-name last resort must not reach a session shepherd is still
+    /// tracking.
+    ///
+    /// `pkill -f retroarch` does not know which RetroArch it is looking at, so
+    /// the reconciliation sweep -- which runs every two seconds while an
+    /// activity refuses to die -- would `SIGKILL` the game a child launched
+    /// afterwards along with the one that escaped. A `SIGKILL` runs no shutdown
+    /// path, so that costs the child their save outright.
+    #[test]
+    fn kill_by_command_spares_a_tracked_session() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        // A uniquely named stand-in, so the `pgrep` cannot match anything on
+        // the machine running the test but these two processes.
+        let script = scratch.path().join("shepherd-killtest-stand-in.sh");
+        std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 0.05; done\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let argv = vec![script.to_string_lossy().into_owned()];
+        let env = HashMap::new();
+        let escapee = ManagedProcess::spawn(&argv, &env, None, None, None, None).unwrap();
+        let tracked = ManagedProcess::spawn(&argv, &env, None, None, None, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(pid_is_live(escapee.pid));
+        assert!(pid_is_live(tracked.pid));
+
+        let protected = std::collections::HashSet::from([tracked.pgid]);
+        kill_by_command(&script.to_string_lossy(), Signal::SIGKILL, &protected);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(
+            !pid_is_live(escapee.pid),
+            "the escaped activity must still be killed by name"
+        );
+        assert!(
+            pid_is_live(tracked.pid),
+            "a session shepherd is tracking must survive a by-name kill aimed at another"
+        );
+
+        let _ = tracked.kill();
+        let _ = escapee.kill();
     }
 
     /// A killed-but-unreaped child is a zombie: it has exited, so `stop` must

@@ -805,7 +805,18 @@ impl LinuxHost {
 
     /// Send every kill we have at an activity, hardest first. Shared by the
     /// stop paths and by the reconciliation sweep.
-    fn kill_activity(pid: u32, pgid: u32, info: &Option<SessionInfo>) {
+    ///
+    /// `protected_pgids` is every *other* session shepherd is currently
+    /// tracking. Only the by-name last resort consults it, and it must: this
+    /// runs every two seconds for as long as an activity refuses to die, and
+    /// `pkill`ing `retroarch` would take out the game a child launched
+    /// afterwards along with the one that escaped.
+    fn kill_activity(
+        pid: u32,
+        pgid: u32,
+        info: &Option<SessionInfo>,
+        protected_pgids: &HashSet<u32>,
+    ) {
         use nix::sys::signal::Signal::SIGKILL;
 
         signal_group(pgid, SIGKILL);
@@ -817,10 +828,27 @@ impl LinuxHost {
             } else if let Some(ref app_id) = info.flatpak_app_id {
                 kill_flatpak_cgroup(app_id, SIGKILL);
             } else {
-                kill_by_command(&info.command_name, SIGKILL);
+                kill_by_command(&info.command_name, SIGKILL, protected_pgids);
             }
         }
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), SIGKILL);
+    }
+
+    /// The process groups of every session currently tracked, minus `except`.
+    ///
+    /// A session's descendants all share its group (`setsid` at spawn), so one
+    /// group id per session is enough to spare all of it from a by-name kill.
+    fn tracked_pgids(
+        processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
+        except: Option<u32>,
+    ) -> HashSet<u32> {
+        processes
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| p.pgid)
+            .filter(|pgid| Some(*pgid) != except)
+            .collect()
     }
 
     /// Keep working on activities that survived teardown, and close any window
@@ -898,7 +926,8 @@ impl LinuxHost {
                 });
             }
 
-            Self::kill_activity(pid, activity.pgid, &activity.info);
+            let protected = Self::tracked_pgids(processes, Some(activity.pgid));
+            Self::kill_activity(pid, activity.pgid, &activity.info, &protected);
 
             // Close any surface it is still showing. A window we can close is
             // the difference between "unsupervised activity on the child's
@@ -1828,9 +1857,15 @@ impl HostAdapter for LinuxHost {
                                 kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGKILL);
                                 info!(flatpak = %app_id, "Sent SIGKILL via flatpak cgroup (timeout)");
                             } else {
+                                // Spare every other tracked session: this
+                                // matches on the command line, and a child who
+                                // relaunched during the grace period is running
+                                // the same program.
+                                let protected = Self::tracked_pgids(&self.processes, Some(pgid));
                                 kill_by_command(
                                     &info.command_name,
                                     nix::sys::signal::Signal::SIGKILL,
+                                    &protected,
                                 );
                                 info!(command = %info.command_name, "Sent SIGKILL via command name (timeout)");
                             }
@@ -1876,7 +1911,12 @@ impl HostAdapter for LinuxHost {
                         kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGKILL);
                         info!(flatpak = %app_id, "Sent SIGKILL via flatpak cgroup");
                     } else {
-                        kill_by_command(&info.command_name, nix::sys::signal::Signal::SIGKILL);
+                        let protected = Self::tracked_pgids(&self.processes, Some(pgid));
+                        kill_by_command(
+                            &info.command_name,
+                            nix::sys::signal::Signal::SIGKILL,
+                            &protected,
+                        );
                         info!(command = %info.command_name, "Sent SIGKILL via command name");
                     }
                 }
