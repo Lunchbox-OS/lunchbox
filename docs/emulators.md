@@ -313,6 +313,15 @@ to localhost, and has no authentication — anyone on the network could quit a
 child's game or load different content into it. Everything shepherd needs
 (including the reset button) is done without it.
 
+The "cannot be restricted" half is upstream's to fix, and it has been asked:
+[libretro/RetroArch#19459][ra-19459] requests a configurable bind address, and a
+collaborator has said it looks like a reasonable addition. If it lands, this
+section is worth revisiting — a loopback-only socket would still be
+unauthenticated to anything running as the same user, but it would take the rest
+of the network out of the picture.
+
+[ra-19459]: https://github.com/libretro/RetroArch/issues/19459
+
 ## Full core catalog
 
 Every core installable through `shepherd-admin apps install retroarch`, with
