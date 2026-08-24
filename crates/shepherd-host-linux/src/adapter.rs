@@ -1775,17 +1775,34 @@ impl HostAdapter for LinuxHost {
                     Some(GracefulSignal::ProcessGroup) | None => {}
                 }
 
-                // Also send SIGTERM via process handle (skip for Steam sessions)
+                // Exactly one SIGTERM reaches the group. Both paths below are
+                // the same syscall -- `ManagedProcess::terminate` is
+                // `kill(-pgid, SIGTERM)`, and so is `signal_group` -- so running
+                // both lands two signals microseconds apart. RetroArch counts
+                // them (`frontend_unix_sighandler` calls `exit(1)` on the
+                // second) and dies without flushing the in-game save or writing
+                // the auto save state. It only *sometimes* dies, because
+                // standard signals do not queue: when the second arrives while
+                // the first is still pending the kernel folds them into one and
+                // the shutdown runs. That race is the whole bug.
                 let is_steam = matches!(plan, Some(GracefulSignal::SteamProcesses(_)));
                 if !is_steam {
-                    // Signal the group from the handle rather than only through
-                    // `ManagedProcess`: once the spawned process is reaped its
-                    // entry is gone, and with it the only path that reached a
-                    // descendant still holding the screen.
-                    signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
-                    let procs = self.processes.lock().unwrap();
-                    if let Some(p) = procs.get(&pid) {
-                        let _ = p.terminate();
+                    let signalled_via_process = {
+                        let procs = self.processes.lock().unwrap();
+                        match procs.get(&pid) {
+                            Some(p) => {
+                                let _ = p.terminate();
+                                true
+                            }
+                            None => false,
+                        }
+                    };
+                    // Once the spawned process is reaped its entry is gone, and
+                    // with it the only path that reached a descendant still
+                    // holding the screen. Signal the group from the handle then,
+                    // and only then.
+                    if !signalled_via_process {
+                        signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
                     }
                 }
 
