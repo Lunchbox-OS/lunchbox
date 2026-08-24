@@ -196,12 +196,22 @@ reachable as an RPC parameter), then:
 cargo run -p shepherd-wire-codegen --bin rpc-codegen
 ```
 
-That rewrites five checked-in files: `docs/rpc-schema.json`, the two method-name
-mirrors, and the payload mirrors for each client —
+That rewrites six checked-in files: `docs/rpc-schema.json`, the two method-name
+mirrors, the payload mirrors for each client —
 `companion-android/.../WireTypes.generated.kt` and
-`shepherd-webui/src/api/wire-types.generated.ts`. Editing any of them by hand is
-pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs` fails
-until the regenerated output is committed.
+`shepherd-webui/src/api/wire-types.generated.ts` — and the config editor's
+mirrors of the `config.toml` schema,
+`shepherd-webui/src/config/model/config.generated.ts`. Editing any of them by
+hand is pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs`
+fails until the regenerated output is committed.
+
+The last of those comes from `crates/shepherd-config/src/schema.rs` rather than
+the wire types, but goes through the same renderer: `ts_types.rs` takes a
+schema and a preamble, so the only thing that differs between the two outputs is
+which Rust file the banner tells you to edit. It refuses, loudly, to render a
+schema shape it does not recognise rather than emitting a plausible mirror —
+so an exotic serde attribute on either side fails codegen instead of quietly
+producing types that typecheck and decode wrongly.
 
 The mirrors were hand-written once and drifted: four `ReasonCode` variants went
 missing from the companion, and a renamed `DailyOverride` field went unnoticed

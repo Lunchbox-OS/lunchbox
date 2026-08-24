@@ -1095,25 +1095,43 @@ because it is the part people assume is hard:
 before this"* — so the branch now sits on the RetroArch PR rather than on the
 `main` it was cut from. Three things fell out of that, none of them textual.
 
-**Two renderers converged on the same name.** While this branch was writing a
-JSON-Schema→TypeScript renderer for the *config* schema, `main` landed one for
-the *wire* schema, and both were called `ts_types.rs` — an add/add conflict
-where each side was several hundred lines. The wire one is the more complete
-implementation and keeps the name; this branch's moved to `config_ts.rs`. They
-stay separate because they consume different dialects: the wire schema is
-hand-rolled and tuned to the shapes the daemon sends, while the config schema
-comes out of `schemars`, is `$ref`-heavy, and carries Rust doc comments as
-`description`. Worth revisiting if a third consumer ever appears — one renderer
-serving both is the better end state, and only the wire renderer's
-wire-specific header and root handling stand in the way.
+**Two renderers converged on the same name, and then into one file.** While
+this branch was writing a JSON-Schema→TypeScript renderer for the *config*
+schema, `main` landed one for the *wire* schema, and both were called
+`ts_types.rs` — an add/add conflict where each side was several hundred lines.
 
-That collision immediately paid for itself. The wire renderer handles a plain
-`enum` array *and* a `oneOf` of `const`s; the config one handled only the
+The rebase resolved it by keeping the wire renderer's name and moving this
+branch's to `config_ts.rs`, on the assumption that the two schemas were
+different enough dialects to justify both. Measuring that assumption killed it.
+Feeding the config schema through the wire renderer rendered 29 of its 30 types
+on the first attempt; the one refusal was `RawDays`, because `schemars` emits
+`anyOf` for `#[serde(untagged)]` and nothing on the wire is untagged. With that
+one branch added, the output was identical to `config_ts.rs`'s own except for
+declaration order — not a single type differed. So `config_ts.rs` is gone and
+`ts_types.rs` renders both.
+
+What that cost, beyond the `anyOf` branch, was the entry point: `render` had the
+wire banner and the `IsoTimestamp`/`IsoDate` aliases baked into it, so the
+preamble became the caller's. `schemars` also leaves the schema root outside
+`$defs`, so the config caller lifts `RawConfig` into the map under its own name
+— which is why it now sorts alphabetically among the other types rather than
+sitting last. The wire and Kotlin outputs came out byte-identical across the
+whole refactor.
+
+One thing this trades away: the renderer panics on a shape it does not
+recognise, deliberately, rather than emitting a plausible mirror. Pointing it at
+a second schema means a future config-side change — an untagged enum of objects,
+say — can now fail wire codegen too. That is the policy working as designed, but
+it is a new way for `schema.rs` to break the build, and worth knowing before
+adding an exotic serde attribute there.
+
+That collision paid for itself before any of this. The wire renderer handles a
+plain `enum` array *and* a `oneOf` of `const`s; the config one handled only the
 latter, because until #129 every enum in the config schema happened to have doc
 comments on its variants. `RawMediaQuality` and `RawMediaSortBy` do not, so
 `schemars` emitted the compact form and they rendered as bare `string` — no
-dropdown, no exhaustiveness. Fixed in `config_ts.rs` by teaching it the second
-form, which is how those two got real unions.
+dropdown, no exhaustiveness. Reading the wire renderer beside it is what made
+that visible.
 
 **The coverage gate caught someone else's change.** The rebase grew the schema
 by 18 fields and `check:coverage` failed with 12 names, which is the first time

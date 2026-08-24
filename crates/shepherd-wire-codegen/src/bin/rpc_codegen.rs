@@ -24,7 +24,7 @@
 //! a CI check that fails on drift.
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -119,15 +119,60 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The banner and by-convention aliases the wire mirror opens with.
+const WIRE_TS_PREAMBLE: &str = "\
+// GENERATED FILE — DO NOT EDIT BY HAND
+//
+// Rendered from the Rust wire types by
+// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// Edit `crates/shepherd-api/src/types.rs` and re-run instead.
+//
+// Property names are the wire form (snake_case), because that is what the
+// daemon sends and nothing renames them in transit.
+
+/** An RFC 3339 timestamp. A `string`; the alias records the intent. */
+export type IsoTimestamp = string;
+
+/** A calendar date, `YYYY-MM-DD`. */
+export type IsoDate = string;
+";
+
 /// TypeScript mirrors of the payload types, from the same wire JSON Schema.
 fn render_wire_types_ts() -> String {
     let schema = shepherd_wire_codegen::wire_schema::wire_schema();
-    shepherd_wire_codegen::ts_types::render(&schema)
+    shepherd_wire_codegen::ts_types::render(&schema, WIRE_TS_PREAMBLE)
 }
+
+const CONFIG_TS_PREAMBLE: &str = "\
+// GENERATED FILE — DO NOT EDIT BY HAND
+//
+// Rendered from `crates/shepherd-config/src/schema.rs` by
+// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// Edit the Rust types and re-run instead.
+//
+// These describe the *projection* the editor renders — what serde produces
+// when the daemon's parser reads a file — not TOML syntax. Where the file
+// format accepts a shorthand (`input_compat = \"touch_to_mouse\"` as well as a
+// list), the projection always carries the canonical form shown here.
+";
 
 /// TypeScript mirrors of the config schema, for the web config editor.
 fn render_config_types() -> String {
-    shepherd_wire_codegen::config_ts::render_config_types()
+    let schema = shepherd_wire_codegen::config_schema::config_schema();
+    let mut value = serde_json::to_value(&schema).expect("config schema serializes");
+    let object = value.as_object_mut().expect("config schema is an object");
+
+    // `schemars` puts every named type in `$defs` and leaves the root — the
+    // `RawConfig` struct itself — inline. The renderer only walks a map, so
+    // lift the root into it under its own name; taking `$defs` out first keeps
+    // it from being rendered as a property of itself.
+    let mut defs = match object.remove("$defs") {
+        Some(Value::Object(defs)) => defs,
+        _ => Map::new(),
+    };
+    defs.insert("RawConfig".to_string(), value);
+
+    shepherd_wire_codegen::ts_types::render(&defs, CONFIG_TS_PREAMBLE)
 }
 
 /// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.
