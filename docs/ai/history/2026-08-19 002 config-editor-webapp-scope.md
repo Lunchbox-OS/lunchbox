@@ -969,6 +969,7 @@ component interaction — grid dragging, slider-to-patch mapping, kind switching
 
 Opening the PR surfaced three problems, none of which a local run would ever
 have shown, because all three were about the environment rather than the code.
+Rebasing onto #129 then resolved one of them independently — see below.
 
 **jsdom would not load on the runner's Node.** The DOM tests failed with
 `TypeError: webidl.util.markAsUncloneable is not a function` — jsdom loads
@@ -989,15 +990,19 @@ cargo-ndk — which also keeps it architecture-neutral, since
 would have had to name a target triple.
 
 **The new crate's tests were not running at all.** `cargo test --all-targets`,
-which is what the `test` job runs, covers only *default members* — and
+which is what the `test` job ran, covers only *default members* — and
 `shepherd-config-wasm` is deliberately not one, since that is what keeps
-`wasm-bindgen` out of the shipped binaries. So the whole
-comment-preservation suite, the entire justification for the crate, would have
-gone green by not existing. The same was true of `shepherd-wire-codegen`, which
-means the codegen drift test had never run in CI at all — predating this branch,
-but newly load-bearing now that a generated file depends on it. Both jobs gained
-an explicit `-p` step rather than switching to `--workspace`, so the default
-build stays the thing that decides what ships.
+`wasm-bindgen` out of the shipped binaries. So the whole comment-preservation
+suite, the entire justification for the crate, would have gone green by not
+existing. The same was true of `shepherd-wire-codegen`, which meant the codegen
+drift test had never run in CI at all.
+
+That last one turned out to be independently true and independently found: the
+base under #129 had already switched the test job to `cargo test --workspace`,
+with a comment giving the same reasoning. The rebase dropped this branch's
+duplicate step. Only the clippy job was still short a `--workspace`, so it got
+one — the same flag rather than a named crate list, since a list is a second
+thing to forget to update.
 
 ### Follow-up: `shepherd dev webui`
 
@@ -1083,6 +1088,46 @@ because it is the part people assume is hard:
   no `_routes.json`, no `404.html`. With no router there are no sub-paths to
   catch, so `config.shepherd.armeafamily.com/anything` returns Cloudflare's own
   404 rather than the app. Deliberate; a one-line `_redirects` would change it.
+
+### Follow-up: rebased onto #129
+
+*"refetch and rebase against #129, which I'm planning on merging immediately
+before this"* — so the branch now sits on the RetroArch PR rather than on the
+`main` it was cut from. Three things fell out of that, none of them textual.
+
+**Two renderers converged on the same name.** While this branch was writing a
+JSON-Schema→TypeScript renderer for the *config* schema, `main` landed one for
+the *wire* schema, and both were called `ts_types.rs` — an add/add conflict
+where each side was several hundred lines. The wire one is the more complete
+implementation and keeps the name; this branch's moved to `config_ts.rs`. They
+stay separate because they consume different dialects: the wire schema is
+hand-rolled and tuned to the shapes the daemon sends, while the config schema
+comes out of `schemars`, is `$ref`-heavy, and carries Rust doc comments as
+`description`. Worth revisiting if a third consumer ever appears — one renderer
+serving both is the better end state, and only the wire renderer's
+wire-specific header and root handling stand in the way.
+
+That collision immediately paid for itself. The wire renderer handles a plain
+`enum` array *and* a `oneOf` of `const`s; the config one handled only the
+latter, because until #129 every enum in the config schema happened to have doc
+comments on its variants. `RawMediaQuality` and `RawMediaSortBy` do not, so
+`schemars` emitted the compact form and they rendered as bare `string` — no
+dropdown, no exhaustiveness. Fixed in `config_ts.rs` by teaching it the second
+form, which is how those two got real unions.
+
+**The coverage gate caught someone else's change.** The rebase grew the schema
+by 18 fields and `check:coverage` failed with 12 names, which is the first time
+that check has fired for a change from outside this branch. `tsc` caught the
+rest: `KIND_LABELS` is a `Record<KindTag, string>`, so the new `retroarch`
+variant was a compile error rather than a missing menu entry, and the media
+kind's `library_id` → `library` rename surfaced the same way. Both are arguments
+for keeping option lists as `Record`s over the generated unions rather than
+arrays, which the new code does throughout.
+
+**One of the three CI fixes above was redundant on the new base**, as noted
+there. Worth the reminder that a fix written against one base can be wrong
+against the next, and that the commit message is the thing that goes stale
+first.
 
 ### Notes for whoever picks this up
 
