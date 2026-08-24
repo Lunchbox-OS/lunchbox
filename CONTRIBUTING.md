@@ -382,7 +382,7 @@ Run the test suite:
 ```sh
 cargo test
 # as run in CI:
-cargo test --all-targets
+cargo test --workspace --all-targets
 ```
 
 Run lint checks:
@@ -390,8 +390,32 @@ Run lint checks:
 ```sh
 cargo clippy
 # as run in CI:
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`--workspace` is the part that matters: `shepherd-config-wasm` and
+`shepherd-wire-codegen` are kept out of `default-members` so `cargo build` never
+compiles `wasm-bindgen` or `schemars` into the shipped binaries, and the side
+effect is that a bare `cargo test` skips them silently — including the codegen
+drift check.
+
+### Editing a workflow file
+
+Run this before pushing:
+
+```sh
+./scripts/ci/check-workflows.sh
+```
+
+Two jobs in one file may not share a name. Forgejo rejects the *entire*
+workflow when they do — "mapping key ... already defined at line ..." — and
+nothing in it runs, so there is no failing job to point at the mistake and no
+CI job that can catch it for you. A merge is how it happens: two branches each
+add a job, they land far enough apart that git merges both without a conflict,
+and the result is a clean diff and a dead workflow.
+
+Note that `python3 -c "import yaml; yaml.safe_load(...)"` will **not** catch it.
+PyYAML accepts duplicate keys and keeps the last one; Forgejo's parser does not.
 
 ### Bumping the version
 

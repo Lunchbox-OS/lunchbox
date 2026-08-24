@@ -237,27 +237,50 @@ jobs:
         run: cargo fmt --all -- --check
 
   webui:
-    name: Web UI (typecheck)
-    # No custom image needed: the default job container (node:20-bookworm) has
-    # node + npm, which is all this needs.
+    name: Web UI
+    # Pinned rather than inheriting the runner's default node:20-bookworm:
+    # jsdom 30, which backs the DOM tests, requires
+    # ^22.22.2 || ^24.15.0 || >=26. On Node 20 those test files fail to load at
+    # all — `webidl.util.markAsUncloneable is not a function`, thrown by the
+    # undici jsdom pulls in — while every pure test still passes, so the run
+    # reports fewer passing files rather than anything that reads as a version
+    # problem. Pinned to a supported major rather than downgrading jsdom.
     #
-    # Types are checked here and nowhere else. `shepherd build` runs the SPA
-    # through rsbuild, which transpiles without type-checking, so a genuine type
-    # error compiles and ships — a `Switch` prop that does not exist on MUI v9
-    # reached a release that way, silently dropping the control's accessible
-    # name. Building the bundle is already covered by the jobs that build the
-    # daemon (rust-embed needs dist/), so this job only has to typecheck.
+    # Types are deliberately NOT checked here; that lives in `config-editor`.
+    # rsbuild transpiles without type-checking, so a genuine type error compiles
+    # and ships — a `Switch` prop that does not exist on MUI v9 reached a
+    # release that way, silently dropping the control's accessible name — which
+    # is why the check exists at all. It cannot run here: `src/config/` imports
+    # `src/config/wasm/`, which wasm-pack generates and this job has no Rust
+    # toolchain to build, so tsc fails on the import alone.
     runs-on: ubuntu-latest
+    container:
+      image: node:22-bookworm
+    defaults:
+      run:
+        working-directory: shepherd-webui
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        working-directory: shepherd-webui
         run: npm ci
 
-      - name: Typecheck
-        working-directory: shepherd-webui
-        run: npm run typecheck
+      # `src/config/` compiles into the standalone bundle, which has no daemon
+      # to talk to. An import reaching back into `src/api/` would drag axios and
+      # the wire types into a bundle that can never use them.
+      - name: Check the config editor's import boundary
+        run: npm run check:boundary
+
+      # A field added to schema.rs and never wired into the editor is a field
+      # nobody can set. Catches whole-field omissions; see the script's header
+      # for what it cannot catch.
+      - name: Check the config editor covers the schema
+        run: npm run check:coverage
+
+      # Includes the jsdom-backed navigation tests. They stub the wasm-backed
+      # document, so this job still needs no Rust toolchain.
+      - name: Unit tests
+        run: npm test
 
   package:
     name: Package (.deb smoke build)
@@ -589,45 +612,6 @@ jobs:
       - name: Build shepherd-media-android cdylib
         run: cargo ndk -t arm64-v8a build -p shepherd-media-android
 
-  webui:
-    name: Web UI
-    # npm, vitest and the static guards need nothing but Node — but jsdom 30,
-    # which backs the DOM tests, requires ^22.22.2 || ^24.15.0 || >=26, and the
-    # runner's default container is node:20-bookworm. Pinned to a supported
-    # major rather than downgrading jsdom.
-    #
-    # The config editor's wasm validator is *not* built here; that needs the
-    # Rust image and is covered by the `config-editor` job below, which also
-    # builds the standalone bundle and typechecks against it.
-    runs-on: ubuntu-latest
-    container:
-      image: node:22-bookworm
-    defaults:
-      run:
-        working-directory: shepherd-webui
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: npm ci
-
-      # `src/config/` compiles into the standalone bundle, which has no daemon
-      # to talk to. An import reaching back into `src/api/` would drag axios and
-      # the wire types into a bundle that can never use them.
-      - name: Check the config editor's import boundary
-        run: npm run check:boundary
-
-      # A field added to schema.rs and never wired into the editor is a field
-      # nobody can set. Catches whole-field omissions; see the script's header
-      # for what it cannot catch.
-      - name: Check the config editor covers the schema
-        run: npm run check:coverage
-
-      # Includes the jsdom-backed navigation tests. They stub the wasm-backed
-      # document, so this job still needs no Rust toolchain.
-      - name: Unit tests
-        run: npm test
-
   config-editor:
     name: Config editor
     needs: [images, warmup]
@@ -699,3 +683,17 @@ jobs:
 
       - name: Check build/packaging path is architecture-neutral
         run: ./scripts/ci/check-arch-neutral.sh
+
+  workflows:
+    name: Workflow syntax
+    # Static guard: fails if two jobs in one workflow file share a name. Forgejo
+    # rejects the entire file when they do, so *nothing* in it runs — including
+    # this job, when the break is in ci.yml itself. That makes this mainly a
+    # local pre-push check; here it still catches a break in release.yml or
+    # images.yml while ci.yml happens to be fine. Needs only bash + awk.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for duplicate job names
+        run: ./scripts/ci/check-workflows.sh
