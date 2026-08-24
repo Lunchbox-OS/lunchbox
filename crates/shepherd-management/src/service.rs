@@ -335,9 +335,6 @@ impl ManagementService for DefaultManagementService {
             eng.start_session(plan, now, now_mono);
         }
 
-        // Resolve the spawn parameters from policy. Populate firewall and
-        // browser from the entry's policy so per-entry rules are actually
-        // applied -- mirrors the IPC `Launch` path in shepherdd/src/main.rs.
         let (entry_kind, spawn_opts, needs_hidpi) = {
             let eng = self.engine.lock().await;
             resolve_spawn(&eng, &id, now)
