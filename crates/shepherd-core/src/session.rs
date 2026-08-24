@@ -19,6 +19,10 @@ pub struct SessionPlan {
     /// session (issue #78). Carried from the entry's config so the HUD knows
     /// the activity's preference; only the "X" button consults it.
     pub confirm_on_close: bool,
+    /// Whether this activity can be reset in place — see
+    /// [`shepherd_api::EntryKind::supports_reset`]. Derived from the entry's
+    /// kind at launch so the HUD knows whether to offer the button.
+    pub can_reset: bool,
 }
 
 impl SessionPlan {
@@ -225,8 +229,24 @@ impl ActiveSession {
             time_remaining: self.time_remaining(now_mono),
             warnings_issued: self.warnings_issued.clone(),
             confirm_on_close: self.plan.confirm_on_close,
+            can_reset: self.plan.can_reset,
         }
     }
+}
+
+/// What a caller needs to restart the current activity in place, from
+/// [`crate::CoreEngine::begin_restart`].
+///
+/// The session id is unchanged — a restart replaces the process, not the
+/// session — so the caller reuses it when spawning the replacement, keeping
+/// every host-side mapping keyed to it consistent.
+#[derive(Debug, Clone)]
+pub struct RestartRequest {
+    pub session_id: SessionId,
+    pub entry_id: EntryId,
+    /// Handle of the process to tear down. `None` if the activity never got
+    /// one, in which case there is nothing to stop before relaunching.
+    pub host_handle: Option<HostSessionHandle>,
 }
 
 /// Result of stopping a session
@@ -262,6 +282,7 @@ mod tests {
                 },
             ],
             confirm_on_close: true,
+            can_reset: false,
         }
     }
 
@@ -311,6 +332,7 @@ mod tests {
                 message_template: None,
             }],
             confirm_on_close: true,
+            can_reset: false,
         };
 
         let times = plan.warning_times();

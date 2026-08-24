@@ -113,6 +113,14 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// Reset the running activity to its starting state, keeping the session.
+    /// Errors when there is no session or its activity can't be reset.
+    pub async fn reset_current(&mut self) -> IpcResult<()> {
+        self.call::<Value>("reset_current", serde_json::json!({}))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn extend_current(
         &mut self,
         by: Duration,

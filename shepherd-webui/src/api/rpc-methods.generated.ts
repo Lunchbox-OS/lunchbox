@@ -19,6 +19,7 @@ export type RpcMethod =
   | "current_session"
   | "launch"
   | "stop_current"
+  | "reset_current"
   | "extend_current"
   | "list_overrides"
   | "get_override"

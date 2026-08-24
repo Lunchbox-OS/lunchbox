@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::{ActiveSession, CoreEvent, SessionPlan, StopResult};
+use crate::{ActiveSession, CoreEvent, RestartRequest, SessionPlan, StopResult};
 
 /// Launch decision from the core engine
 #[derive(Debug)]
@@ -92,6 +92,12 @@ pub struct CoreEngine {
     /// whose configured firewall cannot be applied stops launching rather than
     /// launching unprotected.
     firewall_enforceable: Option<bool>,
+    /// Set while the current activity is being deliberately restarted in place
+    /// (the HUD's reset button). Its teardown fires the same host `Exited`
+    /// event a crash would, and [`Self::end_current_session`] cannot tell
+    /// them apart — so without this the session would end halfway through its
+    /// own reset. See [`Self::begin_restart`].
+    restarting: bool,
 }
 
 impl CoreEngine {
@@ -118,6 +124,7 @@ impl CoreEngine {
             connected_inputs: None,
             diagnostics: DiagnosticSet::default(),
             firewall_enforceable: None,
+            restarting: false,
         }
     }
 
@@ -1121,6 +1128,7 @@ impl CoreEngine {
             max_duration,
             warnings: entry.warnings.clone(),
             confirm_on_close: entry.confirm_on_close,
+            can_reset: entry.kind.supports_reset(),
         };
 
         if let Some(max_dur) = max_duration {
@@ -1154,6 +1162,7 @@ impl CoreEngine {
             label: session.plan.label.clone(),
             deadline: session.deadline,
             confirm_on_close: session.plan.confirm_on_close,
+            can_reset: session.plan.can_reset,
         };
 
         // Log to audit
@@ -1213,6 +1222,73 @@ impl CoreEngine {
         if let Some(session) = &mut self.current_session {
             session.attach_handle(handle);
         }
+    }
+
+    /// Begin restarting the current activity in place.
+    ///
+    /// Returns what the caller needs to tear the activity down and bring it
+    /// back — the entry to relaunch and the handle to stop — or `None` when
+    /// there is no session, or the activity doesn't support being reset.
+    ///
+    /// Everything about the session is preserved: its id, its deadline, its
+    /// warnings, and its usage accounting all keep running. Only the process
+    /// underneath is replaced. That is the whole point — a reset is not a new
+    /// session, so it must not restart the clock or spend a cooldown.
+    ///
+    /// Until [`Self::finish_restart`] is called, exits are ignored (see
+    /// [`Self::restarting`]). **The caller must always call it**, including on
+    /// failure, or the session becomes unkillable-by-exit until it expires.
+    pub fn begin_restart(&mut self) -> Option<RestartRequest> {
+        let session = self.current_session.as_ref()?;
+        if !session.plan.can_reset {
+            debug!(
+                entry_id = %session.plan.entry_id,
+                "Reset requested for an activity that does not support it"
+            );
+            return None;
+        }
+
+        let request = RestartRequest {
+            session_id: session.plan.session_id.clone(),
+            entry_id: session.plan.entry_id.clone(),
+            host_handle: session.host_handle.clone(),
+        };
+        info!(
+            session_id = %request.session_id,
+            entry_id = %request.entry_id,
+            "Restarting activity in place"
+        );
+        self.restarting = true;
+        Some(request)
+    }
+
+    /// Finish a restart begun by [`Self::begin_restart`], attaching the handle
+    /// of the replacement process.
+    ///
+    /// `handle` is `None` when the relaunch failed; the session is ended in
+    /// that case, since there is no longer a process behind it.
+    pub fn finish_restart(
+        &mut self,
+        handle: Option<HostSessionHandle>,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) -> Option<CoreEvent> {
+        self.restarting = false;
+        match handle {
+            Some(handle) => {
+                self.attach_host_handle(handle);
+                None
+            }
+            None => {
+                warn!("Relaunch after reset failed; ending the session");
+                self.end_current_session(None, now_mono, now)
+            }
+        }
+    }
+
+    /// Whether a restart is in flight.
+    pub fn is_restarting(&self) -> bool {
+        self.restarting
     }
 
     /// Tick the engine - check for warnings, expiry, and availability changes
@@ -1341,12 +1417,23 @@ impl CoreEngine {
     ///
     /// For paths where the engine itself knows the activity is gone — a spawn
     /// that never produced a process, or a stop the host has confirmed.
+    ///
+    /// Returns `None` while a reset is in flight: both entry points funnel
+    /// through here, so the guard belongs here rather than on either one.
     pub fn end_current_session(
         &mut self,
         exit_code: Option<i32>,
         now_mono: MonotonicInstant,
         now: DateTime<Local>,
     ) -> Option<CoreEvent> {
+        // A reset tears the activity down on purpose. The host reports that
+        // exactly like a crash, so ignore it until the replacement is up;
+        // `finish_restart` is what decides whether the session survives.
+        if self.restarting {
+            debug!("Activity exited during a reset; keeping the session");
+            return None;
+        }
+
         let session = self.current_session.take()?;
 
         // The child is charged for the time they could actually use, not for
@@ -3792,5 +3879,223 @@ mod tests {
             games.max_run_if_started_now,
             "the group's reported cap should match what its members get"
         );
+    }
+
+    // --- Reset / restart in place (issue #125) ----------------------------
+
+    /// A policy whose one entry is a RetroArch activity, which is the only
+    /// kind that can be reset.
+    fn make_resettable_policy() -> Policy {
+        let mut policy = make_test_policy();
+        policy.entries[0].kind = EntryKind::Retroarch {
+            core: Some("mgba".into()),
+            core_path: None,
+            content: "/roms/game.gba".into(),
+            save_state: shepherd_api::RetroarchSaveState::Auto,
+            command: "retroarch".into(),
+            args: vec![],
+            env: HashMap::new(),
+            kiosk: true,
+            reset: true,
+        };
+        policy
+    }
+
+    fn start_session(engine: &mut CoreEngine, id: &str) -> shepherd_util::SessionId {
+        let now = shepherd_util::now();
+        let entry_id = EntryId::new(id);
+        let LaunchDecision::Approved(plan) = engine.request_launch(&entry_id, now) else {
+            panic!("launch should be approved");
+        };
+        let session_id = plan.session_id.clone();
+        engine.start_session(plan, now, MonotonicInstant::now());
+        session_id
+    }
+
+    /// The exit a reset causes must not end the session — that is the whole
+    /// difference between resetting an activity and closing it.
+    #[test]
+    fn restart_keeps_the_session_across_the_activitys_exit() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        // linux_full, not minimal: the engine gates launches on the host
+        // supporting the entry's kind, and minimal only spawns processes.
+        let mut engine = CoreEngine::new(
+            make_resettable_policy(),
+            store,
+            HostCapabilities::linux_full(),
+        );
+        let session_id = start_session(&mut engine, "test-game");
+
+        let request = engine.begin_restart().expect("entry supports reset");
+        assert_eq!(request.session_id, session_id);
+        assert!(engine.is_restarting());
+
+        // The teardown's exit arrives looking exactly like a crash.
+        let ended =
+            engine.end_current_session(Some(0), MonotonicInstant::now(), shepherd_util::now());
+        assert!(ended.is_none(), "a reset's exit must not end the session");
+        assert!(engine.has_active_session());
+
+        // The replacement process takes over the same session.
+        engine.finish_restart(
+            Some(HostSessionHandle::new(
+                session_id.clone(),
+                shepherd_host_api::HostHandlePayload::Linux { pid: 42, pgid: 42 },
+            )),
+            MonotonicInstant::now(),
+            shepherd_util::now(),
+        );
+        assert!(!engine.is_restarting());
+        let session = engine.current_session().expect("session should survive");
+        assert_eq!(
+            session.plan.session_id, session_id,
+            "a reset replaces the process, not the session"
+        );
+    }
+
+    /// Once the restart is over, a real exit ends the session as usual —
+    /// the suppression must not outlive the operation that needed it.
+    #[test]
+    fn a_later_exit_still_ends_the_session() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        // linux_full, not minimal: the engine gates launches on the host
+        // supporting the entry's kind, and minimal only spawns processes.
+        let mut engine = CoreEngine::new(
+            make_resettable_policy(),
+            store,
+            HostCapabilities::linux_full(),
+        );
+        start_session(&mut engine, "test-game");
+
+        engine.begin_restart().expect("entry supports reset");
+        engine.finish_restart(
+            Some(HostSessionHandle::new(
+                SessionId::new(),
+                shepherd_host_api::HostHandlePayload::Linux { pid: 42, pgid: 42 },
+            )),
+            MonotonicInstant::now(),
+            shepherd_util::now(),
+        );
+
+        let ended =
+            engine.end_current_session(Some(0), MonotonicInstant::now(), shepherd_util::now());
+        assert!(ended.is_some(), "the next real exit should end the session");
+        assert!(!engine.has_active_session());
+    }
+
+    /// A relaunch that fails leaves nothing behind the session, so it ends
+    /// rather than lingering as a session with no process.
+    #[test]
+    fn a_failed_relaunch_ends_the_session() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        // linux_full, not minimal: the engine gates launches on the host
+        // supporting the entry's kind, and minimal only spawns processes.
+        let mut engine = CoreEngine::new(
+            make_resettable_policy(),
+            store,
+            HostCapabilities::linux_full(),
+        );
+        start_session(&mut engine, "test-game");
+
+        engine.begin_restart().expect("entry supports reset");
+        let ended = engine.finish_restart(None, MonotonicInstant::now(), shepherd_util::now());
+        assert!(
+            matches!(ended, Some(CoreEvent::SessionEnded { .. })),
+            "a failed relaunch should end the session"
+        );
+        assert!(!engine.has_active_session());
+        assert!(!engine.is_restarting());
+    }
+
+    /// Activities that don't support reset are refused before anything is
+    /// torn down — otherwise the button would kill an activity it can't
+    /// bring back to a meaningful state.
+    #[test]
+    fn restart_is_refused_for_activities_that_do_not_support_it() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        // make_test_policy's entry is a plain process.
+        let mut engine = CoreEngine::new(make_test_policy(), store, HostCapabilities::minimal());
+        start_session(&mut engine, "test-game");
+
+        assert!(engine.begin_restart().is_none());
+        assert!(!engine.is_restarting());
+        assert!(engine.has_active_session());
+    }
+
+    /// The exit of the process a reset replaced can arrive *after* the
+    /// replacement is attached — the host reports it through a channel the
+    /// reset does not wait on. That stale event must not end a session whose
+    /// activity is running fine. (Found end-to-end: the reset worked, then the
+    /// old process's exit ended the session a moment later.)
+    #[test]
+    fn a_replaced_processs_late_exit_does_not_end_the_session() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_resettable_policy(),
+            store,
+            HostCapabilities::linux_full(),
+        );
+        let session_id = start_session(&mut engine, "test-game");
+
+        let old = HostSessionHandle::new(
+            session_id.clone(),
+            shepherd_host_api::HostHandlePayload::Linux {
+                pid: 100,
+                pgid: 100,
+            },
+        );
+        engine.attach_host_handle(old.clone());
+
+        // Reset: the old process goes away, a new one takes its place.
+        engine.begin_restart().expect("entry supports reset");
+        let new = HostSessionHandle::new(
+            session_id.clone(),
+            shepherd_host_api::HostHandlePayload::Linux {
+                pid: 200,
+                pgid: 200,
+            },
+        );
+        engine.finish_restart(
+            Some(new.clone()),
+            MonotonicInstant::now(),
+            shepherd_util::now(),
+        );
+
+        // Now the old process's exit finally arrives.
+        let ended = engine.notify_activity_exited(
+            &old,
+            Some(0),
+            MonotonicInstant::now(),
+            shepherd_util::now(),
+        );
+        assert!(
+            ended.is_none(),
+            "an exit from the replaced process must not end the session"
+        );
+        assert!(engine.has_active_session());
+
+        // The replacement's own exit still ends it.
+        let ended = engine.notify_activity_exited(
+            &new,
+            Some(0),
+            MonotonicInstant::now(),
+            shepherd_util::now(),
+        );
+        assert!(ended.is_some(), "the live process's exit should end it");
+        assert!(!engine.has_active_session());
+    }
+
+    #[test]
+    fn restart_is_refused_with_no_session() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        // linux_full, not minimal: the engine gates launches on the host
+        // supporting the entry's kind, and minimal only spawns processes.
+        let mut engine = CoreEngine::new(
+            make_resettable_policy(),
+            store,
+            HostCapabilities::linux_full(),
+        );
+        assert!(engine.begin_restart().is_none());
+        assert!(!engine.is_restarting());
     }
 }

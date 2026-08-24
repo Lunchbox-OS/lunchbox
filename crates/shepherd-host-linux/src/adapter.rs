@@ -69,7 +69,7 @@ const WINDOW_READY_POLL: Duration = Duration::from_millis(500);
 const RECONCILE_EVERY_TICKS: u64 = 20;
 
 /// Expand `~` at the beginning of a path to the user's home directory
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             return path.replacen("~", &home.to_string_lossy(), 1);
@@ -206,6 +206,45 @@ struct SessionInfo {
     /// *system* manager, so `systemctl stop` on it (via the helper) reaches
     /// processes our own signals may not.
     firewall_scope: Option<String>,
+    /// A RetroArch session, which gets a longer graceful-stop window: its
+    /// shutdown has to unload the core, flush the in-game save, and write a
+    /// save state before the process goes away.
+    retroarch: bool,
+}
+
+/// How a session's graceful SIGTERM is delivered.
+///
+/// Extracted from `stop` so the rule that matters can be asserted directly:
+/// **a plain process is signalled once, via its process group, and by nothing
+/// else.** It cannot be tested through an actual process — a shell stand-in
+/// folds two SIGTERMs arriving milliseconds apart into a single trap
+/// invocation, and the C-level counting handler that actually breaks (RetroArch
+/// hard-exits on the second signal, skipping its save) has no equivalent a
+/// test script can install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GracefulSignal {
+    /// Snap app: signal the runtime's cgroup, which holds the real process.
+    SnapCgroup(String),
+    /// Steam game: signal the game's own processes, found by app id.
+    SteamProcesses(u32),
+    /// Flatpak app: signal the runtime's cgroup.
+    FlatpakCgroup(String),
+    /// Everything else: one signal to the session's process group.
+    ProcessGroup,
+}
+
+impl GracefulSignal {
+    fn for_session(info: &SessionInfo) -> Self {
+        if let Some(ref snap) = info.snap_name {
+            Self::SnapCgroup(snap.clone())
+        } else if let Some(app_id) = info.steam_app_id {
+            Self::SteamProcesses(app_id)
+        } else if let Some(ref app_id) = info.flatpak_app_id {
+            Self::FlatpakCgroup(app_id.clone())
+        } else {
+            Self::ProcessGroup
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -766,7 +805,18 @@ impl LinuxHost {
 
     /// Send every kill we have at an activity, hardest first. Shared by the
     /// stop paths and by the reconciliation sweep.
-    fn kill_activity(pid: u32, pgid: u32, info: &Option<SessionInfo>) {
+    ///
+    /// `protected_pgids` is every *other* session shepherd is currently
+    /// tracking. Only the by-name last resort consults it, and it must: this
+    /// runs every two seconds for as long as an activity refuses to die, and
+    /// `pkill`ing `retroarch` would take out the game a child launched
+    /// afterwards along with the one that escaped.
+    fn kill_activity(
+        pid: u32,
+        pgid: u32,
+        info: &Option<SessionInfo>,
+        protected_pgids: &HashSet<u32>,
+    ) {
         use nix::sys::signal::Signal::SIGKILL;
 
         signal_group(pgid, SIGKILL);
@@ -778,10 +828,27 @@ impl LinuxHost {
             } else if let Some(ref app_id) = info.flatpak_app_id {
                 kill_flatpak_cgroup(app_id, SIGKILL);
             } else {
-                kill_by_command(&info.command_name, SIGKILL);
+                kill_by_command(&info.command_name, SIGKILL, protected_pgids);
             }
         }
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), SIGKILL);
+    }
+
+    /// The process groups of every session currently tracked, minus `except`.
+    ///
+    /// A session's descendants all share its group (`setsid` at spawn), so one
+    /// group id per session is enough to spare all of it from a by-name kill.
+    fn tracked_pgids(
+        processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
+        except: Option<u32>,
+    ) -> HashSet<u32> {
+        processes
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| p.pgid)
+            .filter(|pgid| Some(*pgid) != except)
+            .collect()
     }
 
     /// Keep working on activities that survived teardown, and close any window
@@ -859,7 +926,8 @@ impl LinuxHost {
                 });
             }
 
-            Self::kill_activity(pid, activity.pgid, &activity.info);
+            let protected = Self::tracked_pgids(processes, Some(activity.pgid));
+            Self::kill_activity(pid, activity.pgid, &activity.info, &protected);
 
             // Close any surface it is still showing. A window we can close is
             // the difference between "unsupervised activity on the child's
@@ -1257,6 +1325,10 @@ impl HostAdapter for LinuxHost {
         entry_kind: &EntryKind,
         options: SpawnOptions,
     ) -> HostResult<HostSessionHandle> {
+        // RetroArch sessions need a longer grace period on stop than the
+        // generic default; `stop` reads this back off the session info.
+        let is_retroarch = matches!(entry_kind, EntryKind::Retroarch { .. });
+
         // Extract argv, env, cwd, snap_name, flatpak_app_id, and steam_app_id based on entry kind
         let (argv, env, cwd, snap_name, flatpak_app_id, steam_app_id) = match entry_kind {
             EntryKind::Process {
@@ -1344,6 +1416,43 @@ impl HostAdapter for LinuxHost {
                 None,
                 None,
             ),
+            EntryKind::Retroarch {
+                core,
+                core_path,
+                content,
+                save_state,
+                command,
+                args,
+                env,
+                kiosk,
+                // The reset button is a HUD concern; nothing about the launch
+                // changes with it.
+                reset: _,
+            } => {
+                let spec = crate::retroarch::Spec {
+                    core: core.as_deref(),
+                    core_path: core_path.as_deref(),
+                    content,
+                    save_state: *save_state,
+                    command,
+                    args,
+                    kiosk: *kiosk,
+                };
+                let launch =
+                    crate::retroarch::prepare(&spec, options.entry_id.as_deref(), expand_tilde)
+                        .map_err(|e| {
+                            HostError::SpawnFailed(format!(
+                                "Failed to prepare RetroArch config: {}",
+                                e
+                            ))
+                        })?;
+                info!(
+                    argv = ?launch.argv,
+                    state_dir = %launch.paths.root.display(),
+                    "Prepared RetroArch launch"
+                );
+                (launch.argv, env.clone(), None, None, None, None)
+            }
             EntryKind::Custom {
                 type_name: _,
                 payload: _,
@@ -1572,6 +1681,7 @@ impl HostAdapter for LinuxHost {
             flatpak_app_id: flatpak_app_id.clone(),
             steam_app_id,
             firewall_scope: firewall_scope.clone(),
+            retroarch: is_retroarch,
         };
         self.session_info
             .lock()
@@ -1612,6 +1722,28 @@ impl HostAdapter for LinuxHost {
         Ok(handle)
     }
 
+    async fn discard_saved_state(
+        &self,
+        entry_kind: &EntryKind,
+        entry_id: Option<&str>,
+    ) -> HostResult<()> {
+        let EntryKind::Retroarch { content, .. } = entry_kind else {
+            return Ok(());
+        };
+
+        let content = expand_tilde(&content.to_string_lossy());
+        let paths = crate::retroarch::paths_for(entry_id, std::path::Path::new(&content));
+        let removed = crate::retroarch::discard_auto_state(&paths).map_err(|e| {
+            HostError::Internal(format!("Failed to discard RetroArch save state: {e}"))
+        })?;
+        info!(
+            removed,
+            states = %paths.states.display(),
+            "Discarded RetroArch auto save state"
+        );
+        Ok(())
+    }
+
     async fn stop(&self, handle: &HostSessionHandle, mode: StopMode) -> HostResult<()> {
         let session_id = handle.session_id.clone();
         let (pid, pgid) = match handle.payload() {
@@ -1632,12 +1764,27 @@ impl HostAdapter for LinuxHost {
 
         match mode {
             StopMode::Graceful { timeout } => {
-                // If this is a snap or flatpak app, use cgroup-based killing (most reliable)
-                if let Some(ref info) = session_info {
-                    if let Some(ref snap) = info.snap_name {
+                // Raise the floor for RetroArch: its shutdown unloads the
+                // core, flushes the in-game save, and writes a save state, and
+                // the cost of cutting that short is the child's save file. The
+                // callers all pass the generic 5s, which is a fine default for
+                // an app whose shutdown is just "exit".
+                let timeout = if session_info.as_ref().is_some_and(|i| i.retroarch) {
+                    timeout.max(crate::retroarch::STOP_TIMEOUT)
+                } else {
+                    timeout
+                };
+
+                let plan = session_info.as_ref().map(GracefulSignal::for_session);
+
+                match plan {
+                    // Sandboxed runtimes put the real app in a cgroup of their
+                    // own, so signalling our direct child would miss it.
+                    Some(GracefulSignal::SnapCgroup(ref snap)) => {
                         kill_snap_cgroup(snap, nix::sys::signal::Signal::SIGTERM);
                         info!(snap = %snap, "Sent SIGTERM via snap cgroup");
-                    } else if let Some(app_id) = info.steam_app_id {
+                    }
+                    Some(GracefulSignal::SteamProcesses(app_id)) => {
                         let _ =
                             kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGTERM);
                         if let Ok(mut map) = self.steam_sessions.lock() {
@@ -1647,30 +1794,44 @@ impl HostAdapter for LinuxHost {
                             steam_app_id = app_id,
                             "Sent SIGTERM to Steam game processes"
                         );
-                    } else if let Some(ref app_id) = info.flatpak_app_id {
+                    }
+                    Some(GracefulSignal::FlatpakCgroup(ref app_id)) => {
                         kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGTERM);
                         info!(flatpak = %app_id, "Sent SIGTERM via flatpak cgroup");
-                    } else {
-                        // Fall back to command name for non-sandboxed apps
-                        kill_by_command(&info.command_name, nix::sys::signal::Signal::SIGTERM);
-                        info!(command = %info.command_name, "Sent SIGTERM via command name");
                     }
+                    // A plain process gets its one SIGTERM from `p.terminate()`
+                    // below, which signals the whole process group.
+                    Some(GracefulSignal::ProcessGroup) | None => {}
                 }
 
-                // Also send SIGTERM via process handle (skip for Steam sessions)
-                let is_steam = session_info
-                    .as_ref()
-                    .and_then(|info| info.steam_app_id)
-                    .is_some();
+                // Exactly one SIGTERM reaches the group. Both paths below are
+                // the same syscall -- `ManagedProcess::terminate` is
+                // `kill(-pgid, SIGTERM)`, and so is `signal_group` -- so running
+                // both lands two signals microseconds apart. RetroArch counts
+                // them (`frontend_unix_sighandler` calls `exit(1)` on the
+                // second) and dies without flushing the in-game save or writing
+                // the auto save state. It only *sometimes* dies, because
+                // standard signals do not queue: when the second arrives while
+                // the first is still pending the kernel folds them into one and
+                // the shutdown runs. That race is the whole bug.
+                let is_steam = matches!(plan, Some(GracefulSignal::SteamProcesses(_)));
                 if !is_steam {
-                    // Signal the group from the handle rather than only through
-                    // `ManagedProcess`: once the spawned process is reaped its
-                    // entry is gone, and with it the only path that reached a
-                    // descendant still holding the screen.
-                    signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
-                    let procs = self.processes.lock().unwrap();
-                    if let Some(p) = procs.get(&pid) {
-                        let _ = p.terminate();
+                    let signalled_via_process = {
+                        let procs = self.processes.lock().unwrap();
+                        match procs.get(&pid) {
+                            Some(p) => {
+                                let _ = p.terminate();
+                                true
+                            }
+                            None => false,
+                        }
+                    };
+                    // Once the spawned process is reaped its entry is gone, and
+                    // with it the only path that reached a descendant still
+                    // holding the screen. Signal the group from the handle then,
+                    // and only then.
+                    if !signalled_via_process {
+                        signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
                     }
                 }
 
@@ -1696,9 +1857,15 @@ impl HostAdapter for LinuxHost {
                                 kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGKILL);
                                 info!(flatpak = %app_id, "Sent SIGKILL via flatpak cgroup (timeout)");
                             } else {
+                                // Spare every other tracked session: this
+                                // matches on the command line, and a child who
+                                // relaunched during the grace period is running
+                                // the same program.
+                                let protected = Self::tracked_pgids(&self.processes, Some(pgid));
                                 kill_by_command(
                                     &info.command_name,
                                     nix::sys::signal::Signal::SIGKILL,
+                                    &protected,
                                 );
                                 info!(command = %info.command_name, "Sent SIGKILL via command name (timeout)");
                             }
@@ -1744,7 +1911,12 @@ impl HostAdapter for LinuxHost {
                         kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGKILL);
                         info!(flatpak = %app_id, "Sent SIGKILL via flatpak cgroup");
                     } else {
-                        kill_by_command(&info.command_name, nix::sys::signal::Signal::SIGKILL);
+                        let protected = Self::tracked_pgids(&self.processes, Some(pgid));
+                        kill_by_command(
+                            &info.command_name,
+                            nix::sys::signal::Signal::SIGKILL,
+                            &protected,
+                        );
                         info!(command = %info.command_name, "Sent SIGKILL via command name");
                     }
                 }
@@ -2144,6 +2316,7 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
+            retroarch: false,
         });
         host.session_info
             .lock()
@@ -2383,6 +2556,228 @@ mod tests {
         let mut reported = HashSet::new();
         assert!(
             LinuxHost::report_unowned_windows(&[hidden], &HashSet::new(), &mut reported).is_empty()
+        );
+    }
+
+    fn session_info(command: &str) -> SessionInfo {
+        SessionInfo {
+            command_name: command.to_string(),
+            snap_name: None,
+            flatpak_app_id: None,
+            steam_app_id: None,
+            firewall_scope: None,
+            retroarch: false,
+        }
+    }
+
+    /// A plain process is signalled *only* through its process group.
+    ///
+    /// The graceful path used to also run `pkill -f <command>`, which landed a
+    /// second SIGTERM on the same process a few milliseconds later. RetroArch
+    /// hard-exits on the second — `frontend_unix_sighandler` calls `exit(1)` —
+    /// skipping the in-game save flush and the save state, so an emulator
+    /// session could not be closed without losing the child's progress. The
+    /// same pkill would also reach unrelated copies of the program running
+    /// outside the session, since it matches on command line.
+    #[test]
+    fn plain_process_is_signalled_once_via_its_process_group() {
+        assert_eq!(
+            GracefulSignal::for_session(&session_info("retroarch")),
+            GracefulSignal::ProcessGroup
+        );
+    }
+
+    /// Sandboxed runtimes keep their cgroup-based delivery: the real app isn't
+    /// in our child's process group, so signalling the group alone would miss.
+    #[test]
+    fn sandboxed_kinds_keep_their_own_delivery() {
+        let snap = SessionInfo {
+            snap_name: Some("mc-installer".into()),
+            ..session_info("snap")
+        };
+        assert_eq!(
+            GracefulSignal::for_session(&snap),
+            GracefulSignal::SnapCgroup("mc-installer".into())
+        );
+
+        let flatpak = SessionInfo {
+            flatpak_app_id: Some("com.google.Chrome".into()),
+            ..session_info("flatpak")
+        };
+        assert_eq!(
+            GracefulSignal::for_session(&flatpak),
+            GracefulSignal::FlatpakCgroup("com.google.Chrome".into())
+        );
+
+        let steam = SessionInfo {
+            steam_app_id: Some(504230),
+            ..session_info("steam")
+        };
+        assert_eq!(
+            GracefulSignal::for_session(&steam),
+            GracefulSignal::SteamProcesses(504230)
+        );
+    }
+
+    /// End-to-end for the RetroArch kind: the adapter materializes the config
+    /// fragment and hands RetroArch the argv that uses it.
+    // Holding the lock across the await is the point: it serializes tests
+    // against the process-global root env var, which `spawn` reads.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn retroarch_spawn_materializes_config_and_argv() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake = scratch.path().join("retroarch");
+        let recorded = scratch.path().join("argv");
+
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$ARGV_FILE\"; done\n\
+             while true; do sleep 0.05; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let state_root = scratch.path().join("state");
+        let _guard = crate::retroarch::ROOT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(crate::retroarch::RETROARCH_ROOT_ENV, &state_root) };
+
+        let host = LinuxHost::new();
+        let _rx = host.subscribe();
+
+        let entry = EntryKind::Retroarch {
+            core: None,
+            core_path: Some("/opt/cores/mgba_libretro.so".into()),
+            content: "/srv/roms/pokemon-firered.gba".into(),
+            save_state: shepherd_api::RetroarchSaveState::Auto,
+            command: fake.to_string_lossy().into_owned(),
+            args: vec!["--verbose".into()],
+            env: HashMap::from([("ARGV_FILE".to_string(), recorded.display().to_string())]),
+            kiosk: true,
+            reset: true,
+        };
+
+        let handle = host
+            .spawn(
+                SessionId::new(),
+                &entry,
+                SpawnOptions {
+                    entry_id: Some("pokemon-firered".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        let fragment = state_root.join("pokemon-firered/append.cfg");
+        assert_eq!(
+            argv,
+            vec![
+                "--appendconfig".to_string(),
+                fragment.display().to_string(),
+                "-f".to_string(),
+                "-L".to_string(),
+                "/opt/cores/mgba_libretro.so".to_string(),
+                "/srv/roms/pokemon-firered.gba".to_string(),
+                "--verbose".to_string(),
+            ]
+        );
+
+        let cfg = std::fs::read_to_string(&fragment).expect("fragment should exist");
+        assert!(cfg.contains("savestate_auto_save = \"true\""));
+        assert!(cfg.contains("savestate_auto_load = \"true\""));
+        assert!(cfg.contains("config_save_on_exit = \"false\""));
+        assert!(cfg.contains("kiosk_mode_enable = \"true\""));
+
+        host.stop(&handle, StopMode::Force).await.unwrap();
+        unsafe { std::env::remove_var(crate::retroarch::RETROARCH_ROOT_ENV) };
+    }
+
+    /// A graceful stop must let the activity finish saving.
+    ///
+    /// It used to send three SIGTERMs — a `pkill -f` by command name, a
+    /// process-group kill, and one per descendant. An app that treats a
+    /// repeated SIGTERM as "the user is impatient" never survives that:
+    /// RetroArch's `frontend_unix_sighandler` calls `exit(1)` on the second,
+    /// skipping the in-game save flush and the save state, so no emulator
+    /// session could close without losing progress.
+    ///
+    /// The stand-in copies those semantics exactly — the first signal starts a
+    /// shutdown that takes a moment, and it resets its own disposition so a
+    /// second signal is fatal. Asserting on the completed shutdown rather than
+    /// on a count of signals is also the only reliable way to write this: a
+    /// shell trap folds two signals arriving milliseconds apart into one
+    /// invocation, so counting receipts cannot tell one SIGTERM from two.
+    #[tokio::test]
+    async fn graceful_stop_lets_the_activity_finish_saving() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let script = scratch.path().join("saves-on-sigterm.sh");
+        let marker = scratch.path().join("saved");
+
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             # First SIGTERM: start saving. Reset the handler first, so a\n\
+             # second one kills us outright -- what RetroArch's exit(1) does.\n\
+             trap 'trap - TERM; sleep 1; printf saved > \"$MARKER_FILE\"; exit 0' TERM\n\
+             while true; do sleep 0.05; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let host = LinuxHost::new();
+        let _rx = host.subscribe();
+        // Without the monitor nothing reaps the child, so `stop` would poll
+        // for its whole timeout even after a clean exit -- which would hide
+        // whether the app exited on its own or was killed at the deadline.
+        let _monitor = host.start_monitor();
+
+        let entry = EntryKind::Process {
+            command: script.to_string_lossy().into_owned(),
+            args: vec![],
+            env: HashMap::from([("MARKER_FILE".to_string(), marker.display().to_string())]),
+            cwd: None,
+        };
+
+        let handle = host
+            .spawn(SessionId::new(), &entry, SpawnOptions::default())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stop_started = std::time::Instant::now();
+        host.stop(
+            &handle,
+            StopMode::Graceful {
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default(),
+            "saved",
+            "the activity was cut off before it finished saving"
+        );
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(4),
+            "stop should have returned when the activity exited, not at the deadline"
         );
     }
 }

@@ -80,6 +80,20 @@ fn main() -> ExitCode {
                             }
                             None => format!("media {} ({})", mode.subcommand(), library),
                         },
+                        EntryKind::Retroarch {
+                            core,
+                            core_path,
+                            content,
+                            ..
+                        } => {
+                            let core = core.clone().unwrap_or_else(|| {
+                                core_path
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default()
+                            });
+                            format!("retroarch ({}, {})", core, content.display())
+                        }
                         EntryKind::Custom { type_name, .. } => {
                             format!("custom ({})", type_name)
                         }

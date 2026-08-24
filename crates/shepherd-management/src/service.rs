@@ -63,6 +63,15 @@ pub trait ManagementService: Send + Sync {
     async fn launch(&self, id: EntryId) -> ManagementResult<LaunchOutcome>;
     #[rpc(default(mode = "default_graceful"))]
     async fn stop_current(&self, mode: StopMode) -> ManagementResult<()>;
+    /// Reset the running activity to its starting state without ending the
+    /// session — the HUD's "reboot the console" button.
+    ///
+    /// Stops the activity cleanly (so it flushes its own saved data), discards
+    /// the resume state that would otherwise put it straight back where it
+    /// was, and relaunches it under the same session: same id, same deadline,
+    /// same clock. Fails if there is no session, or its activity doesn't
+    /// support being reset — see `EntryKind::supports_reset`.
+    async fn reset_current(&self) -> ManagementResult<()>;
     #[rpc(wrap_result = "new_deadline")]
     async fn extend_current(&self, seconds: i64) -> ManagementResult<Option<DateTime<Local>>>;
 
@@ -319,99 +328,16 @@ impl ManagementService for DefaultManagementService {
         let session_id = plan.session_id.clone();
         let plan_label = plan.label.clone();
         let plan_confirm_on_close = plan.confirm_on_close;
+        let plan_can_reset = plan.can_reset;
 
         {
             let mut eng = self.engine.lock().await;
             eng.start_session(plan, now, now_mono);
         }
 
-        // Resolve the spawn parameters from policy. Populate firewall and
-        // browser from the entry's policy so per-entry rules are actually
-        // applied -- mirrors the IPC `Launch` path in shepherdd/src/main.rs.
         let (entry_kind, spawn_opts, needs_hidpi) = {
             let eng = self.engine.lock().await;
-            let entry = eng.policy().get_entry(&id);
-            let kind = entry.map(|e| e.kind.clone());
-            let firewall =
-                entry
-                    .and_then(|e| e.firewall.clone())
-                    .map(|fw| shepherd_host_api::FirewallSpec {
-                        default_deny: fw.default_deny,
-                        allow: fw.allow,
-                        deny: fw.deny,
-                    });
-            let browser =
-                entry
-                    .and_then(|e| e.browser.clone())
-                    .map(|b| shepherd_host_api::BrowserSpec {
-                        policy_id: id.as_str().to_string(),
-                        profile_id: b.profile_id,
-                        mode: b.mode,
-                        start_url: b.start_url,
-                        url_allowlist: b.url_allowlist,
-                        url_blocklist: b.url_blocklist,
-                        disable_dev_tools: b.disable_dev_tools,
-                        disable_incognito: b.disable_incognito,
-                        disable_extensions: b.disable_extensions,
-                        wipe_on_exit: b.wipe_on_exit,
-                    });
-            let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
-            let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
-            // Hand the activity the same check that gates its availability, so
-            // (e.g.) a media grid hides online-only items instead of leaving
-            // tiles that error on tap. The entry's own target wins over the
-            // service's; `forward_check = false` suppresses both.
-            let connectivity_check = entry.and_then(|e| {
-                if !e.internet.forward_check {
-                    return None;
-                }
-                e.internet
-                    .check
-                    .as_ref()
-                    .or(eng.policy().service.internet.check.as_ref())
-                    .map(|t| t.original.clone())
-            });
-            // The cache the activity writes to is the one shepherdd prefetches
-            // into, so the eviction policy has to travel with the launch.
-            let is_media = matches!(kind, Some(EntryKind::Media { .. }));
-            let media_watched_grace_days =
-                is_media.then(|| eng.policy().service.media.watched_grace_days);
-            let media_cache_max_bytes =
-                is_media.then(|| eng.policy().service.media.cache_max_bytes);
-            let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
-            let opts = if eng.policy().service.capture_child_output {
-                let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
-                let filename = format!(
-                    "{}_{}.log",
-                    id.as_str().replace(['/', '\\', ' '], "_"),
-                    timestamp
-                );
-                SpawnOptions {
-                    capture_stdout: true,
-                    capture_stderr: true,
-                    log_path: Some(eng.policy().service.child_log_dir.join(filename)),
-                    firewall,
-                    browser,
-                    input_compat,
-                    input_compat_options,
-                    connectivity_check,
-                    media_watched_grace_days,
-                    media_cache_max_bytes,
-                    ..Default::default()
-                }
-            } else {
-                SpawnOptions {
-                    firewall,
-                    browser,
-                    input_compat,
-                    input_compat_options,
-                    connectivity_check,
-                    media_watched_grace_days,
-                    media_cache_max_bytes,
-                    ..Default::default()
-                }
-            };
-            (kind, opts, needs_hidpi)
+            resolve_spawn(&eng, &id, now)
         };
 
         let Some(kind) = entry_kind else {
@@ -441,6 +367,7 @@ impl ManagementService for DefaultManagementService {
                     label: plan_label,
                     deadline,
                     confirm_on_close: plan_confirm_on_close,
+                    can_reset: plan_can_reset,
                 }));
 
                 Ok(LaunchOutcome::Approved {
@@ -558,6 +485,80 @@ impl ManagementService for DefaultManagementService {
             warn!(error = %e, "Activity survived the stop request");
             ManagementError::Internal(format!("Failed to stop activity: {e}"))
         })
+    }
+
+    async fn reset_current(&self) -> ManagementResult<()> {
+        let now = shepherd_util::now();
+        let now_mono = MonotonicInstant::now();
+
+        // Claim the restart before touching the process. From here until
+        // `finish_restart` the engine ignores the activity's exit, so every
+        // path below must reach that call.
+        let (request, kind, spawn_opts) = {
+            let mut eng = self.engine.lock().await;
+            let Some(request) = eng.begin_restart() else {
+                return Err(ManagementError::NotFound(
+                    "No active session that can be reset".into(),
+                ));
+            };
+            let (kind, spawn_opts, _) = resolve_spawn(&eng, &request.entry_id, now);
+            (request, kind, spawn_opts)
+        };
+
+        let Some(kind) = kind else {
+            // The entry vanished from policy under us (a reload between the
+            // launch and now). Nothing to relaunch.
+            self.finish_reset(None, now_mono, now).await;
+            return Err(ManagementError::NotFound("Entry not found".into()));
+        };
+
+        // Stop gracefully so the activity saves what it owns -- for RetroArch
+        // that is the in-game save, which a reset must not cost the child.
+        // Deliberately no `hidpi.restore()`: the replacement wants the same
+        // output scale, and bouncing it would flash the whole screen.
+        if let Some(handle) = &request.host_handle {
+            let _ = self
+                .host
+                .stop(
+                    handle,
+                    shepherd_host_api::StopMode::Graceful {
+                        timeout: Duration::from_secs(5),
+                    },
+                )
+                .await;
+        }
+
+        // Only now, with the activity gone, is it safe to remove the state it
+        // would otherwise resume from.
+        if let Err(e) = self
+            .host
+            .discard_saved_state(&kind, Some(request.entry_id.as_str()))
+            .await
+        {
+            // Not fatal: the activity still comes back, just where it left off
+            // rather than at its start screen. Better than no activity at all.
+            warn!(error = %e, "Could not discard saved state; resetting anyway");
+        }
+
+        match self
+            .host
+            .spawn(request.session_id.clone(), &kind, spawn_opts)
+            .await
+        {
+            Ok(handle) => {
+                self.finish_reset(Some(handle), now_mono, now).await;
+                Ok(())
+            }
+            Err(e) => {
+                warn!(error = %e, "Relaunch after reset failed");
+                // The session has no process behind it now, so it ends.
+                self.hidpi.restore().await;
+                self.finish_reset(None, now_mono, now).await;
+                Err(ManagementError::Internal(format!(
+                    "Relaunch after reset failed: {e}"
+                )))
+            }
+        }
     }
 
     async fn extend_current(&self, seconds: i64) -> ManagementResult<Option<DateTime<Local>>> {
@@ -1167,6 +1168,43 @@ impl ManagementService for DefaultManagementService {
 }
 
 impl DefaultManagementService {
+    /// Close out a reset started by `CoreEngine::begin_restart`, handing the
+    /// engine the replacement process's handle — or `None` when there isn't
+    /// one, which ends the session.
+    ///
+    /// Must run on every path out of `reset_current`: while a restart is in
+    /// flight the engine ignores the activity's exit, so skipping this would
+    /// leave a session that outlives its own process.
+    async fn finish_reset(
+        &self,
+        handle: Option<shepherd_host_api::HostSessionHandle>,
+        now_mono: MonotonicInstant,
+        now: DateTime<Local>,
+    ) {
+        let ended = {
+            let mut eng = self.engine.lock().await;
+            eng.finish_restart(handle, now_mono, now)
+        };
+
+        if let Some(shepherd_core::CoreEvent::SessionEnded {
+            session_id,
+            entry_id,
+            reason,
+            duration,
+        }) = ended
+        {
+            (self.broadcast_fn)(Event::new(EventPayload::SessionEnded {
+                session_id,
+                entry_id,
+                reason,
+                duration,
+            }));
+        }
+
+        let snap = self.engine.lock().await.get_state();
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+    }
+
     /// Restrictions from config alone: the running activity's override if it has
     /// one, otherwise the global `[service.volume]`.
     async fn policy_volume_restrictions(&self) -> VolumeRestrictions {
@@ -1571,6 +1609,93 @@ fn stricter_min(a: Option<u8>, b: Option<u8>) -> Option<u8> {
         (Some(a), Some(b)) => Some(a.max(b)),
         (x, None) | (None, x) => x,
     }
+}
+
+/// Resolve everything needed to spawn an entry: its kind, its spawn options
+/// (firewall, browser policy, input-compat sidecars, log capture), and whether
+/// it wants the XWayland HiDPI workaround.
+///
+/// Shared by `launch` and `reset_current` so a restarted activity comes back
+/// under exactly the same rules it launched under — a reset that quietly
+/// dropped the firewall or the browser policy would be a hole.
+fn resolve_spawn(
+    eng: &CoreEngine,
+    id: &EntryId,
+    now: DateTime<Local>,
+) -> (Option<shepherd_api::EntryKind>, SpawnOptions, bool) {
+    let entry = eng.policy().get_entry(id);
+    let kind = entry.map(|e| e.kind.clone());
+    let firewall =
+        entry
+            .and_then(|e| e.firewall.clone())
+            .map(|fw| shepherd_host_api::FirewallSpec {
+                default_deny: fw.default_deny,
+                allow: fw.allow,
+                deny: fw.deny,
+            });
+    let browser = entry
+        .and_then(|e| e.browser.clone())
+        .map(|b| shepherd_host_api::BrowserSpec {
+            policy_id: id.as_str().to_string(),
+            profile_id: b.profile_id,
+            mode: b.mode,
+            start_url: b.start_url,
+            url_allowlist: b.url_allowlist,
+            url_blocklist: b.url_blocklist,
+            disable_dev_tools: b.disable_dev_tools,
+            disable_incognito: b.disable_incognito,
+            disable_extensions: b.disable_extensions,
+            wipe_on_exit: b.wipe_on_exit,
+        });
+    let input_compat = entry.map(|e| e.input_compat.clone()).unwrap_or_default();
+    let input_compat_options = entry.map(|e| e.input_compat_options).unwrap_or_default();
+    // Hand the activity the same check that gates its availability, so
+    // (e.g.) a media grid hides online-only items instead of leaving
+    // tiles that error on tap. The entry's own target wins over the
+    // service's; `forward_check = false` suppresses both.
+    let connectivity_check = entry.and_then(|e| {
+        if !e.internet.forward_check {
+            return None;
+        }
+        e.internet
+            .check
+            .as_ref()
+            .or(eng.policy().service.internet.check.as_ref())
+            .map(|t| t.original.clone())
+    });
+    // The cache the activity writes to is the one shepherdd prefetches
+    // into, so the eviction policy has to travel with the launch.
+    let is_media = matches!(kind, Some(EntryKind::Media { .. }));
+    let media_watched_grace_days = is_media.then(|| eng.policy().service.media.watched_grace_days);
+    let media_cache_max_bytes = is_media.then(|| eng.policy().service.media.cache_max_bytes);
+    let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
+
+    let log_path = eng.policy().service.capture_child_output.then(|| {
+        let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+        let filename = format!(
+            "{}_{}.log",
+            id.as_str().replace(['/', '\\', ' '], "_"),
+            timestamp
+        );
+        eng.policy().service.child_log_dir.join(filename)
+    });
+
+    let opts = SpawnOptions {
+        entry_id: Some(id.as_str().to_string()),
+        capture_stdout: log_path.is_some(),
+        capture_stderr: log_path.is_some(),
+        log_path,
+        firewall,
+        browser,
+        input_compat,
+        input_compat_options,
+        connectivity_check,
+        media_watched_grace_days,
+        media_cache_max_bytes,
+        ..Default::default()
+    };
+
+    (kind, opts, needs_hidpi)
 }
 
 fn convert_volume_policy(p: &VolumePolicy) -> VolumeRestrictions {

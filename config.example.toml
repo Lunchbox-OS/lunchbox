@@ -945,6 +945,52 @@ days = "weekends"
 start = "10:00"
 end = "20:00"
 
+## === Emulated games (RetroArch) ===
+# Install RetroArch and the cores you need with:
+#   sudo shepherd-admin apps install retroarch mgba
+#   shepherd-admin apps install retroarch help   # lists the available cores
+#
+# No games are included. Supply your own, and only ones you have the right to.
+# See docs/emulators.md for the full picture: where saves live, how to back
+# them up, and what the reset button does.
+#
+# Closing the activity writes a save state and opening restores it, so the
+# child resumes exactly where they stopped -- mid-battle, mid-cutscene. That
+# also means the game's own title screen becomes unreachable, which is what the
+# HUD's reset button is for.
+
+# Pokemon FireRed on the mGBA core (issue #125).
+[[entries]]
+id = "pokemon-firered"
+label = "Pokemon FireRed"
+# No `xwayland_native_resolution` here on purpose: RetroArch connects as a
+# native Wayland client and renders at the panel's own pixel grid, fractional
+# output scale included, so it does not need the XWayland workaround (see the
+# troubleshooting section of docs/emulators.md, which shows how to check).
+# Shares the "Games" schedule, short-burst cap, combined quota, and cooldown
+# with the other members of this category (issue #5).
+group = "attention-heavy"
+# icon is autodetected from RetroArch's .desktop file; point it at box art to
+# give the game its own tile.
+# icon = "~/Games/Icons/pokemon-firered.png"
+
+[entries.kind]
+type = "retroarch"
+# The core, named the way `shepherd-admin apps install retroarch` names it.
+# Resolved to mgba_libretro.so in the usual libretro directories.
+core = "mgba"
+# Must be absolute or start with "~/": a bare relative path would resolve
+# against the daemon's working directory, not yours.
+content = "~/Games/retroarch/pokemon-firered.gba"
+# save_state = "auto"   # the default; "off" boots the game fresh every time
+# reset = true          # the default; false hides the HUD's reset button
+# kiosk = true          # the default; locks RetroArch's own menu
+
+[entries.limits]
+max_run_seconds = 2700     # 45 minutes -- long enough to reach a save point
+daily_quota_seconds = 5400
+cooldown_seconds = 1800
+
 # Terminal for debugging only.
 # `foot` is used here (not `ptyxis`, `gnome-terminal`, etc.) because
 # single-instance GApplication terminals D-Bus-delegate new windows to a

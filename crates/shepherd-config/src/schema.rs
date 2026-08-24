@@ -1,6 +1,7 @@
 //! Raw configuration schema (as parsed from TOML)
 
 use serde::{Deserialize, Serialize};
+use shepherd_api::RetroarchSaveState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -537,11 +538,49 @@ pub enum RawEntryKind {
         /// playlist too large to be worth the disk.
         prefetch: Option<bool>,
     },
+    /// A single piece of content played through RetroArch. See
+    /// [`shepherd_api::EntryKind::Retroarch`] for what shepherd sets up around
+    /// the launch.
+    Retroarch {
+        /// Core short name (`"mgba"`); resolved to `mgba_libretro.so`.
+        /// Exactly one of `core` / `core_path` is required.
+        #[serde(default)]
+        core: Option<String>,
+        /// Absolute path to the core, bypassing name resolution.
+        #[serde(default)]
+        core_path: Option<PathBuf>,
+        /// The content (ROM / disc image) to load. Must be absolute or start
+        /// with `~/`.
+        content: PathBuf,
+        /// `"auto"` (default) saves state on close and restores it on open;
+        /// `"off"` boots the content fresh every time.
+        #[serde(default)]
+        save_state: RetroarchSaveState,
+        /// The RetroArch binary; defaults to `retroarch` on `PATH`.
+        #[serde(default = "default_retroarch_command")]
+        command: String,
+        /// Extra arguments, appended after the ones shepherd derives.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Additional environment variables
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Lock RetroArch's own menu. On by default.
+        #[serde(default = "default_true")]
+        kiosk: bool,
+        /// Offer the HUD's reset ("reboot the console") button. On by default.
+        #[serde(default = "default_true")]
+        reset: bool,
+    },
     Custom {
         type_name: String,
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+}
+
+fn default_retroarch_command() -> String {
+    "retroarch".to_string()
 }
 
 /// Availability configuration
@@ -917,6 +956,7 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn parse_process_entry() {
@@ -999,6 +1039,95 @@ mod tests {
         "#;
         let config: RawConfig = toml::from_str(opt_out_toml).unwrap();
         assert!(!config.entries[0].confirm_on_close);
+    }
+
+    #[test]
+    fn parse_retroarch_kind_with_defaults() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "pokemon-firered"
+            label = "Pokemon FireRed"
+
+            [entries.kind]
+            type = "retroarch"
+            core = "mgba"
+            content = "~/Games/retroarch/pokemon-firered.gba"
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        match &config.entries[0].kind {
+            RawEntryKind::Retroarch {
+                core,
+                core_path,
+                content,
+                save_state,
+                command,
+                kiosk,
+                reset,
+                ..
+            } => {
+                assert_eq!(core.as_deref(), Some("mgba"));
+                assert_eq!(*core_path, None);
+                assert_eq!(content, Path::new("~/Games/retroarch/pokemon-firered.gba"));
+                // Resuming where the child left off is the point of the kind,
+                // so it is the default rather than an opt-in.
+                assert_eq!(*save_state, RetroarchSaveState::Auto);
+                assert_eq!(command, "retroarch");
+                // Supervised by default: no wandering into RetroArch's menu.
+                assert!(*kiosk);
+                // And the reset button is on, because auto save-state resume
+                // is what makes the title screen otherwise unreachable.
+                assert!(*reset);
+            }
+            other => panic!("expected a retroarch kind, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_retroarch_kind_with_overrides() {
+        let toml_str = r#"
+            config_version = 1
+
+            [[entries]]
+            id = "g"
+            label = "G"
+
+            [entries.kind]
+            type = "retroarch"
+            core_path = "/opt/cores/mgba_libretro.so"
+            content = "/srv/roms/g.gba"
+            save_state = "off"
+            command = "/usr/local/bin/retroarch"
+            args = ["--verbose"]
+            kiosk = false
+            reset = false
+        "#;
+        let config: RawConfig = toml::from_str(toml_str).unwrap();
+        match &config.entries[0].kind {
+            RawEntryKind::Retroarch {
+                core,
+                core_path,
+                save_state,
+                command,
+                args,
+                kiosk,
+                reset,
+                ..
+            } => {
+                assert_eq!(*core, None);
+                assert_eq!(
+                    core_path.as_deref(),
+                    Some(Path::new("/opt/cores/mgba_libretro.so"))
+                );
+                assert_eq!(*save_state, RetroarchSaveState::Off);
+                assert_eq!(command, "/usr/local/bin/retroarch");
+                assert_eq!(args, &["--verbose".to_string()]);
+                assert!(!*kiosk);
+                assert!(!*reset);
+            }
+            other => panic!("expected a retroarch kind, got {:?}", other),
+        }
     }
 
     #[test]

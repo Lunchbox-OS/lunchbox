@@ -43,6 +43,17 @@ pub(crate) fn autodetect_icon(kind: &EntryKind) -> Option<String> {
             }
             .to_string(),
         ),
+        EntryKind::Retroarch { command, .. } => {
+            // RetroArch ships a desktop file, so the same lookup the process
+            // kind uses finds its icon. Per-game artwork stays an explicit
+            // `icon = ` on the entry — there is nothing to autodetect from a
+            // ROM path.
+            let icon = find_process_icon(command);
+            if let Some(ref i) = icon {
+                debug!(command, icon = i, "retroarch icon autodetected");
+            }
+            icon
+        }
         EntryKind::Vm { .. } | EntryKind::Custom { .. } => None,
     }
 }

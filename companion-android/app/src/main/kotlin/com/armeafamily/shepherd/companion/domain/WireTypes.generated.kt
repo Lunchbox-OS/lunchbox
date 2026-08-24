@@ -322,6 +322,16 @@ enum class DiagnosticCode {
      * shown a pairing code.
      */
     @SerialName("ble_pairing_agent_unavailable") BLE_PAIRING_AGENT_UNAVAILABLE,
+    /**
+     * A RetroArch entry names a libretro core that is not installed, so the
+     * activity will not launch.
+     */
+    @SerialName("retroarch_core_missing") RETROARCH_CORE_MISSING,
+    /**
+     * A RetroArch entry's content — its ROM or disc image — is not there, so
+     * the activity will not launch.
+     */
+    @SerialName("retroarch_content_missing") RETROARCH_CONTENT_MISSING,
 }
 
 /**
@@ -597,6 +607,62 @@ sealed interface EntryKind {
         val sortBy: MediaSortBy? = null,
     ) : EntryKind
 
+    /**
+     * A single piece of content played through the RetroArch libretro
+     * frontend, launched directly on its CLI (`retroarch -L <core> <content>`).
+     *
+     * Distinct from [`EntryKind::Process`] because RetroArch needs settings
+     * materialized around the launch to behave in a kiosk: save state on
+     * close, restore it on open, flush the in-game save periodically, and
+     * stay out of its own menu. The host adapter renders those into a config
+     * fragment it passes with `--appendconfig`; the user's own `retroarch.cfg`
+     * is never edited. See `shepherd-host-linux::retroarch`.
+     */
+    @Serializable
+    @SerialName("retroarch")
+    data class Retroarch(
+        /**
+         * Extra arguments, appended after the ones shepherd derives.
+         */
+        val args: List<String> = emptyList(),
+        /**
+         * The RetroArch binary. Defaults to `retroarch` on `PATH`.
+         */
+        val command: String? = null,
+        /**
+         * The content (ROM / disc image) to load.
+         */
+        val content: String,
+        /**
+         * Core short name, e.g. `"mgba"` → `mgba_libretro.so`, resolved
+         * against the usual libretro core directories. Mutually exclusive
+         * with `core_path`.
+         */
+        val core: String? = null,
+        /**
+         * Absolute path to a `*_libretro.so`, bypassing name resolution.
+         */
+        val corePath: String? = null,
+        val env: Map<String, String> = emptyMap(),
+        /**
+         * Lock RetroArch's own menu so the activity can't be used to browse
+         * the filesystem or change emulator settings. On by default: this is
+         * a supervised kiosk.
+         */
+        val kiosk: Boolean = true,
+        /**
+         * Offer a reset ("reboot the console") button on the HUD. On by
+         * default, because `save_state = "auto"` otherwise makes the
+         * console's own power-on screen unreachable — there is no way back to
+         * the title screen from inside a resumed save state.
+         */
+        val reset: Boolean = true,
+        /**
+         * Whether closing the activity saves state and opening restores it.
+         */
+        val saveState: RetroarchSaveState? = null,
+    ) : EntryKind
+
     @Serializable
     @SerialName("custom")
     data class Custom(
@@ -627,6 +693,7 @@ enum class EntryKindTag {
     @SerialName("flatpak") FLATPAK,
     @SerialName("vm") VM,
     @SerialName("media") MEDIA,
+    @SerialName("retroarch") RETROARCH,
     @SerialName("custom") CUSTOM,
 }
 
@@ -1113,6 +1180,32 @@ sealed interface ReasonCode {
 }
 
 /**
+ * How a [`EntryKind::Retroarch`] activity treats its save state across
+ * close and re-open.
+ *
+ * This is the emulator's *snapshot*, not the game's own save file. The
+ * in-game save (SRAM / battery save) is flushed on a clean exit either way,
+ * and periodically while playing.
+ */
+@Serializable
+enum class RetroarchSaveState {
+    /**
+     * Write a save state when the activity closes and load it on the next
+     * open, so the child resumes exactly where they stopped — mid-battle,
+     * mid-cutscene, wherever the session ended.
+     *
+     * Note this makes the console's own power-on screen unreachable, which is
+     * what the HUD's reset button is for.
+     */
+    @SerialName("auto") AUTO,
+    /**
+     * Leave save states alone. Every launch boots the content from scratch;
+     * only the in-game save carries over.
+     */
+    @SerialName("off") OFF,
+}
+
+/**
  * Full service state snapshot
  */
 @Serializable
@@ -1220,6 +1313,12 @@ typealias SessionId = String
  */
 @Serializable
 data class SessionInfo(
+    /**
+     * Whether the HUD should offer a reset button for this session — see
+     * [`EntryKind::supports_reset`]. Defaults to `false` when absent, so an
+     * older payload simply doesn't show the button.
+     */
+    val canReset: Boolean = false,
     /**
      * Whether the HUD should confirm before its "X" button ends this
      * session (issue #78). Defaults to `true` when absent so older payloads

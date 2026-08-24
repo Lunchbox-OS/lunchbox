@@ -28,6 +28,8 @@ pub enum SessionState {
         /// Whether the "X" button should confirm before ending this activity
         /// (issue #78).
         confirm_on_close: bool,
+        /// Whether this activity offers the reset button (issue #125).
+        can_reset: bool,
     },
 
     /// Warning shown - time running low
@@ -44,6 +46,8 @@ pub enum SessionState {
         /// Whether the "X" button should confirm before ending this activity
         /// (issue #78).
         confirm_on_close: bool,
+        /// Whether this activity offers the reset button (issue #125).
+        can_reset: bool,
     },
 
     /// Session is ending
@@ -94,6 +98,18 @@ impl SessionState {
             | SessionState::Warning {
                 confirm_on_close, ..
             } => *confirm_on_close,
+            SessionState::NoSession | SessionState::Ending { .. } => false,
+        }
+    }
+
+    /// Whether the current activity can be reset in place, i.e. whether the
+    /// HUD should show its reset button (issue #125). `false` when there is no
+    /// session, so the button hides along with the rest of the session UI.
+    pub fn can_reset(&self) -> bool {
+        match self {
+            SessionState::Active { can_reset, .. } | SessionState::Warning { can_reset, .. } => {
+                *can_reset
+            }
             SessionState::NoSession | SessionState::Ending { .. } => false,
         }
     }
@@ -332,6 +348,7 @@ impl SharedState {
                 label,
                 deadline,
                 confirm_on_close,
+                can_reset,
             } => {
                 let now = shepherd_util::now();
                 // For unlimited sessions (deadline=None), time_remaining is None
@@ -350,6 +367,7 @@ impl SharedState {
                     time_limit_secs: time_remaining,
                     time_remaining_secs: time_remaining,
                     confirm_on_close: *confirm_on_close,
+                    can_reset: *can_reset,
                 });
             }
 
@@ -373,6 +391,7 @@ impl SharedState {
                         entry_id,
                         entry_name,
                         confirm_on_close,
+                        can_reset,
                         ..
                     } = state
                     {
@@ -386,6 +405,7 @@ impl SharedState {
                                 message: message.clone(),
                                 severity: *severity,
                                 confirm_on_close: *confirm_on_close,
+                                can_reset: *can_reset,
                             };
                         }
                     }
@@ -395,6 +415,7 @@ impl SharedState {
                         entry_id,
                         entry_name,
                         confirm_on_close,
+                        can_reset,
                         ..
                     } = state
                         && sid == session_id
@@ -408,6 +429,7 @@ impl SharedState {
                             message: message.clone(),
                             severity: *severity,
                             confirm_on_close: *confirm_on_close,
+                            can_reset: *can_reset,
                         };
                     }
                 });
@@ -456,6 +478,7 @@ impl SharedState {
                         time_limit_secs: time_remaining,
                         time_remaining_secs: time_remaining,
                         confirm_on_close: session.confirm_on_close,
+                        can_reset: session.can_reset,
                     });
                 } else {
                     self.set_session_state(SessionState::NoSession);
@@ -532,6 +555,7 @@ mod tests {
             time_limit_secs: None,
             time_remaining_secs: None,
             confirm_on_close,
+            can_reset: false,
         }
     }
 

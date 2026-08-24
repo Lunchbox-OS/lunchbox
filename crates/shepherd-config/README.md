@@ -139,6 +139,12 @@ kind = { type = "vm", driver = "qemu", args = { disk = "game.qcow2" } }
 kind = { type = "media", library = "~/.config/shepherd/movies.toml" }
 kind = { type = "media", library = "~/.config/shepherd/movies.toml", mode = "play", item = "big-buck-bunny" }
 
+# Emulated game, played through RetroArch. Saves state on close and restores
+# it on open; `content` must be absolute or start with `~/`. The HUD offers a
+# reset ("reboot the console") button unless `reset = false` — with save-state
+# resume on, it is the only way back to a game's own title screen.
+kind = { type = "retroarch", core = "mgba", content = "~/Games/roms/game.gba" }
+
 # Custom type
 kind = { type = "custom", type_name = "my-launcher", payload = { ... } }
 ```

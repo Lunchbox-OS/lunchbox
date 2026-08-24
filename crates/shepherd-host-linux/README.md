@@ -211,9 +211,30 @@ All spawned processes are placed in their own process group:
 ```
 
 When stopping a session:
-1. SIGTERM is sent to the process group (`-pgid`)
-2. After timeout, SIGKILL is sent to the process group
+1. **Exactly one** SIGTERM is sent to the process group (`-pgid`)
+2. After timeout, SIGKILL is sent to the process group, plus a by-name sweep
+   for anything that escaped it — scoped to spare other live sessions
 3. Orphaned children are cleaned up
+
+The "exactly one" matters, and it is easy to lose. The graceful path once sent
+three SIGTERMs — a `pkill -f` by command name, the process-group kill, and one
+per descendant — and an app whose handler *counts* signals reads the second as
+"the user is impatient". RetroArch's calls `exit(1)` on it, which skips
+flushing the in-game save and writing the save state. It regressed once
+afterwards, to two signals, when a fix elsewhere added a second group kill
+beside `ManagedProcess::terminate` (the same syscall); that cost about a fifth
+of save states until it was measured. Sandboxed kinds (snap, flatpak, Steam)
+still get their cgroup- or app-id-based delivery, because the real process is
+not in our child's process group; `GracefulSignal` in `adapter.rs` is the
+single place that decision is made.
+
+The by-name sweep in step 2 is scoped for a related reason. `pkill -f
+retroarch` cannot tell which RetroArch it is looking at, so it would also kill
+a game the child started afterwards in a different session — and a `SIGKILL`
+runs no shutdown path, so that loses the save outright. `kill_by_command`
+therefore matches with `pgrep`, resolves each candidate's process group, and
+skips every group belonging to a session the host is still tracking
+(`LinuxHost::tracked_pgids`).
 
 ## Window attribution
 
@@ -238,6 +259,35 @@ cheaper check (`report_unowned_windows`), which only knows about pids it
 spawned. Closing an `unowned` window stays a human's call:
 shepherd will not kill a surface it does not recognize, because a system
 dialog on a kiosk a child depends on is worse than the visibility gap.
+## RetroArch
+
+`EntryKind::Retroarch` entries are launched through `retroarch.rs`, which
+renders a config fragment (`--appendconfig`) around the launch: a per-entry
+save-state directory, save-state-on-close/restore-on-open, a periodic in-game
+save flush, kiosk mode, the native Wayland context (so the picture is the
+panel's own pixel grid rather than an upscaled XWayland one), and
+`config_save_on_exit = "false"` so none of it leaks back into the user's own
+`retroarch.cfg`. The in-game save (`.srm`) is deliberately left wherever the
+user's own `savefile_directory` puts it — which is *not* beside the content on
+a default install — so a game has one save however it was launched and a save
+predating the entry is still found. Those sessions also get a longer
+graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown has to
+unload the core and write both kinds of save.
+
+The fragment is *appended* to the user's own `retroarch.cfg`, so controller
+bindings, video settings and per-core options configured outside shepherd carry
+into supervised sessions. RetroArch applies per-core **overrides** after
+`--appendconfig`, though, so an override naming one of the settings above wins
+over shepherd — `retroarch::conflicting_overrides` detects that at launch and
+warns rather than silently losing save-state resume or the menu lock. See
+`docs/emulators.md`.
+
+`discard_saved_state` (the `HostAdapter` hook behind the HUD's reset button)
+deletes the `*.state.auto` files so the next launch boots from the content's
+own start screen. It deliberately leaves the in-game save (`.srm`) alone:
+resetting a console returns it to the title screen, it does not wipe the
+cartridge. Call it only between the stop and the respawn — against a live
+activity it would race RetroArch's own writes.
 
 ## Log Capture
 

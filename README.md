@@ -57,6 +57,11 @@ For collections of media files (local or YouTube), the bundled
 `.toml` library file and presents either a single direct-play activity or a
 browseable poster grid.
 
+Emulated games run through [RetroArch](./docs/emulators.md), which gets its own
+activity kind so that closing one saves the game's state and re-opening resumes
+it — plus a HUD button to reset the console back to its title screen, which a
+resumed save state otherwise makes unreachable.
+
 !["Putt Putt Joins the Circus" hosted within shepherd-launcher UI](./docs/readme/apps-puttputt.png)
 
 > [Putt Putt Joins the Circus](https://humongous.fandom.com/wiki/Putt-Putt_Joins_the_Circus)

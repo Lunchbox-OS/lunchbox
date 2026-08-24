@@ -104,11 +104,13 @@ Example (bedtime restriction):
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/shepherd-ipc/src/client.rs`.
-  - **The HUD's "End session" confirm popover** has a permanent debug-build hook:
+  - **The HUD's confirm popovers** have a permanent debug-build hook:
     export `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>` before `dev headless`
     (env propagates from the invocation into the sway-spawned HUD), then
-    `: > <path>` pops the prompt and `: > <path>.down` dismisses it. Both files
-    are consumed, so open/close cycles are just two `touch`es.
+    `: > <path>` pops the "End session" prompt, `: > <path>.reset` pops the
+    reset prompt (only for activities that offer it — `type = "retroarch"`),
+    and `: > <path>.down` dismisses whichever is up. Every file is consumed, so
+    open/close cycles are just two `touch`es.
   - **Any other HUD-only UI action**: add a temporary one-shot debug hook gated
     behind an env var that calls `widget.emit_clicked()`, boot with the env var
     set, screenshot, then remove the hook. `dev key` (keyboard) *does* reach the

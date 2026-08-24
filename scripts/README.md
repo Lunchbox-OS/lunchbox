@@ -44,7 +44,7 @@ This directory contains the unified script system for shepherd-launcher.
 # Post-install admin tasks (shared with the .deb, where they run as the
 # installed `shepherd-admin` CLI without a source tree)
 ./shepherd setup-user USER          # deploy config + add group memberships
-./shepherd apps install steam|chrome
+./shepherd apps install steam|chrome|retroarch
 ./shepherd deps install run         # (includes yt-dlp)  ==  shepherd-admin yt-dlp install
 ```
 

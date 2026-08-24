@@ -105,12 +105,39 @@ only cover certain codecs, so a GPU with no VP9 or AV1 block still decodes those
 on the CPU. `shepherd-media` asks YouTube for H.264 first for exactly that
 reason.
 
-To install an activity backend (Steam via Canonical's snap, Chrome via Flathub —
-matching what shepherd's `type = "steam"` and `kind = "flatpak"` adapters drive):
+To install an activity backend (Steam via Canonical's snap, Chrome via Flathub,
+RetroArch from the distro's own packages — matching what shepherd's
+`type = "steam"`, `kind = "flatpak"` and `type = "retroarch"` adapters drive):
 
 ```sh
 sudo shepherd-admin apps install steam    # or: chrome
 ```
+
+`apps install retroarch` takes the libretro cores to install, named the way an
+entry's `core =` field names them, and defaults to `mgba`:
+
+```sh
+sudo shepherd-admin apps install retroarch            # just mgba
+sudo shepherd-admin apps install retroarch mgba nestopia snes9x
+sudo shepherd-admin apps install retroarch help       # list the available cores
+```
+
+Cores come from apt, never from RetroArch's built-in core downloader, which
+fetches unsigned binaries at runtime — not something a supervised kiosk should
+do behind the operator's back. The Ubuntu archive packages 14 of them; the rest
+(N64, GameCube/Wii, Saturn, arcade, ~85 more) are packaged only by the libretro
+team's PPA, which `--ppa` opts into:
+
+```sh
+sudo shepherd-admin apps install retroarch --ppa mupen64plus-next
+```
+
+That adds a third-party apt source for the whole system, which is why it is
+opt-in; `sudo add-apt-repository --remove ppa:libretro/testing` reverts it.
+
+**No games are installed** — supply your own, and only ones you have the right
+to. See [emulators.md](./emulators.md) for configuring an activity, where saves
+live, and how the reset button works.
 
 `apps install steam` also connects the snap's `mount-observe` interface and
 permits unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`
