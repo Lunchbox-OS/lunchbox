@@ -50,6 +50,20 @@ export function InternetEditor({
           }
           label="Requires an internet connection"
         />
+        <FormControlLabel
+          control={
+            <Switch
+              checked={value?.forward_check ?? true}
+              onChange={(e) => f.setField("forward_check", e.target.checked)}
+            />
+          }
+          label="Tell the activity about the check too"
+        />
+        <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+          Media activities in browse mode poll the target and hide items with no
+          local source while it fails, rather than showing tiles that error on
+          tap. Turn off to launch without a check.
+        </Typography>
         <TextField
           size="small"
           label="Connectivity check (optional override)"

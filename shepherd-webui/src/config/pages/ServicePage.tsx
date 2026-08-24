@@ -113,6 +113,19 @@ export function ServicePage({ config }: { config: RawConfig }) {
         </Section>
 
         <Section
+          title="Media"
+          description="Caching and background downloads for media activities."
+          present={service.media != null}
+          onTogglePresent={(on) =>
+            on
+              ? apply(set(servicePath("media"), { prefetch: true } as never))
+              : apply(unset(servicePath("media")))
+          }
+        >
+          <MediaServiceEditor config={config} />
+        </Section>
+
+        <Section
           title="Steam"
           description="Behaviour of activities launched through the Steam snap."
           present={service.steam != null}
@@ -216,6 +229,109 @@ function InternetServiceEditor({ config }: { config: RawConfig }) {
           }
         />
       </Stack>
+    </Stack>
+  );
+}
+
+/** One GiB, the unit both size fields are actually configured in. */
+const GIB = 1024 ** 3;
+
+/**
+ * Sizes are stored as bytes but edited in GiB — `cache_max_bytes = 10737418240`
+ * is not a number anyone types correctly. The field shows whatever is stored,
+ * fractional if it is not a whole GiB, and only writes when the value changes,
+ * so opening the page never rewrites the file.
+ */
+function GibField({
+  label,
+  value,
+  onChange,
+  helperText,
+}: {
+  label: string;
+  value: number | undefined;
+  onChange: (bytes: number | undefined) => void;
+  helperText?: string;
+}) {
+  return (
+    <TextField
+      size="small"
+      type="number"
+      label={label}
+      value={value === undefined ? "" : value / GIB}
+      onChange={(e) =>
+        onChange(e.target.value === "" ? undefined : Math.round(Number(e.target.value) * GIB))
+      }
+      slotProps={{ htmlInput: { step: 0.5, min: 0 } }}
+      helperText={helperText}
+    />
+  );
+}
+
+function MediaServiceEditor({ config }: { config: RawConfig }) {
+  const f = useFields("service.media");
+  const v = config.service?.media;
+  return (
+    <Stack spacing={2} sx={{ maxWidth: 520 }}>
+      <FormControlLabel
+        control={
+          <Switch
+            checked={v?.prefetch ?? true}
+            onChange={(e) => f.setField("prefetch", e.target.checked)}
+          />
+        }
+        label="Download remote items in the background"
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        So a video opened later plays from disk instead of buffering. Individual
+        activities can opt out on their own.
+      </Typography>
+      <FormControlLabel
+        control={
+          <Switch
+            checked={v?.prefetch_while_session_active ?? false}
+            onChange={(e) => f.setField("prefetch_while_session_active", e.target.checked)}
+          />
+        }
+        label="Keep downloading while an activity is running"
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        Off by default: a download competing with a game — or with the video
+        being watched right now — costs CPU and bandwidth for content nobody has
+        asked for yet.
+      </Typography>
+      <Stack direction="row" spacing={2}>
+        <GibField
+          label="Cache limit (GiB)"
+          value={v?.cache_max_bytes}
+          onChange={(bytes) => f.setField("cache_max_bytes", bytes)}
+          helperText="Total size of the video cache."
+        />
+        <GibField
+          label="Keep free (GiB)"
+          value={v?.free_space_floor_bytes}
+          onChange={(bytes) => f.setField("free_space_floor_bytes", bytes)}
+          helperText="Stop and warn below this. 0 disables."
+        />
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        Both are needed: a 10 GiB cache on a 16 GiB device fills the disk long
+        before it fills the cache.
+      </Typography>
+      <TextField
+        size="small"
+        type="number"
+        label="Watched grace (days)"
+        value={v?.watched_grace_days ?? ""}
+        onChange={(e) =>
+          f.setField(
+            "watched_grace_days",
+            e.target.value === "" ? undefined : Number(e.target.value),
+          )
+        }
+        slotProps={{ htmlInput: { min: 0 } }}
+        helperText="How long watching a video protects its copy from being displaced. 0 orders purely by age."
+      />
     </Stack>
   );
 }
