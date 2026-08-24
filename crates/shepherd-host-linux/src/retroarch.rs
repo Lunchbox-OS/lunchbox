@@ -37,7 +37,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use shepherd_api::RetroarchSaveState;
+use shepherd_api::{EntryKind, RetroarchSaveState};
 use tracing::{debug, warn};
 
 /// Overrides the root under which per-entry save/state directories are
@@ -253,6 +253,26 @@ pub fn core_filename(name: &str) -> String {
 /// is what `retroarch -L mgba_libretro.so` does today. An unusual install keeps
 /// working rather than failing on our guess.
 pub fn resolve_core(name: &str) -> String {
+    if let Some(path) = find_core(name) {
+        return path;
+    }
+    let filename = core_filename(name);
+    warn!(
+        core = %name,
+        filename = %filename,
+        "libretro core not found in the usual directories; \
+         passing the bare name for RetroArch to resolve"
+    );
+    filename
+}
+
+/// The search half of [`resolve_core`]: the installed core matching `name`, or
+/// `None` when nothing does.
+///
+/// Separate from `resolve_core` because the diagnostic probe asks the same
+/// question on every sweep and wants neither the bare-filename fallback nor a
+/// warning per sweep — only whether it is there.
+fn find_core(name: &str) -> Option<String> {
     let stem = core_stem(name);
     let wanted = normalize_core(stem);
     let wanted = CORE_ALIASES
@@ -278,18 +298,70 @@ pub fn resolve_core(name: &str) -> String {
             };
             if normalize_core(file_stem) == wanted && candidate.is_file() {
                 debug!(core = %name, path = %candidate.display(), "Resolved libretro core");
-                return candidate.to_string_lossy().into_owned();
+                return Some(candidate.to_string_lossy().into_owned());
             }
         }
     }
-    let filename = core_filename(name);
-    warn!(
-        core = %name,
-        filename = %filename,
-        "libretro core not found in the usual directories; \
-         passing the bare name for RetroArch to resolve"
-    );
-    filename
+    None
+}
+
+/// The content a [`EntryKind::Retroarch`] loads, when it is not there.
+///
+/// Companion to [`missing_core`], and separate from it because the two have
+/// different fixes: install a core, versus restore or re-point a ROM. Both are
+/// checked, so an entry with neither in place says so once for each rather than
+/// sending an administrator back for a second round.
+///
+/// `exists` rather than `is_file`: a few cores take a directory, and the
+/// question here is whether the path is there at all.
+pub fn missing_content(kind: &EntryKind) -> Option<String> {
+    let EntryKind::Retroarch { content, .. } = kind else {
+        return None;
+    };
+    let expanded = crate::adapter::expand_tilde(&content.to_string_lossy());
+    (!Path::new(&expanded).exists()).then_some(expanded)
+}
+
+/// Why a RetroArch entry's libretro core could not be found.
+///
+/// Reported as a per-entry diagnostic rather than only at launch: an
+/// administrator should learn the core is missing while looking at the device,
+/// not from their child bouncing off a black screen (issue #143).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissingCore {
+    /// `core = "<name>"` matched nothing in the searched directories. Carries
+    /// the filename RetroArch will be handed, which is what its own log names.
+    Unresolved { name: String, filename: String },
+    /// `core_path = "<path>"` is not a file. Unambiguous, unlike the above:
+    /// nothing downstream can rescue a path that is not there.
+    NoSuchPath { path: String },
+}
+
+/// Check the core a [`EntryKind::Retroarch`] names, returning `None` when it
+/// resolves — or when the kind is not a RetroArch one.
+///
+/// Deliberately runs the same resolution the launch does, so the probe cannot
+/// disagree with what happens when the child presses the tile.
+pub fn missing_core(kind: &EntryKind) -> Option<MissingCore> {
+    let EntryKind::Retroarch {
+        core, core_path, ..
+    } = kind
+    else {
+        return None;
+    };
+    match (core_path, core) {
+        (Some(path), _) => {
+            let expanded = crate::adapter::expand_tilde(&path.to_string_lossy());
+            (!Path::new(&expanded).is_file()).then_some(MissingCore::NoSuchPath { path: expanded })
+        }
+        (None, Some(name)) => find_core(name).is_none().then(|| MissingCore::Unresolved {
+            name: name.clone(),
+            filename: core_filename(name),
+        }),
+        // Validation rejects an entry with neither, and `prepare` leaves the
+        // core empty for a hand-built kind; RetroArch reports that one.
+        (None, None) => None,
+    }
 }
 
 /// Quote a value for a RetroArch config line. RetroArch writes its own config
@@ -713,6 +785,110 @@ mod tests {
         assert_eq!(resolve_core("nosuchcore"), "nosuchcore_libretro.so");
 
         unsafe { std::env::remove_var(LIBRETRO_DIR_ENV) };
+    }
+
+    /// The probe behind the `retroarch_core_missing` diagnostic. It runs the
+    /// same resolution the launch does, so what an administrator is told
+    /// cannot disagree with what the child gets on pressing the tile.
+    #[test]
+    fn missing_core_reports_only_the_cores_that_are_not_there() {
+        use std::collections::HashMap;
+
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let dir = scratch.path();
+        std::fs::write(dir.join("mgba_libretro.so"), b"").unwrap();
+
+        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no other thread reads the variable while the lock is held.
+        unsafe { std::env::set_var(LIBRETRO_DIR_ENV, dir) };
+
+        let kind = |core: Option<&str>, core_path: Option<PathBuf>| EntryKind::Retroarch {
+            core: core.map(str::to_string),
+            core_path,
+            content: PathBuf::from("/roms/game.gba"),
+            save_state: RetroarchSaveState::Auto,
+            command: "retroarch".into(),
+            args: vec![],
+            env: HashMap::new(),
+            kiosk: true,
+            reset: true,
+        };
+
+        assert_eq!(missing_core(&kind(Some("mgba"), None)), None);
+        assert_eq!(
+            missing_core(&kind(Some("nosuchcore"), None)),
+            Some(MissingCore::Unresolved {
+                name: "nosuchcore".into(),
+                filename: "nosuchcore_libretro.so".into(),
+            })
+        );
+
+        // An explicit path is checked as given: name resolution cannot rescue
+        // it, so it is the one case that is certainly broken.
+        assert_eq!(
+            missing_core(&kind(None, Some(dir.join("mgba_libretro.so")))),
+            None
+        );
+        assert_eq!(
+            missing_core(&kind(None, Some(PathBuf::from("/opt/nope_libretro.so")))),
+            Some(MissingCore::NoSuchPath {
+                path: "/opt/nope_libretro.so".into(),
+            })
+        );
+
+        // A kind with no core to miss says nothing rather than something.
+        assert_eq!(
+            missing_core(&EntryKind::Process {
+                command: "scummvm".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            }),
+            None
+        );
+
+        unsafe { std::env::remove_var(LIBRETRO_DIR_ENV) };
+    }
+
+    /// The content half of the same probe. Kept separate from the core check
+    /// because an entry can fail either way, or both, and each has its own fix.
+    #[test]
+    fn missing_content_reports_a_rom_that_is_not_there() {
+        use std::collections::HashMap;
+
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let rom = scratch.path().join("game.gba");
+        std::fs::write(&rom, b"").unwrap();
+
+        let kind = |content: PathBuf| EntryKind::Retroarch {
+            core: Some("mgba".into()),
+            core_path: None,
+            content,
+            save_state: RetroarchSaveState::Auto,
+            command: "retroarch".into(),
+            args: vec![],
+            env: HashMap::new(),
+            kiosk: true,
+            reset: true,
+        };
+
+        assert_eq!(missing_content(&kind(rom)), None);
+        assert_eq!(
+            missing_content(&kind(PathBuf::from("/roms/nosuchgame.gba"))),
+            Some("/roms/nosuchgame.gba".to_string())
+        );
+        // A directory counts as there: a few cores load one.
+        assert_eq!(missing_content(&kind(scratch.path().to_path_buf())), None);
+        // Nothing to say about a kind with no content.
+        assert_eq!(
+            missing_content(&EntryKind::Process {
+                command: "scummvm".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            }),
+            None
+        );
     }
 
     #[test]

@@ -490,10 +490,19 @@ shepherd resolved. A core that isn't there gives
 Fatal error received in: "init_libretro_symbols()"
 ```
 
-If the core name could not be resolved at all, shepherd logs a warning of its
-own at launch and passes the bare filename for RetroArch to resolve against its
-configured `libretro_directory` — so this can also mean "installed somewhere
-unusual"; set `core_path` to the absolute path in that case.
+You should not have to read a log to find this out: shepherd checks every
+RetroArch entry's core *and* its content on its diagnostic sweep, and reports
+what is missing against the activity, in the admin UIs and on the phone — a
+missing core with the `shepherd-admin` command that installs it, missing content
+with the path it looked for. An entry broken both ways says so once for each.
+The conditions clear on the next sweep once the file is there — no restart, so
+a ROM on removable media comes and goes with the drive.
+
+A core named with `core =` that resolves nowhere is reported but not certain:
+shepherd passes the bare filename on to RetroArch, which resolves it against its
+own configured `libretro_directory`, so this can also mean "installed somewhere
+shepherd does not search" — set `core_path` to the absolute path in that case. A
+`core_path` that is not a file is reported as the plain error it is.
 
 **Progress is lost between sessions.** Look for
 `[State] Auto save state to "…" succeeded` and `[SRAM] Saving RAM type #0 to

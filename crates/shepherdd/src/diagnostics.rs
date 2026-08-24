@@ -32,7 +32,7 @@ use shepherd_api::{
     Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSubject,
 };
 use shepherd_config::Policy;
-use shepherd_host_linux::{FirewallEnforcementStatus, refresh_firewall_enforcement};
+use shepherd_host_linux::{FirewallEnforcementStatus, MissingCore, refresh_firewall_enforcement};
 use shepherd_util::EntryId;
 
 /// Identity of a raised condition. Mirrors [`Diagnostic::key`] but owned, so it
@@ -89,6 +89,14 @@ pub struct ProbeFacts {
     pub any_entry_requires_input: bool,
     /// Entries that set a browser policy their kind cannot apply.
     pub browser_policy_ignored_entries: Vec<EntryId>,
+    /// RetroArch entries whose libretro core could not be found, with why.
+    /// Recomputed every sweep like the rest, so installing the core clears the
+    /// condition without a daemon restart.
+    pub retroarch_missing_cores: Vec<(EntryId, MissingCore)>,
+    /// RetroArch entries whose content is not there, with the path checked.
+    /// Separate from the core: the two fail independently and are fixed
+    /// differently, and a ROM on removable media comes and goes with it.
+    pub retroarch_missing_content: Vec<(EntryId, String)>,
 }
 
 /// Compute the probed diagnostics implied by `facts`.
@@ -209,6 +217,61 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
         });
     }
 
+    // A RetroArch entry whose core is not installed. Static in the same sense
+    // as the browser policy above — derivable from the policy plus what is on
+    // disk — and worth probing rather than leaving to the launch-time log,
+    // because the failure the child sees is a black screen and a session that
+    // ends immediately. A warning rather than critical: nothing is claiming a
+    // protection it does not have, one activity is unavailable.
+    for (entry_id, why) in &facts.retroarch_missing_cores {
+        let (message, remedy) = match why {
+            MissingCore::Unresolved { name, filename } => (
+                format!("The libretro core \"{name}\" this activity names is not installed"),
+                format!(
+                    "Install it with `sudo shepherd-admin apps install retroarch {name}`. If it \
+                     is installed somewhere shepherd does not search, point `core_path` at that \
+                     copy of {filename} instead -- otherwise the activity fails to launch."
+                ),
+            ),
+            MissingCore::NoSuchPath { path } => (
+                format!("This activity's core_path is not a file, so it will not launch: {path}"),
+                "Point `core_path` at an installed `*_libretro.so`, or replace it with \
+                 `core = \"<name>\"` and let shepherd find the core."
+                    .to_string(),
+            ),
+        };
+        out.push(Diagnostic {
+            code: DiagnosticCode::RetroarchCoreMissing,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message,
+            remedy: Some(remedy),
+            since: now,
+        });
+    }
+
+    // The other half of the same launch: content that is not there. Reported
+    // separately from the core so an entry missing both says so once for each,
+    // rather than sending an administrator back for a second round.
+    for (entry_id, path) in &facts.retroarch_missing_content {
+        out.push(Diagnostic {
+            code: DiagnosticCode::RetroarchContentMissing,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: format!("The content this activity loads is not there: {path}"),
+            remedy: Some(
+                "Restore the file or point `content` at where it is now. A `~/` path is \
+                 read against the home directory of the user shepherdd runs as."
+                    .to_string(),
+            ),
+            since: now,
+        });
+    }
+
     // Input devices. Same "only if it matters" rule as yt-dlp: with no
     // input-gated entry, an unreadable /dev/input changes nothing.
     if facts.input_devices_readable == Some(false) && facts.any_entry_requires_input {
@@ -265,6 +328,30 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
     .ok()
     .flatten();
 
+    // Off the reactor: this reads the core directories and stats the content,
+    // once per entry.
+    let kinds: Vec<(EntryId, EntryKind)> = policy
+        .entries
+        .iter()
+        .map(|e| (e.id.clone(), e.kind.clone()))
+        .collect();
+    let (retroarch_missing_cores, retroarch_missing_content) =
+        tokio::task::spawn_blocking(move || {
+            let mut cores = Vec::new();
+            let mut content = Vec::new();
+            for (id, kind) in kinds {
+                if let Some(why) = shepherd_host_linux::missing_core(&kind) {
+                    cores.push((id.clone(), why));
+                }
+                if let Some(path) = shepherd_host_linux::missing_content(&kind) {
+                    content.push((id, path));
+                }
+            }
+            (cores, content)
+        })
+        .await
+        .unwrap_or_default();
+
     let youtube_entries = crate::media::youtube_entry_ids(policy);
     let ytdlp_available = if youtube_entries.is_empty() {
         // Skip the probe entirely when nothing could care; it is the only
@@ -286,6 +373,8 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         input_devices_readable,
         any_entry_requires_input: policy.entries.iter().any(|e| !e.requires_input.is_empty()),
         browser_policy_ignored_entries: browser_policy_ignored_entry_ids(policy),
+        retroarch_missing_cores,
+        retroarch_missing_content,
     }
 }
 
@@ -664,6 +753,100 @@ mod tests {
         );
         let named: Vec<_> = diags.iter().filter_map(|d| d.entry_id()).collect();
         assert_eq!(named, vec![&entry("school"), &entry("homework")]);
+    }
+
+    #[test]
+    fn a_missing_libretro_core_is_reported_per_activity_with_the_fix_for_its_cause() {
+        // Two causes, two remedies: a name that resolved nowhere might still
+        // be installed somewhere unusual, while a `core_path` that is not a
+        // file is simply wrong.
+        let facts = ProbeFacts {
+            retroarch_missing_cores: vec![
+                (
+                    entry("pokemon"),
+                    MissingCore::Unresolved {
+                        name: "mgba".into(),
+                        filename: "mgba_libretro.so".into(),
+                    },
+                ),
+                (
+                    entry("mario"),
+                    MissingCore::NoSuchPath {
+                        path: "/opt/nope_libretro.so".into(),
+                    },
+                ),
+            ],
+            ..healthy()
+        };
+        let diags = evaluate(&facts, at(0));
+        assert_eq!(
+            codes(&diags),
+            vec![
+                DiagnosticCode::RetroarchCoreMissing,
+                DiagnosticCode::RetroarchCoreMissing
+            ]
+        );
+        let named: Vec<_> = diags.iter().filter_map(|d| d.entry_id()).collect();
+        assert_eq!(named, vec![&entry("pokemon"), &entry("mario")]);
+        // Warning, not critical: one activity is unavailable, but nothing is
+        // claiming a protection the device is not providing.
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity == DiagnosticSeverity::Warning)
+        );
+        // The name goes into the install command an admin can paste.
+        assert!(
+            diags[0]
+                .remedy
+                .as_deref()
+                .unwrap()
+                .contains("shepherd-admin apps install retroarch mgba")
+        );
+        // The path is named, since that is the thing to correct.
+        assert!(diags[1].message.contains("/opt/nope_libretro.so"));
+    }
+
+    #[test]
+    fn missing_content_is_reported_alongside_a_missing_core_not_instead_of_it() {
+        // An entry can be broken both ways at once. Reporting only the first
+        // would send an administrator back to fix the second afterwards.
+        let facts = ProbeFacts {
+            retroarch_missing_cores: vec![(
+                entry("pokemon"),
+                MissingCore::Unresolved {
+                    name: "mgba".into(),
+                    filename: "mgba_libretro.so".into(),
+                },
+            )],
+            retroarch_missing_content: vec![
+                (entry("pokemon"), "/roms/firered.gba".into()),
+                (entry("mario"), "/roms/smw.sfc".into()),
+            ],
+            ..healthy()
+        };
+        let diags = evaluate(&facts, at(0));
+        assert_eq!(
+            codes(&diags),
+            vec![
+                DiagnosticCode::RetroarchCoreMissing,
+                DiagnosticCode::RetroarchContentMissing,
+                DiagnosticCode::RetroarchContentMissing
+            ]
+        );
+        // Both conditions on `pokemon` survive: identity is (code, subject),
+        // so they do not collide.
+        let named: Vec<_> = diags.iter().filter_map(|d| d.entry_id()).collect();
+        assert_eq!(
+            named,
+            vec![&entry("pokemon"), &entry("pokemon"), &entry("mario")]
+        );
+        assert!(diags[1].message.contains("/roms/firered.gba"));
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity == DiagnosticSeverity::Warning)
+        );
     }
 
     #[test]

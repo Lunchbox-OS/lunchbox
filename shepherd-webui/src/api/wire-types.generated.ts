@@ -293,7 +293,17 @@ export type DiagnosticCode =
    * The BlueZ pairing agent could not be registered; a new phone will not be
    * shown a pairing code.
    */
-  | "ble_pairing_agent_unavailable";
+  | "ble_pairing_agent_unavailable"
+  /**
+   * A RetroArch entry names a libretro core that is not installed, so the
+   * activity will not launch.
+   */
+  | "retroarch_core_missing"
+  /**
+   * A RetroArch entry's content — its ROM or disc image — is not there, so
+   * the activity will not launch.
+   */
+  | "retroarch_content_missing";
 
 /**
  * The current set, as clients see it.

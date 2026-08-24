@@ -29,6 +29,7 @@ pub use brightness::*;
 pub use browser::is_supported_browser_flatpak;
 pub use light::*;
 pub use process::*;
+pub use retroarch::{MissingCore, missing_content, missing_core};
 pub use sway::{
     DisplayInfo, OutputBackend, OutputScale, SwaymsgBackend, disable_output, enable_output,
     get_displays, get_outputs, map_pointer_to_output, move_to_output_fullscreen, pick_mirror_mode,

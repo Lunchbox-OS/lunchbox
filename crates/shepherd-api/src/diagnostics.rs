@@ -69,6 +69,12 @@ pub enum DiagnosticCode {
     /// The BlueZ pairing agent could not be registered; a new phone will not be
     /// shown a pairing code.
     BlePairingAgentUnavailable,
+    /// A RetroArch entry names a libretro core that is not installed, so the
+    /// activity will not launch.
+    RetroarchCoreMissing,
+    /// A RetroArch entry's content — its ROM or disc image — is not there, so
+    /// the activity will not launch.
+    RetroarchContentMissing,
 }
 
 /// What a diagnostic is about.

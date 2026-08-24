@@ -322,6 +322,16 @@ enum class DiagnosticCode {
      * shown a pairing code.
      */
     @SerialName("ble_pairing_agent_unavailable") BLE_PAIRING_AGENT_UNAVAILABLE,
+    /**
+     * A RetroArch entry names a libretro core that is not installed, so the
+     * activity will not launch.
+     */
+    @SerialName("retroarch_core_missing") RETROARCH_CORE_MISSING,
+    /**
+     * A RetroArch entry's content — its ROM or disc image — is not there, so
+     * the activity will not launch.
+     */
+    @SerialName("retroarch_content_missing") RETROARCH_CONTENT_MISSING,
 }
 
 /**
