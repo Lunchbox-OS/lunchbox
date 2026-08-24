@@ -644,12 +644,26 @@ jobs:
         working-directory: shepherd-webui
         run: npm run typecheck
 
-      - name: Upload bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-editor
-          path: shepherd-webui/dist-standalone/
-          retention-days: 7
+      # No upload-artifact here, deliberately. Forgejo does not implement the
+      # upload-artifact@v4 protocol — the runner reports as GHES and the action
+      # hard-fails — which release.yml's header already records, and which is
+      # why its own config-editor job builds the bundle itself rather than
+      # taking a handoff. Nothing consumes a bundle from CI, so there is nothing
+      # to hand off; this checks the build landed where it should instead.
+      #
+      # Worth checking rather than assuming: `output.distPath` in
+      # rsbuild.config.ts is resolved relative to the working directory, so a
+      # build run from the wrong cwd succeeds and writes somewhere else — and
+      # writing into dist/ instead would quietly add ~800 kB of wasm to the
+      # daemon binary that rust-embed builds from it.
+      - name: Check the bundle landed in dist-standalone/
+        run: |
+          test -f shepherd-webui/dist-standalone/index.html
+          test -d shepherd-webui/dist-standalone/static
+          # dist/ ships a tracked .gitkeep, so "untouched" means nothing else.
+          stray=$(ls -A shepherd-webui/dist 2>/dev/null | grep -v '^\.gitkeep$' || true)
+          test -z "$stray" || { echo "standalone build wrote into dist/: $stray" >&2; exit 1; }
+          echo "[OK] standalone bundle built, dist/ untouched"
 
   shellcheck:
     name: ShellCheck
