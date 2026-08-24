@@ -963,9 +963,10 @@ end = "20:00"
 [[entries]]
 id = "pokemon-firered"
 label = "Pokemon FireRed"
-# RetroArch is an XWayland client here; without this it renders at the
-# compositor's logical size and only fills part of a HiDPI panel (issue #45).
-xwayland_native_resolution = true
+# No `xwayland_native_resolution` here on purpose: RetroArch connects as a
+# native Wayland client and renders at the panel's own pixel grid, fractional
+# output scale included, so it does not need the XWayland workaround (see the
+# troubleshooting section of docs/emulators.md, which shows how to check).
 # Shares the "Games" schedule, short-burst cap, combined quota, and cooldown
 # with the other members of this category (issue #5).
 group = "attention-heavy"

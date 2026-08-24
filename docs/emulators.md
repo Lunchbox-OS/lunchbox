@@ -111,9 +111,6 @@ expects.
 [[entries]]
 id = "pokemon-firered"
 label = "Pokemon FireRed"
-# RetroArch is an XWayland client; without this it renders at the compositor's
-# logical size and only fills part of a HiDPI panel (issue #45).
-xwayland_native_resolution = true
 
 [entries.kind]
 type = "retroarch"
@@ -518,8 +515,25 @@ Nothing there means either `save_state = "off"`, or the state file was removed
 **The game pauses whenever the HUD is touched.** `pause_nonactive` is being
 overridden; check for a stray value in `args`.
 
-**The picture only fills part of the screen** on a HiDPI panel: set
-`xwayland_native_resolution = true` on the entry (issue #45).
+**The picture only fills part of the screen** on a HiDPI panel. Do *not* reach
+for `xwayland_native_resolution` here. That flag exists for XWayland clients
+(issue #45), and RetroArch is not one: measured on Ubuntu 26.04 with sway at
+`scale 1.5`, it connects as a native Wayland client (`shell=xdg_shell` in
+`swaymsg -t get_tree`, `[GL] Found GL context: "wayland"` in its own log), binds
+`wp_fractional_scale_manager_v1`, and renders at the panel's full pixel grid.
+Setting the flag would drop every output to scale 1.0 for the duration of the
+activity and buy nothing.
+
+Check what yours is doing before assuming, since the context RetroArch picks
+depends on the user's `retroarch.cfg` — a saved `video_driver` can send it back
+through X11, and shepherd never writes that file:
+
+```sh
+swaymsg -t get_tree | jq -r '.. | objects | select(.pid) | "\(.name)\t\(.shell)"'
+```
+
+`xdg_shell` is Wayland; `xwayland` means something is forcing the fallback, and
+the fix is that setting rather than a compositor-wide scale override.
 
 ## Not covered
 

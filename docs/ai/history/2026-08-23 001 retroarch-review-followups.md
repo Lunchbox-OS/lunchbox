@@ -87,3 +87,52 @@ uses of the interface would be supervision (`GET_STATUS` distinguishes "content
 playing" from "process alive with a window") and `SAVE_FILES`, not the reset
 button that already works. A loopback bind is also not authentication — anything
 running as the same uid could still send `QUIT` or `LOAD_CONTENT`.
+
+## 3. RetroArch is a native Wayland client, not XWayland (docs corrected)
+
+`docs/emulators.md` and `config.example.toml` both told operators to set
+`xwayland_native_resolution = true` on RetroArch entries, on the stated grounds
+that "RetroArch is an XWayland client". Measured on 2026-08-23; it is not, and
+both have been corrected.
+
+How it was measured, so the next person can redo it rather than trust this:
+
+```sh
+sudo ./scripts/shepherd-admin apps install retroarch --ppa mgba
+curl -sLo ~/Games/roms/arm.gba \
+  https://raw.githubusercontent.com/jsmolka/gba-tests/master/arm/arm.gba
+# fixture: one `type = "retroarch"` entry, core = "mgba", that ROM,
+# service.capture_child_output = true, args = ["--verbose"]
+./scripts/shepherd dev headless --config <fixture> --gpu
+swaymsg output HEADLESS-1 scale 1.5          # the case the flag exists for
+printf '{"request_id":1,"api_version":1,"method":"launch","params":{"id":"gba-test"}}\n' \
+  | nc -U dev-runtime/shepherd.sock
+swaymsg -t get_tree | jq -r '.. | objects | select(.pid) | "\(.name)\t\(.shell)"'
+```
+
+Results:
+
+- `RetroArch mGBA 0.11-dev shell=xdg_shell app_id=com.libretro.RetroArch`, with
+  no `window_properties.class`. An XWayland window is the reverse: a `class`,
+  no `app_id`.
+- Its own log: `[GL] Found GL context: "wayland"`, and it binds
+  `wp_fractional_scale_manager_v1`, `wp_viewporter`,
+  `zwp_pointer_constraints_v1`, `zwp_relative_pointer_manager_v1`.
+- On the `scale 1.5` output, sway reports the window at 853x426 logical while
+  RetroArch logs `[GL] Using resolution 1280x720` — the panel's own pixel grid.
+  The screenshot has hard pixel edges on the ROM's pixel font, not the bilinear
+  smear of a logical-size buffer upscaled by the compositor.
+
+So the flag would have bought nothing on a RetroArch entry, while dropping every
+output to scale 1.0 for the duration of the activity and forcing the HUD's
+counter-scale. The corrected docs say so and show the `get_tree` check, because
+the context RetroArch picks depends on the user's `retroarch.cfg`: a saved
+`video_driver` can still send it through X11, and shepherd never writes that
+file (`config_save_on_exit = "false"` in the generated fragment).
+
+Caveats on the measurement: it used the PPA build
+(`1.22.2+ds1+r202602131849~4c3793f36c`) on Ubuntu 26.04 with sway 1.11 headless
+and the gles2 renderer. The Ubuntu archive build (`1.22.2+dfsg-2ubuntu1`) was
+not run -- it wants Qt5, absent here -- but it links the same
+`libwayland-egl/client/cursor` and carries the same context-driver string table,
+so it is expected to behave identically.
