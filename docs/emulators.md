@@ -244,6 +244,7 @@ The fragment sets, and only sets:
 | `autosave_interval = 10` | Flush the in-game save while playing. |
 | `pause_nonactive = false` | The HUD takes keyboard focus for its prompts; left at RetroArch's default the game would pause whenever one opened. |
 | `video_fullscreen = true` | One activity, no window furniture. |
+| `video_context_driver = "wayland"` | Take the native Wayland path rather than whatever auto-detection lands on, so the picture is the panel's own pixel grid instead of an upscaled XWayland one. A preference, not a demand: RetroArch falls back to its usual search if Wayland will not initialize, and the Vulkan path keeps its own ordering (its drivers are named `vk_wayland`). |
 | `kiosk_mode_enable` | Lock the menu (from `kiosk`). |
 
 Shepherd does *not* isolate RetroArch's playlists, history, or runtime logs —
@@ -287,7 +288,8 @@ footgun, and two of them fail quietly:
   all. The activity runs fine; the child just loses their place.
 
 The rest are `config_save_on_exit`, `savestate_directory`,
-`autosave_interval`, `pause_nonactive` and `video_fullscreen`.
+`autosave_interval`, `pause_nonactive`, `video_fullscreen` and
+`video_context_driver`.
 
 shepherd checks for this at every launch and warns, naming the file and the
 keys:
@@ -517,23 +519,24 @@ overridden; check for a stray value in `args`.
 
 **The picture only fills part of the screen** on a HiDPI panel. Do *not* reach
 for `xwayland_native_resolution` here. That flag exists for XWayland clients
-(issue #45), and RetroArch is not one: measured on Ubuntu 26.04 with sway at
-`scale 1.5`, it connects as a native Wayland client (`shell=xdg_shell` in
-`swaymsg -t get_tree`, `[GL] Found GL context: "wayland"` in its own log), binds
-`wp_fractional_scale_manager_v1`, and renders at the panel's full pixel grid.
-Setting the flag would drop every output to scale 1.0 for the duration of the
-activity and buy nothing.
+(issue #45), and RetroArch should not be one: the fragment asks for
+`video_context_driver = "wayland"`, and measured on Ubuntu 26.04 with sway at
+`scale 1.5` that gives a native Wayland client (`shell=xdg_shell` in
+`swaymsg -t get_tree`, `[GL] Found GL context: "wayland"` in the session log)
+rendering at the panel's full pixel grid. Setting the flag would drop every
+output to scale 1.0 for the duration of the activity and buy nothing.
 
-Check what yours is doing before assuming, since the context RetroArch picks
-depends on the user's `retroarch.cfg` — a saved `video_driver` can send it back
-through X11, and shepherd never writes that file:
+If the picture is blurry anyway, check which path it actually took:
 
 ```sh
 swaymsg -t get_tree | jq -r '.. | objects | select(.pid) | "\(.name)\t\(.shell)"'
 ```
 
-`xdg_shell` is Wayland; `xwayland` means something is forcing the fallback, and
-the fix is that setting rather than a compositor-wide scale override.
+`xdg_shell` is Wayland. `xwayland` means something beat the fragment to it —
+almost certainly a per-core or per-game override setting `video_context_driver`
+(see above; shepherd warns about exactly this), or a `video_driver` in your own
+`retroarch.cfg` that does its own windowing, such as `sdl2`. Fix that rather
+than reaching for a compositor-wide scale override.
 
 ## Not covered
 

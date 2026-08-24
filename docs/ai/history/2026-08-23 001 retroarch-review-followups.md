@@ -136,3 +136,18 @@ and the gles2 renderer. The Ubuntu archive build (`1.22.2+dfsg-2ubuntu1`) was
 not run -- it wants Qt5, absent here -- but it links the same
 `libwayland-egl/client/cursor` and carries the same context-driver string table,
 so it is expected to behave identically.
+
+Follow-up in the same pass: since the fragment is already rendered per launch,
+it now asks for `video_context_driver = "wayland"` rather than leaving the
+choice to auto-detection. Reading
+`video_context_driver_init_first` (`gfx/video_driver.c:3945`) and
+`vk_context_driver_init_first` (`gfx/drivers/vulkan.c:3277`) first, because the
+safety of doing that is not obvious: both try the named driver and then **fall
+through to iterating their whole list**, so this is a preference and not a
+demand -- a host without Wayland still runs. And the name does not collide with
+the Vulkan path, whose drivers are called `vk_wayland`, so a Vulkan core keeps
+its own ordering (which prefers Wayland anyway). Verified in the headless
+session afterwards: the fragment carries the key, RetroArch logs
+`[Config] Appending config` then `[GL] Found GL context: "wayland"`, and renders
+1280x720 on the scale-1.5 output. Added to `GUARDED_SETTINGS`, so an override
+that fights it is warned about like the rest.

@@ -434,6 +434,24 @@ pub fn render_append_config(paths: &Paths, save_state: RetroarchSaveState, kiosk
     out.push_str(&format!("video_fullscreen = {}\n\n", cfg_quote("true")));
 
     out.push_str(
+        "# Ask for the Wayland context explicitly rather than taking whatever\n\
+         # auto-detection lands on. As a native Wayland client RetroArch gets\n\
+         # the panel's own pixel grid -- fractional output scale included, via\n\
+         # wp_fractional_scale_v1 -- where the XWayland fallback renders at the\n\
+         # compositor's logical size and is upscaled to fit, i.e. blurry. This\n\
+         # is a preference, not a demand: RetroArch tries this driver first and\n\
+         # falls back to its usual search if it cannot initialize, so a host\n\
+         # without Wayland still runs. The Vulkan path is unaffected -- its\n\
+         # context drivers have their own names ('vk_wayland'), so this name\n\
+         # does not match there and it keeps its own ordering, which prefers\n\
+         # Wayland anyway.\n",
+    );
+    out.push_str(&format!(
+        "video_context_driver = {}\n\n",
+        cfg_quote("wayland")
+    ));
+
+    out.push_str(
         "# Kiosk mode locks RetroArch's own menu: no settings, no file\n\
          # browser, no loading other content from inside the activity.\n",
     );
@@ -529,7 +547,7 @@ pub fn build_argv(spec: &Spec<'_>, config: &Path, core: &str, content: &str) -> 
 /// worse than the rest: `kiosk_mode_enable` unlocks RetroArch's menu inside a
 /// supervised session, and the `savestate_auto_*` pair break resume with no
 /// error at all — just a child who lost their place.
-const GUARDED_SETTINGS: [&str; 8] = [
+const GUARDED_SETTINGS: [&str; 9] = [
     "config_save_on_exit",
     "savestate_directory",
     "savestate_auto_save",
@@ -537,6 +555,7 @@ const GUARDED_SETTINGS: [&str; 8] = [
     "autosave_interval",
     "pause_nonactive",
     "video_fullscreen",
+    "video_context_driver",
     "kiosk_mode_enable",
 ];
 
@@ -955,6 +974,21 @@ mod tests {
         let paths = paths_for(Some("e"), Path::new("/roms/game.gba"));
         let cfg = render_append_config(&paths, RetroarchSaveState::Auto, true);
         assert!(cfg.contains("config_save_on_exit = \"false\""));
+    }
+
+    #[test]
+    fn fragment_asks_for_the_wayland_context() {
+        // Measured, not assumed: RetroArch on Ubuntu 26.04 comes up as a native
+        // Wayland client and renders at the panel's pixel grid on a fractionally
+        // scaled output, where the XWayland fallback would be upscaled and
+        // blurry. Naming the driver keeps that from depending on what
+        // auto-detection or a stale user setting picks.
+        let paths = paths_for(Some("e"), Path::new("/roms/game.gba"));
+        let cfg = render_append_config(&paths, RetroarchSaveState::Auto, true);
+        assert!(cfg.contains("video_context_driver = \"wayland\""));
+        // And it is guarded, so an override that fights it is reported like any
+        // other setting the fragment depends on.
+        assert!(GUARDED_SETTINGS.contains(&"video_context_driver"));
     }
 
     #[test]

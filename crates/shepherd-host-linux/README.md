@@ -254,8 +254,10 @@ dialog on a kiosk a child depends on is worse than the visibility gap.
 `EntryKind::Retroarch` entries are launched through `retroarch.rs`, which
 renders a config fragment (`--appendconfig`) around the launch: a per-entry
 save-state directory, save-state-on-close/restore-on-open, a periodic in-game
-save flush, kiosk mode, and `config_save_on_exit = "false"` so none of it leaks
-back into the user's own `retroarch.cfg`. The in-game save (`.srm`) is
+save flush, kiosk mode, the native Wayland context (so the picture is the
+panel's own pixel grid rather than an upscaled XWayland one), and
+`config_save_on_exit = "false"` so none of it leaks back into the user's own
+`retroarch.cfg`. The in-game save (`.srm`) is
 deliberately left at RetroArch's own default location, so a game has one save
 however it was launched and a save predating the entry is still found. Those sessions also get a
 longer graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown
