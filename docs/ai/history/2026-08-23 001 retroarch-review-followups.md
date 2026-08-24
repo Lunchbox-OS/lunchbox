@@ -53,7 +53,7 @@ round. The check is `exists`, not `is_file`: a few cores load a directory. Being
 re-probed every sweep also means a ROM on removable media raises and clears with
 the drive, which is the behaviour you want from a probed condition.
 
-## 2. RetroArch's command socket still cannot bind to localhost (unchanged)
+## 2. RetroArch's command socket still cannot bind to localhost (filed upstream)
 
 `2026-08-15 002 retroarch-emulator-savestates-scope.md` chose the socket-free
 reset on the strength of this; re-verified against upstream `master` on
@@ -64,22 +64,33 @@ reset on the strength of this; re-verified against upstream `master` on
   independently settable.
 - `configuration.c:3943` still registers only `network_cmd_port`; no bind
   address exists anywhere in the settings table.
-- No upstream issue or PR asks for one (searched issues and PRs by title and
-  full text). The recent merged "Add network_cmd" PR (#19025, May 2026) only
-  adds `SAVE_STATE_SLOT N` and `GET_CONFIG_PARAM`.
+- Nothing upstream asked for one at the time (searched issues and PRs by title
+  and full text; the recent merged "Add network_cmd" PR, #19025, May 2026, only
+  adds `SAVE_STATE_SLOT N` and `GET_CONFIG_PARAM`). Albert has since filed it:
+  **[libretro/RetroArch#19459][ra-19459]**, "[Feature Request] Configurable
+  network binding", 2026-08-23. It proposes a `network_cmd_listen` key
+  defaulting to `0.0.0.0`, so existing deployments do not change, and cites this
+  kiosk as the motivating case. A collaborator (hizzlekizzle) answered the next
+  day: "seems like a good addition to me, assuming the implementation doesn't
+  get too messy" — i.e. the door is open for a PR, on the condition that it stay
+  small.
 - The `AI_PASSIVE` handling in `net_compat.c:280` is **not** the lever: it is
   inside `#if defined(HAVE_SOCKET_LEGACY) || defined(WIIU)`, the shim for
   platforms without a real `getaddrinfo`. On Linux that block compiles out.
   It is still useful evidence — it writes down the same contract glibc
   implements, so a fix that supplies a node regresses no platform.
 
-Patch shape, if it is ever proposed upstream: `input/input_driver.c:6139-6143`
-(reads the settings, calls `command_network_new`), `command.c:245` (take a
-`const char *bind_address`, forward it in place of NULL, NULL/empty keeping
-today's wildcard), `configuration.c` (`SETTING_ARRAY("network_cmd_bind_address",
-…)` plus the struct field). Note `AF_INET` is hardcoded at that call, so an IPv6
-literal would fail; `AF_UNSPEC` is worse, because `socket_init` only ever uses
-the first `addrinfo`.
+Patch shape, using the key name the issue proposes:
+`input/input_driver.c:6139-6143` (reads the settings, calls
+`command_network_new`), `command.c:245` (take a `const char *bind_address`,
+forward it in place of NULL, NULL/empty keeping today's wildcard),
+`configuration.c` (`SETTING_ARRAY("network_cmd_listen", …)` beside
+`network_cmd_port` at `:3943`, plus the struct field). "Not messy" argues for
+config-file-only: a menu entry drags in `menu_setting.c`, `msg_hash` and
+displaylist churn that the headless use case does not need. Note `AF_INET` is
+hardcoded at that call, so an IPv6 literal would fail; `AF_UNSPEC` is worse,
+because `socket_init` only ever uses the first `addrinfo` — so scope it to an
+IPv4 literal and say so.
 
 Even if it landed, #129 should keep its socket-free reset: shepherd targets what
 Ubuntu ships, so the fallback has to exist regardless, and the highest-value
@@ -87,6 +98,8 @@ uses of the interface would be supervision (`GET_STATUS` distinguishes "content
 playing" from "process alive with a window") and `SAVE_FILES`, not the reset
 button that already works. A loopback bind is also not authentication — anything
 running as the same uid could still send `QUIT` or `LOAD_CONTENT`.
+
+[ra-19459]: https://github.com/libretro/RetroArch/issues/19459
 
 ## 3. RetroArch is a native Wayland client, not XWayland (docs corrected)
 
