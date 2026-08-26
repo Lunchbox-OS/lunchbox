@@ -457,6 +457,33 @@ jobs:
               cargo test -p shepherd-e2e --test firewall_cgroup -- \
                 --include-ignored --test-threads=1 --nocapture
 
+            # Again, with /sys/fs/cgroup forced read-only. Whether the sidecar
+            # gives us a writable cgroupfs varies between runs -- one run of
+            # this job failed with EROFS creating the cgroup and the next found
+            # it writable -- so the fallback that mounts cgroup2 a second time
+            # for a writable view of the same hierarchy would otherwise be the
+            # least-exercised code in the firewall path, running for the first
+            # time on whichever run happens to land on a read-only host.
+            # The mount namespace is private, so nothing here escapes this
+            # command. Costs about 6s.
+            unshare -m --propagation private bash -c "
+              set -euo pipefail
+              mount --bind /sys/fs/cgroup /sys/fs/cgroup
+              mount -o remount,bind,ro /sys/fs/cgroup
+              if mkdir /sys/fs/cgroup/shepherd-ro-check 2>/dev/null; then
+                rmdir /sys/fs/cgroup/shepherd-ro-check
+                echo ::error::could-not-make-cgroupfs-read-only-fallback-not-exercised
+                exit 1
+              fi
+              SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+                cargo test -p shepherd-e2e --test firewall_cgroup -- \
+                  --include-ignored --test-threads=1 --nocapture 2>&1 \
+                | tee /tmp/firewall-cgroup-readonly.log
+              # Belt and braces: prove the run really took the fallback rather
+              # than quietly finding a writable /sys/fs/cgroup after all.
+              grep -q private.cgroup2.mount /tmp/firewall-cgroup-readonly.log
+            "
+
             useradd --create-home --user-group tester
             ./scripts/shepherd install firewall --debug --user tester
             systemctl restart polkit

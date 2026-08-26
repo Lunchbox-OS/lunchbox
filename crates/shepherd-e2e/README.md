@@ -38,6 +38,12 @@ a writable view of the same hierarchy and creates its cgroups through that. The
 helper is still handed the real `/sys/fs/cgroup` path, which is all it needs —
 it only opens the cgroup read-only.
 
+CI runs `firewall_cgroup` twice: once as the sidecar gives it, once under
+`unshare -m` with `/sys/fs/cgroup` bind-remounted read-only, so both paths are
+covered on every run. Whether the sidecar's cgroupfs is writable turns out to
+vary between runs, so without the second invocation the fallback would go
+untested until the day it was needed.
+
 `firewall_cgroup` exists because of issue #151: `firewall_real` never loads the
 helper's embedded BPF object (the Process path lets systemd attach the filter),
 so a helper that could not parse that object passed CI while every firewalled

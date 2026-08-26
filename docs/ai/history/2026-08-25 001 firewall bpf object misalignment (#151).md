@@ -294,3 +294,27 @@ Verified three ways on `shepherd-26.04` (kernel 7.0, cgroup v2):
 
 Left undone from the options list: the `wait_for_scope` unit test (1), the
 flatpak probe in CI (3), and snap (4).
+
+## Forcing the read-only path to run every time
+
+The CI run that went green (PR #152, `f2a7814`) printed `[info] creating
+cgroups directly under /sys/fs/cgroup` — the *writable* path. So whether the
+sidecar hands us a writable cgroupfs varies between runs of the same job: one
+failed with EROFS, the next did not. That left the private-mount fallback as
+the least-exercised code in the firewall path, due to run for the first time on
+whichever future run happened to land on a read-only host.
+
+The `firewall` job now runs `firewall_cgroup` twice: once as the host gives it,
+once inside `unshare -m --propagation private` with a read-only bind remount of
+`/sys/fs/cgroup` (the same reproduction used while developing it). Two guards
+keep the second run honest, because a silently-ineffective remount would just
+re-run the first case and look like coverage:
+
+- a `mkdir` that must fail, proving the fs really is read-only;
+- a `grep` for `private cgroup2 mount` in the output, proving the run really
+  took the fallback.
+
+Both were checked against their negative case: dropping the remount makes the
+first guard fail with
+`::error::could-not-make-cgroupfs-read-only-fallback-not-exercised`. Costs about
+6s.
