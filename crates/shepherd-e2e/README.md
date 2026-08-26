@@ -50,7 +50,9 @@ so a helper that could not parse that object passed CI while every firewalled
 flatpak ran unfiltered. Run it with
 `scripts/integration-tests/test-firewall-cgroup.sh`.
 
-Each of these prints `[SKIP] <reason>` and passes when its host cannot run it.
+Each of these prints `[SKIP] <reason>` and passes when its host cannot run it —
+including the plain E2E job, which runs the whole crate with `--include-ignored`
+in an unprivileged container that can neither write cgroupfs nor mount cgroup2.
 Set `SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` for `firewall_cgroup` to turn that
 skip into a failure — CI sets it, so an unmet precondition is reported rather
 than read as a pass.

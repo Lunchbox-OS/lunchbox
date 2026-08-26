@@ -318,3 +318,42 @@ Both were checked against their negative case: dropping the remount makes the
 first guard fail with
 `::error::could-not-make-cgroupfs-read-only-fallback-not-exercised`. Costs about
 6s.
+
+## The other job
+
+`52ae1e4` then failed in the **E2E** job — a different job from `Firewall E2E`,
+and one I had not accounted for. It runs `cargo test -p shepherd-e2e --
+--include-ignored` in a plain unprivileged container, so it picks up
+`firewall_cgroup` along with everything else:
+
+```
+Error: /sys/fs/cgroup is not writable and mounting a private cgroup2 view failed
+(exit status: 32): mount: /tmp/shepherd-cgroup2-YMLqJ7: permission denied
+```
+
+Root inside that container, but no `CAP_SYS_ADMIN`: cgroupfs is read-only and
+the fallback mount is refused. That is a host the test does not apply to, like a
+host with no helper installed — but `open_write_view()` reported it with `bail!`
+rather than through `skip()`, so it failed the job instead of skipping the way
+its three siblings do.
+
+Fixed by routing that error through `skip()`, which keeps
+`SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` (set only in the `Firewall E2E` job)
+making it fatal where it is supposed to run.
+
+Reproduced both directions locally, since the environment is what matters here:
+
+```sh
+sudo unshare -m --propagation private bash -c '
+  mount --bind /sys/fs/cgroup /sys/fs/cgroup
+  mount -o remount,bind,ro /sys/fs/cgroup
+  capsh --drop=cap_sys_admin -- -c "<test binary> --include-ignored --nocapture"'
+```
+
+Read-only cgroupfs plus no `CAP_SYS_ADMIN` — the E2E container exactly. Skips
+and passes without `REQUIRED`; fails with it. The privileged path and the
+forced-read-only path both still pass.
+
+The general lesson, now that this has bitten twice: a test that gates on host
+capability has to answer "not applicable here" and "this host promised to run
+it" separately, and every precondition has to route through the same place.

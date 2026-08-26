@@ -335,7 +335,15 @@ fn cgroup_firewall_filters_real_packets() -> Result<()> {
     std::net::TcpStream::connect_timeout(&deny_addr, Duration::from_secs(3))
         .with_context(|| format!("deny target {deny_target} must be reachable unfiltered"))?;
 
-    let view = open_write_view()?;
+    // Not an error: the plain (unprivileged) CI container can neither write
+    // cgroupfs nor mount cgroup2, and neither can a developer's container. That
+    // is a host this test does not apply to, exactly like a missing helper —
+    // and `SHEPHERD_FIREWALL_CGROUP_REQUIRED` is what makes it fatal on the
+    // hosts that promised to run it.
+    let view = match open_write_view() {
+        Ok(view) => view,
+        Err(e) => return skip(&format!("{e:#}")),
+    };
     let (write_cgroup, helper_cgroup, created) =
         make_cgroup(&view, "shepherd-firewall-cgroup-test")?;
 
