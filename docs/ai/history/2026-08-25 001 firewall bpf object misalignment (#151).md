@@ -111,15 +111,101 @@ Verified:
 - `cargo fmt --all --check`, `cargo clippy -p shepherd-firewall-helper
   --all-targets -- -D warnings`, and `cargo test --workspace` all pass.
 
-## Still open
+## Fail closed (landed)
 
-Not part of this fix, and worth deciding separately:
+Second prompt: "also make it fail closed".
 
-- **Fail closed.** A failed `apply-cgroup` still only logs `warn!`
-  (`crates/shepherd-host-linux/src/process.rs:360`), and the activity keeps
-  running with unrestricted network — which is why this bug was invisible until
-  a child opened a server browser. The process-kind path fails closed. The
-  cgroup path should probably terminate the activity and raise a diagnostic.
-- **CI coverage.** The aya path has none. `firewall_real_snap.rs` /
-  `firewall_real_flatpak.rs` are `#[ignore]`d and need a hand-provisioned
-  app; the new unit test covers only the parse, not attach-and-enforce.
+`LinuxHost::spawn_firewall_guard` (`crates/shepherd-host-linux/src/adapter.rs`)
+replaces the fire-and-forget `tokio::spawn` that used to apply the firewall to a
+runtime-managed scope. On failure — the scope never appears, or the helper's
+`apply-cgroup` fails — it now kills the activity and ends the session as
+`HostEvent::LaunchFailed`.
+
+Why that shape:
+
+- **`LaunchFailed`, not `Exited`.** The engine skips usage settlement for a
+  launch failure (`engine.rs`, issue #135), so a child is not billed for an
+  activity that was yanked out from under them. The error string reaches the
+  audit log and says what actually failed.
+- **Killed via `kill_activity`**, which knows the snap/flatpak cgroup routes —
+  signalling our direct child would miss an app the runtime put in a scope of
+  its own.
+- **Survivors go to the reconciliation sweep.** If the activity outlives the
+  kill, `register_escaped_in` hands it to the same rescue arc a stuck stop uses
+  (#136), rather than leaving an unfiltered activity running with nothing
+  supervising it. `register_escaped` was split into a `&self` wrapper plus an
+  associated fn so a background task can reach it.
+- **An already-exited activity is left alone.** A child who closed the app
+  during the attach window did not suffer a launch failure, and ending the
+  session twice would end whatever launched next.
+
+`apply_firewall_to_existing_scope` now returns `Result<String, String>` instead
+of `Option<String>` so the caller can say *why* in the end reason.
+
+The trade this makes explicit: on a host where the runtime never creates a scope
+(no systemd user manager, say), firewalled snap/flatpak activities now die ~5s
+in, loudly, instead of running unprotected, quietly. That is the point.
+
+Two tests in `adapter.rs`, both driving a real process:
+
+- `an_unappliable_firewall_ends_the_activity` — a scope prefix nothing will ever
+  create; asserts the activity is dead and exactly one `LaunchFailed` carrying
+  the reason. Mutating the guard back to fail-open fails it.
+- `an_already_exited_activity_is_not_reported_as_a_launch_failure`.
+
+Both collect results, clean up the survivor, and *then* assert: a failing
+assertion that leaves `tail -f` holding the harness's stdout pipe hangs the run
+instead of reporting it. (Learned the hard way while mutation-testing this.)
+
+## Making the runtime-scope path testable in CI
+
+Still the gap: nothing in CI exercises `apply-cgroup` at all. The `firewall` job
+(`.github/workflows/ci.yml`) runs `firewall_real`, which is the `systemd-run`
+process path — a completely different mechanism that never loads the embedded
+BPF object. #151 was invisible to it.
+
+The job already boots a `--privileged --cgroupns=host` sidecar with systemd as
+PID 1, polkit, and the helper installed via `shepherd install firewall`, so the
+hard part is done. Options, cheapest first:
+
+1. **`wait_for_scope` against a fake hierarchy** (unit, unprivileged). Point it
+   at a temp dir and assert the `app-flatpak-<id>-` / `snap.<n>.<n>-` patterns
+   match what the runtimes actually name their scopes. Covers the naming
+   contract only, but costs nothing.
+2. **Drive `apply-cgroup` directly against a synthetic cgroup** (the best
+   value). In the existing sidecar: `systemd-run --user --scope` (or a bare
+   `mkdir` under the user slice) to make a cgroup, run the helper against it,
+   then run `run-firewall-probe.sh` inside that cgroup and assert
+   `allow=OPEN deny=BLOCKED`. This is the test that would have caught #151 —
+   it loads the object, attaches the program, and proves packets are filtered —
+   and it needs no flatpak, no runtime download, and no new image content.
+3. **The real flatpak probe** — which is what the third prompt asked about, and
+   the answer is that it already exists: `scripts/integration-tests/
+   test-firewall-flatpak.sh` builds `org.shepherd.firewall.Probe`, a flatpak
+   whose entire payload is `run-firewall-probe.sh` (bash `/dev/tcp` against one
+   allowed and one denied target), installs it user-scoped, and drives
+   `firewall_real_flatpak.rs`. Nothing needs writing; it needs CI plumbing:
+   - flatpak + a runtime in the sidecar image. Bake them into the base image
+     built by the `images` job rather than downloading ~1 GB per run.
+   - `flatpak-builder` and `org.freedesktop.Sdk` are avoidable for an app whose
+     only content is a shell script: `flatpak build-init <dir> <app-id>
+     org.freedesktop.Platform org.freedesktop.Platform 24.08` uses the runtime
+     as its own SDK and drops the larger download.
+   - A systemd **user** manager for the test user. The scope this path polls for
+     lives under `user@<uid>.service/app.slice`; `runuser` alone does not start
+     one. `loginctl enable-linger tester` plus `XDG_RUNTIME_DIR` /
+     `DBUS_SESSION_BUS_ADDRESS`. (The process path in `firewall_real` sidesteps
+     this: its scope is created on the *system* manager via pkexec.)
+   - `/dev/fuse` for flatpak's revokefs — covered by `--privileged`.
+   - Make the deny target hermetic. Both scripts default to `8.8.8.8:53` and
+     skip when it is unreachable, which in CI reads as a pass. Bind a listener
+     on the container's own non-loopback address and point
+     `SHEPHERD_FIREWALL_PROBE_DENY` at it: the allow list is loopback-only, so
+     it must be blocked, and the pre-flight from outside the sandbox proves it
+     was reachable to begin with. No internet required, and no silent skip.
+4. **Snap** is the same story via `test-firewall-snap.sh`, but snapd in a
+   container is far more trouble than flatpak. Not worth it if (2) and (3) land.
+
+Worth pairing any of these with a check that the *helper* is what CI thinks it
+is: #151 shipped a helper whose embedded object could not be parsed, and every
+existing test either skipped or warned.
