@@ -172,13 +172,8 @@ hard part is done. Options, cheapest first:
    at a temp dir and assert the `app-flatpak-<id>-` / `snap.<n>.<n>-` patterns
    match what the runtimes actually name their scopes. Covers the naming
    contract only, but costs nothing.
-2. **Drive `apply-cgroup` directly against a synthetic cgroup** (the best
-   value). In the existing sidecar: `systemd-run --user --scope` (or a bare
-   `mkdir` under the user slice) to make a cgroup, run the helper against it,
-   then run `run-firewall-probe.sh` inside that cgroup and assert
-   `allow=OPEN deny=BLOCKED`. This is the test that would have caught #151 —
-   it loads the object, attaches the program, and proves packets are filtered —
-   and it needs no flatpak, no runtime download, and no new image content.
+2. **Drive `apply-cgroup` directly against a synthetic cgroup** — *implemented*,
+   see below.
 3. **The real flatpak probe** — which is what the third prompt asked about, and
    the answer is that it already exists: `scripts/integration-tests/
    test-firewall-flatpak.sh` builds `org.shepherd.firewall.Probe`, a flatpak
@@ -209,3 +204,93 @@ hard part is done. Options, cheapest first:
 Worth pairing any of these with a check that the *helper* is what CI thinks it
 is: #151 shipped a helper whose embedded object could not be parsed, and every
 existing test either skipped or warned.
+
+## CI coverage for the cgroup path (landed)
+
+Third prompt: "do option 2".
+
+`crates/shepherd-e2e/tests/firewall_cgroup.rs` +
+`scripts/integration-tests/test-firewall-cgroup.sh`, wired into the existing
+`firewall` job in `.github/workflows/ci.yml` (as root, before the job hands the
+workspace to `tester` for `firewall_real`).
+
+What it does:
+
+1. Creates `/sys/fs/cgroup/user.slice/user-61000.slice/user@61000.service/
+   app.slice/<name>.scope` by hand. The uid is synthetic on purpose — the
+   helper only uses `PKEXEC_UID` to bound the subtree it will touch, and
+   borrowing a real user's tree would mean creating and removing cgroups under
+   a live login session. Every directory it creates, it removes.
+2. Runs the helper's `apply-cgroup` against it with `--default deny --allow
+   127.0.0.0/8 --allow ::1/128`, `PKEXEC_UID` set. **This is the step that
+   fails on a #151 build.**
+3. Runs the existing `run-firewall-probe.sh` inside the cgroup
+   (`echo $$ > cgroup.procs && exec bash probe.sh`, `HOLD_SECONDS=0`) and
+   asserts `allow=OPEN`, `deny=BLOCKED`.
+
+Hermetic by construction: the allowed target is a loopback listener, the denied
+target is a listener on *this host's own* routable IPv4 (found by connecting a
+UDP socket to `192.0.2.1:9`, which sends nothing but consults the routing
+table). Nothing leaves the machine, no internet is needed, and a pre-flight
+connect from outside the cgroup proves the denied target was reachable to begin
+with — otherwise `BLOCKED` would prove nothing.
+
+`SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` turns every "not applicable here" skip
+into a failure. CI sets it. This is the fix for the failure mode the other
+firewall tests have, where an unmet precondition prints `[SKIP]` and exits 0.
+
+### The read-only cgroupfs in CI
+
+The first CI run failed exactly where the "watch this" note said it might:
+
+```
+Error: create cgroup /sys/fs/cgroup/user.slice
+Caused by: Read-only file system (os error 30)
+```
+
+`/sys/fs/cgroup` is mounted read-only in the docker-in-docker sidecar, and its
+root has no `user.slice` to begin with. Assuming a writable systemd-shaped
+hierarchy was wrong.
+
+The fix is not to relax what the helper accepts — its path check
+(`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/…`) is a
+security boundary, and the test should exercise the real one. Instead:
+**mounting cgroup2 a second time gives a writable view of the same hierarchy.**
+A cgroup created through that view is the same cgroup, and shows up under the
+read-only `/sys/fs/cgroup` path — which is all the helper needs, since it only
+ever opens the cgroup read-only (`File::open` + `BPF_PROG_ATTACH`).
+
+So `open_write_view()` asks whether `/sys/fs/cgroup` accepts a new cgroup (by
+creating one, not by trusting mount flags), and if not, mounts a private
+cgroup2 at a temp dir and writes through that, unmounting on drop. The helper
+is handed the `/sys/fs/cgroup` path either way, and `make_cgroup` refuses to
+continue if the leaf is not visible through both views.
+
+Reproduced locally before and after, since CI is a slow way to test this:
+
+```sh
+sudo unshare -m --propagation private bash -c '
+  mount --bind /sys/fs/cgroup /sys/fs/cgroup
+  mount -o remount,bind,ro /sys/fs/cgroup
+  ...run the test binary...'
+```
+
+Read-only there, exactly like CI. The test now passes on both paths and says
+which one it took.
+
+Verified three ways on `shepherd-26.04` (kernel 7.0, cgroup v2):
+
+- against the fixed helper: passes (6.2s, dominated by the probe's 6s deny
+  timeout);
+- against a helper reverted to plain `include_bytes!` **and padded so the blob
+  lands at 1 mod 8**: fails with the issue's exact text, `ParseError(ElfError(
+  Error("Invalid ELF header size or alignment")))`. Worth noting that the
+  *unpadded* revert happened to land aligned in that build and passed — which
+  is the whole character of this bug, and why the alignment assertion in the
+  helper's own unit test matters as much as this test does;
+- against a no-op helper that exits 0 without attaching anything: fails with
+  `denied target ... was OPEN, expected BLOCKED`, so the assertion is not
+  vacuous.
+
+Left undone from the options list: the `wait_for_scope` unit test (1), the
+flatpak probe in CI (3), and snap (4).

@@ -442,6 +442,21 @@ jobs:
             cd /work
             ./scripts/shepherd build
 
+            # First, the cgroup path (issue #151). `firewall_real` below
+            # covers the Process kind, which wraps the launch in
+            # `systemd-run` and never loads the embedded BPF
+            # object -- so a helper that could not even parse it
+            # passed CI for months while every firewalled flatpak ran
+            # unfiltered. This drives `apply-cgroup` directly against a
+            # cgroup made for the purpose and checks that packets really
+            # are filtered. It runs as root (it creates cgroups and loads
+            # BPF) and needs no polkit, user session, flatpak or snapd.
+            # REQUIRED=1 turns an unmet precondition into a failure, so a
+            # sidecar that cannot run it says so instead of passing quietly.
+            SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+              cargo test -p shepherd-e2e --test firewall_cgroup -- \
+                --include-ignored --test-threads=1 --nocapture
+
             useradd --create-home --user-group tester
             ./scripts/shepherd install firewall --debug --user tester
             systemctl restart polkit

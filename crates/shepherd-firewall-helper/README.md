@@ -59,3 +59,18 @@ The helper is installed by `scripts/integration-tests/setup-firewall-dev.sh`
 (dev) or by `shepherd install` (production, follow-up). It must live at
 `/usr/libexec/shepherd-firewall-helper` -- that path is hardcoded into the
 polkit policy file.
+
+## Testing
+
+`apply-cgroup` is the path with the sharpest failure mode: it loads the
+embedded BPF object, and if that load fails the caller gets no filter. Issue
+#151 is what that looks like in practice -- a misaligned object made every
+attach fail, and firewalled flatpaks ran unfiltered for months.
+
+- `cargo test -p shepherd-firewall-helper` checks the embedded object is
+  aligned and parses. Unprivileged, runs everywhere.
+- `scripts/integration-tests/test-firewall-cgroup.sh` (root, no polkit or
+  flatpak needed) attaches the program to a purpose-made cgroup and proves
+  packets are actually filtered. This one runs in CI.
+- `test-firewall.sh` / `test-firewall-flatpak.sh` / `test-firewall-snap.sh`
+  are the full-stack tests, driven through shepherdd on a configured host.

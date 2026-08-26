@@ -20,6 +20,35 @@ The tests cover:
 - Daily overrides via `PUT /overrides/{entry_id}` toggling availability.
 - Config reload after rewriting the file on disk.
 
+## Firewall tests
+
+Four of the tests here are about the per-entry firewall, and they do not all
+need the same host:
+
+| test | covers | needs |
+| --- | --- | --- |
+| `firewall_cgroup` | `apply-cgroup`: BPF object loads, attaches, and filters | root + cgroup v2. No sway, polkit, flatpak or internet. **Runs in CI.** |
+| `firewall_real` | the Process kind, via `systemd-run --scope` | the helper installed, polkit grant, sway. Runs in CI. |
+| `firewall_real_flatpak` | the flatpak scope end to end | all of the above plus a flatpak built by `test-firewall-flatpak.sh` |
+| `firewall_real_snap` | the snap scope end to end | all of the above plus a snap |
+
+Where `/sys/fs/cgroup` is mounted read-only (containers, including CI's
+docker-in-docker sidecar), `firewall_cgroup` mounts cgroup2 a second time to get
+a writable view of the same hierarchy and creates its cgroups through that. The
+helper is still handed the real `/sys/fs/cgroup` path, which is all it needs —
+it only opens the cgroup read-only.
+
+`firewall_cgroup` exists because of issue #151: `firewall_real` never loads the
+helper's embedded BPF object (the Process path lets systemd attach the filter),
+so a helper that could not parse that object passed CI while every firewalled
+flatpak ran unfiltered. Run it with
+`scripts/integration-tests/test-firewall-cgroup.sh`.
+
+Each of these prints `[SKIP] <reason>` and passes when its host cannot run it.
+Set `SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` for `firewall_cgroup` to turn that
+skip into a failure — CI sets it, so an unmet precondition is reported rather
+than read as a pass.
+
 ## Running locally
 
 The harness needs `sway`, `dbus-daemon`, and the shepherd binaries (built
