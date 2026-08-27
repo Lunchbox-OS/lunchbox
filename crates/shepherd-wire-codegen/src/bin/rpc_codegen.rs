@@ -11,9 +11,12 @@
 //!   `ManagementClient.kt`.
 //! - `shepherd-webui/src/config/model/config.generated.ts` — TypeScript
 //!   mirrors of the `config.toml` schema, for the config editor.
+//! - `companion-android/.../companion/domain/RpcParams.generated.kt` —
+//!   a params builder per RPC, so the companion stops spelling wire
+//!   param keys as string literals.
 //! - `shepherd-webui/src/api/rpc-methods.generated.ts` — the same
-//!   for the TypeScript web UI: a union type of all method names
-//!   plus a per-method result-type helper.
+//!   for the TypeScript web UI: a union of all method names, plus the
+//!   params and result type of each one.
 //! - `shepherd-webui/src/api/wire-types.generated.ts` — the payload
 //!   types for the web UI, the TypeScript counterpart of
 //!   `WireTypes.generated.kt`.
@@ -25,6 +28,8 @@
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use shepherd_wire_codegen::rust_types::RustType;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,21 +38,59 @@ struct Schema {
     methods: Vec<Method>,
 }
 
-/// Only the fields the renderers actually read are pulled off the
-/// blob. `params` types are exposed to future type-mapping codegen but
-/// today the Kotlin and TypeScript emitters only need the method name
-/// and the wrap-field hint.
 #[derive(Debug, Deserialize)]
 struct Method {
     name: String,
+    #[serde(default)]
+    params: Vec<Param>,
     result: Result_,
+}
+
+/// One RPC parameter. `ty` is the source text of the type from the trait
+/// signature; [`RustType::parse`] turns it into something renderable.
+///
+/// `required` is not the same as non-`Option`: the macro sets it false for a
+/// parameter the caller may omit entirely, which is usually but not always an
+/// `Option<T>` (`max_volume: Option<u8>` is both).
+#[derive(Debug, Deserialize)]
+struct Param {
+    name: String,
+    required: bool,
+    #[serde(rename = "type")]
+    ty: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename = "Result")]
 struct Result_ {
+    #[serde(rename = "type")]
+    ty: String,
     #[serde(default)]
     wrap_field: Option<String>,
+}
+
+impl Param {
+    fn parsed(&self) -> RustType {
+        RustType::parse(&self.ty)
+    }
+
+    /// True when the value may be absent or null, either because the type is
+    /// an `Option` or because the caller may leave it out.
+    fn nullable(&self) -> bool {
+        !self.required || matches!(self.parsed(), RustType::Option(_))
+    }
+}
+
+impl Method {
+    /// The result as it appears on the wire: the bare type, or the single-key
+    /// object `#[rpc(wrap_result = "...")]` puts it in.
+    fn wire_result_ts(&self) -> String {
+        let ty = RustType::parse(&self.result.ty).ts();
+        match &self.result.wrap_field {
+            Some(field) => format!("{{ {field}: {ty} }}"),
+            None => ty,
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -65,12 +108,16 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 6] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 7] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
             (base.join("rpc-schema.json"), format!("{pretty}\n")),
             (base.join("RpcMethods.kt"), render_kotlin(&schema)),
+            (
+                base.join("RpcParams.generated.kt"),
+                render_kotlin_params(&schema),
+            ),
             (base.join("rpc-methods.generated.ts"), render_ts(&schema)),
             (base.join("WireTypes.generated.kt"), render_wire_types()),
             (base.join("wire-types.generated.ts"), render_wire_types_ts()),
@@ -91,6 +138,10 @@ fn main() -> anyhow::Result<()> {
             (
                 repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/RpcMethods.kt"),
                 render_kotlin(&schema),
+            ),
+            (
+                repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/RpcParams.generated.kt"),
+                render_kotlin_params(&schema),
             ),
             (
                 repo.join("shepherd-webui/src/api/rpc-methods.generated.ts"),
@@ -228,22 +279,167 @@ fn render_kotlin(schema: &Schema) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// TypeScript rendering
-// ---------------------------------------------------------------------------
+/// Emit one params builder per RPC, so the companion stops spelling wire keys
+/// as string literals.
+///
+/// Lives in the `domain` package beside the wire types rather than in `ble`
+/// beside [`render_kotlin`]'s method names: the builders reference the payload
+/// enums (`StopMode`, `WindowAction`), and `domain` already depends on `ble`
+/// for `ShepherdJson`.
+fn render_kotlin_params(schema: &Schema) -> String {
+    let defs = shepherd_wire_codegen::wire_schema::wire_schema();
 
-/// Emit the union of method-name string literals plus a small
-/// `wrapField` lookup. The web-ui is REST-shaped today, so we don't
-/// generate call wrappers — this file exists so a change to the trait
-/// forces the TS side to acknowledge new/renamed methods at build
-/// time.
-fn render_ts(schema: &Schema) -> String {
     let mut out = String::new();
     out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n");
     out.push_str("//\n");
     out.push_str("// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/shepherd-management/src/service.rs`.\n\n");
+    out.push_str("package com.armeafamily.shepherd.companion.domain\n\n");
+    out.push_str("import com.armeafamily.shepherd.companion.ble.ShepherdJson\n");
+    out.push_str("import kotlinx.serialization.json.JsonNull\n");
+    out.push_str("import kotlinx.serialization.json.JsonObject\n");
+    out.push_str("import kotlinx.serialization.json.JsonPrimitive\n");
+    out.push_str("import kotlinx.serialization.json.buildJsonObject\n\n");
+    out.push_str("/**\n");
+    out.push_str(" * The params object for every RPC the device speaks, built from the\n");
+    out.push_str(" * `ManagementService` trait's own signatures.\n");
+    out.push_str(" *\n");
+    out.push_str(" * `ManagementClient` used to spell these keys as string literals, which\n");
+    out.push_str(" * left a renamed parameter compiling on both sides and failing at run\n");
+    out.push_str(" * time — the same gap that let the hand-written payload mirrors drift\n");
+    out.push_str(" * twice before they were generated.\n");
+    out.push_str(" *\n");
+    out.push_str(" * A parameter the caller may omit is sent explicitly as `null`, which the\n");
+    out.push_str(" * daemon reads the same way as an absent key.\n");
+    out.push_str(" */\n");
+    out.push_str("object RpcParams {\n");
+
+    for (i, m) in schema.methods.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let fn_name = shepherd_wire_codegen::kotlin_types::camel(&m.name);
+
+        if m.params.is_empty() {
+            out.push_str(&format!(
+                "    /** Params for `{}`, which takes none. */\n",
+                m.name
+            ));
+            out.push_str(&format!(
+                "    fun {fn_name}(): JsonObject = JsonObject(emptyMap())\n"
+            ));
+            continue;
+        }
+
+        let args: Vec<String> = m
+            .params
+            .iter()
+            .map(|p| {
+                let name = shepherd_wire_codegen::kotlin_types::camel(&p.name);
+                let mut ty = p.parsed().kotlin();
+                if p.nullable() && !ty.ends_with('?') {
+                    ty.push('?');
+                }
+                let default = if p.nullable() { " = null" } else { "" };
+                format!("{name}: {ty}{default}")
+            })
+            .collect();
+
+        out.push_str(&format!("    /** Params for `{}`. */\n", m.name));
+        out.push_str(&format!(
+            "    fun {fn_name}({}): JsonObject = buildJsonObject {{\n",
+            args.join(", ")
+        ));
+        for p in &m.params {
+            let name = shepherd_wire_codegen::kotlin_types::camel(&p.name);
+            out.push_str(&format!(
+                "        put(\"{}\", {})\n",
+                p.name,
+                kotlin_json_value(p, &name, &defs)
+            ));
+        }
+        out.push_str("    }\n");
+    }
+
+    out.push_str("}\n");
+    out
+}
+
+/// The expression putting one parameter's value on the wire.
+fn kotlin_json_value(param: &Param, expr: &str, defs: &Map<String, Value>) -> String {
+    let ty = param.parsed();
+    // The `Option` is carried by `nullable()`; encode what is inside it.
+    let inner = match &ty {
+        RustType::Option(inner) => inner.as_ref(),
+        other => other,
+    };
+
+    let encode = |value: &str| -> String {
+        match inner {
+            RustType::Vec(_) => panic!(
+                "{}: a `Vec` parameter has no JsonPrimitive form; teach \
+                 kotlin_json_value to encode it",
+                param.name
+            ),
+            RustType::Named(name) if is_kotlin_enum(name, defs) => {
+                format!("ShepherdJson.encodeToJsonElement({name}.serializer(), {value})")
+            }
+            // Everything else is a primitive, or a newtype over a string that
+            // `kotlin_types` renders as a `typealias` to `String`.
+            _ => format!("JsonPrimitive({value})"),
+        }
+    };
+
+    if param.nullable() {
+        format!("{expr}?.let {{ {} }} ?: JsonNull", encode("it"))
+    } else {
+        encode(expr)
+    }
+}
+
+/// Whether the wire schema describes `name` as an enum, which `kotlin_types`
+/// renders as an `enum class` needing its serializer — as opposed to a newtype
+/// over a string, which it renders as a transparent `typealias`.
+fn is_kotlin_enum(name: &str, defs: &Map<String, Value>) -> bool {
+    let Some(def) = defs.get(name) else {
+        return false;
+    };
+    def.get("enum").is_some() || def.get("oneOf").is_some()
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript rendering
+// ---------------------------------------------------------------------------
+
+/// Emit the union of method-name string literals, the params object each
+/// method takes, and the result each one answers with.
+///
+/// Together those make `call(method, params)` in `src/api/client.ts` checkable
+/// end to end: before this, both halves were hand-written there, so a renamed
+/// parameter compiled fine on both sides and failed at runtime.
+fn render_ts(schema: &Schema) -> String {
+    let mut imports: BTreeSet<String> = BTreeSet::new();
+    for m in &schema.methods {
+        for p in &m.params {
+            p.parsed().imports(&mut imports);
+        }
+        RustType::parse(&m.result.ty).imports(&mut imports);
+    }
+
+    let mut out = String::new();
+    out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n");
+    out.push_str("//\n");
+    out.push_str("// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`\n");
+    out.push_str("// after changing the `ManagementService` trait in\n");
+    out.push_str("// `crates/shepherd-management/src/service.rs`.\n\n");
+
+    out.push_str("import type {\n");
+    for name in &imports {
+        out.push_str(&format!("  {name},\n"));
+    }
+    out.push_str("} from \"./wire-types.generated\";\n\n");
+
     out.push_str("/**\n");
     out.push_str(" * Every RPC method the shepherd device speaks. The web-ui client is\n");
     out.push_str(" * REST-shaped and doesn't dispatch by name, but references such as\n");
@@ -257,6 +453,7 @@ fn render_ts(schema: &Schema) -> String {
         out.push_str(&format!("  | \"{}\"{sep}\n", m.name));
     }
     out.push('\n');
+
     out.push_str(
         "/** Wrap-field lookup for methods whose wire result is `{\"<field>\": <value>}`. */\n",
     );
@@ -266,6 +463,44 @@ fn render_ts(schema: &Schema) -> String {
             out.push_str(&format!("  \"{}\": \"{}\",\n", m.name, field));
         }
     }
-    out.push_str("};\n");
+    out.push_str("};\n\n");
+
+    out.push_str("/**\n");
+    out.push_str(" * The params object each method takes.\n");
+    out.push_str(" *\n");
+    out.push_str(" * Keys are the wire form (snake_case), because that is what the daemon\n");
+    out.push_str(" * deserializes into the trait method's arguments. An optional key may be\n");
+    out.push_str(" * left out entirely; `JSON.stringify` drops an `undefined` value, which\n");
+    out.push_str(" * the daemon reads the same way as an absent one.\n");
+    out.push_str(" */\n");
+    out.push_str("export interface RpcParamsMap {\n");
+    for m in &schema.methods {
+        if m.params.is_empty() {
+            out.push_str(&format!("  \"{}\": Record<string, never>;\n", m.name));
+            continue;
+        }
+        out.push_str(&format!("  \"{}\": {{\n", m.name));
+        for p in &m.params {
+            let opt = if p.required { "" } else { "?" };
+            out.push_str(&format!("    {}{opt}: {};\n", p.name, p.parsed().ts()));
+        }
+        out.push_str("  };\n");
+    }
+    out.push_str("}\n\n");
+    out.push_str("export type RpcParams<M extends RpcMethod> = RpcParamsMap[M];\n\n");
+
+    out.push_str("/**\n");
+    out.push_str(" * What each method answers with, as it arrives on the wire.\n");
+    out.push_str(" *\n");
+    out.push_str(" * Methods carrying a `RPC_WRAP_FIELDS` entry are typed as the wrapping\n");
+    out.push_str(" * object rather than the value inside it, so the type matches the bytes\n");
+    out.push_str(" * and the unwrap stays visible at the call site.\n");
+    out.push_str(" */\n");
+    out.push_str("export interface RpcResultMap {\n");
+    for m in &schema.methods {
+        out.push_str(&format!("  \"{}\": {};\n", m.name, m.wire_result_ts()));
+    }
+    out.push_str("}\n\n");
+    out.push_str("export type RpcResult<M extends RpcMethod> = RpcResultMap[M];\n");
     out
 }

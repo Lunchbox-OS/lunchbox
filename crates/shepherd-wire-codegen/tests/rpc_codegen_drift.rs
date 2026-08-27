@@ -48,6 +48,14 @@ fn codegen_outputs_match_checked_in() {
             "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/RpcMethods.kt",
             "RpcMethods.kt",
         ),
+        // The request half of the protocol. Param *names* were the last part
+        // of the wire contract still hand-written on both clients, where a
+        // rename compiled on both sides and failed only when someone tapped
+        // the button.
+        (
+            "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/RpcParams.generated.kt",
+            "RpcParams.generated.kt",
+        ),
         (
             "shepherd-webui/src/api/rpc-methods.generated.ts",
             "rpc-methods.generated.ts",
