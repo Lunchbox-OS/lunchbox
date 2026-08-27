@@ -20,6 +20,9 @@
 //! - `shepherd-webui/src/api/wire-types.generated.ts` — the payload
 //!   types for the web UI, the TypeScript counterpart of
 //!   `WireTypes.generated.kt`.
+//! - `shepherd-webui/src/config/model/wasm-types.generated.ts` — the
+//!   validation report and availability view the config editor decodes
+//!   back out of `shepherd-config-wasm`.
 //!
 //! Run as `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 //! from the repo root. The binary is deterministic: same schema in,
@@ -108,7 +111,7 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 7] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 8] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
@@ -122,6 +125,7 @@ fn main() -> anyhow::Result<()> {
             (base.join("WireTypes.generated.kt"), render_wire_types()),
             (base.join("wire-types.generated.ts"), render_wire_types_ts()),
             (base.join("config.generated.ts"), render_config_types()),
+            (base.join("wasm-types.generated.ts"), render_editor_types()),
         ]
     } else {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -158,6 +162,10 @@ fn main() -> anyhow::Result<()> {
             (
                 repo.join("shepherd-webui/src/config/model/config.generated.ts"),
                 render_config_types(),
+            ),
+            (
+                repo.join("shepherd-webui/src/config/model/wasm-types.generated.ts"),
+                render_editor_types(),
             ),
         ]
     };
@@ -224,6 +232,27 @@ fn render_config_types() -> String {
     defs.insert("RawConfig".to_string(), value);
 
     shepherd_wire_codegen::ts_types::render(&defs, CONFIG_TS_PREAMBLE)
+}
+
+const EDITOR_TS_PREAMBLE: &str = "\
+// GENERATED FILE — DO NOT EDIT BY HAND
+//
+// Rendered from `crates/shepherd-config-wasm/` by
+// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// Edit the Rust types and re-run instead.
+//
+// What the editor decodes back out of the wasm module: the validation report
+// and the per-day availability view. The `RawConfig` projection it also
+// receives is in `config.generated.ts`, rendered from the daemon's own schema.
+//
+// The helpers over these types — `issuesForEntry`, `MINUTES_PER_DAY` — stay
+// hand-written in `report.ts` and `availability.ts`, which re-export from here.
+";
+
+/// TypeScript mirrors of the types crossing the config editor's wasm boundary.
+fn render_editor_types() -> String {
+    let schema = shepherd_wire_codegen::editor_schema::editor_schema();
+    shepherd_wire_codegen::ts_types::render(&schema, EDITOR_TS_PREAMBLE)
 }
 
 /// Kotlin mirrors of the payload types, rendered from the wire JSON Schema.

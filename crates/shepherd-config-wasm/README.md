@@ -49,6 +49,25 @@ collapse into one undo step, which is what makes a slider drag one undo entry
 instead of two hundred. Snapshots are whole document strings — kilobytes each,
 and exact down to whitespace.
 
+## The types the editor decodes back
+
+`view()` hands over a `RawConfig` projection, `validate()` a `Report`, and
+`availabilityForEntry()` an `AvailabilityView`. All three have generated
+TypeScript mirrors, so none of them is a shape anyone keeps in step by hand:
+
+- `RawConfig` -> `shepherd-webui/src/config/model/config.generated.ts`, from
+  `shepherd-config`'s own schema.
+- `Report` and `AvailabilityView` -> `.../model/wasm-types.generated.ts`, from
+  this crate's, behind the `schema` feature.
+
+That feature is off by default, so `schemars` never reaches the browser
+artifact — `wasm-pack` builds without it. Only `shepherd-wire-codegen` turns it
+on, and the drift test there fails CI if a checked-in mirror goes stale.
+
+`Issue::kind` is an `IssueKind` enum rather than the `&'static str` it started
+as, because `schemars` renders a `&'static str` as a bare `string`: generating
+from that would have lost the union of names the mirror is worth having.
+
 ## Testing
 
 `cargo test -p shepherd-config-wasm` runs natively; the model is

@@ -86,15 +86,34 @@ Results are typed as they arrive **on the wire**, so a `wrap_result` method is
 visible at the call site and made the change purely a typing one: no call site
 changed what it returns.
 
+## Follow-up, same day: `Report` and `AvailabilityView`
+
+Done in a second commit, and the enum came first as planned.
+
+`Issue::kind` was a `&'static str` assigned by hand in
+`From<&ValidationError> for Issue`. Generating from that would have rendered
+`string` and *lost* the eight-name union the hand-written mirror had, so it is
+an `IssueKind` enum now — which also stops the `From` impl being stringly-typed.
+`shepherd-config-wasm` gained a `schema` feature (off by default, so `schemars`
+never reaches the browser artifact; verified with `cargo tree`), and
+`editor_schema.rs` roots the five types the way `wire_schema.rs` roots the wire
+ones.
+
+`report.ts` and `availability.ts` keep their helpers — `issuesForEntry`,
+`MINUTES_PER_DAY` — and re-export the types from
+`model/wasm-types.generated.ts`. `Week` stays hand-written: it is a Rust type
+alias rather than a struct, so `schemars` inlines it and every `Week` in the
+generated view reads as `Span[][]`.
+
+One thing fell out of this. `check-schema-coverage.mjs` excluded exactly
+`config.generated.ts` from its source corpus, which would have let the new
+generated file mark config fields as covered because it happens to spell
+`group`, `kind`, `start` and `end` too. It now excludes `*.generated.ts` as a
+class. Coverage still passes at 126/126, so nothing was relying on the looser
+rule.
+
 ## Deliberately not done
 
-- **`Report` / `AvailabilityView`** (`shepherd-config-wasm`, mirrored by hand in
-  `src/config/model/`). Generatable, but the crate needs a `schema` feature and
-  a dependency edge first, and `Issue.kind` is a `&'static str` — `schemars`
-  would render it `string`, *losing* the eight-literal union the hand-written
-  file has. Make `kind` a real enum first, then generate. Nothing in the editor
-  branches on it today, so the union is currently decorative; the field-level
-  drift risk on `AvailabilityView` is the more real one.
 - **`Patch` ↔ `patches.ts`.** Generatable, but it is a four-variant closed
   vocabulary already pinned by a paired fixture test.
 - **`windows.ts`, `tokenSources.ts`, `reasonLabel()`, `duration.ts`.** These
@@ -108,3 +127,8 @@ changed what it returns.
 `cargo fmt --check`, `npm run typecheck`, `npm test`, `npm run build`,
 `check:boundary`, `check:coverage`, and — with `ANDROID_SDK_ROOT=/opt/android-sdk`
 — `./gradlew :app:compileDebugKotlin` and `:app:testDebugUnitTest`.
+
+The follow-up also ran `./scripts/shepherd build config-editor`, which builds
+the wasm through `wasm-pack` and then the standalone bundle: the artifact came
+out at 851 kB, and `cargo tree -p shepherd-config-wasm` shows no `schemars`
+without the feature.

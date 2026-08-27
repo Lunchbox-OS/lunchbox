@@ -9,6 +9,7 @@ use serde::Serialize;
 use shepherd_config::{CURRENT_CONFIG_VERSION, RawConfig, ValidationError, validate_config};
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Report {
     /// The document is not valid TOML, or does not fit the schema's shape.
@@ -23,11 +24,39 @@ pub enum Report {
     Semantic { errors: Vec<Issue> },
 }
 
+/// Which `ValidationError` variant an issue came from.
+///
+/// An enum rather than the `&'static str` this started as, so the generated
+/// TypeScript is the union of these eight names instead of a bare `string`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum IssueKind {
+    /// Attributable to one activity.
+    Entry,
+    /// Attributable to one category.
+    Group,
+    /// Two activities share an id.
+    DuplicateEntryId,
+    /// Two categories share an id.
+    DuplicateGroupId,
+    /// A window's `start` or `end` is not `HH:MM`.
+    InvalidTimeFormat,
+    /// A window's `days` names something that is not a day.
+    InvalidDaySpec,
+    /// A warning fires after the session it belongs to would already have
+    /// ended.
+    WarningExceedsMaxRun,
+    /// Belongs to no particular activity: service settings and the like.
+    Global,
+}
+
 /// One validation error, flattened so the UI can index by activity.
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Issue {
-    /// Discriminator matching the `ValidationError` variant.
-    pub kind: &'static str,
+    /// Which `ValidationError` this came from.
+    pub kind: IssueKind,
     /// Activity this is attributable to, when the error carries one.
     pub entry_id: Option<String>,
     /// Category this is attributable to, when the error carries one.
@@ -74,56 +103,56 @@ impl From<&ValidationError> for Issue {
         let message = e.to_string();
         match e {
             ValidationError::EntryError { entry_id, .. } => Issue {
-                kind: "entry",
+                kind: IssueKind::Entry,
                 entry_id: Some(entry_id.clone()),
                 group_id: None,
                 value: None,
                 message,
             },
             ValidationError::DuplicateEntryId(id) => Issue {
-                kind: "duplicate_entry_id",
+                kind: IssueKind::DuplicateEntryId,
                 entry_id: Some(id.clone()),
                 group_id: None,
                 value: None,
                 message,
             },
             ValidationError::GroupError { group_id, .. } => Issue {
-                kind: "group",
+                kind: IssueKind::Group,
                 entry_id: None,
                 group_id: Some(group_id.clone()),
                 value: None,
                 message,
             },
             ValidationError::DuplicateGroupId(id) => Issue {
-                kind: "duplicate_group_id",
+                kind: IssueKind::DuplicateGroupId,
                 entry_id: None,
                 group_id: Some(id.clone()),
                 value: None,
                 message,
             },
             ValidationError::InvalidTimeFormat { value, .. } => Issue {
-                kind: "invalid_time_format",
+                kind: IssueKind::InvalidTimeFormat,
                 entry_id: None,
                 group_id: None,
                 value: Some(value.clone()),
                 message,
             },
             ValidationError::InvalidDaySpec(value) => Issue {
-                kind: "invalid_day_spec",
+                kind: IssueKind::InvalidDaySpec,
                 entry_id: None,
                 group_id: None,
                 value: Some(value.clone()),
                 message,
             },
             ValidationError::WarningExceedsMaxRun { entry_id, .. } => Issue {
-                kind: "warning_exceeds_max_run",
+                kind: IssueKind::WarningExceedsMaxRun,
                 entry_id: Some(entry_id.clone()),
                 group_id: None,
                 value: None,
                 message,
             },
             ValidationError::GlobalError(_) => Issue {
-                kind: "global",
+                kind: IssueKind::Global,
                 entry_id: None,
                 group_id: None,
                 value: None,

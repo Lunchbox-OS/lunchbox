@@ -1,37 +1,17 @@
 /**
- * Mirrors `crates/shepherd-config-wasm/src/report.rs`.
+ * Helpers over the validation report, whose types are generated from
+ * `crates/shepherd-config-wasm/src/report.rs`.
  *
- * Three failure modes, kept apart because the editor reacts to each
- * differently: a syntax error has a caret position and blocks everything, a
- * version mismatch means this build cannot safely edit the file at all, and
- * semantic errors are individually attributable to an activity or category.
+ * The three failure modes are kept apart in the Rust because the editor reacts
+ * to each differently: a syntax error has a caret position and blocks
+ * everything, a version mismatch means this build cannot safely edit the file
+ * at all, and semantic errors are individually attributable to an activity or
+ * category. Everything below is the "individually attributable" part, which is
+ * what the detail panels index by.
  */
-export type Report =
-  | { kind: "syntax"; message: string; line: number; column: number }
-  | { kind: "version"; found: number; expected: number }
-  | { kind: "semantic"; errors: Issue[] };
+import type { Issue, Report } from "./wasm-types.generated";
 
-export interface Issue {
-  kind:
-    | "entry"
-    | "group"
-    | "duplicate_entry_id"
-    | "duplicate_group_id"
-    | "invalid_time_format"
-    | "invalid_day_spec"
-    | "warning_exceeds_max_run"
-    | "global";
-  entry_id: string | null;
-  group_id: string | null;
-  /**
-   * The offending literal, for errors that carry one but no id — a malformed
-   * `HH:MM` or an unknown day name. Lets the UI match the value back to the
-   * field holding it, which is the stopgap until `ValidationError` carries
-   * structured paths.
-   */
-  value: string | null;
-  message: string;
-}
+export type { Issue, IssueKind, Report } from "./wasm-types.generated";
 
 export const isValid = (r: Report | null): boolean =>
   r?.kind === "semantic" && r.errors.length === 0;

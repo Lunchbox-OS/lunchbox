@@ -20,8 +20,16 @@ description = "Comment-preserving config document model for the web config edito
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Emit JSON Schema for the types the editor decodes back out of this module,
+# from which `shepherd-webui/src/config/model/wasm-types.generated.ts` is
+# rendered (see shepherd-wire-codegen). Off by default so schemars never
+# reaches the browser artifact — the same arrangement shepherd-config uses.
+schema = ["dep:schemars"]
+
 [dependencies]
 shepherd-config = { workspace = true }
+schemars = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

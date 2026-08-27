@@ -82,6 +82,15 @@ fn codegen_outputs_match_checked_in() {
             "shepherd-webui/src/config/model/config.generated.ts",
             "config.generated.ts",
         ),
+        // What the editor decodes back out of the wasm module. Both of these
+        // were hand-written mirrors carrying a "Mirrors <rust file>" header —
+        // a promise no test kept, and one the compiler could not help with:
+        // adding a `ValidationError` variant forces the Rust `From` impl to
+        // handle it and leaves the TypeScript untouched.
+        (
+            "shepherd-webui/src/config/model/wasm-types.generated.ts",
+            "wasm-types.generated.ts",
+        ),
     ];
 
     for (checked_in, temp_name) in files {

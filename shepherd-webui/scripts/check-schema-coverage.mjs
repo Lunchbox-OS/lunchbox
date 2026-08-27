@@ -30,13 +30,22 @@ const EXEMPT = {
   payload: "kind.custom.payload is free-form JSON, like the vm/media driver args",
 };
 
+/**
+ * Everything under `src/config/` that a human wrote.
+ *
+ * Generated files are excluded as a class, not just `config.generated.ts`:
+ * a mirror of some *other* Rust type can share a property name with the config
+ * schema — `wasm-types.generated.ts` has `group`, `kind`, `start` and `end` —
+ * and counting those as coverage would mark a field reachable because a
+ * different type happens to spell it the same way.
+ */
 function sourceFiles(dir) {
   const out = [];
   for (const name of readdirSync(dir)) {
     if (name === "wasm") continue; // wasm-pack output, not ours
     const path = join(dir, name);
     if (statSync(path).isDirectory()) out.push(...sourceFiles(path));
-    else if (/\.tsx?$/.test(path) && path !== GENERATED) out.push(path);
+    else if (/\.tsx?$/.test(path) && !/\.generated\.tsx?$/.test(path)) out.push(path);
   }
   return out;
 }

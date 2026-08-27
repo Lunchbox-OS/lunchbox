@@ -25,6 +25,7 @@ pub const MINUTES_PER_DAY: u16 = 1440;
 
 /// A half-open span of minutes from local midnight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Span {
     pub start: u16,
     pub end: u16,
@@ -34,6 +35,7 @@ pub struct Span {
 pub type Week = Vec<Vec<Span>>;
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AvailabilityView {
     /// The activity's own windows.
     pub entry: Week,

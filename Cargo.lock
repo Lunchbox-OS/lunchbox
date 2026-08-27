@@ -4264,6 +4264,7 @@ dependencies = [
 name = "shepherd-config-wasm"
 version = "0.3.7"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "shepherd-config",
@@ -4672,6 +4673,7 @@ dependencies = [
  "shepherd-api",
  "shepherd-ble",
  "shepherd-config",
+ "shepherd-config-wasm",
  "shepherd-management",
  "tempfile",
 ]
