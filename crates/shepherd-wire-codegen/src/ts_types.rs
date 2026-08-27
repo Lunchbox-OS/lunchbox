@@ -1,4 +1,16 @@
-//! Render the wire-type JSON Schema as TypeScript.
+//! Render a JSON Schema as TypeScript.
+//!
+//! Used for both generated TypeScript mirrors: the wire types the web UI
+//! decodes, and the `config.toml` types the config editor renders forms from.
+//! Those started as separate renderers written weeks apart, which converged on
+//! the same shapes — rendering the config schema through this one came out
+//! byte-identical to its own output except for declaration order, so the second
+//! renderer was deleted rather than left to drift against this one.
+//!
+//! The two schemas are written differently: the wire schema is hand-rolled in
+//! [`crate::wire_schema`], while the config schema is whatever `schemars`
+//! derives from `RawConfig`. In practice that costs one branch — `schemars`
+//! emits `anyOf` for `#[serde(untagged)]`, which nothing on the wire uses.
 //!
 //! The counterpart to [`crate::kotlin_types`], and it exists for the same
 //! reason: `shepherd-webui/src/api/types.ts` was hand-written, so nothing
@@ -372,19 +384,15 @@ fn render_interface(name: &str, schema: &Value) -> String {
     out
 }
 
-/// Render every type in the schema as TypeScript.
-pub fn render(defs: &Map<String, Value>) -> String {
-    let mut out = String::new();
-    out.push_str("// GENERATED FILE — DO NOT EDIT BY HAND\n//\n");
-    out.push_str("// Rendered from the Rust wire types by\n");
-    out.push_str("// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.\n");
-    out.push_str("// Edit `crates/shepherd-api/src/types.rs` and re-run instead.\n//\n");
-    out.push_str("// Property names are the wire form (snake_case), because that is what the\n");
-    out.push_str("// daemon sends and nothing renames them in transit.\n\n");
-    out.push_str("/** An RFC 3339 timestamp. A `string`; the alias records the intent. */\n");
-    out.push_str("export type IsoTimestamp = string;\n\n");
-    out.push_str("/** A calendar date, `YYYY-MM-DD`. */\n");
-    out.push_str("export type IsoDate = string;\n");
+/// Render every type in `defs` as TypeScript, after `preamble`.
+///
+/// `preamble` is the caller's: the banner naming which Rust file to edit
+/// differs per output, and the wire types open with two aliases that exist only
+/// by convention. Every type to render must be in `defs` — a schema root that
+/// lives outside `$defs` is the caller's to insert under the name it should
+/// have, which is what the config schema does with `RawConfig`.
+pub fn render(defs: &Map<String, Value>, preamble: &str) -> String {
+    let mut out = String::from(preamble);
 
     // Sorted for a stable diff.
     let sorted: BTreeMap<_, _> = defs.iter().collect();
@@ -415,6 +423,20 @@ pub fn render(defs: &Map<String, Value>) -> String {
                 "{name} is a `oneOf` shape this renderer does not handle; teach \
                  ts_types.rs about it or add it to HAND_WRITTEN with the reason"
             );
+        }
+
+        // An untagged union (`#[serde(untagged)]`): the variants are
+        // alternatives with no tag to switch on, so this is a plain TS union.
+        // Only the config schema produces these — `RawDays` is `"mon"` or
+        // `["mon", "tue"]`, because the file format accepts both.
+        if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+            let parts: Vec<String> = variants.iter().map(|v| ts_type(v, "")).collect();
+            blocks.push(format!(
+                "{}export type {name} = {};\n",
+                doc_comment(schema, ""),
+                parts.join(" | ")
+            ));
+            continue;
         }
 
         if let Some(values) = schema.get("enum").and_then(Value::as_array) {
@@ -453,4 +475,50 @@ pub fn render(defs: &Map<String, Value>) -> String {
         out.push_str(&block);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn render_one(name: &str, schema: Value) -> String {
+        let mut defs = Map::new();
+        defs.insert(name.to_string(), schema);
+        render(&defs, "")
+    }
+
+    /// `#[serde(untagged)]`, which only the config schema produces. Rendering
+    /// it as anything else is how `RawDays` — `days = "mon"` or
+    /// `days = ["mon", "tue"]` — would stop type-checking against the file
+    /// format it describes.
+    #[test]
+    fn untagged_unions_render_as_a_plain_union() {
+        let out = render_one(
+            "RawDays",
+            json!({
+                "description": "Days specification",
+                "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+            }),
+        );
+        assert!(
+            out.contains("export type RawDays = string | string[];"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Days specification"),
+            "doc comment dropped: {out}"
+        );
+    }
+
+    /// The two outputs differ only in their banner, so the preamble is the
+    /// caller's and the renderer must not prepend one of its own.
+    #[test]
+    fn the_preamble_is_the_callers() {
+        let mut defs = Map::new();
+        defs.insert("Thing".to_string(), json!({"type": "string"}));
+        let out = render(&defs, "// just this\n");
+        assert!(out.starts_with("// just this\n"), "{out}");
+        assert!(!out.contains("IsoTimestamp"), "wire aliases leaked: {out}");
+    }
 }

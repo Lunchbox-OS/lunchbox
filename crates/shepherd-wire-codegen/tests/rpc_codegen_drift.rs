@@ -48,6 +48,14 @@ fn codegen_outputs_match_checked_in() {
             "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/RpcMethods.kt",
             "RpcMethods.kt",
         ),
+        // The request half of the protocol. Param *names* were the last part
+        // of the wire contract still hand-written on both clients, where a
+        // rename compiled on both sides and failed only when someone tapped
+        // the button.
+        (
+            "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/RpcParams.generated.kt",
+            "RpcParams.generated.kt",
+        ),
         (
             "shepherd-webui/src/api/rpc-methods.generated.ts",
             "rpc-methods.generated.ts",
@@ -66,6 +74,22 @@ fn codegen_outputs_match_checked_in() {
         (
             "shepherd-webui/src/api/wire-types.generated.ts",
             "wire-types.generated.ts",
+        ),
+        // The config editor's mirrors of the `Raw*` types. Same reasoning: a
+        // field added to `schema.rs` that the editor never renders is a field
+        // nobody can set, and only a generated mirror makes that visible.
+        (
+            "shepherd-webui/src/config/model/config.generated.ts",
+            "config.generated.ts",
+        ),
+        // What the editor decodes back out of the wasm module. Both of these
+        // were hand-written mirrors carrying a "Mirrors <rust file>" header —
+        // a promise no test kept, and one the compiler could not help with:
+        // adding a `ValidationError` variant forces the Rust `From` impl to
+        // handle it and leaves the TypeScript untouched.
+        (
+            "shepherd-webui/src/config/model/wasm-types.generated.ts",
+            "wasm-types.generated.ts",
         ),
     ];
 

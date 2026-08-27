@@ -14,8 +14,11 @@ import kotlinx.serialization.json.buildJsonObject
  * serialises params, sends the RPC, and decodes the result; errors
  * surface as [com.armeafamily.shepherd.companion.ble.RpcException].
  *
- * Method-name strings and param keys are the stable wire contract from
- * `crates/shepherd-ble/src/rpc.rs`.
+ * Params come from [RpcParams], generated from the trait's own signatures,
+ * so a renamed parameter fails the build here rather than at run time. Only
+ * the claim-flow methods below still build their own: they live in
+ * `crates/shepherd-ble/src/rpc.rs` rather than on `ManagementService`, so the
+ * RPC schema does not describe them.
  */
 class ManagementClient(private val connection: ShepherdConnection) {
 
@@ -30,25 +33,23 @@ class ManagementClient(private val connection: ShepherdConnection) {
 
     // --- health / state ------------------------------------------------
 
-    suspend fun health(): HealthStatus = decode(call("health", empty()))
+    suspend fun health(): HealthStatus = decode(call("health", RpcParams.health()))
 
-    suspend fun serviceState(): ServiceStateSnapshot = decode(call("service_state", empty()))
+    suspend fun serviceState(): ServiceStateSnapshot =
+        decode(call("service_state", RpcParams.serviceState()))
 
     // --- entries -------------------------------------------------------
 
     suspend fun listEntries(at: IsoTimestamp? = null): List<EntryView> =
-        decode(call("list_entries", buildJsonObject { put("at", at.toJson()) }))
+        decode(call("list_entries", RpcParams.listEntries(at)))
 
     suspend fun getEntry(id: String, at: IsoTimestamp? = null): EntryView =
-        decode(call("get_entry", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("at", at.toJson())
-        }))
+        decode(call("get_entry", RpcParams.getEntry(id, at)))
 
     // --- groups (issue #5) ---------------------------------------------
 
     suspend fun listGroups(at: IsoTimestamp? = null): List<GroupView> =
-        decode(call("list_groups", buildJsonObject { put("at", at.toJson()) }))
+        decode(call("list_groups", RpcParams.listGroups(at)))
 
     // --- tokens (issue #8) ---------------------------------------------
 
@@ -57,35 +58,30 @@ class ManagementClient(private val connection: ShepherdConnection) {
      * [subject] is an entry ID, or `group:<id>` for a whole category.
      */
     suspend fun adjustTokens(subject: String, deltaSeconds: Long): TokenStatus =
-        decode(call("adjust_tokens", buildJsonObject {
-            put("id", JsonPrimitive(subject))
-            put("delta_seconds", JsonPrimitive(deltaSeconds))
-        }))
+        decode(call("adjust_tokens", RpcParams.adjustTokens(subject, deltaSeconds)))
 
     // --- sessions ------------------------------------------------------
 
-    suspend fun currentSession(): SessionInfo? = decodeNullable(call("current_session", empty()))
+    suspend fun currentSession(): SessionInfo? =
+        decodeNullable(call("current_session", RpcParams.currentSession()))
 
     suspend fun launch(id: String): LaunchOutcome =
-        decode(call("launch", buildJsonObject { put("id", JsonPrimitive(id)) }))
+        decode(call("launch", RpcParams.launch(id)))
 
     suspend fun stopCurrent(mode: StopMode = StopMode.GRACEFUL) {
-        call("stop_current", buildJsonObject { put("mode", ShepherdJson.encodeToJsonElement(StopMode.serializer(), mode)) })
+        call("stop_current", RpcParams.stopCurrent(mode))
     }
 
     suspend fun extendCurrent(seconds: Long): ExtendResult =
-        decode(call("extend_current", buildJsonObject { put("seconds", JsonPrimitive(seconds)) }))
+        decode(call("extend_current", RpcParams.extendCurrent(seconds)))
 
     // --- overrides -----------------------------------------------------
 
     suspend fun listOverrides(date: IsoDate? = null): List<DailyOverride> =
-        decode(call("list_overrides", buildJsonObject { put("date", date.toJson()) }))
+        decode(call("list_overrides", RpcParams.listOverrides(date)))
 
     suspend fun getOverride(id: String, date: IsoDate? = null): DailyOverride? =
-        decodeNullable(call("get_override", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("date", date.toJson())
-        }))
+        decodeNullable(call("get_override", RpcParams.getOverride(id, date)))
 
     suspend fun upsertOverride(
         id: String,
@@ -93,81 +89,63 @@ class ManagementClient(private val connection: ShepherdConnection) {
         availability: Boolean? = null,
         quotaDeltaSeconds: Long? = null,
     ): DailyOverride =
-        decode(call("upsert_override", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("date", date.toJson())
-            put("availability", availability?.let(::JsonPrimitive) ?: JsonNull)
-            put("quota_delta_seconds", quotaDeltaSeconds?.let(::JsonPrimitive) ?: JsonNull)
-        }))
+        decode(call(
+            "upsert_override",
+            RpcParams.upsertOverride(id, date, availability, quotaDeltaSeconds),
+        ))
 
     suspend fun deleteOverride(id: String, date: IsoDate? = null): DeleteResult =
-        decode(call("delete_override", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("date", date.toJson())
-        }))
+        decode(call("delete_override", RpcParams.deleteOverride(id, date)))
 
     // --- usage ---------------------------------------------------------
 
     suspend fun usageAll(from: IsoDate, to: IsoDate): List<UsageStat> =
-        decode(call("usage_all", buildJsonObject {
-            put("from", JsonPrimitive(from))
-            put("to", JsonPrimitive(to))
-        }))
+        decode(call("usage_all", RpcParams.usageAll(from, to)))
 
     suspend fun usageEntry(id: String, from: IsoDate, to: IsoDate): List<UsageStat> =
-        decode(call("usage_entry", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("from", JsonPrimitive(from))
-            put("to", JsonPrimitive(to))
-        }))
+        decode(call("usage_entry", RpcParams.usageEntry(id, from, to)))
 
     // --- volume / brightness ------------------------------------------
 
-    suspend fun getVolume(): VolumeInfo = decode(call("get_volume", empty()))
+    suspend fun getVolume(): VolumeInfo = decode(call("get_volume", RpcParams.getVolume()))
 
     suspend fun setVolume(percent: Int): VolumeInfo =
-        decode(call("set_volume", buildJsonObject { put("percent", JsonPrimitive(percent)) }))
+        decode(call("set_volume", RpcParams.setVolume(percent)))
 
     suspend fun setMute(muted: Boolean): VolumeInfo =
-        decode(call("set_mute", buildJsonObject { put("muted", JsonPrimitive(muted)) }))
+        decode(call("set_mute", RpcParams.setMute(muted)))
 
     // --- per-output volume limits (issue #124) --------------------------
 
     suspend fun listAudioOutputs(): List<AudioOutputRecord> =
-        decode(call("list_audio_outputs", empty()))
+        decode(call("list_audio_outputs", RpcParams.listAudioOutputs()))
 
     /** `maxVolume = null` clears the cap and lets the global limit apply. */
     suspend fun setAudioOutputLimits(outputKey: String, maxVolume: Int?): AudioOutputRecord =
-        decode(call("set_audio_output_limits", buildJsonObject {
-            put("output_key", JsonPrimitive(outputKey))
-            put("max_volume", maxVolume?.let { JsonPrimitive(it) } ?: JsonNull)
-        }))
+        decode(call("set_audio_output_limits", RpcParams.setAudioOutputLimits(outputKey, maxVolume)))
 
     suspend fun forgetAudioOutput(outputKey: String): Boolean =
-        decode(call("forget_audio_output", buildJsonObject {
-            put("output_key", JsonPrimitive(outputKey))
-        }))
+        decode(call("forget_audio_output", RpcParams.forgetAudioOutput(outputKey)))
 
     /** Move sound to this output. Returns the reading for the new one. */
     suspend fun selectAudioOutput(outputKey: String): VolumeInfo =
-        decode(call("select_audio_output", buildJsonObject {
-            put("output_key", JsonPrimitive(outputKey))
-        }))
+        decode(call("select_audio_output", RpcParams.selectAudioOutput(outputKey)))
 
-    suspend fun getBrightness(): BrightnessInfo = decode(call("get_brightness", empty()))
+    suspend fun getBrightness(): BrightnessInfo =
+        decode(call("get_brightness", RpcParams.getBrightness()))
 
     suspend fun setBrightness(percent: Int): BrightnessInfo =
-        decode(call("set_brightness", buildJsonObject { put("percent", JsonPrimitive(percent)) }))
+        decode(call("set_brightness", RpcParams.setBrightness(percent)))
 
     suspend fun setAutoBrightness(enabled: Boolean): BrightnessInfo =
-        decode(call("set_auto_brightness", buildJsonObject { put("enabled", JsonPrimitive(enabled)) }))
+        decode(call("set_auto_brightness", RpcParams.setAutoBrightness(enabled)))
 
     // --- misc ----------------------------------------------------------
 
-    suspend fun reloadConfig(): ReloadResult = decode(call("reload_config", empty()))
+    suspend fun reloadConfig(): ReloadResult = decode(call("reload_config", RpcParams.reloadConfig()))
 
     suspend fun logout() {
-        call("logout", empty())
+        call("logout", RpcParams.logout())
     }
 
     /**
@@ -175,26 +153,19 @@ class ManagementClient(private val connection: ShepherdConnection) {
      * — a missing dependency, a protection that is not in effect.
      */
     suspend fun listDiagnostics(): DiagnosticSet =
-        decode(call("list_diagnostics", empty()))
+        decode(call("list_diagnostics", RpcParams.listDiagnostics()))
 
-    suspend fun listWindows(): List<WindowInfo> = decode(call("list_windows", empty()))
+    suspend fun listWindows(): List<WindowInfo> =
+        decode(call("list_windows", RpcParams.listWindows()))
 
     suspend fun actOnWindow(id: Long, action: WindowAction) {
-        call("act_on_window", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("action", ShepherdJson.encodeToJsonElement(WindowAction.serializer(), action))
-        })
+        call("act_on_window", RpcParams.actOnWindow(id, action))
     }
 
     // --- plumbing ------------------------------------------------------
 
     private suspend fun call(method: String, params: JsonElement): JsonElement =
         connection.call(method, params)
-
-    private fun empty(): JsonElement = JsonObject(emptyMap())
-
-    private fun IsoTimestamp?.toJson(): JsonElement =
-        this?.let(::JsonPrimitive) ?: JsonNull
 
     private inline fun <reified T> decode(element: JsonElement): T =
         ShepherdJson.decodeFromJsonElement(kotlinx.serialization.serializer(), element)

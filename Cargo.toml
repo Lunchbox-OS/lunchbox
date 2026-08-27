@@ -30,12 +30,14 @@ members = [
     "crates/shepherd-tablet-bridge",
     "crates/shepherd-gamepad-bridge",
     "crates/shepherd-wire-codegen",
+    "crates/shepherd-config-wasm",
 ]
-# Everything except the codegen crate. `cargo build` at the repo root must not
-# build shepherd-wire-codegen, because doing so would unify its `schema`
-# feature into shepherd-api and compile schemars into shepherdd and the
-# launcher. Use `-p shepherd-wire-codegen` (or `--workspace`, as the tests do)
-# to reach it deliberately.
+# Everything except the codegen and wasm crates. `cargo build` at the repo root
+# must not build shepherd-wire-codegen, because doing so would unify its
+# `schema` feature into shepherd-api and compile schemars into shepherdd and
+# the launcher; shepherd-config-wasm is out for the same reason, so a plain
+# build never reaches wasm-bindgen. Use `-p <crate>` (or `--workspace`, as the
+# tests do) to reach either deliberately.
 default-members = [
     "crates/shepherd-util",
     "crates/shepherd-api",
@@ -75,7 +77,7 @@ exclude = ["crates/shepherd-firewall-bpf"]
 # Canonical version lives in the repo-root VERSION file; Cargo can't read it at
 # parse time, so this literal is written by `shepherd version set` and verified
 # by `shepherd version check` (run in CI). Don't hand-edit — bump via the tool.
-version = "0.3.7"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0"
 authors = ["Albert Armea"]
@@ -97,6 +99,7 @@ shepherd-http = { path = "crates/shepherd-http" }
 shepherd-ble = { path = "crates/shepherd-ble" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
 shepherd-wire-codegen = { path = "crates/shepherd-wire-codegen" }
+shepherd-config-wasm = { path = "crates/shepherd-config-wasm" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

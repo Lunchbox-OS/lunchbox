@@ -138,17 +138,52 @@ types** — a genuine type error compiles and ships. `npm run typecheck` is the
 only thing that checks them, so run it alongside the build; CI runs it as its
 own job.
 
-During development, you can run the rsbuild dev server (which proxies API calls
-to `localhost:8080`) instead of embedding:
+During development, run the rsbuild dev server (which proxies API calls to
+`localhost:8080`) instead of embedding:
 
 ```sh
-cd shepherd-webui
-npm run dev      # hot-reloading dev server, usually on port 3000
+shepherd dev webui                    # hot-reloading, usually on port 3000
+shepherd dev webui --standalone       # config editor only, no daemon needed
+shepherd dev webui -- --port 3001     # anything after -- goes to rsbuild
 ```
+
+This builds the config editor's wasm validator when it is missing, installs npm
+dependencies on first run, and then hands off to rsbuild in the foreground —
+Ctrl-C stops it. `npm run dev` from inside `shepherd-webui/` does the same thing
+without those two steps.
 
 The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
+
+Unit tests, typechecking and the import boundary check:
+
+```sh
+cd shepherd-webui
+npm test             # vitest
+npm run typecheck    # tsc --noEmit
+npm run check:boundary
+npm run check:coverage
+```
+
+Most tests are pure logic — day masks, window merging, duration parsing — and
+run in plain node. A few need a DOM and opt in with `// @vitest-environment
+jsdom` at the top of the file, so the pure ones stay fast.
+
+**Those need Node 22 or newer** (`engines` in `package.json` says so, and CI
+pins its container accordingly). jsdom loads undici, which needs
+`worker_threads.markAsUncloneable`; on an older Node the DOM test files fail to
+load with `TypeError: webidl.util.markAsUncloneable is not a function`, while
+every pure test still passes — so the run reports a smaller number of passing
+files rather than anything that looks like a version problem. Those cover
+behaviour that only appears *across a mount*, which no static check can see:
+the editor's pages are conditionally rendered, so switching tabs unmounts one
+and returning mounts it fresh, and a mount runs every effect regardless of its
+deps. Both navigation bugs found so far were of that shape.
+
+Testing Library only registers its own cleanup when Vitest's `globals` are on,
+and they are not, so a DOM test must `afterEach(cleanup)` itself or every query
+will find two of everything.
 
 ### Generated client types
 
@@ -161,12 +196,22 @@ reachable as an RPC parameter), then:
 cargo run -p shepherd-wire-codegen --bin rpc-codegen
 ```
 
-That rewrites five checked-in files: `docs/rpc-schema.json`, the two method-name
-mirrors, and the payload mirrors for each client —
+That rewrites six checked-in files: `docs/rpc-schema.json`, the two method-name
+mirrors, the payload mirrors for each client —
 `companion-android/.../WireTypes.generated.kt` and
-`shepherd-webui/src/api/wire-types.generated.ts`. Editing any of them by hand is
-pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs` fails
-until the regenerated output is committed.
+`shepherd-webui/src/api/wire-types.generated.ts` — and the config editor's
+mirrors of the `config.toml` schema,
+`shepherd-webui/src/config/model/config.generated.ts`. Editing any of them by
+hand is pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs`
+fails until the regenerated output is committed.
+
+The last of those comes from `crates/shepherd-config/src/schema.rs` rather than
+the wire types, but goes through the same renderer: `ts_types.rs` takes a
+schema and a preamble, so the only thing that differs between the two outputs is
+which Rust file the banner tells you to edit. It refuses, loudly, to render a
+schema shape it does not recognise rather than emitting a plausible mirror —
+so an exotic serde attribute on either side fails codegen instead of quietly
+producing types that typecheck and decode wrongly.
 
 The mirrors were hand-written once and drifted: four `ReasonCode` variants went
 missing from the companion, and a renamed `DailyOverride` field went unnoticed
@@ -182,6 +227,104 @@ tests therefore needs `cargo test --workspace` (which is what CI runs); a bare
 `shepherd-webui/src/api/types.ts` re-exports the generated types and keeps only
 the presentation helpers, so the rest of the UI still imports wire shapes from
 one place.
+
+### Config editor
+
+A graphical editor for `config.toml` lives in
+[`shepherd-webui/src/config/`](shepherd-webui/src/config/) and builds two ways
+from one source:
+
+| Target | Build | Dev server | Output |
+|---|---|---|---|
+| Standalone static site | `shepherd build config-editor` | `shepherd dev webui --standalone` | `dist-standalone/`, for a static host |
+| Embedded in shepherdd | `npm run build` | `shepherd dev webui` | `dist/` — the management UI, which does **not** route to the editor today |
+
+The editor is not reachable from the management UI yet, and `src/App.tsx` says
+why at the point where the route would go. Its only `ConfigSource` reads and
+writes files on whatever computer is doing the browsing, so a "Config" tab in a
+device's own web UI would read as "edit this device's configuration" while doing
+nothing of the sort. That waits on a `DeviceConfigSource`, which waits on
+privilege separation in `shepherd-http` — a config write runs arbitrary commands,
+and one blanket auth layer currently covers all of `/api/v1`.
+
+Leaving it unrouted also keeps the editor's chunks and its ~800 kB wasm
+validator out of `dist/`, and so out of the binary `rust-embed` builds from it.
+
+The two **must** write different directories — anything left in `dist/` is
+compiled into the daemon binary by `rust-embed`. `rsbuild.config.ts` switches on
+`SHEPHERD_UI_TARGET`, and `output.distPath` is resolved relative to the working
+directory, so always run the npm scripts from inside `shepherd-webui/`.
+
+The editor validates with the daemon's own parser, compiled to WebAssembly from
+[`crates/shepherd-config-wasm`](crates/shepherd-config-wasm/), rather than a
+TypeScript reimplementation of `validation.rs`. That crate also holds the
+`toml_edit` document model that makes editing comment-preserving. Build the wasm
+artifact before the npm build:
+
+```sh
+./scripts/shepherd build config-wasm   # wasm-pack -> src/config/wasm/
+```
+
+`shepherd build config-editor` and `shepherd dev webui` both do this for you when
+the artifact is missing; pass `--wasm` to the latter to force a rebuild after
+changing the crate. `src/config/wasm/` is generated and gitignored;
+`npm run typecheck` needs it to exist.
+
+#### Hosting
+
+The standalone bundle is published to Cloudflare Pages at
+<https://config.shepherd.armeafamily.com>, from the `config-editor` job in
+[`release.yml`](.github/workflows/release.yml). It deploys on `vX.Y.Z` tags
+rather than on every push to main, so the hosted editor matches the last
+released shepherd — it renders a `config_version` that ships with the daemon,
+and an editor ahead of the release would offer fields the installed version
+cannot read. Prerelease tags (`v0.4.0-rc1`) are skipped.
+
+Direct Upload, so Cloudflare needs no access to the repo. Two secrets:
+`CLOUDFLARE_API_TOKEN` (with the "Cloudflare Pages: Edit" permission) and
+`CLOUDFLARE_ACCOUNT_ID`.
+
+It gets its own subdomain rather than a path under `shepherd.armeafamily.com`,
+which is left free for a landing and documentation site. A path would have meant
+either building both from one pipeline (Direct Upload replaces the whole
+deployment, so one project cannot host two independently-deployed sites) or
+putting a Worker in front to route `/config*` — machinery a subdomain does not
+need.
+
+The bundle needs nothing unusual from a host — no rewrite rules, since the
+editor has no router; no COOP/COEP, since there are no threads. Two things do
+matter if you ever serve it elsewhere: `application/wasm` for `.wasm` (a
+mismatch falls back to a slower non-streaming load rather than breaking), and a
+`script-src` that permits `'wasm-unsafe-eval'`.
+
+Served at a domain root, so the default relative `assetPrefix` is correct and
+`PUBLIC_BASE_PATH` stays unset. Set it (to e.g. `/config/`) only if the editor
+ever moves under a subpath — relative paths would otherwise break on the
+no-trailing-slash form of the URL.
+
+Two rules keep the split working, both enforced:
+
+* **`src/config/` must not import `src/api/`**, axios, or react-query — the
+  standalone bundle has no daemon to talk to. Genuinely shared code goes in
+  `src/shared/`. Checked by `npm run check:boundary`.
+* **The TypeScript mirrors of the config schema are generated**, by
+  `cargo run -p shepherd-wire-codegen --bin rpc-codegen`, into
+  `src/config/model/config.generated.ts`. A drift test fails CI if the
+  checked-in copy goes stale, and `npm run check:coverage` fails if a generated
+  field is never referenced under `src/config/` — a field the editor cannot set
+  is a field nobody can set. That check works on field *names*, so it does not
+  catch a sub-table wired to one parent but not another; adding a `Raw*` table
+  to a second owner stays a manual check.
+
+The document model is plain Rust with strings on its edges, so it tests
+natively without a browser:
+
+```sh
+cargo test -p shepherd-config-wasm
+```
+
+`crates/shepherd-config-wasm/tests/preservation.rs` is the suite that matters:
+it holds the line on editing `config.example.toml` without disturbing a comment.
 
 ### Android companion app
 
@@ -239,7 +382,7 @@ Run the test suite:
 ```sh
 cargo test
 # as run in CI:
-cargo test --all-targets
+cargo test --workspace --all-targets
 ```
 
 Run lint checks:
@@ -247,8 +390,32 @@ Run lint checks:
 ```sh
 cargo clippy
 # as run in CI:
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`--workspace` is the part that matters: `shepherd-config-wasm` and
+`shepherd-wire-codegen` are kept out of `default-members` so `cargo build` never
+compiles `wasm-bindgen` or `schemars` into the shipped binaries, and the side
+effect is that a bare `cargo test` skips them silently — including the codegen
+drift check.
+
+### Editing a workflow file
+
+Run this before pushing:
+
+```sh
+./scripts/ci/check-workflows.sh
+```
+
+Two jobs in one file may not share a name. Forgejo rejects the *entire*
+workflow when they do — "mapping key ... already defined at line ..." — and
+nothing in it runs, so there is no failing job to point at the mistake and no
+CI job that can catch it for you. A merge is how it happens: two branches each
+add a job, they land far enough apart that git merges both without a conflict,
+and the result is a clean diff and a dead workflow.
+
+Note that `python3 -c "import yaml; yaml.safe_load(...)"` will **not** catch it.
+PyYAML accepts duplicate keys and keeps the last one; Forgejo's parser does not.
 
 ### Bumping the version
 
@@ -271,7 +438,6 @@ Bump every version at once:
 Then commit `VERSION`, `Cargo.toml`, `Cargo.lock`, and
 `shepherd-webui/package*.json` together. CI runs `shepherd version check` to
 fail the build if any literal is edited by hand and drifts out of sync.
-
 
 ## Contribution guidelines
 

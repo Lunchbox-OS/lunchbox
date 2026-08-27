@@ -29,6 +29,9 @@ name: Release
 #   SHEPHERD_KEYSTORE_PASSWORD  keystore password
 #   SHEPHERD_KEY_ALIAS          signing key alias
 #   SHEPHERD_KEY_PASSWORD       signing key password
+#   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
+#                               Edit" permission, to publish the config editor
+#   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
 
 on:
   push:
@@ -195,6 +198,80 @@ jobs:
         if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
         run: |
           echo "Dry run: built the .deb above; not uploading (no release)."
+
+  # --------------------------------------------------------------------------
+  # config-editor: build the standalone config editor and publish it to
+  # Cloudflare Pages, which serves it at config.shepherd.armeafamily.com.
+  # (Its own subdomain, so shepherd.armeafamily.com is free for a landing and
+  # documentation site later. The hostname lives in the Pages project's custom
+  # domain settings, not here — nothing in this job hardcodes it.)
+  #
+  # Tag-driven like everything else here, so the hosted editor matches the last
+  # released shepherd rather than whatever is on main — it renders a schema
+  # (`config_version`) that ships with the daemon, and an editor ahead of the
+  # release would offer fields the installed version cannot read.
+  #
+  # Prerelease tags are skipped for the same reason the apt registry skips them:
+  # an RC should not replace the editor people are using. The bundle is still
+  # built on every trigger, so a dry run exercises wasm-pack and the npm build.
+  #
+  # Direct Upload rather than a git integration: Cloudflare never needs access
+  # to the repo, which is on Forgejo and not mirrored anywhere.
+  # --------------------------------------------------------------------------
+  config-editor:
+    name: Config editor (Cloudflare Pages)
+    needs: [guard, images]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.images.outputs.base-ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    env:
+      # The Pages project. Its production branch must be `main` for the deploy
+      # below to publish to production rather than to a preview URL.
+      PAGES_PROJECT: shepherd-config-editor
+      # Pinned for the same reason bpf-linker, cargo-ndk and wasm-pack are: an
+      # unpinned `npx wrangler` adopts whatever upstream published last.
+      WRANGLER_VERSION: "4.125.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-v2-
+
+      # wasm-pack builds crates/shepherd-config-wasm, then rsbuild writes
+      # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
+      # shepherdd by rust-embed.
+      - name: Build the standalone bundle
+        run: ./scripts/shepherd build config-editor
+
+      - name: Deploy to Cloudflare Pages
+        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy \
+            shepherd-webui/dist-standalone \
+            --project-name "$PAGES_PROJECT" \
+            --branch main \
+            --commit-dirty=true
+
+      - name: Dry run note
+        if: ${{ !((github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true') }}
+        run: |
+          echo "Built shepherd-webui/dist-standalone; not deploying."
+          du -sh shepherd-webui/dist-standalone
 
   # --------------------------------------------------------------------------
   # apk: one signed APK per Android module, built in parallel; each (on publish)

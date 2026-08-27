@@ -53,23 +53,9 @@ export function durationToSecs(d: Duration | null | undefined): number {
   return d.secs + d.nanos / 1e9;
 }
 
-export function formatDuration(secs: number): string {
-  if (secs <= 0) return "0:00";
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = Math.floor(secs % 60);
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-export function formatDurationHuman(secs: number): string {
-  if (secs <= 0) return "0 min";
-  const h = Math.floor(secs / 3600);
-  const m = Math.round((secs % 3600) / 60);
-  if (h > 0 && m > 0) return `${h}h ${m}m`;
-  if (h > 0) return `${h}h`;
-  return `${m}m`;
-}
+// Moved to ../shared/duration so the config editor can use them without
+// importing the API layer; re-exported here so existing call sites keep working.
+export { formatDuration, formatDurationHuman } from "../shared/duration";
 
 export function reasonLabel(r: ReasonCode): string {
   switch (r.code) {

@@ -7,21 +7,8 @@
 // See `crates/shepherd-http/src/handlers/rpc.rs`.
 
 import axios from "axios";
-import type { RpcMethod } from "./rpc-methods.generated";
-import type {
-  AudioOutputRecord,
-  BrightnessInfo,
-  DailyOverride,
-  DiagnosticSet,
-  GroupView,
-  TokenStatus,
-  EntryView,
-  ReasonCode,
-  SessionInfo,
-  UsageStat,
-  VolumeInfo,
-  WindowInfo,
-} from "./types";
+import type { RpcMethod, RpcParams, RpcResult } from "./rpc-methods.generated";
+import type { ReasonCode } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -68,12 +55,21 @@ axiosInstance.interceptors.response.use(
 );
 
 /**
- * Dispatch a single RPC. On success returns the trait method's
- * return value decoded as `T`; on server-side errors throws
- * `ApiError` with the status code + machine-readable code.
+ * Dispatch a single RPC. On success returns the trait method's return value;
+ * on server-side errors throws `ApiError` with the status code and the
+ * machine-readable code.
+ *
+ * Both halves are generated from the trait: `RpcParams` is what the method
+ * takes and `RpcResult` is what it answers with, so a renamed parameter or a
+ * changed return type is a build failure here rather than a runtime surprise.
+ * Methods listed in `RPC_WRAP_FIELDS` answer with a single-key object, and
+ * `RpcResult` says so — the unwrap stays visible at the call site below.
  */
-async function call<T>(method: RpcMethod, params: unknown = {}): Promise<T> {
-  const res = await axiosInstance.post<T>("/rpc", { method, params });
+async function call<M extends RpcMethod>(
+  method: M,
+  params: RpcParams<M>,
+): Promise<RpcResult<M>> {
+  const res = await axiosInstance.post<RpcResult<M>>("/rpc", { method, params });
   return res.data;
 }
 
@@ -82,17 +78,16 @@ async function call<T>(method: RpcMethod, params: unknown = {}): Promise<T> {
 // ---------------------------------------------------------------------------
 
 // Health
-export const getHealth = () => call<{ live: boolean; ready: boolean }>("health");
+export const getHealth = () => call("health", {});
 
 // Entries
 export const listEntries = (at?: Date) =>
-  call<EntryView[]>("list_entries", at ? { at: at.toISOString() } : {});
+  call("list_entries", { at: at?.toISOString() });
 
-export const getEntry = (id: string) => call<EntryView>("get_entry", { id });
+export const getEntry = (id: string) => call("get_entry", { id });
 
 // Sessions
-export const getCurrentSession = () =>
-  call<SessionInfo | null>("current_session");
+export const getCurrentSession = () => call("current_session", {});
 
 /**
  * `LaunchOutcome` on the wire is serde-externally-tagged:
@@ -100,10 +95,6 @@ export const getCurrentSession = () =>
  * written against a friendlier `{ result: "approved" | "denied", ...}`
  * shape from the old REST endpoint, so we normalise here.
  */
-type LaunchWire =
-  | { Approved: { session_id: string; deadline: string | null } }
-  | { Denied: { reasons: ReasonCode[] } };
-
 export type LaunchResponse =
   | { result: "approved"; session_id: string; deadline: string | null }
   | { result: "denied"; reasons: ReasonCode[] };
@@ -111,40 +102,37 @@ export type LaunchResponse =
 export const launchSession = async (
   entry_id: string,
 ): Promise<LaunchResponse> => {
-  const wire = await call<LaunchWire>("launch", { id: entry_id });
+  const wire = await call("launch", { id: entry_id });
   if ("Approved" in wire) {
     return {
       result: "approved",
       session_id: wire.Approved.session_id,
-      deadline: wire.Approved.deadline,
+      deadline: wire.Approved.deadline ?? null,
     };
   }
   return { result: "denied", reasons: wire.Denied.reasons };
 };
 
-export const stopSession = () => call<null>("stop_current");
+export const stopSession = () => call("stop_current", {});
 
 export const extendSession = (seconds: number) =>
-  call<{ new_deadline: string | null }>("extend_current", { seconds });
+  call("extend_current", { seconds });
 
-export const listGroups = () => call<GroupView[]>("list_groups", {});
+export const listGroups = () => call("list_groups", {});
 
 /**
  * Grant (positive) or revoke (negative) banked time on a token gate.
  * `subject` is an entry ID, or `group:<id>` for a whole category.
  */
 export const adjustTokens = (subject: string, delta_seconds: number) =>
-  call<TokenStatus>("adjust_tokens", { id: subject, delta_seconds });
+  call("adjust_tokens", { id: subject, delta_seconds });
 
 // Daily overrides
 export const listOverrides = (date?: string) =>
-  call<DailyOverride[]>("list_overrides", date ? { date } : {});
+  call("list_overrides", { date });
 
 export const getOverride = (entry_id: string, date?: string) =>
-  call<DailyOverride | null>(
-    "get_override",
-    date ? { id: entry_id, date } : { id: entry_id },
-  );
+  call("get_override", { id: entry_id, date });
 
 export const upsertOverride = (
   entry_id: string,
@@ -152,7 +140,7 @@ export const upsertOverride = (
   quota_delta_seconds: number | null,
   date?: string,
 ) =>
-  call<DailyOverride>("upsert_override", {
+  call("upsert_override", {
     id: entry_id,
     date,
     availability,
@@ -166,59 +154,46 @@ export const deleteOverride = async (
   entry_id: string,
   date?: string,
 ): Promise<void> => {
-  await call<{ deleted: boolean }>(
-    "delete_override",
-    date ? { id: entry_id, date } : { id: entry_id },
-  );
+  await call("delete_override", { id: entry_id, date });
 };
 
 // Usage
-export const getUsage = (from?: string, to?: string) => {
-  const params: Record<string, string> = {};
-  if (from) params.from = from;
-  if (to) params.to = to;
-  return call<UsageStat[]>("usage_all", params);
-};
+export const getUsage = (from?: string, to?: string) =>
+  call("usage_all", { from, to });
 
-export const getEntryUsage = (entry_id: string, from?: string, to?: string) => {
-  const params: Record<string, string> = { id: entry_id };
-  if (from) params.from = from;
-  if (to) params.to = to;
-  return call<UsageStat[]>("usage_entry", params);
-};
+export const getEntryUsage = (entry_id: string, from?: string, to?: string) =>
+  call("usage_entry", { id: entry_id, from, to });
 
 // Volume
-export const getVolume = () => call<VolumeInfo>("get_volume");
+export const getVolume = () => call("get_volume", {});
 export const setVolumePercent = (percent: number) =>
-  call<VolumeInfo>("set_volume", { percent });
+  call("set_volume", { percent });
 export const setVolumeMuted = (muted: boolean) =>
-  call<VolumeInfo>("set_mute", { muted });
+  call("set_mute", { muted });
 
 // Per-output volume limits
-export const listAudioOutputs = () =>
-  call<AudioOutputRecord[]>("list_audio_outputs");
+export const listAudioOutputs = () => call("list_audio_outputs", {});
 export const setAudioOutputLimits = (
   output_key: string,
   max_volume: number | null,
-) => call<AudioOutputRecord>("set_audio_output_limits", { output_key, max_volume });
+) => call("set_audio_output_limits", { output_key, max_volume });
 export const forgetAudioOutput = (output_key: string) =>
-  call<boolean>("forget_audio_output", { output_key });
+  call("forget_audio_output", { output_key });
 export const selectAudioOutput = (output_key: string) =>
-  call<VolumeInfo>("select_audio_output", { output_key });
+  call("select_audio_output", { output_key });
 
 // Brightness
-export const getBrightness = () => call<BrightnessInfo>("get_brightness");
+export const getBrightness = () => call("get_brightness", {});
 export const setBrightnessPercent = (percent: number) =>
-  call<BrightnessInfo>("set_brightness", { percent });
+  call("set_brightness", { percent });
 export const setAutoBrightness = (enabled: boolean) =>
-  call<BrightnessInfo>("set_auto_brightness", { enabled });
+  call("set_auto_brightness", { enabled });
 
 // Config — `reload_config` returns `{entry_count: number}` (wrap_result).
-export const reloadConfig = () =>
-  call<{ entry_count: number }>("reload_config");
+export const reloadConfig = () => call("reload_config", {});
 
 // User
-export const logoutUser = () => call<null>("logout");
+export const logoutUser = () => call("logout", {});
 
 // Debug
 // `list_windows` has no `wrap_result`, so the daemon answers with a bare
@@ -230,15 +205,15 @@ export const logoutUser = () => call<null>("logout");
  * queries per page and never fetches a whole snapshot, so the set would
  * otherwise be unreachable from the browser.
  */
-export const listDiagnostics = () => call<DiagnosticSet>("list_diagnostics");
+export const listDiagnostics = () => call("list_diagnostics", {});
 
-export const listWindows = () => call<WindowInfo[]>("list_windows");
+export const listWindows = () => call("list_windows", {});
 export const closeWindow = (id: number) =>
-  call<null>("act_on_window", { id, action: "close" });
+  call("act_on_window", { id, action: "close" });
 export const hideWindow = (id: number) =>
-  call<null>("act_on_window", { id, action: "hide" });
+  call("act_on_window", { id, action: "hide" });
 export const showWindow = (id: number) =>
-  call<null>("act_on_window", { id, action: "show" });
+  call("act_on_window", { id, action: "show" });
 
 /**
  * Open the SSE event stream at `GET /api/v1/events`.

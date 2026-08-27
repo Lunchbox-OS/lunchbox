@@ -6,6 +6,9 @@
 //! not, since `shepherd-ble` depends on it. And being outside the workspace's
 //! `default-members` keeps `schemars` out of the binaries that ship.
 
+pub mod config_schema;
+pub mod editor_schema;
 pub mod kotlin_types;
+pub mod rust_types;
 pub mod ts_types;
 pub mod wire_schema;

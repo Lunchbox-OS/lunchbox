@@ -165,7 +165,10 @@ fn doc_comment(schema: &Value, indent: &str) -> String {
 
 /// snake_case (the wire form) -> camelCase (Kotlin properties). The naming
 /// strategy on `ShepherdJson` performs the same mapping at runtime.
-fn camel(s: &str) -> String {
+///
+/// Public because `rpc-codegen` renders RPC method and parameter names with it
+/// too, and two implementations of this would be two chances to disagree.
+pub fn camel(s: &str) -> String {
     let mut out = String::new();
     let mut upper = false;
     for c in s.chars() {

@@ -11,6 +11,7 @@ path = "src/bin/validate-config.rs"
 
 [dependencies]
 shepherd-util = { workspace = true }
+schemars = { workspace = true, optional = true }
 shepherd-api = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,3 +22,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+# Emit JSON Schema for the `Raw*` config types, from which the web config
+# editor's TypeScript mirrors are generated (see shepherd-wire-codegen).
+# Off by default so schemars never reaches shepherdd or the launcher.
+schema = ["dep:schemars"]
