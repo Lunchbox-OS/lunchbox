@@ -237,20 +237,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The base image is Ubuntu, whose `nodejs` package is still on 20, and
-      # wrangler refuses to start below 22 ("Wrangler requires at least Node.js
-      # v22.0.0"). Installed here rather than fixed in the image because the
-      # build and the upload have to share a job: Forgejo does not implement
-      # upload-artifact@v4, so there is no way to hand `dist-standalone/` from a
-      # Rust-capable job to a Node-capable one. Pinned like every other tool
-      # here, and it matches the `engines` field shepherd-webui already
-      # declares. ci.yml's `webui` job pins node:22-bookworm for the same
-      # underlying reason.
-      - name: Use Node 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -265,6 +251,12 @@ jobs:
       # wasm-pack builds crates/shepherd-config-wasm, then rsbuild writes
       # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
       # shepherdd by rust-embed.
+      #
+      # Building and uploading in one job is forced: Forgejo does not implement
+      # upload-artifact@v4, so `dist-standalone/` cannot be handed from a
+      # Rust-capable job to a Node-capable one. That means the base image has to
+      # satisfy wrangler's Node floor (>= 22) as well as carry the Rust
+      # toolchain, which is one of the reasons it moved to 26.04.
       - name: Build the standalone bundle
         run: ./scripts/shepherd build config-editor
 

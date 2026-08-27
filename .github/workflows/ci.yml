@@ -246,6 +246,11 @@ jobs:
     # reports fewer passing files rather than anything that reads as a version
     # problem. Pinned to a supported major rather than downgrading jsdom.
     #
+    # The base image moving to 26.04 does not retire this pin, which is worth
+    # stating because it looks like it should: 26.04 ships nodejs 22.22.1, and
+    # `^22.22.2` wants 22.22.2. One patch short. Use this image, not the base
+    # one, until Ubuntu's 22.x moves or jsdom's floor does.
+    #
     # Types are deliberately NOT checked here; that lives in `config-editor`.
     # rsbuild transpiles without type-checking, so a genuine type error compiles
     # and ships — a `Switch` prop that does not exist on MUI v9 reached a
