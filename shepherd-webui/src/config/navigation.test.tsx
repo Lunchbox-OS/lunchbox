@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 /**
- * Navigation between pages, which is where the editor keeps getting caught out.
+ * The editor shell in a DOM: what the toolbar says, and navigation between
+ * pages — which is where the editor keeps getting caught out.
  *
- * Both bugs these cover were invisible to every other check in the project.
- * `tsc` was happy, the boundary and coverage guards had nothing to say, and the
- * pure-logic tests do not render anything — because both are about *behaviour
- * across a mount*, which needs a DOM to observe.
+ * Both navigation bugs these cover were invisible to every other check in the
+ * project. `tsc` was happy, the boundary and coverage guards had nothing to
+ * say, and the pure-logic tests do not render anything — because both are about
+ * *behaviour across a mount*, which needs a DOM to observe.
  *
  * The wasm-backed document is stubbed out. These tests are about which page is
  * showing and which subject is open, not about editing, and stubbing the module
@@ -38,6 +39,7 @@ const CONFIG: RawConfig = {
 const doc = {
   ready: true,
   loadError: null,
+  versions: { config_version: 1, crate_version: "9.9.9" },
   view: CONFIG,
   report: { kind: "semantic" as const, errors: [] },
   text: "config_version = 1\n",
@@ -70,6 +72,18 @@ const { ConfigApp } = await import("./ConfigApp");
 const tab = (name: string) => screen.getByRole("tab", { name });
 /** The activity drawer, identified by the heading it puts up. */
 const openActivity = () => screen.queryByRole("heading", { name: "Celeste" });
+
+describe("the shell", () => {
+  afterEach(cleanup);
+
+  // The standalone editor talks to no device, so nothing else on screen says
+  // which build it is — and a stale cached bundle looks exactly like a current
+  // one until it disagrees with a daemon.
+  it("names the build it is", () => {
+    render(<ConfigApp />);
+    expect(screen.getByText("v9.9.9")).toBeTruthy();
+  });
+});
 
 describe("navigating between activities and categories", () => {
   beforeEach(() => {

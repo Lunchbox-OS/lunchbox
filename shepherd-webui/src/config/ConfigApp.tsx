@@ -56,6 +56,7 @@ function ConfigShell() {
   const {
     ready,
     loadError,
+    versions,
     view,
     report,
     document: doc,
@@ -115,9 +116,23 @@ function ConfigShell() {
     <Box sx={{ minHeight: "100dvh", display: "flex", flexDirection: "column" }}>
       <AppBar position="sticky" color="default" elevation={0} sx={{ borderBottom: "1px solid", borderColor: "divider" }}>
         <Toolbar sx={{ gap: 1, flexWrap: "wrap" }}>
-          <Typography variant="h6" color="primary" sx={{ fontWeight: 700, mr: 2 }}>
+          <Typography variant="h6" color="primary" sx={{ fontWeight: 700 }}>
             shepherd-launcher config editor
           </Typography>
+          {versions && (
+            // Which build this is. The standalone editor is deployed on its own
+            // subdomain and talks to no device, so nothing else on screen would
+            // distinguish a stale cached bundle from a current one — and that is
+            // the first thing worth knowing when it disagrees with a daemon.
+            <Tooltip
+              title={`Validates config_version ${versions.config_version}`}
+              placement="bottom-start"
+            >
+              <Typography variant="caption" color="text.secondary" sx={{ mr: 2 }}>
+                v{versions.crate_version}
+              </Typography>
+            </Tooltip>
+          )}
 
           <Button size="small" startIcon={<FolderOpenIcon />} onClick={() => openFrom(fileSource)}>
             Open

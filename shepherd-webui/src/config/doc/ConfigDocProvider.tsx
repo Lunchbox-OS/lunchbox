@@ -16,10 +16,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import init, { ConfigDoc } from "../wasm/shepherd_config";
+import init, { ConfigDoc, versions as wasmVersions } from "../wasm/shepherd_config";
 import type { RawConfig } from "../model/config.generated";
 import type { AvailabilityView } from "../model/availability";
 import type { Report } from "../model/report";
+import type { Versions } from "../model/wasm-types.generated";
 import type { Patch } from "./patches";
 import type { ConfigDocument, ConfigSource } from "../sources/ConfigSource";
 
@@ -30,6 +31,13 @@ interface ConfigDocContextValue {
   /** Null until the wasm module has loaded. */
   ready: boolean;
   loadError: string | null;
+  /**
+   * Which build this is. Null until the module has loaded, because it comes
+   * from the module rather than from the bundle around it — which is the
+   * point: the two are deployed together, so a stale one is stale in both
+   * halves and says so.
+   */
+  versions: Versions | null;
 
   /** `RawConfig` projection. Null before the first successful parse. */
   view: RawConfig | null;
@@ -85,6 +93,7 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState<RawConfig | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [text, setText] = useState("");
+  const [versions, setVersions] = useState<Versions | null>(null);
   const [document, setDocument] = useState<ConfigDocument>({ text: "", name: null });
   const [error, setError] = useState<string | null>(null);
 
@@ -96,6 +105,7 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       .then(() => {
         if (cancelled) return;
         docRef.current = ConfigDoc.blank();
+        setVersions(JSON.parse(wasmVersions()) as Versions);
         setReady(true);
         setVersion((v) => v + 1);
       })
@@ -227,6 +237,7 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     () => ({
       ready,
       loadError,
+      versions,
       view,
       report,
       text,
@@ -250,7 +261,7 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     // which React cannot observe on its own.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
-      ready, loadError, view, report, text, document, version, error,
+      ready, loadError, versions, view, report, text, document, version, error,
       apply, endGesture, replaceText, undo, redo, availabilityFor, openFrom, save, startBlank,
     ],
   );

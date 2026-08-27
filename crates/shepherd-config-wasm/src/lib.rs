@@ -16,15 +16,33 @@ pub mod windows;
 pub use doc::{ConfigDoc, DocError, Patch};
 pub use report::Report;
 
+/// What build of the editor this is.
+///
+/// A struct rather than an ad-hoc JSON object so it has a generated TypeScript
+/// mirror like everything else crossing this boundary.
+#[derive(Debug, serde::Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Versions {
+    /// The `config_version` this build validates against. A file declaring a
+    /// different one comes back as a `version` report rather than being
+    /// edited on a schema this build does not know.
+    pub config_version: u32,
+    /// The shepherd-launcher release this was built from.
+    ///
+    /// Worth showing because the standalone editor is deployed on its own
+    /// subdomain, decoupled from any device: a stale cached bundle is
+    /// indistinguishable from a current one until something disagrees with the
+    /// daemon, and then the first question is which build was open.
+    pub crate_version: String,
+}
+
 /// Schema version this build understands, and the crate version it came from.
-/// The editor shows both so a config written for a newer shepherd fails
-/// legibly rather than mysteriously.
 pub fn versions_json() -> String {
-    serde_json::json!({
-        "config_version": shepherd_config::CURRENT_CONFIG_VERSION,
-        "crate_version": env!("CARGO_PKG_VERSION"),
-    })
-    .to_string()
+    let versions = Versions {
+        config_version: shepherd_config::CURRENT_CONFIG_VERSION,
+        crate_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    serde_json::to_string(&versions).expect("versions serialize")
 }
 
 #[cfg(target_arch = "wasm32")]

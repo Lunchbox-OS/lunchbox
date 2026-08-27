@@ -35,6 +35,7 @@ struct EditorTypes {
     issue_kind: shepherd_config_wasm::report::IssueKind,
     availability_view: shepherd_config_wasm::windows::AvailabilityView,
     span: shepherd_config_wasm::windows::Span,
+    versions: shepherd_config_wasm::Versions,
 }
 
 /// The `$defs` block describing each of those, keyed by Rust type name.
@@ -57,7 +58,14 @@ mod tests {
     #[test]
     fn every_type_the_editor_decodes_is_described() {
         let defs = editor_schema();
-        for name in ["Report", "Issue", "IssueKind", "AvailabilityView", "Span"] {
+        for name in [
+            "Report",
+            "Issue",
+            "IssueKind",
+            "AvailabilityView",
+            "Span",
+            "Versions",
+        ] {
             assert!(defs.contains_key(name), "missing {name} from $defs");
         }
     }

@@ -112,6 +112,26 @@ generated file mark config fields as covered because it happens to spell
 class. Coverage still passes at 126/126, so nothing was relying on the looser
 rule.
 
+## Follow-up: the build stamp the docstring already promised
+
+`versions_json()` in `lib.rs` was exported to the browser and never called.
+Its doc comment said "the editor shows both so a config written for a newer
+shepherd fails legibly rather than mysteriously" — half true at best. The
+schema version does reach the UI, but through a different mechanism entirely
+(`Report::Version`, rendered by `IssueList`, which computes `expected` from
+`CURRENT_CONFIG_VERSION` itself). `crate_version` reached nothing.
+
+That half is worth having precisely because the standalone editor is deployed
+on its own subdomain and talks to no device: a stale cached bundle is
+indistinguishable from a current one until it disagrees with a daemon, and then
+the first question is which build was open. It is a `v0.3.7` caption beside the
+title now, with the schema version in its tooltip.
+
+`versions_json()` builds a `Versions` struct rather than an ad-hoc
+`serde_json::json!` object, so it is rooted in `editor_schema.rs` with the rest
+and its TypeScript comes from the same generated file — no new hand-written
+mirror one commit after removing two.
+
 ## Deliberately not done
 
 - **`Patch` ↔ `patches.ts`.** Generatable, but it is a four-variant closed
