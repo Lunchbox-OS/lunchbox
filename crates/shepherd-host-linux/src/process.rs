@@ -315,12 +315,21 @@ pub fn init() {
 /// approach here; per-user systemd lacks `CAP_NET_ADMIN`/`CAP_BPF`, so it
 /// silently accepted the property without attaching any BPF program. The
 /// helper does the attach itself.
+///
+/// `Err` carries a human-readable reason, which the caller turns into the
+/// activity's end reason: every failure here means the activity is running
+/// unfiltered, so the caller must act on it rather than log it (#151).
 pub async fn apply_firewall_to_existing_scope(
     scope_prefix: &str,
     spec: &FirewallSpec,
     timeout: std::time::Duration,
-) -> Option<String> {
-    let scope_name = wait_for_scope(scope_prefix, timeout).await?;
+) -> Result<String, String> {
+    let Some(scope_name) = wait_for_scope(scope_prefix, timeout).await else {
+        return Err(format!(
+            "no scope matching '{}' appeared within {:?}",
+            scope_prefix, timeout
+        ));
+    };
     let uid = nix::unistd::getuid().as_raw();
     let cgroup_path = format!(
         "/sys/fs/cgroup/user.slice/user-{0}.slice/user@{0}.service/app.slice/{1}",
@@ -353,16 +362,20 @@ pub async fn apply_firewall_to_existing_scope(
     match result {
         Ok(output) if output.status.success() => {
             info!(scope = %scope_name, cgroup = %cgroup_path, "Applied firewall (BPF) to scope");
-            Some(scope_name)
+            Ok(scope_name)
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(scope = %scope_name, stderr = %stderr, "helper apply-cgroup failed");
-            None
+            Err(format!(
+                "helper apply-cgroup failed for scope {}: {}",
+                scope_name,
+                stderr.trim()
+            ))
         }
         Err(e) => {
             warn!(scope = %scope_name, error = %e, "Failed to run pkexec helper");
-            None
+            Err(format!("could not run the pkexec helper: {e}"))
         }
     }
 }

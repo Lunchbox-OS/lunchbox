@@ -23,12 +23,23 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 
 use aya::{
-    Ebpf,
+    Ebpf, include_bytes_aligned,
     maps::{Array, LpmTrie, lpm_trie::Key},
     programs::CgroupSkb,
 };
 
-const BPF_OBJ: &[u8] = include_bytes!(env!("SHEPHERD_FIREWALL_BPF_OBJ"));
+/// The BPF object built by `build.rs`, embedded at 32-byte alignment.
+///
+/// `include_bytes_aligned!` rather than plain `include_bytes!`: the latter
+/// yields alignment-1 data, and aya hands the slice straight to the `object`
+/// crate, whose ELF header parse is a zero-copy cast that rejects anything
+/// not aligned to `align_of::<elf::FileHeader64>()` (8). A plain
+/// `include_bytes!` therefore loads only when the linker happens to place the
+/// blob on an 8-byte boundary — a per-build coin flip that any unrelated
+/// change to this crate's rodata can lose. See issue #151, where the flatpak
+/// firewall silently stopped enforcing with
+/// `ParseError(ElfError(Error("Invalid ELF header size or alignment")))`.
+static BPF_OBJ: &[u8] = include_bytes_aligned!(env!("SHEPHERD_FIREWALL_BPF_OBJ"));
 
 /// Build, populate, and attach the firewall program to `cgroup_path`.
 /// On success the program is left attached to the cgroup; the kernel
@@ -39,15 +50,13 @@ pub fn apply_cgroup(
     allow_rules: &[String],
     deny_rules: &[String],
 ) -> Result<(), Error> {
-    // NOTE: the `{e:?}` (Debug) below isn't decorative. Removing it makes
-    // `Ebpf::load` consistently fail with "error parsing ELF data" on this
-    // path — even though the same BPF object loads cleanly when the
-    // helper is invoked outside the test harness. The most plausible
-    // explanation is that pulling Debug into the closure changes
-    // monomorphization in a way that influences aya's feature-detect
-    // code path; either way the workaround is contained, harmless, and
-    // strictly improves error messages on real load failures (aya's
-    // `ParseError::ElfError(_)` doesn't expose its inner via `source()`).
+    // The `{e:?}` (Debug) is deliberate: aya's `ParseError::ElfError(_)`
+    // doesn't expose its inner error via `source()`, so Debug is the only
+    // way to see why a load actually failed. (An earlier comment here
+    // claimed that removing the Debug formatting *caused* load failures,
+    // and blamed monomorphization. It was really the alignment bug fixed
+    // in #151: adding or removing the formatting shifted this crate's
+    // rodata, moving the embedded object on and off an 8-byte boundary.)
     let mut bpf =
         Ebpf::load(BPF_OBJ).map_err(|e| Error::other("aya load", format!("{e}: {e:?}")))?;
 
@@ -295,6 +304,28 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for issue #151: the embedded BPF object was included
+    /// with plain `include_bytes!`, which yields alignment-1 data. aya's ELF
+    /// parse is a zero-copy cast and rejects a header that isn't 8-byte
+    /// aligned, so `apply-cgroup` failed with "Invalid ELF header size or
+    /// alignment" and every flatpak/snap entry ran unfiltered.
+    #[test]
+    fn embedded_bpf_object_is_aligned_and_parses() {
+        assert_eq!(
+            BPF_OBJ.as_ptr() as usize % 8,
+            0,
+            "embedded BPF object must be at least 8-byte aligned for aya's \
+             zero-copy ELF parse; use include_bytes_aligned!, not include_bytes!"
+        );
+
+        // Parsing is the part this test cares about. Everything after it
+        // (map creation, the verifier) needs CAP_BPF, which unprivileged
+        // test runs don't have — so only a parse failure is fatal here.
+        if let Err(aya::EbpfError::ParseError(e)) = Ebpf::load(BPF_OBJ) {
+            panic!("embedded BPF object failed to parse: {e:?}");
+        }
+    }
 
     fn collect(rule: &str) -> (Vec<V4Cidr>, Vec<V6Cidr>) {
         match parse_rule(rule).expect("parse") {

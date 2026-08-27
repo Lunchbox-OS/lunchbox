@@ -6,8 +6,8 @@ use shepherd_api::{
     WindowOwner,
 };
 use shepherd_host_api::{
-    ExitStatus, HostAdapter, HostCapabilities, HostError, HostEvent, HostHandlePayload, HostResult,
-    HostSessionHandle, SpawnOptions, StopMode,
+    ExitStatus, FirewallSpec, HostAdapter, HostCapabilities, HostError, HostEvent,
+    HostHandlePayload, HostResult, HostSessionHandle, SpawnOptions, StopMode,
 };
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +43,13 @@ const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
 /// notice; short enough that a genuinely stuck activity is reported promptly
 /// rather than leaving the launcher held indefinitely (issue #136).
 const KILL_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
+
+/// How long to wait for a snap/flatpak runtime to create the scope its app runs
+/// in, and for the firewall to be attached to it, before giving up and ending
+/// the activity (#151). The scope is created when the runtime starts the app,
+/// well before the app is usable, so this does not need to cover a cold start —
+/// and every second of it is a second the app runs unfiltered.
+const RUNTIME_SCOPE_FIREWALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to keep watching for a Steam game to appear *after* its launch
 /// timed out and the session was ended (issue #135). Steam honours a
@@ -502,6 +509,102 @@ impl LinuxHost {
                     return;
                 }
             }
+        });
+    }
+
+    /// Attach an activity's firewall to the scope its runtime creates, and end
+    /// the activity if that cannot be done.
+    ///
+    /// Snap and flatpak apps run in a scope the runtime creates, so the filter
+    /// can only be attached once that scope exists — which is after the
+    /// activity is already running. That leaves exactly one honest response to
+    /// a failure: kill it. Until #151 this path only logged `warn!` and let the
+    /// activity keep running with unrestricted network, which is how a broken
+    /// BPF object went unnoticed for months — an entry configured `default =
+    /// "deny"` browsed the internet freely, and the only person who could have
+    /// noticed was reading the journal.
+    ///
+    /// The session ends as [`HostEvent::LaunchFailed`], not `Exited`: the
+    /// launch never produced the activity that was asked for, so the child is
+    /// not billed for it (issue #135).
+    ///
+    /// Note the gap this cannot close: between the runtime starting the app and
+    /// the scope appearing, the app is running unfiltered. Nothing here can
+    /// attach a filter to a cgroup that does not exist yet; keeping the timeout
+    /// short is what bounds it.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_firewall_guard(
+        &self,
+        handle: HostSessionHandle,
+        pid: u32,
+        pgid: u32,
+        scope_prefix: String,
+        spec: FirewallSpec,
+        info: SessionInfo,
+        timeout: Duration,
+    ) {
+        let processes = self.processes.clone();
+        let sidecars = self.sidecars.clone();
+        let escaped = self.escaped.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let error = match apply_firewall_to_existing_scope(&scope_prefix, &spec, timeout).await
+            {
+                Ok(scope) => {
+                    info!(scope = %scope, pid, "Firewall attached to runtime scope");
+                    return;
+                }
+                Err(reason) => reason,
+            };
+
+            let info = Some(info);
+
+            // Nothing to fail closed: the activity is already gone, so the
+            // ordinary exit path owns the session.
+            if !Self::activity_is_running(pid, pgid, &info, false) {
+                info!(
+                    pid,
+                    error, "Firewall could not be applied, but the activity has already exited"
+                );
+                return;
+            }
+
+            warn!(
+                session_id = %handle.session_id,
+                pid,
+                error,
+                "Firewall could not be applied; ending the activity rather than \
+                 running it unfiltered"
+            );
+
+            processes.lock().unwrap().remove(&pid);
+            let protected = Self::tracked_pgids(&processes, Some(pgid));
+            Self::kill_activity(pid, pgid, &info, &protected);
+
+            let _ = event_tx.send(HostEvent::LaunchFailed {
+                handle: handle.clone(),
+                error: format!("firewall could not be applied: {error}"),
+            });
+
+            // Same rescue arc as a stop that does not take: if it outlives the
+            // kill, hand it to the reconciliation sweep rather than leaving an
+            // unfiltered activity running with nothing supervising it (#136).
+            let deadline = Instant::now() + KILL_CONFIRM_WINDOW;
+            while Instant::now() < deadline {
+                if !Self::activity_is_running(pid, pgid, &info, false) {
+                    reap_sidecars(&sidecars, pid);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            warn!(
+                session_id = %handle.session_id,
+                pid,
+                "Activity survived the firewall-failure kill; handing it to the sweep"
+            );
+            Self::register_escaped_in(&escaped, &sidecars, &handle.session_id, pid, pgid, &info);
         });
     }
 
@@ -1113,8 +1216,21 @@ impl LinuxHost {
         pgid: u32,
         info: &Option<SessionInfo>,
     ) {
-        reap_sidecars(&self.sidecars, pid);
-        self.escaped.lock().unwrap().insert(
+        Self::register_escaped_in(&self.escaped, &self.sidecars, session_id, pid, pgid, info);
+    }
+
+    /// [`Self::register_escaped`] against cloned handles, for the background
+    /// tasks that have no `&self`.
+    fn register_escaped_in(
+        escaped: &Arc<Mutex<HashMap<u32, EscapedActivity>>>,
+        sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+        session_id: &SessionId,
+        pid: u32,
+        pgid: u32,
+        info: &Option<SessionInfo>,
+    ) {
+        reap_sidecars(sidecars, pid);
+        escaped.lock().unwrap().insert(
             pid,
             EscapedActivity {
                 session_id: session_id.clone(),
@@ -1620,10 +1736,14 @@ impl HostAdapter for LinuxHost {
             }
         })?;
 
-        // For runtime-managed scopes (snap/flatpak), apply the firewall after
-        // the scope appears. Steam is not yet supported.
-        if let Some(spec) = options.firewall.clone() {
-            match firewall_enforcement_status() {
+        // For runtime-managed scopes (snap/flatpak), the firewall is attached
+        // after the scope appears — the runtime, not us, creates it. Work out
+        // which scope to watch for here; the guard that attaches to it starts
+        // below, once the session is tracked and there is a handle to fail.
+        // Steam is not yet supported.
+        let runtime_scope_prefix = match options.firewall.as_ref() {
+            None => None,
+            Some(_) => match firewall_enforcement_status() {
                 FirewallEnforcementStatus::Unsupported { reason } => {
                     if snap_name.is_some() || flatpak_app_id.is_some() {
                         warn!(
@@ -1633,34 +1753,22 @@ impl HostAdapter for LinuxHost {
                     } else if steam_app_id.is_some() {
                         warn!("Firewall is not yet supported for Steam entries; ignoring");
                     }
+                    None
                 }
                 FirewallEnforcementStatus::Supported => {
                     if let Some(ref snap) = snap_name {
-                        let pattern = format!("snap.{}.{}-", snap, snap);
-                        tokio::spawn(async move {
-                            apply_firewall_to_existing_scope(
-                                &pattern,
-                                &spec,
-                                Duration::from_secs(5),
-                            )
-                            .await;
-                        });
+                        Some(format!("snap.{}.{}-", snap, snap))
                     } else if let Some(ref app_id) = flatpak_app_id {
-                        let pattern = format!("app-flatpak-{}-", app_id);
-                        tokio::spawn(async move {
-                            apply_firewall_to_existing_scope(
-                                &pattern,
-                                &spec,
-                                Duration::from_secs(5),
-                            )
-                            .await;
-                        });
-                    } else if steam_app_id.is_some() {
-                        warn!("Firewall is not yet supported for Steam entries; ignoring");
+                        Some(format!("app-flatpak-{}-", app_id))
+                    } else {
+                        if steam_app_id.is_some() {
+                            warn!("Firewall is not yet supported for Steam entries; ignoring");
+                        }
+                        None
                     }
                 }
-            }
-        }
+            },
+        };
 
         let pid = proc.pid;
         let pgid = proc.pgid;
@@ -1686,12 +1794,24 @@ impl HostAdapter for LinuxHost {
         self.session_info
             .lock()
             .unwrap()
-            .insert(session_id.clone(), session_info_entry);
+            .insert(session_id.clone(), session_info_entry.clone());
         info!(session_id = %session_id, command = %command_name, snap = ?snap_name, flatpak = ?flatpak_app_id, "Tracking session info");
 
         let handle = HostSessionHandle::new(session_id, HostHandlePayload::Linux { pid, pgid });
 
         self.processes.lock().unwrap().insert(pid, proc);
+
+        if let (Some(prefix), Some(spec)) = (runtime_scope_prefix, options.firewall.clone()) {
+            self.spawn_firewall_guard(
+                handle.clone(),
+                pid,
+                pgid,
+                prefix,
+                spec,
+                session_info_entry,
+                RUNTIME_SCOPE_FIREWALL_TIMEOUT,
+            );
+        }
 
         if let Some(app_id) = steam_app_id {
             self.steam_sessions.lock().unwrap().insert(
@@ -2286,6 +2406,131 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         (child, pid, pid)
+    }
+
+    fn launch_failures(rx: &mut mpsc::UnboundedReceiver<HostEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let HostEvent::LaunchFailed { error, .. } = ev {
+                out.push(error);
+            }
+        }
+        out
+    }
+
+    fn firewall_test_info(token: &str) -> SessionInfo {
+        SessionInfo {
+            command_name: token.to_string(),
+            snap_name: None,
+            flatpak_app_id: None,
+            steam_app_id: None,
+            firewall_scope: None,
+            retroarch: false,
+        }
+    }
+
+    fn deny_all() -> FirewallSpec {
+        FirewallSpec {
+            default_deny: true,
+            allow: vec![],
+            deny: vec![],
+        }
+    }
+
+    /// Fail closed: an activity whose firewall could not be attached must be
+    /// ended, not left running with unrestricted network (#151, where a
+    /// misaligned BPF object turned every firewalled flatpak into an
+    /// unfiltered one and said so only in the journal).
+    #[tokio::test]
+    async fn an_unappliable_firewall_ends_the_activity() {
+        let host = LinuxHost::new();
+        let mut rx = host.subscribe();
+
+        let token = "shepherd-firewall-guard-test-alpha";
+        let (mut survivor, pid, pgid) = spawn_survivor(token);
+        let session_id = SessionId::new();
+        let handle = HostSessionHandle::new(session_id, HostHandlePayload::Linux { pid, pgid });
+
+        // A scope prefix no runtime will ever create, so the attach cannot
+        // succeed however long it waits.
+        host.spawn_firewall_guard(
+            handle,
+            pid,
+            pgid,
+            "shepherd-no-such-scope-".to_string(),
+            deny_all(),
+            firewall_test_info(token),
+            Duration::from_millis(200),
+        );
+
+        for _ in 0..300 {
+            if !pgid_is_live(pgid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Collect, clean up, *then* assert. A failing assertion here would
+        // otherwise leave `tail -f` holding the test harness's stdout pipe
+        // open, which hangs the run instead of reporting it.
+        let killed = !pgid_is_live(pgid);
+        let failures = launch_failures(&mut rx);
+        let _ = survivor.kill();
+        let _ = survivor.wait();
+
+        assert!(
+            killed,
+            "an activity whose firewall could not be applied must not keep running"
+        );
+        assert_eq!(
+            failures.len(),
+            1,
+            "the session must end, and as a launch failure so the child is not \
+             billed for it: {failures:?}"
+        );
+        assert!(
+            failures[0].contains("firewall could not be applied"),
+            "the reason must say what actually went wrong: {}",
+            failures[0]
+        );
+    }
+
+    /// The mirror case: a child who closed the activity during the attach
+    /// window has not suffered a launch failure, and there is nothing left to
+    /// kill. Ending the session twice would end whatever launched next.
+    #[tokio::test]
+    async fn an_already_exited_activity_is_not_reported_as_a_launch_failure() {
+        let host = LinuxHost::new();
+        let mut rx = host.subscribe();
+
+        let token = "shepherd-firewall-guard-test-beta";
+        let (mut survivor, pid, pgid) = spawn_survivor(token);
+        let _ = survivor.kill();
+        let _ = survivor.wait();
+        for _ in 0..300 {
+            if !pgid_is_live(pgid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let session_id = SessionId::new();
+        let handle = HostSessionHandle::new(session_id, HostHandlePayload::Linux { pid, pgid });
+        host.spawn_firewall_guard(
+            handle,
+            pid,
+            pgid,
+            "shepherd-no-such-scope-".to_string(),
+            deny_all(),
+            firewall_test_info(token),
+            Duration::from_millis(200),
+        );
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            launch_failures(&mut rx).is_empty(),
+            "an activity that had already exited must not end the session again"
+        );
     }
 
     fn escaped_events(rx: &mut mpsc::UnboundedReceiver<HostEvent>) -> Vec<(u32, bool)> {

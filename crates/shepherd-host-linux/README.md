@@ -311,9 +311,22 @@ network filter via systemd's BPF address controls
   firewall is in place from the first instruction.
 - **Flatpak / Snap**: the runtime creates its own scope
   (`app-flatpak-<id>-*.scope`, `snap.<name>.<name>-*.scope`). The adapter
-  spawns the app, polls for the scope, and then applies the firewall via
-  `systemctl --user --runtime set-property`. Small race window during
-  early app startup.
+  spawns the app, polls for that scope, and then has
+  `shepherd-firewall-helper apply-cgroup` attach a `cgroup_skb/egress` BPF
+  program to it. (`systemctl --user --runtime set-property` was the older
+  approach and silently did nothing: the per-user systemd manager has neither
+  `CAP_NET_ADMIN` nor `CAP_BPF`, so it accepted the property without
+  attaching a program.) Small race window during early app startup, in which
+  the app *is* running unfiltered — nothing can attach a filter to a cgroup
+  the runtime has not created yet.
+- **Fail closed** (`spawn_firewall_guard`): if the scope never appears, or the
+  attach fails, the adapter kills the activity and ends the session as
+  `HostEvent::LaunchFailed` rather than letting it run unfiltered. Issue #151
+  is why: a misaligned BPF object made every attach fail, and the only trace
+  was one `warn!` per launch while firewalled activities browsed freely. The
+  cost of the trade is that a host where the runtime never creates a scope
+  (no systemd user manager, say) loses these activities ~5s in, loudly,
+  instead of running them unprotected, quietly.
 - **Steam**: not yet supported (logged as a warning).
 
 ## Browser policy
