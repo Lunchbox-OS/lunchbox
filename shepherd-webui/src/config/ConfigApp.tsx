@@ -1,9 +1,11 @@
 /**
  * The config editor's shell.
  *
- * Used by both builds: as the whole app in the standalone bundle, and as one
- * lazily-loaded route inside the management UI. It takes no props and talks to
- * no daemon, which is what makes that work.
+ * Today this is the whole of the standalone bundle and nothing else: the
+ * management UI deliberately does not route it, for the reasons `src/App.tsx`
+ * records. It takes no props and talks to no daemon, so mounting it as a lazy
+ * route there needs no change here beyond giving `ConfigDocProvider` a
+ * `DeviceConfigSource`.
  */
 import { useCallback, useState } from "react";
 import AppBar from "@mui/material/AppBar";
