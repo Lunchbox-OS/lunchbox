@@ -16,6 +16,11 @@
  * `["monday"]` stays long-form, whenever the day set still matches.
  */
 import type { RawDays, RawTimeWindow } from "./config.generated";
+// The one `Span`, generated from `windows.rs`. This file used to declare an
+// identical second one, which TypeScript's structural typing let interoperate
+// with it silently — so the two could have drifted apart without a single
+// error, in the one place the grid mixes spans from both sources.
+import type { Span } from "./availability";
 
 export const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
@@ -99,14 +104,37 @@ export function formatDays(mask: number, previous?: RawDays): RawDays {
   return out;
 }
 
-/** `"16:30"` -> `990`. Null when it does not parse. */
+/**
+ * One `HH:MM` field, exactly as `u8::from_str` reads it on the daemon side:
+ * ASCII digits with an optional leading `+`, no surrounding space, and it has
+ * to fit a `u8`.
+ *
+ * Spelling this out rather than reaching for `Number()` matters — `Number()`
+ * takes `" 16"`, `"0x10"` and `"1e2"`, none of which the daemon does.
+ */
+function parseU8(field: string): number | null {
+  if (!/^\+?[0-9]+$/.test(field)) return null;
+  const n = Number(field);
+  return n <= 255 ? n : null;
+}
+
+/**
+ * `"16:30"` -> `990`. Null when it does not parse.
+ *
+ * Mirrors `parse_time` in `crates/shepherd-config/src/validation.rs`, down to
+ * the parts of it that are accidents of `u8::from_str` rather than decisions:
+ * `"16:5"` and `"016:030"` are accepted because the daemon accepts them and
+ * runs on them, so the grid has to draw them where they will actually take
+ * effect. `crates/shepherd-config-wasm/tests/time_formats.json` pins the pair.
+ */
 export function parseTime(value: string): number | null {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
-  if (!m) return null;
-  const h = Number(m[1]);
-  const min = Number(m[2]);
-  if (h > 23 || min > 59) return null;
-  return h * 60 + min;
+  const parts = value.split(":");
+  if (parts.length !== 2) return null;
+  const h = parseU8(parts[0]);
+  const m = parseU8(parts[1]);
+  if (h === null || m === null) return null;
+  if (h > 23 || m > 59) return null;
+  return h * 60 + m;
 }
 
 /** `990` -> `"16:30"`. Minutes past midnight; 1440 renders as `"24:00"`. */
@@ -167,11 +195,6 @@ export function bandsOnDay(w: ParsedWindow, day: number): Span[] {
     { start: w.start, end: MINUTES_IN_DAY },
     { start: 0, end: w.end },
   ];
-}
-
-export interface Span {
-  start: number;
-  end: number;
 }
 
 /** Sort and coalesce overlapping or touching spans. */

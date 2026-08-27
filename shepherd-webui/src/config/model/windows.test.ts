@@ -15,6 +15,7 @@ import {
   snap,
   toggleDay,
 } from "./windows";
+import fixture from "../../../../crates/shepherd-config-wasm/tests/time_formats.json";
 
 describe("day masks", () => {
   it("reads the presets the daemon accepts", () => {
@@ -87,6 +88,21 @@ describe("times", () => {
     expect(parseTime("24:00")).toBeNull();
     expect(parseTime("12:60")).toBeNull();
     expect(parseTime("nope")).toBeNull();
+  });
+
+  // Whatever the daemon runs on, the grid has to draw — including the parts of
+  // `parse_time` that are accidents of `u8::from_str`.
+  it("takes the loose spellings the daemon takes", () => {
+    expect(parseTime("16:5")).toBe(965);
+    expect(parseTime("016:030")).toBe(990);
+    expect(parseTime("+6:30")).toBe(390);
+  });
+
+  // And the reverse: a value the daemon flags must not draw a band as if it
+  // were fine.
+  it("rejects surrounding space, which the daemon does not allow", () => {
+    expect(parseTime(" 16:30")).toBeNull();
+    expect(parseTime("16:30 ")).toBeNull();
   });
 
   it("snaps to the grid step", () => {
@@ -197,5 +213,48 @@ describe("toggleDay", () => {
   it("adds and removes a day", () => {
     expect(toggleDay(0, 2)).toBe(0b100);
     expect(toggleDay(0b100, 2)).toBe(0);
+  });
+});
+
+/**
+ * The editor's half of the time and day format contract.
+ *
+ * `parseDays` and `parseTime` above re-implement `shepherd_config`'s, because
+ * the grid parses on every drag frame and cannot round-trip through wasm to do
+ * it. Nothing connected the two, and they had drifted — see the fixture's own
+ * header for what that cost. `crates/shepherd-config-wasm/tests/time_formats.rs`
+ * asserts the daemon's side of this same file.
+ */
+describe("the format contract with the daemon", () => {
+  // Every assertion below is a loop, so an empty or unreadable fixture would
+  // pass all of them without checking anything.
+  it("actually has cases to check", () => {
+    expect(fixture.times.length).toBeGreaterThan(0);
+    expect(fixture.day_presets.length).toBeGreaterThan(0);
+    expect(fixture.day_lists.length).toBeGreaterThan(0);
+  });
+
+  it("parses every time the fixture lists the way the daemon does", () => {
+    for (const c of fixture.times) {
+      expect(parseTime(c.input), `parseTime(${JSON.stringify(c.input)})`).toBe(
+        c.minutes,
+      );
+    }
+  });
+
+  it("parses every day preset the way the daemon does", () => {
+    for (const c of fixture.day_presets) {
+      expect(parseDays(c.input), `parseDays(${JSON.stringify(c.input)})`).toBe(
+        c.mask,
+      );
+    }
+  });
+
+  it("parses every day list the way the daemon does", () => {
+    for (const c of fixture.day_lists) {
+      expect(parseDays(c.input), `parseDays(${JSON.stringify(c.input)})`).toBe(
+        c.mask,
+      );
+    }
   });
 });
