@@ -18,6 +18,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { RawConfig } from "./model/config.generated";
 
+// Declared rather than pulling in @types/node, matching `target.ts` — which is
+// the module this reaches through to, and which declares it the same way
+// because rspack replaces the expression at build time.
+declare const process: { env: Record<string, string | undefined> };
+
 const CONFIG: RawConfig = {
   config_version: 1,
   groups: [{ id: "games", label: "Games" }],
@@ -82,6 +87,47 @@ describe("the shell", () => {
   it("names the build it is", () => {
     render(<ConfigApp />);
     expect(screen.getByText("v9.9.9")).toBeTruthy();
+  });
+
+  // The default target. In a device's own management UI, "Example" beside a
+  // real config would read as an offer to overwrite it.
+  it("does not offer the example config in the embedded build", () => {
+    render(<ConfigApp />);
+    expect(screen.queryByRole("button", { name: "Example" })).toBeNull();
+  });
+});
+
+/**
+ * The standalone build, which needs its own module registry: `target.ts`
+ * resolves `IS_STANDALONE` once, when it is first evaluated, so seeing both
+ * branches in one file means re-importing the tree after changing what it
+ * reads. Driving it through the real environment variable rather than a stub
+ * also checks `target.ts` itself, which is the thing the build sets.
+ */
+describe("the standalone shell", () => {
+  afterEach(() => {
+    cleanup();
+    delete process.env.SHEPHERD_UI_TARGET;
+  });
+
+  it("opens the bundled example config", async () => {
+    const user = userEvent.setup();
+    process.env.SHEPHERD_UI_TARGET = "standalone";
+    vi.resetModules();
+    vi.doMock("./doc/ConfigDocProvider", () => ({
+      ConfigDocProvider: ({ children }: { children: React.ReactNode }) => children,
+      useConfigDoc: () => doc,
+    }));
+    const { ConfigApp: Standalone } = await import("./ConfigApp");
+
+    render(<Standalone />);
+    await user.click(screen.getByRole("button", { name: "Example" }));
+
+    // Opening goes through the same path as any other source, so the shell
+    // needs no special case for it.
+    expect(doc.openFrom).toHaveBeenCalledTimes(1);
+    const source = doc.openFrom.mock.calls[0][0] as { label: string };
+    expect(source.label).toBe("Example configuration");
   });
 });
 

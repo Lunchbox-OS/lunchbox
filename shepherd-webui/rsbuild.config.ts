@@ -65,6 +65,16 @@ export default defineConfig({
   },
   tools: {
     rspack: {
+      module: {
+        rules: [
+          // `import x from "./f.toml?raw"` — the file's text as a string.
+          // Vite implements this natively, so the tests get it for free;
+          // rspack does not, and without this rule it hands the TOML to the
+          // JavaScript parser. Used to inline `config.example.toml` into the
+          // standalone editor (`src/config/sources/ExampleConfigSource.ts`).
+          { resourceQuery: /^\?raw$/, type: "asset/source" },
+        ],
+      },
       experiments: {
         // wasm-pack's `--target web` output fetches its `.wasm` at runtime;
         // this makes rspack emit it as an asset rather than trying to inline

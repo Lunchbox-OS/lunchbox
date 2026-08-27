@@ -26,6 +26,7 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DescriptionIcon from "@mui/icons-material/Description";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import MenuBookIcon from "@mui/icons-material/MenuBook";
 import NoteAddIcon from "@mui/icons-material/NoteAdd";
 import RedoIcon from "@mui/icons-material/Redo";
 import SaveIcon from "@mui/icons-material/Save";
@@ -33,7 +34,9 @@ import UndoIcon from "@mui/icons-material/Undo";
 import { ConfigDocProvider, useConfigDoc } from "./doc/ConfigDocProvider";
 import type { Subject } from "./doc/patches";
 import { focusFor, type FocusRequest } from "./navigation";
+import { ExampleConfigSource } from "./sources/ExampleConfigSource";
 import { FileConfigSource, hasFileSystemAccess } from "./sources/FileConfigSource";
+import { IS_STANDALONE } from "./target";
 import { IssueList } from "./components/IssueList";
 import { RawTomlPane } from "./components/RawTomlPane";
 import { EntriesPage } from "./pages/EntriesPage";
@@ -43,6 +46,7 @@ import { ServicePage } from "./pages/ServicePage";
 type Page = "entries" | "groups" | "service" | "raw";
 
 const fileSource = new FileConfigSource();
+const exampleSource = new ExampleConfigSource();
 
 export function ConfigApp() {
   return (
@@ -137,6 +141,29 @@ function ConfigShell() {
           <Button size="small" startIcon={<FolderOpenIcon />} onClick={() => openFrom(fileSource)}>
             Open
           </Button>
+          {IS_STANDALONE && (
+            // Standalone only. This build is a static page with nothing behind
+            // it, so the example is the only thing it can open unprompted —
+            // whereas in a device's own UI "Example" beside a real config would
+            // read as an offer to overwrite it.
+            // `describeChild` so the tooltip describes the button rather than
+            // renaming it. Without it MUI puts the title in `aria-label`, and
+            // the accessible name stops being the word on screen — the button
+            // reads as "Open the annotated example…" to a screen reader, and
+            // "click Example" matches nothing under voice control.
+            <Tooltip
+              describeChild
+              title="Open the annotated example that ships with shepherd"
+            >
+              <Button
+                size="small"
+                startIcon={<MenuBookIcon />}
+                onClick={() => openFrom(exampleSource)}
+              >
+                Example
+              </Button>
+            </Tooltip>
+          )}
           <Button size="small" startIcon={<NoteAddIcon />} onClick={startBlank}>
             New
           </Button>
