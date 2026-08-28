@@ -1,7 +1,7 @@
 # CI image for shepherd-launcher.
 #
 # Pre-installs everything `./scripts/shepherd deps install dev` would on a
-# real Ubuntu 25.10 host: apt build/run/test deps, rustup with stable
+# real Ubuntu 26.04 host: apt build/run/test deps, rustup with stable
 # (clippy + rustfmt) and nightly+rust-src, and bpf-linker. Subsequent CI
 # jobs use this image so they can skip the multi-minute apt + rustup +
 # `cargo install bpf-linker` setup that previously OOM-killed the runner
@@ -13,13 +13,18 @@
 # when no input file changed; the hash forces a rebuild whenever the
 # inputs do change.
 
-FROM ubuntu:25.10
+# 26.04, matching the platform shepherd-launcher is developed and tested on
+# (docs/INSTALL.md) and the floor `check_ubuntu_version` recommends. CI had sat
+# a release behind on 25.10, which is how it ended up running an npm below the
+# `engines` floor shepherd-webui declares, and a Node wrangler refuses to start
+# on. 26.04 ships nodejs 22.
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tools the workflow itself needs (git for checkout, curl for the
 # rustup installer in scripts/lib/deps.sh, nodejs for the embedded web
-# UI's npm build).
+# UI's npm build and for wrangler in release.yml's config-editor job).
 RUN apt-get update && \
     apt-get install -y git curl nodejs && \
     rm -rf /var/lib/apt/lists/*

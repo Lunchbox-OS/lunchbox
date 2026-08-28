@@ -79,4 +79,4 @@ over PIDs and ports).
 
 The `e2e` job in `.github/workflows/ci.yml` installs the test deps, builds
 the binaries, and runs `cargo test -p shepherd-e2e -- --include-ignored
---test-threads=1` inside an `ubuntu:25.10` container.
+--test-threads=1` inside an `ubuntu:26.04` container.
