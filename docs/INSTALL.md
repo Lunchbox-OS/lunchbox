@@ -409,10 +409,10 @@ See `man 5 sway-output` for the full set of `output` directives.
 
 ### The compositor socket is closed after startup (issue #144)
 
-The installed `/etc/sway/shepherd.conf` starts `shepherdd` with
-`--harden-sway-ipc`. Once shepherdd has connected to sway it **unlinks the
-compositor's IPC socket**, so no other process can reach it for the rest of the
-session.
+Once `shepherdd` has connected to sway it **unlinks the compositor's IPC
+socket**, so no other process can reach it for the rest of the session. This is
+the default, and the installed `/etc/sway/shepherd.conf` simply does not opt
+out of it.
 
 This is not a micro-optimisation. Sway's IPC grants every process running as
 shepherdd's own uid — which is every activity — the whole compositor:
@@ -432,12 +432,15 @@ Consequences worth knowing before you debug a device:
 - To get a socket back for one session, add a drop-in that passes
   `--sway-ipc-alias <path>` (a second name for the socket, created *before* the
   original is removed; it must be inside `$XDG_RUNTIME_DIR`, because it is a
-  hard link) or drop `--harden-sway-ipc` altogether. Both weaken the device for
-  as long as they are in place.
+  hard link) or `--no-harden-sway-ipc` to switch it off entirely. Both weaken
+  the device for as long as they are in place.
 
-`shepherdd` never does this unless asked: a `shepherdd` run by hand inside your
-own sway session would otherwise delete your desktop's socket. The installer is
-the only thing that turns it on.
+**Running `shepherdd` by hand inside your own desktop will take your desktop's
+sway socket away**, because the unlink applies to whatever session shepherdd is
+in. Every development entry point in the repo passes `--no-harden-sway-ipc`
+already — `sway.conf`, `shepherd dev headless`, `run-dev`, and the e2e harness —
+so this only bites an invocation written from scratch. `shepherd install
+sway-config` is what strips the flag back out for a device.
 
 ### External monitor / docking (issue #87)
 

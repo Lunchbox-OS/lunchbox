@@ -52,6 +52,11 @@ or source it yourself. Add `--harden-ipc` to `dev headless` to boot the way an
 installed device does, with the original name removed — everything above still
 works, because it all goes through the alias either way.
 
+shepherdd hardens by default; `sway.conf` opts out with `--no-harden-sway-ipc`
+because it is the development config, and `--harden-ipc` takes that opt-out back
+off. So a plain `dev headless` leaves the compositor reachable by `swaymsg`, and
+nothing you write by hand needs to remember a flag to keep it that way.
+
 ## Commands
 
 | Command | Purpose |

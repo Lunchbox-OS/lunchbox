@@ -105,9 +105,9 @@ headless_wait_socket() {
 
 # Wait until the compositor exists, by either name.
 #
-# Under `--harden-ipc` shepherdd unlinks the socket sway created as soon as it
-# has connected, so the ambient name is short-lived and a harness that only
-# watched for it would race. Either name proves sway is up, which is all this
+# Under `--harden-ipc` (and on a device, where hardening is the default)
+# shepherdd unlinks the socket sway created as soon as it has connected, so the
+# ambient name is short-lived and a harness that only watched for it would race. Either name proves sway is up, which is all this
 # stage claims — whether *shepherdd* is up is the separate wait on the alias.
 #   headless_wait_compositor <runtime_dir> <user|""> <alias> <deciseconds>
 headless_wait_compositor() {
@@ -203,9 +203,11 @@ headless_precheck_user() {
 #   --no-build      skip the cargo build (use existing target/debug binaries)
 #   --harden-ipc    exercise the production sway-IPC hardening: shepherdd
 #                   unlinks the compositor's socket once it has connected, so
-#                   nothing else can reach it (issue #144). The session stays
-#                   drivable through the alias shepherdd creates first, which
-#                   this harness always asks for and always uses.
+#                   nothing else can reach it (issue #144). This is shepherdd's
+#                   default; `sway.conf` opts out because it is the development
+#                   config, and this flag takes that opt-out back off. The
+#                   session stays drivable through the alias shepherdd creates
+#                   first, which this harness always asks for and always uses.
 headless_start() {
     local size="$HEADLESS_SIZE_DEFAULT" mock_time="" renderer="pixman" do_build=1
     local config="" user="" harden=0
@@ -272,8 +274,9 @@ headless_start() {
 
     # Default sway config boots ./config.example.toml (hard-coded in sway.conf).
     # The derived copy rewrites the shepherdd exec line: its `-c` token when a
-    # config is chosen (--config, or the --user default), and always the sway-IPC
-    # flags. Every other kiosk rule is preserved.
+    # config is chosen (--config, or the --user default), always the alias, and
+    # the hardening opt-out sway.conf carries when --harden-ipc says to drop it.
+    # Every other kiosk rule is preserved.
     mkdir -p "$HEADLESS_DIR_DEFAULT"
     local sway_config="$HEADLESS_DIR_DEFAULT/sway.headless.conf"
     cp "$repo_root/sway.conf" "$sway_config"
@@ -300,13 +303,32 @@ headless_start() {
         info "Booting config: $config${user:+ (as $user)}"
     fi
 
-    local shepherdd_flags="--sway-ipc-alias $sway_alias"
-    [[ "$harden" -eq 1 ]] && shepherdd_flags+=" --harden-sway-ipc"
-    sed -E -i "s#(target/debug/shepherdd -c [^ ]+)#\1 $shepherdd_flags#" "$sway_config"
+    sed -E -i "s#(target/debug/shepherdd -c [^ ]+)#\1 --sway-ipc-alias $sway_alias#" "$sway_config"
     if ! grep -qF -- "--sway-ipc-alias $sway_alias" "$sway_config"; then
         die "Failed to inject the sway-IPC flags into the derived sway config (expected 'target/debug/shepherdd -c <path>')"
     fi
-    [[ "$harden" -eq 1 ]] && info "Hardening sway IPC: shepherdd will unlink the compositor socket"
+
+    # shepherdd hardens by default; `sway.conf` opts out because it is the
+    # development config. `--harden-ipc` therefore takes the opt-out back off
+    # rather than adding a flag, so a dev session that does not ask for it keeps
+    # a compositor `swaymsg` can reach.
+    # Scoped to the exec line: sway.conf's comment names the flag too, so a
+    # whole-file grep answers the wrong question in both directions.
+    local exec_line
+    exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+    if [[ "$harden" -eq 1 ]]; then
+        sed -i "/^exec .*shepherdd -c /s# --no-harden-sway-ipc##g" "$sway_config"
+        exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+        if [[ "$exec_line" == *--no-harden-sway-ipc* ]]; then
+            die "Failed to strip --no-harden-sway-ipc from the derived sway config, so --harden-ipc would not have hardened anything"
+        fi
+        info "Hardening sway IPC: shepherdd will unlink the compositor socket"
+    elif [[ "$exec_line" != *--no-harden-sway-ipc* ]]; then
+        # Without the opt-out the session would harden itself and every later
+        # `swaymsg` would fail, which reads as a broken harness rather than a
+        # missing flag.
+        die "sway.conf no longer passes --no-harden-sway-ipc on its shepherdd exec line, so a plain 'dev headless' would unlink the compositor socket (issue #144)"
+    fi
 
     if [[ "$do_build" -eq 1 ]]; then
         info "Building shepherd binaries..."
@@ -603,9 +625,11 @@ Start options:
     --no-build     Skip the cargo build; use existing target/debug binaries
     --harden-ipc   Exercise the production sway-IPC hardening (issue #144):
                    shepherdd unlinks the compositor's socket once it has
-                   connected, so no other process can reach it. The session
-                   stays drivable through the alias shepherdd creates first,
-                   which this harness always uses either way.
+                   connected, so no other process can reach it. That is
+                   shepherdd's default; sway.conf opts out because it is the
+                   development config, and this flag takes the opt-out back off.
+                   The session stays drivable through the alias shepherdd
+                   creates first, which this harness always uses either way.
 
 The session runs with no login session, no parent compositor, and no GPU, so an
 agent can drive it over SSH. Connection details live in

@@ -347,11 +347,13 @@ pub fn alias_socket(alias: &Path) -> HostResult<()> {
 /// per-entry firewall is attached to.
 ///
 /// Destructive and irreversible: an unlinked socket with no other name cannot
-/// be recovered. Never call it unless the caller was explicitly asked to
-/// harden — a shepherdd run by hand inside a developer's own sway session would
-/// otherwise delete their desktop's socket. Call it only once every connection
-/// this daemon needs is established, and only after [`alias_socket`] has
-/// succeeded if an alias was requested.
+/// be recovered, and it belongs to whatever sway session shepherdd is inside —
+/// run by hand in a developer's own desktop, this takes that desktop's socket
+/// away from every other client. Hardening is on by default, so the guard is
+/// `--no-harden-sway-ipc` on every development entry point rather than a flag
+/// production remembers to set. Call it only once every connection this daemon
+/// needs is established, and only after [`alias_socket`] has succeeded if an
+/// alias was requested.
 pub fn unlink_socket() -> HostResult<()> {
     let socket = socket_path()?;
     std::fs::remove_file(&socket).map_err(|e| {

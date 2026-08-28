@@ -92,22 +92,29 @@ struct Args {
     ///
     /// Must be on the same filesystem as the socket — i.e. inside
     /// `$XDG_RUNTIME_DIR` — because the alias is a hard link. Without this,
-    /// `--harden-sway-ipc` leaves nothing able to reach the compositor except
-    /// shepherdd itself, which is the point in production and unusable in dev.
+    /// hardening leaves nothing able to reach the compositor except shepherdd
+    /// itself, which is the point in production and unusable in dev.
     #[arg(long, env = "SHEPHERD_SWAY_IPC_ALIAS")]
     sway_ipc_alias: Option<PathBuf>,
 
-    /// Unlink sway's IPC socket once shepherdd has connected, so nothing else
-    /// can reach the compositor (or set SHEPHERD_HARDEN_SWAY_IPC).
+    /// Leave sway's IPC socket reachable by every process at this uid, instead
+    /// of unlinking it once shepherdd has connected (or set
+    /// SHEPHERD_NO_HARDEN_SWAY_IPC).
     ///
-    /// Opt-in, and deliberately not the default: sway's IPC hands any process
-    /// running as this uid `exec`, which starts a process outside shepherd's
-    /// supervision *and* outside the cgroup the per-entry firewall is attached
-    /// to (issue #144). But a shepherdd run by hand inside a developer's own
-    /// sway session would delete their desktop's socket, so the safe default is
-    /// off and the installer turns it on.
-    #[arg(long, env = "SHEPHERD_HARDEN_SWAY_IPC")]
-    harden_sway_ipc: bool,
+    /// Hardening is the default because sway's IPC hands any process running as
+    /// this uid `exec`, which starts a process outside shepherd's supervision
+    /// *and* outside the cgroup the per-entry firewall is attached to
+    /// (issue #144) — a device that ships unhardened is a device where
+    /// `default_deny` means nothing.
+    ///
+    /// The escape hatch exists because the unlink is destructive to whatever
+    /// sway session shepherdd happens to be inside: run by hand in a
+    /// developer's own desktop, it would take that desktop's socket away from
+    /// every other client. Every development entry point in this repo passes
+    /// it — `sway.conf`, the headless harness, and the e2e stack — so the flag
+    /// is what a dev session opts *out* with, not what a device opts in with.
+    #[arg(long = "no-harden-sway-ipc", env = "SHEPHERD_NO_HARDEN_SWAY_IPC")]
+    no_harden_sway_ipc: bool,
 }
 
 /// Main service state
@@ -247,7 +254,7 @@ impl Service {
             media_prefetcher,
             diagnostics: Arc::new(diagnostics::DiagnosticRegistry::new()),
             sway_ipc_alias: args.sway_ipc_alias.clone(),
-            harden_sway_ipc: args.harden_sway_ipc,
+            harden_sway_ipc: !args.no_harden_sway_ipc,
         })
     }
 
@@ -271,6 +278,9 @@ impl Service {
     /// Order matters and is load-bearing: connect, then alias, then unlink. An
     /// alias that was asked for and could not be made aborts the unlink, because
     /// a session that is still drivable beats one that is hardened and inert.
+    ///
+    /// `harden` is true unless `--no-harden-sway-ipc` was passed, so this runs
+    /// on any stack that did not explicitly ask to stay reachable.
     async fn harden_compositor_socket(alias: Option<&Path>, harden: bool) {
         if !harden && alias.is_none() {
             return;
