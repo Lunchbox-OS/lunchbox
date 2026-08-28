@@ -200,12 +200,13 @@ pub async fn set_screen_power(on: bool) -> HostResult<()> {
     .await
 }
 
-/// Perform a debug action on the window with the given sway con_id.
+/// Perform an action on the window with the given sway con_id.
 pub async fn act_on_window(window_id: u64, action: WindowAction) -> HostResult<()> {
     let verb = match action {
         WindowAction::Close => "kill",
         WindowAction::Hide => "move scratchpad",
         WindowAction::Show => "scratchpad show",
+        WindowAction::Focus => "focus",
     };
     run_command(&format!("[con_id={window_id}] {verb}")).await
 }

@@ -105,6 +105,16 @@ class WindowPresentationTest {
     }
 
     @Test
+    fun `focus is offered only for an unfocused window that is on screen`() {
+        assertTrue(WindowPresentation.canFocus(window()))
+        // Already focused: a round trip that changes nothing.
+        assertFalse(WindowPresentation.canFocus(window(focused = true)))
+        // On the scratchpad `focus` does not raise it; Show is that button.
+        assertFalse(WindowPresentation.canFocus(window(inScratchpad = true)))
+        assertFalse(WindowPresentation.canFocus(window(inScratchpad = true, focused = true)))
+    }
+
+    @Test
     fun `every owner has a chip label`() {
         assertEquals("Shepherd", WindowPresentation.ownerLabel(window(owner = WindowOwner.SHEPHERD)))
         assertEquals("Activity", WindowPresentation.ownerLabel(window(owner = WindowOwner.ACTIVITY)))

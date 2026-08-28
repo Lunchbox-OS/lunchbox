@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Visibility
@@ -315,6 +316,16 @@ private fun WindowCard(
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (WindowPresentation.canFocus(w)) {
+                    OutlinedButton(onClick = { onAct(WindowAction.FOCUS) }, enabled = !busy) {
+                        Icon(
+                            Icons.Filled.OpenInFull,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text("Focus", Modifier.padding(start = 8.dp))
+                    }
+                }
                 if (w.inScratchpad) {
                     OutlinedButton(onClick = { onAct(WindowAction.SHOW) }, enabled = !busy) {
                         Icon(

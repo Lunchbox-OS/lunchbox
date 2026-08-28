@@ -257,6 +257,8 @@ export const hideWindow = (id: number) =>
   call("act_on_window", { id, action: "hide" });
 export const showWindow = (id: number) =>
   call("act_on_window", { id, action: "show" });
+export const focusWindow = (id: number) =>
+  call("act_on_window", { id, action: "focus" });
 
 /**
  * Open the SSE event stream at `GET /api/v1/events`.

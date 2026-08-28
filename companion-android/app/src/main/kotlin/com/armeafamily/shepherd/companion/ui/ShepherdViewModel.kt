@@ -962,6 +962,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 WindowAction.CLOSE -> "Asked the window to close."
                 WindowAction.HIDE -> "Moved to the scratchpad."
                 WindowAction.SHOW -> "Pulled off the scratchpad."
+                WindowAction.FOCUS -> "Switched to the window."
                 // Unreachable in practice: `act` comes from this app's own
                 // buttons, not off the wire. It exists because the enum has to
                 // tolerate a value a newer device might send, and the honest

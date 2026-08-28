@@ -1472,7 +1472,7 @@ pub struct UsageStat {
     pub duration_seconds: u64,
 }
 
-/// An action that can be performed on a window via the debug API.
+/// An action that can be performed on a window through the management API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -1483,6 +1483,17 @@ pub enum WindowAction {
     Hide,
     /// Pull the window out of the scratchpad so it is shown again.
     Show,
+    /// Give the window keyboard focus, raising it above the others (sway
+    /// `focus`).
+    ///
+    /// Note that on a window currently *on* the scratchpad this also pulls it
+    /// off — verified against sway 1.11, where focusing a stashed window
+    /// clears `in_scratchpad` and makes it visible — so it overlaps
+    /// [`WindowAction::Show`] for that case rather than being a no-op.
+    /// Clients that list the two placements separately should therefore still
+    /// offer `Show` on a scratchpad row and `Focus` on an on-screen one, so
+    /// each row has one obvious action, not because `Focus` would fail there.
+    Focus,
 }
 
 /// Who shepherd believes a window belongs to.
@@ -1566,6 +1577,23 @@ mod tests {
         for (owner, json) in spellings {
             assert_eq!(serde_json::to_string(&owner).unwrap(), json);
             assert_eq!(serde_json::from_str::<WindowOwner>(json).unwrap(), owner);
+        }
+    }
+
+    /// Both clients switch on these strings, and the companion pins the same
+    /// four from the Kotlin side (`WireTest`). A rename now fails twice rather
+    /// than silently turning a button into a no-op.
+    #[test]
+    fn window_action_wire_spelling() {
+        let spellings = [
+            (WindowAction::Close, "\"close\""),
+            (WindowAction::Hide, "\"hide\""),
+            (WindowAction::Show, "\"show\""),
+            (WindowAction::Focus, "\"focus\""),
+        ];
+        for (action, json) in spellings {
+            assert_eq!(serde_json::to_string(&action).unwrap(), json);
+            assert_eq!(serde_json::from_str::<WindowAction>(json).unwrap(), action);
         }
     }
 

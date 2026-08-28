@@ -10,6 +10,7 @@ import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import CloseIcon from "@mui/icons-material/Close";
+import OpenInFullIcon from "@mui/icons-material/OpenInFull";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
@@ -17,6 +18,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   closeWindow,
+  focusWindow,
   hideWindow,
   listWindows,
   showWindow,
@@ -88,9 +90,10 @@ interface WindowCardProps {
   onClose: (id: number) => void;
   onHide: (id: number) => void;
   onShow: (id: number) => void;
+  onFocus: (id: number) => void;
 }
 
-function WindowCard({ w, busy, onClose, onHide, onShow }: WindowCardProps) {
+function WindowCard({ w, busy, onClose, onHide, onShow, onFocus }: WindowCardProps) {
   const orphan = isOrphan(w);
   return (
     <Card
@@ -136,6 +139,24 @@ function WindowCard({ w, busy, onClose, onHide, onShow }: WindowCardProps) {
           </Typography>
         )}
         <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: "wrap", rowGap: 1 }}>
+          {/*
+            Focus is offered only for a window that is on screen and not
+            already focused. A scratchpad row keeps Show as its one action —
+            sway's `focus` would raise it as well, so this is about not
+            offering two buttons that do the same thing — and focusing the
+            focused window is a no-op that still costs a round trip.
+          */}
+          {!w.in_scratchpad && !w.focused && (
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<OpenInFullIcon />}
+              onClick={() => onFocus(w.id)}
+              disabled={busy}
+            >
+              Focus
+            </Button>
+          )}
           {w.in_scratchpad ? (
             <Button
               size="small"
@@ -217,9 +238,20 @@ export function WindowsPage() {
     },
     onError: (e) => flash(String(e), false),
   });
+  const focusMutation = useMutation({
+    mutationFn: focusWindow,
+    onSuccess: () => {
+      flash("Focused");
+      invalidate();
+    },
+    onError: (e) => flash(String(e), false),
+  });
 
   const busy =
-    closeMutation.isPending || hideMutation.isPending || showMutation.isPending;
+    closeMutation.isPending ||
+    hideMutation.isPending ||
+    showMutation.isPending ||
+    focusMutation.isPending;
 
   const windows = data ?? [];
   // Orphans on the scratchpad stay under the scratchpad heading: they are
@@ -233,6 +265,7 @@ export function WindowsPage() {
     onClose: (id: number) => closeMutation.mutate(id),
     onHide: (id: number) => hideMutation.mutate(id),
     onShow: (id: number) => showMutation.mutate(id),
+    onFocus: (id: number) => focusMutation.mutate(id),
   };
 
   return (

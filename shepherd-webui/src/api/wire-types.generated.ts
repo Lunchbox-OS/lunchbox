@@ -2147,7 +2147,7 @@ export interface WifiView {
 }
 
 /**
- * An action that can be performed on a window via the debug API.
+ * An action that can be performed on a window through the management API.
  */
 export type WindowAction =
   /**
@@ -2161,7 +2161,20 @@ export type WindowAction =
   /**
    * Pull the window out of the scratchpad so it is shown again.
    */
-  | "show";
+  | "show"
+  /**
+   * Give the window keyboard focus, raising it above the others (sway
+   * `focus`).
+   *
+   * Note that on a window currently *on* the scratchpad this also pulls it
+   * off — verified against sway 1.11, where focusing a stashed window
+   * clears `in_scratchpad` and makes it visible — so it overlaps
+   * [`WindowAction::Show`] for that case rather than being a no-op.
+   * Clients that list the two placements separately should therefore still
+   * offer `Show` on a scratchpad row and `Focus` on an on-screen one, so
+   * each row has one obvious action, not because `Focus` would fail there.
+   */
+  | "focus";
 
 /**
  * Debug snapshot of a single window known to the host's compositor.
