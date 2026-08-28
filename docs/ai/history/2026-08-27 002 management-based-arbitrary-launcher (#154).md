@@ -248,15 +248,25 @@ With decision 1, the only compositor changes admin mode needs are a **binding
 mode switch** and a **focus command**. Both are ordinary sway commands and both
 work today through `sway.rs`.
 
-sway *binding modes* are runtime-switchable, unlike `for_window`. Wrapping the
-kiosk grabs in a `mode "kiosk"` block and switching to a mode without them frees
-`Home`, `Ctrl+w` and `Alt+F4`, and is the natural place to add Alt+Tab for admin
-mode.
+sway *binding modes* are runtime-switchable, unlike `for_window`, which is what
+makes the key half of this tractable.
 
-Worth noticing on its own: `bindsym --locked Home` and `bindsym --locked Ctrl+w`
-grab those keys **globally today**, so no activity — a browser, a text field,
-anything — has ever seen them. That is a standalone bug, fixable by the same
-`mode "kiosk"` refactor, with no admin mode attached.
+**Implemented (phase 2) as an additive `mode "admin"` block, not by moving the
+kiosk grabs into a `mode "kiosk"`.** The original sketch had it the other way
+round; the additive shape is better on two counts. sway starts in `default`, so
+wrapping the kiosk bindings would have needed the config to force a starting
+mode, and every existing binding would have moved. As written, the default mode
+is byte-for-byte unchanged and the new block is dead weight until something
+enters it — a session that never enters admin mode cannot tell the difference.
+
+**`Home`, `Ctrl+w` and `Alt+F4` being grabbed globally is not a bug**, and an
+earlier draft of this document called it one. `docs/ai/history/2026-02-08 001
+sway stopcurrent keybinds.md` records the intent: they were moved *out* of the
+launcher UI and into sway precisely so that the way out of an activity does not
+depend on the activity cooperating. The cost — no application ever receives
+those three keys — is the right trade for a child and the wrong one for an
+adult setting the device up. Admin mode reverses the trade rather than fixing a
+defect.
 
 **The constraint:** every compositor command for this feature must be issued by
 shepherdd through the host adapter, never by the launcher or HUD shelling out to
@@ -347,10 +357,11 @@ Each of these is independently shippable and useful.
    Immediately useful to the existing web and companion window panels; no mode
    required. Half a day. **Promoted in importance by decision 1**: it is what
    makes phase 3 usable before any taskbar exists.
-2. **Binding modes in `sway.conf`.** Wrap the kiosk grabs in `mode "kiosk"`;
-   nothing switches out of it yet. Fixes the standalone bug that `Home` and
-   `Ctrl+w` are globally grabbed from every activity. Small, and de-risks the
-   mode switch.
+2. **Binding modes in `sway.conf`.** *(Done.)* An additive `mode "admin"`
+   block: the kiosk grabs released, volume/brightness and the emergency exit
+   kept, Alt+Tab added as a stand-in switcher until the taskbar exists. Nothing
+   enters it yet. Deliberately contains no binding that *leaves* the mode, so
+   shepherdd's idea of the mode and the compositor's cannot drift apart.
 3. **The daemon mode.** `enter_admin_mode` / `exit_admin_mode` on
    `ManagementService`; `admin_mode` on `ServiceStateSnapshot`;
    `AdminModeChanged` event; `HostAdapter::set_admin_mode` and the
@@ -527,10 +538,11 @@ Each of these is independently shippable and useful.
    Immediately useful to the existing web and companion window panels; no mode
    required. Half a day. **Promoted in importance by decision 1**: it is what
    makes phase 3 usable before any taskbar exists.
-2. **Binding modes in `sway.conf`.** Wrap the kiosk grabs in `mode "kiosk"`;
-   nothing switches out of it yet. Fixes the standalone bug that `Home` and
-   `Ctrl+w` are globally grabbed from every activity. Small, and de-risks the
-   mode switch.
+2. **Binding modes in `sway.conf`.** *(Done.)* An additive `mode "admin"`
+   block: the kiosk grabs released, volume/brightness and the emergency exit
+   kept, Alt+Tab added as a stand-in switcher until the taskbar exists. Nothing
+   enters it yet. Deliberately contains no binding that *leaves* the mode, so
+   shepherdd's idea of the mode and the compositor's cannot drift apart.
 3. **The daemon mode.** `enter_admin_mode` / `exit_admin_mode` on
    `ManagementService`; `admin_mode` on `ServiceStateSnapshot`;
    `AdminModeChanged` event; `HostAdapter::set_admin_mode` and the
@@ -671,6 +683,31 @@ losing the child's progress. It also serves #48. Nothing about
 button's placement is. Confirm, because a general lock interacts with session
 time accounting (does a locked session still burn the child's quota?) in a way
 the admin-mode-only version never has to answer.
+
+## `sway.conf` has no automated coverage, and `sway -C` is not a substitute
+
+Established while looking for a CI gate for phase 2. Recorded because the next
+person will reach for the same tool and needs to stop sooner than this did.
+
+* **`sway -C -c sway.conf` does not validate the config.** It builds a backend
+  first, so in a headless container it fails for reasons that have nothing to do
+  with the file (`Could not take control of session`, `Unable to create
+  backend`) — identically for a good config and a broken one. Setting
+  `WLR_BACKENDS=headless` gets it past that, and then it exits **0 for both**: a
+  `bindsym` whose command does not exist (`focuss next`) produces no output and
+  no failure, because sway resolves a binding's command lazily, when the key is
+  pressed. A CI step built on it would be a green check that proves nothing.
+* **The e2e harness does not exercise this file.** `shepherd-e2e` writes its own
+  minimal sway config (`crates/shepherd-e2e/src/lib.rs`, "no exec lines, no
+  input devices") because it starts shepherdd itself, so booting the real
+  `sway.conf` is outside what that harness does.
+
+So the kiosk's compositor config is covered by nothing but review and manual
+verification, and a mistake in it surfaces at runtime in
+`dev-runtime/headless/sway.log`. Worth its own issue. A real gate would mean
+booting the actual `sway.conf` headlessly and asserting behaviour — for the
+binding modes specifically, `swaymsg -t get_binding_modes` after boot would at
+least catch a block that failed to parse, which is the likeliest regression.
 
 ## How to verify any of this
 
