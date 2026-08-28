@@ -66,6 +66,14 @@ struct Args {
     #[arg(long)]
     screen_on: bool,
 
+    /// Tell shepherdd the seat has been idle long enough to leave
+    /// administrator mode (issue #154), and exit. The daemon decides whether to
+    /// act: it leaves the mode only when nothing the caregiver opened is still
+    /// on screen. A no-op when the device is not in administrator mode, so
+    /// swayidle can call it unconditionally.
+    #[arg(long)]
+    admin_idle_timeout: bool,
+
     /// Send VolumeUp to shepherdd and exit. Intended for compositor
     /// keybindings on XF86AudioRaiseVolume so the change goes through the
     /// configured volume policy.
@@ -238,6 +246,19 @@ fn main() -> Result<()> {
             }
             Ok::<(), anyhow::Error>(())
         })?;
+        return Ok(());
+    }
+
+    if args.admin_idle_timeout {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let client = CommandClient::new(&socket_path);
+            match client.admin_idle_timeout().await {
+                Ok(true) => tracing::info!("Administrator mode left after the idle timeout"),
+                Ok(false) => tracing::debug!("Idle timeout: nothing to do"),
+                Err(e) => tracing::warn!(error = %e, "Idle timeout request failed"),
+            }
+        });
         return Ok(());
     }
 

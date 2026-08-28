@@ -250,6 +250,15 @@ object RpcParams {
     /** Params for `network_status`, which takes none. */
     fun networkStatus(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `enter_admin_mode`, which takes none. */
+    fun enterAdminMode(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `exit_admin_mode`, which takes none. */
+    fun exitAdminMode(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `admin_idle_timeout`, which takes none. */
+    fun adminIdleTimeout(): JsonObject = JsonObject(emptyMap())
+
     /** Params for `list_windows`, which takes none. */
     fun listWindows(): JsonObject = JsonObject(emptyMap())
 

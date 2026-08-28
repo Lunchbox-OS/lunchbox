@@ -162,6 +162,7 @@ impl LauncherApp {
         stack.add_named(&error_view.0, Some("error"));
         stack.add_named(&session_view.0, Some("session"));
         stack.add_named(&disconnected_view.0, Some("disconnected"));
+        stack.add_named(&Self::create_admin_mode_view(), Some("admin"));
 
         window.set_child(Some(&stack));
 
@@ -398,6 +399,14 @@ impl LauncherApp {
                         error_label.set_text(&message);
                         stack.set_visible_child_name("error");
                     }
+                    LauncherState::AdminMode => {
+                        // Non-interactive by construction: the grid is a
+                        // different stack child, so nothing here can launch.
+                        if let Some(ref win) = window {
+                            win.set_visible(true);
+                        }
+                        stack.set_visible_child_name("admin");
+                    }
                     LauncherState::Suspending => {
                         // Static cover drawn before the screen freezes on
                         // suspend; replaced by fresh state on resume (issue #73).
@@ -631,6 +640,28 @@ impl LauncherApp {
         container.append(&hint);
 
         (container, label, hint)
+    }
+
+    /// What the child sees while a caregiver is setting the device up.
+    ///
+    /// Deliberately plain and static: no spinner, because nothing is loading
+    /// and a spinner would suggest waiting will fix it. It says who can end it,
+    /// so a child who finds the device like this knows it is not broken.
+    fn create_admin_mode_view() -> gtk4::Box {
+        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 24);
+        container.set_halign(gtk4::Align::Center);
+        container.set_valign(gtk4::Align::Center);
+        container.add_css_class("session-active-box");
+
+        let label = gtk4::Label::new(Some("A grown-up is setting things up"));
+        label.add_css_class("session-label");
+        container.append(&label);
+
+        let hint = gtk4::Label::new(Some("Your activities will be back when they're done"));
+        hint.add_css_class("session-sublabel");
+        container.append(&hint);
+
+        container
     }
 
     fn create_disconnected_view() -> (gtk4::Box, gtk4::Button) {

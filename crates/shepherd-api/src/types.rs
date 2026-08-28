@@ -910,6 +910,11 @@ pub enum ReasonCode {
     InternetUnavailable { check: Option<String> },
     /// Entry is manually disabled for the day via a daily override
     ManuallyDisabled { until: NaiveDate },
+    /// The device is in administrator mode (issue #154), so nothing launches as
+    /// an activity. Not a restriction on the child in the sense the others are:
+    /// it clears the moment the caregiver leaves the mode, and it applies to
+    /// every entry at once.
+    AdminMode,
     /// One or more required input devices (issue #96) are not currently
     /// connected. `devices` lists the missing device types, sorted and
     /// deduplicated.
@@ -1076,6 +1081,18 @@ pub struct ServiceStateSnapshot {
     /// arrive as `EventPayload::DiagnosticsChanged`.
     #[serde(default)]
     pub diagnostics: crate::DiagnosticSet,
+    /// Whether the device is in administrator mode (issue #154) — the kiosk's
+    /// restrictions relaxed so a caregiver can set activities up in place.
+    ///
+    /// Every client that behaves differently in the mode reads it from here
+    /// rather than tracking it: the shells change what they draw, and the
+    /// window panels stop calling admin-launched windows orphans. (The screen
+    /// staying awake is not one of them — that check moved inside the daemon
+    /// with issue #144, and `set_screen_power` reads the engine directly.)
+    /// Absent from an older payload means "not in admin mode", which is the
+    /// safe reading.
+    #[serde(default)]
+    pub admin_mode: bool,
 }
 
 /// Role for authorization

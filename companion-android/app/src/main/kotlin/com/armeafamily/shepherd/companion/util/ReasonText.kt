@@ -37,6 +37,12 @@ object ReasonText {
         is ReasonCode.NotReady ->
             "Still starting up"
 
+        // Applies to every entry at once and clears itself when the caregiver
+        // leaves the mode, so it reads as a state of the device rather than a
+        // restriction on this activity.
+        is ReasonCode.AdminMode ->
+            "Administrator mode is on"
+
         is ReasonCode.RequiredInputUnavailable ->
             // Generated as an enum, so render the wire spelling rather than
             // Kotlin's SHOUTING constant names.

@@ -92,6 +92,9 @@ export type RpcMethod =
   | "logout"
   | "list_diagnostics"
   | "network_status"
+  | "enter_admin_mode"
+  | "exit_admin_mode"
+  | "admin_idle_timeout"
   | "list_windows"
   | "act_on_window";
 
@@ -234,6 +237,9 @@ export interface RpcParamsMap {
   "logout": Record<string, never>;
   "list_diagnostics": Record<string, never>;
   "network_status": Record<string, never>;
+  "enter_admin_mode": Record<string, never>;
+  "exit_admin_mode": Record<string, never>;
+  "admin_idle_timeout": Record<string, never>;
   "list_windows": Record<string, never>;
   "act_on_window": {
     id: number;
@@ -302,6 +308,9 @@ export interface RpcResultMap {
   "logout": null;
   "list_diagnostics": DiagnosticSet;
   "network_status": NetworkStatusView;
+  "enter_admin_mode": null;
+  "exit_admin_mode": null;
+  "admin_idle_timeout": boolean;
   "list_windows": WindowInfo[];
   "act_on_window": null;
 }

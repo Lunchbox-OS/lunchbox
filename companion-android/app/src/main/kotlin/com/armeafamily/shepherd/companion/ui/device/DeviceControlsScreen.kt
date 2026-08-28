@@ -71,6 +71,45 @@ fun DeviceControlsScreen(
             }
             state.brightness?.let { BrightnessCard(it, vm) }
 
+            // Administrator mode (issue #154). Above Maintenance because it is
+            // the thing a caregiver comes here to do while standing at the
+            // device, rather than a repair for when something has gone wrong.
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Administrator mode",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (state.adminMode) {
+                            "The kiosk's restrictions are relaxed. Activities can't be " +
+                                "launched and the screen won't blank. It turns itself off " +
+                                "after 15 minutes idle, but only once you've closed " +
+                                "everything you opened."
+                        } else {
+                            "Relax the kiosk so you can log into Steam, install things or " +
+                                "set up controls on the device itself. Nothing can be " +
+                                "launched as an activity while it's on."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    if (state.adminMode) {
+                        // Filled, and always offered: the device's own HUD only
+                        // turns the mode off once every window is closed, so
+                        // this is the way out when one won't.
+                        Button(onClick = vm::exitAdminMode, modifier = Modifier.fillMaxWidth()) {
+                            Text("Turn off administrator mode")
+                        }
+                    } else {
+                        OutlinedButton(onClick = vm::enterAdminMode, modifier = Modifier.fillMaxWidth()) {
+                            Text("Turn on administrator mode")
+                        }
+                    }
+                }
+            }
+
             Card(Modifier.fillMaxWidth()) {
                 Column(androidx.compose.ui.Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Maintenance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)

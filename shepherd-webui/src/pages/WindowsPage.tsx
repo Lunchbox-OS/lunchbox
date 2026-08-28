@@ -19,6 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   closeWindow,
   focusWindow,
+  getServiceState,
   hideWindow,
   listWindows,
   showWindow,
@@ -45,7 +46,12 @@ function windowSubtitle(w: WindowInfo): string {
  * exists for — shepherdd reports them but deliberately will not close an
  * unrecognized one by itself, so a caregiver has to make that call.
  */
-function isOrphan(w: WindowInfo): boolean {
+function isOrphan(w: WindowInfo, adminMode: boolean): boolean {
+  // In administrator mode a caregiver is deliberately opening things, so every
+  // window is unowned by construction and none of them is a problem. Calling
+  // them unsupervised would put a red banner over the caregiver's own work —
+  // the exact false positive the owner attribution exists to remove.
+  if (adminMode) return false;
   return w.owner === "escaped" || w.owner === "unowned";
 }
 
@@ -86,6 +92,7 @@ function OwnerChip({ owner }: { owner: WindowOwner }) {
 
 interface WindowCardProps {
   w: WindowInfo;
+  adminMode: boolean;
   busy: boolean;
   onClose: (id: number) => void;
   onHide: (id: number) => void;
@@ -93,8 +100,8 @@ interface WindowCardProps {
   onFocus: (id: number) => void;
 }
 
-function WindowCard({ w, busy, onClose, onHide, onShow, onFocus }: WindowCardProps) {
-  const orphan = isOrphan(w);
+function WindowCard({ w, adminMode, busy, onClose, onHide, onShow, onFocus }: WindowCardProps) {
+  const orphan = isOrphan(w, adminMode);
   return (
     <Card
       variant="outlined"
@@ -253,12 +260,21 @@ export function WindowsPage() {
     showMutation.isPending ||
     focusMutation.isPending;
 
+  // Only for the orphan framing: a window panel that polled the whole snapshot
+  // for its own sake would be spending an RPC on state this page never draws.
+  const { data: state } = useQuery({
+    queryKey: ["service-state"],
+    queryFn: getServiceState,
+    refetchInterval: 5000,
+  });
+  const adminMode = state?.admin_mode ?? false;
+
   const windows = data ?? [];
   // Orphans on the scratchpad stay under the scratchpad heading: they are
   // stashed rather than loose on the child's screen, which is the same line
   // shepherdd's own reconciliation sweep draws before it warns.
-  const orphaned = windows.filter((w) => !w.in_scratchpad && isOrphan(w));
-  const onScreen = windows.filter((w) => !w.in_scratchpad && !isOrphan(w));
+  const orphaned = windows.filter((w) => !w.in_scratchpad && isOrphan(w, adminMode));
+  const onScreen = windows.filter((w) => !w.in_scratchpad && !isOrphan(w, adminMode));
   const scratchpad = windows.filter((w) => w.in_scratchpad);
 
   const handlers = {
@@ -326,7 +342,7 @@ export function WindowsPage() {
           </Typography>
           <Stack spacing={1}>
             {orphaned.map((w) => (
-              <WindowCard key={w.id} w={w} busy={busy} {...handlers} />
+              <WindowCard key={w.id} w={w} adminMode={adminMode} busy={busy} {...handlers} />
             ))}
           </Stack>
         </Box>
@@ -339,7 +355,7 @@ export function WindowsPage() {
           </Typography>
           <Stack spacing={1}>
             {onScreen.map((w) => (
-              <WindowCard key={w.id} w={w} busy={busy} {...handlers} />
+              <WindowCard key={w.id} w={w} adminMode={adminMode} busy={busy} {...handlers} />
             ))}
           </Stack>
         </Box>
@@ -352,7 +368,7 @@ export function WindowsPage() {
           </Typography>
           <Stack spacing={1}>
             {scratchpad.map((w) => (
-              <WindowCard key={w.id} w={w} busy={busy} {...handlers} />
+              <WindowCard key={w.id} w={w} adminMode={adminMode} busy={busy} {...handlers} />
             ))}
           </Stack>
         </Box>

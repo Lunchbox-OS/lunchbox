@@ -335,6 +335,21 @@ pub trait HostAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Tell the host the device has entered or left administrator mode
+    /// (issue #154).
+    ///
+    /// Hosts that can relax their kiosk restrictions do so here — on Linux,
+    /// switching the compositor's binding mode so key grabs the kiosk holds are
+    /// released, and suppressing the orphan reporting that would otherwise call
+    /// every window the caregiver opens unsupervised.
+    ///
+    /// Defaults to a no-op so a host with nothing to relax still lets the mode
+    /// be entered: the daemon-side effects (no launches, no idle blanking) are
+    /// worth having on their own.
+    async fn set_admin_mode(&self, _active: bool) -> HostResult<()> {
+        Ok(())
+    }
+
     /// Optional: check if the host adapter is healthy
     fn is_healthy(&self) -> bool {
         true

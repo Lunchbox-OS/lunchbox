@@ -97,6 +97,13 @@ data class DeviceUiState(
 ) {
     val entries: List<EntryView> get() = snapshot?.entries.orEmpty()
 
+    /**
+     * Whether the device is in administrator mode (issue #154). Rides the
+     * snapshot, so it needs no RPC of its own and is correct the moment the
+     * link comes up.
+     */
+    val adminMode: Boolean get() = snapshot?.adminMode ?: false
+
     /** The category an activity belongs to, for labelling its row. */
     fun groupOf(entry: EntryView): GroupView? =
         entry.group?.let { id -> groups.firstOrNull { it.groupId == id } }
@@ -183,6 +190,13 @@ data class WindowsUiState(
     val error: String? = null,
     /** Window with an action in flight; its row's buttons are disabled. */
     val busyId: Long? = null,
+    /**
+     * Whether the device was in administrator mode as of the last refresh.
+     * Carried here rather than read from the device state at render time so
+     * the three groupings below stay a pure function of this object, and stay
+     * testable without a device.
+     */
+    val adminMode: Boolean = false,
 ) {
     /**
      * Windows on the child's screen that nothing is supervising.
@@ -194,9 +208,9 @@ data class WindowsUiState(
      * draws before it warns about one.
      */
     val orphaned: List<WindowInfo>
-        get() = windows.filter { !it.inScratchpad && WindowPresentation.isOrphan(it) }
+        get() = windows.filter { !it.inScratchpad && WindowPresentation.isOrphan(it, adminMode) }
     val onScreen: List<WindowInfo>
-        get() = windows.filter { !it.inScratchpad && !WindowPresentation.isOrphan(it) }
+        get() = windows.filter { !it.inScratchpad && !WindowPresentation.isOrphan(it, adminMode) }
     val scratchpad: List<WindowInfo> get() = windows.filter { it.inScratchpad }
 }
 
@@ -934,8 +948,15 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         windowsJob = viewModelScope.launch {
             try {
                 val list = c.listWindows()
+                val adminMode = _state.value.adminMode
                 _windows.update {
-                    it.copy(windows = list, loading = false, loaded = true, error = null)
+                    it.copy(
+                        windows = list,
+                        loading = false,
+                        loaded = true,
+                        error = null,
+                        adminMode = adminMode,
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -978,6 +999,23 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // duplicate and leaves the list a beat stale.
         windowsJob?.cancel()
         refreshWindows()
+    }
+
+    /**
+     * Enter administrator mode (issue #154). Refused by the device while an
+     * activity is running; the message says which, so it is shown as-is.
+     */
+    fun enterAdminMode() = action { c ->
+        c.enterAdminMode()
+        _message.value = "Administrator mode on."
+        refreshSnapshot()
+    }
+
+    /** Leave administrator mode. Never refused, whatever is still on screen. */
+    fun exitAdminMode() = action { c ->
+        c.exitAdminMode()
+        _message.value = "Administrator mode off."
+        refreshSnapshot()
     }
 
     fun upsertOverride(

@@ -177,6 +177,12 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// Report that the seat has been idle long enough to leave administrator
+    /// mode. The daemon decides whether to act; `true` means it left the mode.
+    pub async fn admin_idle_timeout(&mut self) -> IpcResult<bool> {
+        self.call::<bool>("admin_idle_timeout", Value::Null).await
+    }
+
     /// Reset the running activity to its starting state, keeping the session.
     /// Errors when there is no session or its activity can't be reset.
     pub async fn reset_current(&mut self) -> IpcResult<()> {

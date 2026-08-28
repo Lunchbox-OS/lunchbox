@@ -100,6 +100,11 @@ async function call<M extends RpcMethod>(
 // Health
 export const getHealth = () => call("health", {});
 
+// Administrator mode (issue #154). The snapshot that carries `admin_mode` is
+// `getServiceState`, declared with the other whole-snapshot readers below.
+export const enterAdminMode = () => call("enter_admin_mode", {});
+export const exitAdminMode = () => call("exit_admin_mode", {});
+
 // Entries
 export const listEntries = (at?: Date) =>
   call("list_entries", { at: at?.toISOString() });
@@ -242,11 +247,11 @@ export const getNetworkStatus = () => call("network_status", {});
 /**
  * The whole service snapshot.
  *
- * Every other page queries the one thing it needs, which is why this is the
- * only caller: the connectivity checks live on the snapshot and nowhere else,
- * and the network page renders them beside the interfaces they are checked
- * over. Duplicating them onto `network_status` would give the UI two sources
- * for one fact.
+ * Every other page queries the one thing it needs, so this has only two
+ * callers, both of which want facts that live nowhere else: the network page
+ * needs the connectivity checks (duplicating them onto `network_status` would
+ * give the UI two sources for one fact), and the administrator page needs
+ * `admin_mode` and `locked` (issue #154).
  */
 export const getServiceState = () => call("service_state", {});
 

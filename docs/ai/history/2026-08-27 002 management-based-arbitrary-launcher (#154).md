@@ -373,6 +373,23 @@ Each of these is independently shippable and useful.
    waits for phase 5. **No app picker and no taskbar yet** —
    admin mode at this stage is "the kiosk stops fighting you, and you drive
    windows from your phone", which alone covers "SSH in and start a thing".
+*(Phase 3 done.)* Two things it turned up that the plan had not anticipated:
+
+* **Admin mode had to become a policy state, not just a device state.** It
+  lives on `CoreEngine` and disables every entry with `ReasonCode::AdminMode`,
+  reusing the shape the `SessionActive` check already had. That makes the
+  mutual exclusion fall out of the existing launch gate rather than needing a
+  special case, and it makes the child's grid grey itself out without the
+  launcher knowing the mode exists. Entering is refused while an activity runs,
+  naming it, rather than tearing a child's session down from a button that does
+  not say so.
+* **The launcher needed a view of its own.** Because the mode disables every
+  entry, `Idle` rendered a completely blank screen — no reason for the child, no
+  reminder for the caregiver that the kiosk is unlocked. Found by screenshotting
+  it, not by any test. `LauncherState::AdminMode` now says "A grown-up is
+  setting things up". This is a down payment on the persistent indicator the
+  lock section argues for; the taskbar in phase 6 replaces it.
+
 4. **The `.desktop` enumerator** + `list_desktop_apps` / `launch_desktop_app`.
    Testable entirely off-device against fixture directories.
 5. **The lock.** `shepherd-lock` on `ext-session-lock-v1`, `lock_device` /
@@ -554,6 +571,23 @@ Each of these is independently shippable and useful.
    waits for phase 5. **No app picker and no taskbar yet** —
    admin mode at this stage is "the kiosk stops fighting you, and you drive
    windows from your phone", which alone covers "SSH in and start a thing".
+*(Phase 3 done.)* Two things it turned up that the plan had not anticipated:
+
+* **Admin mode had to become a policy state, not just a device state.** It
+  lives on `CoreEngine` and disables every entry with `ReasonCode::AdminMode`,
+  reusing the shape the `SessionActive` check already had. That makes the
+  mutual exclusion fall out of the existing launch gate rather than needing a
+  special case, and it makes the child's grid grey itself out without the
+  launcher knowing the mode exists. Entering is refused while an activity runs,
+  naming it, rather than tearing a child's session down from a button that does
+  not say so.
+* **The launcher needed a view of its own.** Because the mode disables every
+  entry, `Idle` rendered a completely blank screen — no reason for the child, no
+  reminder for the caregiver that the kiosk is unlocked. Found by screenshotting
+  it, not by any test. `LauncherState::AdminMode` now says "A grown-up is
+  setting things up". This is a down payment on the persistent indicator the
+  lock section argues for; the taskbar in phase 6 replaces it.
+
 4. **The `.desktop` enumerator** + `list_desktop_apps` / `launch_desktop_app`.
    Testable entirely off-device against fixture directories.
 5. **The lock.** `shepherd-lock` on `ext-session-lock-v1`, `lock_device` /

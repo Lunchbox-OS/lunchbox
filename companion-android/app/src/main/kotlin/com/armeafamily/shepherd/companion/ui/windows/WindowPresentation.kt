@@ -71,8 +71,15 @@ object WindowPresentation {
      * something no time limit will end and no usage record will count, which
      * is the entire reason this screen can be reached from a phone.
      */
-    fun isOrphan(w: WindowInfo): Boolean =
-        w.owner == WindowOwner.ESCAPED || w.owner == WindowOwner.UNOWNED
+    fun isOrphan(w: WindowInfo, adminMode: Boolean = false): Boolean {
+        // In administrator mode a caregiver is deliberately opening things, so
+        // every window is unowned by construction and none of them is a
+        // problem. Framing them as unsupervised would put a red banner over
+        // the caregiver's own work — the exact false positive the owner
+        // attribution exists to remove.
+        if (adminMode) return false
+        return w.owner == WindowOwner.ESCAPED || w.owner == WindowOwner.UNOWNED
+    }
 
     /**
      * Whether switching to this window is something to offer.

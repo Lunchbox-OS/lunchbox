@@ -19,6 +19,18 @@ pub enum AuditEventType {
     /// Policy loaded/reloaded
     PolicyLoaded { entry_count: usize },
 
+    /// The device entered administrator mode (issue #154).
+    ///
+    /// Admin mode creates no session, so it bills no usage and leaves no trace
+    /// in the usage table. These two events are therefore the only record that
+    /// the device was in use at all for that span, which is why they are
+    /// written before the mode takes effect rather than after.
+    AdminModeEntered,
+
+    /// The device left administrator mode. `timed_out` distinguishes a
+    /// caregiver leaving deliberately from the idle timeout doing it for them.
+    AdminModeExited { timed_out: bool },
+
     /// Session started
     SessionStarted {
         session_id: SessionId,

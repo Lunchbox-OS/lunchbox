@@ -16,8 +16,12 @@ import VolumeOffIcon from "@mui/icons-material/VolumeOff";
 import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import BrightnessHighIcon from "@mui/icons-material/BrightnessHigh";
+import BuildIcon from "@mui/icons-material/Build";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  enterAdminMode,
+  exitAdminMode,
+  getServiceState,
   forgetAudioOutput,
   selectAudioOutput,
   getBrightness,
@@ -117,6 +121,38 @@ export function AdminPage() {
   const setAutoBrightnessMutation = useMutation({
     mutationFn: setAutoBrightness,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["brightness"] }),
+    onError: (e) => flash(String(e), false),
+  });
+
+  // Polled rather than event-driven: this page has no SSE subscription, and the
+  // mode can be left from the HUD or the phone while this is open.
+  const { data: state } = useQuery({
+    queryKey: ["service-state"],
+    queryFn: getServiceState,
+    refetchInterval: 5000,
+  });
+  const adminMode = state?.admin_mode ?? false;
+
+  const invalidateState = () =>
+    queryClient.invalidateQueries({ queryKey: ["service-state"] });
+
+  const enterAdminMutation = useMutation({
+    mutationFn: enterAdminMode,
+    onSuccess: () => {
+      flash("Administrator mode on");
+      invalidateState();
+    },
+    // The refusal that matters is "an activity is running"; the daemon says
+    // which one, so show its message rather than a generic failure.
+    onError: (e) => flash(String(e), false),
+  });
+
+  const exitAdminMutation = useMutation({
+    mutationFn: exitAdminMode,
+    onSuccess: () => {
+      flash("Administrator mode off");
+      invalidateState();
+    },
     onError: (e) => flash(String(e), false),
   });
 
@@ -272,6 +308,35 @@ export function AdminPage() {
               )}
             </Stack>
           ) : null}
+        </CardContent>
+      </Card>
+
+      {/* Administrator mode (issue #154) */}
+      <Card variant="outlined" sx={adminMode ? { borderColor: "warning.main" } : undefined}>
+        <CardContent>
+          <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 600 }}>
+            Administrator Mode
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            {adminMode
+              ? "The kiosk's restrictions are relaxed so you can set this device up in place. Activities cannot be launched, and the screen will not blank. It turns itself off after 15 minutes idle, but only once you have closed everything you opened."
+              : "Relax the kiosk so you can log into Steam, install packages or set up controls directly on the device, without switching to another desktop. Nothing can be launched as an activity while it is on."}
+          </Typography>
+          <Button
+            variant={adminMode ? "contained" : "outlined"}
+            color={adminMode ? "warning" : "primary"}
+            onClick={() =>
+              adminMode ? exitAdminMutation.mutate() : enterAdminMutation.mutate()
+            }
+            disabled={enterAdminMutation.isPending || exitAdminMutation.isPending}
+            startIcon={
+              enterAdminMutation.isPending || exitAdminMutation.isPending
+                ? <Spinner size={16} />
+                : <BuildIcon />
+            }
+          >
+            {adminMode ? "Turn Off Administrator Mode" : "Turn On Administrator Mode"}
+          </Button>
         </CardContent>
       </Card>
 

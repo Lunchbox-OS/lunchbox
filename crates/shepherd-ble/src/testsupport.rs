@@ -268,6 +268,18 @@ impl ManagementService for MockSvc {
         NetworkStatusView::unavailable(WebListenerView::disabled())
     }
 
+    async fn enter_admin_mode(&self) -> ManagementResult<()> {
+        Ok(())
+    }
+
+    async fn exit_admin_mode(&self) -> ManagementResult<()> {
+        Ok(())
+    }
+
+    async fn admin_idle_timeout(&self) -> ManagementResult<bool> {
+        Ok(false)
+    }
+
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {
         Ok(vec![])
     }

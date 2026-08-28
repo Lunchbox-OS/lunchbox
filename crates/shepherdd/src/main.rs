@@ -2515,6 +2515,14 @@ impl Service {
                 };
                 Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
             }
+            CoreEvent::AdminModeChanged { .. } => {
+                // Announced by the management service itself, which already
+                // holds the transition and pairs it with a fresh snapshot (see
+                // `DefaultManagementService::broadcast_admin_mode`). Rebroadcast
+                // here would double every transition; the arm exists so that a
+                // future producer of this event inside the engine is a compile
+                // error here rather than a silently unannounced mode change.
+            }
         }
     }
 

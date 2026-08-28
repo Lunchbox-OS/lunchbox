@@ -98,6 +98,15 @@ pub struct CoreEngine {
     /// them apart — so without this the session would end halfway through its
     /// own reset. See [`Self::begin_restart`].
     restarting: bool,
+
+    /// Whether the device is in administrator mode (issue #154).
+    ///
+    /// Lives here, rather than beside the compositor plumbing it exists to
+    /// drive, for two reasons: [`Self::get_state`] has to report it, and it is
+    /// genuinely a policy state — while it is set, no entry is launchable, on
+    /// the same footing as an active session. Entering it and running an
+    /// activity are mutually exclusive in both directions.
+    admin_mode: bool,
 }
 
 impl CoreEngine {
@@ -117,6 +126,7 @@ impl CoreEngine {
             policy,
             store,
             capabilities,
+            admin_mode: false,
             current_session: None,
             last_availability_set: HashSet::new(),
             internet_status: HashMap::new(),
@@ -194,6 +204,51 @@ impl CoreEngine {
         }
         self.diagnostics = diagnostics;
         true
+    }
+
+    /// Whether the device is in administrator mode (issue #154).
+    pub fn admin_mode(&self) -> bool {
+        self.admin_mode
+    }
+
+    /// Enter administrator mode.
+    ///
+    /// Refuses while an activity is running. The alternative — tearing the
+    /// child's session down to make room — would end their activity from a
+    /// button whose label says nothing about doing so, and the caregiver can
+    /// stop it themselves in one more tap. `Err` carries the running entry so
+    /// the caller can say which.
+    ///
+    /// Audited before the mode takes effect: admin mode bills no usage, so
+    /// these records are the only evidence the device was in use.
+    pub fn enter_admin_mode(&mut self) -> Result<CoreEvent, EntryId> {
+        if let Some(session) = &self.current_session {
+            return Err(session.plan.entry_id.clone());
+        }
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::AdminModeEntered));
+        self.admin_mode = true;
+        info!("Entered administrator mode");
+        Ok(CoreEvent::AdminModeChanged { active: true })
+    }
+
+    /// Leave administrator mode. Idempotent: leaving a mode that is not set is
+    /// not an error, because the exit paths (a button, the phone, the idle
+    /// timeout) can race each other and none of them should report a failure
+    /// for arriving second.
+    pub fn exit_admin_mode(&mut self, timed_out: bool) -> Option<CoreEvent> {
+        if !self.admin_mode {
+            return None;
+        }
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::AdminModeExited {
+                timed_out,
+            }));
+        self.admin_mode = false;
+        info!(timed_out, "Left administrator mode");
+        Some(CoreEvent::AdminModeChanged { active: false })
     }
 
     /// The current administrator-facing diagnostic set (issue #143).
@@ -507,6 +562,14 @@ impl CoreEngine {
         if self.protection_unavailable(entry) {
             enabled = false;
             reasons.push(ReasonCode::ProtectionUnavailable);
+        }
+
+        // Administrator mode owns the screen: nothing launches as an activity
+        // until it is left. Checked before the session test because the two are
+        // mutually exclusive, so at most one of them ever fires.
+        if self.admin_mode {
+            enabled = false;
+            reasons.push(ReasonCode::AdminMode);
         }
 
         // Check if another session is active
@@ -1820,6 +1883,7 @@ impl CoreEngine {
             entries,
             internet_status: self.internet_status_views(),
             diagnostics: self.diagnostics.clone(),
+            admin_mode: self.admin_mode,
         }
     }
 
@@ -2008,6 +2072,88 @@ mod tests {
         let entries = engine.list_entries(shepherd_util::now());
         assert_eq!(entries.len(), 1);
         assert!(entries[0].enabled);
+    }
+
+    /// Administrator mode and a running activity are mutually exclusive, and
+    /// this is the half that keeps a child's session from being ended by a
+    /// button whose label says nothing about doing so (issue #154).
+    #[test]
+    fn administrator_mode_is_refused_while_an_activity_is_running() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_test_policy(), store, HostCapabilities::minimal());
+        let now = shepherd_util::now();
+        let now_mono = MonotonicInstant::now();
+
+        let plan = match engine.request_launch(&EntryId::new("test-game"), now) {
+            LaunchDecision::Approved(plan) => plan,
+            other => panic!("expected the launch to be approved, got {other:?}"),
+        };
+        engine.start_session(plan, now, now_mono);
+
+        assert_eq!(
+            engine.enter_admin_mode().unwrap_err(),
+            EntryId::new("test-game"),
+            "the refusal names the activity, so the caller can say which to stop"
+        );
+        assert!(!engine.admin_mode(), "a refused entry must not half-apply");
+    }
+
+    /// The other half of the exclusion: nothing launches while the mode is on.
+    /// Done by disabling every entry with a reason rather than by a special
+    /// case in the launch path, so the child's grid greys itself out and says
+    /// why without the launcher knowing the mode exists.
+    #[test]
+    fn administrator_mode_makes_every_entry_unavailable_and_gives_it_back() {
+        use shepherd_api::ReasonCode;
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_test_policy(), store, HostCapabilities::minimal());
+        let now = shepherd_util::now();
+
+        assert!(engine.list_entries(now)[0].enabled);
+
+        engine.enter_admin_mode().expect("nothing is running");
+        assert!(engine.admin_mode());
+        assert!(
+            engine.get_state().admin_mode,
+            "shells read the mode from here"
+        );
+
+        let view = &engine.list_entries(now)[0];
+        assert!(!view.enabled);
+        assert!(
+            view.reasons.contains(&ReasonCode::AdminMode),
+            "the child is told a grown-up is setting things up, not just \"unavailable\""
+        );
+        assert!(
+            matches!(
+                engine.request_launch(&EntryId::new("test-game"), now),
+                LaunchDecision::Denied { .. }
+            ),
+            "the same gate must stop a launch that did not come from the grid"
+        );
+
+        engine.exit_admin_mode(false).expect("the mode was on");
+        assert!(engine.list_entries(now)[0].enabled, "and it all comes back");
+    }
+
+    /// Three things can leave the mode — the HUD, the phone, and the idle
+    /// timeout — and they can race. Arriving second is not a failure.
+    #[test]
+    fn leaving_administrator_mode_twice_is_not_an_error() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_test_policy(), store, HostCapabilities::minimal());
+
+        assert!(engine.exit_admin_mode(false).is_none(), "was never in it");
+        engine.enter_admin_mode().unwrap();
+        assert!(
+            engine.exit_admin_mode(false).is_some(),
+            "the transition happened"
+        );
+        assert!(
+            engine.exit_admin_mode(true).is_none(),
+            "and does not happen twice"
+        );
     }
 
     /// A firewalled entry on a host where enforcement is unavailable must not

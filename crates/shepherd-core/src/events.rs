@@ -52,4 +52,7 @@ pub enum CoreEvent {
 
     /// Policy was reloaded
     PolicyReloaded { entry_count: usize },
+
+    /// The device entered or left administrator mode (issue #154).
+    AdminModeChanged { active: bool },
 }

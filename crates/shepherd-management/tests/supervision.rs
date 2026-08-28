@@ -263,6 +263,29 @@ async fn a_blank_reaches_the_compositor_when_nothing_is_running() {
     assert_eq!(*h.host.screen_power_calls.lock().unwrap(), vec![false]);
 }
 
+/// Administrator mode has to suppress the blank too (issue #154), and it is the
+/// case the session check cannot cover: the mode creates no session on purpose,
+/// so to `current_session` a caregiver halfway through a Steam login looks
+/// exactly like an idle kiosk.
+#[tokio::test]
+async fn a_blank_is_suppressed_while_administering() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+
+    assert!(
+        !h.svc.set_screen_power(false).await.unwrap(),
+        "set_screen_power(false) must report that it did not act"
+    );
+    assert!(
+        h.host.screen_power_calls.lock().unwrap().is_empty(),
+        "the screen must not blank on a caregiver setting the device up"
+    );
+
+    // Waking is not suppressed here either.
+    assert!(h.svc.set_screen_power(true).await.unwrap());
+    assert_eq!(*h.host.screen_power_calls.lock().unwrap(), vec![true]);
+}
+
 /// Waking is never suppressed. A device that blanked just before a launch has
 /// to come back, and `swayidle`'s `resume` is the only thing that asks.
 #[tokio::test]

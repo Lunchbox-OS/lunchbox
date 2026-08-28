@@ -9,9 +9,10 @@ use shepherd_api::{
     DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
     HudOrientation, NetworkStatusView, ServiceStateSnapshot, SessionEndReason, SessionInfo,
     StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    WindowOwner,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, parse_config};
-use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
+use shepherd_core::{BeginStopDecision, CoreEngine, CoreEvent, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
     LightSensor, NetworkInfoProvider, NetworkSnapshot, SpawnOptions, SponsorBlockSpec,
@@ -164,7 +165,9 @@ pub trait ManagementService: Send + Sync {
     /// The "is anything running?" check lives here rather than in the caller
     /// because it used to be a separate `--is-idle-allowed` process, and a
     /// launch landing between that check and the blank turned the screen off on
-    /// a child mid-activity. Returns whether it actually acted.
+    /// a child mid-activity. "Anything" includes administrator mode (issue
+    /// #154), which runs no session for the first half of that check to see.
+    /// Returns whether it actually acted.
     async fn set_screen_power(&self, on: bool) -> ManagementResult<bool>;
 
     /// The HUD counter-scale factor in force (1.0 unless an
@@ -336,6 +339,36 @@ pub trait ManagementService: Send + Sync {
     /// ride `service_state`'s `internet_status`, and a UI showing both reads
     /// them from there.
     async fn network_status(&self) -> NetworkStatusView;
+
+    // Administrator mode (issue #154)
+    /// Relax the kiosk so a caregiver can set the device up in place: the
+    /// compositor's key grabs are released, the screen stops blanking, and
+    /// windows opened here stop being reported as unsupervised.
+    ///
+    /// Refused while an activity is running — the caregiver stops it first,
+    /// rather than this ending a child's session from a button that does not
+    /// say so.
+    async fn enter_admin_mode(&self) -> ManagementResult<()>;
+
+    /// Leave administrator mode.
+    ///
+    /// Deliberately never refused, and idempotent. This is the escape hatch:
+    /// the HUD only offers its own exit once no windows are left, so a window
+    /// that will not close would otherwise strand the device. Leaving from
+    /// here always works, whatever is still on screen.
+    async fn exit_admin_mode(&self) -> ManagementResult<()>;
+
+    /// The compositor reports the seat has been idle for the configured span.
+    ///
+    /// Leaves administrator mode, but **only when nothing is open**. Walking
+    /// away is a legitimate workflow — a Steam download on a slow connection is
+    /// the motivating case — so a timeout that closed a caregiver's windows
+    /// would break the most valuable thing the mode does. With windows up this
+    /// is a no-op and the mode persists until somebody leaves it deliberately.
+    ///
+    /// Returns whether it actually left. Idle notification comes from
+    /// `swayidle`, which is already the device's idle authority.
+    async fn admin_idle_timeout(&self) -> ManagementResult<bool>;
 
     // Debug windows
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>>;
@@ -1302,8 +1335,22 @@ impl ManagementService for DefaultManagementService {
         // Blanking is suppressed while an activity is on screen; turning the
         // screen back on never is, so a device that blanked just before a
         // launch still wakes.
-        if !on && self.current_session().await.is_some() {
-            return Ok(false);
+        //
+        // Administrator mode counts alongside an activity (issue #154): the
+        // screen must not blank on a caregiver halfway through a package
+        // install or a Steam login, and the mode deliberately creates no
+        // session for the first check to see.
+        if !on {
+            let busy = {
+                // One lock for both questions: two would be a needless second
+                // acquire on the daemon's hottest mutex, on a path swayidle
+                // takes every two minutes.
+                let eng = self.engine.lock().await;
+                eng.current_session().is_some() || eng.admin_mode()
+            };
+            if busy {
+                return Ok(false);
+            }
         }
         self.host
             .set_screen_power(on)
@@ -1535,6 +1582,89 @@ impl ManagementService for DefaultManagementService {
             .map_err(|e| ManagementError::Internal(e.to_string()))
     }
 
+    // ------------------------------------------------------- administrator
+    async fn enter_admin_mode(&self) -> ManagementResult<()> {
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            let event = eng.enter_admin_mode().map_err(|entry_id| {
+                ManagementError::Conflict(format!(
+                    "'{entry_id}' is running; stop it before entering administrator mode"
+                ))
+            })?;
+            (event, eng.get_state())
+        };
+
+        // The compositor is told after the engine has committed, so a failure
+        // here leaves the mode on everywhere except the key grabs, rather than
+        // a daemon that denies being in a mode it is in. Reported rather than
+        // swallowed: a caregiver whose Ctrl+w still ends the session needs to
+        // know why.
+        if let Err(e) = self.host.set_admin_mode(true).await {
+            warn!(error = %e, "Entered administrator mode, but the compositor did not switch binding mode");
+        }
+        self.broadcast_admin_mode(event, snap);
+        Ok(())
+    }
+
+    async fn exit_admin_mode(&self) -> ManagementResult<()> {
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            (eng.exit_admin_mode(false), eng.get_state())
+        };
+        // Asked unconditionally, so a compositor left in the admin binding mode
+        // by a crash is recovered by pressing the button again.
+        if let Err(e) = self.host.set_admin_mode(false).await {
+            warn!(error = %e, "Left administrator mode, but the compositor did not switch binding mode");
+        }
+        if let Some(event) = event {
+            self.broadcast_admin_mode(event, snap);
+        }
+        Ok(())
+    }
+
+    async fn admin_idle_timeout(&self) -> ManagementResult<bool> {
+        if !self.engine.lock().await.admin_mode() {
+            return Ok(false);
+        }
+
+        // Shepherd's own furniture — the launcher, the HUD — is always mapped,
+        // so "nothing is open" means nothing the caregiver opened. A window
+        // stashed on the scratchpad counts as open: it is somebody's work, and
+        // it comes back.
+        let open = self
+            .host
+            .list_windows()
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?
+            .into_iter()
+            .filter(|w| w.owner != WindowOwner::Shepherd)
+            .count();
+        if open > 0 {
+            debug!(
+                open,
+                "Seat idle in administrator mode, but windows are open; staying in the mode"
+            );
+            return Ok(false);
+        }
+
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            (eng.exit_admin_mode(true), eng.get_state())
+        };
+        if let Err(e) = self.host.set_admin_mode(false).await {
+            warn!(error = %e, "Idle timeout left administrator mode, but the compositor did not switch binding mode");
+        }
+        match event {
+            Some(event) => {
+                info!("Administrator mode timed out with nothing open");
+                self.broadcast_admin_mode(event, snap);
+                Ok(true)
+            }
+            // Raced with a deliberate exit; the mode is off either way.
+            None => Ok(false),
+        }
+    }
+
     async fn act_on_window(&self, id: u64, action: WindowAction) -> ManagementResult<()> {
         self.host
             .act_on_window(id, action)
@@ -1608,6 +1738,22 @@ impl DefaultManagementService {
         self.web_auth.as_ref().ok_or_else(|| {
             ManagementError::Conflict("the management API is not enabled on this device".into())
         })
+    }
+
+    /// Announce an administrator-mode transition (issue #154).
+    ///
+    /// Both the delta and a fresh full snapshot go out. The delta is what the
+    /// shells react to; the snapshot is what keeps `admin_mode`, and the entry
+    /// availability that changes with it, correct for a client that joined
+    /// mid-transition — every entry becomes unavailable on entry and available
+    /// again on exit, and nothing else would tell them so.
+    fn broadcast_admin_mode(&self, event: CoreEvent, snap: ServiceStateSnapshot) {
+        let CoreEvent::AdminModeChanged { active } = event else {
+            debug_assert!(false, "broadcast_admin_mode called with {event:?}");
+            return;
+        };
+        (self.broadcast_fn)(Event::new(EventPayload::AdminModeChanged { active }));
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
     }
 
     /// Close out a reset started by `CoreEngine::begin_restart`, handing the

@@ -601,6 +601,27 @@
       }
     },
     {
+      "name": "enter_admin_mode",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "exit_admin_mode",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "admin_idle_timeout",
+      "params": [],
+      "result": {
+        "type": "bool"
+      }
+    },
+    {
       "name": "list_windows",
       "params": [],
       "result": {

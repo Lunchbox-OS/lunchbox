@@ -1954,6 +1954,16 @@ sealed interface ReasonCode {
     ) : ReasonCode
 
     /**
+     * The device is in administrator mode (issue #154), so nothing launches as
+     * an activity. Not a restriction on the child in the sense the others are:
+     * it clears the moment the caregiver leaves the mode, and it applies to
+     * every entry at once.
+     */
+    @Serializable
+    @SerialName("admin_mode")
+    data object AdminMode : ReasonCode
+
+    /**
      * One or more required input devices (issue #96) are not currently
      * connected. `devices` lists the missing device types, sorted and
      * deduplicated.
@@ -2070,6 +2080,19 @@ enum class RetroarchSaveState(val wire: String) {
  */
 @Serializable
 data class ServiceStateSnapshot(
+    /**
+     * Whether the device is in administrator mode (issue #154) — the kiosk's
+     * restrictions relaxed so a caregiver can set activities up in place.
+     *
+     * Every client that behaves differently in the mode reads it from here
+     * rather than tracking it: the shells change what they draw, and the
+     * window panels stop calling admin-launched windows orphans. (The screen
+     * staying awake is not one of them — that check moved inside the daemon
+     * with issue #144, and `set_screen_power` reads the engine directly.)
+     * Absent from an older payload means "not in admin mode", which is the
+     * safe reading.
+     */
+    val adminMode: Boolean = false,
     val apiVersion: Long,
     val currentSession: SessionInfo? = null,
     /**

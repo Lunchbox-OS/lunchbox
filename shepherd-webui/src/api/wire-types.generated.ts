@@ -1006,6 +1006,18 @@ export type EventPayload =
       entry_count: number;
     }
   /**
+   * The device entered or left administrator mode (issue #154).
+   *
+   * Carries the flag rather than being two variants so a client that only
+   * cares about the current value can handle one arm. The full snapshot also
+   * carries `admin_mode`, so a client that resubscribes mid-mode is not left
+   * guessing.
+   */
+  | {
+      type: "admin_mode_changed";
+      active: boolean;
+    }
+  /**
    * Entry availability changed (for UI updates)
    */
   | {
@@ -1676,6 +1688,13 @@ export type ReasonCode =
       until: IsoDate;
     }
   /**
+   * The device is in administrator mode (issue #154), so nothing launches as
+   * an activity. Not a restriction on the child in the sense the others are:
+   * it clears the moment the caregiver leaves the mode, and it applies to
+   * every entry at once.
+   */
+  | { code: "admin_mode" }
+  /**
    * One or more required input devices (issue #96) are not currently
    * connected. `devices` lists the missing device types, sorted and
    * deduplicated.
@@ -1751,6 +1770,19 @@ export type RetroarchSaveState =
  * Full service state snapshot
  */
 export interface ServiceStateSnapshot {
+  /**
+   * Whether the device is in administrator mode (issue #154) — the kiosk's
+   * restrictions relaxed so a caregiver can set activities up in place.
+   *
+   * Every client that behaves differently in the mode reads it from here
+   * rather than tracking it: the shells change what they draw, and the
+   * window panels stop calling admin-launched windows orphans. (The screen
+   * staying awake is not one of them — that check moved inside the daemon
+   * with issue #144, and `set_screen_power` reads the engine directly.)
+   * Absent from an older payload means "not in admin mode", which is the
+   * safe reading.
+   */
+  admin_mode?: boolean;
   api_version: number;
   current_session?: SessionInfo | null;
   /**
