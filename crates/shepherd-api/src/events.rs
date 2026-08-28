@@ -91,6 +91,9 @@ pub enum EventPayload {
     /// guessing.
     AdminModeChanged { active: bool },
 
+    /// The screen was locked or unlocked (issue #154).
+    LockChanged { locked: bool },
+
     /// Entry availability changed (for UI updates)
     EntryAvailabilityChanged { entry_id: EntryId, enabled: bool },
 

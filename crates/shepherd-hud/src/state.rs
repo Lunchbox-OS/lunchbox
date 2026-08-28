@@ -175,6 +175,11 @@ pub struct SharedState {
     /// HUD's mirror/external toggle visibility and the active-output anchor.
     display_tx: Arc<watch::Sender<Option<DisplayState>>>,
     display_rx: watch::Receiver<Option<DisplayState>>,
+    /// Whether the device is in administrator mode (issue #154). Drives the
+    /// HUD's lock button, which is the only thing on the device's own screen
+    /// that says the mode is on.
+    admin_tx: Arc<watch::Sender<bool>>,
+    admin_rx: watch::Receiver<bool>,
 }
 
 impl SharedState {
@@ -187,6 +192,7 @@ impl SharedState {
         let (internet_tx, internet_rx) = watch::channel(Vec::new());
         let (suspended_tx, suspended_rx) = watch::channel(false);
         let (display_tx, display_rx) = watch::channel(None);
+        let (admin_tx, admin_rx) = watch::channel(false);
 
         Self {
             session_tx: Arc::new(session_tx),
@@ -205,7 +211,18 @@ impl SharedState {
             suspended_rx,
             display_tx: Arc::new(display_tx),
             display_rx,
+            admin_tx: Arc::new(admin_tx),
+            admin_rx,
         }
+    }
+
+    /// Whether the device is in administrator mode (issue #154).
+    pub fn admin_mode(&self) -> bool {
+        *self.admin_rx.borrow()
+    }
+
+    pub fn set_admin_mode(&self, active: bool) {
+        let _ = self.admin_tx.send(active);
     }
 
     /// Current external-display arrangement, if known.
@@ -487,6 +504,7 @@ impl SharedState {
             }
 
             EventPayload::StateChanged(snapshot) => {
+                self.set_admin_mode(snapshot.admin_mode);
                 // Fresh state has arrived (on resume this follows the
                 // post-suspend connectivity re-check), so drop the suspend
                 // placeholders and show live values again.

@@ -370,6 +370,21 @@ pub trait ManagementService: Send + Sync {
     /// `swayidle`, which is already the device's idle authority.
     async fn admin_idle_timeout(&self) -> ManagementResult<bool>;
 
+    /// Lock the screen (issue #154).
+    ///
+    /// Available only inside administrator mode, and the way to walk away from
+    /// a device mid-setup: the Steam download keeps running, and the child
+    /// cannot touch it. There is deliberately no local way back — see
+    /// [`ManagementService::unlock_device`].
+    async fn lock_device(&self) -> ManagementResult<()>;
+
+    /// Unlock the screen.
+    ///
+    /// The counterpart, and the reason the lock is safe to offer: it exists
+    /// only here, on the management transports, so the person who locked the
+    /// device is the only one who can open it again.
+    async fn unlock_device(&self) -> ManagementResult<()>;
+
     /// Every application the system's `.desktop` files offer, as a normal
     /// desktop would list them (issue #154).
     ///
@@ -1626,6 +1641,13 @@ impl ManagementService for DefaultManagementService {
             let mut eng = self.engine.lock().await;
             (eng.exit_admin_mode(false), eng.get_state())
         };
+        // `CoreEngine::exit_admin_mode` clears the lock flag, because a lock
+        // whose only exit is an administrator RPC cannot outlive the mode that
+        // reaches it. The compositor has to be told the same thing or the
+        // screen stays covered while every client reports it open — a device
+        // that looks bricked, with no button anywhere offering to fix it.
+        // Idempotent, so it is asked unconditionally.
+        self.release_screen_lock().await;
         // Asked unconditionally, so a compositor left in the admin binding mode
         // by a crash is recovered by pressing the button again.
         if let Err(e) = self.host.set_admin_mode(false).await {
@@ -1655,10 +1677,15 @@ impl ManagementService for DefaultManagementService {
             .filter(|w| w.owner != WindowOwner::Shepherd)
             .count();
         if open > 0 {
+            // Decision 10 of the design: with work still on screen the timeout
+            // locks rather than leaving. Walking away from a slow download is a
+            // supported way to use the mode, so the timeout must protect the
+            // device without touching what is running on it.
             debug!(
                 open,
-                "Seat idle in administrator mode, but windows are open; staying in the mode"
+                "Seat idle with windows open; locking instead of leaving"
             );
+            self.set_locked(true, true).await?;
             return Ok(false);
         }
 
@@ -1666,6 +1693,8 @@ impl ManagementService for DefaultManagementService {
             let mut eng = self.engine.lock().await;
             (eng.exit_admin_mode(true), eng.get_state())
         };
+        // Same reason as the deliberate exit above.
+        self.release_screen_lock().await;
         if let Err(e) = self.host.set_admin_mode(false).await {
             warn!(error = %e, "Idle timeout left administrator mode, but the compositor did not switch binding mode");
         }
@@ -1678,6 +1707,14 @@ impl ManagementService for DefaultManagementService {
             // Raced with a deliberate exit; the mode is off either way.
             None => Ok(false),
         }
+    }
+
+    async fn lock_device(&self) -> ManagementResult<()> {
+        self.set_locked(true, false).await
+    }
+
+    async fn unlock_device(&self) -> ManagementResult<()> {
+        self.set_locked(false, false).await
     }
 
     async fn list_desktop_apps(&self) -> ManagementResult<Vec<DesktopApp>> {
@@ -1822,6 +1859,65 @@ impl DefaultManagementService {
         };
         (self.broadcast_fn)(Event::new(EventPayload::AdminModeChanged { active }));
         (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+    }
+
+    /// Tell the host to uncover the screen, whatever it currently believes.
+    ///
+    /// Called on every path that leaves administrator mode. A failure is logged
+    /// rather than propagated: leaving the mode must not be refusable, and the
+    /// caller cannot do anything useful with the error anyway — pressing unlock
+    /// retries it.
+    async fn release_screen_lock(&self) {
+        if let Err(e) = self.host.set_locked(false).await {
+            warn!(error = %e, "Could not release the screen lock while leaving administrator mode");
+        }
+    }
+
+    /// Lock or unlock, keeping the engine, the compositor and every client in
+    /// step (issue #154).
+    ///
+    /// The order differs by direction, and both are deliberate. Locking tells
+    /// the *host* first: if the lock client cannot start, the screen is not
+    /// covered, and a daemon that had already announced `locked: true` would be
+    /// telling every client something untrue about a safety control. Unlocking
+    /// commits to the engine first, because the RPC must not be refusable —
+    /// a host that fails to release the lock leaves a stuck screen that
+    /// pressing the button again can retry.
+    async fn set_locked(&self, locked: bool, timed_out: bool) -> ManagementResult<()> {
+        if locked {
+            if !self.engine.lock().await.admin_mode() {
+                return Err(ManagementError::Conflict(
+                    "The screen can only be locked from administrator mode".into(),
+                ));
+            }
+            self.host.set_locked(true).await.map_err(|e| {
+                ManagementError::Internal(format!("could not lock the screen: {e}"))
+            })?;
+        }
+
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            let event = if locked {
+                eng.lock(timed_out).map_err(|_| {
+                    ManagementError::Conflict(
+                        "The screen can only be locked from administrator mode".into(),
+                    )
+                })?
+            } else {
+                eng.unlock()
+            };
+            (event, eng.get_state())
+        };
+
+        if !locked {
+            self.release_screen_lock().await;
+        }
+
+        if let Some(CoreEvent::LockChanged { locked }) = event {
+            (self.broadcast_fn)(Event::new(EventPayload::LockChanged { locked }));
+            (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+        }
+        Ok(())
     }
 
     /// Close out a reset started by `CoreEngine::begin_restart`, handing the

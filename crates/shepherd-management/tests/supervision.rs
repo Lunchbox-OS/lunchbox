@@ -803,3 +803,111 @@ async fn inside_the_mode_an_unknown_application_is_reported_as_missing() {
     );
     assert!(h.host.unsupervised_launches.lock().unwrap().is_empty());
 }
+
+/// The lock exists to make walking away from a half-configured device safe, so
+/// its two invariants are that it cannot be entered from a child's session and
+/// cannot be left except through a management client.
+#[tokio::test]
+async fn the_screen_locks_only_from_administrator_mode() {
+    let h = harness();
+
+    let err = h
+        .svc
+        .lock_device()
+        .await
+        .expect_err("a child's session must not be lockable");
+    assert!(matches!(err, ManagementError::Conflict(_)), "{err:?}");
+    assert!(!h.svc.engine.lock().await.locked());
+
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.lock_device().await.expect("locking inside the mode");
+    assert!(h.svc.engine.lock().await.locked());
+
+    // Idempotent: a second press is not an error.
+    h.svc.lock_device().await.expect("locking twice");
+    h.svc.unlock_device().await.expect("unlocking");
+    assert!(!h.svc.engine.lock().await.locked());
+    h.svc.unlock_device().await.expect("unlocking twice");
+}
+
+/// Leaving the mode has to clear the lock. The only way out of a locked screen
+/// is an RPC reached through administrator mode, so a lock that outlived the
+/// mode would be a device nobody could get back into.
+#[tokio::test]
+async fn leaving_administrator_mode_unlocks_the_screen() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.lock_device().await.unwrap();
+
+    h.svc.exit_admin_mode().await.unwrap();
+
+    let eng = h.svc.engine.lock().await;
+    assert!(
+        !eng.locked(),
+        "a lock must never outlive the mode that can end it"
+    );
+    assert!(!eng.admin_mode());
+    drop(eng);
+
+    // Regression, found by driving it: the engine cleared its own flag while
+    // nothing told the compositor, so the screen stayed covered with every
+    // client reporting it open — a device that looks bricked, and whose unlock
+    // button is hidden precisely because the daemon believes it is unlocked.
+    assert!(
+        !*h.host.locked.lock().unwrap(),
+        "the host must be told to uncover the screen, not just the engine"
+    );
+}
+
+/// The same divergence, on the other path out of the mode.
+#[tokio::test]
+async fn the_idle_timeouts_exit_also_releases_the_screen_lock() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.lock_device().await.unwrap();
+    assert!(*h.host.locked.lock().unwrap());
+
+    // No windows, so the timeout leaves the mode rather than locking.
+    assert!(h.svc.admin_idle_timeout().await.unwrap());
+    assert!(
+        !*h.host.locked.lock().unwrap(),
+        "leaving on the timeout must uncover the screen too"
+    );
+}
+
+/// Decision 10: with work still on screen the idle timeout locks rather than
+/// leaving, because walking away from a slow download is a supported way to use
+/// the mode and closing the caregiver's windows would defeat it.
+#[tokio::test]
+async fn the_idle_timeout_locks_when_windows_are_open_and_leaves_when_none_are() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+
+    // MockHost reports no windows, so this is the empty case: leave.
+    assert!(h.svc.admin_idle_timeout().await.unwrap(), "left the mode");
+    assert!(!h.svc.engine.lock().await.admin_mode());
+    assert!(!h.svc.engine.lock().await.locked(), "leaving does not lock");
+
+    // With a window on screen the mode is kept and the screen is locked.
+    h.svc.enter_admin_mode().await.unwrap();
+    h.host.set_windows(vec![shepherd_api::WindowInfo {
+        id: 1,
+        name: Some("Steam".into()),
+        app_id: Some("steam".into()),
+        window_class: None,
+        pid: Some(4242),
+        workspace: Some("1".into()),
+        in_scratchpad: false,
+        visible: true,
+        focused: true,
+        owner: shepherd_api::WindowOwner::Unowned,
+    }]);
+
+    assert!(
+        !h.svc.admin_idle_timeout().await.unwrap(),
+        "the mode is kept: the caregiver's work is still running"
+    );
+    let eng = h.svc.engine.lock().await;
+    assert!(eng.admin_mode(), "still administering");
+    assert!(eng.locked(), "but the screen is covered");
+}

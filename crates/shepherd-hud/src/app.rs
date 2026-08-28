@@ -893,6 +893,30 @@ fn build_hud_content(
     });
     orientation.flow_append(&right_box, &display_button);
 
+    // Lock button (issue #154). Present only in administrator mode, where it is
+    // also the one thing on the device's own screen saying the mode is on.
+    //
+    // Locking is offered here; unlocking deliberately is not. The screen can
+    // only be opened again from the companion or web app, which is what makes
+    // it safe to lock a half-configured device and walk away from it.
+    let lock_icon = gtk4::Image::from_icon_name("system-lock-screen-symbolic");
+    lock_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let lock_button = gtk4::Button::builder()
+        .child(&lock_icon)
+        .has_frame(false)
+        .tooltip_text("Lock the screen (unlock from the Shepherd app)")
+        .visible(false)
+        .build();
+    lock_button.add_css_class("indicator-button");
+    lock_button.connect_clicked(move |_| {
+        spawn_action(
+            default_socket_path(),
+            "lock_device",
+            move |mut client| async move { client.lock_device().await },
+        );
+    });
+    right_box.append(&lock_button);
+
     // Network connectivity indicator. Shown only when at least one
     // connectivity check is configured. Icon reflects the worst status across
     // all configured checks; the tooltip lists every check and its result so
@@ -1207,6 +1231,7 @@ fn build_hud_content(
     let network_box_clone = network_box.clone();
     let network_icon_clone = network_icon.clone();
     let display_button_clone = display_button.clone();
+    let lock_button_clone = lock_button.clone();
     // Tracks the connector the HUD is currently anchored to, so we only
     // re-anchor the layer-shell surface when the active output actually changes.
     let anchored_connector = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
@@ -1503,6 +1528,9 @@ fn build_hud_content(
             }
             network_box_clone.set_tooltip_text(Some(&tooltip));
         }
+
+        // The lock button appears with administrator mode and goes away with it.
+        lock_button_clone.set_visible(state.admin_mode());
 
         // Update the display-mode toggle and follow the active output (#87).
         // The button only appears while an external display is connected; its

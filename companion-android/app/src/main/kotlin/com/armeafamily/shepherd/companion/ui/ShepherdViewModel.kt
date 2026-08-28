@@ -104,6 +104,9 @@ data class DeviceUiState(
      */
     val adminMode: Boolean get() = snapshot?.adminMode ?: false
 
+    /** Whether the device's screen is currently locked (issue #154). */
+    val locked: Boolean get() = snapshot?.locked ?: false
+
     /** The category an activity belongs to, for labelling its row. */
     fun groupOf(entry: EntryView): GroupView? =
         entry.group?.let { id -> groups.firstOrNull { it.groupId == id } }
@@ -1015,6 +1018,20 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     fun exitAdminMode() = action { c ->
         c.exitAdminMode()
         _message.value = "Administrator mode off."
+        refreshSnapshot()
+    }
+
+    /** Lock the device's screen. Only meaningful inside administrator mode. */
+    fun lockDevice() = action { c ->
+        c.lockDevice()
+        _message.value = "Screen locked."
+        refreshSnapshot()
+    }
+
+    /** Unlock it. There is no way to do this from the device itself. */
+    fun unlockDevice() = action { c ->
+        c.unlockDevice()
+        _message.value = "Screen unlocked."
         refreshSnapshot()
     }
 

@@ -177,6 +177,16 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// Cover the screen while leaving administrator mode's work running
+    /// (issue #154). There is no `unlock` counterpart here on purpose: the
+    /// screen is opened again from the companion or web app, never from the
+    /// device itself.
+    pub async fn lock_device(&mut self) -> IpcResult<()> {
+        self.call::<Value>("lock_device", Value::Null)
+            .await
+            .map(|_| ())
+    }
+
     /// Report that the seat has been idle long enough to leave administrator
     /// mode. The daemon decides whether to act; `true` means it left the mode.
     pub async fn admin_idle_timeout(&mut self) -> IpcResult<bool> {

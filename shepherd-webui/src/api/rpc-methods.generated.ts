@@ -96,6 +96,8 @@ export type RpcMethod =
   | "enter_admin_mode"
   | "exit_admin_mode"
   | "admin_idle_timeout"
+  | "lock_device"
+  | "unlock_device"
   | "list_desktop_apps"
   | "launch_desktop_app"
   | "list_windows"
@@ -243,6 +245,8 @@ export interface RpcParamsMap {
   "enter_admin_mode": Record<string, never>;
   "exit_admin_mode": Record<string, never>;
   "admin_idle_timeout": Record<string, never>;
+  "lock_device": Record<string, never>;
+  "unlock_device": Record<string, never>;
   "list_desktop_apps": Record<string, never>;
   "launch_desktop_app": {
     id: string;
@@ -318,6 +322,8 @@ export interface RpcResultMap {
   "enter_admin_mode": null;
   "exit_admin_mode": null;
   "admin_idle_timeout": boolean;
+  "lock_device": null;
+  "unlock_device": null;
   "list_desktop_apps": DesktopApp[];
   "launch_desktop_app": null;
   "list_windows": WindowInfo[];

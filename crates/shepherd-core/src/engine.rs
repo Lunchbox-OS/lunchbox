@@ -54,6 +54,12 @@ pub enum TokenAdjustError {
 }
 
 /// The core policy engine
+/// The screen was asked to lock while the device was not in administrator mode
+/// (issue #154). Its own type rather than a bare unit error so the one thing it
+/// can mean is written down where the caller reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAdministering;
+
 pub struct CoreEngine {
     policy: Policy,
     store: Arc<dyn Store>,
@@ -107,6 +113,13 @@ pub struct CoreEngine {
     /// the same footing as an active session. Entering it and running an
     /// activity are mutually exclusive in both directions.
     admin_mode: bool,
+
+    /// Whether the screen is locked (issue #154).
+    ///
+    /// Only ever true inside [`Self::admin_mode`]. Leaving the mode clears it,
+    /// so the two cannot disagree — a locked device with no administrator mode
+    /// behind it would have no button anywhere that could unlock it.
+    locked: bool,
 }
 
 impl CoreEngine {
@@ -127,6 +140,7 @@ impl CoreEngine {
             store,
             capabilities,
             admin_mode: false,
+            locked: false,
             current_session: None,
             last_availability_set: HashSet::new(),
             internet_status: HashMap::new(),
@@ -233,6 +247,48 @@ impl CoreEngine {
         Ok(CoreEvent::AdminModeChanged { active: true })
     }
 
+    /// Whether the screen is locked (issue #154).
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Lock the screen.
+    ///
+    /// Refused outside administrator mode: the lock's only exit is a management
+    /// RPC, so locking a device that a caregiver is not already administering
+    /// would strand a child behind a screen with no way out of it.
+    ///
+    /// Idempotent — `None` when already locked, so a second press is not an
+    /// error and does not re-announce.
+    pub fn lock(&mut self, timed_out: bool) -> Result<Option<CoreEvent>, NotAdministering> {
+        if !self.admin_mode {
+            return Err(NotAdministering);
+        }
+        if self.locked {
+            return Ok(None);
+        }
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::ScreenLocked { timed_out }));
+        self.locked = true;
+        info!(timed_out, "Screen locked");
+        Ok(Some(CoreEvent::LockChanged { locked: true }))
+    }
+
+    /// Unlock the screen. Idempotent, and never refused: this is the only way
+    /// out, so it must work from whichever client reaches the device first.
+    pub fn unlock(&mut self) -> Option<CoreEvent> {
+        if !self.locked {
+            return None;
+        }
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::ScreenUnlocked));
+        self.locked = false;
+        info!("Screen unlocked");
+        Some(CoreEvent::LockChanged { locked: false })
+    }
+
     /// Leave administrator mode. Idempotent: leaving a mode that is not set is
     /// not an error, because the exit paths (a button, the phone, the idle
     /// timeout) can race each other and none of them should report a failure
@@ -247,6 +303,16 @@ impl CoreEngine {
                 timed_out,
             }));
         self.admin_mode = false;
+        // A lock outlives nothing: its only exit is an administrator RPC that
+        // is reached through the mode, so leaving with the screen still locked
+        // would be a device nobody could get back into.
+        if self.locked {
+            let _ = self
+                .store
+                .append_audit(AuditEvent::new(AuditEventType::ScreenUnlocked));
+            self.locked = false;
+            info!("Screen unlocked because administrator mode ended");
+        }
         info!(timed_out, "Left administrator mode");
         Some(CoreEvent::AdminModeChanged { active: false })
     }
@@ -1884,6 +1950,7 @@ impl CoreEngine {
             internet_status: self.internet_status_views(),
             diagnostics: self.diagnostics.clone(),
             admin_mode: self.admin_mode,
+            locked: self.locked,
         }
     }
 

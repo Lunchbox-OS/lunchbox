@@ -1057,6 +1057,13 @@ export type EventPayload =
       active: boolean;
     }
   /**
+   * The screen was locked or unlocked (issue #154).
+   */
+  | {
+      type: "lock_changed";
+      locked: boolean;
+    }
+  /**
    * Entry availability changed (for UI updates)
    */
   | {
@@ -1841,6 +1848,15 @@ export interface ServiceStateSnapshot {
    * Empty when no connectivity checks are configured.
    */
   internet_status?: InternetStatusView[];
+  /**
+   * Whether the screen is locked (issue #154).
+   *
+   * Only ever set inside administrator mode: it is what makes walking away
+   * from a half-configured device safe, and it is deliberately not something
+   * a child's session can enter. Clearing it is a management RPC — there is
+   * no local affordance, which is the entire point.
+   */
+  locked?: boolean;
   policy_loaded: boolean;
 }
 

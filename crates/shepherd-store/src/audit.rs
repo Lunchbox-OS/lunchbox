@@ -31,6 +31,15 @@ pub enum AuditEventType {
     /// caregiver leaving deliberately from the idle timeout doing it for them.
     AdminModeExited { timed_out: bool },
 
+    /// The screen was locked. `timed_out` distinguishes a caregiver pressing
+    /// the button from the idle timeout doing it because they walked away with
+    /// work still running.
+    ScreenLocked { timed_out: bool },
+
+    /// The screen was unlocked. Only a management client can do this, so this
+    /// is the record that an administrator was present.
+    ScreenUnlocked,
+
     /// A `.desktop` application was launched from administrator mode's picker
     /// (issue #154).
     ///

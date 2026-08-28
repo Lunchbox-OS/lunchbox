@@ -17,11 +17,15 @@ import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import BrightnessHighIcon from "@mui/icons-material/BrightnessHigh";
 import BuildIcon from "@mui/icons-material/Build";
+import LockIcon from "@mui/icons-material/Lock";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   enterAdminMode,
   exitAdminMode,
   getServiceState,
+  lockDevice,
+  unlockDevice,
   forgetAudioOutput,
   selectAudioOutput,
   getBrightness,
@@ -132,6 +136,7 @@ export function AdminPage() {
     refetchInterval: 5000,
   });
   const adminMode = state?.admin_mode ?? false;
+  const locked = state?.locked ?? false;
 
   const invalidateState = () =>
     queryClient.invalidateQueries({ queryKey: ["service-state"] });
@@ -151,6 +156,24 @@ export function AdminPage() {
     mutationFn: exitAdminMode,
     onSuccess: () => {
       flash("Administrator mode off");
+      invalidateState();
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const lockMutation = useMutation({
+    mutationFn: lockDevice,
+    onSuccess: () => {
+      flash("Screen locked");
+      invalidateState();
+    },
+    onError: (e) => flash(String(e), false),
+  });
+
+  const unlockMutation = useMutation({
+    mutationFn: unlockDevice,
+    onSuccess: () => {
+      flash("Screen unlocked");
       invalidateState();
     },
     onError: (e) => flash(String(e), false),
@@ -319,24 +342,53 @@ export function AdminPage() {
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
             {adminMode
-              ? "The kiosk's restrictions are relaxed so you can set this device up in place. Activities cannot be launched, and the screen will not blank. It turns itself off after 15 minutes idle, but only once you have closed everything you opened."
+              ? locked
+                ? "The screen is locked. Whatever you left running is still running — this is only a cover. Unlocking is possible from here and from the companion app, and nowhere on the device itself."
+                : "The kiosk's restrictions are relaxed so you can set this device up in place. Activities cannot be launched, and the screen will not blank. It turns itself off after 15 minutes idle — or locks instead, if you left something open."
               : "Relax the kiosk so you can log into Steam, install packages or set up controls directly on the device, without switching to another desktop. Nothing can be launched as an activity while it is on."}
           </Typography>
-          <Button
-            variant={adminMode ? "contained" : "outlined"}
-            color={adminMode ? "warning" : "primary"}
-            onClick={() =>
-              adminMode ? exitAdminMutation.mutate() : enterAdminMutation.mutate()
-            }
-            disabled={enterAdminMutation.isPending || exitAdminMutation.isPending}
-            startIcon={
-              enterAdminMutation.isPending || exitAdminMutation.isPending
-                ? <Spinner size={16} />
-                : <BuildIcon />
-            }
-          >
-            {adminMode ? "Turn Off Administrator Mode" : "Turn On Administrator Mode"}
-          </Button>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", rowGap: 1 }}>
+            <Button
+              variant={adminMode ? "contained" : "outlined"}
+              color={adminMode ? "warning" : "primary"}
+              onClick={() =>
+                adminMode ? exitAdminMutation.mutate() : enterAdminMutation.mutate()
+              }
+              disabled={
+                enterAdminMutation.isPending || exitAdminMutation.isPending || locked
+              }
+              startIcon={
+                enterAdminMutation.isPending || exitAdminMutation.isPending
+                  ? <Spinner size={16} />
+                  : <BuildIcon />
+              }
+            >
+              {adminMode ? "Turn Off Administrator Mode" : "Turn On Administrator Mode"}
+            </Button>
+            {/*
+              Locking is offered only inside the mode; unlocking is offered
+              from here and the phone and nowhere else. That asymmetry is the
+              feature — the device itself has no way back in, which is what
+              makes it safe to walk away from mid-setup.
+            */}
+            {adminMode && (
+              <Button
+                variant={locked ? "contained" : "outlined"}
+                color={locked ? "primary" : "inherit"}
+                onClick={() =>
+                  locked ? unlockMutation.mutate() : lockMutation.mutate()
+                }
+                disabled={lockMutation.isPending || unlockMutation.isPending}
+                startIcon={
+                  lockMutation.isPending || unlockMutation.isPending
+                    ? <Spinner size={16} />
+                    : locked ? <LockOpenIcon /> : <LockIcon />
+                }
+              >
+                {locked ? "Unlock Screen" : "Lock Screen"}
+              </Button>
+            )}
+          </Stack>
         </CardContent>
       </Card>
 

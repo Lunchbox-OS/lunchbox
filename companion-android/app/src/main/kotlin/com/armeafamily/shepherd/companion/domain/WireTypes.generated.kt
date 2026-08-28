@@ -2152,6 +2152,15 @@ data class ServiceStateSnapshot(
      * Empty when no connectivity checks are configured.
      */
     val internetStatus: List<InternetStatusView> = emptyList(),
+    /**
+     * Whether the screen is locked (issue #154).
+     *
+     * Only ever set inside administrator mode: it is what makes walking away
+     * from a half-configured device safe, and it is deliberately not something
+     * a child's session can enter. Clearing it is a management RPC — there is
+     * no local affordance, which is the entire point.
+     */
+    val locked: Boolean = false,
     val policyLoaded: Boolean,
 )
 

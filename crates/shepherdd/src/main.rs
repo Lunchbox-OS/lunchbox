@@ -2515,6 +2515,12 @@ impl Service {
                 };
                 Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
             }
+            CoreEvent::LockChanged { .. } => {
+                // Announced by the management service, which pairs it with a
+                // fresh snapshot (see `DefaultManagementService::set_locked`).
+                // The arm exists so a future producer inside the engine is a
+                // compile error rather than a silently unannounced lock.
+            }
             CoreEvent::AdminModeChanged { .. } => {
                 // Announced by the management service itself, which already
                 // holds the transition and pairs it with a fresh snapshot (see

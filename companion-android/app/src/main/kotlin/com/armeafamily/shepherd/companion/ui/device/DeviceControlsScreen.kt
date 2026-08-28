@@ -82,11 +82,15 @@ fun DeviceControlsScreen(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        if (state.adminMode) {
+                        if (state.locked) {
+                            "The screen is locked. Whatever you left running is still " +
+                                "running — this is only a cover. It can be unlocked from " +
+                                "here or the management page, and nowhere on the device."
+                        } else if (state.adminMode) {
                             "The kiosk's restrictions are relaxed. Activities can't be " +
                                 "launched and the screen won't blank. It turns itself off " +
-                                "after 15 minutes idle, but only once you've closed " +
-                                "everything you opened."
+                                "after 15 minutes idle — or locks instead, if you left " +
+                                "something open."
                         } else {
                             "Relax the kiosk so you can log into Steam, install things or " +
                                 "set up controls on the device itself. Nothing can be " +
@@ -99,8 +103,30 @@ fun DeviceControlsScreen(
                         // Filled, and always offered: the device's own HUD only
                         // turns the mode off once every window is closed, so
                         // this is the way out when one won't.
-                        Button(onClick = vm::exitAdminMode, modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = vm::exitAdminMode,
+                            enabled = !state.locked,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
                             Text("Turn off administrator mode")
+                        }
+                        // The phone is one of only two places the screen can be
+                        // unlocked, so this button is never hidden or disabled
+                        // while the lock is on.
+                        if (state.locked) {
+                            Button(
+                                onClick = vm::unlockDevice,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("Unlock screen")
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = vm::lockDevice,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("Lock screen")
+                            }
                         }
                     } else {
                         OutlinedButton(onClick = vm::enterAdminMode, modifier = Modifier.fillMaxWidth()) {

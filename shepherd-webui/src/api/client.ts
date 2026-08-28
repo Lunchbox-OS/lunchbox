@@ -104,6 +104,8 @@ export const getHealth = () => call("health", {});
 // `getServiceState`, declared with the other whole-snapshot readers below.
 export const enterAdminMode = () => call("enter_admin_mode", {});
 export const exitAdminMode = () => call("exit_admin_mode", {});
+export const lockDevice = () => call("lock_device", {});
+export const unlockDevice = () => call("unlock_device", {});
 
 // Entries
 export const listEntries = (at?: Date) =>

@@ -1093,6 +1093,14 @@ pub struct ServiceStateSnapshot {
     /// safe reading.
     #[serde(default)]
     pub admin_mode: bool,
+    /// Whether the screen is locked (issue #154).
+    ///
+    /// Only ever set inside administrator mode: it is what makes walking away
+    /// from a half-configured device safe, and it is deliberately not something
+    /// a child's session can enter. Clearing it is a management RPC — there is
+    /// no local affordance, which is the entire point.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// Role for authorization

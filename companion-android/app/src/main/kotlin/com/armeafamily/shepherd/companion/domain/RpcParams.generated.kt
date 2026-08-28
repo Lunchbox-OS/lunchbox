@@ -259,6 +259,12 @@ object RpcParams {
     /** Params for `admin_idle_timeout`, which takes none. */
     fun adminIdleTimeout(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `lock_device`, which takes none. */
+    fun lockDevice(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `unlock_device`, which takes none. */
+    fun unlockDevice(): JsonObject = JsonObject(emptyMap())
+
     /** Params for `list_desktop_apps`, which takes none. */
     fun listDesktopApps(): JsonObject = JsonObject(emptyMap())
 

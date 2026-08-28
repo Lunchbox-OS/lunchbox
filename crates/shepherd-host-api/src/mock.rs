@@ -1,7 +1,7 @@
 //! Mock host adapter for testing
 
 use async_trait::async_trait;
-use shepherd_api::EntryKind;
+use shepherd_api::{EntryKind, WindowInfo};
 use shepherd_util::SessionId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +30,15 @@ pub struct MockHost {
     sessions: Arc<Mutex<HashMap<u64, MockSession>>>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
+
+    /// Whether `set_locked` was last told to cover the screen. The engine
+    /// clearing its own flag is not enough — if the host is not also told, the
+    /// compositor stays locked while every client reports unlocked.
+    pub locked: Arc<Mutex<bool>>,
+
+    /// What `list_windows` reports. Empty by default, which is the "nothing on
+    /// screen" case; `set_windows` models a caregiver's work still being up.
+    pub windows: Arc<Mutex<Vec<WindowInfo>>>,
 
     /// Every argv handed to `launch_unsupervised`, in order. Lets a test
     /// assert that administrator mode's gate stops a launch from reaching the
@@ -76,6 +85,8 @@ impl MockHost {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
+            locked: Arc::new(Mutex::new(false)),
+            windows: Arc::new(Mutex::new(Vec::new())),
             unsupervised_launches: Arc::new(Mutex::new(Vec::new())),
             fail_spawn: Arc::new(Mutex::new(false)),
             fail_stop: Arc::new(Mutex::new(false)),
@@ -85,6 +96,11 @@ impl MockHost {
             stop_exit_after: Arc::new(Mutex::new(None)),
             screen_power_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Set what the compositor is reported to be showing.
+    pub fn set_windows(&self, windows: Vec<WindowInfo>) {
+        *self.windows.lock().unwrap() = windows;
     }
 
     /// Model an activity that ignores every signal: `stop` waits `blocks_for`,
@@ -195,6 +211,15 @@ impl HostAdapter for MockHost {
         }
 
         Ok(handle)
+    }
+
+    async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
+        Ok(self.windows.lock().unwrap().clone())
+    }
+
+    async fn set_locked(&self, locked: bool) -> HostResult<()> {
+        *self.locked.lock().unwrap() = locked;
+        Ok(())
     }
 
     async fn launch_unsupervised(&self, argv: &[String]) -> HostResult<()> {

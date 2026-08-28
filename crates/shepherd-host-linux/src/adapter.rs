@@ -375,6 +375,12 @@ pub struct LinuxHost {
     /// would fill the log with the one false positive the orphan work exists to
     /// avoid.
     admin_mode: Arc<AtomicBool>,
+    /// The running `shepherd-lock`, when the screen is locked (issue #154).
+    ///
+    /// Held so it can be asked to unlock. It must be *asked* — a SIGKILL leaves
+    /// the compositor holding an abandoned lock with no client to release it,
+    /// which shows as a blank screen until the session restarts.
+    lock_process: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
 }
 
 /// What the reconciliation sweep needs to decide whether a window on screen is
@@ -501,6 +507,7 @@ impl LinuxHost {
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
             steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
             admin_mode: Arc::new(AtomicBool::new(false)),
+            lock_process: Arc::new(tokio::sync::Mutex::new(None)),
             escaped: Arc::new(Mutex::new(HashMap::new())),
             diagnostics: Arc::new(Mutex::new(None)),
             window_nudge_tx: nudge_tx,
@@ -2618,6 +2625,75 @@ impl HostAdapter for LinuxHost {
 
     async fn act_on_window(&self, window_id: u64, action: WindowAction) -> HostResult<()> {
         crate::sway::act_on_window(window_id, action).await
+    }
+
+    async fn set_locked(&self, locked: bool) -> HostResult<()> {
+        let mut slot = self.lock_process.lock().await;
+        match (locked, slot.as_mut()) {
+            // Already in the requested state.
+            (true, Some(_)) | (false, None) => Ok(()),
+
+            (true, None) => {
+                // Beside the running binary when there is one, which is what
+                // makes a dev build use its own lock client. The fallback goes
+                // through `helpers` rather than `$PATH` (issue #144): a bare
+                // name here is one an activity could satisfy by dropping its
+                // own `shepherd-lock` on a PATH the kiosk user chooses — and
+                // this particular binary is the thing standing between a child
+                // and a locked screen.
+                let exe = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("shepherd-lock")))
+                    .filter(|p| p.exists())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "shepherd-lock".into());
+                // The resolved path, not the name, because the failure worth
+                // naming is "it is not installed" and the two look identical
+                // otherwise: a device that never shipped `shepherd-lock` and one
+                // whose copy is unreadable both answer ENOENT, and only the path
+                // says which directory was actually looked in.
+                let resolved = crate::helpers::resolve(&exe);
+
+                let child = crate::helpers::tokio_command(&exe)
+                    .envs(crate::process::build_inherited_env(&HashMap::new()))
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| {
+                        HostError::Internal(format!(
+                            "failed to start the screen lock at {}: {e}",
+                            resolved.display()
+                        ))
+                    })?;
+                info!(pid = child.id(), "Screen lock started");
+                *slot = Some(child);
+                Ok(())
+            }
+
+            (false, Some(child)) => {
+                // SIGTERM, never SIGKILL: `shepherd-lock` handles it by
+                // releasing the lock through the protocol. Killing it outright
+                // would leave the compositor showing an abandoned lock that
+                // nothing can clear.
+                if let Some(pid) = child.id() {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGTERM,
+                    );
+                }
+                // Reap it, so the unlock is complete before this returns and a
+                // relock cannot race the old process's teardown.
+                match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                    Ok(Ok(status)) => info!(?status, "Screen lock released"),
+                    Ok(Err(e)) => warn!(error = %e, "Could not wait on the screen lock"),
+                    Err(_) => warn!(
+                        "The screen lock did not exit within 5s; leaving it rather than \
+                         killing it, since a killed lock client cannot be unlocked"
+                    ),
+                }
+                *slot = None;
+                Ok(())
+            }
+        }
     }
 
     async fn launch_unsupervised(&self, argv: &[String]) -> HostResult<()> {

@@ -175,6 +175,12 @@ impl SharedState {
                 // EntryAvailabilityChanged / StateChanged; the raw check
                 // status is HUD-only.
             }
+            EventPayload::LockChanged { locked } => {
+                // Nothing for the launcher to draw: a session lock covers every
+                // surface, so whatever it is showing is already hidden by the
+                // compositor. Logged because it explains a gap in the journal.
+                tracing::info!(locked, "Screen lock changed");
+            }
             EventPayload::AdminModeChanged { active } => {
                 // The tiles are driven by the snapshot that follows this event:
                 // every entry carries `ReasonCode::AdminMode` while the mode is

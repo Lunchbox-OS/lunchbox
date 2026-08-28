@@ -622,6 +622,20 @@
       }
     },
     {
+      "name": "lock_device",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "unlock_device",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "list_desktop_apps",
       "params": [],
       "result": {

@@ -280,6 +280,14 @@ impl ManagementService for MockSvc {
         Ok(false)
     }
 
+    async fn lock_device(&self) -> ManagementResult<()> {
+        Ok(())
+    }
+
+    async fn unlock_device(&self) -> ManagementResult<()> {
+        Ok(())
+    }
+
     async fn list_desktop_apps(&self) -> ManagementResult<Vec<shepherd_api::DesktopApp>> {
         Ok(Vec::new())
     }

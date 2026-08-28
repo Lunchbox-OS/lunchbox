@@ -350,6 +350,19 @@ pub trait HostAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Lock or unlock the screen (issue #154).
+    ///
+    /// On Linux this runs `shepherd-lock`, an `ext-session-lock-v1` client, and
+    /// unlocks it with SIGTERM. The protocol is what makes the lock worth
+    /// having: if the client dies the compositor keeps the session locked
+    /// rather than revealing the desktop, so the failure mode is "stuck
+    /// locked", never "silently unlocked".
+    ///
+    /// Idempotent in both directions.
+    async fn set_locked(&self, _locked: bool) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
     /// Start a program outside any session, for administrator mode's app
     /// picker (issue #154).
     ///

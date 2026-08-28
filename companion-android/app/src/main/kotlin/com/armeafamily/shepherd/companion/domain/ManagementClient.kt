@@ -235,6 +235,20 @@ class ManagementClient(private val connection: ShepherdConnection) {
         call("exit_admin_mode", RpcParams.exitAdminMode())
     }
 
+    /** Cover the screen while leaving everything running (issue #154). */
+    suspend fun lockDevice() {
+        call("lock_device", RpcParams.lockDevice())
+    }
+
+    /**
+     * Uncover it. This and the web app are the only places it can be done: the
+     * device itself offers no way back in, which is what makes locking it and
+     * walking away safe.
+     */
+    suspend fun unlockDevice() {
+        call("unlock_device", RpcParams.unlockDevice())
+    }
+
     suspend fun listWindows(): List<WindowInfo> =
         decode(call("list_windows", RpcParams.listWindows()))
 
