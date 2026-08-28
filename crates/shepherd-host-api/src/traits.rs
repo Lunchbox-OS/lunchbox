@@ -350,6 +350,24 @@ pub trait HostAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Start a program outside any session, for administrator mode's app
+    /// picker (issue #154).
+    ///
+    /// Deliberately unsupervised, which is the whole point of the mode: no
+    /// session, no deadline, no per-entry firewall, no usage billed. The
+    /// caregiver is the supervision.
+    ///
+    /// `argv` is already tokenized and field-code-free — hosts must not run it
+    /// through a shell, so that a `.desktop` file whose `Exec` contains shell
+    /// metacharacters cannot mean something other than what its arguments say.
+    ///
+    /// Nothing is returned to identify the process: it is not tracked, and the
+    /// window it maps is how the caregiver finds it. `Ok` means the host
+    /// accepted the request, not that the program is still running.
+    async fn launch_unsupervised(&self, _argv: &[String]) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
     /// Optional: check if the host adapter is healthy
     fn is_healthy(&self) -> bool {
         true

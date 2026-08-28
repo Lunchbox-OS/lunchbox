@@ -280,6 +280,14 @@ impl ManagementService for MockSvc {
         Ok(false)
     }
 
+    async fn list_desktop_apps(&self) -> ManagementResult<Vec<shepherd_api::DesktopApp>> {
+        Ok(Vec::new())
+    }
+
+    async fn launch_desktop_app(&self, _id: String) -> ManagementResult<()> {
+        Ok(())
+    }
+
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {
         Ok(vec![])
     }

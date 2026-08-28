@@ -8,6 +8,7 @@ import type {
   AudioOutputRecord,
   BrightnessInfo,
   DailyOverride,
+  DesktopApp,
   DiagnosticSet,
   DisplayMode,
   DisplayState,
@@ -95,6 +96,8 @@ export type RpcMethod =
   | "enter_admin_mode"
   | "exit_admin_mode"
   | "admin_idle_timeout"
+  | "list_desktop_apps"
+  | "launch_desktop_app"
   | "list_windows"
   | "act_on_window";
 
@@ -240,6 +243,10 @@ export interface RpcParamsMap {
   "enter_admin_mode": Record<string, never>;
   "exit_admin_mode": Record<string, never>;
   "admin_idle_timeout": Record<string, never>;
+  "list_desktop_apps": Record<string, never>;
+  "launch_desktop_app": {
+    id: string;
+  };
   "list_windows": Record<string, never>;
   "act_on_window": {
     id: number;
@@ -311,6 +318,8 @@ export interface RpcResultMap {
   "enter_admin_mode": null;
   "exit_admin_mode": null;
   "admin_idle_timeout": boolean;
+  "list_desktop_apps": DesktopApp[];
+  "launch_desktop_app": null;
   "list_windows": WindowInfo[];
   "act_on_window": null;
 }

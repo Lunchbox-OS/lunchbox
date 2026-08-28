@@ -20,8 +20,8 @@ use shepherd_host_api::{
     NoOpDisplayController, NoOpVolumeController,
 };
 use shepherd_management::{
-    AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementService,
-    WebListenerHandle,
+    AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementError,
+    ManagementService, WebListenerHandle,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
@@ -737,4 +737,69 @@ async fn stale_exit_from_previous_activity_does_not_end_the_next_session() {
         "bitwig's session must survive RetroArch's reap"
     );
     let _ = drained(&mut h.events);
+}
+
+// ---------------------------------------------------------------------------
+// Administrator mode's app picker (issue #154)
+// ---------------------------------------------------------------------------
+
+/// The gate that keeps `launch_desktop_app` from being a permanently open "run
+/// anything" RPC on a device whose whole purpose is that only configured
+/// activities run.
+///
+/// Asserted against the host, not just the return value: a refusal that still
+/// spawned would be the worst possible outcome, and the error alone cannot
+/// tell the two apart.
+#[tokio::test]
+async fn the_picker_cannot_launch_anything_outside_administrator_mode() {
+    let h = harness();
+
+    let err = h
+        .svc
+        .launch_desktop_app("org.example.Anything.desktop".into())
+        .await
+        .expect_err("launching outside administrator mode must be refused");
+    assert!(
+        matches!(err, ManagementError::Conflict(_)),
+        "refused because of the mode, not because the app is missing: {err:?}"
+    );
+    assert!(
+        h.host.unsupervised_launches.lock().unwrap().is_empty(),
+        "the refusal must stop the spawn, not merely report one"
+    );
+}
+
+/// The catalogue is readable whenever: a picker wants to draw the list before
+/// the caregiver commits to entering the mode. Only *starting* is gated.
+#[tokio::test]
+async fn the_catalogue_is_readable_outside_the_mode() {
+    let h = harness();
+    // The device this runs on decides what is installed, so the assertion is
+    // that it answers at all rather than what is in it.
+    h.svc
+        .list_desktop_apps()
+        .await
+        .expect("listing must not depend on administrator mode");
+}
+
+/// Inside the mode the gate is open, and an id that matches nothing is a
+/// not-found rather than a silent success.
+#[tokio::test]
+async fn inside_the_mode_an_unknown_application_is_reported_as_missing() {
+    let h = harness();
+    h.svc
+        .enter_admin_mode()
+        .await
+        .expect("nothing is running in a fresh harness");
+
+    let err = h
+        .svc
+        .launch_desktop_app("definitely.not.installed.desktop".into())
+        .await
+        .expect_err("an id matching no desktop file cannot launch");
+    assert!(
+        matches!(err, ManagementError::NotFound(_)),
+        "past the mode gate, so the failure is about the id: {err:?}"
+    );
+    assert!(h.host.unsupervised_launches.lock().unwrap().is_empty());
 }

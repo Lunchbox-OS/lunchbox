@@ -31,6 +31,11 @@ pub struct MockHost {
     event_tx: mpsc::UnboundedSender<HostEvent>,
     event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<HostEvent>>>>,
 
+    /// Every argv handed to `launch_unsupervised`, in order. Lets a test
+    /// assert that administrator mode's gate stops a launch from reaching the
+    /// host at all, rather than only that the RPC returned an error.
+    pub unsupervised_launches: Arc<Mutex<Vec<Vec<String>>>>,
+
     /// Configure spawn to fail
     pub fail_spawn: Arc<Mutex<bool>>,
 
@@ -71,6 +76,7 @@ impl MockHost {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_tx: tx,
             event_rx: Arc::new(Mutex::new(Some(rx))),
+            unsupervised_launches: Arc::new(Mutex::new(Vec::new())),
             fail_spawn: Arc::new(Mutex::new(false)),
             fail_stop: Arc::new(Mutex::new(false)),
             auto_exit_delay: Arc::new(Mutex::new(None)),
@@ -189,6 +195,14 @@ impl HostAdapter for MockHost {
         }
 
         Ok(handle)
+    }
+
+    async fn launch_unsupervised(&self, argv: &[String]) -> HostResult<()> {
+        self.unsupervised_launches
+            .lock()
+            .unwrap()
+            .push(argv.to_vec());
+        Ok(())
     }
 
     async fn stop(&self, handle: &HostSessionHandle, _mode: StopMode) -> HostResult<()> {

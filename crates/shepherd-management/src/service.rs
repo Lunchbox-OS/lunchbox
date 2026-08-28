@@ -4,12 +4,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, Diagnostic,
-    DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject,
-    DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
-    HudOrientation, NetworkStatusView, ServiceStateSnapshot, SessionEndReason, SessionInfo,
-    StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
-    WindowOwner,
+    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, DesktopApp,
+    Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink,
+    DiagnosticSubject, DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload,
+    GroupView, HealthStatus, HudOrientation, NetworkStatusView, ServiceStateSnapshot,
+    SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo,
+    VolumeRestrictions, WindowAction, WindowInfo, WindowOwner,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, parse_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, CoreEvent, LaunchDecision, TokenAdjustError};
@@ -369,6 +369,21 @@ pub trait ManagementService: Send + Sync {
     /// Returns whether it actually left. Idle notification comes from
     /// `swayidle`, which is already the device's idle authority.
     async fn admin_idle_timeout(&self) -> ManagementResult<bool>;
+
+    /// Every application the system's `.desktop` files offer, as a normal
+    /// desktop would list them (issue #154).
+    ///
+    /// Readable outside administrator mode — it is a catalogue, and a picker
+    /// wants it drawn before the mode is entered — but nothing in it can be
+    /// started until the mode is on.
+    async fn list_desktop_apps(&self) -> ManagementResult<Vec<DesktopApp>>;
+
+    /// Start one of them, by desktop file ID.
+    ///
+    /// **Refused unless administrator mode is on.** Otherwise this would be a
+    /// permanently open "run anything" RPC on a device whose entire purpose is
+    /// that only configured activities run.
+    async fn launch_desktop_app(&self, id: String) -> ManagementResult<()>;
 
     // Debug windows
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>>;
@@ -1663,6 +1678,59 @@ impl ManagementService for DefaultManagementService {
             // Raced with a deliberate exit; the mode is off either way.
             None => Ok(false),
         }
+    }
+
+    async fn list_desktop_apps(&self) -> ManagementResult<Vec<DesktopApp>> {
+        // Reads a few dozen small files across the XDG search path. Off the
+        // async worker so a slow or stale network mount cannot stall the
+        // runtime, which is also where every other RPC is served from.
+        tokio::task::spawn_blocking(shepherd_config::desktop::list_desktop_apps)
+            .await
+            .map_err(|e| ManagementError::Internal(format!("desktop scan failed: {e}")))
+    }
+
+    async fn launch_desktop_app(&self, id: String) -> ManagementResult<()> {
+        if !self.engine.lock().await.admin_mode() {
+            return Err(ManagementError::Conflict(
+                "Administrator mode is not on; turn it on before launching applications".into(),
+            ));
+        }
+
+        let wanted = id.clone();
+        let entry = tokio::task::spawn_blocking(move || {
+            shepherd_config::desktop::find_desktop_app(&wanted)
+        })
+        .await
+        .map_err(|e| ManagementError::Internal(format!("desktop lookup failed: {e}")))?
+        .ok_or_else(|| ManagementError::NotFound(format!("No application with id '{id}'")))?;
+
+        let argv = if entry.app.terminal {
+            shepherd_config::desktop::terminal_command(&entry.argv).ok_or_else(|| {
+                ManagementError::Unprocessable(format!(
+                    "'{}' needs a terminal emulator and none is installed",
+                    entry.app.name
+                ))
+            })?
+        } else {
+            entry.argv.clone()
+        };
+
+        // Audited before the spawn, and deliberately even if the spawn then
+        // fails: an unsupervised launch leaves no other trace, so "it was
+        // asked for" is worth more than "it definitely started".
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::AdminAppLaunched {
+                id: entry.app.id.clone(),
+                name: entry.app.name.clone(),
+            }));
+
+        self.host
+            .launch_unsupervised(&argv)
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        info!(id = %entry.app.id, name = %entry.app.name, "Launched from the administrator picker");
+        Ok(())
     }
 
     async fn act_on_window(&self, id: u64, action: WindowAction) -> ManagementResult<()> {

@@ -622,6 +622,26 @@
       }
     },
     {
+      "name": "list_desktop_apps",
+      "params": [],
+      "result": {
+        "type": "Vec<DesktopApp>"
+      }
+    },
+    {
+      "name": "launch_desktop_app",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "list_windows",
       "params": [],
       "result": {

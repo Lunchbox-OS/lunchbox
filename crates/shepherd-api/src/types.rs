@@ -1489,6 +1489,37 @@ pub struct UsageStat {
     pub duration_seconds: u64,
 }
 
+/// One launchable application from the system's `.desktop` files, as
+/// administrator mode's app picker sees it (issue #154).
+///
+/// Enumerated by `shepherd_config::desktop`, which does the Desktop Entry
+/// parsing; this is only the shape that crosses the wire. Deliberately carries
+/// no `Exec`: what a client may do is ask for an id to be launched, not hand
+/// the daemon a command line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DesktopApp {
+    /// The desktop file ID — the path relative to its `applications`
+    /// directory with `/` replaced by `-`, e.g. `org.kde.krita.desktop`. The
+    /// spec's own identifier, and what `launch_desktop_app` takes.
+    pub id: String,
+    /// Display name, localized to the device's locale where the file offers a
+    /// translation.
+    pub name: String,
+    /// One-line description (`Comment`), localized the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Icon theme name or absolute path, straight from `Icon`. Resolved by
+    /// whichever toolkit draws it, exactly as for a configured entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Whether the application expects a terminal emulator. Shown so a picker
+    /// can mark it: on a device with no terminal installed, launching one of
+    /// these fails, and saying so up front beats a launch that appears to do
+    /// nothing.
+    pub terminal: bool,
+}
+
 /// An action that can be performed on a window through the management API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

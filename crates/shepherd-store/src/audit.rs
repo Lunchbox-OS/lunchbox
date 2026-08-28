@@ -31,6 +31,16 @@ pub enum AuditEventType {
     /// caregiver leaving deliberately from the idle timeout doing it for them.
     AdminModeExited { timed_out: bool },
 
+    /// A `.desktop` application was launched from administrator mode's picker
+    /// (issue #154).
+    ///
+    /// These launches are unsupervised by design — no session, no time limit,
+    /// no usage recorded — so this is the only record that they happened at
+    /// all. `name` is stored alongside the id because a `.desktop` file can be
+    /// uninstalled, and "org.kde.krita.desktop" is a poor answer six months
+    /// later to "what was run on this device?".
+    AdminAppLaunched { id: String, name: String },
+
     /// Session started
     SessionStarted {
         session_id: SessionId,

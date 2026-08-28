@@ -141,7 +141,7 @@ fn find_process_icon(command: &str) -> Option<String> {
 }
 
 /// XDG application directories in priority order.
-fn xdg_application_dirs() -> Vec<PathBuf> {
+pub(crate) fn xdg_application_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     // $XDG_DATA_HOME/applications (default: ~/.local/share/applications)

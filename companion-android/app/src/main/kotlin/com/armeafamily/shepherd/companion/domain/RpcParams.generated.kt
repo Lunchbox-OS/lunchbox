@@ -259,6 +259,14 @@ object RpcParams {
     /** Params for `admin_idle_timeout`, which takes none. */
     fun adminIdleTimeout(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `list_desktop_apps`, which takes none. */
+    fun listDesktopApps(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `launch_desktop_app`. */
+    fun launchDesktopApp(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
     /** Params for `list_windows`, which takes none. */
     fun listWindows(): JsonObject = JsonObject(emptyMap())
 

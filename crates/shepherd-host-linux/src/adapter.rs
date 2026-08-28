@@ -2620,6 +2620,54 @@ impl HostAdapter for LinuxHost {
         crate::sway::act_on_window(window_id, action).await
     }
 
+    async fn launch_unsupervised(&self, argv: &[String]) -> HostResult<()> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(HostError::SpawnFailed("empty command".into()));
+        };
+
+        // No shell. `Command` passes the arguments straight to `execvp`, so a
+        // `.desktop` file whose Exec contains `;` or `$(...)` gets those as
+        // literal argument text rather than as syntax.
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args)
+            .envs(crate::process::build_inherited_env(&HashMap::new()))
+            .stdin(std::process::Stdio::null())
+            // The caregiver watches the window, not a log file, and an app that
+            // writes steadily to stdout would otherwise fill a pipe nobody
+            // drains and block.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        // Its own session, like every supervised spawn: without this the
+        // program shares shepherdd's process group and dies with it, which
+        // would kill a package install the moment the daemon restarted.
+        //
+        // SAFETY: async-signal-safe, in the pre-exec context.
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setsid().map_err(|e| std::io::Error::other(e.to_string()))?;
+                Ok(())
+            });
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| HostError::SpawnFailed(format!("Failed to spawn {program}: {e}")))?;
+        let pid = child.id();
+        info!(pid, program = %program, "Launched an unsupervised program (admin mode)");
+
+        // Nothing supervises this, but somebody has to reap it or every launch
+        // leaves a zombie for the life of the daemon. Waiting is all this task
+        // does: the exit status is deliberately not acted on.
+        tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) => debug!(pid, ?status, "Unsupervised program exited"),
+                Err(e) => debug!(pid, error = %e, "Could not wait on unsupervised program"),
+            }
+        });
+        Ok(())
+    }
+
     async fn set_admin_mode(&self, active: bool) -> HostResult<()> {
         // Set the flag before touching the compositor, so that a sweep landing
         // between the two does not report the caregiver's first window. It is

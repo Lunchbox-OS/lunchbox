@@ -391,7 +391,22 @@ Each of these is independently shippable and useful.
   lock section argues for; the taskbar in phase 6 replaces it.
 
 4. **The `.desktop` enumerator** + `list_desktop_apps` / `launch_desktop_app`.
-   Testable entirely off-device against fixture directories.
+   *(Done.)* `shepherd_config::desktop`, hand-rolled as predicted — ~300 lines
+   sharing `xdg_application_dirs()` with `icon.rs`, no new dependency. Two
+   things worth carrying forward:
+
+   * **Shadowing has to happen before the visibility check, not after.** A user
+     file with `Hidden=true` is the spec's documented way to delete a system
+     entry from your own menu, so an ID seen in an earlier directory must
+     suppress the later one *even when the earlier file is itself hidden*.
+     Filtering first and de-duplicating second silently resurrects entries the
+     user removed.
+   * **Launching needed a spawn path that creates no session.**
+     `HostAdapter::launch_unsupervised(argv)` — `setsid` so the program does not
+     die with shepherdd's process group (a package install must survive a daemon
+     restart), a reaper task so each launch does not leave a zombie, and no
+     shell, so `Exec` metacharacters stay literal argument text. `argv` arrives
+     already tokenized and field-code-free from the parser.
 5. **The lock.** `shepherd-lock` on `ext-session-lock-v1`, `lock_device` /
    `unlock_device` (unlock never exposed as a local affordance), the lock
    button, and the timeout's lock branch. Admin-mode-only per decision 11, so
@@ -589,7 +604,22 @@ Each of these is independently shippable and useful.
   lock section argues for; the taskbar in phase 6 replaces it.
 
 4. **The `.desktop` enumerator** + `list_desktop_apps` / `launch_desktop_app`.
-   Testable entirely off-device against fixture directories.
+   *(Done.)* `shepherd_config::desktop`, hand-rolled as predicted — ~300 lines
+   sharing `xdg_application_dirs()` with `icon.rs`, no new dependency. Two
+   things worth carrying forward:
+
+   * **Shadowing has to happen before the visibility check, not after.** A user
+     file with `Hidden=true` is the spec's documented way to delete a system
+     entry from your own menu, so an ID seen in an earlier directory must
+     suppress the later one *even when the earlier file is itself hidden*.
+     Filtering first and de-duplicating second silently resurrects entries the
+     user removed.
+   * **Launching needed a spawn path that creates no session.**
+     `HostAdapter::launch_unsupervised(argv)` — `setsid` so the program does not
+     die with shepherdd's process group (a package install must survive a daemon
+     restart), a reaper task so each launch does not leave a zombie, and no
+     shell, so `Exec` metacharacters stay literal argument text. `argv` arrives
+     already tokenized and field-code-free from the parser.
 5. **The lock.** `shepherd-lock` on `ext-session-lock-v1`, `lock_device` /
    `unlock_device` (unlock never exposed as a local affordance), the lock
    button, and the timeout's lock branch. Admin-mode-only per decision 11, so
