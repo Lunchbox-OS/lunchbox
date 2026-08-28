@@ -2,8 +2,11 @@
 
 use gtk4::glib;
 use gtk4::prelude::*;
+use shepherd_util::EntryId;
 use shepherd_util::gamepad_nav::{NavDir, StickNav};
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -16,6 +19,8 @@ use crate::state::{LauncherState, SharedState};
 
 /// CSS styling for the launcher
 const LAUNCHER_CSS: &str = r#"
+.admin-picker { padding: 32px 48px; }
+.admin-search { font-size: 20px; padding: 10px 14px; }
 window {
     background-color: #1a1a2e;
 }
@@ -162,7 +167,21 @@ impl LauncherApp {
         stack.add_named(&error_view.0, Some("error"));
         stack.add_named(&session_view.0, Some("session"));
         stack.add_named(&disconnected_view.0, Some("disconnected"));
-        stack.add_named(&Self::create_admin_mode_view(), Some("admin"));
+        // Administrator mode's app picker (issue #154): the same grid the child
+        // sees, over the system's `.desktop` files, with a search bar. Its own
+        // grid instance rather than the child's, so the two launch paths cannot
+        // be confused for one another — this one starts arbitrary programs.
+        let admin_grid = LauncherGrid::new();
+        let admin_search = gtk4::SearchEntry::builder()
+            .placeholder_text("Search applications")
+            .hexpand(true)
+            .build();
+        admin_search.add_css_class("admin-search");
+        let admin_view = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
+        admin_view.add_css_class("admin-picker");
+        admin_view.append(&admin_search);
+        admin_view.append(&admin_grid);
+        stack.add_named(&admin_view, Some("admin"));
 
         window.set_child(Some(&stack));
 
@@ -179,6 +198,13 @@ impl LauncherApp {
         // Create command client for sending commands
         let command_client = Arc::new(CommandClient::new(&socket_path));
         Self::setup_keyboard_input(&window, &grid);
+        Self::setup_admin_picker(
+            &admin_grid,
+            &admin_search,
+            command_client.clone(),
+            runtime.clone(),
+            state.clone(),
+        );
         Self::setup_gamepad_input(
             &window,
             &grid,
@@ -426,6 +452,123 @@ impl LauncherApp {
         window.present();
     }
 
+    /// Populate administrator mode's picker and keep the search working.
+    ///
+    /// The catalogue is fetched once per entry into the mode rather than
+    /// polled: `.desktop` files change when something is installed, which is
+    /// itself something the caregiver does from here, and re-reading fifty
+    /// files on a timer to catch that is the wrong trade. Leaving and
+    /// re-entering the mode refreshes it.
+    ///
+    /// GTK widgets are not `Send`, so nothing here touches the grid from inside
+    /// a tokio task: the fetch drops its result in a mutex and the GTK-side
+    /// tick picks it up, which is the same shape the rest of this file uses for
+    /// crossing that boundary.
+    fn setup_admin_picker(
+        grid: &LauncherGrid,
+        search: &gtk4::SearchEntry,
+        client: Arc<CommandClient>,
+        runtime: Arc<Runtime>,
+        state: SharedState,
+    ) {
+        /// The catalogue, once fetched. `None` while a fetch is outstanding.
+        type Catalogue = Arc<std::sync::Mutex<Option<Vec<shepherd_api::DesktopApp>>>>;
+        let fetched: Catalogue = Arc::new(std::sync::Mutex::new(None));
+        // The GTK-side copy, so typing filters without a round trip.
+        let apps: Rc<RefCell<Vec<shepherd_api::DesktopApp>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let client_for_launch = client.clone();
+        let runtime_for_launch = runtime.clone();
+        let state_for_launch = state.clone();
+        grid.connect_launch(move |entry_id| {
+            // This grid's "entry id" is a desktop file ID, which is what
+            // `launch_desktop_app` takes. Guarded on the state as well as the
+            // daemon's own gate, so a stale click cannot start something after
+            // the mode has ended.
+            if !matches!(state_for_launch.get(), LauncherState::AdminMode) {
+                return;
+            }
+            let id = entry_id.to_string();
+            let client = client_for_launch.clone();
+            runtime_for_launch.spawn(async move {
+                match client.launch_desktop_app(&id).await {
+                    Ok(()) => info!(id = %id, "Launched from the administrator picker"),
+                    Err(e) => error!(id = %id, error = %e, "Launch from the picker failed"),
+                }
+            });
+        });
+
+        let grid_for_search = grid.clone();
+        let apps_for_search = apps.clone();
+        search.connect_search_changed(move |entry| {
+            let needle = entry.text().to_lowercase();
+            let filtered: Vec<_> = apps_for_search
+                .borrow()
+                .iter()
+                .filter(|a| {
+                    needle.is_empty()
+                        || a.name.to_lowercase().contains(&needle)
+                        // The id catches what a display name would not — typing
+                        // "kde" to find "Krita", whose id is org.kde.krita.
+                        || a.id.to_lowercase().contains(&needle)
+                })
+                .map(Self::desktop_app_as_entry)
+                .collect();
+            grid_for_search.set_entries(filtered);
+            grid_for_search.select_first();
+        });
+
+        let grid_for_tick = grid.clone();
+        let search_for_tick = search.clone();
+        let mut was_admin = false;
+        glib::timeout_add_local(Duration::from_millis(300), move || {
+            let is_admin = matches!(state.get(), LauncherState::AdminMode);
+            if is_admin && !was_admin {
+                search_for_tick.set_text("");
+                grid_for_tick.set_entries(Vec::new());
+                let client = client.clone();
+                let slot = fetched.clone();
+                runtime.spawn(async move {
+                    match client.list_desktop_apps().await {
+                        Ok(list) => *slot.lock().unwrap() = Some(list),
+                        Err(e) => error!(error = %e, "Could not list applications for the picker"),
+                    }
+                });
+            }
+            was_admin = is_admin;
+
+            // Apply a completed fetch on the GTK thread.
+            if let Some(list) = fetched.lock().unwrap().take() {
+                let views: Vec<_> = list.iter().map(Self::desktop_app_as_entry).collect();
+                *apps.borrow_mut() = list;
+                grid_for_tick.set_entries(views);
+                grid_for_tick.select_first();
+                search_for_tick.grab_focus();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Present a `.desktop` application as a grid tile.
+    ///
+    /// The tile's "entry id" is the desktop file ID, which is what the picker's
+    /// launch path takes. Everything policy-shaped is inert: these are not
+    /// activities, have no limits, and are always launchable while the mode is
+    /// on — the mode is the gate.
+    fn desktop_app_as_entry(app: &shepherd_api::DesktopApp) -> shepherd_api::EntryView {
+        shepherd_api::EntryView {
+            entry_id: EntryId::new(&app.id),
+            label: app.name.clone(),
+            icon_ref: app.icon.clone(),
+            kind_tag: shepherd_api::EntryKindTag::Process,
+            enabled: true,
+            group: None,
+            reasons: Vec::new(),
+            tokens: None,
+            max_run_if_started_now: None,
+        }
+    }
+
     fn setup_keyboard_input(window: &gtk4::ApplicationWindow, grid: &LauncherGrid) {
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -640,28 +783,6 @@ impl LauncherApp {
         container.append(&hint);
 
         (container, label, hint)
-    }
-
-    /// What the child sees while a caregiver is setting the device up.
-    ///
-    /// Deliberately plain and static: no spinner, because nothing is loading
-    /// and a spinner would suggest waiting will fix it. It says who can end it,
-    /// so a child who finds the device like this knows it is not broken.
-    fn create_admin_mode_view() -> gtk4::Box {
-        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 24);
-        container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::Center);
-        container.add_css_class("session-active-box");
-
-        let label = gtk4::Label::new(Some("A grown-up is setting things up"));
-        label.add_css_class("session-label");
-        container.append(&label);
-
-        let hint = gtk4::Label::new(Some("Your activities will be back when they're done"));
-        hint.add_css_class("session-sublabel");
-        container.append(&hint);
-
-        container
     }
 
     fn create_disconnected_view() -> (gtk4::Box, gtk4::Button) {

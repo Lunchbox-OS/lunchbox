@@ -45,6 +45,140 @@ where
     });
 }
 
+/// How many characters of a window's title the taskbar shows.
+///
+/// Long titles are the norm — browsers put the whole page title in them — and
+/// this row shares the bar with the clock, two sliders and four buttons.
+const TASKBAR_LABEL_CHARS: usize = 24;
+
+/// What a window is called in the taskbar.
+///
+/// Same fallback chain the two management clients use (`name` → `app_id` →
+/// `class` → something generic), so a window is called the same thing wherever
+/// a caregiver sees it.
+fn taskbar_label(w: &shepherd_api::WindowInfo) -> String {
+    let title = w
+        .name
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .or(w.app_id.as_deref())
+        .or(w.window_class.as_deref())
+        .unwrap_or("Window");
+    let mut label: String = title.chars().take(TASKBAR_LABEL_CHARS).collect();
+    if title.chars().count() > TASKBAR_LABEL_CHARS {
+        label.push('…');
+    }
+    label
+}
+
+/// Redraw the taskbar's window buttons.
+///
+/// Rebuilt wholesale rather than diffed: there are a handful of buttons, they
+/// change only when a window opens or closes, and the alternative is keeping a
+/// parallel model of the row in sync with the compositor's — which is the kind
+/// of bookkeeping that goes wrong quietly. Skipped entirely when the labels
+/// already match, so the common tick costs one comparison and the focused
+/// window's button does not lose a press mid-click.
+fn rebuild_taskbar(row: &gtk4::Box, windows: &[shepherd_api::WindowInfo]) {
+    let wanted: Vec<(u64, String, bool)> = windows
+        .iter()
+        .map(|w| (w.id, taskbar_label(w), w.focused))
+        .collect();
+
+    let mut existing = Vec::new();
+    let mut child = row.first_child();
+    while let Some(w) = child {
+        child = w.next_sibling();
+        existing.push(w);
+    }
+    let unchanged = existing.len() == wanted.len()
+        && existing
+            .iter()
+            .zip(&wanted)
+            .all(|(widget, (_, label, focused))| {
+                widget.downcast_ref::<gtk4::Button>().is_some_and(|b| {
+                    b.label().is_some_and(|l| l == label.as_str())
+                        && b.has_css_class("taskbar-focused") == *focused
+                })
+            });
+    if unchanged {
+        return;
+    }
+
+    for widget in existing {
+        row.remove(&widget);
+    }
+    for (id, label, focused) in wanted {
+        let button = gtk4::Button::builder()
+            .label(&label)
+            .tooltip_text(&label)
+            .has_frame(false)
+            .build();
+        button.add_css_class("indicator-button");
+        if focused {
+            button.add_css_class("taskbar-focused");
+        }
+        button.connect_clicked(move |_| {
+            spawn_action(
+                default_socket_path(),
+                "focus window",
+                move |mut client| async move {
+                    client
+                        .act_on_window(id, shepherd_api::WindowAction::Focus)
+                        .await
+                },
+            );
+        });
+        row.append(&button);
+    }
+}
+
+/// The launcher's own window, which administrator mode's "Apps" button raises.
+fn shell_window_id(windows: &[shepherd_api::WindowInfo]) -> Option<u64> {
+    windows
+        .iter()
+        .find(|w| w.app_id.as_deref() == Some("org.shepherd.launcher"))
+        .map(|w| w.id)
+}
+
+/// The windows a caregiver opened: everything that is not shepherd's own
+/// furniture, **including the ones stashed on the scratchpad**. What the
+/// taskbar lists.
+///
+/// The scratchpad is this compositor's "minimized", and a taskbar is how a
+/// minimized window comes back — so a stashed window needs a button, and
+/// pressing it works: `WindowAction::Focus` pulls a window off the scratchpad
+/// as well as raising it. It matters more here than it looks. `sway.conf`'s
+/// `for_window [class="^[Ss]team$"] move scratchpad` rules are not part of the
+/// admin binding mode and cannot be — `for_window` is evaluated at map time —
+/// so Steam launched from the picker is stashed the moment it maps. Without a
+/// button for it, "log into Steam", the first thing issue #154 asks for, cannot
+/// be done from the device at all.
+fn admin_windows(windows: &[shepherd_api::WindowInfo]) -> Vec<shepherd_api::WindowInfo> {
+    windows
+        .iter()
+        .filter(|w| w.owner != shepherd_api::WindowOwner::Shepherd)
+        .cloned()
+        .collect()
+}
+
+/// The subset of [`admin_windows`] that is actually on screen. What the "X"
+/// closes one of, and what decides whether it offers the exit instead.
+///
+/// A separate question from what the taskbar lists, and the two must not share
+/// an answer. The preloaded Steam client sits stashed for the life of the
+/// session and the compositor reports it as belonging to nothing shepherd
+/// knows about — `snap run` re-execs, so the pid the host recorded is not the
+/// pid that draws — so counting stashed windows here would mean the "X" never
+/// offered the way out on any device that preloads Steam. Which is every device
+/// that has it configured.
+fn admin_windows_on_screen(windows: &[shepherd_api::WindowInfo]) -> Vec<shepherd_api::WindowInfo> {
+    admin_windows(windows)
+        .into_iter()
+        .filter(|w| !w.in_scratchpad)
+        .collect()
+}
+
 /// Ask shepherdd to end the current session gracefully (the "X" button).
 fn request_stop_current(socket_path: PathBuf) {
     tracing::info!("Requesting end session");
@@ -311,6 +445,16 @@ impl TitleLabel {
             Self::Vertical(label) => label.clone().upcast(),
         }
     }
+
+    /// Show or hide the label. Administrator mode's taskbar wants the space the
+    /// activity name occupies in the kiosk, and "No session" says nothing there
+    /// (issue #154).
+    fn set_visible(&self, visible: bool) {
+        match self {
+            Self::Horizontal(label) => label.set_visible(visible),
+            Self::Vertical(label) => label.set_visible(visible),
+        }
+    }
 }
 
 /// Number of characters of activity name the bar guarantees, and the most it
@@ -428,6 +572,18 @@ impl HudApp {
             std::thread::spawn(move || {
                 if let Err(e) = run_event_loop(socket_clone, state_clone) {
                     tracing::error!("Event loop error: {}", e);
+                }
+            });
+
+            // Poll the window list for administrator mode's taskbar (issue
+            // #154). Its own connection because `run_event_loop` cannot send
+            // RPCs once it has subscribed, and its own thread for the same
+            // reason `spawn_action` uses one.
+            let state_clone = state.clone();
+            let socket_clone = socket_path.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = run_window_poll(socket_clone, state_clone) {
+                    tracing::error!("Window poll error: {}", e);
                 }
             });
 
@@ -692,6 +848,58 @@ fn build_hud_content(
     let time_display = TimeDisplay::new();
     time_display.set_compact(vertical);
     orientation.flow_append(&left_box, &time_display);
+
+    // Administrator mode's taskbar (issue #154). Hidden in the kiosk, where the
+    // whole point is that there is nothing to switch between; shown when a
+    // caregiver is setting the device up, where there is.
+    //
+    // Only the window buttons are rebuilt as windows come and go — the Start
+    // button is permanent, so it keeps its click handler across refreshes.
+    let taskbar_box = gtk4::Box::builder()
+        .orientation(orientation.group())
+        .spacing(6)
+        .visible(false)
+        .build();
+
+    // The Start button raises the launcher, which in administrator mode *is*
+    // the app picker. Nothing new to show or hide: focusing its window brings
+    // the picker in front of whatever the caregiver has open.
+    let start_button = gtk4::Button::builder()
+        .label("Apps")
+        .tooltip_text("Show the application picker")
+        // Frameless like every other control on this bar; the default frame is
+        // a light rounded rect that reads as a blank tile against the HUD.
+        .has_frame(false)
+        .build();
+    start_button.add_css_class("indicator-button");
+    let state_for_start = state.clone();
+    start_button.connect_clicked(move |_| {
+        // In administrator mode the launcher *is* the picker, so "Apps" is
+        // simply "raise the launcher". Reuses `WindowAction::Focus` rather than
+        // inventing an RPC: the taskbar already polls the window list, so the
+        // id is in hand.
+        let Some(id) = shell_window_id(&state_for_start.windows()) else {
+            tracing::warn!("Apps pressed but the launcher's window was not in the list");
+            return;
+        };
+        spawn_action(
+            default_socket_path(),
+            "focus launcher",
+            move |mut client| async move {
+                client
+                    .act_on_window(id, shepherd_api::WindowAction::Focus)
+                    .await
+            },
+        );
+    });
+    taskbar_box.append(&start_button);
+
+    let window_buttons = gtk4::Box::builder()
+        .orientation(orientation.group())
+        .spacing(6)
+        .build();
+    taskbar_box.append(&window_buttons);
+    orientation.flow_append(&left_box, &taskbar_box);
 
     orientation.flow_append(&container, &left_box);
 
@@ -1034,6 +1242,33 @@ fn build_hud_content(
             } else {
                 request_stop_current(socket_path);
             }
+        } else if state_for_action.admin_mode() {
+            // Administrator mode's "X" closes the focused window, and only
+            // becomes "leave the mode" once none are left (the issue's own
+            // design). The gate is deliberately local to this button: the
+            // management clients can always leave, which is what rescues a
+            // window that refuses to close.
+            let windows = admin_windows_on_screen(&state_for_action.windows());
+            match windows
+                .iter()
+                .find(|w| w.focused)
+                .or_else(|| windows.first())
+            {
+                Some(w) => {
+                    let id = w.id;
+                    spawn_action(socket_path, "close window", move |mut client| async move {
+                        client
+                            .act_on_window(id, shepherd_api::WindowAction::Close)
+                            .await
+                    });
+                }
+                None => {
+                    tracing::info!("Leaving administrator mode");
+                    spawn_action(socket_path, "exit_admin_mode", |mut client| async move {
+                        client.exit_admin_mode().await
+                    });
+                }
+            }
         } else {
             tracing::info!("Requesting logout");
             spawn_action(socket_path, "logout", |mut client| async move {
@@ -1232,6 +1467,8 @@ fn build_hud_content(
     let network_icon_clone = network_icon.clone();
     let display_button_clone = display_button.clone();
     let lock_button_clone = lock_button.clone();
+    let taskbar_box_clone = taskbar_box.clone();
+    let window_buttons_clone = window_buttons.clone();
     // Tracks the connector the HUD is currently anchored to, so we only
     // re-anchor the layer-shell surface when the active output actually changes.
     let anchored_connector = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
@@ -1400,12 +1637,24 @@ fn build_hud_content(
             }
         }
 
+        let admin_mode = state.admin_mode();
+
         // Update session state
         let session_state = state.session_state();
         let has_session = session_state.session_id().is_some();
         if has_session {
             action_icon_clone.set_icon_name(Some("window-close-symbolic"));
             action_button_clone.set_tooltip_text(Some("End session"));
+        } else if admin_mode {
+            // The issue's design: the button closes windows until there are
+            // none, then changes to the way out of the mode.
+            if admin_windows_on_screen(&state.windows()).is_empty() {
+                action_icon_clone.set_icon_name(Some("system-log-out-symbolic"));
+                action_button_clone.set_tooltip_text(Some("Leave administrator mode"));
+            } else {
+                action_icon_clone.set_icon_name(Some("window-close-symbolic"));
+                action_button_clone.set_tooltip_text(Some("Close the focused window"));
+            }
         } else {
             action_icon_clone.set_icon_name(Some("system-log-out-symbolic"));
             action_button_clone.set_tooltip_text(Some("Log out"));
@@ -1530,7 +1779,17 @@ fn build_hud_content(
         }
 
         // The lock button appears with administrator mode and goes away with it.
-        lock_button_clone.set_visible(state.admin_mode());
+        lock_button_clone.set_visible(admin_mode);
+
+        // The taskbar, and with it the kiosk's own left-hand labels: in
+        // administrator mode "No session" and a blank countdown say nothing,
+        // and the space is wanted for the window list.
+        taskbar_box_clone.set_visible(admin_mode);
+        app_label_clone.set_visible(!admin_mode);
+        time_display_clone.set_visible(!admin_mode);
+        if admin_mode {
+            rebuild_taskbar(&window_buttons_clone, &admin_windows(&state.windows()));
+        }
 
         // Update the display-mode toggle and follow the active output (#87).
         // The button only appears while an external display is connected; its
@@ -2448,6 +2707,19 @@ const CSS_TEMPLATE: &str = r#"
             background-color: var(--hover-bg);
         }
 
+        /* Administrator mode's taskbar (issue #154). Window buttons carry a
+           label rather than an icon, so they need room to the sides that the
+           square indicator buttons do not. */
+        .indicator-button label {
+            padding: 0 6px;
+        }
+
+        /* Which window the keyboard is talking to. The taskbar is the only
+           place that says so — the kiosk hides every border and title bar. */
+        .taskbar-focused {
+            background-color: var(--hover-bg);
+        }
+
         /* Automatic brightness is the default, so its toggle stays plain when
            checked (auto on) and lights up only in the *manual* state
            (unchecked, and only when a sensor makes auto an option at all),
@@ -2712,6 +2984,43 @@ const CSS_TEMPLATE: &str = r#"
         }
     "#;
 
+/// Keep the taskbar's window list current while administrator mode is on.
+///
+/// Polled rather than pushed: nothing broadcasts a window opening or closing —
+/// `EventPayload` has no variant for it, the same gap the companion app's
+/// window screen works around — so this is the only way to see one appear.
+///
+/// Idle outside the mode. In the kiosk there is nothing to switch between, so
+/// the taskbar is hidden and a poll would be pure cost on a handheld; the loop
+/// wakes twice a second, checks a bool, and goes back to sleep.
+fn run_window_poll(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
+    let rt = Runtime::new()?;
+    rt.block_on(async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if !state.admin_mode() {
+                // Drop a stale list, so re-entering the mode never shows
+                // windows that closed while nobody was looking.
+                if !state.windows().is_empty() {
+                    state.set_windows(Vec::new());
+                }
+                continue;
+            }
+            match IpcClient::connect(&socket_path).await {
+                Ok(mut client) => match client.list_windows().await {
+                    Ok(windows) => state.set_windows(windows),
+                    // Keep the previous list rather than blanking the taskbar:
+                    // the ids under those buttons are what a click acts on, and
+                    // pulling them out from under a finger is worse than a list
+                    // that is half a second stale.
+                    Err(e) => tracing::debug!(error = %e, "list_windows failed"),
+                },
+                Err(e) => tracing::debug!(error = %e, "could not connect for the window poll"),
+            }
+        }
+    })
+}
+
 fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
     let rt = Runtime::new()?;
 
@@ -2837,6 +3146,123 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(id: u64, app_id: &str, owner: shepherd_api::WindowOwner) -> shepherd_api::WindowInfo {
+        shepherd_api::WindowInfo {
+            id,
+            name: None,
+            app_id: Some(app_id.into()),
+            window_class: None,
+            pid: None,
+            workspace: Some("1".into()),
+            in_scratchpad: false,
+            visible: true,
+            focused: false,
+            owner,
+        }
+    }
+
+    /// The taskbar lists what the caregiver opened, not shepherd's own
+    /// furniture: the launcher and the HUD are always mapped, and buttons for
+    /// them would be a row that never empties — which is also what the "X"
+    /// keys its "leave the mode" state off.
+    #[test]
+    fn the_taskbar_lists_only_what_the_caregiver_opened() {
+        use shepherd_api::WindowOwner;
+        let windows = vec![
+            window(1, "org.shepherd.launcher", WindowOwner::Shepherd),
+            window(2, "org.shepherd.hud", WindowOwner::Shepherd),
+            window(3, "steam", WindowOwner::Unowned),
+            window(4, "org.gnome.Nautilus", WindowOwner::Unowned),
+        ];
+        let listed: Vec<u64> = admin_windows(&windows).iter().map(|w| w.id).collect();
+        assert_eq!(listed, vec![3, 4]);
+
+        // With nothing of the caregiver's left, the "X" becomes the way out.
+        let only_ours = vec![window(1, "org.shepherd.launcher", WindowOwner::Shepherd)];
+        assert!(admin_windows(&only_ours).is_empty());
+        assert!(admin_windows_on_screen(&only_ours).is_empty());
+    }
+
+    /// A stashed window still gets a taskbar button, and still does not hold
+    /// the exit shut. The two questions are separate and both were got wrong at
+    /// once when they shared an answer.
+    ///
+    /// The exit half: the preloaded Steam client sits stashed for the life of
+    /// the session and the compositor reports it `Unowned`, because `snap run`
+    /// re-execs and the pid the host recorded is not the pid that draws.
+    /// `report_unowned_windows` never noticed — it skips the scratchpad — so
+    /// the misattribution surfaced here first, as an administrator mode whose
+    /// HUD would never offer the way out on any device that preloads Steam.
+    ///
+    /// The taskbar half, found by driving it the other way: `sway.conf` stashes
+    /// every Steam client window at map time, and `for_window` rules are not
+    /// part of the admin binding mode, so Steam launched from the picker
+    /// vanishes on arrival. Dropping it from the taskbar too left the caregiver
+    /// with a running, invisible, signed-out Steam and no local way to reach
+    /// it — which is the first thing issue #154 asks for.
+    #[test]
+    fn a_stashed_window_is_listed_but_is_not_on_screen() {
+        use shepherd_api::WindowOwner;
+        let mut stashed = window(3, "steam", WindowOwner::Unowned);
+        stashed.in_scratchpad = true;
+        stashed.visible = false;
+        let windows = vec![
+            window(1, "org.shepherd.launcher", WindowOwner::Shepherd),
+            stashed,
+        ];
+        assert_eq!(
+            admin_windows(&windows)
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![3],
+            "a stashed window needs the button that brings it back"
+        );
+        assert!(
+            admin_windows_on_screen(&windows).is_empty(),
+            "the exit has to be reachable with nothing but stashed furniture up"
+        );
+    }
+
+    /// "Apps" raises the launcher, which in administrator mode is the picker.
+    #[test]
+    fn the_apps_button_finds_the_launchers_window() {
+        use shepherd_api::WindowOwner;
+        let windows = vec![
+            window(7, "steam", WindowOwner::Unowned),
+            window(9, "org.shepherd.launcher", WindowOwner::Shepherd),
+        ];
+        assert_eq!(shell_window_id(&windows), Some(9));
+        assert_eq!(shell_window_id(&windows[..1]), None);
+    }
+
+    #[test]
+    fn taskbar_labels_fall_back_and_are_truncated() {
+        use shepherd_api::WindowOwner;
+        let mut w = window(1, "org.gnome.Nautilus", WindowOwner::Unowned);
+        assert_eq!(
+            taskbar_label(&w),
+            "org.gnome.Nautilus",
+            "app_id when unnamed"
+        );
+
+        w.name = Some("Home".into());
+        assert_eq!(taskbar_label(&w), "Home", "the title wins");
+
+        // A blank title is not a name; browsers and terminals both produce them.
+        w.name = Some("   ".into());
+        assert_eq!(taskbar_label(&w), "org.gnome.Nautilus");
+
+        w.name = Some("A very long browser window title that will not fit".into());
+        let label = taskbar_label(&w);
+        assert!(label.ends_with('…'));
+        assert_eq!(label.chars().count(), TASKBAR_LABEL_CHARS + 1);
+
+        // Exactly at the limit keeps every character and gains no ellipsis.
+        w.name = Some("x".repeat(TASKBAR_LABEL_CHARS));
+        assert_eq!(taskbar_label(&w).chars().count(), TASKBAR_LABEL_CHARS);
+    }
 
     #[test]
     fn scales_px_literals_and_leaves_other_numbers_alone() {

@@ -411,11 +411,20 @@ Each of these is independently shippable and useful.
    `unlock_device` (unlock never exposed as a local affordance), the lock
    button, and the timeout's lock branch. Admin-mode-only per decision 11, so
    no session-clock work is in scope.
-6. **The taskbar HUD and the Start-menu grid.** Includes the mode indicator,
-   the held-open-timeout warning, and the "X" that becomes "exit admin mode"
-   only when no windows are left (decision 7 — the HUD is the *only* place that
-   gate applies). The most visible work, and the most throwaway-able; do it
-   last, when the semantics underneath are settled.
+6. **The taskbar HUD and the Start-menu grid.** *(Done.)* The mode indicator,
+   the taskbar, and the "X" that becomes "leave administrator mode" only when
+   no windows are left (decision 7 — the HUD is the *only* place that gate
+   applies). Two notes:
+
+   * **`build_hud_content` did not need the refactor after all.** The taskbar
+     went in as an additional box in `left_box`, shown on `admin_mode` while the
+     kiosk's own label and countdown hide. The kiosk path is untouched, and #48
+     can still take the refactor on its own terms rather than inheriting one
+     shaped around this feature.
+   * **"Apps" is `WindowAction::Focus` on the launcher's own window**, not a new
+     RPC. In administrator mode the launcher *is* the picker, so the Start
+     button is simply "raise the launcher" — which phase 1 had already made
+     possible, and which the taskbar's own poll already has the window id for.
 
 Release gate: **#144**, per decision 4.
 
@@ -624,11 +633,20 @@ Each of these is independently shippable and useful.
    `unlock_device` (unlock never exposed as a local affordance), the lock
    button, and the timeout's lock branch. Admin-mode-only per decision 11, so
    no session-clock work is in scope.
-6. **The taskbar HUD and the Start-menu grid.** Includes the mode indicator,
-   the held-open-timeout warning, and the "X" that becomes "exit admin mode"
-   only when no windows are left (decision 7 — the HUD is the *only* place that
-   gate applies). The most visible work, and the most throwaway-able; do it
-   last, when the semantics underneath are settled.
+6. **The taskbar HUD and the Start-menu grid.** *(Done.)* The mode indicator,
+   the taskbar, and the "X" that becomes "leave administrator mode" only when
+   no windows are left (decision 7 — the HUD is the *only* place that gate
+   applies). Two notes:
+
+   * **`build_hud_content` did not need the refactor after all.** The taskbar
+     went in as an additional box in `left_box`, shown on `admin_mode` while the
+     kiosk's own label and countdown hide. The kiosk path is untouched, and #48
+     can still take the refactor on its own terms rather than inheriting one
+     shaped around this feature.
+   * **"Apps" is `WindowAction::Focus` on the launcher's own window**, not a new
+     RPC. In administrator mode the launcher *is* the picker, so the Start
+     button is simply "raise the launcher" — which phase 1 had already made
+     possible, and which the taskbar's own poll already has the window id for.
 
 Release gate: **#144**, per decision 4.
 

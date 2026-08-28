@@ -177,6 +177,49 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// The compositor's windows (issue #154), for the administrator taskbar.
+    pub async fn list_windows(&mut self) -> IpcResult<Vec<shepherd_api::WindowInfo>> {
+        self.call::<Vec<shepherd_api::WindowInfo>>("list_windows", Value::Null)
+            .await
+    }
+
+    /// Focus, close, hide or show one of them.
+    pub async fn act_on_window(
+        &mut self,
+        id: u64,
+        action: shepherd_api::WindowAction,
+    ) -> IpcResult<()> {
+        self.call::<Value>(
+            "act_on_window",
+            serde_json::json!({ "id": id, "action": action }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Leave administrator mode (issue #154). Offered by the HUD only once
+    /// every window is closed; the management clients can always do it.
+    pub async fn exit_admin_mode(&mut self) -> IpcResult<()> {
+        self.call::<Value>("exit_admin_mode", Value::Null)
+            .await
+            .map(|_| ())
+    }
+
+    /// Every application the system's `.desktop` files offer (issue #154),
+    /// for administrator mode's picker.
+    pub async fn list_desktop_apps(&mut self) -> IpcResult<Vec<shepherd_api::DesktopApp>> {
+        self.call::<Vec<shepherd_api::DesktopApp>>("list_desktop_apps", Value::Null)
+            .await
+    }
+
+    /// Start one of them by desktop file ID. Refused unless administrator mode
+    /// is on.
+    pub async fn launch_desktop_app(&mut self, id: &str) -> IpcResult<()> {
+        self.call::<Value>("launch_desktop_app", serde_json::json!({ "id": id }))
+            .await
+            .map(|_| ())
+    }
+
     /// Cover the screen while leaving administrator mode's work running
     /// (issue #154). There is no `unlock` counterpart here on purpose: the
     /// screen is opened again from the companion or web app, never from the

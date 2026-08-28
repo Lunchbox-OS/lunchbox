@@ -185,6 +185,18 @@ impl CommandClient {
             .map_err(Into::into)
     }
 
+    /// The applications administrator mode's picker offers (issue #154).
+    pub async fn list_desktop_apps(&self) -> Result<Vec<shepherd_api::DesktopApp>> {
+        let mut client = IpcClient::connect(&self.socket_path).await?;
+        client.list_desktop_apps().await.map_err(Into::into)
+    }
+
+    /// Start one of them.
+    pub async fn launch_desktop_app(&self, id: &str) -> Result<()> {
+        let mut client = IpcClient::connect(&self.socket_path).await?;
+        client.launch_desktop_app(id).await.map_err(Into::into)
+    }
+
     /// Tell shepherdd the seat is idle; it leaves administrator mode only if
     /// nothing the caregiver opened is still on screen (issue #154).
     pub async fn admin_idle_timeout(&self) -> Result<bool> {

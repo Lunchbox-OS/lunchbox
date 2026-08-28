@@ -180,6 +180,11 @@ pub struct SharedState {
     /// that says the mode is on.
     admin_tx: Arc<watch::Sender<bool>>,
     admin_rx: watch::Receiver<bool>,
+    /// What the compositor is showing, polled while administrator mode is on so
+    /// the taskbar has something to list (issue #154). Empty otherwise: the
+    /// kiosk has nothing to switch between, and polling it would be pure cost.
+    windows_tx: Arc<watch::Sender<Vec<shepherd_api::WindowInfo>>>,
+    windows_rx: watch::Receiver<Vec<shepherd_api::WindowInfo>>,
 }
 
 impl SharedState {
@@ -193,6 +198,7 @@ impl SharedState {
         let (suspended_tx, suspended_rx) = watch::channel(false);
         let (display_tx, display_rx) = watch::channel(None);
         let (admin_tx, admin_rx) = watch::channel(false);
+        let (windows_tx, windows_rx) = watch::channel(Vec::new());
 
         Self {
             session_tx: Arc::new(session_tx),
@@ -213,6 +219,8 @@ impl SharedState {
             display_rx,
             admin_tx: Arc::new(admin_tx),
             admin_rx,
+            windows_tx: Arc::new(windows_tx),
+            windows_rx,
         }
     }
 
@@ -223,6 +231,15 @@ impl SharedState {
 
     pub fn set_admin_mode(&self, active: bool) {
         let _ = self.admin_tx.send(active);
+    }
+
+    /// The compositor's windows, as of the last poll.
+    pub fn windows(&self) -> Vec<shepherd_api::WindowInfo> {
+        self.windows_rx.borrow().clone()
+    }
+
+    pub fn set_windows(&self, windows: Vec<shepherd_api::WindowInfo>) {
+        let _ = self.windows_tx.send(windows);
     }
 
     /// Current external-display arrangement, if known.
