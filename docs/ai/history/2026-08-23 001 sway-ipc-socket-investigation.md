@@ -791,3 +791,47 @@ reach it.
 `swaybg`, `swayidle` (Wayland protocols, not sway IPC), and the
 `companion-pairing` skill, which drives adb and the shepherd stack and issues no
 `swaymsg` of its own.
+
+## Rebase onto `main`, 2026-08-27
+
+Rebased the four commits onto `bf6651f` (`main` after the graphical config
+editor, the RetroArch activity kind, the BPF alignment fix, and the CI move to
+Ubuntu 26.04). Three conflicts, all in the same shape — this branch and `main`
+each added something new at the same seam — plus one the merge resolved cleanly
+and wrongly.
+
+**`adapter.rs`, twice: keep both.** `main`'s #129 work added `tracked_pgids`
+(the by-name kill's protected set) immediately after `kill_activity`, which is
+exactly where this branch put `windows_for_sweep` and `start_window_watch`.
+Nothing overlapping, just adjacent insertions.
+
+**`shepherd-webui/src/api/types.ts`: take `main`, then regenerate.** The wire
+types are generated now (#139 codegen), so `DiagnosticCode` moved to
+`wire-types.generated.ts` and `types.ts` only re-exports it. The
+`compositor_unreachable` variant this branch added by hand had to come back
+through `cargo run -p shepherd-wire-codegen --bin rpc-codegen` instead — the
+Rust side (`diagnostics.rs`) merged clean, so the regeneration is the whole fix.
+`tests/rpc_codegen_drift.rs` catches this, but only under `cargo test
+--workspace`; the codegen crate is outside `default-members` and a bare `cargo
+test` skips it silently.
+
+**`main.rs`: a silent duplicate.** This branch *moves* the
+`diagnostics_changed` channel earlier in `run()`, so the host adapter can be
+handed a `DiagnosticPublisher` before its monitor starts. `main` had edited the
+code around the old declaration, so the three-way merge applied the addition and
+kept the original — two `let (diagnostics_changed_tx, mut
+diagnostics_changed_rx)` bindings, the second shadowing the first. It compiles.
+The only symptom is an `unused_variables` warning on the *first* receiver, which
+is the one the main loop is supposed to select on: every diagnostic raised by
+the host adapter would have been published to a channel nobody read. Worth
+remembering that a moved declaration is the conflict a rebase is least likely to
+show you.
+
+Revalidated with `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace --all-targets`, and the
+web UI's `check:boundary` / `check:coverage` / `test` / `typecheck`, then
+end-to-end through `dev headless --harden-ipc`: the log shows the window-event
+subscription and the output-event watch opening, the socket aliased and then
+unlinked, a launch billed off `Activity window appeared` (the `list_windows`
+hot path this branch rewrote), and the launcher focused again after
+`stop_current` — with no `CompositorUnreachable` raised at any point.
