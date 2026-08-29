@@ -835,3 +835,124 @@ subscription and the output-event watch opening, the socket aliased and then
 unlinked, a launch billed off `Activity window appeared` (the `list_windows`
 hot path this branch rewrote), and the launcher focused again after
 `stop_current` — with no `CompositorUnreachable` raised at any point.
+
+## Failure modes when a component dies — a follow-up register, 2026-08-29
+
+Walked during review of the finished branch, because the transport rewrite
+changes what "the compositor is gone" means and the hardening changes what
+recovery is available. Most of this is working as designed and is recorded so
+nobody re-derives it. **Two rows are open defects**; they are marked, and
+neither blocks the branch.
+
+| what dies | detected? | consequence |
+| --- | --- | --- |
+| request connection | yes — `CompositorUnreachable` | escape detection off, said out loud |
+| `window` subscription | **log line only** | latency degrades 100 ms → 60 s, silently |
+| `output` subscription | log line only | docking hotplug off for the session |
+| shepherdd, during startup | yes | `swaymsg exit` tears down sway |
+| shepherdd, after hardening | **no** | sway survives unsupervised; the fallback cannot connect |
+| sway | yes (SIGHUP) | graceful shutdown |
+| launcher / HUD | no | gone for the session, no respawn |
+| activity | yes | re-killed, window closed, reported |
+
+### The connection state machine underneath all of it
+
+`sway_ipc::Client` is `Fresh` → `Up` → `Down(why)`, and `Down` is terminal: a
+failure on an established connection is never retried, because shepherdd is
+`exec`'d by sway and dies with it, and after `unlink_socket` there is no path a
+reconnect could use. A failure while still `Fresh` leaves it `Fresh`, so one
+transient error at startup does not disable the compositor for the session.
+
+The part that matters for everything below: **the request connection and each
+event subscription are separate sockets.** They die independently, which is
+what makes the two open defects possible.
+
+### Open defect 1 — a dead `window` subscription is silent
+
+`start_window_watch` logs `"Sway window event stream ended"` and returns. No
+diagnostic is raised. Downstream: no nudges, so reconciliation falls back to the
+60 s `RECONCILE_SAFETY_NET_TICKS` sweep; no `window::new` broadcasts, so
+in-flight launches fall back to the 5 s `WINDOW_READY_TICK`.
+
+If the *request* connection is still healthy — and it can be, being a different
+socket — `list_windows()` keeps succeeding, so `CompositorUnreachable` never
+fires. Escape-detection latency silently degrades from ~100 ms to up to 60 s
+with one `warn!` line as the only evidence.
+
+This is a smaller version of the defect the branch exists to remove: a broken
+mechanism indistinguishable from a working one. It *degrades* rather than
+fails — the safety net still catches everything, just slowly — which is why it
+is a follow-up and not a blocker.
+
+Note why it degrades cleanly rather than spinning or panicking: the channel is
+not closed when the task exits, because `LinuxHost` still holds
+`window_nudge_tx` and the task only had a clone. The monitor goes on draining an
+empty channel. That is also why nothing notices.
+
+**Fix shape:** `windows_for_sweep` already has the pattern to copy — raise on
+failure, clear on success, idempotent on `(code, subject)`. The same treatment
+on the subscription task, probably a distinct code, since "escape detection is
+slow" is a different administrator-facing condition from "shepherd cannot see
+the screen at all".
+
+### Open defect 2 — a shepherdd crash after hardening leaves sway up
+
+`sway.conf` starts the daemon as `exec sh -c '… shepherdd … || swaymsg exit'`,
+so that a shepherdd which fails to start tears the session down rather than
+leaving a compositor with no supervision.
+
+Two cases, and hardening splits them:
+
+* **During startup** (config error, bind failure) hardening has not run yet — it
+  is late in `run()`, after every connection is open — so the socket still has
+  its name and the fallback works. This is the case the line was written for.
+* **After startup**, on a device, the socket name is gone, so `swaymsg exit`
+  cannot connect. sway keeps running with no shepherdd: whatever activity was up
+  is now unsupervised, and the launcher and HUD cannot reach the daemon.
+
+A *graceful* shutdown is unaffected — `host.logout()` asks sway to exit over
+shepherdd's own held connection, and `sway::exit()` treats a connection that
+dies without replying as success, since sway may tear the socket down before
+answering. SIGTERM and SIGHUP both route there. The gap is only a crash or
+abort, where nothing runs the graceful path.
+
+`sway.conf`'s comment already acknowledges that `swaymsg` cannot connect
+post-hardening, but frames it around the `Mod4+Shift+Escape` binding, where the
+consequence is trivial. On the exec-line fallback it is not.
+
+**Fix shape:** unclear, and worth thinking about rather than reaching for the
+first idea. `--sway-ipc-alias` handed to a supervisor would re-open the socket
+to everything at that uid and defeat the point. A `systemd --user` unit that
+owns sway's lifetime, or a small supervisor holding its own connection opened
+before the unlink, both look plausible. Note this is pre-existing in mechanism —
+it applied to any device the installer had opted in — but flipping hardening to
+the default makes it the norm rather than the exception, so it is fair to treat
+as a consequence of that flip.
+
+### Working as designed (recorded so it is not re-investigated)
+
+* **Request connection dies.** Every `list_windows()` returns `Err`,
+  `windows_for_sweep` returns `None`, `CompositorUnreachable` is raised once
+  with `since` pinned to when it broke. The sweep skips all window work rather
+  than concluding the screen is clear; kills still run. Raised within 60 s even
+  with no events, because the safety-net sweep still fires.
+* **`output` subscription dies.** `display_watch` logs and returns; docking
+  hotplug stops for the session. Same silent-degradation shape as defect 1 but
+  much lower stakes, and it predates this branch — the old code had a `swaymsg`
+  respawn loop here, removed deliberately because `Down` is terminal. Worth
+  folding into whatever diagnostic defect 1 gets.
+* **sway dies.** shepherdd gets SIGHUP and routes to the same graceful
+  shutdown. Surviving connections go `Down`, correctly — there is nothing to
+  reconnect to.
+* **launcher or HUD dies.** Nothing respawns them: `exec_always` runs at startup
+  and on config reload, not on process exit, and the HUD's plain `exec` does not
+  even do that. Hardening removes the *hostile* route to this (an activity can
+  no longer issue `[app_id=org.shepherd.hud] kill`) but not a crash. The
+  `window::close` event needed to notice is already on the subscription this
+  branch adds; see "What none of this closes" above, where it was deliberately
+  left out of scope.
+* **An activity dies or escapes.** Unchanged and well covered.
+  `reconcile_escaped` re-kills, emits `ActivityEscaped { resolved: false }`
+  once, and closes any surface still showing the pid — which reaches an activity
+  whose process cannot be signalled. With no window list it still works the
+  kills; only the close is skipped.

@@ -269,6 +269,16 @@ to the design:
    systemd, but the pkexec hop is worth seeing rather than assuming, because
    several tempting shortcuts depend on the answer.
 
+## Related: the crash-recovery gap hardening opens
+
+Making the unlink the default has a consequence recorded in the #147 note's
+"Failure modes when a component dies" register, and repeated here because it
+belongs to whoever owns hardening rather than whoever owns the transport:
+`sway.conf`'s `… shepherdd … || swaymsg exit` fallback cannot connect once the
+socket is unlinked, so a shepherdd that *crashes* mid-session leaves sway up
+with no supervisor. A shepherdd that fails during *startup* is fine, because
+hardening runs late in `run()` and the name still exists at that point.
+
 ## What this does not close
 
 Peer credentials protect the *management socket*. They do not touch the
