@@ -59,7 +59,8 @@ shepherd-launcher --socket /custom/path/shepherdd.sock
 | `-s, --socket` | `$XDG_RUNTIME_DIR/shepherdd/shepherdd.sock` | Service socket path |
 | `-l, --log-level` | `info` | Log verbosity |
 | `--stop-current` | — | One-shot: send `StopCurrent` to shepherdd and exit |
-| `--is-idle-allowed` | — | One-shot: exit 0 if no session, 1 if active (for swayidle) |
+| `--screen-off` | — | One-shot: blank the displays unless an activity is up (swayidle `timeout`) |
+| `--screen-on` | — | One-shot: wake the displays (swayidle `resume`) |
 | `--volume-up [STEP]` | step `5` | One-shot: send `VolumeUp` to shepherdd (XF86AudioRaiseVolume binding) |
 | `--volume-down [STEP]` | step `5` | One-shot: send `VolumeDown` to shepherdd (XF86AudioLowerVolume binding) |
 | `--toggle-mute` | — | One-shot: send `ToggleMute` to shepherdd (XF86AudioMute binding) |

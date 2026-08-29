@@ -54,6 +54,11 @@ pub struct MockHost {
     /// emitting it inline. Models the real monitor, whose 100ms poll can
     /// notice the reap only *after* `stop` has already returned.
     pub stop_exit_after: Arc<Mutex<Option<Duration>>>,
+
+    /// Every `set_screen_power` call, in order. The blank is suppressed while
+    /// an activity is on screen (issue #144), and "did the compositor get
+    /// asked at all" is the only way to tell suppression from a no-op.
+    pub screen_power_calls: Arc<Mutex<Vec<bool>>>,
 }
 
 impl MockHost {
@@ -72,6 +77,7 @@ impl MockHost {
             stop_blocks_for: Arc::new(Mutex::new(None)),
             stop_leaves_running: Arc::new(Mutex::new(false)),
             stop_exit_after: Arc::new(Mutex::new(None)),
+            screen_power_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -135,6 +141,11 @@ impl Default for MockHost {
 impl HostAdapter for MockHost {
     fn capabilities(&self) -> &HostCapabilities {
         &self.capabilities
+    }
+
+    async fn set_screen_power(&self, on: bool) -> HostResult<()> {
+        self.screen_power_calls.lock().unwrap().push(on);
+        Ok(())
     }
 
     async fn spawn(

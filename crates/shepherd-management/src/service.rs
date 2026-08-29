@@ -152,6 +152,18 @@ pub trait ManagementService: Send + Sync {
     async fn set_auto_brightness(&self, enabled: bool) -> ManagementResult<BrightnessInfo>;
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo>;
 
+    /// Turn the displays on or off, refusing to blank while an activity is up.
+    ///
+    /// Called by `swayidle` through `shepherd-launcher --screen-off/--screen-on`
+    /// (issue #144): the compositor socket has no name on a hardened device, so
+    /// the blanking has to run on the connection shepherdd holds.
+    ///
+    /// The "is anything running?" check lives here rather than in the caller
+    /// because it used to be a separate `--is-idle-allowed` process, and a
+    /// launch landing between that check and the blank turned the screen off on
+    /// a child mid-activity. Returns whether it actually acted.
+    async fn set_screen_power(&self, on: bool) -> ManagementResult<bool>;
+
     /// The HUD counter-scale factor in force (1.0 unless an
     /// `xwayland_native_resolution` activity is running). Shells fetch this on
     /// every connect: `HudScaleChanged` is a one-shot event at launch, so one
@@ -1078,6 +1090,20 @@ impl ManagementService for DefaultManagementService {
         // room's lighting shifts noticeably (phone-style).
         self.register_manual_override().await;
         self.broadcast_brightness_change().await
+    }
+
+    async fn set_screen_power(&self, on: bool) -> ManagementResult<bool> {
+        // Blanking is suppressed while an activity is on screen; turning the
+        // screen back on never is, so a device that blanked just before a
+        // launch still wakes.
+        if !on && self.current_session().await.is_some() {
+            return Ok(false);
+        }
+        self.host
+            .set_screen_power(on)
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        Ok(true)
     }
 
     async fn brightness_up(&self, step: u8) -> ManagementResult<BrightnessInfo> {

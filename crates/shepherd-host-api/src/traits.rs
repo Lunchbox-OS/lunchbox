@@ -286,6 +286,17 @@ pub trait HostAdapter: Send + Sync {
         Err(HostError::Internal("Not supported".into()))
     }
 
+    /// Optional: turn the displays on or off (DPMS).
+    ///
+    /// The idle timer stays outside shepherd — `swayidle` is what notices that
+    /// nobody has touched the device — but the blanking itself has to happen
+    /// here, because on a hardened device the compositor's IPC socket has no
+    /// name for `swaymsg` to connect to (issue #144). This runs on the
+    /// connection shepherdd already holds.
+    async fn set_screen_power(&self, _on: bool) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
     /// Optional: list the windows the compositor is aware of, including any
     /// that have been moved to the scratchpad. Used by the management UI for
     /// debugging the Sway tree.

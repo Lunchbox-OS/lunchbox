@@ -213,6 +213,13 @@ impl IpcClient {
             .await
     }
 
+    /// Turn the displays on or off. Answers `false` when a blank was suppressed
+    /// because an activity is on screen (issue #144).
+    pub async fn set_screen_power(&mut self, on: bool) -> IpcResult<bool> {
+        self.call("set_screen_power", serde_json::json!({ "on": on }))
+            .await
+    }
+
     pub async fn set_auto_brightness(&mut self, enabled: bool) -> IpcResult<BrightnessInfo> {
         self.call(
             "set_auto_brightness",

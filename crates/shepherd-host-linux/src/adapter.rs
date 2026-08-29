@@ -2296,6 +2296,10 @@ impl HostAdapter for LinuxHost {
         crate::sway::exit().await
     }
 
+    async fn set_screen_power(&self, on: bool) -> HostResult<()> {
+        crate::sway::set_screen_power(on).await
+    }
+
     async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
         let mut windows = crate::sway::list_windows().await?;
         // Attribute before handing the list out: an admin UI's whole job here

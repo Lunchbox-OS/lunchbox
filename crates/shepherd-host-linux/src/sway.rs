@@ -184,6 +184,22 @@ pub async fn exit() -> HostResult<()> {
     check_command_replies("exit", &body)
 }
 
+/// Turn every output on or off (DPMS).
+///
+/// `swayidle` used to do this itself with `swaymsg "output * dpms off"`, which
+/// stopped working the moment the compositor socket lost its name (issue #144)
+/// — silently, because nothing checks a `swayidle` command's exit status. The
+/// timer still lives in `swayidle`; only the privileged half moved here, onto
+/// the connection this daemon holds for the life of the session.
+pub async fn set_screen_power(on: bool) -> HostResult<()> {
+    run_command(if on {
+        "output * dpms on"
+    } else {
+        "output * dpms off"
+    })
+    .await
+}
+
 /// Perform a debug action on the window with the given sway con_id.
 pub async fn act_on_window(window_id: u64, action: WindowAction) -> HostResult<()> {
     let verb = match action {
