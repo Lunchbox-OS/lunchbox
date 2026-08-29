@@ -263,6 +263,16 @@ export type DiagnosticCode =
    */
   | "compositor_unreachable"
   /**
+   * The compositor's IPC socket is still reachable by every process at this
+   * uid, because hardening it failed (issue #144).
+   *
+   * The session is deliberately left running — an unhardened kiosk beats no
+   * kiosk — so nothing else about the device looks wrong. Without this the
+   * only trace is one log line, and a device ships without a protection it
+   * is configured to have.
+   */
+  | "compositor_not_hardened"
+  /**
    * This entry sets a browser policy that its kind does not support, so the
    * policy is ignored.
    */

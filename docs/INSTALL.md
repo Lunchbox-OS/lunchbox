@@ -429,6 +429,11 @@ Consequences worth knowing before you debug a device:
   nothing there.
 - **shepherdd cannot be restarted inside a session.** A second one would have
   no socket to connect to. Log out and back in, or reboot.
+- **If hardening fails, the session still starts.** An unhardened kiosk beats a
+  child staring at a dead screen, so every failure path leaves the socket
+  reachable and carries on. It is not silent: the device raises the `Critical`
+  diagnostic `compositor_not_hardened`, visible in the web UI and the companion
+  app, and the daemon's log carries the underlying reason.
 - To get a socket back for one session, add a drop-in that passes
   `--sway-ipc-alias <path>` (a second name for the socket, created *before* the
   original is removed; it must be inside `$XDG_RUNTIME_DIR`, because it is a

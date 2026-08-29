@@ -12,7 +12,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use shepherd_api::{EntryKind, EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response};
+use shepherd_api::{
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
+    EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response,
+};
 use shepherd_ble::{BleServer, BleServerConfig};
 use shepherd_config::load_config;
 use shepherd_core::{CoreEngine, CoreEvent};
@@ -281,16 +284,36 @@ impl Service {
     ///
     /// `harden` is true unless `--no-harden-sway-ipc` was passed, so this runs
     /// on any stack that did not explicitly ask to stay reachable.
-    async fn harden_compositor_socket(alias: Option<&Path>, harden: bool) {
+    ///
+    /// Every failure leaves the session running and the socket reachable. That
+    /// is the right trade — an unhardened kiosk beats a child staring at a dead
+    /// screen — but it means nothing else about the device looks wrong, so a
+    /// failure has to be said out loud or it ships as a silent downgrade
+    /// (`CompositorNotHardened`, issue #144).
+    async fn harden_compositor_socket(
+        alias: Option<&Path>,
+        harden: bool,
+        diagnostics: &dyn DiagnosticSink,
+    ) {
         if !harden && alias.is_none() {
             return;
         }
+
+        // Only a stack that asked to be hardened can be *un*-hardened. With
+        // `--sway-ipc-alias` alone there is nothing to fail to do, so the
+        // failures below are logged and not reported.
+        let report = |reason: String| {
+            if harden {
+                diagnostics.raise(Self::not_hardened_diagnostic(&reason));
+            }
+        };
 
         // The subscriptions are already up, but the request connection is lazy.
         // Unlinking before it exists would leave it permanently unable to
         // connect.
         if let Err(e) = shepherd_host_linux::sway_ipc::client().connect_now().await {
             warn!(error = %e, "Not hardening the sway IPC socket: no connection to keep alive");
+            report(format!("shepherd could not reach the compositor: {e}"));
             return;
         }
 
@@ -301,6 +324,10 @@ impl Service {
                     warn!(error = %e, alias = %alias.display(),
                         "Could not alias the sway IPC socket; leaving it reachable rather than \
                          stranding the session");
+                    report(format!(
+                        "the socket alias at {} could not be made: {e}",
+                        alias.display()
+                    ));
                     return;
                 }
             }
@@ -314,7 +341,34 @@ impl Service {
             Ok(()) => info!(
                 "Sway IPC socket unlinked; the compositor is no longer reachable by anything else"
             ),
-            Err(e) => warn!(error = %e, "Could not unlink the sway IPC socket"),
+            Err(e) => {
+                warn!(error = %e, "Could not unlink the sway IPC socket");
+                report(format!("the socket's name could not be removed: {e}"));
+            }
+        }
+    }
+
+    /// The administrator-facing form of "this device is not hardened".
+    ///
+    /// Split out so the severity and subject can be asserted without a
+    /// compositor: `Critical` because the config promises a protection the
+    /// device is not providing, and `Service` because it is true of the device
+    /// rather than of any one activity.
+    fn not_hardened_diagnostic(reason: &str) -> Diagnostic {
+        Diagnostic {
+            code: DiagnosticCode::CompositorNotHardened,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Critical,
+            message: format!(
+                "the compositor's IPC socket is still reachable by every process on this \
+                 device, so an activity can drive sway directly — {reason}"
+            ),
+            remedy: Some(
+                "Restart the session. If it recurs, check this daemon's log for the \
+                 \"Could not unlink the sway IPC socket\" line, which carries the reason."
+                    .to_string(),
+            ),
+            since: shepherd_util::now(),
         }
     }
 
@@ -716,7 +770,12 @@ impl Service {
 
         // Every sway connection this daemon needs is now open, so the socket's
         // name in the filesystem has done its job (issue #144).
-        Self::harden_compositor_socket(sway_ipc_alias.as_deref(), harden_sway_ipc).await;
+        Self::harden_compositor_socket(
+            sway_ipc_alias.as_deref(),
+            harden_sway_ipc,
+            &diagnostic_publisher,
+        )
+        .await;
 
         // Set up config file watcher
         let (config_change_tx, mut config_change_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -1538,4 +1597,89 @@ async fn main() -> Result<()> {
     // Create and run the service
     let service = Service::new(&args).await?;
     service.run().await
+}
+
+#[cfg(test)]
+mod harden_diagnostic_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Captures what the hardening step reports, so the failure paths can be
+    /// exercised without a compositor.
+    #[derive(Default)]
+    struct RecordingSink {
+        raised: StdMutex<Vec<DiagnosticCode>>,
+    }
+
+    impl DiagnosticSink for RecordingSink {
+        fn raise(&self, diagnostic: Diagnostic) {
+            self.raised.lock().unwrap().push(diagnostic.code);
+        }
+        fn clear(&self, _code: DiagnosticCode, _subject: &DiagnosticSubject) {}
+    }
+
+    /// An alias that cannot be created, so hardening always fails somewhere:
+    /// with no compositor reachable it fails at `connect_now`, and inside a
+    /// live sway session it gets as far as `alias_socket` and fails there.
+    /// Either way a stack that asked to be hardened is not hardened, which is
+    /// the only thing these tests care about — and it keeps them from
+    /// depending on whether the developer runs `cargo test` inside sway.
+    fn impossible_alias() -> &'static Path {
+        Path::new("/nonexistent-dir-for-shepherd-tests/alias.sock")
+    }
+
+    /// The regression this guards: every failure path returns early, leaves
+    /// the session running, and leaves the socket reachable. Nothing else
+    /// about the device looks wrong, so if the report is ever dropped the
+    /// downgrade becomes invisible (issue #144).
+    #[tokio::test]
+    async fn a_hardening_failure_is_reported() {
+        let sink = RecordingSink::default();
+        Service::harden_compositor_socket(Some(impossible_alias()), true, &sink).await;
+
+        assert_eq!(
+            *sink.raised.lock().unwrap(),
+            vec![DiagnosticCode::CompositorNotHardened],
+            "a stack that asked to be hardened, and was not, has to say so"
+        );
+    }
+
+    /// The same failure on a stack that never asked to be hardened is not a
+    /// downgrade — there was nothing to fail to do. Reporting it would put a
+    /// `Critical` on every developer session, which is how a channel stops
+    /// being read.
+    #[tokio::test]
+    async fn the_same_failure_is_silent_when_hardening_was_not_asked_for() {
+        let sink = RecordingSink::default();
+        Service::harden_compositor_socket(Some(impossible_alias()), false, &sink).await;
+
+        assert!(
+            sink.raised.lock().unwrap().is_empty(),
+            "an unhardened dev session is not an administrator-facing condition"
+        );
+    }
+
+    /// The severity is the whole point: this is the config promising a
+    /// protection the device is not providing, which is what `Critical` means
+    /// here — and it is about the device, not any one activity.
+    ///
+    /// Pinned because every failure path deliberately leaves the session
+    /// running and looking healthy (issue #144). If this stops being reported,
+    /// a device ships unhardened with nothing to show for it, which is the
+    /// exact silent downgrade the diagnostic exists to prevent.
+    #[test]
+    fn a_failed_hardening_is_a_critical_service_condition() {
+        let d = Service::not_hardened_diagnostic("the socket's name could not be removed: EACCES");
+
+        assert_eq!(d.code, DiagnosticCode::CompositorNotHardened);
+        assert_eq!(d.severity, DiagnosticSeverity::Critical);
+        assert!(matches!(d.subject, DiagnosticSubject::Service));
+        assert!(
+            d.message.contains("EACCES"),
+            "the underlying reason has to survive into the message, or the \
+             administrator sees a condition with no cause: {}",
+            d.message
+        );
+        assert!(d.remedy.is_some(), "a Critical condition needs an answer");
+    }
 }

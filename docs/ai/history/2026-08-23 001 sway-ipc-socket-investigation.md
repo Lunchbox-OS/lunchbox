@@ -929,6 +929,32 @@ it applied to any device the installer had opted in — but flipping hardening t
 the default makes it the norm rather than the exception, so it is fair to treat
 as a consequence of that flip.
 
+### Closed since: a failed hardening no longer ships silently
+
+Walking the register raised the obvious neighbouring question — what if the
+*hardening itself* fails? Every path in `harden_compositor_socket` was a `warn!`
+and a bare `return`, and the function returns `()`, so a device could boot
+unhardened with one log line as the only evidence and nothing else about it
+looking wrong.
+
+Failing open is right: refusing to boot because the socket could not be
+unlinked would leave a child staring at a dead screen. The silence was not,
+and it was inconsistent with the precedent next door — `FirewallUnenforceable`
+exists for exactly this shape, and #152 established failing loudly when a
+runtime scope's firewall cannot be applied. It also mattered more once
+hardening became the default, because every device now depends on it.
+
+Fixed on this branch: `CompositorNotHardened`, `Critical`, `Service`-scoped,
+raised on both reachable failure paths, carrying the underlying reason.
+Reporting is gated on `harden` being true, so a development session that never
+asked for hardening does not raise a `Critical` — which is how a diagnostic
+channel stops being read.
+
+Worth noting one path was already covered by accident: a failed `connect_now`
+leaves the client `Fresh`, so the next `list_windows()` retries, fails, and
+raises `CompositorUnreachable` within 60 s. True, but it describes the symptom
+rather than the downgrade, so both are now reported.
+
 ### Working as designed (recorded so it is not re-investigated)
 
 * **Request connection dies.** Every `list_windows()` returns `Err`,
