@@ -25,8 +25,8 @@ use crate::process::{
     apply_firewall_to_existing_scope, build_inherited_env, find_steam_game_pids,
     firewall_enforcement_status, firewall_helper_argv_prefix, init, kill_by_command,
     kill_flatpak_cgroup, kill_snap_cgroup, kill_steam_game_processes, make_scope_name,
-    pgid_is_live, pid_in_group, pid_is_live, signal_group, steam_webhelper_running,
-    stop_firewall_scope, user_scope_argv_prefix,
+    pgid_is_live, pid_in_group, pid_is_live, signal_group, steam_preload_argv,
+    steam_preload_scope_name, steam_webhelper_running, stop_firewall_scope, user_scope_argv_prefix,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -782,20 +782,36 @@ impl LinuxHost {
             steam_interstitial::ensure_cef_debug_enabled();
         }
 
-        // -silent tells Steam not to show its main window on startup
-        let argv = vec![
-            "snap".to_string(),
-            "run".to_string(),
-            "steam".to_string(),
-            "-silent".to_string(),
-        ];
+        // Into a scope of its own, like an activity (issue #144). The preloaded
+        // client is the parent every Steam game inherits from, so this is the
+        // launch that matters; `spawn` wraps the per-game `steam://rungameid`
+        // request for the same reason. See `steam_preload_argv` for why the
+        // wrapping is not redundant even though `snap run` re-scopes.
+        let scope = match activity_isolation_status() {
+            ActivityIsolationStatus::Supported => Some(steam_preload_scope_name()),
+            ActivityIsolationStatus::Unsupported { reason } => {
+                // Same trade as the activity path: preload anyway rather than
+                // leave Steam entries gated forever. shepherdd already raises
+                // `ipc_socket_not_hardened` at startup when the probe fails.
+                warn!(
+                    reason = %reason,
+                    "Cannot give the preloaded Steam client a cgroup of its own"
+                );
+                None
+            }
+        };
+        let argv = steam_preload_argv(scope.as_deref());
+
         match ManagedProcess::spawn(
             &argv,
             &HashMap::new(),
             None,
             None,
             Some("steam".to_string()),
-            None,
+            // Not `argv[0]`: that is `systemd-run` once wrapped, and was
+            // `snap` before — `pkill -f snap` on shutdown would reach every
+            // snap on the device, not just Steam.
+            Some("steam"),
         ) {
             Ok(proc) => {
                 let pid = proc.pid;
@@ -1917,6 +1933,17 @@ impl HostAdapter for LinuxHost {
         // would nest a scope around a launcher that immediately hands off to a
         // long-lived runtime process elsewhere — more moving parts, no cgroup
         // we did not already have.
+        //
+        // Steam is *not* skipped, though `snap run` re-scopes it into
+        // `snap.steam.steam-<uuid>.scope` the same way, and though the game
+        // itself is a child of the preloaded client rather than of this
+        // process. The scope this creates empties out at that hand-off and
+        // `--collect` reaps it. It is kept because the alternative is an
+        // invariant with a hole in it: "an activity is never in shepherd's
+        // cgroup" should hold because of what this function does, not because
+        // snapd usually moves the process quickly enough. `preload_steam` wraps
+        // the client for the same reason, and that is the launch a game
+        // actually inherits its cgroup from.
         let final_argv = if scoped_by_helper || sandboxed_app_name.is_some() {
             final_argv
         } else {

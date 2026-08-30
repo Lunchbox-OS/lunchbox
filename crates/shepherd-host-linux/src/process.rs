@@ -226,6 +226,75 @@ pub fn user_scope_argv_prefix(scope_name: &str) -> Vec<String> {
     ]
 }
 
+/// The argv prefix that puts one of shepherd's own **helper subprocesses** into
+/// a transient scope of its own (issue #144).
+///
+/// Distinct from [`user_scope_argv_prefix`], which isolates an *activity*, and
+/// the reasoning is different. A helper is shepherd's own choice of binary with
+/// shepherd's own argv, so it is not the untrusted party — but some helpers
+/// parse data that is. `yt-dlp` is the one that matters: it runs on a
+/// background prefetch timer with no activity launched, and it parses whatever
+/// a remote host returns. Being a direct child of shepherdd puts it inside the
+/// management socket's allow-list, so a parser bug there would be a peer the
+/// daemon trusts.
+///
+/// Returns an **empty** prefix when the user manager cannot be reached, meaning
+/// "run it bare" — the same trade the activity path makes, and reported by the
+/// same `ipc_socket_not_hardened` diagnostic at startup.
+///
+/// `tag` names the helper for the scope, so a stray unit is identifiable in
+/// `systemctl --user list-units`. The counter keeps concurrent helpers from
+/// colliding on a unit name, which would fail the launch outright.
+pub fn helper_scope_argv_prefix(tag: &str) -> Vec<String> {
+    match activity_isolation_status() {
+        ActivityIsolationStatus::Supported => {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            user_scope_argv_prefix(&make_scope_name(&format!(
+                "{tag}-{}-{n}",
+                std::process::id()
+            )))
+        }
+        ActivityIsolationStatus::Unsupported { .. } => Vec::new(),
+    }
+}
+
+/// The argv for the preloaded Steam client, in a scope of its own (issue #144).
+///
+/// `scope` is `None` when [`activity_isolation_status`] says the user manager
+/// cannot be reached, in which case the client is preloaded unwrapped rather
+/// than not at all.
+///
+/// This looks redundant and is not. `snap run` re-scopes the client into
+/// `snap.steam.steam-<uuid>.scope` moments later, so the scope built here
+/// empties and `--collect` reaps it. It is here so that "nothing shepherd
+/// starts for an activity is ever in shepherd's cgroup" holds because of what
+/// this code does, not because snapd usually moves the process quickly enough
+/// — and the preloaded client is the parent every Steam game inherits from, so
+/// it is the launch that matters.
+pub fn steam_preload_argv(scope: Option<&str>) -> Vec<String> {
+    // -silent tells Steam not to show its main window on startup.
+    let client = ["snap", "run", "steam", "-silent"]
+        .into_iter()
+        .map(String::from);
+    match scope {
+        Some(scope) => user_scope_argv_prefix(scope)
+            .into_iter()
+            .chain(client)
+            .collect(),
+        None => client.collect(),
+    }
+}
+
+/// The scope name for the preloaded Steam client.
+///
+/// Keyed by pid rather than a session id because the preload belongs to the
+/// daemon, not to a session — and because a name reused across a restart would
+/// collide with a scope the previous daemon had not finished releasing.
+pub fn steam_preload_scope_name() -> String {
+    make_scope_name(&format!("steam-preload-{}", std::process::id()))
+}
+
 /// Build the argv prefix for spawning a Process-kind activity through the
 /// privileged firewall helper. The full argv handed to `Command::spawn` is the
 /// returned prefix plus the activity's own command + args.
@@ -1520,6 +1589,58 @@ mod tests {
             !pgid_is_live(pgid),
             "signalling the group must reach the survivor"
         );
+    }
+
+    #[test]
+    fn the_preloaded_steam_client_is_launched_into_a_scope_of_its_own() {
+        // Deliberate, and it looks redundant: `snap run` re-scopes the client
+        // into `snap.steam.steam-<uuid>.scope` a moment later, so the scope
+        // built here empties out and is reaped. Keeping it is what makes
+        // "nothing shepherd starts for an activity is ever in shepherd's
+        // cgroup" a property of this code rather than of snapd's timing — and
+        // the preloaded client is the parent every Steam game inherits from,
+        // so dropping it would reopen the window for every game at once.
+        let argv = steam_preload_argv(Some("shepherd-steam-preload-42.scope"));
+        assert_eq!(
+            argv,
+            vec![
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--unit=shepherd-steam-preload-42.scope",
+                "--",
+                "snap",
+                "run",
+                "steam",
+                "-silent",
+            ],
+            "the preloaded Steam client must be wrapped, not spawned bare"
+        );
+    }
+
+    #[test]
+    fn steam_is_still_preloaded_when_it_cannot_be_isolated() {
+        // Without a reachable user manager the client is preloaded unwrapped
+        // rather than not at all — the same trade the activity path makes. The
+        // downgrade is reported as `ipc_socket_not_hardened` at startup.
+        assert_eq!(
+            steam_preload_argv(None),
+            vec!["snap", "run", "steam", "-silent"]
+        );
+    }
+
+    #[test]
+    fn the_preload_scope_is_named_per_daemon_not_per_session() {
+        let name = steam_preload_scope_name();
+        assert!(
+            name.starts_with("shepherd-steam-preload-") && name.ends_with(".scope"),
+            "unexpected preload scope name {name:?}"
+        );
+        // Distinguishable from a session scope, so a stale preload scope can
+        // never be mistaken for an activity's during teardown or triage.
+        assert_ne!(name, make_scope_name(&format!("{}", std::process::id())));
     }
 
     /// `command_name` is the `pkill -f` fallback, so it must name the

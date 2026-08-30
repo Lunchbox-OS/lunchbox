@@ -466,8 +466,15 @@ descendant inherits, and an unprivileged process can neither forge nor leave.
 `shepherdd` accepts a connection only from:
 
 - a process in **its own cgroup** — that is the session: sway, the launcher, the
-  HUD, and the one-shots sway starts for a keybinding; and
+  HUD, the one-shots sway starts for a keybinding, and shepherd's own helper
+  subprocesses (the input-compat sidecars, `wl-mirror`, the pairing overlay, and
+  the short-lived commands it runs to read volume, brightness and audio state);
+  and
 - **root**, so `sudo` still reaches the daemon from an operator's own shell.
+
+`yt-dlp` is the one helper deliberately kept *out* of that cgroup: it runs on a
+background prefetch timer and parses whatever a remote host returns, so it is
+launched into a transient scope of its own like an activity.
 
 Everything else is refused at accept, before it can read any state, and the
 refusal raises the `ipc_peer_rejected` diagnostic naming the cgroup it came
@@ -478,8 +485,9 @@ For this to be a boundary, two things have to hold, and the daemon checks both:
 
 - **Activities must be somewhere else.** They are: an entry with
   `[entries.firewall]` already gets a system-manager scope, snap and flatpak are
-  scoped by their own runtimes, and everything else is launched into a transient
-  scope of its own via `systemd-run --user --scope`.
+  scoped by their own runtimes, and everything else — Steam and the preloaded
+  Steam client included — is launched into a transient scope of its own via
+  `systemd-run --user --scope`.
 - **The session's cgroup must be one an activity cannot join.** A session
   started from the installed *Shepherd Kiosk* desktop entry is in a logind
   session scope, which is root-owned — nothing at this uid can add a process to

@@ -353,15 +353,43 @@ every activity is somewhere else before it starts:
   `user@<uid>.service/app.slice`, which is the same fact
   `apply_firewall_to_existing_scope` relies on to find them. Wrapping them again
   would nest a scope around a launcher that immediately hands off elsewhere.
-- **Everything else**: wrapped in `systemd-run --user --scope --collect`
-  (`user_scope_argv_prefix`). Unprivileged — no helper, no polkit — because all
-  this has to achieve is "not shepherd's cgroup", which the *user* manager can
-  do even though it cannot attach BPF.
+- **Everything else, Steam included**: wrapped in
+  `systemd-run --user --scope --collect` (`user_scope_argv_prefix`).
+  Unprivileged — no helper, no polkit — because all this has to achieve is "not
+  shepherd's cgroup", which the *user* manager can do even though it cannot
+  attach BPF.
 
 Like the firewall helper's `systemd-run --scope`, this execs the command in its
 own process rather than forking one, so the pid the adapter records is the
 activity's, already inside the scope, and every pid, pgid and kill path is
 unchanged.
+
+### Steam is wrapped at both ends, and why it looks redundant
+
+Steam reaches the same place by a different route, so the wrapper around it is
+easy to mistake for dead code. It is deliberate, and the reasoning is worth
+keeping:
+
+- A Steam entry launches `snap run steam steam://rungameid/<id>`, which is a
+  short-lived request to the **preloaded** client. `snap run` re-scopes itself
+  into `snap.steam.steam-<uuid>.scope` almost immediately, so the
+  `shepherd-<session>.scope` around it empties and `--collect` reaps it. Measured:
+  the scope is `inactive` within a second and no units accumulate.
+- The game is a child of the preloaded client, not of that request — so
+  `preload_steam` is the launch a game actually inherits its cgroup from, and it
+  is wrapped too (`shepherd-steam-preload-<pid>.scope`).
+
+Both scopes empty out the moment `snap run` hands off. What the wrapping buys is
+that "nothing shepherd starts for an activity is ever in shepherd's cgroup"
+holds because of what this crate does, rather than because snapd happens to move
+the process quickly enough. Removing either wrapper would restore a window —
+short, and not obviously reachable, but one whose width is set by a third party.
+
+Neither wrapper changes where Steam ends up: the client and its games live in
+snapd's `snap.steam.steam-*` scope under `user@<uid>.service/app.slice`, which is
+already outside shepherd's cgroup. `snap run` does not preserve the pid either,
+with or without the wrapper, which is why Steam sessions are tracked by
+`find_steam_game_pids` rather than by the pid the adapter recorded.
 
 `activity_isolation_status()` probes whether the user manager can be reached at
 all (a temp `XDG_RUNTIME_DIR` with no bus, as in the e2e harness, cannot), and
@@ -369,6 +397,31 @@ caches the answer. When it cannot, the activity is launched anyway rather than
 lost — the trade the compositor hardening makes — and `shepherdd` raises the
 `ipc_socket_not_hardened` diagnostic, because the socket check has nothing left
 to tell apart.
+
+## Shepherd's own helpers get one too (issue #144)
+
+Being in shepherdd's cgroup is what the management socket trusts, so it is worth
+knowing what else is in there. Most of shepherd's helper subprocesses are
+uninteresting — fixed argv, output read straight back: `wpctl`/`pactl`/`amixer`,
+`pw-dump`, `brightnessctl`, `pgrep`, `pkcheck`, `flatpak --version`.
+
+`yt-dlp` is the exception, and it is scoped like an activity.
+`helper_scope_argv_prefix` builds the wrapper; `shepherdd` injects it into
+`shepherd-media-cache` at startup, because that crate is shared with the player
+and the Android build and must not depend on this one. It applies to the two
+invocations that touch the network — the download and the playlist fetch — and
+not to the `yt-dlp --version` liveness probe, which parses no remote input and
+runs on every diagnostics pass.
+
+The reasoning is not that yt-dlp is untrusted code: it is shepherd's own choice
+of binary with shepherd's own argv. It is that yt-dlp runs on a background
+prefetch timer, with no activity launched, parsing whatever a remote host
+returns — so a parser bug there would be a peer the daemon trusts. The URLs come
+from admin-configured libraries, so an activity cannot choose the target.
+
+Still unscoped, and deliberately: the input-compat sidecars (`sidecar.rs`),
+`wl-mirror`, and the pairing overlay. All three are shepherd's own furniture
+with no remote input, and two of them need the session's own devices.
 
 ## Browser policy
 

@@ -221,7 +221,9 @@ pub fn fetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
 fn fetch_playlist_live(url: &str) -> Result<PlaylistInfo, String> {
     ensure_ytdlp_available()?;
 
-    let output = Command::new("yt-dlp")
+    // Scoped like the download for the same reason (issue #144): the playlist
+    // JSON is remote input parsed by yt-dlp. See `crate::subprocess`.
+    let output = crate::subprocess::ytdlp_command("ytdlp-playlist")
         .args([
             "--dump-json",
             "--flat-playlist",
@@ -256,6 +258,12 @@ pub fn ytdlp_available() -> bool {
     ensure_ytdlp_available().is_ok()
 }
 
+/// Deliberately *not* scoped the way the two fetches above are (issue #144):
+/// `--version` touches no network and parses no remote input, so it is not the
+/// exposure the scoping exists for — and this runs on every playlist fetch and
+/// every diagnostics pass, where a systemd round trip per call would be paid
+/// for nothing. A compromised yt-dlp *binary* is a different problem, and one
+/// no cgroup helps with.
 fn ensure_ytdlp_available() -> Result<(), String> {
     Command::new("yt-dlp")
         .arg("--version")

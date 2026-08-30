@@ -90,9 +90,20 @@ unprivileged process can neither forge it nor climb out of it.
 
 | Peer | Verdict |
 |------|---------|
-| In `shepherdd`'s own cgroup (sway, the launcher, the HUD, sway's keybinding one-shots) | accepted as `Admin` |
+| In `shepherdd`'s own cgroup | accepted as `Admin` |
 | root, from any cgroup (`sudo`) | accepted as `Admin` |
 | Anything else, or anything that cannot be identified | **refused at accept** |
+
+What is in `shepherdd`'s cgroup is worth stating in full, because that set *is*
+the trust boundary: sway, `shepherdd`, the launcher, the HUD, `swayidle` and the
+one-shots sway starts for a keybinding — and also shepherd's own helper
+subprocesses, which are children of the daemon: the input-compat sidecars,
+`wl-mirror`, the pairing overlay, and the short-lived query commands
+(`wpctl`/`pactl`/`amixer`, `pw-dump`, `brightnessctl`, `pgrep`, `pkcheck`).
+
+Activities are not, by construction — see `shepherd-host-linux`'s README. Nor is
+`yt-dlp`, which is scoped out of this cgroup despite being shepherd's own
+subprocess, because it parses remote input on a background timer.
 
 The decision is made **once per connection, at accept**, not per call: one
 decision instead of many, it cannot be forgotten when a method is added, and a

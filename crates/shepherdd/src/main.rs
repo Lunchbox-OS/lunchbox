@@ -228,6 +228,13 @@ impl Service {
         // Initialize host adapter
         let host = Arc::new(LinuxHost::new());
 
+        // Give `yt-dlp` a cgroup of its own, like an activity (issue #144). The
+        // media cache cannot build this wrapper itself — it is shared with the
+        // player and the Android build, neither of which has a user manager —
+        // so the daemon injects the one from the Linux host here, once, before
+        // any prefetch can start.
+        shepherd_media_cache::set_scope_prefix_fn(shepherd_host_linux::helper_scope_argv_prefix);
+
         // Initialize volume controller
         let volume = Arc::new(LinuxVolumeController::new());
         if volume.capabilities().available {
