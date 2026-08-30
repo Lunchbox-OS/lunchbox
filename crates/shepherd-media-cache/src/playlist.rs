@@ -17,7 +17,7 @@
 //! keeps working offline.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -265,7 +265,7 @@ pub fn ytdlp_available() -> bool {
 /// for nothing. A compromised yt-dlp *binary* is a different problem, and one
 /// no cgroup helps with.
 fn ensure_ytdlp_available() -> Result<(), String> {
-    Command::new("yt-dlp")
+    crate::subprocess::ytdlp_probe_command()
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

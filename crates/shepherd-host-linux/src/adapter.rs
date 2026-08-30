@@ -1,5 +1,6 @@
 //! Linux host adapter implementation
 
+use crate::helpers;
 use async_trait::async_trait;
 use shepherd_api::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
@@ -1703,7 +1704,11 @@ impl HostAdapter for LinuxHost {
                 // For snap apps, we need to use 'snap run <snap_name>' to launch them.
                 // The command (if specified) is passed as an argument after the snap name,
                 // followed by any additional args.
-                let mut argv = vec!["snap".to_string(), "run".to_string(), snap_name.clone()];
+                let mut argv = vec![
+                    helpers::resolve_arg("snap"),
+                    "run".to_string(),
+                    snap_name.clone(),
+                ];
                 // If a custom command is specified (different from snap_name), add it
                 if let Some(cmd) = command
                     && cmd != snap_name
@@ -1716,7 +1721,7 @@ impl HostAdapter for LinuxHost {
             EntryKind::Steam { app_id, args, env } => {
                 // Steam games are launched via the Steam snap: snap run steam steam://rungameid/<app_id>
                 let mut argv = vec![
-                    "snap".to_string(),
+                    helpers::resolve_arg("snap"),
                     "run".to_string(),
                     "steam".to_string(),
                     format!("steam://rungameid/{}", app_id),
@@ -1730,7 +1735,7 @@ impl HostAdapter for LinuxHost {
                 // `[entries.kind.env]` entries only reach the app via the
                 // explicit `--env=KEY=VAL` flag. Build them into the argv
                 // (sorted for deterministic ordering and easier debugging).
-                let mut argv = vec!["flatpak".to_string(), "run".to_string()];
+                let mut argv = vec![helpers::resolve_arg("flatpak"), "run".to_string()];
                 let mut keys: Vec<&String> = env.keys().collect();
                 keys.sort();
                 for k in keys {

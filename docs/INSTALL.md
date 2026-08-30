@@ -476,6 +476,14 @@ descendant inherits, and an unprivileged process can neither forge nor leave.
 background prefetch timer and parses whatever a remote host returns, so it is
 launched into a transient scope of its own like an activity.
 
+Those helpers are also located from a fixed list of root-owned directories
+rather than `$PATH`. This matters more than it sounds: GDM's PAM stack is
+configured with `user_readenv=1`, so `~/.pam_environment` — a file the kiosk user
+owns — sets the session's environment, and an activity that could steer `$PATH`
+could have shepherd exec a binary of its choosing *inside shepherd's own
+cgroup*. For the same reason `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER` are
+ignored unless `--no-restrict-ipc-peers` is passed, which no device does.
+
 Everything else is refused at accept, before it can read any state, and the
 refusal raises the `ipc_peer_rejected` diagnostic naming the cgroup it came
 from. Because an activity's cgroup is named after its session id, that usually

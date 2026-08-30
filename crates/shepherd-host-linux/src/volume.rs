@@ -5,6 +5,7 @@
 //! - PulseAudio (via `pactl`)
 //! - ALSA (via `amixer`)
 
+use crate::helpers;
 use async_trait::async_trait;
 use shepherd_host_api::{
     AudioSnapshot, VolumeCapabilities, VolumeController, VolumeError, VolumeResult, VolumeStatus,
@@ -52,7 +53,7 @@ impl SoundBackend {
 
     fn is_pipewire_available() -> bool {
         // Check if wpctl is available and can communicate with PipeWire
-        Command::new("wpctl")
+        Command::new(helpers::resolve("wpctl"))
             .args(["status"])
             .output()
             .map(|o| o.status.success())
@@ -61,7 +62,7 @@ impl SoundBackend {
 
     fn is_pulseaudio_available() -> bool {
         // Check if pactl is available and server is running
-        Command::new("pactl")
+        Command::new(helpers::resolve("pactl"))
             .args(["info"])
             .output()
             .map(|o| o.status.success())
@@ -70,7 +71,7 @@ impl SoundBackend {
 
     fn is_alsa_available() -> bool {
         // Check if amixer is available
-        Command::new("amixer")
+        Command::new(helpers::resolve("amixer"))
             .args(["sget", "Master"])
             .output()
             .map(|o| o.status.success())
@@ -139,7 +140,7 @@ impl LinuxVolumeController {
     /// Set volume via PipeWire
     fn set_volume_pipewire(percent: u8) -> VolumeResult<()> {
         let volume = format!("{}%", percent);
-        Command::new("wpctl")
+        Command::new(helpers::resolve("wpctl"))
             .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -148,7 +149,7 @@ impl LinuxVolumeController {
 
     /// Set volume via PulseAudio
     fn set_volume_pulseaudio(percent: u8) -> VolumeResult<()> {
-        Command::new("pactl")
+        Command::new(helpers::resolve("pactl"))
             .args([
                 "set-sink-volume",
                 "@DEFAULT_SINK@",
@@ -161,7 +162,7 @@ impl LinuxVolumeController {
 
     /// Set volume via ALSA
     fn set_volume_alsa(percent: u8) -> VolumeResult<()> {
-        Command::new("amixer")
+        Command::new(helpers::resolve("amixer"))
             .args(["sset", "Master", &format!("{}%", percent)])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -170,7 +171,7 @@ impl LinuxVolumeController {
 
     /// Toggle mute via PipeWire
     fn toggle_mute_pipewire() -> VolumeResult<()> {
-        Command::new("wpctl")
+        Command::new(helpers::resolve("wpctl"))
             .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -179,7 +180,7 @@ impl LinuxVolumeController {
 
     /// Toggle mute via PulseAudio
     fn toggle_mute_pulseaudio() -> VolumeResult<()> {
-        Command::new("pactl")
+        Command::new(helpers::resolve("pactl"))
             .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -188,7 +189,7 @@ impl LinuxVolumeController {
 
     /// Toggle mute via ALSA
     fn toggle_mute_alsa() -> VolumeResult<()> {
-        Command::new("amixer")
+        Command::new(helpers::resolve("amixer"))
             .args(["sset", "Master", "toggle"])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -198,7 +199,7 @@ impl LinuxVolumeController {
     /// Set mute state via PipeWire
     fn set_mute_pipewire(muted: bool) -> VolumeResult<()> {
         let state = if muted { "1" } else { "0" };
-        Command::new("wpctl")
+        Command::new(helpers::resolve("wpctl"))
             .args(["set-mute", "@DEFAULT_AUDIO_SINK@", state])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -208,7 +209,7 @@ impl LinuxVolumeController {
     /// Set mute state via PulseAudio
     fn set_mute_pulseaudio(muted: bool) -> VolumeResult<()> {
         let state = if muted { "1" } else { "0" };
-        Command::new("pactl")
+        Command::new(helpers::resolve("pactl"))
             .args(["set-sink-mute", "@DEFAULT_SINK@", state])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -218,7 +219,7 @@ impl LinuxVolumeController {
     /// Set mute state via ALSA
     fn set_mute_alsa(muted: bool) -> VolumeResult<()> {
         let state = if muted { "mute" } else { "unmute" };
-        Command::new("amixer")
+        Command::new(helpers::resolve("amixer"))
             .args(["sset", "Master", state])
             .status()
             .map_err(|e| VolumeError::Backend(e.to_string()))?;
@@ -406,7 +407,7 @@ impl VolumeController for LinuxVolumeController {
 /// as 0 %, which is indistinguishable from genuine silence and is a perfectly
 /// plausible reading to act on.
 fn run_reading(program: &str, args: &[&str]) -> VolumeResult<String> {
-    let output = Command::new(program)
+    let output = Command::new(helpers::resolve(program))
         .args(args)
         .output()
         .map_err(|e| VolumeError::Backend(format!("{program}: {e}")))?;

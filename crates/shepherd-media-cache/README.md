@@ -39,6 +39,11 @@ and the playlist fetch in `playlist.rs` — go through
 The `yt-dlp --version` liveness probe does not: it parses no remote input, and
 it runs on every playlist fetch and diagnostics pass.
 
+`shepherdd` likewise injects a resolver (`set_program_resolver_fn`) so `yt-dlp`
+is found in a root-owned directory rather than through `$PATH` — the scope
+contains a substituted `yt-dlp`, but the `--version` liveness probe runs
+unscoped, so the lookup has to be safe on its own (issue #144).
+
 This crate does **not** build that wrapper. It is shared with the player and the
 Android build, neither of which has a systemd user manager, and the probe for
 whether scoping works at all lives in `shepherd-host-linux`. Instead `shepherdd`

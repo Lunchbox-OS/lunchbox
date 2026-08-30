@@ -9,7 +9,7 @@ running GDM, and the environment a kiosk session actually receives was measured
 against GDM's own PAM stack. The other two were tested on the same host but not
 against a live kiosk login.
 
-## 1. An activity chooses shepherdd's entire environment
+## 1. An activity chooses shepherdd's entire environment — FIXED
 
 `shepherdd` execs `systemd-run`, `pkexec`, `snap`, `flatpak`, `yt-dlp`, `pgrep`,
 `systemctl`, `wpctl`, `pactl`, `amixer`, `pw-dump`, `wl-mirror`, `script`,
@@ -118,6 +118,34 @@ Resolution should be lazy-then-cached, not eager: `pactl` and `wl-mirror` are
 optional fallbacks and eager resolution would raise diagnostics for tools that
 are legitimately absent.
 
+### Fixed
+
+`crates/shepherd-host-linux/src/helpers.rs`. `resolve` searches a compiled-in
+list of root-owned directories and never reads the environment; a name found
+nowhere resolves to `/usr/bin/<name>` rather than falling back to a `$PATH`
+lookup. `resolve_daemon_sibling` covers shepherd's own binaries — the input
+sidecars, and the pairing overlay, which had never had even the `current_exe()`
+treatment the sidecars did. `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER` go
+through one gate, `env_override`, off unless `--no-restrict-ipc-peers` says this
+is a development session. `yt-dlp` is resolved through an injected resolver, for
+the same reason the scope wrapper is injected.
+
+Regression tests are in `crates/shepherd-host-linux/tests/helper_resolution.rs`
+— an integration test rather than a unit test, because poisoning `PATH` in the
+crate's shared test process breaks the several unit tests that spawn `sleep` and
+`sh` by name.
+
+Verified in the headless dev stack, which exercises the real spawn paths:
+
+```
+Activities will be launched into a cgroup of their own      <- resolved systemd-run ran
+Environment overrides for helper binaries are enabled...    <- dev gate fires in dev only
+Steam preloaded in background pid=288898                    <- resolved + wrapped snap path
+yt-dlp ... HTTP Error 400 (placeholder playlist id)         <- resolved yt-dlp really ran
+```
+
+No helper failed to resolve.
+
 ## 2. An activity can take over the management socket's name
 
 Demonstrated end to end with a throwaway socket:
@@ -209,8 +237,7 @@ Recorded so the next reader does not re-derive it:
 
 ## Priority
 
-1 is the one to fix, and it should block the branch: it is reachable by any
-activity, it needs one file write, and it converts the peer check from a
-boundary into a formality. 2 needs an installer change and a decision about
-where the socket lives. 3 is a papercut, worth folding into whatever touches the
-diagnostic next.
+1 is fixed. 2 needs an installer change and a decision about where the socket
+lives; it is a spoofing and denial vector against clients rather than an
+escalation, so it does not block the branch the way 1 did. 3 is a papercut,
+worth folding into whatever touches the diagnostic next.

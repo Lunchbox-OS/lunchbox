@@ -1,5 +1,6 @@
 //! Process management utilities
 
+use crate::helpers;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -18,8 +19,15 @@ pub const DEFAULT_FIREWALL_HELPER_PATH: &str = "/usr/libexec/shepherd-firewall-h
 
 /// Resolve the firewall helper path, honoring the env override.
 pub fn firewall_helper_path() -> String {
-    std::env::var("SHEPHERD_FIREWALL_HELPER")
-        .unwrap_or_else(|_| DEFAULT_FIREWALL_HELPER_PATH.to_string())
+    // The override is honoured only in a development session (issue #144). It
+    // names a binary `pkexec` is asked to run, and the environment is exactly
+    // what an activity can choose, so on a device it must not be read at all.
+    // polkit pins the action to the default path anyway, so an override that
+    // slipped through would fail rather than escalate — this is the belt to
+    // that brace.
+    helpers::env_override("SHEPHERD_FIREWALL_HELPER")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DEFAULT_FIREWALL_HELPER_PATH.to_string())
 }
 
 /// Whether the host can actually enforce per-cgroup IP filters.
@@ -102,7 +110,7 @@ fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
 /// only if the action is granted with no auth prompt required.
 fn probe_polkit_grant() -> Result<(), String> {
     let pid = std::process::id();
-    let output = std::process::Command::new("pkcheck")
+    let output = std::process::Command::new(helpers::resolve("pkcheck"))
         .args([
             "--action-id",
             "org.shepherd.firewall.apply-process",
@@ -179,7 +187,7 @@ fn probe_activity_isolation() -> ActivityIsolationStatus {
     // for instance, runs with a temp XDG_RUNTIME_DIR and no bus at all. The
     // only reliable test is the thing we are about to do for real.
     let scope = format!("shepherd-isolation-probe-{}.scope", std::process::id());
-    let output = std::process::Command::new("systemd-run")
+    let output = std::process::Command::new(helpers::resolve("systemd-run"))
         .args([
             "--user",
             "--scope",
@@ -216,7 +224,7 @@ fn probe_activity_isolation() -> ActivityIsolationStatus {
 /// kill path keeps working unchanged.
 pub fn user_scope_argv_prefix(scope_name: &str) -> Vec<String> {
     vec![
-        "systemd-run".into(),
+        helpers::resolve_arg("systemd-run"),
         "--user".into(),
         "--scope".into(),
         "--collect".into(),
@@ -274,9 +282,13 @@ pub fn helper_scope_argv_prefix(tag: &str) -> Vec<String> {
 /// it is the launch that matters.
 pub fn steam_preload_argv(scope: Option<&str>) -> Vec<String> {
     // -silent tells Steam not to show its main window on startup.
-    let client = ["snap", "run", "steam", "-silent"]
-        .into_iter()
-        .map(String::from);
+    let client = [
+        helpers::resolve_arg("snap"),
+        "run".into(),
+        "steam".into(),
+        "-silent".into(),
+    ]
+    .into_iter();
     match scope {
         Some(scope) => user_scope_argv_prefix(scope)
             .into_iter()
@@ -311,7 +323,7 @@ pub fn firewall_helper_argv_prefix(
     cwd: Option<&std::path::Path>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
-        "pkexec".into(),
+        helpers::resolve_arg("pkexec"),
         // Preserve shepherdd's cwd so the activity's effective cwd matches
         // the no-firewall path (pkexec otherwise resets to root's home).
         "--keep-cwd".into(),
@@ -542,7 +554,7 @@ pub async fn apply_firewall_to_existing_scope(
         args.push(rule.clone());
     }
 
-    let result = tokio::process::Command::new("pkexec")
+    let result = tokio::process::Command::new(helpers::resolve("pkexec"))
         .args(&args)
         .output()
         .await;
@@ -626,7 +638,7 @@ pub fn kill_snap_cgroup(snap_name: &str, _signal: Signal) -> bool {
 
                 // Always use SIGKILL for snap apps to prevent self-restart behavior
                 // Using systemctl kill --signal=KILL sends SIGKILL to all processes in scope
-                let result = Command::new("systemctl")
+                let result = Command::new(helpers::resolve("systemctl"))
                     .args(["--user", "kill", "--signal=KILL", &scope_name])
                     .output();
 
@@ -693,7 +705,7 @@ pub fn kill_flatpak_cgroup(app_id: &str, _signal: Signal) -> bool {
 
                 // Always use SIGKILL for flatpak apps to prevent self-restart behavior
                 // Using systemctl kill --signal=KILL sends SIGKILL to all processes in scope
-                let result = Command::new("systemctl")
+                let result = Command::new(helpers::resolve("systemctl"))
                     .args(["--user", "kill", "--signal=KILL", &scope_name])
                     .output();
 
@@ -829,7 +841,7 @@ pub fn kill_steam_game_processes(app_id: u32, signal: Signal) -> bool {
 /// The helper's single polkit action gates the binary as a whole, so this needs
 /// no grant beyond the one `apply-process` already requires.
 pub fn stop_firewall_scope(scope_name: &str) -> bool {
-    let output = Command::new("pkexec")
+    let output = Command::new(helpers::resolve("pkexec"))
         .args([
             &firewall_helper_path(),
             "stop-scope",
@@ -946,7 +958,10 @@ pub fn kill_by_command(
     signal: Signal,
     protected_pgids: &std::collections::HashSet<u32>,
 ) -> bool {
-    let output = match Command::new("pgrep").args(["-f", command_name]).output() {
+    let output = match Command::new(helpers::resolve("pgrep"))
+        .args(["-f", command_name])
+        .output()
+    {
         Ok(output) => output,
         Err(e) => {
             warn!(command = command_name, error = %e, "Failed to run pgrep");
@@ -1043,7 +1058,7 @@ impl ManagedProcess {
                     .join(" ");
 
                 let script_argv = vec![
-                    "script".to_string(),
+                    helpers::resolve_arg("script"),
                     "-q".to_string(),
                     "-c".to_string(),
                     original_cmd,
@@ -1416,7 +1431,9 @@ mod tests {
             Some(std::path::Path::new("/tmp")),
         );
 
-        assert_eq!(prefix[0], "pkexec");
+        // Resolved, not bare: `$PATH` must not get to choose which pkexec
+        // runs (issue #144).
+        assert_eq!(prefix[0], helpers::resolve_arg("pkexec"));
         assert!(prefix.iter().any(|a| a == "--keep-cwd"));
         assert!(prefix.iter().any(|a| a == "apply-process"));
         assert!(prefix.iter().any(|a| a == "shepherd-test.scope"));
@@ -1604,17 +1621,17 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "systemd-run",
-                "--user",
-                "--scope",
-                "--collect",
-                "--quiet",
-                "--unit=shepherd-steam-preload-42.scope",
-                "--",
-                "snap",
-                "run",
-                "steam",
-                "-silent",
+                helpers::resolve_arg("systemd-run"),
+                "--user".into(),
+                "--scope".into(),
+                "--collect".into(),
+                "--quiet".into(),
+                "--unit=shepherd-steam-preload-42.scope".into(),
+                "--".into(),
+                helpers::resolve_arg("snap"),
+                "run".into(),
+                "steam".into(),
+                "-silent".into(),
             ],
             "the preloaded Steam client must be wrapped, not spawned bare"
         );
@@ -1627,7 +1644,12 @@ mod tests {
         // downgrade is reported as `ipc_socket_not_hardened` at startup.
         assert_eq!(
             steam_preload_argv(None),
-            vec!["snap", "run", "steam", "-silent"]
+            vec![
+                helpers::resolve_arg("snap"),
+                "run".into(),
+                "steam".into(),
+                "-silent".into()
+            ]
         );
     }
 

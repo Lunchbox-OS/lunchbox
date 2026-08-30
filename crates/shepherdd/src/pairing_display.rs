@@ -49,7 +49,10 @@ impl PairingDisplay for SwayPairingDisplay {
             PairingMethod::Enter => "enter",
         };
 
-        let mut cmd = Command::new(BINARY);
+        // Resolved like the input sidecars rather than exec'd by bare name:
+        // this is a direct child of the daemon, so `$PATH` deciding which binary
+        // runs would put a chosen one in the daemon's cgroup (issue #144).
+        let mut cmd = Command::new(shepherd_host_linux::resolve_daemon_sibling(BINARY));
         cmd.args([
             "--passkey",
             &passkey.to_string(),

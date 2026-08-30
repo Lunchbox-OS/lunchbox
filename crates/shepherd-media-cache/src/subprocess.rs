@@ -30,6 +30,34 @@ pub type ScopePrefixFn = fn(&str) -> Vec<String>;
 
 static SCOPE_PREFIX: OnceLock<ScopePrefixFn> = OnceLock::new();
 
+/// Resolves a bare program name to an absolute path in a directory only root
+/// can write.
+///
+/// Injected for the same reason as [`ScopePrefixFn`]: the scoping above
+/// contains a hijacked `yt-dlp`, but the `--version` liveness probe runs
+/// unscoped, so where the binary is *found* has to be safe on its own. On a
+/// device `$PATH` is not — GDM's PAM stack reads `~/.pam_environment`, which the
+/// kiosk user owns (issue #144).
+pub type ProgramResolverFn = fn(&str) -> String;
+
+static PROGRAM_RESOLVER: OnceLock<ProgramResolverFn> = OnceLock::new();
+
+/// Install the resolver every `yt-dlp` lookup goes through.
+pub fn set_program_resolver_fn(f: ProgramResolverFn) {
+    let _ = PROGRAM_RESOLVER.set(f);
+}
+
+/// `yt-dlp`'s path: resolved if a resolver was injected, bare otherwise.
+///
+/// Bare is right for the player and the Android build, which have no daemon
+/// cgroup to protect and no injected resolver.
+pub fn ytdlp_program() -> String {
+    PROGRAM_RESOLVER
+        .get()
+        .map(|f| f("yt-dlp"))
+        .unwrap_or_else(|| "yt-dlp".to_string())
+}
+
 /// Install the wrapper every `yt-dlp` invocation is launched through.
 ///
 /// Called once by `shepherdd` at startup. Later calls are ignored rather than
@@ -47,21 +75,30 @@ pub fn ytdlp_command(tag: &str) -> Command {
     ytdlp_command_with(SCOPE_PREFIX.get().map(|f| f(tag)).unwrap_or_default())
 }
 
+/// A bare `yt-dlp` command — resolved, but in no scope of its own.
+///
+/// Only for the `--version` liveness probe, which parses no remote input. See
+/// `playlist::ensure_ytdlp_available`.
+pub fn ytdlp_probe_command() -> Command {
+    Command::new(ytdlp_program())
+}
+
 /// [`ytdlp_command`] with the prefix supplied rather than looked up.
 ///
 /// Split out so the wrapping is testable: the lookup goes through a `OnceLock`
 /// that, once set, stays set for the whole test binary — so a test that
 /// installed one would decide the outcome of every other test by running first.
 fn ytdlp_command_with(prefix: Vec<String>) -> Command {
+    let ytdlp = ytdlp_program();
     match prefix.split_first() {
         Some((program, rest)) => {
             let mut cmd = Command::new(program);
             // `yt-dlp` goes after the prefix, which ends in `--`; before it, the
             // wrapper would read it as one of its own flags.
-            cmd.args(rest).arg("yt-dlp");
+            cmd.args(rest).arg(ytdlp);
             cmd
         }
-        None => Command::new("yt-dlp"),
+        None => Command::new(ytdlp),
     }
 }
 

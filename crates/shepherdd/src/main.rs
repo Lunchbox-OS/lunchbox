@@ -225,6 +225,14 @@ impl Service {
         // Log service start
         store.append_audit(AuditEvent::new(AuditEventType::ServiceStarted))?;
 
+        // Decide whether the environment may name binaries, before anything is
+        // resolved or spawned (issue #144). On a device it may not: GDM's PAM
+        // stack reads `~/.pam_environment`, so the kiosk user — and therefore
+        // every activity — chooses the session's environment. The same flag
+        // governs this and the peer allow-list because they mean the same
+        // thing: whether this stack is a device or a developer's.
+        shepherd_host_linux::helpers::set_trust_environment(args.no_restrict_ipc_peers);
+
         // Initialize host adapter
         let host = Arc::new(LinuxHost::new());
 
@@ -234,6 +242,11 @@ impl Service {
         // so the daemon injects the one from the Linux host here, once, before
         // any prefetch can start.
         shepherd_media_cache::set_scope_prefix_fn(shepherd_host_linux::helper_scope_argv_prefix);
+        // ...and resolve it from a trusted directory rather than `$PATH`, for
+        // the same reason (issue #144). The scope contains a hijacked yt-dlp,
+        // but `ytdlp_available`'s `--version` probe runs unscoped, so the
+        // lookup has to be safe on its own.
+        shepherd_media_cache::set_program_resolver_fn(shepherd_host_linux::resolve_helper_arg);
 
         // Initialize volume controller
         let volume = Arc::new(LinuxVolumeController::new());

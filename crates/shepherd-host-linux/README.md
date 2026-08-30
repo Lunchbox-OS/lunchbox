@@ -423,6 +423,58 @@ Still unscoped, and deliberately: the input-compat sidecars (`sidecar.rs`),
 `wl-mirror`, and the pairing overlay. All three are shepherd's own furniture
 with no remote input, and two of them need the session's own devices.
 
+## Helper binaries come from trusted directories, not `$PATH` (issue #144)
+
+`shepherdd` execs a good deal it did not write — `systemd-run`, `pkexec`,
+`snap`, `flatpak`, `systemctl`, `pgrep`, `pkcheck`, `script`, `wpctl`, `pactl`,
+`amixer`, `pw-dump`, `wl-mirror`. Every one used to be named bare and resolved
+through `$PATH`.
+
+That is not safe here, because on a stock 26.04 + GDM host **the kiosk user
+chooses the session's environment**: `/etc/pam.d/gdm-password` and
+`gdm-autologin` carry `pam_env.so … user_readenv=1`, and `libpam-modules` still
+honours it, so `~/.pam_environment` sets `PATH` outright. Every activity runs as
+that uid. An activity could write one file, drop its own `systemd-run` on the
+resulting `PATH`, and at the next login have shepherd exec it — as a direct
+child of the daemon, in the daemon's cgroup, which the management socket accepts
+as `Admin`. The same substitution turns `user_scope_argv_prefix` into a no-op,
+so every activity would land in shepherd's cgroup too, and nothing would fail
+loudly.
+
+`helpers::resolve` therefore does not read the environment at all. It searches a
+**compiled-in** list of root-owned directories (`/usr/local/sbin`,
+`/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`, `/snap/bin`) and
+returns an absolute path. Lookups are lazy and cached — `pactl` and `wl-mirror`
+are optional, so eager resolution would only have to decide what to do about
+tools that are legitimately absent.
+
+- A name that already contains `/` is a caller's deliberate path and is returned
+  untouched.
+- A name found nowhere resolves to `/usr/bin/<name>` rather than the bare name.
+  Returning the bare name would hand the lookup back to `$PATH`; an absolute
+  path under a root-owned directory fails at spawn exactly as a missing tool
+  always did, and an activity cannot satisfy it.
+- `helpers::resolve_daemon_sibling` is the variant for shepherd's *own*
+  binaries: `current_exe()`'s directory first (where both an install and a
+  `cargo build` put them), then the trusted directories. The input-compat
+  sidecars and the pairing overlay use it.
+
+`SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER` are binary-substitution
+primitives, so they go through the single gate `helpers::env_override` and are
+**ignored by default**. `shepherdd` enables them with
+`helpers::set_trust_environment` from the same flag that disarms the peer check
+(`--no-restrict-ipc-peers`), because both mean the same thing: whether this
+stack is a device or a developer's.
+
+An activity's own command from `[entries]` is still resolved however the admin
+wrote it. `config.toml` is owned by the same uid the activities run as, so that
+is the same class of problem — tracked as #156/#157, and a policy decision
+rather than a lookup bug.
+
+The measurements are in
+`docs/ai/history/2026-08-29 004 ipc-peer-cgroup-hole-hunt.md`; the regression
+tests are `crates/shepherd-host-linux/tests/helper_resolution.rs`.
+
 ## Browser policy
 
 When `SpawnOptions::browser` is set and the entry is the supported

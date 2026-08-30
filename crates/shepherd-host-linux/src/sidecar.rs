@@ -16,24 +16,22 @@ use tracing::{debug, info, warn};
 /// Locate a sidecar binary by name.
 ///
 /// Resolution order:
-/// 1. The matching `SHEPHERD_*_BIN` env var override, if set and non-empty.
-/// 2. A sibling of the running daemon binary (`current_exe()`'s directory).
-/// 3. The literal binary name, which `Command` resolves via `PATH`.
+/// 1. The matching `SHEPHERD_*_BIN` env var override — **development only**,
+///    gated by [`crate::helpers::env_override`]. It names a binary the daemon
+///    will exec as a direct child, and on a device the environment is chosen by
+///    the kiosk user (issue #144).
+/// 2. A sibling of the running daemon binary (`current_exe()`'s directory),
+///    which is where an install puts them and where a `cargo build` leaves them.
+/// 3. A trusted system directory.
+///
+/// Step 3 used to be the bare name, resolved through `$PATH`. That is the hole
+/// #144's peer check exists to close: a sidecar is a direct child of the daemon,
+/// so it lands in the daemon's cgroup and is accepted on the management socket.
 fn sidecar_binary(name: &str, env_override: &str) -> PathBuf {
-    if let Ok(val) = std::env::var(env_override)
-        && !val.is_empty()
-    {
-        return PathBuf::from(val);
+    if let Some(path) = crate::helpers::env_override(env_override) {
+        return path;
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    PathBuf::from(name)
+    crate::helpers::resolve_daemon_sibling(name)
 }
 
 /// Locate the `shepherd-touch-bridge` binary.

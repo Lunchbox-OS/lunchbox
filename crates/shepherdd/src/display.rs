@@ -76,7 +76,7 @@ impl MirrorLauncher for WlMirrorLauncher {
         if let Some(mut old) = guard.take() {
             let _ = old.kill().await;
         }
-        match tokio::process::Command::new("wl-mirror")
+        match tokio::process::Command::new(shepherd_host_linux::resolve_helper("wl-mirror"))
             .arg(source_output)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
