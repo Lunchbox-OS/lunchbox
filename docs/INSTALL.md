@@ -509,6 +509,15 @@ saying which one. `--no-restrict-ipc-peers` turns the check off; like
 `--no-harden-sway-ipc`, every development entry point passes it already, and
 `shepherd install sway-config` strips it back out for a device.
 
+**An activity can still take the socket's name.** It shares shepherd's uid, so
+it can delete the socket file and bind its own in its place — no file permission
+stops that, because a root-owned directory would stop `shepherdd` binding too,
+and the sticky bit only restricts deletion to the file's owner, which an
+activity is. What it cannot do is be *believed*: the launcher, the HUD and the
+one-shots check the daemon's cgroup before they say anything to it, the same way
+the daemon checks theirs. The device raises the `Critical` diagnostic
+`ipc_socket_replaced` when it happens, and the session needs restarting.
+
 **This does not close every path to the same effects.** The management HTTP API
 and the BLE transport are separate surfaces with their own authentication, and
 policy and usage state are files owned by the same uid the activities run as. An

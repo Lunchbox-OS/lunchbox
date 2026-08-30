@@ -130,6 +130,50 @@ nothing consults it at dispatch: once the allow-list is in place every accepted
 peer is either root or shepherd's own code, so a per-method tier split would
 have no security content to enforce.
 
+### Which daemon a client will talk to (issue #144)
+
+The same question backwards, and it needs asking. The socket lives in a
+directory owned by the uid every activity runs as, so an activity can
+`unlink()` it and `bind()` its own listener at the same path: established
+connections survive, but every new one — a relaunched launcher or HUD, a
+keybinding one-shot, `swayidle`'s screen blank — arrives at the impostor.
+
+**No file mode prevents this**, which is worth stating because two fixes suggest
+themselves and both were measured and rejected:
+
+| Attempt | Result |
+|---------|--------|
+| Socket in a root-owned directory | `shepherdd` cannot bind there at all — `EACCES` |
+| Sticky bit on the directory | Restricts deletion to the file's *owner*, and an activity **is** the owner: it shares the daemon's uid |
+
+Preventing the name being taken needs the socket to be created by something
+that is not the daemon — systemd socket activation, where root binds it and
+passes the fd — which `shepherdd` cannot use while sway `exec`s it.
+
+So the client checks who answered, exactly as the server checks who called.
+`IpcClient::connect` compares the listener's cgroup with its own via
+`classify_server`:
+
+| What answered | Verdict |
+|---------------|---------|
+| A process in our own cgroup — the session's real daemon | accepted |
+| Anything in another cgroup | **refused** |
+| A listener that cannot be identified | **refused** — an impostor can cause this by exiting once the connection is accepted |
+| Our own cgroup unreadable | accepted, with a warning — nothing an activity does causes this, and refusing would leave a device with a launcher that will not start |
+
+Root is exempt, because `sudo` reaches the daemon from a login session that is
+never shepherd's cgroup — the same exemption the server makes.
+`IpcClient::connect_unverified` exists for clients that legitimately live
+outside the session; the launcher, the HUD and the one-shots must never use it,
+since they are precisely the clients an impostor is worth deceiving.
+
+The daemon also notices: `IpcServer::socket_was_replaced` compares
+`(st_dev, st_ino)` against what it bound, and `shepherdd` polls it once a minute
+and raises the `Critical` diagnostic `ipc_socket_replaced`. Nothing is given
+away when this happens — clients refuse the impostor — but the session has
+become unreachable, and that should not look like a launcher that stopped
+working for no reason.
+
 ## Client Usage
 
 ### Connecting

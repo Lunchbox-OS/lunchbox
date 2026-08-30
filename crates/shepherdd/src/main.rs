@@ -48,6 +48,10 @@ use tracing_subscriber::EnvFilter;
 /// admin editing the file does not wait for the timer.
 const DIAGNOSTIC_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 
+/// How often to check that the management socket is still the one we bound
+/// (issue #144). A minute: this is a deliberate act, not a hot path.
+const SOCKET_WATCH_INTERVAL: Duration = Duration::from_secs(60);
+
 mod diagnostics;
 mod display;
 mod display_watch;
@@ -536,6 +540,54 @@ impl Service {
         }
     }
 
+    /// Watch for the management socket being replaced under us (issue #144).
+    ///
+    /// An activity shares this uid, so it can `unlink()` the socket and bind
+    /// its own listener at the same path. Clients refuse to talk to the
+    /// impostor — they check the daemon's cgroup the same way the daemon checks
+    /// theirs — so nothing is breached; what is lost is reachability, silently.
+    /// This turns that into a `Critical` an administrator can see.
+    ///
+    /// Polled rather than watched with inotify: this is a rare, deliberate act
+    /// rather than a hot path, one `stat` a minute costs nothing, and an inotify
+    /// watch on a path an activity can delete has its own edge cases.
+    fn spawn_socket_watch(ipc: Arc<IpcServer>, diagnostics: Arc<diagnostics::DiagnosticPublisher>) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(SOCKET_WATCH_INTERVAL);
+            ticker.tick().await; // the first tick is immediate
+            loop {
+                ticker.tick().await;
+                if ipc.socket_was_replaced() {
+                    warn!(
+                        "The management socket is no longer the one this daemon bound; \
+                         something at this uid replaced or removed it"
+                    );
+                    diagnostics.raise(Diagnostic {
+                        code: DiagnosticCode::IpcSocketReplaced,
+                        subject: DiagnosticSubject::Service,
+                        severity: DiagnosticSeverity::Critical,
+                        message: "Something replaced shepherd's management socket, so the \
+                                  launcher, the HUD and the screen-blank timer can no longer \
+                                  reach the daemon. They refuse to talk to whatever bound it \
+                                  instead, so nothing has been given away — but this session \
+                                  needs restarting."
+                            .to_string(),
+                        remedy: Some(
+                            "Log out and back in. If it recurs, an activity is doing it: the \
+                             daemon's log names the cgroup of anything that also tried to \
+                             connect."
+                                .to_string(),
+                        ),
+                        since: shepherd_util::now(),
+                    });
+                    // Once is enough; the condition does not clear by itself and
+                    // the session has to be restarted either way.
+                    return;
+                }
+            }
+        });
+    }
+
     /// The administrator-facing form of "something tried to drive the daemon".
     ///
     /// Names the peer's cgroup when it could be read: an activity's scope is
@@ -613,6 +665,11 @@ impl Service {
         let (diagnostics_changed_tx, mut diagnostics_changed_rx) = mpsc::unbounded_channel();
         let diagnostic_publisher =
             diagnostics::DiagnosticPublisher::new(self.diagnostics.clone(), diagnostics_changed_tx);
+
+        // Notice if the management socket is replaced under us (issue #144).
+        // Started here because this is the first point where there is somewhere
+        // to report to — the same ordering constraint the peer allow-list has.
+        Self::spawn_socket_watch(self.ipc.clone(), Arc::new(diagnostic_publisher.clone()));
 
         // The host's sweep raises `CompositorUnreachable` when it cannot read
         // the window list, which would otherwise look exactly like an empty

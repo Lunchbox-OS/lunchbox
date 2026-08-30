@@ -253,6 +253,64 @@ pub fn is_delegated_user_cgroup(path: &str) -> bool {
     })
 }
 
+/// What a *client* found on the other end of its connection (issue #144).
+///
+/// The mirror of [`PeerPolicy`], and needed for the same reason read backwards.
+/// The socket lives in a directory owned by the uid every activity runs as, so
+/// an activity can `unlink()` it and `bind()` its own listener at the same
+/// path: existing connections survive, but every new one — a relaunched
+/// launcher or HUD, a keybinding one-shot, `swayidle`'s screen blank — arrives
+/// at the impostor instead. No file mode prevents this. A root-owned directory
+/// stops `shepherdd` binding at all, and the sticky bit restricts deletion to
+/// the file's *owner*, which an activity is: it shares the daemon's uid. Both
+/// were measured, not assumed.
+///
+/// So the client checks who answered, the same way the daemon checks who
+/// called. Shepherd's own clients — the launcher, the HUD, the one-shots sway
+/// starts — live in the daemon's cgroup, so "the server is in my cgroup" is
+/// exactly the question, and an activity's listener cannot pass it: it is in a
+/// scope of its own by construction.
+#[derive(Debug)]
+pub enum ServerCheck {
+    /// The daemon shares our cgroup — it is this session's own.
+    Ours,
+    /// Something in another cgroup answered. Either an impostor, or a
+    /// legitimate client talking from outside the session.
+    Foreign { server: u64, ours: u64 },
+    /// The server could not be identified at all.
+    Unknown(PeerError),
+    /// *We* could not be identified, so there is nothing to compare against.
+    /// Distinct from [`Self::Unknown`] because the two fail in opposite
+    /// directions — see [`classify_server`].
+    SelfUnknown(PeerError),
+}
+
+/// Identify the process on the other end of a client connection.
+///
+/// The two failure cases are deliberately separate, because an activity can
+/// reach one and not the other:
+///
+/// * [`ServerCheck::Unknown`] means the *server's* identity could not be read.
+///   An impostor can induce that — accept the connection, then exit, and
+///   `PIDFD_GET_INFO` answers `ESRCH` — so it has to be treated as a refusal.
+///   Trusting it would hand back everything the check was for.
+/// * [`ServerCheck::SelfUnknown`] means we could not read our *own* cgroup.
+///   Nothing an activity does causes that; it is a kernel that cannot answer,
+///   and refusing would leave a device with a launcher that will not start. The
+///   caller warns and continues, which is the same trade the daemon makes when
+///   it cannot read its own cgroup at startup.
+pub fn classify_server(fd: BorrowedFd<'_>) -> ServerCheck {
+    let ours = match own_cgroup_id() {
+        Ok(id) => id,
+        Err(e) => return ServerCheck::SelfUnknown(e),
+    };
+    match peer_cgroup_id(fd) {
+        Ok(server) if server == ours => ServerCheck::Ours,
+        Ok(server) => ServerCheck::Foreign { server, ours },
+        Err(e) => ServerCheck::Unknown(e),
+    }
+}
+
 /// Why a peer was refused, in the words an administrator should see.
 #[derive(Debug, Clone)]
 pub struct Rejection {

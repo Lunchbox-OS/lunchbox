@@ -146,7 +146,7 @@ yt-dlp ... HTTP Error 400 (placeholder playlist id)         <- resolved yt-dlp r
 
 No helper failed to resolve.
 
-## 2. An activity can take over the management socket's name
+## 2. An activity can take over the management socket's name — FIXED
 
 Demonstrated end to end with a throwaway socket:
 
@@ -172,9 +172,54 @@ can lie to the launcher and the HUD, and silently swallow `--screen-off`, which
 is a policy effect a child would notice and a parent would not.
 
 Any fix must keep `server.rs:105`'s unconditional `remove_file`, which is there
-so a crashed daemon's stale socket does not make a restart impossible. Putting
-the socket in a root-owned directory (`/run/shepherd/`, created by the
-installer) closes it and keeps that property.
+so a crashed daemon's stale socket does not make a restart impossible.
+
+### The obvious fix does not work
+
+This note originally recommended moving the socket to a root-owned
+`/run/shepherd/`. That is wrong, and the reason generalises: **no file mode can
+help while the daemon and the activities share a uid.** Measured:
+
+```
+root-owned dir, 0755:  bind: BLOCKED -> [Errno 13] Permission denied
+sticky bit, 1777:      activity unlink: SUCCEEDED
+```
+
+A directory `shepherdd` cannot write is a directory it cannot bind in. The
+sticky bit restricts deletion to the file's *owner*, and an activity is the
+owner — same uid. Preventing the name being taken requires the socket to be
+created by something other than the daemon, i.e. systemd socket activation with
+root binding it and passing the fd, which `shepherdd` cannot use while sway
+`exec`s it.
+
+### Fixed, by asking the question backwards
+
+The name can still be taken. What an impostor cannot do is be believed.
+
+`IpcClient::connect` now identifies the listener with the same
+`SO_PEERPIDFD` + `PIDFD_GET_INFO` machinery the daemon uses on its peers
+(`classify_server`, `ServerCheck`): shepherd's own clients live in the daemon's
+cgroup, so "is the server in my cgroup?" is exactly the question, and an
+activity's listener is in a scope of its own by construction. Root is exempt, as
+it is on the server side. `connect_unverified` exists for clients that
+legitimately live outside the session.
+
+The two failure modes deliberately fail in opposite directions: a *server* that
+cannot be identified is refused, because an impostor can cause that by exiting
+once the connection is accepted; a client that cannot read its *own* cgroup
+warns and continues, because nothing an activity does causes that and refusing
+would leave a device with a launcher that will not start.
+
+`IpcServer::socket_was_replaced` compares `(st_dev, st_ino)` against what was
+bound; `shepherdd` polls it once a minute and raises the new `Critical`
+diagnostic `ipc_socket_replaced`. That is the residual: the name can be taken,
+so the session can be made unreachable. Nothing is given away, but it should not
+look like a launcher that stopped working for no reason.
+
+Tests: `crates/shepherd-ipc/tests/server_identity.rs`, including a real impostor
+put in a cgroup of its own with `systemd-run --user --scope` (skipped where no
+user manager is available). Verified in the headless dev stack: eight client
+connections, no refusals, full launcher grid.
 
 ## 3. A rejected peer can amplify one `connect()` into a broadcast
 
@@ -237,7 +282,10 @@ Recorded so the next reader does not re-derive it:
 
 ## Priority
 
-1 is fixed. 2 needs an installer change and a decision about where the socket
-lives; it is a spoofing and denial vector against clients rather than an
-escalation, so it does not block the branch the way 1 did. 3 is a papercut,
-worth folding into whatever touches the diagnostic next.
+1 and 2 are fixed. 3 is a papercut, worth folding into whatever touches the
+diagnostic next.
+
+The residual on 2 is denial: an activity can still make the session unreachable
+by taking the socket's name, and only systemd socket activation would prevent
+that. It is reported rather than prevented, which is the same trade the
+compositor hardening makes.

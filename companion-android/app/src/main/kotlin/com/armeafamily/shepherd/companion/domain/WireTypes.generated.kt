@@ -301,6 +301,19 @@ enum class DiagnosticCode {
      */
     @SerialName("compositor_not_hardened") COMPOSITOR_NOT_HARDENED,
     /**
+     * Something replaced or removed shepherdd's management socket, so the
+     * daemon is no longer reachable at the path its clients use (issue #144).
+     *
+     * An activity can do this: the socket lives in a directory owned by the
+     * uid every activity runs as, and no file mode prevents it — a root-owned
+     * directory stops shepherdd binding at all, and the sticky bit restricts
+     * deletion to the file's owner, which an activity is. Clients refuse to
+     * talk to whatever bound the name instead, so this is a denial rather than
+     * a breach; without saying so, it looks like a launcher that stopped
+     * working for no reason.
+     */
+    @SerialName("ipc_socket_replaced") IPC_SOCKET_REPLACED,
+    /**
      * shepherdd's own management socket is reachable by processes that are
      * not part of the session — the peer allow-list is not armed, or it is
      * armed somewhere it cannot mean anything (issue #144).

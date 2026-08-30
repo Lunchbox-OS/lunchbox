@@ -59,6 +59,8 @@ pub struct IpcServer {
     /// exists. `None` until [`Self::start`] has bound successfully.
     socket_id: Option<(u64, u64)>,
     listener: Option<UnixListener>,
+    /// `(st_dev, st_ino)` of the socket this server bound, for [`Self::socket_was_replaced`].
+    bound_identity: Option<(u64, u64)>,
     clients: Arc<RwLock<HashMap<ClientId, ClientHandle>>>,
     event_tx: broadcast::Sender<Event>,
     message_tx: mpsc::UnboundedSender<ServerMessage>,
@@ -83,11 +85,34 @@ impl IpcServer {
             socket_path: socket_path.as_ref().to_path_buf(),
             socket_id: None,
             listener: None,
+            bound_identity: None,
             clients: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             message_tx,
             message_rx: Arc::new(Mutex::new(Some(message_rx))),
             peer_policy: PeerPolicy::unrestricted(),
+        }
+    }
+
+    /// Whether the socket at our path is no longer the one we bound.
+    ///
+    /// `true` means something replaced or removed it — an activity can, since
+    /// it shares this uid and no file mode prevents it (see
+    /// [`crate::ServerCheck`]). Clients refuse to talk to the impostor, so this
+    /// is not a breach; it is the daemon becoming unreachable, which is worth
+    /// saying out loud rather than leaving as a launcher that mysteriously
+    /// stops working.
+    ///
+    /// `false` when we never bound, or when the path cannot be read — an
+    /// unreadable path is not evidence of replacement.
+    pub fn socket_was_replaced(&self) -> bool {
+        let Some(bound) = self.bound_identity else {
+            return false;
+        };
+        match socket_identity(&self.socket_path) {
+            Some(now) => now != bound,
+            // Gone entirely. The unlink half of the same act.
+            None => true,
         }
     }
 
@@ -114,6 +139,13 @@ impl IpcServer {
         }
 
         let listener = UnixListener::bind(&self.socket_path)?;
+
+        // Remember which file we bound, so a replacement can be noticed
+        // (issue #144). An activity shares this uid and so can `unlink()` the
+        // socket and bind its own at the same path; clients refuse to talk to
+        // the impostor, but the daemon would otherwise never learn that it had
+        // become unreachable.
+        self.bound_identity = socket_identity(&self.socket_path);
 
         // Set socket permissions (readable/writable by owner and group)
         if let Err(err) =
@@ -432,6 +464,12 @@ impl Drop for IpcServer {
 }
 
 /// Get peer UID from Unix socket
+/// `(st_dev, st_ino)` for the socket at `path`, or `None` if it cannot be read.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
 fn get_peer_uid(stream: &UnixStream) -> Option<u32> {
     use std::os::unix::io::AsFd;
 
