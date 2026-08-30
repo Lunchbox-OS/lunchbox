@@ -167,6 +167,15 @@ never shepherd's cgroup — the same exemption the server makes.
 outside the session; the launcher, the HUD and the one-shots must never use it,
 since they are precisely the clients an impostor is worth deceiving.
 
+A refusal is reported at most once a minute (`RejectionReporter`). The first
+is always reported in full — a single probe is never silent — and the rest are
+counted, with the tally carried on the next report. Without that, an activity
+could call `connect()` in a loop: each refusal is a `warn!` line plus a
+diagnostic whose text names the peer's cgroup, and a diagnostic whose text has
+changed wakes every subscriber — the web UI, the companion app, the launcher.
+Nothing is breached, but it would be noise an activity controls, aimed at the
+channel an administrator watches for exactly this warning.
+
 The daemon also notices: `IpcServer::socket_was_replaced` compares
 `(st_dev, st_ino)` against what it bound, and `shepherdd` polls it once a minute
 and raises the `Critical` diagnostic `ipc_socket_replaced`. Nothing is given

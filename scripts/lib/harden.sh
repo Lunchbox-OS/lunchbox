@@ -246,6 +246,63 @@ EOF
     record_action "$user" "perms" "$user_home"
     
     # =========================================================================
+    # 8. Stop PAM reading the user's own environment file (issue #144)
+    # =========================================================================
+    # `pam_env`'s `user_readenv=1` makes PAM read `~/.pam_environment` — a file
+    # the kiosk user owns — and hand what it says to the session it is opening.
+    # That is the session shepherdd runs in, so without this the kiosk user, and
+    # therefore every activity running as that uid, chooses the daemon's whole
+    # environment: PATH, and anything else the session reads.
+    #
+    # shepherdd itself no longer trusts its environment for anything that
+    # selects a binary, but the rest of the session still does, and the option
+    # has been deprecated upstream for years. Ubuntu 26.04 ships it enabled on
+    # every GDM service.
+    #
+    # Deleting `~/.pam_environment` instead would not work: the user owns their
+    # home directory, so they can remove a root-owned file there and put their
+    # own back. The configuration that reads it is what has to go, and that
+    # lives in root-owned `/etc/pam.d`.
+    info "Disabling PAM's reading of user environment files..."
+
+    local pam_files_changed=0
+    local pam_file
+    while IFS= read -r pam_file; do
+        [[ -n "$pam_file" ]] || continue
+        save_for_restore "$user" "$pam_file"
+        sed -i 's/[[:space:]]user_readenv=1//g' "$pam_file"
+        record_action "$user" "file" "$pam_file"
+        info "  Disabled user_readenv in: $pam_file"
+        pam_files_changed=$((pam_files_changed + 1))
+    done < <(grep -rlE '^[^#]*user_readenv=1' /etc/pam.d/ 2>/dev/null || true)
+
+    if [[ "$pam_files_changed" -eq 0 ]]; then
+        info "  No PAM service reads user environment files; nothing to do"
+    fi
+
+    # A rename or reformat upstream that left one enabled would ship a device
+    # where the kiosk user still picks the session environment, so check rather
+    # than trust the sed.
+    #
+    # The check globs where the edit loop recursed, deliberately: `grep -r` does
+    # not follow symlinks, and `/etc/pam.d` is full of them (`gdm-smartcard` ->
+    # `/etc/alternatives/...`). Editing through a symlink would be wrong — `sed
+    # -i` would replace the link with a regular file — so the loop is right to
+    # skip them, but a symlink whose target is still enabled has to be caught
+    # rather than passed over by the same blind spot.
+    local still_enabled
+    still_enabled="$(grep -lE '^[^#]*user_readenv=1' /etc/pam.d/* 2>/dev/null | tr '\n' ' ')"
+    if [[ -n "$still_enabled" ]]; then
+        die "Failed to disable user_readenv in ${still_enabled}- the kiosk user could still set the session environment (issue #144)"
+    fi
+
+    # Its presence is not a problem once nothing reads it, but it is worth
+    # saying: on a device nothing legitimate writes this file.
+    if [[ -e "$user_home/.pam_environment" ]]; then
+        warn "  $user_home/.pam_environment exists; nothing reads it now, but nothing on a device should have written it"
+    fi
+
+    # =========================================================================
     # Mark as hardened
     # =========================================================================
     date -Iseconds > "$state_dir/hardened"
@@ -259,6 +316,7 @@ EOF
     info "  - Sudo access denied"
     info "  - Shell restricted to Sway sessions"
     info "  - Home directory secured (mode 0700)"
+    info "  - PAM no longer reads ~/.pam_environment (issue #144)"
     info ""
     info "To revert: shepherd harden revert --user $user"
 }
@@ -324,6 +382,7 @@ harden_revert() {
     info "  - Access via SSH"
     info "  - Login at console"
     info "  - Use sudo (if previously allowed)"
+    info "  - Set the session environment via ~/.pam_environment (issue #144)"
 }
 
 # Show hardening status

@@ -487,7 +487,9 @@ ignored unless `--no-restrict-ipc-peers` is passed, which no device does.
 Everything else is refused at accept, before it can read any state, and the
 refusal raises the `ipc_peer_rejected` diagnostic naming the cgroup it came
 from. Because an activity's cgroup is named after its session id, that usually
-names the activity that went looking.
+names the activity that went looking. Repeats are rate-limited to one report a
+minute, carrying a count, so an activity cannot bury the warning by probing in a
+loop.
 
 For this to be a boundary, two things have to hold, and the daemon checks both:
 

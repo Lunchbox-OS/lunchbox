@@ -221,7 +221,7 @@ put in a cgroup of its own with `systemd-run --user --scope` (skipped where no
 user manager is available). Verified in the headless dev stack: eight client
 connections, no refusals, full launcher grid.
 
-## 3. A rejected peer can amplify one `connect()` into a broadcast
+## 3. A rejected peer can amplify one `connect()` into a broadcast — FIXED
 
 Per refused connection (`server.rs:169-186`): two `SO_PEERPIDFD` +
 `PIDFD_GET_INFO` round trips (once in `classify`, once in `reject` for the log),
@@ -240,9 +240,31 @@ accept loop `continue`s immediately.
 
 Low severity — noise and CPU, not a bypass — but it is noise an activity
 controls, aimed at the channel an administrator watches for exactly this
-diagnostic. Dropping the pid/cgroup from the diagnostic message (keeping them in
-the log, where they belong) would make repeated rejections dedupe to one
-broadcast.
+diagnostic.
+
+### Fixed, but not the way this note first suggested
+
+The first suggestion here was to drop the pid and cgroup from the diagnostic
+message so repeats dedupe. That turns out to be wrong: naming the cgroup is a
+deliberate, tested decision (`a_refused_peer_names_where_it_came_from`), and it
+is what turns "something probed the socket" into "this activity did". An
+activity's scope carries its session id, so the detail is the whole value of the
+report.
+
+So the other option was taken instead: rate-limit the reporting.
+`RejectionReporter` in `server.rs` reports the first refusal in full — a single
+probe is never silent — and then at most one a minute, carrying the count of
+what it suppressed. The `warn!` line and the `ClientRejected` message are gated
+together, so both the journal and the diagnostics broadcast are bounded by the
+same decision.
+
+Not changed: `classify` still does its two pidfd round trips and a `/proc` read
+per refusal, even when the result will not be reported. That is a few
+microseconds against an accept-and-close that costs more, and separating it
+would mean restructuring `PeerPolicy::classify` to gather the human-readable
+detail lazily. Worth doing only if a refusal flood ever shows up in a profile.
+
+Test: `the_first_refusal_is_reported_and_a_flood_is_counted`.
 
 ## What was checked and found sound
 
@@ -282,10 +304,43 @@ Recorded so the next reader does not re-derive it:
 
 ## Priority
 
-1 and 2 are fixed. 3 is a papercut, worth folding into whatever touches the
-diagnostic next.
+All three are fixed.
 
 The residual on 2 is denial: an activity can still make the session unreachable
 by taking the socket's name, and only systemd socket activation would prevent
 that. It is reported rather than prevented, which is the same trade the
 compositor hardening makes.
+
+## The source of finding 1, closed separately
+
+`shepherdd` no longer trusts its environment, but `~/.pam_environment` still set
+the environment of everything *else* in the session. `shepherd harden apply` now
+strips `user_readenv=1` from every `/etc/pam.d` service that enables it — seven
+GDM services on a stock 26.04 — and `harden revert` puts them back.
+
+Deleting the file instead would not work, and the reason is the same one that
+defeats a root-owned socket directory: the user owns their home directory, so
+they can remove a root-owned file there and put their own back. The
+configuration that *reads* it is what has to go, and that lives in root-owned
+`/etc/pam.d`.
+
+Verified end to end on the installed kiosk user, with the attack file left in
+place:
+
+```
+$ sudo ./pamenv gdm-password shepherd-kiosk       # before
+PATH=/home/shepherd-kiosk/evil:/usr/bin:/bin
+SHEPHERD_PAMENV_MARKER=reached
+
+$ sudo shepherd harden apply --user shepherd-kiosk
+$ sudo ./pamenv gdm-password shepherd-kiosk       # after
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+```
+
+`harden revert` restored all eight files, confirmed with `dpkg -V gdm3`.
+
+One trap worth knowing: `grep -r` does not follow symlinks and `/etc/pam.d` is
+full of them (`gdm-smartcard` -> `/etc/alternatives/...`). The edit loop is right
+to skip them — `sed -i` through a symlink replaces the link with a regular file
+— but the *verification* globs instead, so a symlink whose target is still
+enabled is caught rather than passed over by the same blind spot.

@@ -7,6 +7,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
@@ -185,6 +186,8 @@ impl IpcServer {
             .as_ref()
             .ok_or_else(|| IpcError::ServerError("Server not started".into()))?;
 
+        let mut rejections = RejectionReporter::default();
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -201,17 +204,23 @@ impl IpcServer {
                     let role = match self.peer_policy.classify(stream.as_fd(), uid) {
                         Ok(role) => role,
                         Err(rejection) => {
-                            warn!(
-                                client_id = %client_id,
-                                uid = ?uid,
-                                peer_pid = ?rejection.peer_pid,
-                                peer_cgroup = ?rejection.peer_cgroup,
-                                reason = %rejection.reason,
-                                "Refused a client on the management socket"
-                            );
-                            let _ = self
-                                .message_tx
-                                .send(ServerMessage::ClientRejected { rejection });
+                            // Reported at most once a minute: a refused peer can
+                            // reconnect as fast as the kernel allows, and each
+                            // report wakes every diagnostics subscriber.
+                            if let Some(suppressed) = rejections.should_report(Instant::now()) {
+                                warn!(
+                                    client_id = %client_id,
+                                    uid = ?uid,
+                                    peer_pid = ?rejection.peer_pid,
+                                    peer_cgroup = ?rejection.peer_cgroup,
+                                    reason = %rejection.reason,
+                                    suppressed_since_last_report = suppressed,
+                                    "Refused a client on the management socket"
+                                );
+                                let _ = self
+                                    .message_tx
+                                    .send(ServerMessage::ClientRejected { rejection });
+                            }
                             // Dropping the stream closes the connection. The
                             // peer sees EOF rather than an error frame: there
                             // is nothing useful to tell it, and a refusal that
@@ -464,6 +473,50 @@ impl Drop for IpcServer {
 }
 
 /// Get peer UID from Unix socket
+/// How long after reporting a refused peer before another is reported.
+///
+/// The first refusal is always reported, so a single probe is never silent.
+const REJECTION_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Rate-limits reporting of refused peers (issue #144).
+///
+/// A refusal costs more than the connection that caused it: a `warn!` line, and
+/// a `ClientRejected` message that becomes a diagnostic — and raising a
+/// diagnostic whose text has changed wakes every subscriber, which is the web
+/// UI, the companion app and the launcher. The peer's cgroup is deliberately
+/// part of that text (it is what turns "something probed the socket" into
+/// "this activity did"), so every refusal is a distinct diagnostic and every
+/// one would broadcast.
+///
+/// An activity can call `connect()` in a loop. Nothing is breached — it is
+/// refused every time — but it would be noise it controls, aimed squarely at
+/// the channel an administrator watches for exactly this warning. So the first
+/// refusal is reported in full and the rest are counted, with the tally carried
+/// on the next report.
+#[derive(Debug, Default)]
+struct RejectionReporter {
+    last_report: Option<Instant>,
+    suppressed: u64,
+}
+
+impl RejectionReporter {
+    /// `Some(suppressed_since_last_report)` when this refusal should be
+    /// reported, `None` when it should only be counted.
+    fn should_report(&mut self, now: Instant) -> Option<u64> {
+        let due = match self.last_report {
+            None => true,
+            Some(last) => now.duration_since(last) >= REJECTION_REPORT_INTERVAL,
+        };
+        if due {
+            self.last_report = Some(now);
+            Some(std::mem::take(&mut self.suppressed))
+        } else {
+            self.suppressed += 1;
+            None
+        }
+    }
+}
+
 /// `(st_dev, st_ino)` for the socket at `path`, or `None` if it cannot be read.
 fn socket_identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
@@ -484,6 +537,41 @@ fn get_peer_uid(stream: &UnixStream) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use super::{REJECTION_REPORT_INTERVAL, RejectionReporter};
+    use std::time::Instant;
+
+    /// A single probe must never be silent — that is the whole point of the
+    /// warning — while a peer that reconnects in a loop must not get to wake
+    /// every diagnostics subscriber each time (issue #144).
+    #[test]
+    fn the_first_refusal_is_reported_and_a_flood_is_counted() {
+        let mut r = RejectionReporter::default();
+        let t0 = Instant::now();
+
+        assert_eq!(
+            r.should_report(t0),
+            Some(0),
+            "the first refusal must always be reported"
+        );
+
+        for _ in 0..10_000 {
+            assert_eq!(
+                r.should_report(t0),
+                None,
+                "a flood inside the window must be counted, not reported"
+            );
+        }
+
+        // The tally rides along on the next report, so the flood is visible
+        // without having been broadcast ten thousand times.
+        assert_eq!(
+            r.should_report(t0 + REJECTION_REPORT_INTERVAL),
+            Some(10_000)
+        );
+        // ...and resets once carried.
+        assert_eq!(r.should_report(t0 + REJECTION_REPORT_INTERVAL * 2), Some(0));
+    }
+
     use super::*;
     use tempfile::tempdir;
 
