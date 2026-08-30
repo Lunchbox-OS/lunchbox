@@ -1,6 +1,9 @@
 # Hardening shepherdd's own IPC socket — scoping (issue #144)
 
 > Issue: <https://git.armeafamily.com/albert/shepherd-launcher/issues/144>
+> Follow-up: `2026-08-29 002 shepherdd-socket-peer-credentials-verified.md`
+> settles the three open questions below on real hardware, and corrects the
+> deny-list phrasing this note's "Where the check goes" section slips into.
 > Related: #147 (the sway IPC migration, which closed the *same* hole on a
 > *different* socket), #151/#152 (the per-entry firewall cgroups this design
 > wants to reuse), #143 (the diagnostics channel a rejected peer would report
