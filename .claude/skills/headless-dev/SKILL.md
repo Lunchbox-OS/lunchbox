@@ -52,6 +52,16 @@ or source it yourself. Add `--harden-ipc` to `dev headless` to boot the way an
 installed device does, with the original name removed — everything above still
 works, because it all goes through the alias either way.
 
+**The management socket's peer check is off in dev, and `--harden-ipc` does not
+turn it on.** shepherdd otherwise accepts a client on its own socket only from
+its own cgroup (issue #144). On a device that is the display manager's
+root-owned session scope; here the whole stack shares the cgroup of the shell
+that launched it, so the check would only refuse clients started from another
+terminal while protecting nothing. Every dev entry point passes
+`--no-restrict-ipc-peers`, and `headless.sh` fails loudly if `sway.conf` stops
+doing so. Nothing you drive through `dev shot` / `dev tree` / `dev key` is
+affected — those go through sway, not shepherdd.
+
 shepherdd hardens by default; `sway.conf` opts out with `--no-harden-sway-ipc`
 because it is the development config, and `--harden-ipc` takes that opt-out back
 off. So a plain `dev headless` leaves the compositor reachable by `swaymsg`, and

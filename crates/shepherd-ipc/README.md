@@ -9,7 +9,7 @@ This crate provides the local inter-process communication infrastructure between
 - **Unix domain socket server** - Listens for client connections
 - **NDJSON protocol** - Newline-delimited JSON message framing
 - **Client management** - Connection tracking and cleanup
-- **Peer authentication** - UID-based role assignment
+- **Peer authentication** - cgroup-based allow-list (issue #144)
 - **Event broadcasting** - Push events to subscribed clients
 
 ## Architecture
@@ -80,25 +80,44 @@ use shepherd_api::Event;
 server.broadcast_event(Event::new(EventPayload::StateChanged(snapshot))).await;
 ```
 
-### Client Roles
+### Which peers are accepted (issue #144)
 
-Clients are assigned roles based on their peer UID:
+The peer's uid decides nothing, because every activity `shepherdd` launches runs
+as `shepherdd`'s own uid. The identity that does separate them is the peer's
+**cgroup**: the kernel maintains it, every descendant inherits it — including
+double-forked and reparented ones, where a PPID walk falls apart — and an
+unprivileged process can neither forge it nor climb out of it.
 
-| UID | Role | Permissions |
-|-----|------|-------------|
-| root (0) | `Admin` | All commands |
-| Service user | `Admin` | All commands |
-| Other | `Shell` | Read + Launch/Stop |
+| Peer | Verdict |
+|------|---------|
+| In `shepherdd`'s own cgroup (sway, the launcher, the HUD, sway's keybinding one-shots) | accepted as `Admin` |
+| root, from any cgroup (`sudo`) | accepted as `Admin` |
+| Anything else, or anything that cannot be identified | **refused at accept** |
 
-```rust
-// Role-based command filtering
-match (request.command, client_info.role) {
-    (Command::ReloadConfig, ClientRole::Admin) => { /* allowed */ }
-    (Command::ReloadConfig, ClientRole::Shell) => { /* denied */ }
-    (Command::Launch { .. }, _) => { /* allowed for all */ }
-    // ...
-}
-```
+The decision is made **once per connection, at accept**, not per call: one
+decision instead of many, it cannot be forgotten when a method is added, and a
+peer that should not read state at all never reaches the event stream. A refusal
+just closes the connection — a refusal that answers is a refusal that can be
+probed — and reports `ServerMessage::ClientRejected` so the daemon can raise a
+diagnostic.
+
+It is an **allow-list**, not a deny-list. "Refuse peers I recognise as
+activities" fails open on exactly the cases it cannot classify, and there is a
+verified escape that lands in that gap: an activity can ask `systemd --user` to
+start a process for it in a cgroup that is in no shepherd scope at all. That
+process is refused here because it is not *in `shepherdd`'s cgroup*, which is a
+different question from whether it is in a scope shepherd made.
+
+`PeerPolicy::unrestricted()` restores the old uid-only classification; the
+daemon uses it for `--no-restrict-ipc-peers`. See `src/peer.rs` for how the
+cgroup is read (`SO_PEERPIDFD` + `PIDFD_GET_INFO`, so no `/proc` lookup and no
+pid-reuse race) and `docs/ai/history/2026-08-29 001` / `002` for the design and
+the measurements behind it.
+
+`ClientRole` still rides on `ClientInfo` and is recorded in the audit log, but
+nothing consults it at dispatch: once the allow-list is in place every accepted
+peer is either root or shepherd's own code, so a per-method tier split would
+have no security content to enforce.
 
 ## Client Usage
 

@@ -301,6 +301,23 @@ enum class DiagnosticCode {
      */
     @SerialName("compositor_not_hardened") COMPOSITOR_NOT_HARDENED,
     /**
+     * shepherdd's own management socket is reachable by processes that are
+     * not part of the session — the peer allow-list is not armed, or it is
+     * armed somewhere it cannot mean anything (issue #144).
+     *
+     * Like [`Self::CompositorNotHardened`], the session is deliberately left
+     * running, so nothing else about the device looks wrong and the downgrade
+     * is invisible unless it is said out loud.
+     */
+    @SerialName("ipc_socket_not_hardened") IPC_SOCKET_NOT_HARDENED,
+    /**
+     * Something at this uid tried to drive the daemon from outside the
+     * session and was refused (issue #144). Worth an administrator's
+     * attention: an activity probing the management socket is not something
+     * that happens by accident.
+     */
+    @SerialName("ipc_peer_rejected") IPC_PEER_REJECTED,
+    /**
      * This entry sets a browser policy that its kind does not support, so the
      * policy is ignored.
      */

@@ -1,8 +1,9 @@
 //! IPC server implementation
 
-use shepherd_api::{ClientInfo, ClientRole, Event, Request, Response};
+use shepherd_api::{ClientInfo, Event, Request, Response};
 use shepherd_util::ClientId;
 use std::collections::HashMap;
+use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
+use crate::peer::{PeerPolicy, Rejection};
 use crate::{IpcError, IpcResult};
 
 /// Message from client to server
@@ -25,6 +27,13 @@ pub enum ServerMessage {
     },
     ClientDisconnected {
         client_id: ClientId,
+    },
+    /// A peer was refused at accept (issue #144). Reported rather than only
+    /// logged: something at this uid tried to drive the daemon from outside
+    /// the session, which is an administrator-facing condition, not a debug
+    /// detail.
+    ClientRejected {
+        rejection: Rejection,
     },
 }
 
@@ -54,6 +63,9 @@ pub struct IpcServer {
     event_tx: broadcast::Sender<Event>,
     message_tx: mpsc::UnboundedSender<ServerMessage>,
     message_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<ServerMessage>>>>,
+    /// Which peers may connect (issue #144). Unrestricted unless the daemon
+    /// arms it, so a caller that never opts in behaves as it always did.
+    peer_policy: PeerPolicy,
 }
 
 struct ClientHandle {
@@ -75,7 +87,16 @@ impl IpcServer {
             event_tx,
             message_tx,
             message_rx: Arc::new(Mutex::new(Some(message_rx))),
+            peer_policy: PeerPolicy::unrestricted(),
         }
+    }
+
+    /// Restrict which peers this server will accept (issue #144).
+    ///
+    /// Must be called before [`Self::run`]; the policy is consulted once per
+    /// connection at accept.
+    pub fn set_peer_policy(&mut self, policy: PeerPolicy) {
+        self.peer_policy = policy;
     }
 
     /// Start listening
@@ -140,11 +161,31 @@ impl IpcServer {
                     // Get peer credentials
                     let uid = get_peer_uid(&stream);
 
-                    // Determine role based on UID
-                    let role = match uid {
-                        Some(0) => ClientRole::Admin, // root
-                        Some(u) if u == nix::unistd::getuid().as_raw() => ClientRole::Admin,
-                        _ => ClientRole::Shell,
+                    // Decide here, at accept, rather than at dispatch: one
+                    // decision per connection instead of one per call, it
+                    // cannot be forgotten when a method is added, and a peer
+                    // that should not read state at all never reaches the
+                    // event stream (issue #144).
+                    let role = match self.peer_policy.classify(stream.as_fd(), uid) {
+                        Ok(role) => role,
+                        Err(rejection) => {
+                            warn!(
+                                client_id = %client_id,
+                                uid = ?uid,
+                                peer_pid = ?rejection.peer_pid,
+                                peer_cgroup = ?rejection.peer_cgroup,
+                                reason = %rejection.reason,
+                                "Refused a client on the management socket"
+                            );
+                            let _ = self
+                                .message_tx
+                                .send(ServerMessage::ClientRejected { rejection });
+                            // Dropping the stream closes the connection. The
+                            // peer sees EOF rather than an error frame: there
+                            // is nothing useful to tell it, and a refusal that
+                            // answers is a refusal that can be probed.
+                            continue;
+                        }
                     };
 
                     let info = ClientInfo::new(role);

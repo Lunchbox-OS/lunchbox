@@ -447,6 +447,58 @@ already — `sway.conf`, `shepherd dev headless`, `run-dev`, and the e2e harness
 so this only bites an invocation written from scratch. `shepherd install
 sway-config` is what strips the flag back out for a device.
 
+### shepherd's own socket accepts only the session and root (issue #144)
+
+The other half of the same problem. `shepherdd` listens on a Unix socket for the
+launcher, the HUD and the compositor's keybinding one-shots — and every activity
+runs as `shepherdd`'s uid, so the socket's file permissions separate nothing.
+Without a check, a game can call `stop_current`, `launch` another entry, or
+`logout`.
+
+A shared uid also rules out the fixes that suggest themselves. The socket's name
+cannot be removed the way sway's is, because those one-shot clients connect by
+path all session long. A token cannot help either: any secret a trusted client
+can read — from its environment, its argv, or a file — an activity at the same
+uid can read too.
+
+What does work is the peer's **cgroup**, which the kernel maintains, every
+descendant inherits, and an unprivileged process can neither forge nor leave.
+`shepherdd` accepts a connection only from:
+
+- a process in **its own cgroup** — that is the session: sway, the launcher, the
+  HUD, and the one-shots sway starts for a keybinding; and
+- **root**, so `sudo` still reaches the daemon from an operator's own shell.
+
+Everything else is refused at accept, before it can read any state, and the
+refusal raises the `ipc_peer_rejected` diagnostic naming the cgroup it came
+from. Because an activity's cgroup is named after its session id, that usually
+names the activity that went looking.
+
+For this to be a boundary, two things have to hold, and the daemon checks both:
+
+- **Activities must be somewhere else.** They are: an entry with
+  `[entries.firewall]` already gets a system-manager scope, snap and flatpak are
+  scoped by their own runtimes, and everything else is launched into a transient
+  scope of its own via `systemd-run --user --scope`.
+- **The session's cgroup must be one an activity cannot join.** A session
+  started from the installed *Shepherd Kiosk* desktop entry is in a logind
+  session scope, which is root-owned — nothing at this uid can add a process to
+  it. A session started from a shell, or from a `systemd --user` unit, is inside
+  the user manager's delegated cgroups, where any process at this uid can join
+  any cgroup, including `shepherdd`'s.
+
+If either fails, the session still starts — an unhardened kiosk beats a dead one
+— and the device raises the `Critical` diagnostic `ipc_socket_not_hardened`
+saying which one. `--no-restrict-ipc-peers` turns the check off; like
+`--no-harden-sway-ipc`, every development entry point passes it already, and
+`shepherd install sway-config` strips it back out for a device.
+
+**This does not close every path to the same effects.** The management HTTP API
+and the BLE transport are separate surfaces with their own authentication, and
+policy and usage state are files owned by the same uid the activities run as. An
+activity that can read `config.toml` or `<data_dir>/admin.toml` is not stopped by
+anything here. Those are tracked as #156 and #157.
+
 ### External monitor / docking (issue #87)
 
 If you use external-monitor mirroring, the Sway session must be started with

@@ -330,6 +330,21 @@ headless_start() {
         die "sway.conf no longer passes --no-harden-sway-ipc on its shepherdd exec line, so a plain 'dev headless' would unlink the compositor socket (issue #144)"
     fi
 
+    # The management socket's peer check stays off here, and `--harden-ipc`
+    # deliberately does not take it off — unlike the compositor unlink, it
+    # cannot be exercised by this harness at all. It accepts peers in
+    # shepherdd's own cgroup, and everything the harness starts (sway, shepherdd,
+    # the launcher, the HUD, and any client a test runs) shares the cgroup of
+    # the shell that launched it. On a device that cgroup is the display
+    # manager's root-owned session scope, which an activity cannot join; here it
+    # is a delegated user scope, which anything at this uid can join. So the
+    # harness cannot make the check pass meaningfully *or* fail honestly, and a
+    # session that armed it would only refuse clients run from another terminal.
+    # See `docs/ai/history/2026-08-29 002` for the measurements.
+    if [[ "$exec_line" != *--no-restrict-ipc-peers* ]]; then
+        die "sway.conf no longer passes --no-restrict-ipc-peers on its shepherdd exec line, so a dev session would refuse clients started from any other terminal (issue #144)"
+    fi
+
     if [[ "$do_build" -eq 1 ]]; then
         info "Building shepherd binaries..."
         build_cargo false

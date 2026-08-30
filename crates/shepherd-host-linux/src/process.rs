@@ -119,6 +119,113 @@ fn probe_polkit_grant() -> Result<(), String> {
     }
 }
 
+/// Whether an activity can be launched into a cgroup of its own without
+/// privilege (issue #144).
+///
+/// The peer allow-list on shepherdd's management socket accepts exactly the
+/// processes in shepherdd's own cgroup. That is only a boundary if activities
+/// are somewhere else — and a plain `Process` entry launched by `fork`/`exec`
+/// inherits shepherdd's cgroup *exactly*, character for character, so it is
+/// not merely hard to tell from the launcher, it is identical to it.
+///
+/// The privileged firewall helper already moves an activity out, via a
+/// system-manager scope. This is the unprivileged path for everything that
+/// does not go through it: `systemd-run --user --scope` asks shepherd's own
+/// user manager for a transient scope. That is enough here even though it is
+/// not enough for the firewall (BPF attach needs the *system* manager), because
+/// all this has to achieve is "not shepherd's cgroup".
+///
+/// Snap and flatpak activities need nothing: their runtimes already place them
+/// under `user@<uid>.service/app.slice` — the same fact
+/// [`apply_firewall_to_existing_scope`] relies on to find their scope.
+#[derive(Debug, Clone)]
+pub enum ActivityIsolationStatus {
+    Supported,
+    Unsupported { reason: String },
+}
+
+impl ActivityIsolationStatus {
+    pub fn is_supported(&self) -> bool {
+        matches!(self, ActivityIsolationStatus::Supported)
+    }
+}
+
+static ISOLATION_STATUS: RwLock<Option<ActivityIsolationStatus>> = RwLock::new(None);
+
+/// Cached probe of whether `systemd-run --user --scope` works from here.
+///
+/// Cached for the same reason the firewall probe is: the launch path consults
+/// it on every spawn and the probe execs a process. Refreshable so a user
+/// manager that appears later (or a session that gains a bus) is picked up
+/// without a daemon restart.
+pub fn activity_isolation_status() -> ActivityIsolationStatus {
+    if let Some(cached) = ISOLATION_STATUS.read().expect("isolation lock").clone() {
+        return cached;
+    }
+    refresh_activity_isolation()
+}
+
+/// Re-run the probe and replace the cached value.
+pub fn refresh_activity_isolation() -> ActivityIsolationStatus {
+    let fresh = probe_activity_isolation();
+    *ISOLATION_STATUS.write().expect("isolation lock") = Some(fresh.clone());
+    fresh
+}
+
+fn probe_activity_isolation() -> ActivityIsolationStatus {
+    // Actually create a throwaway scope rather than inferring from the
+    // environment. Whether the user manager is reachable depends on
+    // XDG_RUNTIME_DIR, a live bus, and the manager itself — the e2e harness,
+    // for instance, runs with a temp XDG_RUNTIME_DIR and no bus at all. The
+    // only reliable test is the thing we are about to do for real.
+    let scope = format!("shepherd-isolation-probe-{}.scope", std::process::id());
+    let output = std::process::Command::new("systemd-run")
+        .args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--quiet",
+            &format!("--unit={}", scope),
+            "--",
+            "/bin/true",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => ActivityIsolationStatus::Supported,
+        Ok(out) => ActivityIsolationStatus::Unsupported {
+            reason: format!(
+                "`systemd-run --user --scope` failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        },
+        Err(e) => ActivityIsolationStatus::Unsupported {
+            reason: format!("could not exec systemd-run: {}", e),
+        },
+    }
+}
+
+/// Build the argv prefix that launches an activity into a transient scope of
+/// its own in shepherd's *user* manager (issue #144).
+///
+/// `--collect` so the scope is reaped when the activity exits: there is no
+/// teardown call to forget, unlike the privileged path's `stop_firewall_scope`.
+///
+/// Like the firewall helper's `systemd-run --scope`, this execs the command in
+/// its own process rather than forking one — so the pid shepherdd records is
+/// the activity's, already inside the scope, and every existing pid, pgid and
+/// kill path keeps working unchanged.
+pub fn user_scope_argv_prefix(scope_name: &str) -> Vec<String> {
+    vec![
+        "systemd-run".into(),
+        "--user".into(),
+        "--scope".into(),
+        "--collect".into(),
+        "--quiet".into(),
+        format!("--unit={}", scope_name),
+        "--".into(),
+    ]
+}
+
 /// Build the argv prefix for spawning a Process-kind activity through the
 /// privileged firewall helper. The full argv handed to `Command::spawn` is the
 /// returned prefix plus the activity's own command + args.
@@ -297,6 +404,18 @@ pub fn init() {
                 reason = %reason,
                 "Per-entry firewall enforcement is NOT available; \
                  entries with [entries.firewall] configured will be spawned without filtering"
+            );
+        }
+    }
+    match activity_isolation_status() {
+        ActivityIsolationStatus::Supported => {
+            info!("Activities will be launched into a cgroup of their own");
+        }
+        ActivityIsolationStatus::Unsupported { reason } => {
+            warn!(
+                reason = %reason,
+                "Activities will share shepherd's own cgroup, so the management socket \
+                 cannot tell one from the launcher (issue #144)"
             );
         }
     }

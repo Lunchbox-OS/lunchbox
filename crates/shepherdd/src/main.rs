@@ -118,6 +118,28 @@ struct Args {
     /// is what a dev session opts *out* with, not what a device opts in with.
     #[arg(long = "no-harden-sway-ipc", env = "SHEPHERD_NO_HARDEN_SWAY_IPC")]
     no_harden_sway_ipc: bool,
+
+    /// Accept a client on shepherdd's own management socket from any process
+    /// at this uid, instead of only from the session shepherdd is part of (or
+    /// set SHEPHERD_NO_RESTRICT_IPC_PEERS).
+    ///
+    /// Restricting is the default because every activity runs as this uid, so
+    /// the socket's file permissions separate nothing: without the check, a
+    /// game can call `logout`, `stop_current` or `launch` (issue #144).
+    /// Accepted peers are those in shepherdd's own cgroup — the launcher, the
+    /// HUD and the compositor's one-shot keybinding clients — plus root, so
+    /// `sudo` still reaches the daemon from an operator's own shell.
+    ///
+    /// The escape hatch exists because the check only means something where
+    /// shepherdd's cgroup is one an activity cannot join, which is true of a
+    /// device's display-manager session and false of a stack started from a
+    /// shell. In dev the whole stack shares the launching terminal's cgroup,
+    /// so a client run from any *other* terminal would be refused. Every
+    /// development entry point in this repo passes this — `sway.conf`, the
+    /// headless harness, `run-dev` and the e2e stack — so the flag is what a
+    /// dev session opts *out* with, not what a device opts in with.
+    #[arg(long = "no-restrict-ipc-peers", env = "SHEPHERD_NO_RESTRICT_IPC_PEERS")]
+    no_restrict_ipc_peers: bool,
 }
 
 /// Main service state
@@ -142,6 +164,26 @@ struct Service {
     /// Whether to take sway's IPC socket away from everything else once we
     /// have connected (issue #144).
     harden_sway_ipc: bool,
+    /// How the peer allow-list on our own socket ended up (issue #144).
+    /// Carried so `run()` can report a downgrade once the diagnostics channel
+    /// exists — the IPC server is started well before it.
+    ipc_peer_hardening: IpcPeerHardening,
+}
+
+/// What arming the management socket's peer allow-list actually achieved.
+///
+/// Three outcomes rather than a bool, because "the operator turned it off" and
+/// "it is on but cannot be a boundary here" look identical from the socket and
+/// mean opposite things to whoever is responsible for the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IpcPeerHardening {
+    /// Armed, and in a cgroup an activity cannot join.
+    Enforced,
+    /// Deliberately off (`--no-restrict-ipc-peers`).
+    OptedOut,
+    /// Armed, but shepherdd is somewhere the check cannot hold, or could not
+    /// be armed at all. Carries the reason for the diagnostic.
+    Degraded(String),
 }
 
 impl Service {
@@ -235,6 +277,7 @@ impl Service {
 
         // Initialize IPC server
         let mut ipc = IpcServer::new(&socket_path);
+        let ipc_peer_hardening = Self::arm_ipc_peer_policy(&mut ipc, !args.no_restrict_ipc_peers);
         ipc.start().await?;
 
         info!(socket_path = %socket_path.display(), "IPC server started");
@@ -258,6 +301,7 @@ impl Service {
             diagnostics: Arc::new(diagnostics::DiagnosticRegistry::new()),
             sway_ipc_alias: args.sway_ipc_alias.clone(),
             harden_sway_ipc: !args.no_harden_sway_ipc,
+            ipc_peer_hardening,
         })
     }
 
@@ -348,6 +392,158 @@ impl Service {
         }
     }
 
+    /// Arm the peer allow-list on shepherdd's own management socket (#144).
+    ///
+    /// Every activity runs as shepherdd's uid, so the socket's mode separates
+    /// nothing: the check that does is the peer's cgroup, which the kernel
+    /// maintains, which every descendant inherits, and which an unprivileged
+    /// process can neither forge nor leave.
+    ///
+    /// Returns what was actually achieved rather than reporting it here,
+    /// because the IPC server is built long before the diagnostics channel
+    /// exists — the ordering constraint that already bit once on this branch.
+    fn arm_ipc_peer_policy(ipc: &mut IpcServer, restrict: bool) -> IpcPeerHardening {
+        if !restrict {
+            info!(
+                "Management socket peer restriction is off; every process at this uid can \
+                 drive the daemon"
+            );
+            return IpcPeerHardening::OptedOut;
+        }
+
+        let policy = match shepherd_ipc::PeerPolicy::restricted() {
+            Ok(policy) => policy,
+            Err(e) => {
+                // A policy that cannot name what it accepts would refuse every
+                // client, including the launcher. Staying open is the same
+                // trade the compositor hardening makes: an unhardened kiosk
+                // beats a dead one, as long as it is said out loud.
+                warn!(error = %e, "Could not read shepherd's own cgroup; leaving the management socket open to this uid");
+                return IpcPeerHardening::Degraded(format!(
+                    "shepherd could not read its own cgroup, so it cannot tell its own \
+                     clients from an activity: {e}"
+                ));
+            }
+        };
+        ipc.set_peer_policy(policy);
+
+        // Armed — but only a boundary where shepherd's cgroup is one an
+        // activity cannot get into. Inside the user manager's delegated
+        // subtree every cgroup is owned by this uid, so any process at this
+        // uid can move itself into any other: the allow-list still refuses a
+        // peer that has not bothered, and stops being a boundary against one
+        // that has. A device's session (started by the display manager, in a
+        // root-owned logind scope) is outside it; a stack started from a shell
+        // or as a `systemd --user` unit is inside it.
+        match shepherd_ipc::own_cgroup_path() {
+            Ok(path) if shepherd_ipc::is_delegated_user_cgroup(&path) => {
+                warn!(
+                    cgroup = %path,
+                    "shepherd is running inside the user manager's delegated cgroup subtree, \
+                     where a process at this uid can join any cgroup; the management socket's \
+                     peer check is not a boundary here"
+                );
+                IpcPeerHardening::Degraded(format!(
+                    "shepherd is running inside the user manager's delegated cgroups \
+                     ({path}), where any process at this uid can join any cgroup — including \
+                     shepherd's own"
+                ))
+            }
+            Ok(path) => {
+                // Armed and in a cgroup nothing at this uid can join — but the
+                // allow-list only separates anything if activities are put
+                // somewhere else, and one that shares this cgroup is accepted
+                // by it. That makes a failure to isolate activities the same
+                // downgrade, reported the same way.
+                match shepherd_host_linux::activity_isolation_status() {
+                    shepherd_host_linux::ActivityIsolationStatus::Supported => {
+                        info!(cgroup = %path, "Management socket accepts only this session and root");
+                        IpcPeerHardening::Enforced
+                    }
+                    shepherd_host_linux::ActivityIsolationStatus::Unsupported { reason } => {
+                        IpcPeerHardening::Degraded(format!(
+                            "activities cannot be given a cgroup of their own, so they share \
+                         shepherd's and the check cannot tell them from the launcher: {reason}"
+                        ))
+                    }
+                }
+            }
+            Err(e) => IpcPeerHardening::Degraded(format!(
+                "shepherd could not read its own cgroup path, so it cannot tell whether the \
+                 peer check is a boundary on this host: {e}"
+            )),
+        }
+    }
+
+    /// Report the peer allow-list ending up as anything other than a boundary.
+    ///
+    /// Separate from arming it because the two happen at opposite ends of
+    /// startup: the IPC server is built before there is anywhere to report to,
+    /// which is the ordering constraint that already bit once on this branch.
+    fn degraded_ipc_hardening_is_reported(
+        state: &IpcPeerHardening,
+        diagnostics: &dyn DiagnosticSink,
+    ) {
+        if let IpcPeerHardening::Degraded(reason) = state {
+            diagnostics.raise(Self::ipc_not_hardened_diagnostic(reason));
+        }
+    }
+
+    /// The administrator-facing form of "the management socket is open".
+    ///
+    /// Split out for the same reason as [`Self::not_hardened_diagnostic`]: the
+    /// severity and subject are the part worth asserting, and asserting them
+    /// needs no socket. `Critical` because a device that ships this way lets
+    /// any activity drive the daemon; `Service` because it is true of the
+    /// device, not of one activity.
+    fn ipc_not_hardened_diagnostic(reason: &str) -> Diagnostic {
+        Diagnostic {
+            code: DiagnosticCode::IpcSocketNotHardened,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Critical,
+            message: format!(
+                "shepherd's own management socket can be driven by any process running as \
+                 this user, so an activity can stop itself, launch another, or log the \
+                 session out — {reason}"
+            ),
+            remedy: Some(
+                "Start the session from the installed \"Shepherd Kiosk\" desktop entry, \
+                 which puts it in a session cgroup no activity can join, and do not pass \
+                 --no-restrict-ipc-peers on a device."
+                    .to_string(),
+            ),
+            since: shepherd_util::now(),
+        }
+    }
+
+    /// The administrator-facing form of "something tried to drive the daemon".
+    ///
+    /// Names the peer's cgroup when it could be read: an activity's scope is
+    /// named after its session id, so this usually identifies which activity
+    /// went looking. Best-effort — the refusal has already happened, and
+    /// nothing here influenced it.
+    fn ipc_peer_rejected_diagnostic(rejection: &shepherd_ipc::Rejection) -> Diagnostic {
+        let who = match (&rejection.peer_cgroup, rejection.peer_pid) {
+            (Some(cgroup), _) => format!(" (from {cgroup})"),
+            (None, Some(pid)) => format!(" (pid {pid})"),
+            (None, None) => String::new(),
+        };
+        Diagnostic {
+            code: DiagnosticCode::IpcPeerRejected,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "a process outside this session tried to drive shepherd and was refused{who}"
+            ),
+            remedy: Some(
+                "Nothing is broken: the request was denied. If it repeats, check what that \
+                 activity is doing — reaching for the management socket is not accidental."
+                    .to_string(),
+            ),
+            since: shepherd_util::now(),
+        }
+    }
+
     /// The administrator-facing form of "this device is not hardened".
     ///
     /// Split out so the severity and subject can be asserted without a
@@ -377,6 +573,7 @@ impl Service {
         // runs late, once every sway connection is established.
         let sway_ipc_alias = self.sway_ipc_alias.clone();
         let harden_sway_ipc = self.harden_sway_ipc;
+        let ipc_peer_hardening = self.ipc_peer_hardening.clone();
 
         let config_path = self.config_path.clone();
 
@@ -768,6 +965,11 @@ impl Service {
             display_watch::spawn(mgr, shutdown_rx.clone()).await;
         }
 
+        // The peer allow-list was decided at construction, before there was
+        // anywhere to report to; say so now if it did not end up a boundary
+        // (issue #144).
+        Self::degraded_ipc_hardening_is_reported(&ipc_peer_hardening, &diagnostic_publisher);
+
         // Every sway connection this daemon needs is now open, so the socket's
         // name in the filesystem has done its job (issue #144).
         Self::harden_compositor_socket(
@@ -927,7 +1129,10 @@ impl Service {
 
                 // IPC messages
                 Some(msg) = ipc_messages.recv() => {
-                    Self::handle_ipc_message(&svc, &ipc_ref, &store, &rate_limiter, msg).await;
+                    Self::handle_ipc_message(
+                        &svc, &ipc_ref, &store, &rate_limiter, &diagnostic_publisher, msg,
+                    )
+                    .await;
                 }
             }
         }
@@ -1464,6 +1669,7 @@ impl Service {
         ipc: &Arc<IpcServer>,
         store: &Arc<dyn Store>,
         rate_limiter: &Arc<Mutex<RateLimiter>>,
+        diagnostics: &dyn DiagnosticSink,
         msg: ServerMessage,
     ) {
         match msg {
@@ -1527,6 +1733,12 @@ impl Service {
                     role: format!("{:?}", info.role),
                     uid: info.uid,
                 }));
+            }
+
+            ServerMessage::ClientRejected { rejection } => {
+                // Already logged with full detail by the IPC layer; here it
+                // becomes something an administrator can see (issue #143).
+                diagnostics.raise(Self::ipc_peer_rejected_diagnostic(&rejection));
             }
 
             ServerMessage::ClientDisconnected { client_id } => {
@@ -1616,6 +1828,71 @@ mod harden_diagnostic_tests {
             self.raised.lock().unwrap().push(diagnostic.code);
         }
         fn clear(&self, _code: DiagnosticCode, _subject: &DiagnosticSubject) {}
+    }
+
+    /// Opting out has to leave the socket exactly as open as it was before
+    /// #144, and say so without reporting a problem — a developer who asked
+    /// for this is not looking at a broken device.
+    #[test]
+    fn opting_out_of_the_peer_check_reports_nothing() {
+        let mut ipc = IpcServer::new("/nonexistent-dir-for-shepherd-tests/ipc.sock");
+        assert_eq!(
+            Service::arm_ipc_peer_policy(&mut ipc, false),
+            IpcPeerHardening::OptedOut
+        );
+    }
+
+    /// The check being armed is not the same as the check being a boundary.
+    /// Where shepherd sits in a cgroup any process at this uid can join —
+    /// a stack started from a shell, which is every dev session — arming it
+    /// changes nothing, and a device configured that way has to say so rather
+    /// than look protected.
+    #[test]
+    fn a_degraded_peer_check_is_reported_as_such() {
+        let sink = RecordingSink::default();
+        Service::degraded_ipc_hardening_is_reported(
+            &IpcPeerHardening::Degraded("test reason".into()),
+            &sink,
+        );
+        assert_eq!(
+            *sink.raised.lock().unwrap(),
+            vec![DiagnosticCode::IpcSocketNotHardened],
+            "a socket that is not a boundary has to say so"
+        );
+    }
+
+    /// The other two outcomes are silent: one is working as intended, the
+    /// other is a deliberate choice.
+    #[test]
+    fn an_enforced_or_opted_out_peer_check_reports_nothing() {
+        for state in [IpcPeerHardening::Enforced, IpcPeerHardening::OptedOut] {
+            let sink = RecordingSink::default();
+            Service::degraded_ipc_hardening_is_reported(&state, &sink);
+            assert!(
+                sink.raised.lock().unwrap().is_empty(),
+                "{state:?} should not raise a diagnostic"
+            );
+        }
+    }
+
+    /// A refused peer is an administrator-facing condition, and the message
+    /// has to name who it was — an activity's scope carries its session id, so
+    /// this is what turns "something probed the socket" into "this activity
+    /// did". Dropping the cgroup would leave a report nobody can act on.
+    #[test]
+    fn a_refused_peer_names_where_it_came_from() {
+        let d = Service::ipc_peer_rejected_diagnostic(&shepherd_ipc::Rejection {
+            reason: "not shepherd's own".into(),
+            peer_cgroup: Some("/system.slice/shepherd-abc-123.scope".into()),
+            peer_pid: Some(4242),
+        });
+        assert_eq!(d.code, DiagnosticCode::IpcPeerRejected);
+        assert_eq!(d.subject, DiagnosticSubject::Service);
+        assert!(
+            d.message.contains("shepherd-abc-123.scope"),
+            "the report has to name the activity: {}",
+            d.message
+        );
     }
 
     /// An alias that cannot be created, so hardening always fails somewhere:

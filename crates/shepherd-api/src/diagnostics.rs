@@ -59,6 +59,19 @@ pub enum DiagnosticCode {
     /// only trace is one log line, and a device ships without a protection it
     /// is configured to have.
     CompositorNotHardened,
+    /// shepherdd's own management socket is reachable by processes that are
+    /// not part of the session — the peer allow-list is not armed, or it is
+    /// armed somewhere it cannot mean anything (issue #144).
+    ///
+    /// Like [`Self::CompositorNotHardened`], the session is deliberately left
+    /// running, so nothing else about the device looks wrong and the downgrade
+    /// is invisible unless it is said out loud.
+    IpcSocketNotHardened,
+    /// Something at this uid tried to drive the daemon from outside the
+    /// session and was refused (issue #144). Worth an administrator's
+    /// attention: an activity probing the management socket is not something
+    /// that happens by accident.
+    IpcPeerRejected,
     /// This entry sets a browser policy that its kind does not support, so the
     /// policy is ignored.
     BrowserPolicyIgnored,

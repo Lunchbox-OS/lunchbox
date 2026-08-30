@@ -21,11 +21,12 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::process::{
-    FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
-    build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
-    firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name, pgid_is_live, pid_in_group, pid_is_live,
-    signal_group, steam_webhelper_running, stop_firewall_scope,
+    ActivityIsolationStatus, FirewallEnforcementStatus, ManagedProcess, activity_isolation_status,
+    apply_firewall_to_existing_scope, build_inherited_env, find_steam_game_pids,
+    firewall_enforcement_status, firewall_helper_argv_prefix, init, kill_by_command,
+    kill_flatpak_cgroup, kill_snap_cgroup, kill_steam_game_processes, make_scope_name,
+    pgid_is_live, pid_in_group, pid_is_live, signal_group, steam_webhelper_running,
+    stop_firewall_scope, user_scope_argv_prefix,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -1864,12 +1865,19 @@ impl HostAdapter for LinuxHost {
         // doesn't grant us, skip the wrapper rather than spawning under a
         // silent no-op.
         let mut firewall_scope: Option<String> = None;
+        // Whether the activity is already being launched into a cgroup of its
+        // own. The privileged path below does that as a side effect of
+        // filtering; everything else needs the unprivileged scope further down,
+        // or it inherits shepherdd's cgroup and becomes indistinguishable from
+        // the launcher on the management socket (issue #144).
+        let mut scoped_by_helper = false;
         let final_argv = if let Some(ref spec) = options.firewall {
             if sandboxed_app_name.is_none() && steam_app_id.is_none() {
                 match firewall_enforcement_status() {
                     FirewallEnforcementStatus::Supported => {
                         let scope_name = make_scope_name(&session_id.to_string());
                         firewall_scope = Some(scope_name.clone());
+                        scoped_by_helper = true;
                         let activity_env = build_inherited_env(&env);
                         let uid = nix::unistd::getuid().as_raw();
                         let gid = nix::unistd::getgid().as_raw();
@@ -1898,6 +1906,41 @@ impl HostAdapter for LinuxHost {
             }
         } else {
             argv
+        };
+
+        // Put the activity in a cgroup that is not shepherdd's, so the peer
+        // check on the management socket has something to tell apart (#144).
+        //
+        // Skipped for snap and flatpak: their runtimes already scope them under
+        // `user@<uid>.service/app.slice`, which is where
+        // `apply_firewall_to_existing_scope` goes looking. Wrapping them again
+        // would nest a scope around a launcher that immediately hands off to a
+        // long-lived runtime process elsewhere — more moving parts, no cgroup
+        // we did not already have.
+        let final_argv = if scoped_by_helper || sandboxed_app_name.is_some() {
+            final_argv
+        } else {
+            match activity_isolation_status() {
+                ActivityIsolationStatus::Supported => {
+                    let mut prefixed =
+                        user_scope_argv_prefix(&make_scope_name(&session_id.to_string()));
+                    prefixed.extend(final_argv);
+                    prefixed
+                }
+                ActivityIsolationStatus::Unsupported { reason } => {
+                    // Launch anyway rather than leaving a child staring at a
+                    // dead screen — the same trade the compositor hardening
+                    // makes. The daemon reports the downgrade as a diagnostic
+                    // at startup, so it is not silent.
+                    warn!(
+                        command = ?final_argv.first(),
+                        reason = %reason,
+                        "Cannot give this activity a cgroup of its own; it will share \
+                         shepherd's, and the management socket cannot tell it from the launcher"
+                    );
+                    final_argv
+                }
+            }
         };
 
         // Spawn any input-compat sidecars before the activity. We log

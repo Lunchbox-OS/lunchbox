@@ -313,9 +313,12 @@ When `SpawnOptions::firewall` is set, the adapter applies a per-session
 network filter via systemd's BPF address controls
 (`IPAddressAllow=`/`IPAddressDeny=`).
 
-- **Process kind**: the spawn argv is wrapped in
-  `systemd-run --user --scope --collect --quiet --property=...` so the
-  firewall is in place from the first instruction.
+- **Process kind**: the spawn argv is wrapped in `pkexec
+  shepherd-firewall-helper apply-process`, which execs `systemd-run --scope
+  --property=...` against the **system** manager, so the firewall is in place
+  from the first instruction. The system manager is required: attaching the
+  `cgroup_skb` programs behind `IPAddress*=` needs privileges the per-user
+  manager does not have.
 - **Flatpak / Snap**: the runtime creates its own scope
   (`app-flatpak-<id>-*.scope`, `snap.<name>.<name>-*.scope`). The adapter
   spawns the app, polls for that scope, and then has
@@ -335,6 +338,37 @@ network filter via systemd's BPF address controls
   (no systemd user manager, say) loses these activities ~5s in, loudly,
   instead of running them unprotected, quietly.
 - **Steam**: not yet supported (logged as a warning).
+
+## Every activity gets a cgroup of its own (issue #144)
+
+Independent of the firewall, and for a different reason: `shepherdd` accepts a
+client on its management socket only from its own cgroup, and an activity
+launched by a plain `fork`/`exec` inherits that cgroup *exactly* — not merely
+hard to tell from the launcher, but the same string. So the adapter makes sure
+every activity is somewhere else before it starts:
+
+- **Firewalled Process kind**: already handled — the helper's system-manager
+  scope above.
+- **Snap / Flatpak**: already handled — the runtime scopes them under
+  `user@<uid>.service/app.slice`, which is the same fact
+  `apply_firewall_to_existing_scope` relies on to find them. Wrapping them again
+  would nest a scope around a launcher that immediately hands off elsewhere.
+- **Everything else**: wrapped in `systemd-run --user --scope --collect`
+  (`user_scope_argv_prefix`). Unprivileged — no helper, no polkit — because all
+  this has to achieve is "not shepherd's cgroup", which the *user* manager can
+  do even though it cannot attach BPF.
+
+Like the firewall helper's `systemd-run --scope`, this execs the command in its
+own process rather than forking one, so the pid the adapter records is the
+activity's, already inside the scope, and every pid, pgid and kill path is
+unchanged.
+
+`activity_isolation_status()` probes whether the user manager can be reached at
+all (a temp `XDG_RUNTIME_DIR` with no bus, as in the e2e harness, cannot), and
+caches the answer. When it cannot, the activity is launched anyway rather than
+lost — the trade the compositor hardening makes — and `shepherdd` raises the
+`ipc_socket_not_hardened` diagnostic, because the socket check has nothing left
+to tell apart.
 
 ## Browser policy
 

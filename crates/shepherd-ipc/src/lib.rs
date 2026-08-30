@@ -4,12 +4,14 @@
 //! - Unix domain socket server
 //! - NDJSON (newline-delimited JSON) protocol
 //! - Client connection management
-//! - Peer UID authentication
+//! - Peer authentication by cgroup (issue #144)
 
 mod client;
+mod peer;
 mod server;
 
 pub use client::*;
+pub use peer::{PeerError, PeerPolicy, Rejection, is_delegated_user_cgroup, own_cgroup_path};
 pub use server::*;
 
 use thiserror::Error;

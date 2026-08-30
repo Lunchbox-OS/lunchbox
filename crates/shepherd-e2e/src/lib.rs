@@ -357,6 +357,15 @@ impl TestHarness {
             // `SwayIpcBackend` call in a fixture unable to reconnect. Tests
             // exercising the hardened path should drop this deliberately.
             .arg("--no-harden-sway-ipc")
+            // shepherdd otherwise accepts a client on its own socket only from
+            // its own cgroup (issue #144). This harness spawns shepherdd as a
+            // child of the test process, so the two share a cgroup and clients
+            // would in fact be accepted — but only by accident of where the
+            // test runner happens to sit, and a runner that scoped its tests
+            // would start failing every RPC with no clue why. The check is
+            // exercised by the unit tests in `shepherd-ipc`, which can put a
+            // peer in a cgroup of its own without a whole session.
+            .arg("--no-restrict-ipc-peers")
             .arg("--log-level")
             .arg(std::env::var("SHEPHERD_E2E_LOG").unwrap_or_else(|_| "info".into()))
             .env_clear()
