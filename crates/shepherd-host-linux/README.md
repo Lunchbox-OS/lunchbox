@@ -20,10 +20,17 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
   channel (`LinuxLightSensor`), used by the automatic-brightness feature.
   Read-only and world-readable, so no helper or privilege is needed. Absent
   on hosts without an ALS.
+- **Compositor IPC** (`sway_ipc.rs`) — a client for sway's own socket
+  (`sway-ipc(7)`): one connection behind a mutex for requests, a second per
+  event subscription. Replaces the `swaymsg` subprocess every compositor call
+  used to spawn, which stopped being defensible once the escape sweep started
+  reading the window tree twice a second (issue #147). Losing an established
+  connection is terminal — shepherdd is `exec`'d by sway and dies with it.
 - **Compositor output primitives** (`sway.rs`) — query/enable/disable outputs,
   set modes and scales, and pick a mirror mode; behind the `OutputBackend`
   trait so the docking state machine in `shepherdd` is unit-testable. Used for
-  external monitor / docking support (issue #87).
+  external monitor / docking support (issue #87). The parsing is separate from
+  the transport and is tested against literals, with no compositor.
 - **Audio topology** (`audio.rs`) — parse `pw-dump` into the list of selectable
   audio outputs, identify which one is active, and read its volume. Shared by
   the two consumers below.

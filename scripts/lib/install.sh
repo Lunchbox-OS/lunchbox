@@ -119,14 +119,39 @@ install_sway_config() {
     local prefix="${1:-$DEFAULT_PREFIX}"
     local bindir="$prefix/$DEFAULT_BINDIR"
     
-    # Copy and modify the config for production use
+    # Copy and modify the config for production use.
+    #
+    # `--no-harden-sway-ipc` is stripped here (issue #144). shepherdd hardens by
+    # default: once it has connected it unlinks sway's IPC socket, and nothing
+    # else can reach the compositor for the rest of the session. That matters
+    # because sway's IPC hands any process running as shepherdd's uid — which is
+    # every activity — `exec`, which starts a process outside supervision *and*
+    # outside the cgroup the per-entry firewall is attached to.
+    #
+    # `sway.conf` carries the flag because it is the development config, where
+    # the unlink would take the socket away from `swaymsg` and the headless
+    # harness. An installed kiosk wants the default, so the flag comes back out
+    # here — and the check below is the one that matters: a rename upstream that
+    # silently left it in would ship an unhardened device.
     sed \
         -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
         -e "s|./target/debug/shepherd-hud|$bindir/shepherd-hud|g" \
         -e "s|./target/debug/shepherdd|$bindir/shepherdd|g" \
         -e "s|./config.example.toml|~/.config/shepherd/config.toml|g" \
         -e "s|-c ./sway.conf|-c $dst_config|g" \
+        -e "s| --no-harden-sway-ipc||g" \
         "$src_config" > "$dst_config"
+
+    # Scoped to the exec line: the comment above it names the flag too, and a
+    # whole-file grep would fail an install that had stripped it correctly.
+    local dst_exec_line
+    dst_exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$dst_config" || true)"
+    if [[ -z "$dst_exec_line" ]]; then
+        die "No 'shepherdd -c <path>' exec line in $dst_config (sway.conf's shepherdd exec line may have changed)"
+    fi
+    if [[ "$dst_exec_line" == *--no-harden-sway-ipc* ]]; then
+        die "Failed to strip --no-harden-sway-ipc from $dst_config; the installed device would leave sway's IPC socket reachable by every activity (issue #144)"
+    fi
     
     chmod 0644 "$dst_config"
     

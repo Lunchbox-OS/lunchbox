@@ -350,6 +350,13 @@ impl TestHarness {
             .arg(&socket_path)
             .arg("-d")
             .arg(&data_dir)
+            // shepherdd unlinks sway's IPC socket by default (issue #144). This
+            // harness owns the sway it started, so hardening would not reach a
+            // developer's desktop — but it would take the socket away from
+            // anything a test wants to ask the compositor, and leave every
+            // `SwayIpcBackend` call in a fixture unable to reconnect. Tests
+            // exercising the hardened path should drop this deliberately.
+            .arg("--no-harden-sway-ipc")
             .arg("--log-level")
             .arg(std::env::var("SHEPHERD_E2E_LOG").unwrap_or_else(|_| "info".into()))
             .env_clear()

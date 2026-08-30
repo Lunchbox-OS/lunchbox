@@ -69,6 +69,7 @@ export type RpcMethod =
   | "brightness_down"
   | "set_auto_brightness"
   | "toggle_auto_brightness"
+  | "set_screen_power"
   | "get_hud_scale"
   | "get_display_state"
   | "set_display_mode"
@@ -188,6 +189,9 @@ export interface RpcParamsMap {
     enabled: boolean;
   };
   "toggle_auto_brightness": Record<string, never>;
+  "set_screen_power": {
+    on: boolean;
+  };
   "get_hud_scale": Record<string, never>;
   "get_display_state": Record<string, never>;
   "set_display_mode": {
@@ -247,6 +251,7 @@ export interface RpcResultMap {
   "brightness_down": BrightnessInfo;
   "set_auto_brightness": BrightnessInfo;
   "toggle_auto_brightness": BrightnessInfo;
+  "set_screen_power": boolean;
   "get_hud_scale": number;
   "get_display_state": DisplayState;
   "set_display_mode": DisplayState;

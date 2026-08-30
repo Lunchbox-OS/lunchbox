@@ -165,7 +165,7 @@ Commands:
     headless    Start a detached HEADLESS session (no login session, no GPU)
                 that an agent or SSH user can screenshot and drive:
         headless [--config PATH] [--user NAME] [--size WxH] [--time "..."]
-                 [--gpu] [--no-build]
+                 [--gpu] [--no-build] [--harden-ipc]
         shot [out.png]      Screenshot the virtual output
         tree [raw]          Dump the window tree (app_id/focus/fullscreen)
         key <keysym>...     Inject keystroke(s), e.g. Down Return

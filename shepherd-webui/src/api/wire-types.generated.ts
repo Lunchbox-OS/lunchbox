@@ -256,6 +256,23 @@ export type DiagnosticCode =
    */
   | "firewall_not_applied"
   /**
+   * shepherd cannot talk to the compositor, so it cannot see what is on
+   * screen. The escape sweep closes nothing and no orphaned window is
+   * reported, which is indistinguishable from a clear screen unless it is
+   * said out loud (issue #147).
+   */
+  | "compositor_unreachable"
+  /**
+   * The compositor's IPC socket is still reachable by every process at this
+   * uid, because hardening it failed (issue #144).
+   *
+   * The session is deliberately left running — an unhardened kiosk beats no
+   * kiosk — so nothing else about the device looks wrong. Without this the
+   * only trace is one log line, and a device ships without a protection it
+   * is configured to have.
+   */
+  | "compositor_not_hardened"
+  /**
    * This entry sets a browser policy that its kind does not support, so the
    * policy is ignored.
    */
