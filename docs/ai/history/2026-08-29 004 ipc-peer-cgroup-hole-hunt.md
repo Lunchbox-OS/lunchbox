@@ -344,3 +344,39 @@ full of them (`gdm-smartcard` -> `/etc/alternatives/...`). The edit loop is righ
 to skip them — `sed -i` through a symlink replaces the link with a regular file
 — but the *verification* globs instead, so a symlink whose target is still
 enabled is caught rather than passed over by the same blind spot.
+
+### It did not compose across users, and it aborted on the second run
+
+Two bugs in the first version of the above, both found by auditing what
+hardening does to *other* users of the same machine.
+
+**`set -o pipefail` vs. the success case.** The verification was
+`still_enabled="$(grep -lE ... | tr '\n' ' ')"`. `grep -l` exits 1 when it finds
+nothing — which is the outcome being checked for — and `common.sh` sets
+`set -euo pipefail`, so the assignment aborted the whole run. `harden apply`
+therefore worked exactly once and failed on every later invocation, after
+stripping PAM but before writing the `hardened` marker: a half-hardened user
+that `harden revert` then refused to touch. Fixed with `|| true`, and the
+symptom is why the comment there now says so.
+
+**Per-user backups of system-wide files.** `/etc/pam.d` has no per-user form, so
+disabling `user_readenv` disables it for everyone — but it was backed up under
+the hardened user's state directory. Harden A, harden B, revert A, and A's
+backup (taken before anything changed) put the file back, silently un-hardening
+B. `/etc/security/access.conf` had the same shape and had had it since before
+this branch: appended per user, restored wholesale.
+
+Now: system-wide changes live in `$HARDENING_STATE_DIR/.global`, applied by the
+first hardened user and restored only when the last one is reverted; shared
+files that take a per-user rule get a `# BEGIN/END shepherd hardening for user:`
+block that revert removes surgically. Measured across two users:
+
+```
+stock:            pam_enabled=8  access_rules=0
+after harden A:   pam_enabled=0  access_rules=1
+after harden B:   pam_enabled=0  access_rules=2
+after revert A:   pam_enabled=0  access_rules=1   <- B still hardened, B's rule kept
+after revert B:   pam_enabled=8  access_rules=0   <- restored only at the last one
+```
+
+`dpkg -V gdm3` reports no drift afterwards.

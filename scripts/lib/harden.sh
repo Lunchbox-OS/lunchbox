@@ -12,6 +12,98 @@ source "$HARDEN_LIB_DIR/common.sh"
 # State directory for hardening rollback
 HARDENING_STATE_DIR="/var/lib/shepherdd/hardening"
 
+# State for changes that are system-wide rather than per-user.
+#
+# Some of what hardening does cannot be scoped to one user: `/etc/pam.d` has no
+# per-user form, so disabling `user_readenv` disables it for everyone. Backing
+# such a file up per user does not compose — harden A, harden B, revert A, and
+# A's backup (taken before anything was changed) puts the file back the way it
+# was, silently un-hardening B. So they are applied once, tracked here, and
+# restored only when the last hardened user is reverted.
+#
+# Dot-prefixed so the `*/` glob in `hardened_users` skips it, and because a
+# username cannot collide with it.
+GLOBAL_STATE_DIR="$HARDENING_STATE_DIR/.global"
+
+# The users currently hardened, one per line.
+hardened_users() {
+    local dir
+    shopt -s nullglob
+    for dir in "$HARDENING_STATE_DIR"/*/; do
+        if [[ -f "$dir/hardened" ]]; then
+            basename "$dir"
+        fi
+    done
+    shopt -u nullglob
+}
+
+# Save a system-wide file for restoration when the last user is reverted.
+global_save_for_restore() {
+    local file="$1"
+    local backup_path="$GLOBAL_STATE_DIR/backup/${file#/}"
+
+    mkdir -p "$(dirname "$backup_path")"
+    if [[ -e "$file" ]]; then
+        cp -a "$file" "$backup_path"
+        echo "exists" > "$backup_path.meta"
+    else
+        echo "absent" > "$backup_path.meta"
+    fi
+}
+
+# Restore every system-wide file saved by global_save_for_restore.
+global_restore_all() {
+    [[ -d "$GLOBAL_STATE_DIR/backup" ]] || return 0
+
+    local meta backup_path file original_state
+    while IFS= read -r meta; do
+        [[ -n "$meta" ]] || continue
+        backup_path="${meta%.meta}"
+        file="/${backup_path#"$GLOBAL_STATE_DIR/backup/"}"
+        original_state="$(cat "$meta")"
+        if [[ "$original_state" == "exists" ]]; then
+            cp -a "$backup_path" "$file"
+            info "  Restored: $file"
+        else
+            rm -f "$file"
+            info "  Removed: $file (didn't exist before)"
+        fi
+    done < <(find "$GLOBAL_STATE_DIR/backup" -name '*.meta' 2>/dev/null || true)
+}
+
+# Add a per-user block to a shared config file, idempotently.
+#
+# Shared files are appended to by every hardened user, so they cannot be
+# restored wholesale on revert without discarding another user's block. The
+# markers let exactly one user's contribution be taken back out.
+add_marked_block() {
+    local user="$1" file="$2" body="$3"
+
+    if grep -qF "$(block_begin "$user")" "$file" 2>/dev/null; then
+        return 0
+    fi
+    {
+        echo ""
+        block_begin "$user"
+        printf '%s\n' "$body"
+        block_end "$user"
+    } >> "$file"
+}
+
+# Remove the block add_marked_block wrote, leaving every other user's alone.
+remove_marked_block() {
+    local user="$1" file="$2"
+
+    [[ -f "$file" ]] || return 0
+    if grep -qF "$(block_begin "$user")" "$file" 2>/dev/null; then
+        sed -i "\|^$(block_begin "$user")$|,\|^$(block_end "$user")$|d" "$file"
+        info "  Removed hardening block for $user from: $file"
+    fi
+}
+
+block_begin() { echo "# BEGIN shepherd hardening for user: $1"; }
+block_end()   { echo "# END shepherd hardening for user: $1"; }
+
 # Get the state directory for a user
 get_user_state_dir() {
     local user="$1"
@@ -89,6 +181,114 @@ record_action() {
     state_dir="$(get_user_state_dir "$user")"
     
     echo "$action|$target" >> "$state_dir/actions.log"
+}
+
+# Apply the parts of hardening that are system-wide (issue #144).
+#
+# Idempotent and refcounted: the first hardened user applies these, any later
+# one finds them already in place, and `revert_global_hardening_if_last` puts
+# them back only when no hardened users remain.
+apply_global_hardening() {
+    local user="$1"
+    local user_home
+    user_home="$(get_user_home "$user")"
+
+    info "Applying system-wide settings..."
+
+    if [[ -f "$GLOBAL_STATE_DIR/applied" ]]; then
+        info "  Already in place for: $(hardened_users | tr '\n' ' ')"
+        return 0
+    fi
+
+    mkdir -p "$GLOBAL_STATE_DIR/backup"
+    chmod 0700 "$GLOBAL_STATE_DIR"
+
+    # -- getty auto-login override (inert; documents how to turn it on) -----
+    local getty_override_dir="/etc/systemd/system/getty@tty1.service.d"
+    local getty_override="$getty_override_dir/shepherd-autologin.conf"
+
+    global_save_for_restore "$getty_override"
+    mkdir -p "$getty_override_dir"
+    cat > "$getty_override" <<EOF
+# Shepherd hardening: auto-login for the kiosk user
+# Uncomment the following lines to enable auto-login to tty1
+# [Service]
+# ExecStart=
+# ExecStart=-/sbin/agetty --autologin $user --noclear %I \$TERM
+EOF
+    chmod 0644 "$getty_override"
+
+    # -- stop PAM reading the user's own environment file -------------------
+    #
+    # `pam_env`'s `user_readenv=1` makes PAM read `~/.pam_environment` -- a file
+    # the kiosk user owns -- and hand what it says to the session it is opening.
+    # That is the session shepherdd runs in, so without this the kiosk user, and
+    # therefore every activity running as that uid, chooses the daemon's whole
+    # environment. Ubuntu 26.04 ships it enabled on every GDM service.
+    #
+    # Deleting `~/.pam_environment` instead would not work: the user owns their
+    # home directory, so they can remove a root-owned file there and put their
+    # own back. The configuration that reads it is what has to go, and that
+    # lives in root-owned `/etc/pam.d`.
+    info "  Disabling PAM's reading of user environment files..."
+
+    local pam_file changed=0
+    while IFS= read -r pam_file; do
+        [[ -n "$pam_file" ]] || continue
+        global_save_for_restore "$pam_file"
+        sed -i 's/[[:space:]]user_readenv=1//g' "$pam_file"
+        info "    Disabled user_readenv in: $pam_file"
+        changed=$((changed + 1))
+    done < <(grep -rlE '^[^#]*user_readenv=1' /etc/pam.d/ 2>/dev/null || true)
+
+    if [[ "$changed" -eq 0 ]]; then
+        info "    No PAM service reads user environment files"
+    fi
+
+    # A rename or reformat upstream that left one enabled would ship a device
+    # where the kiosk user still picks the session environment, so check rather
+    # than trust the sed.
+    #
+    # The check globs where the loop above recursed, deliberately: `grep -r`
+    # does not follow symlinks and /etc/pam.d is full of them (`gdm-smartcard`
+    # -> /etc/alternatives/...). Editing through a symlink would be wrong --
+    # `sed -i` replaces the link with a regular file -- so the loop is right to
+    # skip them, but a symlink whose target is still enabled has to be caught
+    # rather than passed over by the same blind spot.
+    #
+    # `|| true` because finding nothing is the success case, and `grep` exits 1
+    # for it: under `set -o pipefail` that would abort the whole run, which is
+    # exactly what happened the first time this was written.
+    local still_enabled
+    still_enabled="$(grep -lE '^[^#]*user_readenv=1' /etc/pam.d/* 2>/dev/null || true)"
+    if [[ -n "$still_enabled" ]]; then
+        die "Failed to disable user_readenv in $(echo "$still_enabled" | tr '\n' ' ')- the kiosk user could still set the session environment (issue #144)"
+    fi
+
+    # Its presence is not a problem once nothing reads it, but it is worth
+    # saying: on a device nothing legitimate writes this file.
+    if [[ -e "$user_home/.pam_environment" ]]; then
+        warn "  $user_home/.pam_environment exists; nothing reads it now, but nothing on a device should have written it"
+    fi
+
+    date -Iseconds > "$GLOBAL_STATE_DIR/applied"
+}
+
+# Undo apply_global_hardening, but only once nobody is hardened any more.
+revert_global_hardening_if_last() {
+    local remaining
+    remaining="$(hardened_users | tr '\n' ' ')"
+
+    if [[ -n "${remaining// /}" ]]; then
+        info "Leaving system-wide settings in place; still hardened: $remaining"
+        return 0
+    fi
+
+    [[ -f "$GLOBAL_STATE_DIR/applied" ]] || return 0
+
+    info "Restoring system-wide settings (no hardened users remain)..."
+    global_restore_all
+    rm -rf "$GLOBAL_STATE_DIR"
 }
 
 # Apply hardening to a user
@@ -179,43 +379,14 @@ EOF
     info "Restricting console access..."
     
     local pam_access="/etc/security/access.conf"
-    local shepherd_access_marker="# Shepherd hardening for user: $user"
-    
-    save_for_restore "$user" "$pam_access"
-    
-    # Add rule to deny console access (but allow via display managers)
-    if ! grep -q "$shepherd_access_marker" "$pam_access" 2>/dev/null; then
-        cat >> "$pam_access" <<EOF
 
-$shepherd_access_marker
-# Deny console login for kiosk user (allow display manager access)
--:$user:tty1 tty2 tty3 tty4 tty5 tty6 tty7
-EOF
-    fi
-    record_action "$user" "file" "$pam_access"
-    
-    # =========================================================================
-    # 5. Set up autologin to shepherd session (systemd override)
-    # =========================================================================
-    info "Configuring auto-login (if applicable)..."
-    
-    # Create getty override for auto-login (optional - only if desired)
-    # This doesn't force auto-login, but prepares the override if needed
-    local getty_override_dir="/etc/systemd/system/getty@tty1.service.d"
-    local getty_override="$getty_override_dir/shepherd-autologin.conf"
-    
-    save_for_restore "$user" "$getty_override"
-    
-    mkdir -p "$getty_override_dir"
-    cat > "$getty_override" <<EOF
-# Shepherd hardening: auto-login for kiosk user
-# Uncomment the following lines to enable auto-login to tty1
-# [Service]
-# ExecStart=
-# ExecStart=-/sbin/agetty --autologin $user --noclear %I \$TERM
-EOF
-    chmod 0644 "$getty_override"
-    record_action "$user" "file" "$getty_override"
+    # A marked block rather than a whole-file backup: every hardened user
+    # appends to this file, so restoring it wholesale on revert would discard
+    # the other users' rules along with this one's.
+    add_marked_block "$user" "$pam_access" \
+"# Deny console login for kiosk user (allow display manager access)
+-:$user:tty1 tty2 tty3 tty4 tty5 tty6 tty7"
+    record_action "$user" "block" "$pam_access"
     
     # =========================================================================
     # 6. Lock down sudo access
@@ -246,61 +417,9 @@ EOF
     record_action "$user" "perms" "$user_home"
     
     # =========================================================================
-    # 8. Stop PAM reading the user's own environment file (issue #144)
+    # 8. System-wide settings, applied once for however many users are hardened
     # =========================================================================
-    # `pam_env`'s `user_readenv=1` makes PAM read `~/.pam_environment` — a file
-    # the kiosk user owns — and hand what it says to the session it is opening.
-    # That is the session shepherdd runs in, so without this the kiosk user, and
-    # therefore every activity running as that uid, chooses the daemon's whole
-    # environment: PATH, and anything else the session reads.
-    #
-    # shepherdd itself no longer trusts its environment for anything that
-    # selects a binary, but the rest of the session still does, and the option
-    # has been deprecated upstream for years. Ubuntu 26.04 ships it enabled on
-    # every GDM service.
-    #
-    # Deleting `~/.pam_environment` instead would not work: the user owns their
-    # home directory, so they can remove a root-owned file there and put their
-    # own back. The configuration that reads it is what has to go, and that
-    # lives in root-owned `/etc/pam.d`.
-    info "Disabling PAM's reading of user environment files..."
-
-    local pam_files_changed=0
-    local pam_file
-    while IFS= read -r pam_file; do
-        [[ -n "$pam_file" ]] || continue
-        save_for_restore "$user" "$pam_file"
-        sed -i 's/[[:space:]]user_readenv=1//g' "$pam_file"
-        record_action "$user" "file" "$pam_file"
-        info "  Disabled user_readenv in: $pam_file"
-        pam_files_changed=$((pam_files_changed + 1))
-    done < <(grep -rlE '^[^#]*user_readenv=1' /etc/pam.d/ 2>/dev/null || true)
-
-    if [[ "$pam_files_changed" -eq 0 ]]; then
-        info "  No PAM service reads user environment files; nothing to do"
-    fi
-
-    # A rename or reformat upstream that left one enabled would ship a device
-    # where the kiosk user still picks the session environment, so check rather
-    # than trust the sed.
-    #
-    # The check globs where the edit loop recursed, deliberately: `grep -r` does
-    # not follow symlinks, and `/etc/pam.d` is full of them (`gdm-smartcard` ->
-    # `/etc/alternatives/...`). Editing through a symlink would be wrong — `sed
-    # -i` would replace the link with a regular file — so the loop is right to
-    # skip them, but a symlink whose target is still enabled has to be caught
-    # rather than passed over by the same blind spot.
-    local still_enabled
-    still_enabled="$(grep -lE '^[^#]*user_readenv=1' /etc/pam.d/* 2>/dev/null | tr '\n' ' ')"
-    if [[ -n "$still_enabled" ]]; then
-        die "Failed to disable user_readenv in ${still_enabled}- the kiosk user could still set the session environment (issue #144)"
-    fi
-
-    # Its presence is not a problem once nothing reads it, but it is worth
-    # saying: on a device nothing legitimate writes this file.
-    if [[ -e "$user_home/.pam_environment" ]]; then
-        warn "  $user_home/.pam_environment exists; nothing reads it now, but nothing on a device should have written it"
-    fi
+    apply_global_hardening "$user"
 
     # =========================================================================
     # Mark as hardened
@@ -316,7 +435,7 @@ EOF
     info "  - Sudo access denied"
     info "  - Shell restricted to Sway sessions"
     info "  - Home directory secured (mode 0700)"
-    info "  - PAM no longer reads ~/.pam_environment (issue #144)"
+    info "  - PAM no longer reads ~/.pam_environment (system-wide, issue #144)"
     info ""
     info "To revert: shepherd harden revert --user $user"
 }
@@ -349,6 +468,9 @@ harden_revert() {
                 file)
                     restore_file "$user" "$target"
                     ;;
+                block)
+                    remove_marked_block "$user" "$target"
+                    ;;
                 perms)
                     if [[ -f "$state_dir/home_perms" ]]; then
                         local original_perms
@@ -374,15 +496,22 @@ harden_revert() {
     # =========================================================================
     # Clean up state directory
     # =========================================================================
+    # Before the refcount is read, so this user no longer counts as hardened.
     rm -rf "$state_dir"
-    
+
+    # =========================================================================
+    # System-wide settings, only once nobody is hardened any more
+    # =========================================================================
+    revert_global_hardening_if_last
+
     success "Hardening reverted for user: $user"
     info ""
     info "All restrictions have been removed. The user can now:"
     info "  - Access via SSH"
     info "  - Login at console"
     info "  - Use sudo (if previously allowed)"
-    info "  - Set the session environment via ~/.pam_environment (issue #144)"
+    info "  - Set the session environment via ~/.pam_environment, if no other"
+    info "    user is still hardened (issue #144)"
 }
 
 # Show hardening status
