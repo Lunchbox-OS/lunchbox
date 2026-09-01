@@ -39,10 +39,7 @@ async fn a_client_refuses_an_impostor_in_another_cgroup() {
     // Below the kernel floor the client cannot identify anything, so it warns
     // and proceeds and there is no refusal to assert on. CI runs in a container
     // on the runner's kernel, which is older than the image suggests.
-    if !shepherd_ipc::kernel_supports_peer_cgroup() {
-        eprintln!(
-            "[SKIP] a_client_refuses_an_impostor_in_another_cgroup: no PIDFD_GET_INFO on this kernel"
-        );
+    if shepherd_ipc::skip_without_peer_cgroup("a_client_refuses_an_impostor_in_another_cgroup") {
         return;
     }
 

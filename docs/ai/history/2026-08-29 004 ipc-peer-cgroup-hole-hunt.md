@@ -158,23 +158,31 @@ yt-dlp ... HTTP Error 400 (placeholder playlist id)         <- resolved yt-dlp r
 
 No helper failed to resolve.
 
-### CI cannot exercise the peer check at all
+### CI could not exercise the peer check, until the runner is upgraded
 
-Worth recording, because it looks like a passing suite. The Rust jobs run in a
-container on a hosted runner, so they get the **runner's kernel** however new the
-image is — and it is older than `PIDFD_GET_INFO`, which answers `ENOTTY`. Four
-`peer::tests` cases (and the impostor case in `server_identity.rs`) therefore
-failed there while passing on any 26.04 host.
+The Rust jobs run in a container, so they get the **host's kernel** however new
+the image is — and the runner's was older than `PIDFD_GET_INFO`, which answers
+`ENOTTY`. Four `peer::tests` cases (and the impostor case in
+`server_identity.rs`) failed there while passing on any 26.04 host.
 
-They now skip loudly via `kernel_supports_peer_cgroup()`. That is a real
-coverage gap rather than a fix: the cgroup comparison at the heart of #144 is
-exercised only on a host new enough to run it — a developer's machine, or a
-device — so a regression in it would not show up in CI. The parts that do not
-need the ioctl (the request-number pin, the struct-size pin, the delegated-
-subtree parsing, the disarmed-policy behaviour) still run everywhere.
+They skip via `skip_without_peer_cgroup()`, which counts `NoCgroup` as
+unsupported too: that is what a kernel new enough for `PIDFD_GET_INFO` but not
+for `PIDFD_INFO_CGROUPID` answers, an intermediate an upgrade can land on, and
+treating it as support would run the tests and fail them.
 
-Closing the gap properly means giving CI a newer kernel than the hosted runner
-provides, which is not something the workflow can choose.
+**A skip is invisible.** `cargo test` captures a passing test's output, so the
+`[SKIP]` line never reaches the log and a green run says nothing about whether
+the check was exercised. So the guard escalates: set
+`SHEPHERD_REQUIRE_PEER_CGROUP=1` and a skip becomes a panic naming the reason.
+The runner is self-hosted, so once its distribution is upgraded past the floor,
+adding that variable to the `test` and `e2e` jobs makes the coverage mandatory
+and stops it disappearing again unnoticed.
+
+Two things stay skipped in a container even on a new kernel, and neither is
+about the kernel: `a_client_refuses_an_impostor_in_another_cgroup` needs a
+systemd **user manager** and a session bus to put the impostor in a scope of its
+own, and `activity_isolation_status()` needs the same to isolate an activity at
+all.
 
 ## 2. An activity can take over the management socket's name — FIXED
 

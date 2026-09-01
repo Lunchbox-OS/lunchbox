@@ -267,7 +267,44 @@ pub fn is_delegated_user_cgroup(path: &str) -> bool {
 /// enough to run it, so a regression in the cgroup comparison would show up on
 /// a developer's machine and in the e2e suite, not in CI.
 pub fn kernel_supports_peer_cgroup() -> bool {
-    !matches!(own_cgroup_id(), Err(PeerError::Unsupported(_)))
+    // `NoCgroup` counts as unsupported, not as a failure. It is what a kernel
+    // new enough for `PIDFD_GET_INFO` but not for `PIDFD_INFO_CGROUPID` answers
+    // — an intermediate a distribution upgrade can genuinely land on — and
+    // "this kernel cannot report a peer's cgroup" is exactly what this function
+    // is asked. Treating it as support would run the tests and fail them.
+    !matches!(
+        own_cgroup_id(),
+        Err(PeerError::Unsupported(_) | PeerError::NoCgroup)
+    )
+}
+
+/// Environment variable that turns a skip into a failure.
+///
+/// Skips are invisible: `cargo test` captures a passing test's output, so
+/// `[SKIP]` never reaches the log and a green run says nothing about whether
+/// the peer check was actually exercised. Set this on a runner whose kernel is
+/// known to be above the floor and the suite starts insisting on it, so the
+/// coverage cannot quietly disappear again.
+pub const REQUIRE_PEER_CGROUP_ENV: &str = "SHEPHERD_REQUIRE_PEER_CGROUP";
+
+/// Whether `test` should bail out because this kernel cannot support it.
+///
+/// Panics instead when [`REQUIRE_PEER_CGROUP_ENV`] is set, which is how a
+/// runner that has been upgraded stops accepting a silent skip.
+pub fn skip_without_peer_cgroup(test: &str) -> bool {
+    if kernel_supports_peer_cgroup() {
+        return false;
+    }
+    assert!(
+        std::env::var_os(REQUIRE_PEER_CGROUP_ENV).is_none(),
+        "{test}: {REQUIRE_PEER_CGROUP_ENV} is set, but this kernel cannot report a peer's \
+         cgroup — the host is below the floor #144 needs, or the container cannot see cgroup2"
+    );
+    eprintln!(
+        "[SKIP] {test}: this kernel cannot report a peer's cgroup; set \
+         {REQUIRE_PEER_CGROUP_ENV}=1 to make this a failure"
+    );
+    true
 }
 
 /// What a *client* found on the other end of its connection (issue #144).
@@ -488,11 +525,7 @@ mod tests {
 
     #[test]
     fn our_own_cgroup_reads_back() {
-        if !kernel_supports_peer_cgroup() {
-            eprintln!(
-                "[SKIP] our_own_cgroup_reads_back: this kernel has no PIDFD_GET_INFO \
-                 (CI runs in a container, so it gets the runner's kernel)"
-            );
+        if skip_without_peer_cgroup("our_own_cgroup_reads_back") {
             return;
         }
         // Both readers have to work on whatever runs the tests; this is the
@@ -505,11 +538,7 @@ mod tests {
 
     #[test]
     fn an_armed_policy_accepts_a_peer_in_our_own_cgroup() {
-        if !kernel_supports_peer_cgroup() {
-            eprintln!(
-                "[SKIP] an_armed_policy_accepts_a_peer_in_our_own_cgroup: this kernel has no PIDFD_GET_INFO \
-                 (CI runs in a container, so it gets the runner's kernel)"
-            );
+        if skip_without_peer_cgroup("an_armed_policy_accepts_a_peer_in_our_own_cgroup") {
             return;
         }
         // A socketpair's peer is this very process, so it is in our cgroup by
@@ -525,11 +554,7 @@ mod tests {
 
     #[test]
     fn an_armed_policy_refuses_a_peer_from_another_cgroup() {
-        if !kernel_supports_peer_cgroup() {
-            eprintln!(
-                "[SKIP] an_armed_policy_refuses_a_peer_from_another_cgroup: this kernel has no PIDFD_GET_INFO \
-                 (CI runs in a container, so it gets the runner's kernel)"
-            );
+        if skip_without_peer_cgroup("an_armed_policy_refuses_a_peer_from_another_cgroup") {
             return;
         }
         // Stand in for an activity by claiming a cgroup id that cannot be ours.
@@ -553,11 +578,7 @@ mod tests {
 
     #[test]
     fn root_is_accepted_from_any_cgroup() {
-        if !kernel_supports_peer_cgroup() {
-            eprintln!(
-                "[SKIP] root_is_accepted_from_any_cgroup: this kernel has no PIDFD_GET_INFO \
-                 (CI runs in a container, so it gets the runner's kernel)"
-            );
+        if skip_without_peer_cgroup("root_is_accepted_from_any_cgroup") {
             return;
         }
         // `sudo shepherd …` comes from the operator's own login session, which
