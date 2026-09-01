@@ -174,9 +174,11 @@ treating it as support would run the tests and fail them.
 `[SKIP]` line never reaches the log and a green run says nothing about whether
 the check was exercised. So the guard escalates: set
 `SHEPHERD_REQUIRE_PEER_CGROUP=1` and a skip becomes a panic naming the reason.
-The runner is self-hosted, so once its distribution is upgraded past the floor,
-adding that variable to the `test` and `e2e` jobs makes the coverage mandatory
-and stops it disappearing again unnoticed.
+The runner is self-hosted, so the floor is something the host can be upgraded
+past — and `ci.yml` now sets that variable on the `test` and `e2e` jobs, which
+makes the coverage mandatory and stops it disappearing again unnoticed. If those
+jobs start failing with *"this kernel cannot report a peer's cgroup"*, the
+runner is below the floor rather than the code being wrong.
 
 Two things stay skipped in a container even on a new kernel, and neither is
 about the kernel: `a_client_refuses_an_impostor_in_another_cgroup` needs a

@@ -148,6 +148,15 @@ jobs:
       # goes stale — were never running here at all.
       - name: Run tests
         run: cargo test --workspace --all-targets
+        env:
+          # Insist that the peer-cgroup check in shepherd-ipc actually runs
+          # (issue #144). It needs SO_PEERPIDFD + PIDFD_GET_INFO, and these jobs
+          # run in a container, so they get the *host's* kernel however new the
+          # image is. Below the floor those tests skip -- and a skip is
+          # invisible, because cargo captures a passing test's output, so a
+          # green run would say nothing about whether the check was exercised.
+          # With this set the skip becomes a failure naming the reason instead.
+          SHEPHERD_REQUIRE_PEER_CGROUP: "1"
 
   e2e:
     name: E2E
@@ -184,6 +193,10 @@ jobs:
 
       - name: Run e2e tests
         run: cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
+        env:
+          # As in the `test` job: a kernel too old for the peer check must fail
+          # here rather than skip quietly (issue #144).
+          SHEPHERD_REQUIRE_PEER_CGROUP: "1"
 
   lint:
     name: Clippy
