@@ -458,6 +458,13 @@ tools that are legitimately absent.
   binaries: `current_exe()`'s directory first (where both an install and a
   `cargo build` put them), then the trusted directories. The input-compat
   sidecars and the pairing overlay use it.
+- **In a development session `$PATH` is searched first**, which is exactly the
+  behaviour from before #144. It has to be: stubbing a helper by putting a fake
+  one on `$PATH` is how the e2e suite tests the flatpak and polkit paths without
+  installing either. A device never takes that branch —
+  `helpers::set_trust_environment` is off unless `--no-restrict-ipc-peers` was
+  passed, and `shepherd install sway-config` strips that flag and refuses to
+  finish if the strip did not take.
 
 `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER` are binary-substitution
 primitives, so they go through the single gate `helpers::env_override` and are

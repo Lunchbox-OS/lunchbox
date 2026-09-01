@@ -133,7 +133,19 @@ the same reason the scope wrapper is injected.
 Regression tests are in `crates/shepherd-host-linux/tests/helper_resolution.rs`
 — an integration test rather than a unit test, because poisoning `PATH` in the
 crate's shared test process breaks the several unit tests that spawn `sleep` and
-`sh` by name.
+`sh` by name. `tests/helper_env_override.rs` is a second file for the same
+reason at one remove: the trust flag is process-global and `resolve` consults
+it, so two tests that disagree about it would decide each other's outcome by
+running order.
+
+**It broke stubbing, which CI caught.** The e2e browser test installs a fake
+`flatpak` on `$PATH` to exercise the policy-injection path without installing
+Chrome — resolving only from trusted directories found `/usr/bin/flatpak`, which
+does not exist in the CI container, and the launch failed. So `resolve` searches
+`$PATH` **first when the environment is trusted**, which is the pre-#144
+behaviour and is off on a device by the same flag that arms the peer check.
+Stubbing a helper is a legitimate thing for a test to do; what must not happen
+is a *device* taking binaries from a `$PATH` the kiosk user writes.
 
 Verified in the headless dev stack, which exercises the real spawn paths:
 
@@ -145,6 +157,24 @@ yt-dlp ... HTTP Error 400 (placeholder playlist id)         <- resolved yt-dlp r
 ```
 
 No helper failed to resolve.
+
+### CI cannot exercise the peer check at all
+
+Worth recording, because it looks like a passing suite. The Rust jobs run in a
+container on a hosted runner, so they get the **runner's kernel** however new the
+image is — and it is older than `PIDFD_GET_INFO`, which answers `ENOTTY`. Four
+`peer::tests` cases (and the impostor case in `server_identity.rs`) therefore
+failed there while passing on any 26.04 host.
+
+They now skip loudly via `kernel_supports_peer_cgroup()`. That is a real
+coverage gap rather than a fix: the cgroup comparison at the heart of #144 is
+exercised only on a host new enough to run it — a developer's machine, or a
+device — so a regression in it would not show up in CI. The parts that do not
+need the ioctl (the request-number pin, the struct-size pin, the delegated-
+subtree parsing, the disarmed-policy behaviour) still run everywhere.
+
+Closing the gap properly means giving CI a newer kernel than the hosted runner
+provides, which is not something the workflow can choose.
 
 ## 2. An activity can take over the management socket's name — FIXED
 

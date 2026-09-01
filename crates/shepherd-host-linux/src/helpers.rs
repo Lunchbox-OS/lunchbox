@@ -123,10 +123,17 @@ pub fn resolve(name: &str) -> PathBuf {
         return hit.clone();
     }
 
-    let resolved = TRUSTED_PATH
-        .iter()
-        .map(|dir| Path::new(dir).join(name))
-        .find(|p| is_executable(p))
+    // In a development session `$PATH` is searched first, which is exactly the
+    // behaviour from before #144. It has to be: stubbing a helper by putting a
+    // fake one on `$PATH` is how the e2e suite tests the flatpak and polkit
+    // paths without installing either, and resolving only from `/usr/bin` broke
+    // that. A device never takes this branch — `set_trust_environment` is off
+    // unless `--no-restrict-ipc-peers` was passed, and `shepherd install
+    // sway-config` strips that flag.
+    let resolved = environment_is_trusted()
+        .then(|| search_path(name))
+        .flatten()
+        .or_else(|| search_trusted(name))
         .unwrap_or_else(|| {
             debug!(
                 helper = name,
@@ -163,6 +170,23 @@ pub fn resolve_daemon_sibling(name: &str) -> PathBuf {
 /// [`resolve`], as a `String`, for the argv vectors built by `process.rs`.
 pub fn resolve_arg(name: &str) -> String {
     resolve(name).to_string_lossy().into_owned()
+}
+
+/// First executable `name` in [`TRUSTED_PATH`].
+fn search_trusted(name: &str) -> Option<PathBuf> {
+    TRUSTED_PATH
+        .iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|p| is_executable(p))
+}
+
+/// First executable `name` on `$PATH`. Development only — see [`resolve`].
+fn search_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|p| is_executable(p))
+    })
 }
 
 fn is_executable(path: &Path) -> bool {

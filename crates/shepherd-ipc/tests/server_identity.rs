@@ -36,6 +36,16 @@ async fn a_client_accepts_the_daemon_in_its_own_cgroup() {
 /// runs with a temp `XDG_RUNTIME_DIR` and no bus).
 #[tokio::test]
 async fn a_client_refuses_an_impostor_in_another_cgroup() {
+    // Below the kernel floor the client cannot identify anything, so it warns
+    // and proceeds and there is no refusal to assert on. CI runs in a container
+    // on the runner's kernel, which is older than the image suggests.
+    if !shepherd_ipc::kernel_supports_peer_cgroup() {
+        eprintln!(
+            "[SKIP] a_client_refuses_an_impostor_in_another_cgroup: no PIDFD_GET_INFO on this kernel"
+        );
+        return;
+    }
+
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("shepherdd.sock");
 
