@@ -377,7 +377,7 @@ impl TestHarness {
             // daemon to take binaries from the environment (issue #144). Its
             // own flag, deliberately: an ordinary dev session does not stub
             // anything and so resolves binaries exactly as a device does.
-            .arg("--trust-env-binaries")
+            .arg("--trust-environment")
             .arg("--log-level")
             .arg(std::env::var("SHEPHERD_E2E_LOG").unwrap_or_else(|_| "info".into()))
             .env_clear()

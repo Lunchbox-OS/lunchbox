@@ -196,11 +196,22 @@ fn media_argv(
 }
 
 /// Resolve the base directory under which browser policy/profile dirs are
-/// materialized. Honors `SHEPHERD_BROWSER_ROOT` (used by tests to redirect
-/// writes away from the real `~/.var/app/...`), otherwise the user's home.
+/// materialized: the user's home, or `SHEPHERD_BROWSER_ROOT` where the
+/// environment is trusted.
+///
+/// Gated, because redirecting this is a policy bypass rather than a
+/// convenience (issue #144): the managed-policy JSON lands somewhere Chrome
+/// never reads, the browser lockdown silently does not apply, and the daemon
+/// still logs "Materialized Chrome browser policy". On a device the kiosk user
+/// owns the environment, so an activity could switch off the restrictions
+/// meant to contain it.
+///
+/// Nothing production reads it — the variable exists so the e2e suite can
+/// redirect writes away from the real `~/.var/app/...`, and that harness passes
+/// `--trust-environment`.
 fn resolve_browser_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("SHEPHERD_BROWSER_ROOT") {
-        return PathBuf::from(root);
+    if let Some(root) = crate::helpers::env_override("SHEPHERD_BROWSER_ROOT") {
+        return root;
     }
     dirs::home_dir().unwrap_or_default()
 }

@@ -280,11 +280,40 @@ Closing it means changing how *every* binary resolves its paths, and deciding
 what a dev session and `shepherd-admin` do instead, which is a design change
 rather than an attribute deletion.
 
-Also outside the flag sweep, and lower severity: `SHEPHERD_BROWSER_ROOT`
-(redirects where Chrome's managed policy is written, so the lockdown silently
-misses the real profile while the daemon still logs success) and the RetroArch
-path overrides. `SHEPHERD_MOCK_TIME` is `#[cfg(debug_assertions)]`, so inert in
-the release build a device ships — it would defeat time limits in a debug one.
+`SHEPHERD_BROWSER_ROOT` was folded into the same gate. It redirects where
+Chrome's managed-policy JSON is written, so an activity that could set it would
+land the policy somewhere Chrome never reads — the browser lockdown silently not
+applying, while the daemon still logs that it did. Nothing production reads it;
+it exists so the e2e suite can redirect writes away from the real
+`~/.var/app/...`, and that harness passes `--trust-environment`. The flag was
+renamed from `--trust-env-binaries` at the same time, because it no longer gates
+only binaries.
+
+### What could not be gated, and why
+
+`SHEPHERD_RETROARCH_ROOT` looked like the same case — its doc says tests point it
+at a scratch dir, otherwise the data dir is used — but it cannot be gated
+cheaply. Four **unit** tests in `retroarch.rs` set it in-process, serialised by a
+dedicated `ROOT_ENV_LOCK` because "the variable is process-global, and the
+crate's tests share one binary". Gating it would mean flipping the process-global
+trust flag from inside that binary, which is the hazard that already forced
+`helper_env_override.rs` into a test file of its own. Closing it wants those
+tests restructured to pass a root rather than export one.
+
+`SHEPHERD_LIBRETRO_DIR` and `SHEPHERD_RETROARCH_CONFIG_DIR` are different again:
+both docs claim a *production* use ("for installs that put cores/config
+somewhere unusual"), so gating them would break a supported configuration. They
+want to become `config.toml` settings, which puts them on #157's surface, since
+that file is writable at the same uid anyway. Severity is lower regardless:
+`LIBRETRO_DIR` is a `dlopen` source, but RetroArch is itself an activity in its
+own cgroup, so it is code execution as themselves rather than escalation.
+
+`SHEPHERD_DATA_DIR` belongs to #157 outright — it is another door to the same
+file-backed state, and it dissolves under #157's fix, since separate uids would
+stop an activity setting shepherd's environment at all.
+
+`SHEPHERD_MOCK_TIME` is `#[cfg(debug_assertions)]`, so inert in the release build
+a device ships — it would defeat time limits in a debug one.
 
 ## 2. An activity can take over the management socket's name — FIXED
 

@@ -149,9 +149,9 @@ struct Args {
     #[arg(long = "no-restrict-ipc-peers")]
     no_restrict_ipc_peers: bool,
 
-    /// Let the environment name the binaries shepherdd execs: honour
-    /// `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER`, and search `$PATH`
-    /// ahead of the compiled-in trusted directories.
+    /// Trust the environment: honour `SHEPHERD_*_BIN`,
+    /// `SHEPHERD_FIREWALL_HELPER` and `SHEPHERD_BROWSER_ROOT`, and search
+    /// `$PATH` ahead of the compiled-in trusted directories.
     ///
     /// Off by default, because on a device the environment is not shepherd's to
     /// trust: GDM's PAM stack reads `~/.pam_environment`, a file the kiosk user
@@ -165,8 +165,8 @@ struct Args {
     /// decides which code the daemon *runs*. Only the e2e suite needs it — it
     /// stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` — so an ordinary dev
     /// session leaves it off and exercises the same resolution a device does.
-    #[arg(long = "trust-env-binaries")]
-    trust_env_binaries: bool,
+    #[arg(long = "trust-environment")]
+    trust_environment: bool,
 }
 
 /// Main service state
@@ -262,7 +262,7 @@ impl Service {
         // this one decides which code the daemon runs, and only the e2e suite
         // wants the second. Keeping them apart is what lets an ordinary dev
         // session resolve binaries the way a device does.
-        shepherd_host_linux::helpers::set_trust_environment(args.trust_env_binaries);
+        shepherd_host_linux::helpers::set_trust_environment(args.trust_environment);
 
         // Initialize host adapter
         let host = Arc::new(LinuxHost::new());

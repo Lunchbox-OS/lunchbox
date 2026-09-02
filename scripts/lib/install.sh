@@ -128,10 +128,11 @@ install_sway_config() {
     # every activity — `exec`, which starts a process outside supervision *and*
     # outside the cgroup the per-entry firewall is attached to.
     #
-    # `--trust-env-binaries` is stripped for the same reason again: it lets the
-    # environment name the binaries shepherdd execs, and on a device the kiosk
-    # user chooses the environment (GDM's PAM stack reads `~/.pam_environment`).
-    # Only the e2e suite passes it, but a hand-edited config could.
+    # `--trust-environment` is stripped for the same reason again: it lets the
+    # environment name the binaries shepherdd execs and redirect where the
+    # browser policy is written, and on a device the kiosk user chooses the
+    # environment (GDM's PAM stack reads `~/.pam_environment`). Only the e2e
+    # suite passes it, but a hand-edited config could.
     #
     # `--no-restrict-ipc-peers` is stripped for the same reason. It opens
     # shepherdd's *own* management socket to every process at this uid, which is
@@ -152,7 +153,7 @@ install_sway_config() {
         -e "s|-c ./sway.conf|-c $dst_config|g" \
         -e "s| --no-harden-sway-ipc||g" \
         -e "s| --no-restrict-ipc-peers||g" \
-        -e "s| --trust-env-binaries||g" \
+        -e "s| --trust-environment||g" \
         "$src_config" > "$dst_config"
 
     # Scoped to the exec line: the comment above it names the flag too, and a
@@ -168,8 +169,8 @@ install_sway_config() {
     if [[ "$dst_exec_line" == *--no-restrict-ipc-peers* ]]; then
         die "Failed to strip --no-restrict-ipc-peers from $dst_config; the installed device would let every activity drive shepherd's own management socket (issue #144)"
     fi
-    if [[ "$dst_exec_line" == *--trust-env-binaries* ]]; then
-        die "Failed to strip --trust-env-binaries from $dst_config; the installed device would take helper binaries from a \$PATH the kiosk user can write (issue #144)"
+    if [[ "$dst_exec_line" == *--trust-environment* ]]; then
+        die "Failed to strip --trust-environment from $dst_config; the installed device would take helper binaries, and the browser-policy root, from an environment the kiosk user can write (issue #144)"
     fi
     
     chmod 0644 "$dst_config"

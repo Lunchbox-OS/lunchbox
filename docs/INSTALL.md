@@ -482,7 +482,7 @@ configured with `user_readenv=1`, so `~/.pam_environment` — a file the kiosk u
 owns — sets the session's environment, and an activity that could steer `$PATH`
 could have shepherd exec a binary of its choosing *inside shepherd's own
 cgroup*. For the same reason `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER` are ignored
-unless `--trust-env-binaries` is passed, which no device does — and which is a
+unless `--trust-environment` is passed, which no device does — and which is a
 flag rather than an environment variable precisely so that
 `shepherd install sway-config` can strip it and refuse to finish if the strip
 did not take. None of the development opt-outs read the environment for the same
