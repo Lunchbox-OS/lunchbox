@@ -389,7 +389,7 @@ EOF
     record_action "$user" "block" "$pam_access"
     
     # =========================================================================
-    # 6. Lock down sudo access
+    # 5. Lock down sudo access
     # =========================================================================
     info "Restricting sudo access..."
     
@@ -405,7 +405,7 @@ EOF
     record_action "$user" "file" "$sudoers_file"
     
     # =========================================================================
-    # 7. Set restrictive file permissions on user home
+    # 6. Set restrictive file permissions on user home
     # =========================================================================
     info "Securing home directory permissions..."
     
@@ -417,7 +417,7 @@ EOF
     record_action "$user" "perms" "$user_home"
     
     # =========================================================================
-    # 8. System-wide settings, applied once for however many users are hardened
+    # 7. System-wide settings, applied once for however many users are hardened
     # =========================================================================
     apply_global_hardening "$user"
 
