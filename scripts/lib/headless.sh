@@ -162,14 +162,33 @@ headless_wait_ipc() {
 }
 
 # Poll the tree until the launcher surface is mapped (deciseconds in $1).
+# Wait for the launcher to map a surface, in 0.1s ticks.
+#
+# The budget is generous because GTK can stall long before it paints: with no
+# `xdg-desktop-portal` answering — an SSH-only box with no graphical login, which
+# is exactly where this harness is meant to run — each of two portal lookups
+# blocks for 25s, so the UI appears about 50s in. A 20s budget reported that as
+# "surface not detected", which reads as a broken stack rather than a slow one,
+# and cost an afternoon of chasing a regression that was not there.
+#
+# `hint_after` keeps the shorter feedback: past that point it says once that it
+# is still waiting and why, so a genuinely dead launcher is not a silent
+# minute-and-a-half.
+#   headless_wait_launcher [tries] [hint_after]
 headless_wait_launcher() {
-    local tries="${1:-200}"
+    local tries="${1:-900}" hint_after="${2:-200}" i=0
     # The launcher registers as "org.shepherd.launcher" (older builds used the
     # bare "shepherd-launcher"); accept either.
     for _ in $(seq 1 "$tries"); do
         if headless_run swaymsg -t get_tree 2>/dev/null \
             | grep -qE '"app_id": *"(org\.)?shepherd[.-]launcher"'; then
             return 0
+        fi
+        i=$((i + 1))
+        if [[ "$i" -eq "$hint_after" ]]; then
+            info "Still waiting for the launcher to paint. GTK blocks ~25s per"
+            info "portal lookup when no xdg-desktop-portal answers, so this can"
+            info "take about a minute on a box with no graphical login."
         fi
         sleep 0.1
     done
@@ -558,10 +577,10 @@ EOF
 
     success "Headless session up (pid $pid${user:+, user=$user}, WAYLAND_DISPLAY=$wd, SWAYSOCK=$swaysock)"
 
-    if headless_wait_launcher 200; then
+    if headless_wait_launcher 900 200; then
         success "Launcher surface is mapped and ready to screenshot."
     else
-        warn "Launcher surface not detected within 20s — the stack is up but the"
+        warn "Launcher surface not detected within 90s — the stack is up but the"
         warn "GTK UI may not have painted. Check $log and 'shepherd dev tree'."
     fi
 
