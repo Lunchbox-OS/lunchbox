@@ -158,6 +158,55 @@ yt-dlp ... HTTP Error 400 (placeholder playlist id)         <- resolved yt-dlp r
 
 No helper failed to resolve.
 
+### The armed path, finally exercised (2026-09-02)
+
+Everything above was reasoned about `Enforced` without ever running it: every
+dev session passes `--no-restrict-ipc-peers`, and a stack started from a shell
+sits under `user@.service`, so the policy degrades. It can be reached without a
+device, and the recipe is worth keeping — a **system**-manager scope owned by
+the right uid is non-delegated, which is structurally what a logind session
+scope is:
+
+```sh
+sudo systemd-run --uid=1000 --gid=1000 --scope --slice=user-1000.slice \
+  --setenv=XDG_RUNTIME_DIR=/run/user/1000 \
+  --setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+  ./target/debug/shepherdd -c ./config.example.toml -s /tmp/t/s.sock -d /tmp/t/data
+```
+
+Both `--setenv`s are load-bearing: without them `systemd-run --user --scope`
+cannot reach the user bus, activities cannot be isolated, and the daemon
+correctly refuses to arm — *"Activities will share shepherd's own cgroup, so the
+management socket cannot tell one from the launcher"*. Seeing that by accident
+was the second gap from `2026-08-29 003` demonstrating itself.
+
+With the environment right, the daemon logged what it never had here before:
+
+```
+cgroup: /user.slice/user-1000.slice/shepherd-armed-508526.scope   (no user@, so not delegated)
+Activities will be launched into a cgroup of their own
+Management socket accepts only this session and root
+```
+
+The four peer cases, against that live daemon over its real socket, with
+`health` as the probe:
+
+| Peer | Result |
+|------|--------|
+| Same cgroup as the daemon (the launcher/HUD relationship) | **accepted**, `health` responded |
+| Another cgroup, same uid (an activity) | **refused** — connection reset at accept |
+| Root from another cgroup (`sudo`) | **accepted** — the administration escape hatch works |
+| The daemon's own report | `Refused a client on the management socket`, reason `not shepherd's own` |
+
+The `sudo` row is the one worth having measured: if it were wrong, hardening a
+device would lock its operator out, and nothing in the unit tests proves it
+against a real socket.
+
+Finding 3's throttle was exercised at the same time: **200 refused connections
+from the wrong cgroup produced zero new reports**, the first refusal having
+already spent the window. The 60-second tally carry is only unit-tested — the
+daemon was not kept alive long enough to see the second report.
+
 ### CI could not exercise the peer check, until the runner is upgraded
 
 The Rust jobs run in a container, so they get the **host's kernel** however new

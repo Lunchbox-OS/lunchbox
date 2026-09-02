@@ -130,6 +130,27 @@ nothing consults it at dispatch: once the allow-list is in place every accepted
 peer is either root or shepherd's own code, so a per-method tier split would
 have no security content to enforce.
 
+### Exercising the armed check without a device
+
+`PeerPolicy::restricted()` degrades wherever shepherd's cgroup is one an
+activity could join, which is every stack started from a shell — so a dev
+session never runs the enforced path. A **system**-manager scope owned by the
+right uid is not delegated, which is structurally what a logind session scope
+is, so this reaches it:
+
+```sh
+sudo systemd-run --uid=1000 --gid=1000 --scope --slice=user-1000.slice \
+  --setenv=XDG_RUNTIME_DIR=/run/user/1000 \
+  --setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+  ./target/debug/shepherdd -c ./config.example.toml -s /tmp/t/s.sock -d /tmp/t/data
+```
+
+Both `--setenv`s matter: without them `systemd-run --user --scope` cannot reach
+the user bus, so activities cannot be isolated and the daemon refuses to arm —
+correctly, since the check separates nothing when everything shares its cgroup.
+Look for `Management socket accepts only this session and root`; any other line
+means it degraded, and says why.
+
 ### Which daemon a client will talk to (issue #144)
 
 The same question backwards, and it needs asking. The socket lives in a
