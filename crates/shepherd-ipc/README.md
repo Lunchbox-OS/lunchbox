@@ -151,6 +151,13 @@ correctly, since the check separates nothing when everything shares its cgroup.
 Look for `Management socket accepts only this session and root`; any other line
 means it degraded, and says why.
 
+For a whole session rather than a bare daemon, `shepherd dev headless
+--harden-ipc-peers` does the same thing around sway, and refuses to hand back a
+session that degraded — the failure it exists to prevent, since a degraded
+session looks identical from the outside. Measured there: the launcher, the HUD
+and the one-shots connect (they share shepherdd's cgroup, as on a device), a
+client from another cgroup is refused, and `sudo` still gets through.
+
 ### Which daemon a client will talk to (issue #144)
 
 The same question backwards, and it needs asking. The socket lives in a
