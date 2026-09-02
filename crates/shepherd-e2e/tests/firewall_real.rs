@@ -24,6 +24,10 @@
 //!   cargo test -p shepherd-e2e --test firewall_real -- \
 //!       --include-ignored --test-threads=1 --nocapture
 
+// Fixture code: spawns probes and stand-ins by name, which the ban makes
+// deliberate rather than accidental (issue #144).
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result};
 use serde_json::json;
 use shepherd_e2e::{TestHarness, json_body};

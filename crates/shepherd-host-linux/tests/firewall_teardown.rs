@@ -27,6 +27,10 @@
 //! When a prerequisite is missing the test prints `[SKIP]` and passes, so the
 //! same command works on CI.
 
+// Spawns stand-ins by name, which is what a fixture is for; the ban is aimed at
+// a daemon on a device choosing a helper through `$PATH` (issue #144).
+#![allow(clippy::disallowed_methods)]
+
 use shepherd_api::EntryKind;
 use shepherd_host_api::{FirewallSpec, HostAdapter, SpawnOptions};
 use shepherd_host_linux::{LinuxHost, make_scope_name, pid_is_live, stop_firewall_scope};

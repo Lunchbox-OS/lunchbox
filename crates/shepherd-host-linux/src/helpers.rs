@@ -167,6 +167,22 @@ pub fn resolve_daemon_sibling(name: &str) -> PathBuf {
     resolve(name)
 }
 
+/// A [`std::process::Command`] for helper `name`, resolved (issue #144).
+///
+/// The way shepherd should spawn anything it chose itself. `Command::new` is
+/// banned workspace-wide (see `clippy.toml`) precisely so that reaching for it
+/// is a deliberate act with a comment attached, rather than the default.
+#[allow(clippy::disallowed_methods)]
+pub fn command(name: &str) -> std::process::Command {
+    std::process::Command::new(resolve(name))
+}
+
+/// [`command`], for the async call sites.
+#[allow(clippy::disallowed_methods)]
+pub fn tokio_command(name: &str) -> tokio::process::Command {
+    tokio::process::Command::new(resolve(name))
+}
+
 /// [`resolve`], as a `String`, for the argv vectors built by `process.rs`.
 pub fn resolve_arg(name: &str) -> String {
     resolve(name).to_string_lossy().into_owned()

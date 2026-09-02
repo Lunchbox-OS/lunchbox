@@ -17,6 +17,12 @@
 //! via [`set_scope_prefix_fn`]; anything that has not called it — a test, the
 //! player, Android — runs `yt-dlp` bare, exactly as before.
 
+// This crate cannot call `helpers::command`: it must not depend on
+// shepherd-host-linux, which is the whole reason the resolver is injected here
+// instead (issue #144). Every `Command::new` below takes a value that has
+// already been through that resolver, or through the injected scope prefix.
+#![allow(clippy::disallowed_methods)]
+
 use std::process::Command;
 use std::sync::OnceLock;
 

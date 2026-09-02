@@ -478,6 +478,32 @@ wrote it. `config.toml` is owned by the same uid the activities run as, so that
 is the same class of problem — tracked as #156/#157, and a policy decision
 rather than a lookup bug.
 
+### The rule is enforced, not just documented
+
+`clippy.toml` disallows `std::process::Command::new` and
+`tokio::process::Command::new` workspace-wide, pointing at
+`helpers::command()` / `helpers::tokio_command()` instead. Prose in a README
+does not survive the next person adding a call site; a denied method does.
+
+Spawning something that is *not* a shepherd-chosen helper is still legitimate
+and takes an `#[allow(clippy::disallowed_methods)]` with a comment saying which
+exception it is. There are five kinds, and they are the whole list:
+
+- `ManagedProcess::spawn` — `argv[0]` is the activity's own command from
+  `config.toml`, the admin's string and not shepherd's to reinterpret.
+- The input sidecars and the pairing overlay — already resolved by
+  `resolve_daemon_sibling`.
+- `shepherd-firewall-helper` — only ever runs under `pkexec`, which replaces the
+  environment with a minimal one; measured, its `PATH` is root-owned throughout.
+- `shepherd-media-cache` — must not depend on this crate, which is why its
+  resolver is injected instead.
+- Tests, fixtures and build scripts — spawning stand-ins by name is what they
+  are for.
+
+The ban caught a live gap the moment it was armed: `brightness.rs` was exec'ing
+`brightnessctl` through `$PATH`, missed by the original sweep because the name
+was in a `const` rather than a string literal.
+
 The measurements are in
 `docs/ai/history/2026-08-29 004 ipc-peer-cgroup-hole-hunt.md`; the regression
 tests are `crates/shepherd-host-linux/tests/helper_resolution.rs`.

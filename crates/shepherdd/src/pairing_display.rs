@@ -52,6 +52,10 @@ impl PairingDisplay for SwayPairingDisplay {
         // Resolved like the input sidecars rather than exec'd by bare name:
         // this is a direct child of the daemon, so `$PATH` deciding which binary
         // runs would put a chosen one in the daemon's cgroup (issue #144).
+        // Already resolved to a sibling of the running daemon (or a trusted
+        // system directory), so this is not a bare name `$PATH` could
+        // reinterpret — the case `Command::new`'s ban is aimed at (issue #144).
+        #[allow(clippy::disallowed_methods)]
         let mut cmd = Command::new(shepherd_host_linux::resolve_daemon_sibling(BINARY));
         cmd.args([
             "--passkey",

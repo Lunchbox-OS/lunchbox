@@ -209,6 +209,28 @@ systemd **user manager** and a session bus to put the impostor in a scope of its
 own, and `activity_isolation_status()` needs the same to isolate an activity at
 all.
 
+### Nothing stopped the next bare `Command::new`
+
+The fix above changed 26 call sites and wrote the rule into two READMEs, and
+that was all: no lint, no test, no CI check. `clippy.toml` already existed and
+already used `disallowed-methods` — for exactly one thing, `chrono::Local::now`
+— so the mechanism was there and unused for this.
+
+Both `Command::new` paths are now denied workspace-wide, pointing at
+`helpers::command()`. Legitimate spawns take an
+`#[allow(clippy::disallowed_methods)]` with a comment naming the exception,
+which makes each one greppable and argued rather than invisible.
+
+Arming it found a live gap immediately: `brightness.rs` exec'd `brightnessctl`
+through `$PATH`. The original sweep matched `Command::new("<literal>")` and this
+one names the binary in a `const`, so it had been missed — the precise failure
+mode a grep-based guard would also have missed, found on the first run of a
+type-aware one.
+
+Verified by reintroducing the hole on purpose (`helpers::command("pkcheck")` ->
+`std::process::Command::new("pkcheck")`) and confirming CI-equivalent clippy
+rejects it with the reason attached, then restoring it.
+
 ## 2. An activity can take over the management socket's name — FIXED
 
 Demonstrated end to end with a throwaway socket:

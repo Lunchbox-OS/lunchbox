@@ -110,7 +110,7 @@ fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
 /// only if the action is granted with no auth prompt required.
 fn probe_polkit_grant() -> Result<(), String> {
     let pid = std::process::id();
-    let output = std::process::Command::new(helpers::resolve("pkcheck"))
+    let output = helpers::command("pkcheck")
         .args([
             "--action-id",
             "org.shepherd.firewall.apply-process",
@@ -187,7 +187,7 @@ fn probe_activity_isolation() -> ActivityIsolationStatus {
     // for instance, runs with a temp XDG_RUNTIME_DIR and no bus at all. The
     // only reliable test is the thing we are about to do for real.
     let scope = format!("shepherd-isolation-probe-{}.scope", std::process::id());
-    let output = std::process::Command::new(helpers::resolve("systemd-run"))
+    let output = helpers::command("systemd-run")
         .args([
             "--user",
             "--scope",
@@ -554,10 +554,7 @@ pub async fn apply_firewall_to_existing_scope(
         args.push(rule.clone());
     }
 
-    let result = tokio::process::Command::new(helpers::resolve("pkexec"))
-        .args(&args)
-        .output()
-        .await;
+    let result = helpers::tokio_command("pkexec").args(&args).output().await;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -638,7 +635,7 @@ pub fn kill_snap_cgroup(snap_name: &str, _signal: Signal) -> bool {
 
                 // Always use SIGKILL for snap apps to prevent self-restart behavior
                 // Using systemctl kill --signal=KILL sends SIGKILL to all processes in scope
-                let result = Command::new(helpers::resolve("systemctl"))
+                let result = helpers::command("systemctl")
                     .args(["--user", "kill", "--signal=KILL", &scope_name])
                     .output();
 
@@ -705,7 +702,7 @@ pub fn kill_flatpak_cgroup(app_id: &str, _signal: Signal) -> bool {
 
                 // Always use SIGKILL for flatpak apps to prevent self-restart behavior
                 // Using systemctl kill --signal=KILL sends SIGKILL to all processes in scope
-                let result = Command::new(helpers::resolve("systemctl"))
+                let result = helpers::command("systemctl")
                     .args(["--user", "kill", "--signal=KILL", &scope_name])
                     .output();
 
@@ -841,7 +838,7 @@ pub fn kill_steam_game_processes(app_id: u32, signal: Signal) -> bool {
 /// The helper's single polkit action gates the binary as a whole, so this needs
 /// no grant beyond the one `apply-process` already requires.
 pub fn stop_firewall_scope(scope_name: &str) -> bool {
-    let output = Command::new(helpers::resolve("pkexec"))
+    let output = helpers::command("pkexec")
         .args([
             &firewall_helper_path(),
             "stop-scope",
@@ -958,7 +955,7 @@ pub fn kill_by_command(
     signal: Signal,
     protected_pgids: &std::collections::HashSet<u32>,
 ) -> bool {
-    let output = match Command::new(helpers::resolve("pgrep"))
+    let output = match helpers::command("pgrep")
         .args(["-f", command_name])
         .output()
     {
@@ -1074,6 +1071,13 @@ impl ManagedProcess {
         let program = &actual_argv[0];
         let args = &actual_argv[1..];
 
+        // Deliberately not resolved here (issue #144). `program` is
+        // `actual_argv[0]`, which is either an activity's own command from
+        // `config.toml` — the admin's string, and not shepherd's to reinterpret
+        // — or a helper the caller already resolved before building the argv.
+        // Resolving again would be wrong for the first and redundant for the
+        // second.
+        #[allow(clippy::disallowed_methods)]
         let mut cmd = Command::new(program);
         cmd.args(args);
 
@@ -1361,6 +1365,11 @@ impl Drop for ManagedProcess {
     }
 }
 
+// Tests spawn stand-ins by name on purpose — `sh`, `true`, `setsid`, a stubbed
+// `flatpak` — which is the case `Command::new`'s ban exists to make deliberate
+// rather than accidental (issue #144). A test process is not a daemon on a
+// device, and what it execs is its own fixture.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

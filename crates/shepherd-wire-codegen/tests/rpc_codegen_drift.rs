@@ -7,6 +7,10 @@
 //! would hide drift from PR review. Keeping the outputs checked in
 //! and diffed on CI means every schema change shows up in the diff.
 
+// Re-runs the generator via `env!("CARGO")` — an absolute path the toolchain
+// supplied, at build time, with no daemon and no kiosk user involved (#144).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

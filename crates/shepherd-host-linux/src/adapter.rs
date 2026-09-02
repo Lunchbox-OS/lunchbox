@@ -2408,6 +2408,11 @@ impl HostAdapter for LinuxHost {
     }
 }
 
+// Tests spawn stand-ins by name on purpose — `sh`, `true`, `setsid`, a stubbed
+// `flatpak` — which is the case `Command::new`'s ban exists to make deliberate
+// rather than accidental (issue #144). A test process is not a daemon on a
+// device, and what it execs is its own fixture.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

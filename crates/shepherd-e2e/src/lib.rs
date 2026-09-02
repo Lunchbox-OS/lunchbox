@@ -8,6 +8,12 @@
 //! See the crate README for usage. The harness is intentionally Linux-only
 //! and assumes the workspace binaries have been built (`cargo build`).
 
+// The harness spawns `sway` and the shepherd binaries by name on purpose: it is
+// test scaffolding running as the developer, not a daemon on a device choosing a
+// helper through a `$PATH` the kiosk user wrote (issue #144). Tests also stub
+// binaries on `$PATH` precisely so they can be intercepted.
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result, anyhow, bail};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;

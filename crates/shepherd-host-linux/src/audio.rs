@@ -411,7 +411,7 @@ impl std::fmt::Display for DumpError {
 /// Returns [`DumpError`] rather than `None` so a caller on a PipeWire host can
 /// refuse to treat a failed read as an empty topology.
 pub async fn dump() -> Result<AudioTopology, DumpError> {
-    let out = tokio::process::Command::new(helpers::resolve("pw-dump"))
+    let out = helpers::tokio_command("pw-dump")
         .output()
         .await
         .map_err(|_| DumpError::Unavailable)?;
@@ -424,7 +424,7 @@ pub async fn dump() -> Result<AudioTopology, DumpError> {
 /// Point PipeWire's default sink at a node. `id` must come from the same dump it
 /// is used with — see [`AudioTopology::node_id_of`].
 pub async fn set_default_sink(id: u32) -> bool {
-    tokio::process::Command::new(helpers::resolve("wpctl"))
+    helpers::tokio_command("wpctl")
         .args(["set-default", &id.to_string()])
         .status()
         .await

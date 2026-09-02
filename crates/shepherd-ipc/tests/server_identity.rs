@@ -8,6 +8,10 @@
 //! activity is, since it shares the daemon's uid. No file mode fixes it, so the
 //! client identifies who answered instead.
 
+// The impostor is deliberately spawned by name: it is a fixture standing in for
+// an activity, not a helper a daemon chose (issue #144).
+#![allow(clippy::disallowed_methods)]
+
 use shepherd_ipc::{IpcClient, IpcServer};
 
 /// The positive path, and the one that would break every device if the check
