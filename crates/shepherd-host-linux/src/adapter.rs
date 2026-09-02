@@ -3275,11 +3275,16 @@ mod tests {
             .unwrap();
 
         let state_root = scratch.path().join("state");
-        let _guard = crate::retroarch::ROOT_ENV_LOCK
+        let _guard = crate::retroarch::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(crate::retroarch::RETROARCH_ROOT_ENV, &state_root) };
+        // The root override is gated now (issue #144), and this test drives the
+        // real `spawn` rather than `retroarch::prepare_in`, so it is the one
+        // case that still needs the variable honoured. The trust flag is
+        // process-global like the variable itself, so `ENV_LOCK` covers both.
+        crate::helpers::set_trust_environment(true);
 
         let host = LinuxHost::new();
         let _rx = host.subscribe();
@@ -3307,6 +3312,9 @@ mod tests {
             )
             .await
             .unwrap();
+        // Put it back before the assertions, so a failing one cannot leave the
+        // rest of this test binary resolving binaries from `$PATH`.
+        crate::helpers::set_trust_environment(false);
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 

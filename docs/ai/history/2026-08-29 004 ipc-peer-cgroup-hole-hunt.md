@@ -291,14 +291,28 @@ only binaries.
 
 ### What could not be gated, and why
 
-`SHEPHERD_RETROARCH_ROOT` looked like the same case — its doc says tests point it
-at a scratch dir, otherwise the data dir is used — but it cannot be gated
-cheaply. Four **unit** tests in `retroarch.rs` set it in-process, serialised by a
-dedicated `ROOT_ENV_LOCK` because "the variable is process-global, and the
-crate's tests share one binary". Gating it would mean flipping the process-global
-trust flag from inside that binary, which is the hazard that already forced
-`helper_env_override.rs` into a test file of its own. Closing it wants those
-tests restructured to pass a root rather than export one.
+`SHEPHERD_RETROARCH_ROOT` needed its tests restructured first, and now is gated
+too. Five tests set it in-process, serialised by a lock because "the variable is
+process-global, and the crate's tests share one binary" — so gating it would
+have made them read the real data dir instead.
+
+The seam is `paths_for_in` / `prepare_in`, taking the root as an argument;
+`paths_for` / `prepare` are now one-liners over them with `root_dir()`. Four of
+the five tests pass a scratch root and touch no environment at all, which is a
+better test than the one it replaced: `paths_are_absolute_even_from_a_relative_root`
+now says what it means directly instead of arranging it through a variable.
+
+The fifth is a genuine holdout —
+`adapter::tests::retroarch_spawn_materializes_config_and_argv` drives the real
+`spawn`, not the seam — so it still sets the variable, and now also flips
+`helpers::set_trust_environment`. That flag is process-global in the same way,
+so the lock (renamed `ENV_LOCK`, since it is no longer about the root) covers
+both, and the test restores it before its assertions so a failure cannot leave
+the rest of the binary resolving from `$PATH`.
+
+The lock stays because `SHEPHERD_LIBRETRO_DIR` and
+`SHEPHERD_RETROARCH_CONFIG_DIR` still need it: both document a *production* use,
+so they remain ungated.
 
 `SHEPHERD_LIBRETRO_DIR` and `SHEPHERD_RETROARCH_CONFIG_DIR` are different again:
 both docs claim a *production* use ("for installs that put cores/config
