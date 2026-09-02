@@ -180,6 +180,29 @@ makes the coverage mandatory and stops it disappearing again unnoticed. If those
 jobs start failing with *"this kernel cannot report a peer's cgroup"*, the
 runner is below the floor rather than the code being wrong.
 
+### ...and then it ran as root, which is not the same as running
+
+With the kernel floor met, `an_armed_policy_refuses_a_peer_from_another_cgroup`
+failed: `a peer outside shepherd's cgroup must be refused: Admin`. The CI image
+has no `USER` directive, so the tests run as **root** — and `classify` accepts
+root from any cgroup by design, checking that *before* it looks at the cgroup.
+The test passed `Some(getuid())`, which as root is `Some(0)`, so it never
+reached the comparison it exists to make.
+
+The code was right; the test assumed a non-root user. Worse, two of its
+neighbours were passing for the same wrong reason —
+`an_armed_policy_accepts_a_peer_in_our_own_cgroup` and
+`a_disarmed_policy_classifies_as_before` both got their expected answer from the
+root rule without comparing anything. So a suite that looked green under root was
+exercising less than the same suite under uid 1000.
+
+All three now claim a fixed non-root `PEER_UID`, which is what the accept loop
+would have read from `SO_PEERCRED`; nothing about them depends on the process's
+real uid any more. Verified by running the test binary both ways — reproduced
+the failure under `sudo` first, then confirmed the fix under `sudo` and as the
+normal user, and swept the whole workspace as root (1015 passed) for other uid
+assumptions. There were none.
+
 Two things stay skipped in a container even on a new kernel, and neither is
 about the kernel: `a_client_refuses_an_impostor_in_another_cgroup` needs a
 systemd **user manager** and a session bus to put the impostor in a scope of its

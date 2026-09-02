@@ -500,6 +500,19 @@ impl PeerPolicy {
 mod tests {
     use super::*;
 
+    /// The uid these tests claim the peer had, deliberately not root.
+    ///
+    /// `classify` accepts root from any cgroup by design, and it checks that
+    /// *before* it looks at the cgroup — so a test that passes `getuid()` skips
+    /// the thing it means to exercise the moment it runs as root. The CI image
+    /// has no `USER` directive, so that is exactly what happens there: one test
+    /// failed outright and two others passed without ever comparing a cgroup.
+    ///
+    /// This is the value the accept loop would have read from `SO_PEERCRED`.
+    /// Nothing here depends on it matching the process's real uid; what matters
+    /// is only that it is not 0.
+    const PEER_UID: u32 = 1000;
+
     #[test]
     fn the_ioctl_request_number_matches_the_kernel_header() {
         // _IOWR(0xFF, 11, struct pidfd_info) with the 80-byte struct. Pinned
@@ -547,7 +560,7 @@ mod tests {
         let policy = PeerPolicy::restricted().expect("read own cgroup");
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let role = policy
-            .classify(a.as_fd(), Some(nix::unistd::getuid().as_raw()))
+            .classify(a.as_fd(), Some(PEER_UID))
             .expect("a peer in our own cgroup is accepted");
         assert_eq!(role, ClientRole::Admin);
     }
@@ -563,11 +576,11 @@ mod tests {
         // mismatch is refused rather than logged and waved through.
         let policy = PeerPolicy {
             own_cgroup: Some(own_cgroup_id().expect("own cgroup id").wrapping_add(1)),
-            own_uid: nix::unistd::getuid().as_raw(),
+            own_uid: PEER_UID,
         };
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let err = policy
-            .classify(a.as_fd(), Some(nix::unistd::getuid().as_raw()))
+            .classify(a.as_fd(), Some(PEER_UID))
             .expect_err("a peer outside shepherd's cgroup must be refused");
         assert!(
             err.reason.contains("not shepherd's own"),
@@ -599,16 +612,26 @@ mod tests {
     fn a_disarmed_policy_classifies_as_before() {
         // The dev opt-out has to be exactly the old behaviour, or a developer's
         // session starts failing in ways a device never would.
-        let policy = PeerPolicy::unrestricted();
-        assert!(!policy.is_restricted());
+        assert!(!PeerPolicy::unrestricted().is_restricted());
+
+        // Built by hand rather than via `unrestricted()`, which takes `own_uid`
+        // from `getuid()`: as root that is 0, and the root rule would answer
+        // before the uid comparison this is here to check.
+        let policy = PeerPolicy {
+            own_cgroup: None,
+            own_uid: PEER_UID,
+        };
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let uid = nix::unistd::getuid().as_raw();
         assert_eq!(
-            policy.classify(a.as_fd(), Some(uid)).expect("accepted"),
+            policy
+                .classify(a.as_fd(), Some(PEER_UID))
+                .expect("accepted"),
             ClientRole::Admin
         );
         assert_eq!(
-            policy.classify(a.as_fd(), Some(uid + 1)).expect("accepted"),
+            policy
+                .classify(a.as_fd(), Some(PEER_UID + 1))
+                .expect("accepted"),
             ClientRole::Shell
         );
     }
