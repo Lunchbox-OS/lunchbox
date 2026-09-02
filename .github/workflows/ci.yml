@@ -25,7 +25,7 @@ env:
 #
 # Cargo caching is split in two so the parallel compile jobs cooperate instead
 # of racing:
-#   * The dep registry (~/.cargo/registry + ~/.cargo/git) lives under ONE shared
+#   * The dep registry (/usr/local/cargo/{registry,git}) lives under ONE shared
 #     key. The `warmup` job below populates it once (via `cargo fetch`) before
 #     any compile job starts, so build/test/e2e/lint/package don't each cold-
 #     download the same crates in parallel. Those jobs restore it read-only
@@ -64,11 +64,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       - name: Fetch dependencies
         # --locked also guards against a stale committed Cargo.lock: it fails
@@ -87,18 +87,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The image already provides ~/.cargo/bin (bpf-linker) and
+      # The image already provides /usr/local/cargo/bin (bpf-linker) and
       # ~/.rustup/toolchains; only the dep registry (shared, populated by
       # `warmup`) and target/ (per-job) vary and warrant caching.
       - name: Restore cargo registry
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -127,11 +127,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -146,8 +146,28 @@ jobs:
       # into the shipped binaries, and the side effect was that its tests — the
       # drift check that is supposed to fail CI when a generated client mirror
       # goes stale — were never running here at all.
+      # Run as the image's unprivileged `ci` user, not root. CI ran everything
+      # as root, and that hid a real bug: `classify` accepts root from any
+      # cgroup by design, so three peer tests never reached the cgroup
+      # comparison they exist to make — one failed outright once the runner met
+      # the kernel floor, and two had been passing without testing anything
+      # (issue #144). A device never runs an activity as root.
+      #
+      # `chown` because `actions/checkout` runs as root and cargo has to write
+      # `target/`. The environment is passed explicitly rather than through
+      # `sudo -E`: sudoers' `env_reset` and `secure_path` decide what survives,
+      # and the one variable that must not be dropped is the one that turns a
+      # skipped peer-cgroup test into a failure — losing it would quietly
+      # restore exactly the blind spot this step exists to remove.
       - name: Run tests
-        run: cargo test --workspace --all-targets
+        run: |
+          chown -R ci: . "$CARGO_HOME"
+          sudo -u ci env \
+            "PATH=$PATH" \
+            "CARGO_HOME=$CARGO_HOME" \
+            "RUSTUP_HOME=$RUSTUP_HOME" \
+            "SHEPHERD_REQUIRE_PEER_CGROUP=$SHEPHERD_REQUIRE_PEER_CGROUP" \
+            cargo test --workspace --all-targets
         env:
           # Insist that the peer-cgroup check in shepherd-ipc actually runs
           # (issue #144). It needs SO_PEERPIDFD + PIDFD_GET_INFO, and these jobs
@@ -174,11 +194,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -214,11 +234,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -320,11 +340,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       - name: Cache build artifacts
         uses: actions/cache@v4
@@ -615,8 +635,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -646,11 +666,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('**/Cargo.lock') }}
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-registry-v1-
+            ${{ runner.os }}-cargo-registry-v2-
 
       # Builds crates/shepherd-config-wasm with wasm-pack, then the standalone
       # static bundle. Typechecking lives here rather than in the `webui` job
