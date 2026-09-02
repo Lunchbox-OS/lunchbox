@@ -315,6 +315,38 @@ closes this class is separating shepherdd's uid from the activities' — which
 would also make #144 itself dissolve, since the existing uid check would then
 mean what it says. That is #157's territory, not this one's.
 
+#### Added 2026-09-02: the environment is a second door to the same state
+
+Found while auditing what an activity can set in shepherdd's environment (see
+`2026-08-29 004`, which closed the #144-shaped half of that). These are recorded
+here rather than fixed there, because they are the same problem #157 already
+describes and they dissolve under the same fix — with separate uids an activity
+cannot set shepherdd's environment at all.
+
+- **`SHEPHERD_DATA_DIR`** points the daemon at a different store. Verified live:
+  the daemon creates and uses an env-supplied data dir. So it is not only that
+  `shepherdd.db` is *writable* by the activity's uid — the activity can hand the
+  daemon a fresh one, and usage accounting starts from zero. Same effect as
+  deleting the database, by a route that needs no write access to it.
+- **`SHEPHERD_SOCKET`** moves the management socket. Less interesting since
+  clients now verify the daemon's cgroup, but it is the same shape.
+
+Both resisted the #144 treatment for a reason worth writing down: unlike the
+development switches, these are not clap-only bindings. `shepherd_util::paths`
+(`default_socket_path`, `default_data_dir`) reads them directly, so they are
+honoured by the daemon *and* every client, and `run-dev` and the e2e harness
+both `export` them. Deleting the `env =` attribute from shepherdd's args would
+have made them look closed while leaving them live — worse than leaving them
+documented. Closing them means changing how every binary resolves its paths and
+deciding what a dev session and `shepherd-admin` do instead.
+
+Also on this surface, lower severity: **`SHEPHERD_LIBRETRO_DIR`** and
+**`SHEPHERD_RETROARCH_CONFIG_DIR`**. Both document a production use ("installs
+that put cores/config somewhere unusual"), so unlike their sibling
+`SHEPHERD_RETROARCH_ROOT` they could not simply be gated — they want to become
+`config.toml` settings, which is this issue's surface too, since that file is
+writable at the same uid.
+
 ### So what does the socket check uniquely buy?
 
 The runtime effects that have no on-disk or HTTP equivalent —  `stop_current`,

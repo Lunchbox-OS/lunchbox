@@ -263,22 +263,14 @@ outside shepherd's supervision and outside the cgroup the firewall is attached
 to. Nothing had ever set it from the environment (the headless harness passes it
 as an argument), so removing the binding cost nothing.
 
-### Residual: `SHEPHERD_SOCKET` and `SHEPHERD_DATA_DIR`
+### Residual: `SHEPHERD_SOCKET` and `SHEPHERD_DATA_DIR` → #157
 
-These two are **not** in the same category, and removing their `env =` would be
-theatre. `shepherd_util::paths::default_socket_path` and `default_data_dir` read
-them directly, so the variables keep working through the shared path helper —
-which the daemon *and* every client use, and which `run-dev`
-(`scripts/lib/sway.sh`) and the e2e harness both `export`. Dropping the clap
-binding would make them look closed while leaving them live, which is worse than
-leaving them documented.
-
-They are worth closing: `SHEPHERD_DATA_DIR` redirects the store, so an activity
-that could set it would give the daemon fresh usage accounting — time limits
-from zero. Verified live: the daemon creates and uses an env-supplied data dir.
-Closing it means changing how *every* binary resolves its paths, and deciding
-what a dev session and `shepherd-admin` do instead, which is a design change
-rather than an attribute deletion.
+Not the same category, and removing their `env =` would be theatre:
+`shepherd_util::paths` reads them directly, so they stay live through the shared
+path helper the daemon and every client use. They are another door to the
+file-backed state #157 already describes, and they dissolve under its fix.
+Recorded there — see the *"the environment is a second door to the same state"*
+subsection of `2026-08-29 002` — rather than duplicated here.
 
 `SHEPHERD_BROWSER_ROOT` was folded into the same gate. It redirects where
 Chrome's managed-policy JSON is written, so an activity that could set it would
@@ -317,14 +309,10 @@ so they remain ungated.
 `SHEPHERD_LIBRETRO_DIR` and `SHEPHERD_RETROARCH_CONFIG_DIR` are different again:
 both docs claim a *production* use ("for installs that put cores/config
 somewhere unusual"), so gating them would break a supported configuration. They
-want to become `config.toml` settings, which puts them on #157's surface, since
-that file is writable at the same uid anyway. Severity is lower regardless:
-`LIBRETRO_DIR` is a `dlopen` source, but RetroArch is itself an activity in its
-own cgroup, so it is code execution as themselves rather than escalation.
-
-`SHEPHERD_DATA_DIR` belongs to #157 outright — it is another door to the same
-file-backed state, and it dissolves under #157's fix, since separate uids would
-stop an activity setting shepherd's environment at all.
+want to become `config.toml` settings, which puts them on #157's surface and is
+where they are recorded. Severity is lower regardless: `LIBRETRO_DIR` is a
+`dlopen` source, but RetroArch is itself an activity in its own cgroup, so it is
+code execution as themselves rather than escalation.
 
 `SHEPHERD_MOCK_TIME` is `#[cfg(debug_assertions)]`, so inert in the release build
 a device ships — it would defeat time limits in a debug one.
