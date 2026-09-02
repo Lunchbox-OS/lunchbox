@@ -231,6 +231,31 @@ Verified by reintroducing the hole on purpose (`helpers::command("pkcheck")` ->
 `std::process::Command::new("pkcheck")`) and confirming CI-equivalent clippy
 rejects it with the reason attached, then restoring it.
 
+### The dev opt-out was two switches wearing one coat, and readable from the environment
+
+`--no-restrict-ipc-peers` had grown a second meaning — it also decided whether
+the environment could name the binaries the daemon execs. Both are development
+opt-outs, but they are different risks wanted at different times: one decides
+who may **drive** the daemon, the other decides which code the daemon **runs**.
+
+Coupling them had a concrete cost. Every dev and e2e run took binaries from
+`$PATH`, so the trusted-directory resolution a device uses was exercised only by
+unit tests — nothing in the e2e suite ever ran the daemon the way a device runs
+it. Split into `--trust-env-binaries`, which only the e2e suite passes (it stubs
+`flatpak`, `pkcheck` and `pkexec`), an ordinary dev session now resolves helpers
+exactly as a device does. Confirmed in the headless stack: activities still
+isolated, no helper failed to resolve, eight clients connected.
+
+Worse, all three opt-outs were also readable from the environment
+(`SHEPHERD_NO_RESTRICT_IPC_PEERS`, `SHEPHERD_NO_HARDEN_SWAY_IPC`). Measured
+before removal: `SHEPHERD_NO_RESTRICT_IPC_PEERS=true` disarmed the peer check
+outright, and `=1` failed to start with a clap parse error — fail-closed by
+luck, not design. On a device that has not run `shepherd harden apply`, an
+activity could write that into `~/.pam_environment` and disarm the whole of #144
+at the next login. The aliases are gone: a flag can be stripped from the config
+and verified, which `shepherd install sway-config` does for all three and dies
+if any strip fails; an environment variable can be neither.
+
 ## 2. An activity can take over the management socket's name — FIXED
 
 Demonstrated end to end with a throwaway socket:

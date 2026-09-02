@@ -105,8 +105,7 @@ struct Args {
     sway_ipc_alias: Option<PathBuf>,
 
     /// Leave sway's IPC socket reachable by every process at this uid, instead
-    /// of unlinking it once shepherdd has connected (or set
-    /// SHEPHERD_NO_HARDEN_SWAY_IPC).
+    /// of unlinking it once shepherdd has connected.
     ///
     /// Hardening is the default because sway's IPC hands any process running as
     /// this uid `exec`, which starts a process outside shepherd's supervision
@@ -120,12 +119,11 @@ struct Args {
     /// every other client. Every development entry point in this repo passes
     /// it — `sway.conf`, the headless harness, and the e2e stack — so the flag
     /// is what a dev session opts *out* with, not what a device opts in with.
-    #[arg(long = "no-harden-sway-ipc", env = "SHEPHERD_NO_HARDEN_SWAY_IPC")]
+    #[arg(long = "no-harden-sway-ipc")]
     no_harden_sway_ipc: bool,
 
     /// Accept a client on shepherdd's own management socket from any process
-    /// at this uid, instead of only from the session shepherdd is part of (or
-    /// set SHEPHERD_NO_RESTRICT_IPC_PEERS).
+    /// at this uid, instead of only from the session shepherdd is part of.
     ///
     /// Restricting is the default because every activity runs as this uid, so
     /// the socket's file permissions separate nothing: without the check, a
@@ -142,8 +140,27 @@ struct Args {
     /// development entry point in this repo passes this — `sway.conf`, the
     /// headless harness, `run-dev` and the e2e stack — so the flag is what a
     /// dev session opts *out* with, not what a device opts in with.
-    #[arg(long = "no-restrict-ipc-peers", env = "SHEPHERD_NO_RESTRICT_IPC_PEERS")]
+    #[arg(long = "no-restrict-ipc-peers")]
     no_restrict_ipc_peers: bool,
+
+    /// Let the environment name the binaries shepherdd execs: honour
+    /// `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER`, and search `$PATH`
+    /// ahead of the compiled-in trusted directories.
+    ///
+    /// Off by default, because on a device the environment is not shepherd's to
+    /// trust: GDM's PAM stack reads `~/.pam_environment`, a file the kiosk user
+    /// owns, so every activity can choose what `$PATH` says (issue #144). A
+    /// substituted `systemd-run` would run as a direct child of the daemon, in
+    /// the daemon's own cgroup, which the management socket accepts as `Admin`.
+    ///
+    /// Separate from `--no-restrict-ipc-peers` although both are development
+    /// opt-outs, because they are not the same risk and are not wanted at the
+    /// same times. That one decides who may *drive* the daemon; this one
+    /// decides which code the daemon *runs*. Only the e2e suite needs it — it
+    /// stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` — so an ordinary dev
+    /// session leaves it off and exercises the same resolution a device does.
+    #[arg(long = "trust-env-binaries")]
+    trust_env_binaries: bool,
 }
 
 /// Main service state
@@ -232,10 +249,14 @@ impl Service {
         // Decide whether the environment may name binaries, before anything is
         // resolved or spawned (issue #144). On a device it may not: GDM's PAM
         // stack reads `~/.pam_environment`, so the kiosk user — and therefore
-        // every activity — chooses the session's environment. The same flag
-        // governs this and the peer allow-list because they mean the same
-        // thing: whether this stack is a device or a developer's.
-        shepherd_host_linux::helpers::set_trust_environment(args.no_restrict_ipc_peers);
+        // every activity — chooses the session's environment.
+        //
+        // Its own flag rather than a second meaning for
+        // `--no-restrict-ipc-peers`: that one decides who may drive the daemon,
+        // this one decides which code the daemon runs, and only the e2e suite
+        // wants the second. Keeping them apart is what lets an ordinary dev
+        // session resolve binaries the way a device does.
+        shepherd_host_linux::helpers::set_trust_environment(args.trust_env_binaries);
 
         // Initialize host adapter
         let host = Arc::new(LinuxHost::new());

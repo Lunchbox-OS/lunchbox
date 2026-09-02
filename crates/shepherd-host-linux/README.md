@@ -462,16 +462,23 @@ tools that are legitimately absent.
   behaviour from before #144. It has to be: stubbing a helper by putting a fake
   one on `$PATH` is how the e2e suite tests the flatpak and polkit paths without
   installing either. A device never takes that branch —
-  `helpers::set_trust_environment` is off unless `--no-restrict-ipc-peers` was
+  `helpers::set_trust_environment` is off unless `--trust-env-binaries` was
   passed, and `shepherd install sway-config` strips that flag and refuses to
-  finish if the strip did not take.
+  finish if the strip did not take. Only the e2e suite passes it, because it
+  stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH`; an ordinary dev session
+  leaves it off and so resolves helpers exactly as a device does.
 
 `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER` are binary-substitution
 primitives, so they go through the single gate `helpers::env_override` and are
 **ignored by default**. `shepherdd` enables them with
-`helpers::set_trust_environment` from the same flag that disarms the peer check
-(`--no-restrict-ipc-peers`), because both mean the same thing: whether this
-stack is a device or a developer's.
+`helpers::set_trust_environment`, from its own flag `--trust-env-binaries`.
+
+That is deliberately *not* the flag that disarms the peer check. Both are
+development opt-outs, but they are different risks wanted at different times:
+`--no-restrict-ipc-peers` decides who may **drive** the daemon, this one decides
+which code the daemon **runs**. Coupling them meant every dev and e2e run took
+binaries from `$PATH`, so the trusted-directory path was exercised only by unit
+tests and on a device.
 
 An activity's own command from `[entries]` is still resolved however the admin
 wrote it. `config.toml` is owned by the same uid the activities run as, so that

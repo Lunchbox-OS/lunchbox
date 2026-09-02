@@ -372,6 +372,12 @@ impl TestHarness {
             // exercised by the unit tests in `shepherd-ipc`, which can put a
             // peer in a cgroup of its own without a whole session.
             .arg("--no-restrict-ipc-peers")
+            // The suite stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` and
+            // points `SHEPHERD_FIREWALL_HELPER` at a fake, so it needs the
+            // daemon to take binaries from the environment (issue #144). Its
+            // own flag, deliberately: an ordinary dev session does not stub
+            // anything and so resolves binaries exactly as a device does.
+            .arg("--trust-env-binaries")
             .arg("--log-level")
             .arg(std::env::var("SHEPHERD_E2E_LOG").unwrap_or_else(|_| "info".into()))
             .env_clear()
