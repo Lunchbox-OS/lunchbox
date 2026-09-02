@@ -95,13 +95,19 @@ struct Args {
     log_level: String,
 
     /// Give sway's IPC socket a second name at this path before hardening
-    /// removes the first (or set SHEPHERD_SWAY_IPC_ALIAS).
+    /// removes the first.
     ///
     /// Must be on the same filesystem as the socket — i.e. inside
     /// `$XDG_RUNTIME_DIR` — because the alias is a hard link. Without this,
     /// hardening leaves nothing able to reach the compositor except shepherdd
     /// itself, which is the point in production and unusable in dev.
-    #[arg(long, env = "SHEPHERD_SWAY_IPC_ALIAS")]
+    // Deliberately no `env =` (issue #144). This is the most dangerous of the
+    // development switches to leave environment-settable: the others disarm a
+    // check, this one *hands out a working compositor socket* at a path the
+    // caller picks, and sway's IPC grants `exec` — a process outside shepherd's
+    // supervision and outside the cgroup the firewall is attached to. On a
+    // device the environment belongs to the kiosk user, so a flag it is.
+    #[arg(long)]
     sway_ipc_alias: Option<PathBuf>,
 
     /// Leave sway's IPC socket reachable by every process at this uid, instead

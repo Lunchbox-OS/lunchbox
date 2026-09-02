@@ -256,6 +256,36 @@ at the next login. The aliases are gone: a flag can be stripped from the config
 and verified, which `shepherd install sway-config` does for all three and dies
 if any strip fails; an environment variable can be neither.
 
+`--sway-ipc-alias` lost its `env =` in the same sweep, and it was the worst of
+the four. The others disarm a check; this one *hands out a working compositor
+socket* at a path the caller picks, and sway's IPC grants `exec` — a process
+outside shepherd's supervision and outside the cgroup the firewall is attached
+to. Nothing had ever set it from the environment (the headless harness passes it
+as an argument), so removing the binding cost nothing.
+
+### Residual: `SHEPHERD_SOCKET` and `SHEPHERD_DATA_DIR`
+
+These two are **not** in the same category, and removing their `env =` would be
+theatre. `shepherd_util::paths::default_socket_path` and `default_data_dir` read
+them directly, so the variables keep working through the shared path helper —
+which the daemon *and* every client use, and which `run-dev`
+(`scripts/lib/sway.sh`) and the e2e harness both `export`. Dropping the clap
+binding would make them look closed while leaving them live, which is worse than
+leaving them documented.
+
+They are worth closing: `SHEPHERD_DATA_DIR` redirects the store, so an activity
+that could set it would give the daemon fresh usage accounting — time limits
+from zero. Verified live: the daemon creates and uses an env-supplied data dir.
+Closing it means changing how *every* binary resolves its paths, and deciding
+what a dev session and `shepherd-admin` do instead, which is a design change
+rather than an attribute deletion.
+
+Also outside the flag sweep, and lower severity: `SHEPHERD_BROWSER_ROOT`
+(redirects where Chrome's managed policy is written, so the lockdown silently
+misses the real profile while the daemon still logs success) and the RetroArch
+path overrides. `SHEPHERD_MOCK_TIME` is `#[cfg(debug_assertions)]`, so inert in
+the release build a device ships — it would defeat time limits in a debug one.
+
 ## 2. An activity can take over the management socket's name — FIXED
 
 Demonstrated end to end with a throwaway socket:
