@@ -80,6 +80,11 @@ object WindowPresentation {
         WindowOwner.ACTIVITY -> "Activity"
         WindowOwner.ESCAPED -> "Escaped"
         WindowOwner.UNOWNED -> "Unowned"
+        // A device newer than this build classified it as something we have no
+        // word for. Say so plainly rather than guessing at a category: the row
+        // is still worth showing, and a wrong label is worse than an honest
+        // gap.
+        WindowOwner.UNKNOWN -> "Unrecognised"
     }
 
     /**
@@ -93,6 +98,9 @@ object WindowPresentation {
         WindowOwner.UNOWNED ->
             "No process the device knows about. Either it was started outside " +
                 "shepherd, or an activity got away without being noticed."
-        WindowOwner.SHEPHERD, WindowOwner.ACTIVITY -> null
+        // `UNKNOWN` gets no detail for the same reason the two ordinary owners
+        // do not: this build cannot say anything true about a category it does
+        // not have, and `isOrphan` already leaves it out of the orphan set.
+        WindowOwner.SHEPHERD, WindowOwner.ACTIVITY, WindowOwner.UNKNOWN -> null
     }
 }

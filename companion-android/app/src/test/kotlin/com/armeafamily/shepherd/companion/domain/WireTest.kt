@@ -456,4 +456,53 @@ class WireTest {
         assertEquals("\"hide\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.HIDE))
         assertEquals("\"show\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.SHOW))
     }
+
+    @Test
+    fun `a diagnostic code this build predates does not fail the decode`() {
+        // The device is the thing that gains variants, and it gains them in
+        // exactly the releases a phone has not been updated for. kotlinx's
+        // default enum serializer throws on an unrecognised value, and the
+        // exception takes down the decode of the whole enclosing response --
+        // so before this, one new `DiagnosticCode` made a newer device
+        // unreadable to an older companion. Worst possible timing: a
+        // diagnostic is reported when something is already wrong.
+        //
+        // `ignoreUnknownKeys` does not cover it. That forgives an unknown
+        // *key*; this is a known key with an unknown *value*.
+        val json = """
+            {"code":"a_code_from_a_newer_device","message":"something is wrong",
+             "remedy":null,"severity":"critical",
+             "since":"2026-09-03T00:00:00.000000000-04:00",
+             "subject":{"type":"service"}}
+        """.trimIndent()
+
+        val diagnostic = decode<Diagnostic>(json)
+
+        assertEquals(DiagnosticCode.UNKNOWN, diagnostic.code)
+        // The rest of the payload has to survive, which is the entire point:
+        // the message and remedy are written for a person and are readable
+        // even when the code is not.
+        assertEquals("something is wrong", diagnostic.message)
+        assertEquals(DiagnosticSeverity.CRITICAL, diagnostic.severity)
+    }
+
+    @Test
+    fun `a known enum value still round-trips by its wire name`() {
+        // The tolerant serializer replaces the one kotlinx derives from
+        // `@SerialName`, so the ordinary case needs holding down too: a
+        // mistake there would rename every value on the wire at once.
+        val json = """{"code":"state_not_protected","message":"m","remedy":null,
+                       "severity":"warning",
+                       "since":"2026-09-03T00:00:00.000000000-04:00",
+                       "subject":{"type":"service"}}""".trimIndent()
+
+        val diagnostic = decode<Diagnostic>(json)
+        assertEquals(DiagnosticCode.STATE_NOT_PROTECTED, diagnostic.code)
+        assertEquals(
+            "state_not_protected",
+            ShepherdJson.encodeToString(DiagnosticCode.serializer(), diagnostic.code)
+                .trim('"'),
+        )
+    }
+
 }
