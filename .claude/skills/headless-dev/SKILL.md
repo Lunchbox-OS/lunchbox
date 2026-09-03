@@ -152,6 +152,21 @@ Example (bedtime restriction):
   `XDG_RUNTIME_DIR` / `SWAYSOCK`, see `dev-runtime/headless/session.env`). GTK
   clients rebind on the capability change, which is why `dev key` works there.
   Synthetic pointer clicks never reached the egui surface under any timing.
+- **Qt/KDE clients need the same repeat trick, and ignore synthetic clicks.**
+  Okular (issue #160's Phase 0) takes `wtype -s 800 -M ctrl -k o -m ctrl` when
+  the sequence is repeated two or three times, and drops a single press. Menubar
+  mnemonics (`Alt+F`) never landed at all, and `dev click` on a menu title did
+  nothing — so check a menu's *contents* through its keyboard shortcuts, with an
+  unrestricted control run to prove the key would have worked.
+- **Never `pkill -f <pattern>` from a driver command.** `bash -c` puts the whole
+  script in its own command line, so the pattern matches the driver itself and
+  kills the script mid-run (exit 144) — the same failure mode as the `sleep`
+  gotcha below, from the other direction. Use `pgrep -x <name>` and kill the
+  pids.
+- **A GUI app that ignores `SIGTERM` can be closed politely** with
+  `swaymsg '[app_id="…"] kill'` (an `xdg_toplevel.close` *request*, not a
+  signal), which is how you verify save-on-close behaviour that shepherd's
+  current graceful stop does not trigger. See the #160 scope note.
 - **Settle after "ready".** `dev headless` returns once the launcher *surface*
   maps, but async icon/tile loading can lag a beat (a tile may still say
   "Loading…"). For the fully-painted UI, poll `dev tree` for the specific entry,
