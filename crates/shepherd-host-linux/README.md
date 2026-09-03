@@ -284,6 +284,25 @@ attribute of the GUI definition. Reading positions live in
 `<data>/okular/docdata/` and are never written by shepherd. See
 `docs/ebooks.md`.
 
+## Closing a window before signalling it
+
+`SIGTERM` is a request to die; `xdg_toplevel.close` is a request to finish. A
+large class of desktop applications saves its state in the window's close
+handler and installs no signal handler at all — Okular is the measured case: it
+writes the page it was on only on a clean close, so a signal-only stop loses the
+child's place every session.
+
+So a graceful stop for a kind that asks for it (`EntryKind::wants_polite_close`)
+first asks the compositor to close every window attributed to the session
+(`[con_id=N] kill` over the sway IPC the daemon already holds), waits up to
+`POLITE_CLOSE_TIMEOUT`, and only then falls through to the unchanged
+`SIGTERM` → `SIGKILL` ladder. Measured at 0.33 s (PDF) to ~2 s (EPUB).
+
+It is opt-in per kind rather than universal because a close request is not
+always a quit: Steam reads it as "hide to tray", and RetroArch already has a
+verified single-`SIGTERM` shutdown that writes its save state. An activity with
+no window costs nothing — the wait only happens if a window was found.
+
 ## RetroArch
 
 `EntryKind::Retroarch` entries are launched through `retroarch.rs`, which

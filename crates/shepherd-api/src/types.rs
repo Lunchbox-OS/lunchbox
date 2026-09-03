@@ -670,6 +670,28 @@ impl EntryKind {
     pub fn supports_reset(&self) -> bool {
         matches!(self, EntryKind::Retroarch { reset: true, .. })
     }
+
+    /// Whether a graceful stop should ask the compositor to close this
+    /// activity's window before it signals the process (issue #160).
+    ///
+    /// A `SIGTERM` is a request to *die*; closing the window is a request to
+    /// *finish*. Applications that save on window close and install no signal
+    /// handler — Okular is the measured case, and it is a large class — lose
+    /// everything to the signal-only path, so for them the close request is
+    /// the difference between remembering the page and starting over.
+    ///
+    /// Opt-in per kind rather than universal, because a close request is not
+    /// always a quit:
+    ///
+    /// - **Steam** treats it as "hide to tray", so the close would be ignored
+    ///   and the stop would only get slower.
+    /// - **RetroArch** already has a verified single-`SIGTERM` shutdown that
+    ///   writes its save state (#125). Nothing is broken there to fix.
+    /// - **Snap and flatpak** activities are signalled through their own
+    ///   cgroups, which is a different lever with its own reasons.
+    pub fn wants_polite_close(&self) -> bool {
+        matches!(self, EntryKind::Ebook { .. })
+    }
 }
 
 /// A token gate's current state, for caregiver UIs (issue #8).
