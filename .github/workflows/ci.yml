@@ -552,17 +552,17 @@ jobs:
             ./scripts/shepherd install firewall --debug --user tester
             systemctl restart polkit
 
-            # Hand the workspace and root'\''s rustup install over to
-            # tester so cargo can write target/ and reuse the populated
-            # registry at /root/.cargo (toolchain at /root/.cargo/bin
-            # is already on PATH via the image ENV). /root itself stays
-            # 0700 — only +x is needed so tester can traverse into it.
-            chown -R tester:tester /work /root/.cargo /root/.rustup
-            chmod a+x /root
+            # Hand the workspace to tester so cargo can write target/. The
+            # toolchain and the dep registry live in /usr/local/{cargo,rustup}
+            # and the image already makes them writable by any user, so they
+            # need no chown here — and must not get one, since they are shared
+            # rather than tester's.
+            chown -R tester:tester /work
 
             runuser -u tester -- env \
-              CARGO_HOME=/root/.cargo \
-              RUSTUP_HOME=/root/.rustup \
+              CARGO_HOME="$CARGO_HOME" \
+              RUSTUP_HOME="$RUSTUP_HOME" \
+              PATH="$PATH" \
               bash -c "
                 cd /work
                 cargo test -p shepherd-e2e --test firewall_real -- \
