@@ -671,6 +671,19 @@ impl EntryKind {
         matches!(self, EntryKind::Retroarch { reset: true, .. })
     }
 
+    /// Whether the HUD should offer page-turn buttons for this activity
+    /// (issue #160).
+    ///
+    /// Turning a page in a document reader is bound to keys, a gamepad D-pad
+    /// or a scroll wheel — and a touchscreen produces none of those, while the
+    /// reader itself has no swipe gesture. On a touch-only device that leaves
+    /// a child on page one, so the buttons live where every activity's
+    /// controls already live: shepherd's own HUD, which is on the overlay
+    /// layer, always reachable, and cannot be locked out by the reader.
+    pub fn supports_page_turn(&self) -> bool {
+        matches!(self, EntryKind::Ebook { .. })
+    }
+
     /// Whether a graceful stop should ask the compositor to close this
     /// activity's window before it signals the process (issue #160).
     ///
@@ -928,6 +941,10 @@ pub struct SessionInfo {
     /// older payload simply doesn't show the button.
     #[serde(default)]
     pub can_reset: bool,
+    /// Whether the HUD should show page-turn buttons for this session. See
+    /// [`EntryKind::supports_page_turn`].
+    #[serde(default)]
+    pub can_turn_pages: bool,
 }
 
 /// Default for [`SessionInfo::confirm_on_close`] / the `SessionStarted` event:

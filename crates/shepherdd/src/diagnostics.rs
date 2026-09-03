@@ -30,6 +30,7 @@ use chrono::{DateTime, Local};
 use shepherd_api::EntryKind;
 use shepherd_api::{
     Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSubject,
+    InputDeviceType,
 };
 use shepherd_config::Policy;
 use shepherd_host_linux::{
@@ -103,6 +104,12 @@ pub struct ProbeFacts {
     pub ebook_missing_books: Vec<(EntryId, String)>,
     /// Ebook entries whose reader, or whose format backend, is not installed.
     pub ebook_missing_support: Vec<(EntryId, MissingSupport)>,
+    /// Ebook entries laid out in pages, on a device where nothing can turn
+    /// one: a touchscreen with no keyboard or gamepad, *and* no writable
+    /// `/dev/uinput` for the HUD's page-turn buttons to work through. Empty
+    /// when input detection is unavailable — a device we cannot enumerate is
+    /// not one we should accuse.
+    pub ebook_unturnable_pages: Vec<EntryId>,
 }
 
 /// Compute the probed diagnostics implied by `facts`.
@@ -328,6 +335,35 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
         });
     }
 
+    // A book that cannot be turned. Paging is a keystroke, a D-pad press or a
+    // scroll wheel; a touchscreen produces none of those, and the reader has
+    // no swipe gesture. The HUD's page-turn buttons exist for exactly that
+    // device -- but they synthesize a key through `/dev/uinput`, so where that
+    // is not writable they are two buttons that do nothing and the book is
+    // stuck on page one. A failure a child reports as "it's broken", and one
+    // no log line or launch error would ever mention.
+    for entry_id in &facts.ebook_unturnable_pages {
+        out.push(Diagnostic {
+            code: DiagnosticCode::EbookNoPageTurn,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: "This device has a touchscreen and no keyboard or gamepad, and \
+                      /dev/uinput is not writable -- so neither a gesture nor the HUD's \
+                      page-turn buttons can turn the page in this activity"
+                .to_string(),
+            remedy: Some(
+                "Give the session user write access to /dev/uinput (the same access the \
+                 input-compat bridges need), which is what the HUD's page buttons \
+                 synthesize their keypress through. Failing that, set layout = \"scroll\" \
+                 on the entry to drag-scroll instead of paging, or attach a keyboard."
+                    .to_string(),
+            ),
+            since: now,
+        });
+    }
+
     // Input devices. Same "only if it matters" rule as yt-dlp: with no
     // input-gated entry, an unreadable /dev/input changes nothing.
     if facts.input_devices_readable == Some(false) && facts.any_entry_requires_input {
@@ -420,6 +456,31 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
     .await
     .unwrap_or_default();
 
+    // Only worth scanning when something could care, and only conclusive when
+    // the devices could be read at all.
+    let paged_ebooks = paged_ebook_entry_ids(policy);
+    let ebook_unturnable_pages = if paged_ebooks.is_empty() {
+        Vec::new()
+    } else {
+        match tokio::task::spawn_blocking(crate::input_devices::connected_inputs).await {
+            Ok(Some(connected)) => {
+                let touch_only = connected.contains(&InputDeviceType::Touch)
+                    && !connected.contains(&InputDeviceType::Keyboard)
+                    && !connected.contains(&InputDeviceType::Gamepad);
+                // The HUD's buttons rescue a touch-only device, but only if
+                // they can synthesize a key at all.
+                if touch_only && !shepherd_bridge::uinput_is_writable() {
+                    paged_ebooks
+                } else {
+                    Vec::new()
+                }
+            }
+            // Detection unavailable, or the scan panicked: fail open rather
+            // than warn about a device we cannot see.
+            _ => Vec::new(),
+        }
+    };
+
     let youtube_entries = crate::media::youtube_entry_ids(policy);
     let ytdlp_available = if youtube_entries.is_empty() {
         // Skip the probe entirely when nothing could care; it is the only
@@ -445,7 +506,21 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         retroarch_missing_content,
         ebook_missing_books,
         ebook_missing_support,
+        ebook_unturnable_pages,
     }
+}
+
+/// Ebook entries whose layout turns pages rather than scrolling.
+fn paged_ebook_entry_ids(policy: &Policy) -> Vec<EntryId> {
+    policy
+        .entries
+        .iter()
+        .filter(|e| match &e.kind {
+            shepherd_api::EntryKind::Ebook { layout, .. } => layout.needs_keys_to_turn_pages(),
+            _ => false,
+        })
+        .map(|e| e.id.clone())
+        .collect()
 }
 
 /// Entries whose `[entries.browser]` will be ignored because their kind cannot
@@ -619,6 +694,41 @@ impl shepherd_api::DiagnosticSink for DiagnosticPublisher {
 
 #[cfg(test)]
 mod tests {
+    /// A paged book on a touch-only device is unreadable past page one, and
+    /// that is the sort of thing an administrator finds out from a child.
+    #[test]
+    fn a_paged_book_with_nothing_to_turn_it_is_flagged() {
+        let facts = ProbeFacts {
+            ebook_unturnable_pages: vec![EntryId::new("the-hobbit")],
+            ..Default::default()
+        };
+        let out = evaluate(&facts, shepherd_util::now());
+        let flagged: Vec<_> = out
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::EbookNoPageTurn)
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].severity, DiagnosticSeverity::Warning);
+        // The remedy has to name the way out, not just the problem.
+        assert!(
+            flagged[0]
+                .remedy
+                .as_ref()
+                .is_some_and(|r| r.contains("uinput") && r.contains("scroll")),
+            "remedy should point at layout = \"scroll\""
+        );
+    }
+
+    /// …and a scrolling one is not, because dragging works.
+    #[test]
+    fn a_scrolling_book_is_not_flagged() {
+        let out = evaluate(&ProbeFacts::default(), shepherd_util::now());
+        assert!(
+            !out.iter()
+                .any(|d| d.code == DiagnosticCode::EbookNoPageTurn),
+            "nothing to flag when no entry pages"
+        );
+    }
 
     use super::*;
 

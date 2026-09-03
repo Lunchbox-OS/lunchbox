@@ -341,6 +341,7 @@ impl ManagementService for DefaultManagementService {
         let plan_label = plan.label.clone();
         let plan_confirm_on_close = plan.confirm_on_close;
         let plan_can_reset = plan.can_reset;
+        let plan_can_turn_pages = plan.can_turn_pages;
 
         {
             let mut eng = self.engine.lock().await;
@@ -380,6 +381,7 @@ impl ManagementService for DefaultManagementService {
                     deadline,
                     confirm_on_close: plan_confirm_on_close,
                     can_reset: plan_can_reset,
+                    can_turn_pages: plan_can_turn_pages,
                 }));
 
                 Ok(LaunchOutcome::Approved {

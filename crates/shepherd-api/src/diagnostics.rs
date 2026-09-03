@@ -119,6 +119,10 @@ pub enum DiagnosticCode {
     /// installed. On Ubuntu the EPUB backend ships separately from Okular, so
     /// this is the likely first-run failure.
     EbookReaderMissing,
+    /// An ebook entry lays the book out in pages on a device that has no way
+    /// to turn one: a touchscreen and nothing else. Reading would stop at the
+    /// end of the first page.
+    EbookNoPageTurn,
 }
 
 /// What a diagnostic is about.

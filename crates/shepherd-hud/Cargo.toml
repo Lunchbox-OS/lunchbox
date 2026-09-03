@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 shepherd-api = { workspace = true }
+shepherd-bridge = { workspace = true }
 shepherd-ipc = { workspace = true }
 shepherd-util = { workspace = true }
 

@@ -1047,7 +1047,12 @@ type = "ebook"
 book = "~/Books/the-hobbit.epub"
 # layout = "facing"     # the default: two pages, like an open book. Use
 #                       # "single" on a portrait screen, where one page fills
-#                       # it, or "scroll" for a continuous column.
+#                       # it -- and "scroll" on a TOUCH-ONLY screen, which is
+#                       # the only layout a finger can navigate: paging is
+#                       # bound to keys and the scroll wheel, and the reader
+#                       # has no swipe gesture -- but the HUD grows a pair of
+#                       # page-turn buttons for a reading activity, so a paged
+#                       # layout is usable on a tablet too.
 # font_size = 16        # points, for a reflowed EPUB. This is the reading-size
 #                       # knob: the page is fitted to the screen, so a larger
 #                       # font means fewer words on it and bigger text. It also

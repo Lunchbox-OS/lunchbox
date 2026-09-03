@@ -1129,6 +1129,7 @@ impl CoreEngine {
             warnings: entry.warnings.clone(),
             confirm_on_close: entry.confirm_on_close,
             can_reset: entry.kind.supports_reset(),
+            can_turn_pages: entry.kind.supports_page_turn(),
         };
 
         if let Some(max_dur) = max_duration {
@@ -1163,6 +1164,7 @@ impl CoreEngine {
             deadline: session.deadline,
             confirm_on_close: session.plan.confirm_on_close,
             can_reset: session.plan.can_reset,
+            can_turn_pages: session.plan.can_turn_pages,
         };
 
         // Log to audit

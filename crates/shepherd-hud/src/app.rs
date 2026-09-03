@@ -119,6 +119,26 @@ const BASE_VOLUME_SLIDER_WIDTH: i32 = 100;
 /// volume slider so the two indicators line up.
 const BASE_BRIGHTNESS_SLIDER_WIDTH: i32 = 100;
 
+/// Slider width while the page-turn buttons are on the bar (issue #160).
+///
+/// The bar is full at 1280 logical pixels: two more buttons cost about a
+/// hundred, and the only thing that yields on its own is the activity name,
+/// which ellipsized down to nothing. The sliders give the width back instead —
+/// they stay usable a third shorter, and a name a child can read matters more
+/// than the last 30px of a volume control.
+const READING_SLIDER_WIDTH: i32 = 66;
+
+/// Size the two sliders for the current HUD scale, and for whether the bar is
+/// also carrying the page-turn buttons.
+fn apply_slider_widths(volume: &gtk4::Scale, brightness: &gtk4::Scale, scale: f64, reading: bool) {
+    let base = |full: i32| {
+        let base = if reading { READING_SLIDER_WIDTH } else { full };
+        (f64::from(base) * scale).round() as i32
+    };
+    volume.set_width_request(base(BASE_VOLUME_SLIDER_WIDTH));
+    brightness.set_width_request(base(BASE_BRIGHTNESS_SLIDER_WIDTH));
+}
+
 /// The HUD application
 pub struct HudApp {
     app: gtk4::Application,
@@ -247,11 +267,12 @@ fn build_hud_content(
 
     container.add_css_class("hud-bar");
 
-    // Left section: App name and time.
-    //
+    // Left section: App name and time
     // `halign(Fill)`, not `Start`: with `Start` the box is allocated its
     // *minimum* width and merely positioned left, which collapses the
-    // ellipsizing label below even when the bar has room to spare.
+    // ellipsizing label below to the ellipsis even when the bar has hundreds
+    // of pixels to spare. Filling gives the name the leftover room, and the
+    // ellipsis then only appears when the bar is genuinely full.
     let left_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(12)
@@ -265,7 +286,7 @@ fn build_hud_content(
     // Adventures in Wonderland") takes its natural width and pushes the
     // right-hand controls off the end of the bar — where they are simply
     // clipped, not wrapped. Ellipsizing gives the label a small minimum width
-    // so the controls always fit.
+    // so the controls always fit (issue #160 added two more of them).
     app_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     // An ellipsizing label asks for the ellipsis as its *minimum*, and GTK
     // hands out minimums unless a child claims the leftover — so without
@@ -273,12 +294,18 @@ fn build_hud_content(
     // spare. `xalign` then keeps the text against the left edge as it grows.
     app_label.set_hexpand(true);
     app_label.set_xalign(0.0);
+    // Bound the request explicitly rather than trusting expand semantics: an
+    // ellipsizing label asks for the ellipsis as its minimum and GTK hands out
+    // minimums first, so "Alice in Wonderland" rendered as "..." with 400px of
+    // the bar unused. A width floor keeps the name readable; the ceiling stops
+    // a very long one from crowding out the controls it shares the bar with.
     // The HUD surface is sized to its content, so the label's *minimum* is
     // what it actually gets. Twelve characters is the most that leaves room
-    // for every control on a 1280-wide panel — measured, not guessed; wider,
-    // and the end-session "X" fell off the end, where GTK clips rather than
-    // wraps, and a session the child cannot end is a worse failure than a
-    // truncated title. The ceiling does the same job for a very long name.
+    // for the reading buttons *and* the end-session button on a 1280-wide
+    // panel — measured, not guessed; at 18 the "X" fell off the end, where GTK
+    // clips rather than wraps, and a session the child cannot end is a worse
+    // failure than a truncated title. The ceiling does the same job for a very
+    // long name.
     app_label.set_width_chars(12);
     app_label.set_max_width_chars(28);
     left_box.append(&app_label);
@@ -596,6 +623,36 @@ fn build_hud_content(
 
     right_box.append(&battery_box);
 
+    // Page-turn buttons, shown only for activities that read (issue #160).
+    // A reader turns pages on a key, a D-pad or a wheel; a touchscreen
+    // produces none of those and has no swipe gesture to fall back on, so on a
+    // touch-only panel these are the only way through a book. They sit left of
+    // the reset and end-session buttons — the two a child should have to reach
+    // past, not the ones they use every page.
+    let page_back_icon = gtk4::Image::from_icon_name("go-previous-symbolic");
+    page_back_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let page_back_button = gtk4::Button::builder()
+        .child(&page_back_icon)
+        .has_frame(false)
+        .tooltip_text("Previous page")
+        .visible(false)
+        .build();
+    page_back_button.add_css_class("indicator-button");
+    page_back_button.add_css_class("page-button");
+    right_box.append(&page_back_button);
+
+    let page_forward_icon = gtk4::Image::from_icon_name("go-next-symbolic");
+    page_forward_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let page_forward_button = gtk4::Button::builder()
+        .child(&page_forward_icon)
+        .has_frame(false)
+        .tooltip_text("Next page")
+        .visible(false)
+        .build();
+    page_forward_button.add_css_class("indicator-button");
+    page_forward_button.add_css_class("page-button");
+    right_box.append(&page_forward_button);
+
     // Reset ("reboot the console") button, shown only for activities that
     // support it (issue #125). With RetroArch's save-state resume on, every
     // launch puts the child back exactly where they stopped, so this is the
@@ -681,6 +738,26 @@ fn build_hud_content(
     });
     right_box.append(&action_button);
 
+    // One virtual keyboard for the life of the HUD, created on the first
+    // press. See `page_turn` for why the key rather than an RPC.
+    let page_turner = crate::page_turn::PageTurner::new();
+    for (button, direction) in [
+        (&page_back_button, crate::page_turn::Direction::Back),
+        (&page_forward_button, crate::page_turn::Direction::Forward),
+    ] {
+        let state_for_page = state.clone();
+        let turner = page_turner.clone();
+        button.connect_clicked(move |_| {
+            // The visibility check is not enough on its own: a session can end
+            // between the press and the handler, and a key sent then would
+            // land on the launcher.
+            if !state_for_page.session_state().can_turn_pages() {
+                return;
+            }
+            turner.borrow_mut().turn(direction);
+        });
+    }
+
     let state_for_reset = state.clone();
     let prompt_for_reset = reset_prompt.clone();
     let window_for_reset = window.clone();
@@ -709,14 +786,19 @@ fn build_hud_content(
     // click a GTK button (the synthetic pointer does not fire `clicked`; see the
     // `headless-dev` skill). With `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
     // set, creating `<path>` pops the close-confirmation prompt, `<path>.reset`
-    // pops the reset one, and `<path>.down` dismisses whichever is up; every
-    // file is consumed. That is enough to drive open/close cycles — and scale
+    // pops the reset one, `<path>.down` dismisses whichever is up, and
+    // `<path>.page_next` / `<path>.page_prev` press the page-turn buttons;
+    // every file is consumed. That is enough to drive open/close cycles — and scale
     // changes across them — from a shell. Never compiled into a release build.
     #[cfg(debug_assertions)]
     if let Ok(trigger) = std::env::var("SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER") {
         let up = std::path::PathBuf::from(&trigger);
         let up_reset = std::path::PathBuf::from(format!("{trigger}.reset"));
         let down = std::path::PathBuf::from(format!("{trigger}.down"));
+        let page_next = std::path::PathBuf::from(format!("{trigger}.page_next"));
+        let page_prev = std::path::PathBuf::from(format!("{trigger}.page_prev"));
+        let page_forward_for_debug = page_forward_button.clone();
+        let page_back_for_debug = page_back_button.clone();
         let action_button_for_debug = action_button.clone();
         let reset_button_for_debug = reset_button.clone();
         let prompt_for_debug = confirm_prompt.clone();
@@ -734,6 +816,14 @@ fn build_hud_content(
                 let _ = std::fs::remove_file(&down);
                 prompt_for_debug.borrow().popover.popdown();
                 reset_prompt_for_debug.borrow().popover.popdown();
+            }
+            if page_next.exists() {
+                let _ = std::fs::remove_file(&page_next);
+                page_forward_for_debug.emit_clicked();
+            }
+            if page_prev.exists() {
+                let _ = std::fs::remove_file(&page_prev);
+                page_back_for_debug.emit_clicked();
             }
             glib::ControlFlow::Continue
         });
@@ -767,6 +857,10 @@ fn build_hud_content(
     let confirm_prompt_for_timer = confirm_prompt.clone();
     let action_button_for_rebuild = action_button.clone();
     let reset_button_clone = reset_button.clone();
+    let page_back_button_clone = page_back_button.clone();
+    let volume_label_for_pages = volume_label.clone();
+    let brightness_label_for_pages = brightness_label.clone();
+    let page_forward_button_clone = page_forward_button.clone();
     let reset_prompt_for_timer = reset_prompt.clone();
     let reset_button_for_rebuild = reset_button.clone();
     let window_for_rebuild = window.clone();
@@ -833,11 +927,12 @@ fn build_hud_content(
             for (boxed, base_spacing) in &scaled_boxes {
                 boxed.set_spacing((f64::from(*base_spacing) * desired_scale).round() as i32);
             }
-            let slider_width = (f64::from(BASE_VOLUME_SLIDER_WIDTH) * desired_scale).round() as i32;
-            volume_slider_clone.set_width_request(slider_width);
-            let brightness_slider_width =
-                (f64::from(BASE_BRIGHTNESS_SLIDER_WIDTH) * desired_scale).round() as i32;
-            brightness_slider_clone.set_width_request(brightness_slider_width);
+            apply_slider_widths(
+                &volume_slider_clone,
+                &brightness_slider_clone,
+                desired_scale,
+                state.session_state().can_turn_pages(),
+            );
             // Rebuild the close-confirmation prompt for the new factor. It is
             // hidden right now, and GTK does not restyle hidden widgets, so the
             // one built for the previous factor would keep that factor's sizes
@@ -914,6 +1009,27 @@ fn build_hud_content(
         reset_button_clone.set_visible(can_reset);
         if !can_reset {
             reset_prompt_for_timer.borrow().popover.popdown();
+        }
+        // Same rule for the page buttons: they belong to the activity, so a
+        // session that is not a reading one never shows them.
+        let can_turn_pages = session_state.can_turn_pages();
+        if page_back_button_clone.is_visible() != can_turn_pages {
+            page_back_button_clone.set_visible(can_turn_pages);
+            page_forward_button_clone.set_visible(can_turn_pages);
+            // The bar is full: the two buttons have to come out of something.
+            // The sliders give up a third of their width and the numeric
+            // readouts step aside — the slider position already says how loud
+            // and how bright, and neither is worth the activity name or the
+            // end-session button, which is what would otherwise be pushed off
+            // the end (see `READING_SLIDER_WIDTH`).
+            apply_slider_widths(
+                &volume_slider_clone,
+                &brightness_slider_clone,
+                applied_scale_for_timer.get(),
+                can_turn_pages,
+            );
+            volume_label_for_pages.set_visible(!can_turn_pages);
+            brightness_label_for_pages.set_visible(!can_turn_pages);
         }
         match &session_state {
             SessionState::NoSession => {
@@ -1492,6 +1608,15 @@ const CSS_TEMPLATE: &str = r#"
             padding: 4px;
             border-radius: 4px;
             color: var(--text-primary);
+        }
+
+        /* The page-turn buttons exist for a finger, on a panel with no
+           keyboard, so they get a real touch target rather than the 32px an
+           indicator gets — a mis-tap here turns no page and reads as the
+           activity being broken. */
+        .page-button {
+            min-width: 44px;
+            min-height: 40px;
         }
 
         .indicator-button:hover,

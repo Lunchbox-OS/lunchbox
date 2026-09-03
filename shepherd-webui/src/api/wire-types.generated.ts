@@ -361,7 +361,13 @@ export type DiagnosticCode =
    * installed. On Ubuntu the EPUB backend ships separately from Okular, so
    * this is the likely first-run failure.
    */
-  | "ebook_reader_missing";
+  | "ebook_reader_missing"
+  /**
+   * An ebook entry lays the book out in pages on a device that has no way
+   * to turn one: a touchscreen and nothing else. Reading would stop at the
+   * end of the first page.
+   */
+  | "ebook_no_page_turn";
 
 /**
  * The current set, as clients see it.
@@ -832,6 +838,11 @@ export type EventPayload =
        * show the button.
        */
       can_reset?: boolean;
+      /**
+       * Whether the HUD should offer page-turn buttons for this session
+       * (issue #160). Defaults to `false` when absent, like `can_reset`.
+       */
+      can_turn_pages?: boolean;
       /**
        * Whether the HUD should confirm before its "X" button ends this
        * session (issue #78). Defaults to `true` when absent.
@@ -1501,6 +1512,11 @@ export interface SessionInfo {
    * older payload simply doesn't show the button.
    */
   can_reset?: boolean;
+  /**
+   * Whether the HUD should show page-turn buttons for this session. See
+   * [`EntryKind::supports_page_turn`].
+   */
+  can_turn_pages?: boolean;
   /**
    * Whether the HUD should confirm before its "X" button ends this
    * session (issue #78). Defaults to `true` when absent so older payloads

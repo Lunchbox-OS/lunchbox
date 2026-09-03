@@ -13,4 +13,4 @@ mod uinput;
 
 pub use event::{OutputEvent, ScrollAxis};
 pub use sink::OutputSink;
-pub use uinput::UinputSink;
+pub use uinput::{UinputSink, is_writable as uinput_is_writable};

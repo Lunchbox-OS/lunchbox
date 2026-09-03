@@ -20,6 +20,8 @@ pub enum CoreEvent {
         confirm_on_close: bool,
         /// Whether the HUD should offer a reset button for this session.
         can_reset: bool,
+        /// Whether the HUD should offer page-turn buttons (issue #160).
+        can_turn_pages: bool,
     },
 
     /// The set of available entries has changed (e.g., due to time window boundaries)

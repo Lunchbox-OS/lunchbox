@@ -13,6 +13,10 @@ Always-visible HUD overlay for Shepherd.
 - **Volume control** - Adjust system volume with enforced limits
 - **Brightness control** - Adjust screen brightness on hosts with a backlight (hidden otherwise)
 - **Session controls** - End session button (confirms first unless the activity opts out via `confirm_on_close = false`)
+- **Reset** - Restart an activity in place, for kinds that offer it (`type = "retroarch"`)
+- **Page turning** - `‹` / `›` for reading activities (`type = "ebook"`), which synthesize `Page Up` / `Page Down` through `/dev/uinput`. They exist because a touchscreen cannot turn a page any other way: readers bind paging to keys, a D-pad or a wheel, and have no swipe gesture. The HUD is where they belong — it is on the overlay layer, above the activity, and it is shepherd's own surface rather than something a reader's own restrictions could take away. See `src/page_turn.rs` and `docs/ebooks.md`.
+
+  A reading session is the one case where the bar runs out of room, so while those buttons are shown the volume and brightness percentages are hidden and their sliders shorten. The activity name ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
 - **Power controls** - Suspend, shutdown, restart
 - **Warning display** - Visual and audio alerts for time warnings
 

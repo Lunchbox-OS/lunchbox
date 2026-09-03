@@ -6,6 +6,7 @@
 mod app;
 mod battery;
 mod brightness;
+mod page_turn;
 mod state;
 mod time_display;
 mod volume;

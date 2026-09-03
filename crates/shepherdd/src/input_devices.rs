@@ -55,6 +55,16 @@ pub fn inputs_readable() -> bool {
     scan_connected_inputs().is_some()
 }
 
+/// Which input device *types* are connected right now, or `None` when nothing
+/// under `/dev/input` could be read.
+///
+/// The same scan again, for diagnostics that depend on what a child can
+/// physically do — turning a page needs a key, and a touchscreen has none
+/// (issue #160). Blocking; call from `spawn_blocking`.
+pub fn connected_inputs() -> Option<HashSet<InputDeviceType>> {
+    scan_connected_inputs()
+}
+
 pub struct InputMonitor {
     /// Whether we've already logged that detection is unavailable, so the
     /// periodic fallback re-scan doesn't spam the log every cycle.

@@ -390,6 +390,12 @@ enum class DiagnosticCode {
      * this is the likely first-run failure.
      */
     @SerialName("ebook_reader_missing") EBOOK_READER_MISSING,
+    /**
+     * An ebook entry lays the book out in pages on a device that has no way
+     * to turn one: a touchscreen and nothing else. Reading would stop at the
+     * end of the first page.
+     */
+    @SerialName("ebook_no_page_turn") EBOOK_NO_PAGE_TURN,
 }
 
 /**
@@ -1488,6 +1494,11 @@ data class SessionInfo(
      * older payload simply doesn't show the button.
      */
     val canReset: Boolean = false,
+    /**
+     * Whether the HUD should show page-turn buttons for this session. See
+     * [`EntryKind::supports_page_turn`].
+     */
+    val canTurnPages: Boolean = false,
     /**
      * Whether the HUD should confirm before its "X" button ends this
      * session (issue #78). Defaults to `true` when absent so older payloads

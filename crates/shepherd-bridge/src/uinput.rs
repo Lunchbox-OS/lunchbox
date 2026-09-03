@@ -62,6 +62,20 @@ const MAX_SLOT: i32 = 9;
 /// so the first real input would otherwise be lost.
 const SETTLE: Duration = Duration::from_millis(300);
 
+/// Whether `/dev/uinput` can be opened for writing.
+///
+/// Every synthetic input in shepherd goes through it — the touch and gamepad
+/// bridges, and the HUD's page-turn buttons — and on a device where the node
+/// is missing or not writable by the session user, all of them fail at the
+/// moment someone tries to use them. Cheap enough to run from a diagnostics
+/// sweep: an open and a close, no device created.
+pub fn is_writable() -> bool {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/uinput")
+        .is_ok()
+}
+
 /// A `/dev/uinput`-backed [`OutputSink`].
 pub struct UinputSink {
     device: VirtualDevice,
@@ -125,6 +139,25 @@ impl UinputSink {
             .context("register uinput ABS_X")?
             .with_absolute_axis(&abs_y)
             .context("register uinput ABS_Y")?
+            .build()
+            .context("create uinput virtual device")?;
+
+        Ok(Self::ready(device))
+    }
+
+    /// Build a keyboard-only device (the HUD's page-turn buttons, issue #160).
+    ///
+    /// No pointer axes on purpose: a device that declares them makes libinput
+    /// hand the seat a second pointer, and on a touch-only panel that means a
+    /// mouse cursor appearing over the child's book the first time a button is
+    /// pressed.
+    pub fn new_keyboard() -> Result<Self> {
+        let builder = VirtualDevice::builder()
+            .context("open /dev/uinput (is the user allowed to write it?)")?;
+        let device = builder
+            .name("shepherd-bridge virtual keyboard")
+            .with_keys(&keyboard_keys())
+            .context("register uinput keys")?
             .build()
             .context("create uinput virtual device")?;
 
@@ -351,11 +384,16 @@ fn rescale_abs(value: u32, extent: u32) -> i32 {
 /// generously (all keyboard codes plus the mouse-button range) rather than
 /// tracking exactly which codes a preset uses.
 fn keyboard_and_mouse_keys() -> AttributeSet<KeyCode> {
+    let mut keys = keyboard_keys();
+    insert_mouse_buttons(&mut keys);
+    keys
+}
+
+fn keyboard_keys() -> AttributeSet<KeyCode> {
     let mut keys = AttributeSet::<KeyCode>::new();
     for code in 1u16..=255 {
         keys.insert(KeyCode::new(code));
     }
-    insert_mouse_buttons(&mut keys);
     keys
 }
 

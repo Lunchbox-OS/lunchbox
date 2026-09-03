@@ -64,7 +64,7 @@ default = "deny"
 | Field | Default | Notes |
 | --- | --- | --- |
 | `book` | required | Absolute or `~/`-prefixed. A relative path would resolve against the daemon's working directory, not yours. |
-| `layout` | `facing` | `facing` (two pages, like an open book), `facing_first_centered` (same, cover alone), `single` (one page), `scroll` (a continuous column, scrolled rather than paged). |
+| `layout` | `facing` | `facing` (two pages, like an open book), `facing_first_centered` (same, cover alone), `single` (one page), `scroll` (a continuous column — the only one a touch-only screen can navigate; see "Touch"). |
 | `font_size` | `16` | Points, for a reflowed EPUB. See "Text size" below. |
 | `font_family` | `Noto Serif` | Must be installed on the device. |
 | `open_at` | — | 1-based page, **first launch only**; afterwards the remembered position wins. |
@@ -82,6 +82,76 @@ scroll, so turning the page turns the page.
   is letterboxed and small; two side by side fill the width and read like an
   open book.
 - **`single` on a portrait screen**, where one page already fills it.
+- **`scroll` on a touch-only screen** — see below. It is the one layout that
+  can be navigated by touch alone.
+
+### Touch
+
+**A paged layout cannot be turned by touch.** Read the next paragraph before
+setting up a tablet.
+
+Okular's desktop view grabs exactly one gesture — pinch, which zooms
+(`part/pageview.cpp`, `grabGesture(Qt::PinchGesture)`). There is no
+swipe-to-turn anywhere in it. Everything else a finger does arrives as a
+synthesized mouse event, and a drag feeds Okular's kinetic scroller, which pans
+the view. Turning a page is bound to keys (`Page Down`, `Space`, arrows), to
+the scroll wheel at the top or bottom of a page (`wheelEvent`), and to nothing
+else. A touchscreen produces none of those.
+
+**So shepherd puts the page buttons in the HUD.** A reading session adds a
+`‹` and a `›` to the HUD bar, beside the reset and end-session buttons. They are
+shepherd's own surface — on the overlay layer, above the activity, and outside
+anything the reader's own restrictions could take away — and pressing one
+synthesizes the `Page Up` / `Page Down` the reader is already listening for,
+through the same `/dev/uinput` device the input-compat bridges use.
+
+That makes every device navigable:
+
+| Input | Paged layouts | `layout = "scroll"` |
+| --- | --- | --- |
+| Keyboard | Page Up/Down, arrows, Space | scrolls |
+| Gamepad (`input_compat = "gamepad_productivity"`) | D-pad → arrow keys | scrolls |
+| Mouse / touchpad | wheel turns the page | wheel scrolls |
+| **Touchscreen only** | **the HUD's `‹` `›` buttons** | drag scrolls, or the same buttons |
+
+`layout = "scroll"` remains the alternative for a touch-only device where
+scrolling reads better than paging: one continuous column fitted to the width,
+dragged like a phone. It is not the default because it is the wrong shape
+everywhere else.
+
+The buttons need `/dev/uinput` to be writable by the session user — the same
+access the touch and gamepad bridges need. Where it is not, and the device has
+no keyboard or gamepad either, shepherd raises the `EbookNoPageTurn` diagnostic
+rather than leaving a child on page one; it names both fixes (the uinput access,
+or `layout = "scroll"`).
+
+While the page buttons are on the bar, the volume and brightness *percentages*
+step aside and their sliders shorten: the bar is full at a typical panel width,
+and something had to give way for two more controls. The sliders still show the
+level, and the activity name still fits.
+
+**Partly verified.** The HUD buttons were driven end to end in the headless
+harness: pressing one creates the virtual keyboard and emits exactly
+`KEY_PAGEDOWN` / `KEY_PAGEUP`, read back from the device node. What that harness
+cannot show is the last hop — the compositor reading a uinput device and
+delivering the key — because it runs with no input devices at all (its seat
+reports no pointer, keyboard or touch capability, and the libinput backend needs
+a real seat). That hop is the one the touch and gamepad bridges already rely on.
+Everything about what a *finger* does in the reader is from Okular's source, not
+a measurement, and is worth checking the first time a panel is set up.
+
+### Text size
+
+`font_size` is the reading-size knob, not zoom. Okular reflows an EPUB at that
+size, paginates from it, and then fits the page to the screen — so a larger
+font means fewer words per page and larger text on it.
+
+It follows that changing `font_size` **repaginates the book**, and a remembered
+position is a page number. Pick the size before the first read; changing it
+later moves where the child left off.
+
+A fixed-layout format (PDF, comics) ignores it entirely — the pages are already
+laid out, and the reader only scales them.
 
 ## How the page is remembered
 
@@ -236,6 +306,15 @@ close. Check that the session ended through shepherd (the HUD, a time limit, or
 book — it repaginates and moves their place. On a landscape screen, check
 `layout = "facing"`: a single portrait page is fitted to the screen height and
 letterboxed.
+
+**Nothing happens when the child swipes.** A paged layout has no touch gesture
+that turns a page — see "Touch". Use the HUD's `‹` `›` buttons, or set
+`layout = "scroll"`.
+
+**The HUD's page buttons do nothing.** They synthesize a keypress through
+`/dev/uinput`; if the session user cannot write it, they are inert and the HUD
+logs a warning at the first press. Give that user the same uinput access the
+input-compat bridges need.
 
 **A menu or toolbar is back.** The generated configuration is re-rendered on
 every launch, so this means the entry is not `kiosk = true`, or is not an
