@@ -1,0 +1,20 @@
+[package]
+name = "shepherd-state-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol and client for shepherd's state custodian (issue #157)"
+
+[dependencies]
+shepherd-api = { workspace = true }
+shepherd-store = { workspace = true }
+shepherd-util = { workspace = true }
+chrono = { workspace = true }
+nix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

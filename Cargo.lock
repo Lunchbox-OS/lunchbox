@@ -4609,6 +4609,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-state-proto"
+version = "0.4.1"
+dependencies = [
+ "chrono",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "shepherd-api",
+ "shepherd-store",
+ "shepherd-util",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "shepherd-store"
 version = "0.4.1"
 dependencies = [

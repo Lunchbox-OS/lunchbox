@@ -8,7 +8,11 @@ use std::time::Duration;
 use crate::{AuditEvent, StoreResult};
 
 /// A subject's banked token state for a day (issue #8).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` because this crosses the wire to the state
+/// custodian (issue #157); `Duration` and `bool` both have serde impls, so the
+/// derive is enough and the representation stays the obvious one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenState {
     /// Time banked and not yet spent.
     pub balance: Duration,
