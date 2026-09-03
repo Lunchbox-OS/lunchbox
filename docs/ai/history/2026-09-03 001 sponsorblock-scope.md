@@ -1,11 +1,10 @@
 # SponsorBlock in shepherd-media (issue #159) — scope
 
-> Status: **scoped and approved, not started.** No branch, no code. Issue #159
-> was filed with a title and an empty body; the design below is a proposal, but
-> the four judgement calls it turned on were answered on 2026-09-03 and are
-> recorded under "Decisions" at the end. Build to those, not to the first
-> proposal — where the two differ, this document has been rewritten to the
-> decision and the original suggestion is noted inline.
+> Status: **built**, on `feat/159-sponsorblock` (six commits, unpushed at time
+> of writing). Issue #159 was filed with a title and an empty body; the design
+> below is what was proposed, the four judgement calls it turned on were
+> answered on 2026-09-03 and are recorded under "Decisions", and the places the
+> implementation departed from the plan are in "As built" at the end.
 
 ## Prompt
 
@@ -300,3 +299,78 @@ Answered 2026-09-03, in reply to this scope:
    See "Licensing" above.
 4. **Android parity is in scope for #159.** Phase 5 blocks the issue rather than
    shipping behind it.
+
+## As built
+
+All six phases landed. Four things differ from the plan above, and one thing the
+plan asked for is missing.
+
+**The per-entry override is a boolean, not a category list.** The scope allowed
+for either (`sponsorblock = false`, or a list). It is `Option<bool>`, resolved
+against the service default in both directions, and *which* categories to skip
+stays on the service table. The need a per-entry setting answers is "not in this
+library" — a channel whose sponsor reads are part of the show — rather than
+"differently in this library", and a per-entry list would have meant a mirrored
+category enum in `shepherd-api` and in the config schema for a case nobody has
+yet. `Option<bool>` also mirrors `prefetch`, which sits beside it.
+
+**The fetch and its cache split three ways, not two.** The plan put both in
+`shepherd-media-cache`. Phase 5 showed that would write the whole policy twice,
+because the Android app cannot depend on that crate, so the split now matches
+the poster cache exactly:
+
+| Where | What |
+|---|---|
+| `shepherd-media-core` | the decisions, plus the request URL — the only place that knows what categories exist |
+| `shepherd-media-app` | `BucketStore`: the file layout, the TTL, the atomic write, the stale-on-failure fallback |
+| `shepherd-media-cache` / `shepherd-media-android` | the HTTP call and where the directory is — ~60 lines each |
+
+**Prefetch warms only what it caches.** The plan said to warm the bucket for
+prefetched YouTube items; it warms only those the cache actually holds
+(`Queued` or `AlreadyCached`). A video nobody is downloading can look its own
+segments up at play time, because playing it needs the network anyway, and
+tying the warm to cache membership keeps a sweep from fetching a hundred
+buckets for a library it is not caching.
+
+**Android's toggle is per library**, in its settings page beside "Resume
+playback", because there is no shepherdd and no service table there. It uses the
+shared default category set.
+
+**The skipped notice lives in `shepherd-media-ui`**, not in the Linux binary, so
+both front-ends say the same thing in the same place.
+
+## Verified end to end
+
+Through the headless harness (`shepherd dev headless`), against a real YouTube
+video whose sponsor span the database puts at 31.6s-100.3s (locked, 18 votes),
+played for a fixed 45 seconds of wall clock with `--resume` on so the position
+reached is written to disk and can be read back:
+
+| Run | Where playback got to |
+|---|---|
+| `--sponsorblock-categories sponsor` | **106.1s** |
+| no flag | 43.5s |
+
+Three repeats of the enabled arm landed at 105.9s, 106.2s and 106.1s — the far
+side of the span plus the seconds that then played, every time. The request on
+the wire was the hash-prefix endpoint for bucket `3e4f`, asking for every
+skippable category, and the response was cached to
+`~/.cache/shepherd/media/sponsorblock/3e4f.json`.
+
+**One run in four did not skip, before a bug was found and fixed.** The plan was
+being built once, from the first duration the player reported, and latched —
+including when that first answer produced an empty plan. A player that reports a
+provisional duration for a network stream before the real one would therefore
+skip nothing for the rest of the video. The plan is now rebuilt whenever the
+duration changes by more than a quarter-second, both front-ends carry the fix,
+and each build is logged with the duration it used, so a recurrence is
+diagnosable rather than silent. That the fix cured *this* failure is not proven
+— the failing run predates the logging that would have shown it — but it is a
+real defect with exactly that signature, and the four runs since have all
+skipped.
+
+**Not done: the end-to-end negative test.** The verification plan called for
+asserting through the headless harness that `enabled = false` makes no request.
+That assertion exists as unit tests at three levels (no categories → no watcher,
+the argv builder emits no flag, the prefetcher resolves to off), which is where
+it can be checked cheaply — but not as an observation of the wire.

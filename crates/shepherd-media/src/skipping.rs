@@ -27,9 +27,16 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use shepherd_media_cache::SponsorBlockCache;
-use shepherd_media_core::sponsorblock::{Category, SegmentSkipper, Skip, parse_bucket, plan_skips};
+use shepherd_media_core::sponsorblock::{
+    Category, RawSegment, SegmentSkipper, Skip, parse_bucket, plan_skips,
+};
 use shepherd_media_core::{ClassifiedUri, Item, PlatformInfo, resolve_source, uri};
 use tracing::{debug, warn};
+
+/// How far a reported duration must move before the plan is rebuilt. Well under
+/// the tolerance the duration filter itself applies, so a jitter of a few
+/// milliseconds does not churn, and far below a real correction.
+const DURATION_EPSILON: f64 = 0.25;
 
 /// Per-playback SponsorBlock state: what is being fetched, and what to skip.
 pub struct SkipWatcher {
@@ -39,10 +46,16 @@ pub struct SkipWatcher {
     video_id: Option<String>,
     /// Set while a worker thread is fetching; taken when it answers.
     pending: Option<Receiver<Option<String>>>,
-    /// The bucket, once fetched. Kept because the duration may not have arrived
-    /// yet, and because it survives a restart of the same item.
-    bucket: Option<String>,
+    /// The submissions, parsed once on arrival. Kept as the parsed form because
+    /// the plan is rebuilt whenever the duration changes, and re-parsing 40 KB
+    /// of JSON on a frame loop to do it would not be free.
+    submissions: Option<Vec<RawSegment>>,
     skipper: Option<SegmentSkipper>,
+    /// The duration the current plan was built against, so a later, different
+    /// one rebuilds it. mpv's first answer for a network stream is not always
+    /// its last, and a plan latched to a wrong duration is a plan that skips
+    /// nothing for the rest of the video.
+    planned_for: Option<f64>,
 }
 
 impl SkipWatcher {
@@ -64,8 +77,9 @@ impl SkipWatcher {
             categories,
             video_id: None,
             pending: None,
-            bucket: None,
+            submissions: None,
             skipper: None,
+            planned_for: None,
         })
     }
 
@@ -81,13 +95,15 @@ impl SkipWatcher {
         // the viewer has seen is reset.
         if video_id.is_some() && video_id == self.video_id {
             self.skipper = None;
+            self.planned_for = None;
             return;
         }
 
         self.video_id = video_id;
         self.pending = None;
-        self.bucket = None;
+        self.submissions = None;
         self.skipper = None;
+        self.planned_for = None;
 
         let Some(video_id) = self.video_id.clone() else {
             return;
@@ -111,10 +127,11 @@ impl SkipWatcher {
         }
     }
 
-    /// Playback stopped. Drops the plan but keeps the fetched bucket, so
-    /// returning to the same video does not fetch again.
+    /// Playback stopped. Drops the plan but keeps the submissions, so returning
+    /// to the same video does not fetch again.
     pub fn note_stopped(&mut self) {
         self.skipper = None;
+        self.planned_for = None;
     }
 
     /// Feed the current playback position; seek to what comes back.
@@ -125,21 +142,36 @@ impl SkipWatcher {
     pub fn poll(&mut self, position: Option<f64>, duration: Option<f64>) -> Option<Skip> {
         self.collect_pending();
 
-        if self.skipper.is_none() {
-            self.build_plan(duration?);
+        let duration = duration?;
+        // Rebuild when the duration changes, not just once. Every submission is
+        // judged against the duration of the file that is playing, and mpv can
+        // report a provisional one before the real one for a network stream —
+        // building the plan once, from whatever arrived first, silently disabled
+        // skipping for the rest of the video whenever that happened.
+        if self
+            .planned_for
+            .is_none_or(|had| (had - duration).abs() > DURATION_EPSILON)
+        {
+            self.build_plan(duration);
         }
         self.skipper.as_mut()?.on_position(position?)
     }
 
-    /// Take the worker's answer if it has one.
+    /// Take the worker's answer if it has one, and parse it.
     fn collect_pending(&mut self) {
         let Some(rx) = self.pending.as_ref() else {
             return;
         };
         match rx.try_recv() {
             Ok(bucket) => {
-                self.bucket = bucket;
                 self.pending = None;
+                let (Some(bucket), Some(video_id)) = (bucket, self.video_id.as_ref()) else {
+                    return;
+                };
+                match parse_bucket(&bucket, video_id) {
+                    Ok(raw) => self.submissions = Some(raw),
+                    Err(e) => warn!(video_id, "could not parse a SponsorBlock bucket: {e}"),
+                }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
@@ -150,29 +182,27 @@ impl SkipWatcher {
         }
     }
 
-    /// Resolve the fetched bucket against this file's duration, once both are
-    /// in hand.
+    /// Resolve the submissions against this file's duration, once both are in
+    /// hand.
+    ///
+    /// Rebuilding forgets which spans the viewer has already been skipped past,
+    /// which is correct: a duration that changed is a different timeline, and
+    /// the spans it produces are not the ones that were consumed.
     fn build_plan(&mut self, duration: f64) {
-        let (Some(bucket), Some(video_id)) = (self.bucket.as_ref(), self.video_id.as_ref()) else {
+        let (Some(raw), Some(video_id)) = (self.submissions.as_ref(), self.video_id.as_ref())
+        else {
             return;
         };
-        let raw = match parse_bucket(bucket, video_id) {
-            Ok(raw) => raw,
-            Err(e) => {
-                warn!(video_id, "could not parse a SponsorBlock bucket: {e}");
-                self.bucket = None;
-                return;
-            }
-        };
-        let segments = plan_skips(&raw, duration, &self.categories);
-        if !segments.is_empty() {
-            debug!(
-                video_id,
-                segments = segments.len(),
-                "SponsorBlock segments to skip"
-            );
-        }
+        let segments = plan_skips(raw, duration, &self.categories);
+        debug!(
+            video_id,
+            duration,
+            submissions = raw.len(),
+            segments = segments.len(),
+            "planned SponsorBlock skips"
+        );
         self.skipper = Some(SegmentSkipper::new(segments, duration));
+        self.planned_for = Some(duration);
     }
 }
 
@@ -190,6 +220,17 @@ mod tests {
     use super::*;
     use shepherd_media_core::{ItemKind, Platform, PlayerHint, Source};
     use url::Url;
+
+    /// One sponsor submission over 30s-60s of a 600s video.
+    fn sponsor_submission() -> Vec<RawSegment> {
+        parse_bucket(
+            r#"[{"videoID":"v","segments":[{"category":"sponsor","actionType":"skip",
+               "segment":[30,60],"UUID":"u","videoDuration":600.0,"locked":0,"votes":4,
+               "description":""}]}]"#,
+            "v",
+        )
+        .expect("fixture parses")
+    }
 
     fn item(uri: ClassifiedUri) -> Item {
         Item {
@@ -256,12 +297,7 @@ mod tests {
         let cache = SponsorBlockCache::with_dir(None, shepherd_media_cache::SPONSORBLOCK_API);
         let mut watcher = SkipWatcher::new(cache, vec![Category::Sponsor]).unwrap();
         watcher.video_id = Some("v".into());
-        watcher.bucket = Some(
-            r#"[{"videoID":"v","segments":[{"category":"sponsor","actionType":"skip",
-               "segment":[30,60],"UUID":"u","videoDuration":600.0,"locked":0,"votes":4,
-               "description":""}]}]"#
-                .into(),
-        );
+        watcher.submissions = Some(sponsor_submission());
 
         // No duration yet: nothing to judge against, so nothing happens.
         assert!(watcher.poll(Some(31.0), None).is_none());
@@ -273,6 +309,45 @@ mod tests {
         assert_eq!(skip.category, Category::Sponsor);
     }
 
+    /// The bug this rebuild exists for: mpv can report a provisional duration
+    /// for a network stream before the real one. A plan built once, from
+    /// whatever arrived first, judged every submission against the wrong
+    /// timeline and then skipped nothing for the rest of the video.
+    #[test]
+    fn a_corrected_duration_rebuilds_the_plan() {
+        let cache = SponsorBlockCache::with_dir(None, shepherd_media_cache::SPONSORBLOCK_API);
+        let mut watcher = SkipWatcher::new(cache, vec![Category::Sponsor]).unwrap();
+        watcher.video_id = Some("v".into());
+        watcher.submissions = Some(sponsor_submission());
+
+        // A duration nothing can be judged against: the submission is for a
+        // 600s cut, so it is refused and the plan is empty.
+        assert!(watcher.poll(Some(31.0), Some(120.0)).is_none());
+        assert!(watcher.skipper.as_ref().unwrap().is_empty());
+
+        // The real duration arrives a frame later, and the span is skipped.
+        let skip = watcher
+            .poll(Some(31.0), Some(600.0))
+            .expect("the corrected duration must be planned against");
+        assert_eq!(skip.target, 60.0);
+    }
+
+    /// ...but an unchanged duration must not rebuild, or every frame would
+    /// forget which spans the viewer has already been skipped past.
+    #[test]
+    fn a_steady_duration_keeps_what_the_viewer_has_seen() {
+        let cache = SponsorBlockCache::with_dir(None, shepherd_media_cache::SPONSORBLOCK_API);
+        let mut watcher = SkipWatcher::new(cache, vec![Category::Sponsor]).unwrap();
+        watcher.video_id = Some("v".into());
+        watcher.submissions = Some(sponsor_submission());
+
+        assert!(watcher.poll(Some(31.0), Some(600.0)).is_some());
+        // The viewer rewinds into the span they were just skipped past.
+        assert!(watcher.poll(Some(45.0), Some(600.0)).is_none());
+        // And a duration that only jitters is still the same timeline.
+        assert!(watcher.poll(Some(46.0), Some(600.05)).is_none());
+    }
+
     /// Replaying the same video re-arms the skipper without re-fetching.
     #[test]
     fn restarting_the_same_video_keeps_the_bucket_and_skips_again() {
@@ -282,12 +357,7 @@ mod tests {
         let it = item(ClassifiedUri::YouTube(url));
 
         watcher.video_id = Some("v".into());
-        watcher.bucket = Some(
-            r#"[{"videoID":"v","segments":[{"category":"sponsor","actionType":"skip",
-               "segment":[30,60],"UUID":"u","videoDuration":600.0,"locked":0,"votes":4,
-               "description":""}]}]"#
-                .into(),
-        );
+        watcher.submissions = Some(sponsor_submission());
         assert!(watcher.poll(Some(31.0), Some(600.0)).is_some());
         assert!(
             watcher.poll(Some(31.0), Some(600.0)).is_none(),
@@ -299,7 +369,7 @@ mod tests {
             watcher.pending.is_none(),
             "no second fetch for the same video"
         );
-        assert!(watcher.bucket.is_some());
+        assert!(watcher.submissions.is_some());
         assert!(watcher.poll(Some(31.0), Some(600.0)).is_some());
     }
 }
