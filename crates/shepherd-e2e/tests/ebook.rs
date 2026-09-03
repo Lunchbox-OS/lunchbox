@@ -51,6 +51,16 @@ book = "/nonexistent/nosuchbook.epub"
 command = "{READER}"
 [entries.availability]
 always = true
+
+[[entries]]
+id = "missing-reader"
+label = "No Reader"
+[entries.kind]
+type = "ebook"
+book = "{BOOK}"
+command = "/nonexistent/no-such-reader"
+[entries.availability]
+always = true
 "#;
 
 /// A stub that stands in for the reader: it maps no window and waits to be
@@ -64,8 +74,25 @@ fn stub_reader(dir: &std::path::Path) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// A book that is not there is reported against its own activity; one that is
-/// there is not reported at all.
+/// A stand-in for Okular's EPUB backend, which ships separately from Okular on
+/// Ubuntu and so is absent from every CI runner.
+///
+/// Without it the format probe correctly reports the backend missing for every
+/// `.epub` entry, and a test about *books* fails on a machine that simply has
+/// no reader installed. Returns the directory to hand the daemon as
+/// `QT_PLUGIN_PATH`.
+fn fake_epub_backend(dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let plugins = dir.join("qtplugins");
+    let generators = plugins.join("okular_generators");
+    std::fs::create_dir_all(&generators)?;
+    std::fs::write(generators.join("okularGenerator_epub.so"), b"")?;
+    Ok(plugins)
+}
+
+/// A book that is not there is reported against its own activity, and a reader
+/// that is not installed against its own; anything healthy is not reported at
+/// all — which matters as much as the first two, since a probe that flagged
+/// everything would be ignored.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn a_missing_book_reaches_clients_as_a_per_entry_diagnostic() -> Result<()> {
@@ -73,6 +100,7 @@ async fn a_missing_book_reaches_clients_as_a_per_entry_diagnostic() -> Result<()
     let book = scratch.path().join("book.epub");
     std::fs::write(&book, b"")?;
     let reader = stub_reader(scratch.path())?;
+    let plugins = fake_epub_backend(scratch.path())?;
 
     let h = TestHarness::builder()
         .config_toml(
@@ -80,6 +108,7 @@ async fn a_missing_book_reaches_clients_as_a_per_entry_diagnostic() -> Result<()
                 .replace("{BOOK}", &book.to_string_lossy())
                 .replace("{READER}", &reader.to_string_lossy()),
         )
+        .shepherdd_env("QT_PLUGIN_PATH", plugins.to_string_lossy().to_string())
         .start()
         .await?;
     let http = h.http();
@@ -103,7 +132,7 @@ async fn a_missing_book_reaches_clients_as_a_per_entry_diagnostic() -> Result<()
                 ))
             })
             .collect();
-        if !flagged.is_empty() {
+        if flagged.len() == 2 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -112,8 +141,14 @@ async fn a_missing_book_reaches_clients_as_a_per_entry_diagnostic() -> Result<()
     flagged.sort();
     assert_eq!(
         flagged,
-        vec![("ebook_book_missing".to_string(), "missing-book".to_string())],
-        "expected only the entry whose book is absent to be flagged"
+        vec![
+            ("ebook_book_missing".to_string(), "missing-book".to_string()),
+            (
+                "ebook_reader_missing".to_string(),
+                "missing-reader".to_string()
+            ),
+        ],
+        "expected exactly the entry whose book is absent, and the one whose reader is"
     );
 
     h.shutdown().await?;
@@ -132,6 +167,7 @@ async fn launching_materializes_the_readers_kiosk_configuration() -> Result<()> 
     let book = scratch.path().join("book.epub");
     std::fs::write(&book, b"")?;
     let reader = stub_reader(scratch.path())?;
+    let plugins = fake_epub_backend(scratch.path())?;
     let state_root = scratch.path().join("ebook-state");
 
     let h = TestHarness::builder()
@@ -144,6 +180,7 @@ async fn launching_materializes_the_readers_kiosk_configuration() -> Result<()> 
             "SHEPHERD_EBOOK_ROOT",
             state_root.to_string_lossy().to_string(),
         )
+        .shepherdd_env("QT_PLUGIN_PATH", plugins.to_string_lossy().to_string())
         .start()
         .await?;
     let http = h.http();
