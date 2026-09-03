@@ -1,7 +1,10 @@
 # SponsorBlock in shepherd-media (issue #159) — scope
 
-> Status: **built**, on `feat/159-sponsorblock` (six commits, unpushed at time
-> of writing). Issue #159 was filed with a title and an empty body; the design
+> Status: **built and verified**, on `feat/159-sponsorblock` (unpushed at time
+> of writing). Both front-ends have been run against a real video with real
+> segments — the Linux one in the headless session, the Android one on a Pixel
+> 10a — and the "off means silent" claim has been checked on the wire rather
+> than argued from the code. See the three verification sections at the end. Issue #159 was filed with a title and an empty body; the design
 > below is what was proposed, the four judgement calls it turned on were
 > answered on 2026-09-03 and are recorded under "Decisions", and the places the
 > implementation departed from the plan are in "As built" at the end.
@@ -369,8 +372,50 @@ diagnosable rather than silent. That the fix cured *this* failure is not proven
 real defect with exactly that signature, and the four runs since have all
 skipped.
 
-**Not done: the end-to-end negative test.** The verification plan called for
-asserting through the headless harness that `enabled = false` makes no request.
-That assertion exists as unit tests at three levels (no categories → no watcher,
-the argv builder emits no flag, the prefetcher resolves to off), which is where
-it can be checked cheaply — but not as an observation of the wire.
+## Verified on Android
+
+On a Pixel 10a (Android 17, arm64-v8a) over adb, with the app's own
+`Skip sponsors` toggle and the same video. Timed from the log line that says mpv
+started decoding, and read back from the app's resume state:
+
+| Per-library setting | Wall clock | Where playback got to |
+|---|---|---|
+| `sponsorblock = true` | 62s | **112.5s** |
+| `sponsorblock = false` | 62s | 62.7s |
+
+The off arm tracks wall clock exactly; the on arm is ~50s ahead of it, which is
+the span. The device also wrote `files/cache/sponsorblock/3e4f.json` (54 KB) —
+the same bucket, under the same prefix, into app-private storage — so the
+hashing, the request and the cache all ran on the phone rather than being
+inferred from the Linux side. The notice reads "Skipped sponsor" over live
+video, from the shared overlay.
+
+mpv decoded with `mediacodec` zero-copy throughout, so this also exercised the
+path that matters on the hardware this targets.
+
+One change came out of running it: the Android plan line was logged at `debug`,
+and the app filters to `info` (`lib.rs`), so the one line that says whether
+anything was planned — and against which duration — was invisible in logcat,
+which is the only window into a device. It is `info` now.
+
+## The negative test, on the wire
+
+`scripts/integration-tests/test-sponsorblock.sh` runs the real player twice in
+the headless session under `strace -e trace=connect`, and asserts what actually
+left the machine:
+
+| Arm | Result |
+|---|---|
+| off (the default) | 0 of 120 connections went to any address `sponsor.ajay.app` resolves to; 0 buckets cached |
+| on, `--sponsorblock-api` at a stand-in | exactly 1 connection to the stand-in, 0 to the public instance |
+
+The off arm makes ~120 connections — posters, the video itself — which is what
+makes it worth anything: the silence is about SponsorBlock, not about being
+offline. The on arm's single request is checked to be the privacy endpoint
+(`/api/skipSegments/<4 hex>`), to carry no `videoID`, to ask for every skippable
+category, and to ask for no marker category. That it reached the stand-in and
+not the public instance also demonstrates the mirror override.
+
+The script needed one fix of its own before it was worth anything: a
+`grep -q … && break` inside the wait loop tripped `set -e` on every iteration
+that had not seen the line yet, so it exited 1, silently, before running an arm.

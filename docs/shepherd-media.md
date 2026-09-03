@@ -686,6 +686,15 @@ is played offline.
   back into. Seeking back to *before* a span arms it again.
 - **A live stream**, or any file the player cannot report a duration for.
 
+### Checking what it sends
+
+`scripts/integration-tests/test-sponsorblock.sh` drives the real player in the
+headless dev session under `strace` and asserts what actually goes out: with the
+feature off, no connection to any address `sponsor.ajay.app` resolves to and no
+bucket on disk; with it on, one request to a stand-in instance, and that request
+is the hash-prefix endpoint asking for every skippable category. It needs
+`strace`, `python3` and a network.
+
 ### Attribution
 
 Segment data comes from [SponsorBlock](https://sponsor.ajay.app) and is licensed

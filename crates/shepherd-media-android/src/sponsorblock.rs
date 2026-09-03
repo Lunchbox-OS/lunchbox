@@ -211,7 +211,12 @@ impl SkipWatcher {
             return;
         };
         let segments = plan_skips(raw, duration, &self.categories);
-        log::debug!(
+        // At `info`, because logcat is the only window into a device and this
+        // one line answers the question that matters when a video did not skip:
+        // whether anything was planned, and against which duration. The app
+        // filters to `info` (see `lib.rs`), so a `debug` here would be invisible
+        // exactly when it is wanted.
+        log::info!(
             "planned {} SponsorBlock skips in {video_id} from {} submissions at {duration}s",
             segments.len(),
             raw.len()
