@@ -406,10 +406,20 @@ EOF
     {
         printf '#!/bin/sh\nset -e\n'
         printf 'group=%s\n' "$FIREWALL_GROUP"
+        printf 'stated_user=%s\n' "$STATED_USER"
         cat <<'EOF'
 if [ "$1" = "configure" ]; then
     if ! getent group "$group" >/dev/null 2>&1; then
         groupadd --system "$group" || true
+    fi
+    # The uid that owns shepherd's policy and state, so activities -- which run
+    # as the kiosk user -- cannot reach them (issue #157). Mirrors install.sh's
+    # install_state. No home, no shell: it exists to own files and answer one
+    # socket. The per-user socket is enabled by `shepherd-admin setup-user`,
+    # since the kiosk user is not known at package time.
+    if ! getent passwd "$stated_user" >/dev/null 2>&1; then
+        useradd --system --no-create-home --home-dir /nonexistent \
+            --shell /usr/sbin/nologin "$stated_user" || true
     fi
     if command -v udevadm >/dev/null 2>&1; then
         udevadm control --reload-rules || true
@@ -419,6 +429,8 @@ if [ "$1" = "configure" ]; then
         systemctl reload polkit 2>/dev/null \
             || systemctl restart polkit 2>/dev/null \
             || true
+        # Pick up shepherd-stated@.socket / @.service.
+        systemctl daemon-reload || true
     fi
     # Bluetooth drop-in: the staged file carries the *build* host's daemon
     # path, so re-point it at this machine's before reloading. Mirrors

@@ -9,14 +9,44 @@
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-# Default location of shepherdd's admin record under a user's home.
-# Must match shepherd_management::DefaultAdminRecordPath, i.e. the
-# default `<data_dir>/admin.toml` where data_dir defaults to
-# ~/.local/share/shepherdd (`APP_DIR = "shepherdd"` in shepherd-util).
+# Where shepherdd's admin record and factory-reset sentinel live.
+#
+# Two possible homes since issue #157, and this has to check both. On a device
+# with the state custodian installed they are in its directory, at a uid the
+# kiosk user does not have; before it, and on a stack running with
+# `--no-state-custodian`, they are under the user's home. Using only the second
+# would make `bluetooth clear` silently do nothing on a current device: it would
+# find no admin record (so leave the BlueZ bond in place) and write a sentinel
+# where nothing reads it (so the reset would never happen).
+#
+# `<data_dir>/admin.toml`, where data_dir defaults to ~/.local/share/shepherdd
+# (`APP_DIR = "shepherdd"` in shepherd-util).
 SHEPHERD_DEFAULT_ADMIN_REL=".local/share/shepherdd/admin.toml"
-
-# Same idea for the factory-reset sentinel.
 SHEPHERD_DEFAULT_SENTINEL_REL=".local/share/shepherdd/.factory-reset-ble"
+
+# The custodian's directory, which must match install.sh's STATED_STATE_ROOT.
+SHEPHERD_STATE_ROOT="/var/lib/shepherdd/state"
+
+# Echo the admin record for $1, preferring the custodian's copy.
+_default_admin_record() {
+    local user="$1" home="$2"
+    if [[ -f "$SHEPHERD_STATE_ROOT/$user/admin.toml" ]]; then
+        echo "$SHEPHERD_STATE_ROOT/$user/admin.toml"
+    else
+        echo "$home/$SHEPHERD_DEFAULT_ADMIN_REL"
+    fi
+}
+
+# Echo where to plant the sentinel for $1. Prefers the custodian's directory
+# when it exists, because that is the only one shepherdd will read there.
+_default_sentinel() {
+    local user="$1" home="$2"
+    if [[ -d "$SHEPHERD_STATE_ROOT/$user" ]]; then
+        echo "$SHEPHERD_STATE_ROOT/$user/.factory-reset-ble"
+    else
+        echo "$home/$SHEPHERD_DEFAULT_SENTINEL_REL"
+    fi
+}
 
 # Refuse to operate on a user who currently has an active login
 # session. The whole point of this command is to clean up *after*
@@ -136,11 +166,13 @@ bluetooth_clear() {
     fi
 
     if [[ -z "$admin_record" ]]; then
-        admin_record="$home/$SHEPHERD_DEFAULT_ADMIN_REL"
+        admin_record="$(_default_admin_record "$user" "$home")"
     fi
     if [[ -z "$sentinel" ]]; then
-        sentinel="$home/$SHEPHERD_DEFAULT_SENTINEL_REL"
+        sentinel="$(_default_sentinel "$user" "$home")"
     fi
+    info "Admin record: $admin_record"
+    info "Sentinel:     $sentinel"
 
     # Collect peer addresses from the admin record (currently only one
     # admin peer is supported, but loop in case the schema grows).
@@ -197,9 +229,12 @@ Commands:
 Options for 'clear':
     --user USER             Target user (required).
     --admin-record PATH     Override admin.toml location
-                            (default: ~USER/$SHEPHERD_DEFAULT_ADMIN_REL).
+                            (default: the custodian's copy in
+                            $SHEPHERD_STATE_ROOT/USER/, else
+                            ~USER/$SHEPHERD_DEFAULT_ADMIN_REL).
     --sentinel PATH         Override reset-sentinel location
-                            (default: ~USER/$SHEPHERD_DEFAULT_SENTINEL_REL).
+                            (default: the custodian's directory when there is
+                            one, else ~USER/$SHEPHERD_DEFAULT_SENTINEL_REL).
     --force                 Proceed even if the user is currently logged in.
 
 Examples:

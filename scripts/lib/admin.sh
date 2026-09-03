@@ -1202,6 +1202,17 @@ setup_user() {
     # package's postinst (or install_firewall) created.
     add_user_to_groups "$user" "${SHEPHERD_REQUIRED_GROUPS[@]}" "$FIREWALL_GROUP"
 
+    # The state custodian is per-user, so the package cannot enable it: the
+    # kiosk user is not known at package time. Without this the daemon never
+    # starts and shepherdd falls back to keeping its state in the user's home,
+    # where every activity can reach it (issue #157) -- degraded, and reported
+    # as a diagnostic, but not what an operator following the docs expects.
+    if command_exists systemctl && [[ -f "$STATED_UNIT_DIR/$STATED_SOCKET_UNIT" ]]; then
+        info "Enabling the state custodian for $user..."
+        systemctl enable --now "shepherd-stated@$user.socket" 2>/dev/null \
+            || warn "Could not enable shepherd-stated@$user.socket; shepherd's state will stay in $user's home"
+    fi
+
     success "Set up $user"
     info "Have $user log out and back in so the new group memberships apply,"
     info "then pick the \"Shepherd Kiosk\" session at login."
