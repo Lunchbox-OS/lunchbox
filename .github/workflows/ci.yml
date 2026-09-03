@@ -556,7 +556,11 @@ jobs:
             # toolchain and the dep registry live in /usr/local/{cargo,rustup}
             # and the image already makes them writable by any user, so they
             # need no chown here — and must not get one, since they are shared
-            # rather than tester's.
+            # with every other user rather than owned by tester.
+            #
+            # No apostrophes in this comment: the whole block is a
+            # single-quoted argument to `bash -c`, so one would close the
+            # string early. That is what broke run 4516.
             chown -R tester:tester /work
 
             runuser -u tester -- env \
