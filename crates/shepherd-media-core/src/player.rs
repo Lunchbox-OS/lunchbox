@@ -417,6 +417,34 @@ mod libmpv_backend {
                     // Best-effort: keep default quality if the profile is missing.
                     let _ = init.set_property("profile", "fast");
                 }
+                // Decode every frame between the keyframe and a seek target
+                // instead of letting the decoder drop them.
+                //
+                // mpv's default is `yes`: "Allow the video decoder to drop
+                // frames during seek, if these frames are before the seek
+                // target". Cheap, and safe with software decoding — but a
+                // hardware decoder handed that instruction can skip a frame
+                // later frames reference, and everything after the seek is then
+                // decoded against a picture that was never produced. That would
+                // show as blocks of corruption from the seek until the next
+                // keyframe.
+                //
+                // Which is the symptom reported against the desktop build
+                // (`vo=libmpv`, `hwdec=auto-safe`), and this is what the mpv
+                // manual points at when precise seeking misbehaves — but it is
+                // a diagnosis, not a confirmed one. It does not reproduce under
+                // software decoding, and the machine this was written on has no
+                // GPU to exercise the hardware path. If corruption survives
+                // this, `SHEPHERD_MPV_LOG` will hold the decoder's own
+                // complaints from around the seek.
+                //
+                // The cost is decoding the frames between the preceding
+                // keyframe and the target — part of one GOP, a few tens of
+                // milliseconds — instead of skipping them. Worth it: the skip
+                // this feature performs is automatic, so the corruption arrives
+                // unprompted rather than as the price of a seek somebody asked
+                // for.
+                init.set_property("hr-seek-framedrop", "no")?;
                 init.set_property("osc", "no")?;
                 init.set_property("input-default-bindings", "no")?;
                 init.set_property("input-vo-keyboard", "no")?;
@@ -589,10 +617,18 @@ mod libmpv_backend {
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
         }
 
+        /// Seek to `seconds`, exactly.
+        ///
+        /// `exact` is spelled out rather than left to `--hr-seek`, whose
+        /// default mpv documents as "implementation specific and may change
+        /// with new releases". Landing on the preceding keyframe instead of the
+        /// requested position would put a SponsorBlock skip back inside the
+        /// span it just jumped, with the span already marked as skipped — so
+        /// the rest of the sponsor would play with nothing left to stop it.
         fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
             let arg = format!("{seconds}");
             self.mpv
-                .command("seek", &[&arg, "absolute"])
+                .command("seek", &[&arg, "absolute+exact"])
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
         }
 

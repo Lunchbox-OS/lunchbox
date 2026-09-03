@@ -686,6 +686,22 @@ is played offline.
   back into. Seeking back to *before* a span arms it again.
 - **A live stream**, or any file the player cannot report a duration for.
 
+### Seeking
+
+Skips are issued as `seek <t> absolute+exact`, and mpv is configured with
+`hr-seek-framedrop=no`.
+
+Both are about landing cleanly. Exactness is spelled out rather than left to
+mpv's `--hr-seek` default, which the manual calls "implementation specific":
+landing on the preceding keyframe would put playback back *inside* the span it
+just skipped, with the span already marked as skipped, so the rest of the
+sponsor would play with nothing left to stop it. And `hr-seek-framedrop`, which
+mpv defaults to `yes`, lets the decoder drop frames between the keyframe and the
+seek target — safe in software, but a hardware decoder that skips a frame later
+frames reference leaves everything after the seek decoded against a picture that
+was never produced, which is visible corruption until the next keyframe. It
+costs part of one GOP of decoding per seek.
+
 ### Checking what it sends
 
 `scripts/integration-tests/test-sponsorblock.sh` drives the real player in the
