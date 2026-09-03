@@ -247,16 +247,40 @@ fn build_hud_content(
 
     container.add_css_class("hud-bar");
 
-    // Left section: App name and time
+    // Left section: App name and time.
+    //
+    // `halign(Fill)`, not `Start`: with `Start` the box is allocated its
+    // *minimum* width and merely positioned left, which collapses the
+    // ellipsizing label below even when the bar has room to spare.
     let left_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(12)
         .hexpand(true)
-        .halign(gtk4::Align::Start)
+        .halign(gtk4::Align::Fill)
         .build();
 
     let app_label = gtk4::Label::new(Some("No session"));
     app_label.add_css_class("app-name");
+    // The left box expands, so without this a long activity name ("Alice's
+    // Adventures in Wonderland") takes its natural width and pushes the
+    // right-hand controls off the end of the bar — where they are simply
+    // clipped, not wrapped. Ellipsizing gives the label a small minimum width
+    // so the controls always fit.
+    app_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    // An ellipsizing label asks for the ellipsis as its *minimum*, and GTK
+    // hands out minimums unless a child claims the leftover — so without
+    // `hexpand` the name collapses to "..." with hundreds of pixels going
+    // spare. `xalign` then keeps the text against the left edge as it grows.
+    app_label.set_hexpand(true);
+    app_label.set_xalign(0.0);
+    // The HUD surface is sized to its content, so the label's *minimum* is
+    // what it actually gets. Twelve characters is the most that leaves room
+    // for every control on a 1280-wide panel — measured, not guessed; wider,
+    // and the end-session "X" fell off the end, where GTK clips rather than
+    // wraps, and a session the child cannot end is a worse failure than a
+    // truncated title. The ceiling does the same job for a very long name.
+    app_label.set_width_chars(12);
+    app_label.set_max_width_chars(28);
     left_box.append(&app_label);
 
     let time_display = TimeDisplay::new();
