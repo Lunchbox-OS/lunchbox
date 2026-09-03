@@ -197,6 +197,17 @@ pub fn peer_pid(fd: BorrowedFd<'_>) -> Option<u32> {
     let pidfd = peer_pidfd(fd).ok()?;
     pidfd_info(pidfd.as_fd()).ok().map(|i| i.pid)
 }
+/// The uid the kernel recorded for whoever called `connect()`.
+///
+/// `SO_PEERCRED`, captured at connect time, so the peer cannot set or change
+/// it. On its own it separates nothing here — every activity shares shepherdd's
+/// uid, which is the whole of #144 — but root is unforgeable in it, and that is
+/// what keeps `sudo` able to reach a daemon from outside the trusted cgroup.
+pub fn peer_uid(fd: BorrowedFd<'_>) -> Option<u32> {
+    nix::sys::socket::getsockopt(&fd, nix::sys::socket::sockopt::PeerCredentials)
+        .ok()
+        .map(|cred| cred.uid())
+}
 
 /// Our own cgroup id, read the same way we read a peer's.
 ///
@@ -404,7 +415,12 @@ pub struct PeerPolicy {
     /// `Some` when the allow-list is armed, carrying the cgroup id every
     /// accepted peer must match. `None` disarms it (the dev opt-out), and the
     /// uid-only classification from before this check applies.
-    own_cgroup: Option<u64>,
+    ///
+    /// Usually this is our *own* cgroup ([`PeerPolicy::restricted`]) — but not
+    /// necessarily. A server that is deliberately outside the session it serves
+    /// names the trusted cgroup instead ([`PeerPolicy::for_cgroup`]), so the
+    /// field is what it is trusted to be rather than where we happen to live.
+    trusted_cgroup: Option<u64>,
     own_uid: u32,
 }
 
@@ -415,7 +431,7 @@ impl PeerPolicy {
     /// and any client started from another terminal would otherwise be refused.
     pub fn unrestricted() -> Self {
         Self {
-            own_cgroup: None,
+            trusted_cgroup: None,
             own_uid: nix::unistd::getuid().as_raw(),
         }
     }
@@ -426,15 +442,43 @@ impl PeerPolicy {
     /// name what it accepts would refuse every client — better to say so at
     /// startup than to bring up a session nothing can talk to.
     pub fn restricted() -> Result<Self, PeerError> {
-        Ok(Self {
-            own_cgroup: Some(own_cgroup_id()?),
+        Ok(Self::for_cgroup(own_cgroup_id()?))
+    }
+
+    /// Accept only root, and peers in the cgroup `trusted`.
+    ///
+    /// For a server that is **not in the session it serves** and so cannot
+    /// compare against itself: `shepherd-stated` runs under the system manager
+    /// as its own uid, and the cgroup it trusts is the kiosk's logind session
+    /// scope, resolved from logind rather than from `own_cgroup_id`.
+    ///
+    /// The comparison is the same one [`Self::restricted`] makes and rests on
+    /// the same measured facts (issue #157): a `session-<n>.scope` is
+    /// root-owned, an activity cannot write itself into it, and it cannot ask
+    /// logind or the user manager to put a process there either. What differs
+    /// is only where the number came from.
+    ///
+    /// Callers are responsible for resolving a cgroup that means something. A
+    /// trusted id that names a cgroup nothing runs in refuses every peer, which
+    /// is the safe direction but still wants saying out loud at startup.
+    pub fn for_cgroup(trusted: u64) -> Self {
+        Self {
+            trusted_cgroup: Some(trusted),
             own_uid: nix::unistd::getuid().as_raw(),
-        })
+        }
     }
 
     /// Whether the allow-list is armed.
     pub fn is_restricted(&self) -> bool {
-        self.own_cgroup.is_some()
+        self.trusted_cgroup.is_some()
+    }
+
+    /// The cgroup id every non-root peer must be in, when armed.
+    ///
+    /// For startup reporting: a daemon that says which cgroup it is trusting
+    /// turns "everything is refused" from a mystery into one line of log.
+    pub fn trusted_cgroup(&self) -> Option<u64> {
+        self.trusted_cgroup
     }
 
     /// Decide what a connected peer may do, or why it may do nothing.
@@ -455,7 +499,7 @@ impl PeerPolicy {
             return Ok(ClientRole::Admin);
         }
 
-        let Some(own) = self.own_cgroup else {
+        let Some(trusted) = self.trusted_cgroup else {
             // Disarmed: exactly the classification shepherdd shipped before.
             return Ok(match peer_uid {
                 Some(u) if u == self.own_uid => ClientRole::Admin,
@@ -464,12 +508,12 @@ impl PeerPolicy {
         };
 
         match peer_cgroup_id(fd) {
-            Ok(peer) if peer == own => Ok(ClientRole::Admin),
+            Ok(peer) if peer == trusted => Ok(ClientRole::Admin),
             Ok(peer) => Err(self.reject(
                 fd,
                 format!(
                     "a process at this uid connected from cgroup id {peer}, which is not \
-                     shepherd's own ({own}) — activities live in their own \
+                     the trusted one ({trusted}) — activities live in their own \
                      cgroups and nothing there may drive the daemon"
                 ),
             )),
@@ -575,7 +619,7 @@ mod tests {
         // can put a peer in a scope of its own; here the point is only that a
         // mismatch is refused rather than logged and waved through.
         let policy = PeerPolicy {
-            own_cgroup: Some(own_cgroup_id().expect("own cgroup id").wrapping_add(1)),
+            trusted_cgroup: Some(own_cgroup_id().expect("own cgroup id").wrapping_add(1)),
             own_uid: PEER_UID,
         };
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
@@ -583,7 +627,40 @@ mod tests {
             .classify(a.as_fd(), Some(PEER_UID))
             .expect_err("a peer outside shepherd's cgroup must be refused");
         assert!(
-            err.reason.contains("not shepherd's own"),
+            err.reason.contains("not the trusted one"),
+            "unhelpful refusal: {}",
+            err.reason
+        );
+    }
+
+    #[test]
+    fn for_cgroup_trusts_a_cgroup_that_is_not_our_own() {
+        if skip_without_peer_cgroup("for_cgroup_trusts_a_cgroup_that_is_not_our_own") {
+            return;
+        }
+        // `shepherd-stated` is deliberately outside the session it serves, so
+        // the cgroup it trusts is never its own. A socketpair peer *is* this
+        // process, which is what makes both directions checkable here: name our
+        // cgroup and the peer is accepted, name any other and it is refused.
+        let ours = own_cgroup_id().expect("own cgroup id");
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+
+        let trusting_us = PeerPolicy::for_cgroup(ours);
+        assert!(trusting_us.is_restricted());
+        assert_eq!(trusting_us.trusted_cgroup(), Some(ours));
+        assert_eq!(
+            trusting_us
+                .classify(a.as_fd(), Some(PEER_UID))
+                .expect("a peer in the trusted cgroup is accepted"),
+            ClientRole::Admin
+        );
+
+        let trusting_elsewhere = PeerPolicy::for_cgroup(ours.wrapping_add(1));
+        let err = trusting_elsewhere
+            .classify(a.as_fd(), Some(PEER_UID))
+            .expect_err("a peer outside the trusted cgroup must be refused");
+        assert!(
+            err.reason.contains("not the trusted one"),
             "unhelpful refusal: {}",
             err.reason
         );
@@ -598,7 +675,7 @@ mod tests {
         // is never shepherdd's cgroup. Without this the check would lock an
         // administrator out of their own device.
         let policy = PeerPolicy {
-            own_cgroup: Some(own_cgroup_id().expect("own cgroup id").wrapping_add(1)),
+            trusted_cgroup: Some(own_cgroup_id().expect("own cgroup id").wrapping_add(1)),
             own_uid: nix::unistd::getuid().as_raw(),
         };
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
@@ -618,7 +695,7 @@ mod tests {
         // from `getuid()`: as root that is 0, and the root rule would answer
         // before the uid comparison this is here to check.
         let policy = PeerPolicy {
-            own_cgroup: None,
+            trusted_cgroup: None,
             own_uid: PEER_UID,
         };
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");

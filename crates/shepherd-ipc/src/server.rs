@@ -534,14 +534,7 @@ fn socket_identity(path: &Path) -> Option<(u64, u64)> {
 
 fn get_peer_uid(stream: &UnixStream) -> Option<u32> {
     use std::os::unix::io::AsFd;
-
-    // Get the borrowed file descriptor from the stream
-    let fd = stream.as_fd();
-
-    match nix::sys::socket::getsockopt(&fd, nix::sys::socket::sockopt::PeerCredentials) {
-        Ok(cred) => Some(cred.uid()),
-        Err(_) => None,
-    }
+    crate::peer::peer_uid(stream.as_fd())
 }
 
 #[cfg(test)]
