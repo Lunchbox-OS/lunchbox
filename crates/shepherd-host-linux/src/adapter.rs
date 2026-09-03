@@ -3266,9 +3266,16 @@ mod tests {
 
         std::fs::write(
             &fake,
+            // Bounded, not `while true`: the test stops what it spawned on
+            // its way out, but a failing assertion unwinds past that, and this
+            // runs in a scope of its own that outlives the test process. One
+            // such escape sat on this box for six hours and then failed an
+            // unrelated e2e test, which asserts that no `sleep` is running.
+            // 60s is far longer than the test needs and far shorter than a
+            // suite run.
             "#!/bin/sh\n\
              for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$ARGV_FILE\"; done\n\
-             while true; do sleep 0.05; done\n",
+             i=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -3375,7 +3382,7 @@ mod tests {
              # First SIGTERM: start saving. Reset the handler first, so a\n\
              # second one kills us outright -- what RetroArch's exit(1) does.\n\
              trap 'trap - TERM; sleep 1; printf saved > \"$MARKER_FILE\"; exit 0' TERM\n\
-             while true; do sleep 0.05; done\n",
+             i=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))

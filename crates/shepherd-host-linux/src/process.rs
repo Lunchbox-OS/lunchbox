@@ -1516,7 +1516,14 @@ mod tests {
         // A uniquely named stand-in, so the `pgrep` cannot match anything on
         // the machine running the test but these two processes.
         let script = scratch.path().join("shepherd-killtest-stand-in.sh");
-        std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 0.05; done\n").unwrap();
+        // Bounded rather than endless: a failing assertion unwinds past the
+        // kill this test ends with, and an orphaned stand-in then outlives the
+        // suite. 60s is longer than the test needs and shorter than a run.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ni=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
 
