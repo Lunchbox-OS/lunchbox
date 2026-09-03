@@ -960,6 +960,8 @@ impl Service {
                     firmware_version: env!("CARGO_PKG_VERSION").to_string(),
                     admin_record_path: ble_cfg.admin_record_path,
                     reset_sentinel_path: ble_cfg.reset_sentinel_path,
+                    // Wired up in the commit that connects to the custodian.
+                    files: None,
                     adapter: ble_cfg.adapter,
                 };
                 // `shepherd-pairing-display` is spawned per pairing

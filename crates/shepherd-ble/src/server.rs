@@ -218,7 +218,7 @@ fn advertised_name(name: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{}{ADV_NAME_ELLIPSIS}", &name[..end]))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BleServerConfig {
     /// Advertised local name (also the device name in `DeviceInfo`).
     /// Defaults to the system hostname when constructed via `default`.
@@ -236,6 +236,28 @@ pub struct BleServerConfig {
     /// or an interface name (`"hci1"`). `None` takes whichever BlueZ
     /// lists first. See [`resolve_adapter`].
     pub adapter: Option<String>,
+    /// Where the admin record, the unbond queue and the reset sentinel
+    /// actually live (issue #157).
+    ///
+    /// `Some` on a device: the state custodian holds them at a uid activities
+    /// do not have, which matters most for the admin record — it carries the
+    /// minted HTTP token, so a copy at the shared uid is a credential every
+    /// activity can read and present to the management API. `None` keeps the
+    /// three path fields above, which is what a dev stack and the tests use.
+    pub files: Option<Arc<dyn shepherd_util::ProtectedFiles>>,
+}
+
+impl std::fmt::Debug for BleServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BleServerConfig")
+            .field("device_name", &self.device_name)
+            .field("firmware_version", &self.firmware_version)
+            .field("admin_record_path", &self.admin_record_path)
+            .field("reset_sentinel_path", &self.reset_sentinel_path)
+            .field("adapter", &self.adapter)
+            .field("custodial", &self.files.is_some())
+            .finish()
+    }
 }
 
 impl BleServerConfig {
@@ -276,14 +298,21 @@ impl BleServer {
         svc: Arc<dyn ManagementService>,
         display: Arc<dyn PairingDisplay>,
     ) -> anyhow::Result<Self> {
-        let store = AdminStore::new(config.admin_record_path.clone());
-        let pending_unbond = PendingUnbondStore::new(config.pending_unbond_path());
+        let (store, pending_unbond, reset_requested) = match &config.files {
+            Some(files) => (
+                AdminStore::custodial(Arc::clone(files)),
+                PendingUnbondStore::custodial(Arc::clone(files)),
+                crate::admin::check_reset_sentinel_custodial(files.as_ref()),
+            ),
+            None => (
+                AdminStore::new(config.admin_record_path.clone()),
+                PendingUnbondStore::new(config.pending_unbond_path()),
+                check_reset_sentinel(&config.reset_sentinel_path),
+            ),
+        };
 
-        if check_reset_sentinel(&config.reset_sentinel_path) {
-            warn!(
-                sentinel = %config.reset_sentinel_path.display(),
-                "Factory-reset sentinel present at startup; clearing admin record",
-            );
+        if reset_requested {
+            warn!("Factory-reset sentinel present at startup; clearing admin record");
             // Record the bond for removal *before* clearing the admin
             // record, and durably. Without the removal the phone stays
             // bonded while the device goes Unclaimed, so every reconnect
@@ -2159,6 +2188,7 @@ mod tests {
             admin_record_path: dir.path().join("admin.json"),
             reset_sentinel_path: dir.path().join("reset"),
             adapter: None,
+            files: None,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2198,6 +2228,7 @@ mod tests {
             admin_record_path: dir.path().join("admin.json"),
             reset_sentinel_path: dir.path().join("reset"),
             adapter: None,
+            files: None,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2367,6 +2398,7 @@ mod tests {
             admin_record_path: admin_path.clone(),
             reset_sentinel_path: sentinel_path,
             adapter: None,
+            files: None,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2384,7 +2416,13 @@ mod tests {
         // fresh store on the same path stands in for that next startup.
         let queued = server.pending_unbond.list().unwrap();
         assert_eq!(queued, vec!["AA:BB:CC:DD:EE:FF".to_string()]);
-        let next_boot = PendingUnbondStore::new(server.pending_unbond.path().to_path_buf());
+        let next_boot = PendingUnbondStore::new(
+            server
+                .pending_unbond
+                .path()
+                .expect("file-backed in tests")
+                .to_path_buf(),
+        );
         assert_eq!(next_boot.list().unwrap(), queued);
     }
 }
