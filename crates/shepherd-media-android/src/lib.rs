@@ -18,6 +18,7 @@ pub mod playback;
 pub mod player;
 pub mod posters;
 pub mod resolve;
+pub mod sponsorblock;
 pub mod storage;
 pub mod surface;
 pub mod ui;

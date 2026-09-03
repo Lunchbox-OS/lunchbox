@@ -11,6 +11,13 @@ It also owns the YouTube playlist metadata cache
 (`$XDG_CACHE_HOME/shepherd/media/playlists/`), for the same reason: shepherdd
 has to know what is in a playlist before it can prefetch it.
 
+It also fetches **SponsorBlock buckets** (issue #159), for the same reason: the
+player looks a video's segments up when it starts playing, and shepherdd warms
+the same buckets alongside the videos it prefetches, so a library filled while
+online still skips when it is played offline. Only the HTTP request is here —
+the disk policy is `shepherd_media_app::BucketStore` and the decisions are
+`shepherd_media_core::sponsorblock`, both shared with the Android app.
+
 ## Why it is its own crate
 
 Two processes share this directory. `shepherd-media` reads it when a video

@@ -57,6 +57,14 @@ the full design and roadmap.
   in `<filesDir>/resume/<library-id>.toml`; the state model and its policy are
   shared with the Linux binary (`shepherd-media-app`'s `resume` module). Not yet
   exercised on hardware.
+- Per-library **Skip sponsors** (default off, issue #159): jumps over sponsor
+  reads, self-promotion, "like and subscribe", intros and end cards in YouTube
+  videos, with a brief notice saying what was skipped. The categories, the
+  filtering and the skip state machine are `shepherd-media-core`'s and the
+  bucket cache is `shepherd-media-app`'s, so this behaves exactly as the Linux
+  binary does; only the fetch and the cache directory
+  (`<filesDir>/cache/sponsorblock/`) are local. Off means no request is made.
+  Not yet exercised on hardware.
 - Source resolution (`resolve` module): local/`file://` TOML, HTTP(S) TOML, and
   `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
   and the grid lists the real items. `content://` SAF and YouTube sources report

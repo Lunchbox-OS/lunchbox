@@ -21,6 +21,7 @@ pub mod poster_cache;
 pub mod quality;
 pub mod resume;
 pub mod settings;
+pub mod sponsorblock;
 
 pub use cache::{Freshness, Resolution};
 pub use cache_key::{SPONSORBLOCK_PREFIX_LEN, content_key, interest_key, sponsorblock_prefix};
@@ -32,3 +33,4 @@ pub use settings::{
     AppSettings, CachingSettings, LibraryEntry, LibrarySource, SETTINGS_SCHEMA_VERSION,
     SettingsError, SettingsIoError,
 };
+pub use sponsorblock::BucketStore;

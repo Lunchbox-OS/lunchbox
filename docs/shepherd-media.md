@@ -627,6 +627,11 @@ sponsorblock = false
 *Which* categories to skip stays a household decision on the service table;
 the per-entry setting is only whether to skip at all.
 
+The Android app has the same feature as a per-library **Skip sponsors** toggle
+in its settings page, also off by default, using the default category set. Both
+front-ends share the categories, the filtering and the skip logic, so a video
+skips the same way whichever one is playing it.
+
 ### Categories
 
 | Category | What it marks | In the default set |

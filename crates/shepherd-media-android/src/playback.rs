@@ -16,6 +16,7 @@
 use std::time::{Duration, Instant};
 
 use shepherd_media_core::PlayerHandle;
+use shepherd_media_core::sponsorblock::Category;
 use shepherd_media_ui::video;
 
 /// The shared transport overlay in the Android app's default-theme colors.
@@ -36,17 +37,31 @@ const IDLE_TICK: Duration = Duration::from_millis(250);
 
 pub struct PlaybackView {
     last_input_at: Instant,
+    /// The most recent SponsorBlock skip and when it happened, so the viewer is
+    /// told why the video jumped (issue #159). `None` once it has expired.
+    skipped: Option<(Category, Instant)>,
 }
 
 impl PlaybackView {
     pub fn new() -> Self {
         Self {
             last_input_at: Instant::now(),
+            skipped: None,
         }
     }
 
     pub fn note_started(&mut self) {
         self.last_input_at = Instant::now();
+        self.skipped = None;
+    }
+
+    /// A SponsorBlock segment was just skipped; show why for a few seconds.
+    ///
+    /// Deliberately does *not* touch `last_input_at`: the skip is the player
+    /// acting on its own, and summoning the whole transport overlay for it
+    /// would put a control bar over the video nobody asked for.
+    pub fn note_skipped(&mut self, category: Category) {
+        self.skipped = Some((category, Instant::now()));
     }
 
     /// Draw the overlay. Returns `true` if the user asked to leave playback
@@ -82,6 +97,10 @@ impl PlaybackView {
 
         let controls_visible =
             self.last_input_at.elapsed() < video::CONTROLS_VISIBLE_FOR || player.is_paused();
+        // Copied out of `self` so the closure below borrows neither.
+        let skipped = self.skipped;
+        let showing_notice = skipped.is_some_and(|(_, at)| at.elapsed() < video::SKIP_NOTICE_FOR);
+        let mut expire_notice = false;
 
         // Transparent, not black: the video SurfaceView is *behind* this
         // window, so any opaque fill here hides it.
@@ -95,7 +114,23 @@ impl PlaybackView {
                 {
                     leave = true;
                 }
+
+                match skipped {
+                    Some((category, at)) if at.elapsed() < video::SKIP_NOTICE_FOR => {
+                        video::skip_notice(
+                            ui.painter(),
+                            rect,
+                            &format!("Skipped {}", category.label()),
+                            &OVERLAY_THEME,
+                        );
+                    }
+                    Some(_) => expire_notice = true,
+                    None => {}
+                }
             });
+        if expire_notice {
+            self.skipped = None;
+        }
 
         if any_input {
             self.last_input_at = Instant::now();
@@ -104,7 +139,7 @@ impl PlaybackView {
         // Nothing here is tied to the video's frame rate any more, so the old
         // unconditional `request_repaint()` — which drove a full render pass at
         // display rate whether or not there was a new frame — is gone.
-        ctx.request_repaint_after(if controls_visible {
+        ctx.request_repaint_after(if controls_visible || showing_notice {
             OVERLAY_TICK
         } else {
             IDLE_TICK

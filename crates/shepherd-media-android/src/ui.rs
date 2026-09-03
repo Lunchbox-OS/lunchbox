@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -292,6 +293,14 @@ pub struct MediaApp {
     player: Option<Box<dyn PlayerHandle>>,
     playback: PlaybackView,
     playing: Option<PlayingItem>,
+    /// Shared bucket cache for SponsorBlock lookups (issue #159). Buckets are
+    /// not per library — a video's segments are the same whichever playlist
+    /// reached it — so one cache serves them all.
+    sponsorblock_cache: Arc<crate::sponsorblock::SponsorBlockCache>,
+    /// The active library's skipper, or `None` when that library has the
+    /// setting off. `None` is the off switch: with no watcher there is no path
+    /// that contacts the service.
+    sponsorblock: Option<crate::sponsorblock::SkipWatcher>,
     /// A YouTube item whose stream URLs are being resolved on a worker thread
     /// before playback can start.
     playback_pending: Option<PendingPlayback>,
@@ -354,6 +363,9 @@ impl MediaApp {
         // `render` and the redraw callback are all no-ops in this mode.
         let player = make_player();
         let playback = PlaybackView::new();
+        let sponsorblock_cache = Arc::new(crate::sponsorblock::SponsorBlockCache::new(
+            cache_dir.join("sponsorblock"),
+        ));
 
         let resume_dir = settings_path
             .parent()
@@ -375,6 +387,8 @@ impl MediaApp {
             poster_rx,
             player,
             playback,
+            sponsorblock_cache,
+            sponsorblock: None,
             playing: None,
             playback_pending: None,
             stream_cache: HashMap::new(),
@@ -595,6 +609,21 @@ impl MediaApp {
                                 resume_toggled = Some(id.clone());
                             }
                             controls.push(res);
+                            // Skip sponsored spans (mirrors the Linux
+                            // `--sponsorblock-categories`, which shepherdd fills
+                            // in from `service.media.sponsorblock`).
+                            let sb = ui
+                                .checkbox(&mut entry.sponsorblock, "Skip sponsors")
+                                .on_hover_text(
+                                    "Jump over sponsor reads, self-promotion, \
+                                     \"like and subscribe\", intros and end cards in \
+                                     YouTube videos, using the SponsorBlock database. \
+                                     Off sends nothing to sponsor.ajay.app.",
+                                );
+                            if sb.changed() {
+                                resume_toggled = Some(id.clone());
+                            }
+                            controls.push(sb);
                         });
                     }
 
@@ -813,6 +842,7 @@ impl MediaApp {
                 caching: CachingSettings::default(),
                 reverse: false,
                 resume: false,
+                sponsorblock: false,
             };
             match self.settings.add_library(entry) {
                 Ok(()) => {
@@ -1028,6 +1058,20 @@ impl MediaApp {
     /// ids: positions for departed items are dropped, and an offer is only made
     /// for an item the library still has.
     fn attach_resume(&mut self, library_id: &str) {
+        // The segment skipper follows the same library switch, and off is the
+        // absence of one.
+        self.sponsorblock = self
+            .settings
+            .get(library_id)
+            .is_some_and(|e| e.sponsorblock)
+            .then(|| {
+                crate::sponsorblock::SkipWatcher::new(
+                    self.sponsorblock_cache.clone(),
+                    shepherd_media_core::sponsorblock::DEFAULT_CATEGORIES.to_vec(),
+                )
+            })
+            .flatten();
+
         let enabled = self
             .settings
             .get(library_id)
@@ -1339,6 +1383,17 @@ impl MediaApp {
             return;
         };
 
+        // Arm the segment lookup here, before the YouTube resolve forks the two
+        // paths: this is the last point where the source is still the library's
+        // own URI rather than a resolved stream URL with no video id in it.
+        if let Some(watcher) = self.sponsorblock.as_mut() {
+            let video_id = match &source.uri {
+                ClassifiedUri::YouTube(url) => shepherd_media_core::uri::youtube_video_id(url),
+                _ => None,
+            };
+            watcher.note_item_started(video_id);
+        }
+
         // YouTube: resolve the stream URL on a worker before playback (network
         // must not run on the UI thread, and there's no yt-dlp on PATH for
         // mpv's own ytdl hook to use).
@@ -1447,6 +1502,9 @@ impl MediaApp {
         if let Some(p) = self.player.as_mut() {
             let _ = p.stop();
         }
+        if let Some(watcher) = self.sponsorblock.as_mut() {
+            watcher.note_stopped();
+        }
         self.playing = None;
     }
 
@@ -1526,8 +1584,11 @@ impl MediaApp {
             return;
         }
 
-        // Still playing: feed the player's position into the resume state
-        // (batched — this runs every frame).
+        // Still playing: skip anything the viewer has reached, then feed the
+        // position into the resume state (batched — this runs every frame).
+        // In that order, so a position saved this frame is the one on the far
+        // side of a skip rather than inside it.
+        self.apply_segment_skip();
         self.track_resume_progress();
 
         let title = self
@@ -1545,6 +1606,30 @@ impl MediaApp {
         if leave {
             self.finish_resume_tracking();
             self.end_playback();
+        }
+    }
+
+    /// Seek past a SponsorBlock segment the viewer has reached.
+    ///
+    /// No-op when the library has the setting off, when the lookup has not
+    /// answered yet, or when the player cannot yet report a duration — every one
+    /// of which simply plays the video as it is.
+    fn apply_segment_skip(&mut self) {
+        let Some(watcher) = self.sponsorblock.as_mut() else {
+            return;
+        };
+        let (position, duration) = match self.player.as_ref() {
+            Some(p) => (p.position(), p.duration()),
+            None => return,
+        };
+        let Some(skip) = watcher.poll(position, duration) else {
+            return;
+        };
+        if let Some(p) = self.player.as_mut() {
+            match p.seek_absolute(skip.target) {
+                Ok(()) => self.playback.note_skipped(skip.category),
+                Err(e) => log::warn!("could not skip a SponsorBlock segment: {e}"),
+            }
         }
     }
 

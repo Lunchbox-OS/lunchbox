@@ -261,6 +261,34 @@ struct WireSegment {
     locked: i64,
 }
 
+/// The URL that fetches one bucket.
+///
+/// Built here, in the core, because both front-ends fetch and neither should be
+/// deciding what to ask for: the query is *every* skippable category and the
+/// `skip` action, whatever a household has enabled. That keeps a cached bucket
+/// independent of configuration — changing the enabled categories re-reads the
+/// same file rather than invalidating it — and it keeps the shape of the
+/// request from describing anybody's settings.
+///
+/// `api` is the instance's base URL, with or without a trailing slash.
+pub fn bucket_url(api: &str, prefix: &str) -> String {
+    let categories: Vec<&str> = Category::all()
+        .iter()
+        .filter(|c| c.is_skippable())
+        .map(|c| c.as_str())
+        .collect();
+    // `serde_json` cannot fail on a list of string literals.
+    let categories = serde_json::to_string(&categories).unwrap_or_else(|_| "[]".to_string());
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("categories", &categories)
+        .append_pair("actionTypes", r#"["skip"]"#)
+        .finish();
+    format!(
+        "{}/api/skipSegments/{prefix}?{query}",
+        api.trim_end_matches('/')
+    )
+}
+
 /// Pull one video's submissions out of a hash-prefix response.
 ///
 /// `json` is the whole bucket — every video whose id hashes into the same
@@ -913,6 +941,35 @@ mod tests {
         let mut s = SegmentSkipper::from_bucket(&json, "v", 600.0, DEFAULT_CATEGORIES).unwrap();
         assert_eq!(s.segments().len(), 1, "filler is not a default category");
         assert_eq!(s.on_position(31.0).unwrap().category, Category::Sponsor);
+    }
+
+    // --- the request ---
+
+    #[test]
+    fn a_bucket_url_asks_for_every_skippable_category() {
+        let url = bucket_url("https://sponsor.ajay.app", "5f6b");
+        assert!(
+            url.starts_with("https://sponsor.ajay.app/api/skipSegments/5f6b?"),
+            "{url}"
+        );
+        assert!(url.contains("categories="), "{url}");
+        assert!(url.contains("sponsor"), "{url}");
+        assert!(url.contains("music_offtopic"), "{url}");
+        assert!(
+            !url.contains("poi_highlight") && !url.contains("chapter"),
+            "markers are not requested: {url}"
+        );
+        assert!(url.contains("actionTypes="), "{url}");
+        // The JSON array must be encoded, or the brackets and quotes travel raw.
+        assert!(!url.contains('['), "{url}");
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_api_does_not_double_up() {
+        assert_eq!(
+            bucket_url("https://sb.example/", "abcd"),
+            bucket_url("https://sb.example", "abcd")
+        );
     }
 
     // --- categories ---

@@ -12,6 +12,11 @@ Platform-agnostic core for `shepherd-media`. Contains:
   afterwards — which is what the front-ends' opt-in resume feature rides on.
 - A **session state machine** that drives `Browsing` ↔ `Playing` transitions
   (`session.rs`).
+- **SponsorBlock** (`sponsorblock.rs`) — the wire format, the filtering that
+  decides which submissions apply to the file actually loaded, and the state
+  machine that says when to seek (issue #159). Pure: both front-ends fetch their
+  own way and then reach the same decision here, which is what keeps a video
+  from skipping differently depending on which one is playing it.
 - The **stdout line protocol** that the platform binary uses to report
   playback events to `shepherdd` (`protocol.rs`).
 
