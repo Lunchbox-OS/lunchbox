@@ -4625,6 +4625,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-stated"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "nix 0.29.0",
+ "notify",
+ "serde",
+ "serde_json",
+ "shepherd-ipc",
+ "shepherd-state-proto",
+ "shepherd-store",
+ "shepherd-util",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "shepherd-store"
 version = "0.4.1"
 dependencies = [
