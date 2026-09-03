@@ -97,6 +97,7 @@ pub struct HarnessBuilder {
     config_toml: Option<String>,
     spawn_launcher: bool,
     spawn_hud: bool,
+    restrict_ipc_peers: bool,
     auth_token: Option<String>,
     extra_env: Vec<(String, String)>,
 }
@@ -113,6 +114,7 @@ impl HarnessBuilder {
             config_toml: None,
             spawn_launcher: false,
             spawn_hud: false,
+            restrict_ipc_peers: false,
             auth_token: None,
             extra_env: Vec::new(),
         }
@@ -147,6 +149,19 @@ impl HarnessBuilder {
     /// Add an environment variable to shepherdd's process. Applied after the
     /// harness's standard `env_clear()` + base env, so it can override the
     /// defaults (e.g. `PATH` to inject fakes for `pkcheck`/`pkexec`).
+    /// Arm the management socket's peer allow-list instead of opting out of it
+    /// (issue #144).
+    ///
+    /// Off by default for the reason the opt-out exists: this harness spawns
+    /// shepherdd as a child, so the two share a cgroup and every client is
+    /// accepted anyway. Armed, a peer placed in a cgroup of its own is refused
+    /// — which is what `tests/ipc_peer_check.rs` needs, and what nothing else
+    /// should want.
+    pub fn restrict_ipc_peers(mut self, yes: bool) -> Self {
+        self.restrict_ipc_peers = yes;
+        self
+    }
+
     pub fn shepherdd_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_env.push((key.into(), value.into()));
         self
@@ -371,7 +386,13 @@ impl TestHarness {
             // would start failing every RPC with no clue why. The check is
             // exercised by the unit tests in `shepherd-ipc`, which can put a
             // peer in a cgroup of its own without a whole session.
-            .arg("--no-restrict-ipc-peers")
+            .args(if builder.restrict_ipc_peers {
+                // Armed: `tests/ipc_peer_check.rs` puts a peer in its own
+                // cgroup and expects a refusal.
+                &[][..]
+            } else {
+                &["--no-restrict-ipc-peers"][..]
+            })
             // The suite stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` and
             // points `SHEPHERD_FIREWALL_HELPER` at a fake, so it needs the
             // daemon to take binaries from the environment (issue #144). Its

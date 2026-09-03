@@ -207,6 +207,31 @@ from the wrong cgroup produced zero new reports**, the first refusal having
 already spent the window. The 60-second tally carry is only unit-tested — the
 daemon was not kept alive long enough to see the second report.
 
+### #144's acceptance test now exists
+
+The issue asked for one: *"connect from an unregistered process, assert
+`adjust_tokens` and `extend_current` are refused."* It could not be written
+while the harness had no way to arm the check;
+`crates/shepherd-e2e/tests/ipc_peer_check.rs` is it.
+
+Two details make it test something rather than pass:
+
+- **It cannot use `IpcClient`.** That verifies the *server's* cgroup before it
+  speaks, so from a foreign cgroup it refuses the daemon and never reaches the
+  daemon's allow-list — proving the call fails, but not that the server refused
+  it. `src/bin/peer-probe.rs` speaks the protocol over a raw socket instead.
+- **It was checked against a disarmed daemon**, where the foreign peer does
+  reach `adjust_tokens` and the daemon answers it. A refusal test that cannot
+  observe an acceptance is not evidence.
+
+The harness's cgroup is a delegated user scope, so the check is not a boundary
+there — a peer could move itself in. The probe does not, which is the point:
+what is under test is whether the comparison is made and acted on, and that is
+the same code a device runs.
+
+The refusal is also audited now (`AuditEventType::ClientRejected`), which the
+issue asked for and which was missing while an *acceptance* was being recorded.
+
 ### CI could not exercise the peer check, until the runner is upgraded
 
 The Rust jobs run in a container, so they get the **host's kernel** however new

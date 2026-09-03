@@ -1841,7 +1841,15 @@ impl Service {
 
             ServerMessage::ClientRejected { rejection } => {
                 // Already logged with full detail by the IPC layer; here it
-                // becomes something an administrator can see (issue #143).
+                // becomes something an administrator can see (issue #143) and
+                // something the audit log keeps (issue #144's acceptance asks
+                // for the rejection to be audited, and an acceptance was being
+                // recorded while a refusal was not).
+                let _ = store.append_audit(AuditEvent::new(AuditEventType::ClientRejected {
+                    reason: rejection.reason.clone(),
+                    peer_cgroup: rejection.peer_cgroup.clone(),
+                    peer_pid: rejection.peer_pid,
+                }));
                 diagnostics.raise(Self::ipc_peer_rejected_diagnostic(&rejection));
             }
 

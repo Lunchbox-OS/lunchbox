@@ -139,6 +139,15 @@ impl IpcServer {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Deliberately a filesystem socket, and it must stay one (issue #144).
+        //
+        // An abstract socket would be tempting: it has no directory entry, so
+        // the takeover this file guards against with `socket_was_replaced`
+        // would be impossible. But an abstract name ignores filesystem
+        // permissions entirely, and that forecloses the fix that actually ends
+        // this whole class — separating shepherd's uid from the activities'
+        // (#105/#157), after which a 0700 socket directory does the job that no
+        // amount of peer checking can do while the uid is shared.
         let listener = UnixListener::bind(&self.socket_path)?;
 
         // Remember which file we bound, so a replacement can be noticed

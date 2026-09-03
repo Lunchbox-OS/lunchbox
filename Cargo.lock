@@ -4303,6 +4303,7 @@ dependencies = [
  "serde_json",
  "shepherd-api",
  "shepherd-ipc",
+ "shepherd-store",
  "shepherd-util",
  "tempfile",
  "tokio",
