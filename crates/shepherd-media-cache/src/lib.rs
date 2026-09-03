@@ -38,12 +38,14 @@ pub mod key;
 pub mod lock;
 pub mod paths;
 pub mod playlist;
+pub mod sponsorblock;
 pub mod store;
 
 pub use download::{DEFAULT_DOWNLOAD_INTERVAL, DownloadKind, RETRY_COOLDOWN};
 pub use key::{content_key, interest_key, source_url};
 pub use paths::media_cache_dir;
 pub use playlist::{fetch_playlist, ytdlp_available};
+pub use sponsorblock::{DEFAULT_API as SPONSORBLOCK_API, SponsorBlockCache};
 // The shared eviction scoring; re-exported so callers of this crate need not
 // reach into `shepherd-media-app` for it.
 pub use shepherd_media_app::lru::{DEFAULT_WATCHED_GRACE, Score, ScoreWeights as CacheWeights};

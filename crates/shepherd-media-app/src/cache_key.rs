@@ -63,6 +63,29 @@ pub fn interest_key(url: &str) -> String {
     hash_parts(&[url])
 }
 
+/// Hex characters of the digest that name a SponsorBlock bucket. Four is what
+/// the service recommends and what every other client uses; a different number
+/// would ask for a bucket size the server does not serve.
+pub const SPONSORBLOCK_PREFIX_LEN: usize = 4;
+
+/// The SponsorBlock bucket a YouTube video falls into: the first four hex
+/// characters of the SHA-256 of its *video id* (issue #159).
+///
+/// This is not a cache-naming decision like the two keys above — it is the
+/// service's own convention, and asking for anything else would query a bucket
+/// nobody serves. It lives here anyway because both front-ends need it and both
+/// already depend on this crate for its SHA-256, and because the bucket doubles
+/// as the name of the file the response is cached in.
+///
+/// The id alone is hashed, with no separator and no URL around it: the digest
+/// has to match the one the service computed, so it cannot go through
+/// [`content_key`]'s NUL-joined form.
+pub fn sponsorblock_prefix(video_id: &str) -> String {
+    let mut prefix = hash_parts(&[video_id]);
+    prefix.truncate(SPONSORBLOCK_PREFIX_LEN);
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +112,19 @@ mod tests {
         assert_eq!(
             interest_key("https://example.com/a.mp4"),
             "0e06dca0234da29358bb3b0f700b1473"
+        );
+    }
+
+    /// Pinned against the service: this is the bucket `dQw4w9WgXcQ` is served
+    /// from, and the digest is SHA-256 of the bare id — the same value yt-dlp's
+    /// SponsorBlock postprocessor computes.
+    #[test]
+    fn a_sponsorblock_prefix_matches_the_service() {
+        assert_eq!(sponsorblock_prefix("dQw4w9WgXcQ"), "5f6b");
+        assert_eq!(sponsorblock_prefix("eXjGWlJOhWg"), "5f6b");
+        assert_eq!(
+            sponsorblock_prefix("dQw4w9WgXcQ").len(),
+            SPONSORBLOCK_PREFIX_LEN
         );
     }
 

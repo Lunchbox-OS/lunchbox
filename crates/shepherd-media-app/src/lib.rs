@@ -23,7 +23,7 @@ pub mod resume;
 pub mod settings;
 
 pub use cache::{Freshness, Resolution};
-pub use cache_key::{content_key, interest_key};
+pub use cache_key::{SPONSORBLOCK_PREFIX_LEN, content_key, interest_key, sponsorblock_prefix};
 pub use lru::{Score, ScoreWeights, Standing};
 pub use poster_cache::RemotePosterCache;
 pub use quality::{CacheMode, PosterPolicy, Quality};
