@@ -266,6 +266,24 @@ cheaper check (`report_unowned_windows`), which only knows about pids it
 spawned. Closing an `unowned` window stays a human's call:
 shepherd will not kill a surface it does not recognize, because a system
 dialog on a kiosk a child depends on is worse than the visibility gap.
+## Ebook
+
+`EntryKind::Ebook` entries are launched through `ebook.rs`, which generates the
+reader's entire configuration into a per-entry `XDG_CONFIG_HOME` /
+`XDG_DATA_HOME` / `XDG_CACHE_HOME` and re-renders it before every launch —
+Okular rewrites its own config on exit, so a one-time seed would decay. The
+admin's own KDE configuration is never touched.
+
+Three mechanisms, because Okular has no single kiosk switch: KDE's Kiosk
+*action restrictions* in `kdeglobals` (immutable via `[$i]`, enforced by
+`KActionCollection` so the menu item, toolbar button and shortcut all die
+together), the view settings in `okularrc`/`okularpartrc` (no menubar, sidebar
+or scrollbars; a page at a time, fitted to the screen), and a local XMLGUI
+`.rc` to hide the toolbar — which is not a config setting at all, but an
+attribute of the GUI definition. Reading positions live in
+`<data>/okular/docdata/` and are never written by shepherd. See
+`docs/ebooks.md`.
+
 ## RetroArch
 
 `EntryKind::Retroarch` entries are launched through `retroarch.rs`, which

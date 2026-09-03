@@ -80,6 +80,9 @@ fn main() -> ExitCode {
                             }
                             None => format!("media {} ({})", mode.subcommand(), library),
                         },
+                        EntryKind::Ebook { book, viewer, .. } => {
+                            format!("ebook {} ({})", viewer.default_command(), book.display())
+                        }
                         EntryKind::Retroarch {
                             core,
                             core_path,

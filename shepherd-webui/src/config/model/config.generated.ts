@@ -10,6 +10,49 @@
 // list), the projection always carries the canonical form shown here.
 
 /**
+ * How an [`EntryKind::Ebook`] activity lays pages out.
+ */
+export type EbookLayout =
+  /**
+   * Two pages side by side, like an open book. Fits a landscape panel: a
+   * single portrait page fitted to 16:9 is letterboxed and small.
+   */
+  | "facing"
+  /**
+   * Two pages side by side, with the first page alone — so the spreads fall
+   * where a printed book's would.
+   */
+  | "facing_first_centered"
+  /**
+   * One page at a time. The right choice on a portrait screen.
+   */
+  | "single"
+  /**
+   * One continuous column, scrolled rather than paged, fitted to the width.
+   *
+   * The only layout a **touch-only** device can navigate: dragging scrolls
+   * it. The paged layouts turn the page on a key, a gamepad D-pad or a
+   * scroll wheel, and a touchscreen produces none of those — Okular grabs
+   * only the pinch gesture, and has no swipe-to-turn anywhere in its
+   * desktop view.
+   */
+  | "scroll";
+
+/**
+ * Which reader an [`EntryKind::Ebook`] activity drives.
+ *
+ * Open rather than closed on purpose: the config surface here — a book and a
+ * place in it — is reader-agnostic, even though only one reader is wired up.
+ */
+export type EbookViewer =
+  /**
+   * Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
+   * PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
+   * documented way to disable its own escape hatches.
+   */
+  | "okular";
+
+/**
  * Automatic screen-brightness configuration (ambient-light driven).
  */
 export interface RawAutoBrightnessConfig {
@@ -553,6 +596,56 @@ export type RawEntryKind =
        * `"off"` boots the content fresh every time.
        */
       save_state?: RetroarchSaveState;
+    }
+  /**
+   * A single book, opened in a reader locked down to reading it. See
+   * [`shepherd_api::EntryKind::Ebook`] for what shepherd sets up around the
+   * launch.
+   */
+  | {
+      type: "ebook";
+      /**
+       * Extra arguments, appended after the ones shepherd derives.
+       */
+      args?: string[];
+      /**
+       * The book to open. Must be absolute or start with `~/`.
+       */
+      book: string;
+      /**
+       * The reader binary; defaults to the viewer's own name.
+       */
+      command?: string | null;
+      /**
+       * Additional environment variables
+       */
+      env?: Record<string, string>;
+      /**
+       * Font family for the same. Default "Noto Serif".
+       */
+      font_family?: string;
+      /**
+       * Point size of an EPUB's reflowed text. Default 16. Changing it
+       * repaginates, which moves a remembered position.
+       */
+      font_size?: number;
+      /**
+       * Lock the reader's own escape hatches. On by default.
+       */
+      kiosk?: boolean;
+      /**
+       * `facing` (default), `facing_first_centered`, or `single`.
+       */
+      layout?: EbookLayout;
+      /**
+       * Page to open on the first launch, 1-based. Ignored once the reader
+       * remembers a position for this book.
+       */
+      open_at?: number | null;
+      /**
+       * Which reader to drive. `okular` (default) is the only one wired up.
+       */
+      viewer?: EbookViewer;
     }
   | {
       type: "custom";

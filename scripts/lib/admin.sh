@@ -978,6 +978,54 @@ No games are installed — supply your own, and only ones you have the right to.
 EOF
 }
 
+# Install Okular and everything a reading activity needs (issue #160).
+#
+# Three packages, and the second is the one people miss: on Ubuntu, Okular's
+# EPUB support ships in okular-extra-backends, so a plain `apt install okular`
+# opens PDFs and refuses novels. The font is installed too, because the
+# `ebook` kind's default reading font has to exist for the entry to look like
+# the example — a missing family silently falls back to whatever Qt picks.
+ebook_install() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -*) die "Unknown option for 'apps install okular': $arg" ;;
+            *) die "'apps install okular' takes no arguments (got '$arg')" ;;
+        esac
+    done
+
+    require_root
+    maybe_sudo apt-get update
+
+    local -a packages=(okular okular-extra-backends fonts-noto-core)
+    info "Installing Okular, its extra format backends, and the default reading font"
+    if ! maybe_sudo apt-get install -y "${packages[@]}"; then
+        die "Failed to install: ${packages[*]}"
+    fi
+    success "Installed: ${packages[*]}"
+
+    cat <<EOF
+
+Reference a book with:
+
+    [[entries]]
+    id = "the-hobbit"
+    label = "The Hobbit"
+
+    [entries.kind]
+    type = "ebook"
+    book = "~/Books/the-hobbit.epub"
+
+The book path must be absolute or start with ~/. shepherd generates the
+reader's whole configuration per entry — the restrictions that keep a child in
+the book, the page-at-a-time view, and the reading font — and re-renders it on
+every launch, so nothing there needs installing or editing by hand.
+
+No books are installed. Supply your own, DRM-free; a store's own books belong
+in that store's app (a browser or Android activity), not here.
+EOF
+}
+
 # Install a supported activity backend, or one of the project's own Android
 # apps, using whichever packaging each actually expects — they all differ. The
 # type="steam" adapter drives Canonical's Steam *snap* (config.example.toml
@@ -1009,6 +1057,9 @@ apps_install() {
             success "Installed the Steam snap"
             info "Launch Steam once and log in before using type=\"steam\" entries."
             ;;
+        okular|ebook)
+            ebook_install "$@"
+            ;;
         chrome)
             require_root
             ensure_flathub
@@ -1025,14 +1076,14 @@ apps_install() {
             return 0
             ;;
         *)
-            die "Unknown app '$app' (supported: steam, chrome, retroarch, companion, media)"
+            die "Unknown app '$app' (supported: steam, chrome, retroarch, okular, companion, media)"
             ;;
     esac
 }
 
 apps_usage() {
     cat <<EOF
-Usage: shepherd-admin apps install <steam|chrome|retroarch [core...]>
+Usage: shepherd-admin apps install <steam|chrome|retroarch [core...]|okular>
        shepherd-admin apps install <companion|media> [options]
 
 Installs a supported activity backend, or one of shepherd's own Android apps,
@@ -1065,6 +1116,12 @@ with the packaging each expects (they differ):
 $(retroarch_core_table)
                 e.g.  shepherd-admin apps install retroarch mgba nestopia
                       shepherd-admin apps install retroarch --ppa mupen64plus-next
+
+    okular      Okular, its extra format backends, and the default reading
+                font (drives type = "ebook" entries). The backends matter:
+                EPUB support is packaged separately from Okular itself, so
+                without them a reading activity opens PDFs and refuses novels.
+                Installs no books.
 
     companion   Shepherd Companion, the parent-facing admin app.
     media       Shepherd Media, the media player for phones/tablets/Fire TV.

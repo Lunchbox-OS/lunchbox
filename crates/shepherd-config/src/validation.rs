@@ -335,6 +335,23 @@ fn validate_entry(entry: &RawEntry, config: &RawConfig) -> Vec<ValidationError> 
                 command,
             ));
         }
+        RawEntryKind::Ebook {
+            book,
+            command,
+            font_size,
+            font_family,
+            open_at,
+            ..
+        } => {
+            errors.extend(validate_ebook(
+                &entry.id,
+                book,
+                command.as_deref(),
+                *font_size,
+                font_family,
+                *open_at,
+            ));
+        }
         RawEntryKind::Custom { type_name, .. } => {
             if type_name.is_empty() {
                 errors.push(ValidationError::EntryError {
@@ -634,6 +651,64 @@ fn validate_time_window(window: &RawTimeWindow, entry_id: &str) -> Vec<Validatio
 /// The content path is the strict one: a bare relative path would be resolved
 /// against shepherdd's working directory, not the operator's, so it silently
 /// fails to find the ROM at launch time rather than here.
+/// Check an `ebook` entry (issue #160).
+///
+/// The book path gets the same treatment as RetroArch's `content`: a bare
+/// relative path would resolve against the daemon's working directory, which is
+/// never what an admin means. The font is checked because it is the one setting
+/// that cannot be fixed later without moving every remembered reading position.
+fn validate_ebook(
+    entry_id: &str,
+    book: &Path,
+    command: Option<&str>,
+    font_size: u32,
+    font_family: &str,
+    open_at: Option<u32>,
+) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    let mut err = |message: String| {
+        errors.push(ValidationError::EntryError {
+            entry_id: entry_id.to_string(),
+            message,
+        })
+    };
+
+    if book.as_os_str().is_empty() {
+        err("book cannot be empty".into());
+    } else if !is_rooted(book) {
+        err(format!(
+            "book must be absolute or start with ~/ (a relative path resolves \
+             against the daemon's working directory, not yours): {}",
+            book.display()
+        ));
+    }
+
+    if let Some(command) = command
+        && command.is_empty()
+    {
+        err("command cannot be empty".into());
+    }
+
+    // Okular renders a reflowed book at this size and paginates from it, so a
+    // silly value is not a cosmetic problem: it decides how much of the book
+    // fits on a page.
+    if !(6..=72).contains(&font_size) {
+        err(format!(
+            "font_size must be between 6 and 72 points (got {font_size})"
+        ));
+    }
+
+    if font_family.trim().is_empty() {
+        err("font_family cannot be empty".into());
+    }
+
+    if open_at == Some(0) {
+        err("open_at is a 1-based page number; use 1 for the first page".into());
+    }
+
+    errors
+}
+
 fn validate_retroarch(
     entry_id: &str,
     core: Option<&str>,

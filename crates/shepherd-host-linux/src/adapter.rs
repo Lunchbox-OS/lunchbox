@@ -260,10 +260,12 @@ struct SessionInfo {
     /// *system* manager, so `systemctl stop` on it (via the helper) reaches
     /// processes our own signals may not.
     firewall_scope: Option<String>,
-    /// A RetroArch session, which gets a longer graceful-stop window: its
-    /// shutdown has to unload the core, flush the in-game save, and write a
-    /// save state before the process goes away.
-    retroarch: bool,
+    /// Floor on this session's graceful-stop window, when its kind needs one
+    /// longer than the generic 5 s. RetroArch has to unload the core, flush
+    /// the in-game save and write a save state; a reader has to run its close
+    /// handler and write the page it was on. The cost of cutting either short
+    /// is the child's progress.
+    graceful_floor: Option<Duration>,
 }
 
 /// How a session's graceful SIGTERM is delivered.
@@ -1704,9 +1706,13 @@ impl HostAdapter for LinuxHost {
         entry_kind: &EntryKind,
         options: SpawnOptions,
     ) -> HostResult<HostSessionHandle> {
-        // RetroArch sessions need a longer grace period on stop than the
-        // generic default; `stop` reads this back off the session info.
-        let is_retroarch = matches!(entry_kind, EntryKind::Retroarch { .. });
+        // Some kinds need a longer grace period on stop than the generic
+        // default; `stop` reads this back off the session info.
+        let graceful_floor = match entry_kind {
+            EntryKind::Retroarch { .. } => Some(crate::retroarch::STOP_TIMEOUT),
+            EntryKind::Ebook { .. } => Some(crate::ebook::STOP_TIMEOUT),
+            _ => None,
+        };
 
         // Extract argv, env, cwd, snap_name, flatpak_app_id, and steam_app_id based on entry kind
         let (argv, env, cwd, snap_name, flatpak_app_id, steam_app_id) = match entry_kind {
@@ -1836,6 +1842,50 @@ impl HostAdapter for LinuxHost {
                     "Prepared RetroArch launch"
                 );
                 (launch.argv, env.clone(), None, None, None, None)
+            }
+            EntryKind::Ebook {
+                book,
+                viewer,
+                open_at,
+                layout,
+                font_size,
+                font_family,
+                command,
+                args,
+                env,
+                kiosk,
+            } => {
+                let spec = crate::ebook::Spec {
+                    book,
+                    viewer: *viewer,
+                    open_at: *open_at,
+                    layout: *layout,
+                    font_size: *font_size,
+                    font_family,
+                    command: command.as_deref(),
+                    args,
+                    kiosk: *kiosk,
+                };
+                let launch =
+                    crate::ebook::prepare(&spec, options.entry_id.as_deref(), expand_tilde)
+                        .map_err(|e| {
+                            HostError::SpawnFailed(format!(
+                                "Failed to prepare reader config: {}",
+                                e
+                            ))
+                        })?;
+                info!(
+                    argv = ?launch.argv,
+                    state_dir = %launch.paths.root.display(),
+                    "Prepared reader launch"
+                );
+                // The generated environment points the reader at the entry's
+                // own config and state; an explicit `[entries.kind.env]` is
+                // layered on top, so an admin can still override one of them
+                // deliberately.
+                let mut merged: HashMap<String, String> = launch.env.into_iter().collect();
+                merged.extend(env.clone());
+                (launch.argv, merged, None, None, None, None)
             }
             EntryKind::Custom {
                 type_name: _,
@@ -2110,7 +2160,7 @@ impl HostAdapter for LinuxHost {
             flatpak_app_id: flatpak_app_id.clone(),
             steam_app_id,
             firewall_scope: firewall_scope.clone(),
-            retroarch: is_retroarch,
+            graceful_floor,
         };
         self.session_info
             .lock()
@@ -2205,15 +2255,13 @@ impl HostAdapter for LinuxHost {
 
         match mode {
             StopMode::Graceful { timeout } => {
-                // Raise the floor for RetroArch: its shutdown unloads the
-                // core, flushes the in-game save, and writes a save state, and
-                // the cost of cutting that short is the child's save file. The
-                // callers all pass the generic 5s, which is a fine default for
-                // an app whose shutdown is just "exit".
-                let timeout = if session_info.as_ref().is_some_and(|i| i.retroarch) {
-                    timeout.max(crate::retroarch::STOP_TIMEOUT)
-                } else {
-                    timeout
+                // Raise the floor for kinds whose shutdown does real work —
+                // RetroArch writing a save state, a reader writing the page it
+                // was on. The callers all pass the generic 5s, which is a fine
+                // default for an app whose shutdown is just "exit".
+                let timeout = match session_info.as_ref().and_then(|i| i.graceful_floor) {
+                    Some(floor) => timeout.max(floor),
+                    None => timeout,
                 };
 
                 let plan = session_info.as_ref().map(GracefulSignal::for_session);
@@ -2889,7 +2937,7 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
-            retroarch: false,
+            graceful_floor: None,
         }
     }
 
@@ -3025,7 +3073,7 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
-            retroarch: false,
+            graceful_floor: None,
         });
         host.session_info
             .lock()
@@ -3359,7 +3407,7 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
-            retroarch: false,
+            graceful_floor: None,
         }
     }
 

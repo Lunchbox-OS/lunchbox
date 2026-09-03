@@ -19,6 +19,7 @@ pub enum EntryKindTag {
     Vm,
     Media,
     Retroarch,
+    Ebook,
     Custom,
 }
 
@@ -325,6 +326,50 @@ pub enum EntryKind {
         #[serde(default = "default_true")]
         reset: bool,
     },
+    /// One book, opened in a document reader locked down to reading it
+    /// (issue #160).
+    ///
+    /// The reader keeps the page: shepherd's job is to hand it a private
+    /// configuration that closes every door out of the book, and to close the
+    /// window politely at the end of the session so the position is written.
+    /// See [`shepherd_host_linux::ebook`] for what is generated.
+    Ebook {
+        /// The book. Absolute, or `~/`-prefixed; expanded at launch.
+        book: PathBuf,
+        /// Which reader to drive. Only `okular` is implemented.
+        #[serde(default)]
+        viewer: EbookViewer,
+        /// Page to open on the *first* launch, 1-based. Ignored once the
+        /// reader has a remembered position for this book.
+        #[serde(default)]
+        open_at: Option<u32>,
+        /// How pages are laid out. `facing` (the default) suits a landscape
+        /// panel; `single` a portrait one.
+        #[serde(default)]
+        layout: EbookLayout,
+        /// Point size for the reflowed text of an EPUB. Changing it
+        /// repaginates the book, which moves a remembered position, so pick it
+        /// before the book is first opened.
+        #[serde(default = "default_ebook_font_size")]
+        font_size: u32,
+        /// Font family for the same. Must be installed on the device.
+        #[serde(default = "default_ebook_font_family")]
+        font_family: String,
+        /// The reader binary. Defaults to the viewer's usual name.
+        #[serde(default)]
+        command: Option<String>,
+        /// Extra arguments, appended after the ones shepherd derives.
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Lock the reader down: no file dialog, no printing, no settings, no
+        /// menubar or toolbar. On by default — this is a supervised kiosk, and
+        /// off is only for an admin checking what the reader looks like
+        /// unrestricted.
+        #[serde(default = "default_true")]
+        kiosk: bool,
+    },
     Custom {
         type_name: String,
         payload: serde_json::Value,
@@ -334,6 +379,96 @@ pub enum EntryKind {
 /// Default for [`EntryKind::Retroarch::command`].
 pub(crate) fn default_retroarch_command() -> String {
     "retroarch".to_string()
+}
+
+pub(crate) fn default_ebook_font_size() -> u32 {
+    16
+}
+
+pub(crate) fn default_ebook_font_family() -> String {
+    "Noto Serif".to_string()
+}
+
+/// Which reader an [`EntryKind::Ebook`] activity drives.
+///
+/// Open rather than closed on purpose: the config surface here — a book and a
+/// place in it — is reader-agnostic, even though only one reader is wired up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum EbookViewer {
+    /// Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
+    /// PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
+    /// documented way to disable its own escape hatches.
+    #[default]
+    Okular,
+}
+
+impl EbookViewer {
+    /// The binary this viewer runs as, when the entry does not name one.
+    pub fn default_command(self) -> &'static str {
+        match self {
+            EbookViewer::Okular => "okular",
+        }
+    }
+}
+
+/// How an [`EntryKind::Ebook`] activity lays pages out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum EbookLayout {
+    /// Two pages side by side, like an open book. Fits a landscape panel: a
+    /// single portrait page fitted to 16:9 is letterboxed and small.
+    #[default]
+    Facing,
+    /// Two pages side by side, with the first page alone — so the spreads fall
+    /// where a printed book's would.
+    FacingFirstCentered,
+    /// One page at a time. The right choice on a portrait screen.
+    Single,
+    /// One continuous column, scrolled rather than paged, fitted to the width.
+    ///
+    /// The only layout a **touch-only** device can navigate: dragging scrolls
+    /// it. The paged layouts turn the page on a key, a gamepad D-pad or a
+    /// scroll wheel, and a touchscreen produces none of those — Okular grabs
+    /// only the pinch gesture, and has no swipe-to-turn anywhere in its
+    /// desktop view.
+    Scroll,
+}
+
+impl EbookLayout {
+    /// The value Okular's `[PageView] ViewMode` takes for this layout.
+    pub fn okular_view_mode(self) -> &'static str {
+        match self {
+            EbookLayout::Facing => "Facing",
+            EbookLayout::FacingFirstCentered => "FacingFirstCentered",
+            // Scrolling a two-page spread is nobody's idea of reading.
+            EbookLayout::Single | EbookLayout::Scroll => "Single",
+        }
+    }
+
+    /// Whether the view scrolls continuously instead of turning pages.
+    pub fn is_continuous(self) -> bool {
+        matches!(self, EbookLayout::Scroll)
+    }
+
+    /// Okular's `[Zoom] ZoomMode`: fit the width of a scrolled column, fit the
+    /// whole page when the page is the unit of navigation.
+    pub fn okular_zoom_mode(self) -> u8 {
+        match self {
+            EbookLayout::Scroll => 1,
+            _ => 2,
+        }
+    }
+
+    /// Whether turning the page needs an input a touchscreen cannot produce.
+    ///
+    /// The basis of the `EbookNoPageTurn` diagnostic: a paged layout on a
+    /// touch-only device leaves a child stranded on page one.
+    pub fn needs_keys_to_turn_pages(self) -> bool {
+        !self.is_continuous()
+    }
 }
 
 /// How a [`EntryKind::Retroarch`] activity treats its save state across
@@ -520,6 +655,7 @@ impl EntryKind {
             EntryKind::Vm { .. } => EntryKindTag::Vm,
             EntryKind::Media { .. } => EntryKindTag::Media,
             EntryKind::Retroarch { .. } => EntryKindTag::Retroarch,
+            EntryKind::Ebook { .. } => EntryKindTag::Ebook,
             EntryKind::Custom { .. } => EntryKindTag::Custom,
         }
     }

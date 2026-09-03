@@ -1019,6 +1019,57 @@ max_run_seconds = 2700     # 45 minutes -- long enough to reach a save point
 daily_quota_seconds = 5400
 cooldown_seconds = 1800
 
+## === Reading (ebook) ===
+# Install the reader with:
+#   sudo shepherd-admin apps install okular
+#
+# One activity per book, opening where the child stopped. shepherd generates
+# the reader's whole configuration per entry -- the restrictions that keep the
+# activity inside the book, the page-at-a-time view, the reading font -- and
+# re-renders it before every launch, so nothing below needs a config file of
+# its own. See docs/ebooks.md.
+#
+# No books are included. Supply your own, DRM-free. A book from a store belongs
+# in that store's app -- a browser activity for Kindle Cloud Reader or Google
+# Play Books -- because the DRM is the point of the store, and shepherd is not
+# in the business of removing it.
+[[entries]]
+id = "the-hobbit"
+label = "The Hobbit"
+# The cover makes a far better tile than a generic book icon; without one,
+# shepherd falls back to the format's mime icon.
+# icon = "~/Books/covers/the-hobbit.png"
+
+[entries.kind]
+type = "ebook"
+# Absolute or ~/-prefixed, like a RetroArch `content`: a bare relative path
+# would resolve against the daemon's working directory, not yours.
+book = "~/Books/the-hobbit.epub"
+# layout = "facing"     # the default: two pages, like an open book. Use
+#                       # "single" on a portrait screen, where one page fills
+#                       # it, or "scroll" for a continuous column.
+# font_size = 16        # points, for a reflowed EPUB. This is the reading-size
+#                       # knob: the page is fitted to the screen, so a larger
+#                       # font means fewer words on it and bigger text. It also
+#                       # repaginates the book, which moves a saved place --
+#                       # so choose it before the first read, not after.
+# font_family = "Noto Serif"
+# open_at = 1           # first launch only; after that the reader reopens
+#                       # wherever the child stopped.
+# kiosk = true          # the default; false unlocks the reader's own menus,
+#                       # file dialog and settings -- for an admin looking at
+#                       # what the reader does unrestricted, not for a child.
+
+# Reading is the obvious thing to reward, so no limit here -- and see the
+# [entries.tokens] block on a game entry for banking reading time into it.
+[entries.availability]
+always = true
+
+# A book needs no network. Belt to the reader's own restrictions: this is what
+# stops a link inside a book reaching anything.
+[entries.firewall]
+default = "deny"
+
 # Terminal for debugging only.
 # `foot` is used here (not `ptyxis`, `gnome-terminal`, etc.) because
 # single-instance GApplication terminals D-Bus-delegate new windows to a

@@ -28,6 +28,9 @@ const GENERATED = join(CONFIG_DIR, "model", "config.generated.ts");
  */
 const EXEMPT = {
   payload: "kind.custom.payload is free-form JSON, like the vm/media driver args",
+  viewer:
+    "kind.ebook.viewer has exactly one value (okular), so a one-option select would be " +
+    "clutter; wire it up when a second reader lands and this exemption goes stale",
 };
 
 /**

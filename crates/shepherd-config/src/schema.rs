@@ -1,7 +1,7 @@
 //! Raw configuration schema (as parsed from TOML)
 
 use serde::{Deserialize, Serialize};
-use shepherd_api::RetroarchSaveState;
+use shepherd_api::{EbookLayout, EbookViewer, RetroarchSaveState};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -593,6 +593,42 @@ pub enum RawEntryKind {
         #[serde(default = "default_true")]
         reset: bool,
     },
+    /// A single book, opened in a reader locked down to reading it. See
+    /// [`shepherd_api::EntryKind::Ebook`] for what shepherd sets up around the
+    /// launch.
+    Ebook {
+        /// The book to open. Must be absolute or start with `~/`.
+        book: PathBuf,
+        /// Which reader to drive. `okular` (default) is the only one wired up.
+        #[serde(default)]
+        viewer: EbookViewer,
+        /// Page to open on the first launch, 1-based. Ignored once the reader
+        /// remembers a position for this book.
+        #[serde(default)]
+        open_at: Option<u32>,
+        /// `facing` (default), `facing_first_centered`, or `single`.
+        #[serde(default)]
+        layout: EbookLayout,
+        /// Point size of an EPUB's reflowed text. Default 16. Changing it
+        /// repaginates, which moves a remembered position.
+        #[serde(default = "default_ebook_font_size")]
+        font_size: u32,
+        /// Font family for the same. Default "Noto Serif".
+        #[serde(default = "default_ebook_font_family")]
+        font_family: String,
+        /// The reader binary; defaults to the viewer's own name.
+        #[serde(default)]
+        command: Option<String>,
+        /// Extra arguments, appended after the ones shepherd derives.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Additional environment variables
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Lock the reader's own escape hatches. On by default.
+        #[serde(default = "default_true")]
+        kiosk: bool,
+    },
     Custom {
         type_name: String,
         #[serde(default)]
@@ -602,6 +638,14 @@ pub enum RawEntryKind {
 
 fn default_retroarch_command() -> String {
     "retroarch".to_string()
+}
+
+fn default_ebook_font_size() -> u32 {
+    16
+}
+
+fn default_ebook_font_family() -> String {
+    "Noto Serif".to_string()
 }
 
 /// Availability configuration

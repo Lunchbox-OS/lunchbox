@@ -32,7 +32,9 @@ use shepherd_api::{
     Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSubject,
 };
 use shepherd_config::Policy;
-use shepherd_host_linux::{FirewallEnforcementStatus, MissingCore, refresh_firewall_enforcement};
+use shepherd_host_linux::{
+    FirewallEnforcementStatus, MissingCore, MissingSupport, refresh_firewall_enforcement,
+};
 use shepherd_util::EntryId;
 
 /// Identity of a raised condition. Mirrors [`Diagnostic::key`] but owned, so it
@@ -97,6 +99,10 @@ pub struct ProbeFacts {
     /// Separate from the core: the two fail independently and are fixed
     /// differently, and a ROM on removable media comes and goes with it.
     pub retroarch_missing_content: Vec<(EntryId, String)>,
+    /// Ebook entries whose book is not there, with the path checked.
+    pub ebook_missing_books: Vec<(EntryId, String)>,
+    /// Ebook entries whose reader, or whose format backend, is not installed.
+    pub ebook_missing_support: Vec<(EntryId, MissingSupport)>,
 }
 
 /// Compute the probed diagnostics implied by `facts`.
@@ -272,6 +278,56 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
         });
     }
 
+    // A book that is not where the entry says it is. Same shape as RetroArch's
+    // missing content, and the same reasoning: the child taps a tile and gets
+    // an error dialog, which nothing else surfaces.
+    for (entry_id, path) in &facts.ebook_missing_books {
+        out.push(Diagnostic {
+            code: DiagnosticCode::EbookBookMissing,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: format!("The book this activity opens is not there: {path}"),
+            remedy: Some(
+                "Restore the file or point `book` at where it is now. A `~/` path is read                  against the home directory of the user shepherdd runs as."
+                    .to_string(),
+            ),
+            since: now,
+        });
+    }
+
+    // The reader itself, or the backend for this book's format. Worth its own
+    // code because the fix is an install rather than a config edit -- and
+    // because EPUB support shipping separately from Okular is exactly the kind
+    // of thing an administrator finds out from a child, otherwise.
+    for (entry_id, why) in &facts.ebook_missing_support {
+        let (message, remedy) = match why {
+            MissingSupport::Reader { command } => (
+                format!("The reader this activity runs is not installed: {command}"),
+                "Install it with `sudo shepherd-admin apps install okular`, or point                  `command` at the reader you meant."
+                    .to_string(),
+            ),
+            MissingSupport::Backend { format, generator } => (
+                format!(
+                    "Okular is installed but cannot open {format} files: the {generator}                      backend is missing"
+                ),
+                "Install it with `sudo shepherd-admin apps install okular`, which includes                  okular-extra-backends -- EPUB and DjVu support ship separately from Okular                  itself."
+                    .to_string(),
+            ),
+        };
+        out.push(Diagnostic {
+            code: DiagnosticCode::EbookReaderMissing,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message,
+            remedy: Some(remedy),
+            since: now,
+        });
+    }
+
     // Input devices. Same "only if it matters" rule as yt-dlp: with no
     // input-gated entry, an unreadable /dev/input changes nothing.
     if facts.input_devices_readable == Some(false) && facts.any_entry_requires_input {
@@ -335,22 +391,34 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         .iter()
         .map(|e| (e.id.clone(), e.kind.clone()))
         .collect();
-    let (retroarch_missing_cores, retroarch_missing_content) =
-        tokio::task::spawn_blocking(move || {
-            let mut cores = Vec::new();
-            let mut content = Vec::new();
-            for (id, kind) in kinds {
-                if let Some(why) = shepherd_host_linux::missing_core(&kind) {
-                    cores.push((id.clone(), why));
-                }
-                if let Some(path) = shepherd_host_linux::missing_content(&kind) {
-                    content.push((id, path));
-                }
+    let (
+        retroarch_missing_cores,
+        retroarch_missing_content,
+        ebook_missing_books,
+        ebook_missing_support,
+    ) = tokio::task::spawn_blocking(move || {
+        let mut cores = Vec::new();
+        let mut content = Vec::new();
+        let mut books = Vec::new();
+        let mut support = Vec::new();
+        for (id, kind) in kinds {
+            if let Some(why) = shepherd_host_linux::missing_core(&kind) {
+                cores.push((id.clone(), why));
             }
-            (cores, content)
-        })
-        .await
-        .unwrap_or_default();
+            if let Some(path) = shepherd_host_linux::missing_content(&kind) {
+                content.push((id.clone(), path));
+            }
+            if let Some(path) = shepherd_host_linux::missing_book(&kind) {
+                books.push((id.clone(), path));
+            }
+            if let Some(why) = shepherd_host_linux::missing_support(&kind) {
+                support.push((id, why));
+            }
+        }
+        (cores, content, books, support)
+    })
+    .await
+    .unwrap_or_default();
 
     let youtube_entries = crate::media::youtube_entry_ids(policy);
     let ytdlp_available = if youtube_entries.is_empty() {
@@ -375,6 +443,8 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         browser_policy_ignored_entries: browser_policy_ignored_entry_ids(policy),
         retroarch_missing_cores,
         retroarch_missing_content,
+        ebook_missing_books,
+        ebook_missing_support,
     }
 }
 
@@ -549,6 +619,7 @@ impl shepherd_api::DiagnosticSink for DiagnosticPublisher {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn at(secs: i64) -> DateTime<Local> {

@@ -54,6 +54,23 @@ pub(crate) fn autodetect_icon(kind: &EntryKind) -> Option<String> {
             }
             icon
         }
+        // A book has no on-disk app to look up, and nothing about the reader
+        // identifies the book. Cover art stays an explicit `icon = ` on the
+        // entry; the fallback is the format's own mime icon, which every icon
+        // theme carries.
+        EntryKind::Ebook { book, .. } => Some(
+            match book
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("pdf") => "application-pdf",
+                Some("cbz") | Some("cbr") | Some("cb7") | Some("cbt") => "application-x-cbz",
+                Some("djvu") | Some("djv") => "image-vnd.djvu",
+                _ => "application-epub+zip",
+            }
+            .to_string(),
+        ),
         EntryKind::Vm { .. } | EntryKind::Custom { .. } => None,
     }
 }
