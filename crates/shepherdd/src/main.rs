@@ -320,16 +320,6 @@ impl StateSource {
         }
     }
 
-    /// The custodian's policy text, when there is one.
-    fn custodial_policy(&self) -> Option<String> {
-        match self {
-            StateSource::Custodian { files, .. } => {
-                files.read(ProtectedFile::Config).ok().flatten()
-            }
-            StateSource::Local { .. } => None,
-        }
-    }
-
     /// The policy, from wherever this device keeps it.
     ///
     /// A custodian that answers but holds no policy falls back to the file at
@@ -500,32 +490,6 @@ impl Service {
         Err(last.expect("at least one attempt"))
     }
 
-    /// Say something when the policy the daemon read is not the policy sitting
-    /// at the path an operator edits.
-    ///
-    /// The home copy is deliberately kept: it is the seed migration copies
-    /// from, and the fallback shepherdd reads when the custodian is
-    /// unreachable — without it, a custodian that fails to start would take the
-    /// whole session down, which is the trade #144 refuses to make.
-    ///
-    /// The cost of keeping it is that an operator can edit it and see nothing
-    /// happen. That is the trap this warning exists to close: it fires exactly
-    /// when the two have diverged, which is exactly when someone has edited the
-    /// wrong one.
-    fn warn_if_the_policy_diverged(local: &Path, custodial: &str) {
-        let Ok(home) = std::fs::read_to_string(local) else {
-            return;
-        };
-        if home != custodial {
-            warn!(
-                path = %local.display(),
-                "The policy here differs from the one shepherd is running. The custodian's \
-                 copy is what takes effect; this one is the seed and the fallback. Apply an \
-                 edit with `sudo shepherd install policy --user <user>` (issue #157)"
-            );
-        }
-    }
-
     /// Say something when a protected device still has the old database in the
     /// user's home.
     ///
@@ -693,9 +657,6 @@ impl Service {
             source = state.policy_source(&args.config),
             "Configuration loaded"
         );
-        if let Some(custodial) = state.custodial_policy() {
-            Self::warn_if_the_policy_diverged(&args.config, &custodial);
-        }
 
         // Determine paths
         let socket_path = args
@@ -1656,6 +1617,7 @@ impl Service {
                 _ = diagnostic_timer.tick() => {
                     Self::sweep_diagnostics(
                         &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
+                        policy_files.as_ref(), &config_path,
                     ).await;
                 }
 
@@ -1713,6 +1675,7 @@ impl Service {
                     // keeps a diagnostic about an activity that is gone.
                     Self::sweep_diagnostics(
                         &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
+                        policy_files.as_ref(), &config_path,
                     ).await;
                 }
 
@@ -1881,9 +1844,21 @@ impl Service {
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         sound_backend_available: bool,
+        policy_files: Option<&Arc<dyn ProtectedFiles>>,
+        config_path: &Path,
     ) {
         let policy = { engine.lock().await.policy().clone() };
-        let facts = diagnostics::gather_facts(&policy, sound_backend_available).await;
+        // Read the custodian's copy here rather than caching it: the whole
+        // point is to notice an edit made since the last sweep, and a cached
+        // one would report the divergence that existed at startup forever.
+        let custodial =
+            policy_files.and_then(|files| files.read(ProtectedFile::Config).ok().flatten());
+        let source = custodial.as_ref().map(|text| diagnostics::PolicySource {
+            local: config_path,
+            custodial: text,
+        });
+        let facts =
+            diagnostics::gather_facts(&policy, sound_backend_available, source.as_ref()).await;
         let fresh = diagnostics::evaluate(&facts, shepherd_util::now());
 
         // Feed the firewall answer to the availability gate before publishing.

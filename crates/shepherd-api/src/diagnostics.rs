@@ -90,6 +90,19 @@ pub enum DiagnosticCode {
     /// device an activity could *push* into falling back, which is the one
     /// thing this must not be.
     StateNotProtected,
+    /// The policy at the path an operator edits is not the policy the device
+    /// is running (issue #157).
+    ///
+    /// The custodian's copy is authoritative; the one in the user's home is the
+    /// seed migration reads and the fallback used when the custodian cannot be
+    /// reached. Keeping the second is what stops a custodian that failed to
+    /// start taking the session down with it — and the cost is that an editor
+    /// can be pointed at the wrong one and see nothing happen.
+    ///
+    /// `Warning` rather than `Critical`: nothing is unprotected, and the device
+    /// is enforcing a policy that was deliberately installed. What is wrong is
+    /// that somebody's edit is not the one in force.
+    PolicyDiverged,
     /// Something at this uid tried to drive the daemon from outside the
     /// session and was refused (issue #144). Worth an administrator's
     /// attention: an activity probing the management socket is not something

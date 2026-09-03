@@ -173,9 +173,14 @@ that failed to start would take the whole session down — the trade #144
 declines to make twice already.
 
 The custodian's copy is what takes effect. The cost of keeping the other is that
-an operator can edit it and see nothing happen, so two things close that trap:
-`shepherd install config` writes both, and `shepherdd` warns at startup when the
-two have diverged — which is exactly when someone has edited the wrong one.
+an operator can edit it and see nothing happen, so three things close that trap:
+`shepherd install policy` pushes an edit, `shepherd install config` writes both,
+and the device reports `policy_diverged` while the two disagree — which is
+exactly what a forgotten push looks like.
+
+That is a swept diagnostic rather than a log line, so it clears itself when the
+edit is pushed. It has to be: the sweep also runs on config reload, and a reload
+is what pushing an edit causes.
 
 ### What is still open
 

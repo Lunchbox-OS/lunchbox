@@ -588,8 +588,9 @@ Consequences worth knowing before you debug a device:
 - **Editing `~/.config/shepherd/config.toml` no longer takes effect on its own.**
   That file is now the seed and the fallback; the custodian's copy is what the
   daemon reads. Push an edit with `sudo shepherd install policy --user kiosk`,
-  which reloads within a second. `shepherdd` warns at startup when the two have
-  diverged, which is what a forgotten push looks like.
+  which reloads within a second. While the two disagree the device reports the
+  `policy_diverged` diagnostic — visible in the web UI and the companion app —
+  and it clears when the edit is pushed.
 - **The state is not in the user's home.** `/var/lib/shepherdd/state/<user>/` is,
   and only `root` and `shepherd-state` can read it.
 - **The socket is created by systemd, not by the daemon**, which is what stops an
