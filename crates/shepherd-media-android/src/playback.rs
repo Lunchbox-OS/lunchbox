@@ -66,7 +66,17 @@ impl PlaybackView {
 
     /// Draw the overlay. Returns `true` if the user asked to leave playback
     /// (back button / Esc).
-    pub fn draw(&mut self, ui: &mut egui::Ui, player: &mut dyn PlayerHandle, title: &str) -> bool {
+    ///
+    /// `video` is where the video sits inside `ui`, in points, or `None` before
+    /// a file is open. Everything outside it is filled with black — see
+    /// [`Self::paint_letterbox`].
+    pub fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        player: &mut dyn PlayerHandle,
+        title: &str,
+        video: Option<crate::surface::VideoRect>,
+    ) -> bool {
         let ctx = ui.ctx().clone();
         let mut leave = false;
         let mut any_input = false;
@@ -108,6 +118,7 @@ impl PlaybackView {
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .show_inside(ui, |ui| {
                 let rect = ui.max_rect();
+                Self::paint_letterbox(ui.painter(), rect, video);
                 if controls_visible
                     && video::transport_overlay(ui, rect, player, title, &OVERLAY_THEME)
                         == video::OverlayAction::Leave
@@ -146,6 +157,44 @@ impl PlaybackView {
         });
 
         leave
+    }
+}
+
+impl PlaybackView {
+    /// Fill everything outside the video with black.
+    ///
+    /// The window is translucent — that is how the SurfaceView behind it shows
+    /// through — so whatever this does not paint shows the home screen instead
+    /// of a letterbox bar. Painting the *whole* panel is not an option either:
+    /// an opaque fill over the video area would hide the video, and egui cannot
+    /// punch a hole back through it. So the bars are painted as bars.
+    ///
+    /// With no video rectangle yet, nothing is painted: the surface is still
+    /// filling the window, and black over all of it would hide the first frame.
+    fn paint_letterbox(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        video: Option<crate::surface::VideoRect>,
+    ) {
+        let Some(video) = video else { return };
+        let black = egui::Color32::BLACK;
+        let left = rect.min.x + video.x;
+        let top = rect.min.y + video.y;
+        let right = left + video.width;
+        let bottom = top + video.height;
+
+        for bar in [
+            // Pillarbox, then letterbox: whichever pair is degenerate paints
+            // nothing, so this covers both orientations without a branch.
+            egui::Rect::from_min_max(rect.min, egui::pos2(left, rect.max.y)),
+            egui::Rect::from_min_max(egui::pos2(right, rect.min.y), rect.max),
+            egui::Rect::from_min_max(egui::pos2(left, rect.min.y), egui::pos2(right, top)),
+            egui::Rect::from_min_max(egui::pos2(left, bottom), egui::pos2(right, rect.max.y)),
+        ] {
+            if bar.width() > 0.0 && bar.height() > 0.0 {
+                painter.rect_filled(bar, 0.0, black);
+            }
+        }
     }
 }
 

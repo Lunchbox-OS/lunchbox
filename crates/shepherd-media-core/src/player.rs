@@ -107,6 +107,20 @@ pub trait PlayerHandle: Send {
         None
     }
 
+    /// The size the current video should be *displayed* at, in pixels, once
+    /// anamorphic pixels are accounted for. `None` when nothing is playing, for
+    /// audio, or before the file is open.
+    ///
+    /// Only a backend that leaves scaling to someone else needs this. Under
+    /// Android's `mediacodec_embed` the decoder scales its output to whatever
+    /// size the Surface happens to be, and no pass under mpv's control ever
+    /// draws the frame — so `--keepaspect` cannot apply, and the host has to
+    /// shape the Surface itself. The Linux front-end renders through mpv's own
+    /// GL API, which letterboxes internally, and never calls this.
+    fn video_size(&self) -> Option<(i64, i64)> {
+        None
+    }
+
     fn set_volume(&mut self, _percent: f64) -> Result<(), PlayerError> {
         Ok(())
     }
@@ -588,6 +602,15 @@ mod libmpv_backend {
 
         fn duration(&self) -> Option<f64> {
             self.mpv.get_property::<f64>("duration").ok()
+        }
+
+        /// `dwidth`/`dheight` rather than `width`/`height`: they are the
+        /// dimensions after aspect correction, so a 720x576 anamorphic PAL file
+        /// reports the 1024x576 it should be shown at.
+        fn video_size(&self) -> Option<(i64, i64)> {
+            let width = self.mpv.get_property::<i64>("dwidth").ok()?;
+            let height = self.mpv.get_property::<i64>("dheight").ok()?;
+            (width > 0 && height > 0).then_some((width, height))
         }
 
         fn set_volume(&mut self, percent: f64) -> Result<(), PlayerError> {

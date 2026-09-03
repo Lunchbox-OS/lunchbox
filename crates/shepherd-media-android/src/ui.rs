@@ -294,6 +294,11 @@ pub struct MediaApp {
     player: Option<Box<dyn PlayerHandle>>,
     playback: PlaybackView,
     playing: Option<PlayingItem>,
+    /// Where the video sits inside the window, in egui points: what the
+    /// SurfaceView is placed at, and what the letterbox bars are painted
+    /// around. `None` when no file is open. Held so the activity is only told
+    /// when it changes rather than every frame.
+    video_rect: Option<crate::surface::VideoRect>,
     /// Shared bucket cache for SponsorBlock lookups (issue #159). Buckets are
     /// not per library — a video's segments are the same whichever playlist
     /// reached it — so one cache serves them all.
@@ -388,6 +393,7 @@ impl MediaApp {
             poster_rx,
             player,
             playback,
+            video_rect: None,
             sponsorblock_cache,
             sponsorblock: None,
             playing: None,
@@ -1510,6 +1516,8 @@ impl MediaApp {
         if let Some(watcher) = self.sponsorblock.as_mut() {
             watcher.note_stopped();
         }
+        // The video rectangle is deliberately left alone: see
+        // `track_video_bounds`. It is replaced when the next file opens.
         self.playing = None;
     }
 
@@ -1593,6 +1601,7 @@ impl MediaApp {
         // position into the resume state (batched — this runs every frame).
         // In that order, so a position saved this frame is the one on the far
         // side of a skip rather than inside it.
+        self.track_video_bounds(ui.max_rect().size(), ui.ctx().pixels_per_point());
         self.apply_segment_skip();
         self.track_resume_progress();
 
@@ -1602,7 +1611,7 @@ impl MediaApp {
             .map(|x| x.title.clone())
             .unwrap_or_default();
         let leave = match self.player.as_mut() {
-            Some(p) => self.playback.draw(ui, p.as_mut(), &title),
+            Some(p) => self.playback.draw(ui, p.as_mut(), &title, self.video_rect),
             None => {
                 ui.label("No player available on this platform.");
                 ui.button("⬅ Back").clicked()
@@ -1611,6 +1620,39 @@ impl MediaApp {
         if leave {
             self.finish_resume_tracking();
             self.end_playback();
+        }
+    }
+
+    /// Keep the video SurfaceView placed at the rectangle the playing file
+    /// should occupy, and remember it so the bars can be painted around it.
+    ///
+    /// Polled rather than pushed once at play time: the size is not known when
+    /// playback is requested, only once the file is open, and it can change
+    /// again mid-playback (a stream switching representation, a playlist moving
+    /// on). The activity is told only when the rectangle actually changes, so
+    /// the steady state is one property read per frame and no JNI at all.
+    fn track_video_bounds(&mut self, window: egui::Vec2, pixels_per_point: f32) {
+        let size = self.player.as_ref().and_then(|p| p.video_size());
+        let rect = size.and_then(|(w, h)| {
+            crate::surface::fit_video((window.x, window.y), (w as f32, h as f32))
+        });
+        // A size that has *stopped* being known is not a reason to resize. The
+        // surface still holds the last frame of the file that just ended, and
+        // stretching it back across the window to say "nothing is playing" is
+        // the very distortion this exists to avoid. The next file sets its own
+        // bounds when it opens.
+        let Some(rect) = rect else { return };
+        let rect = Some(rect);
+        if rect != self.video_rect {
+            self.video_rect = rect;
+            // The activity lays views out in window pixels; egui works in
+            // points, so this is the one place the two have to agree.
+            crate::surface::set_video_bounds(rect.map(|r| crate::surface::VideoRect {
+                x: r.x * pixels_per_point,
+                y: r.y * pixels_per_point,
+                width: r.width * pixels_per_point,
+                height: r.height * pixels_per_point,
+            }));
         }
     }
 
