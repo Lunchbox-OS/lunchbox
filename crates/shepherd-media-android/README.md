@@ -64,8 +64,9 @@ the full design and roadmap.
   bucket cache is `shepherd-media-app`'s, so this behaves exactly as the Linux
   binary does; only the fetch and the cache directory
   (`<filesDir>/cache/sponsorblock/`) are local. Off means no request is made.
-  Verified on a Pixel 10a: 62s of playback reaches 112s of video with the
-  toggle on and 62s with it off, and the bucket lands in the app's own cache.
+  Verified on a Pixel 10a, through the settings checkbox: 62s of playback
+  reaches 112s of video with the toggle on and 62s with it off, and the bucket
+  lands in the app's own cache.
 - Source resolution (`resolve` module): local/`file://` TOML, HTTP(S) TOML, and
   `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
   and the grid lists the real items. `content://` SAF and YouTube sources report

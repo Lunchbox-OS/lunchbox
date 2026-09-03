@@ -234,9 +234,10 @@ struct GridView {
     /// resolve. `None` when its "Resume playback" option is off — which is what
     /// turns the whole feature off: nothing is recorded and nothing offered.
     resume: Option<ResumeTracker>,
-    /// Whether the resume state has been attached yet (the library has to
-    /// resolve first, so this can't be done when the view is created).
-    resume_attached: bool,
+    /// Whether the per-library state (resume, and the SponsorBlock skipper)
+    /// has been attached yet — the library has to resolve first, so it cannot
+    /// be done when the view is created.
+    state_attached: bool,
     /// The item the "continue watching" card is offering, until the viewer
     /// answers it.
     resume_offer: Option<String>,
@@ -559,9 +560,9 @@ impl MediaApp {
         // A library whose "Reverse" toggle flipped this frame, applied to its
         // already-loaded grid below (so it takes effect without re-resolving).
         let mut reverse_toggled: Option<String> = None;
-        // Likewise for "Resume playback": the grid's resume state is attached
-        // per library, so a flip has to re-attach it.
-        let mut resume_toggled: Option<String> = None;
+        // Likewise for "Resume playback" and "Skip sponsors": both are attached
+        // to the grid per library, so a flip of either has to re-attach them.
+        let mut library_state_toggled: Option<String> = None;
         let active = self.settings.active_library.clone();
         let count = ids.len();
 
@@ -606,7 +607,7 @@ impl MediaApp {
                                      continue the last one watched.",
                                 );
                             if res.changed() {
-                                resume_toggled = Some(id.clone());
+                                library_state_toggled = Some(id.clone());
                             }
                             controls.push(res);
                             // Skip sponsored spans (mirrors the Linux
@@ -621,7 +622,7 @@ impl MediaApp {
                                      Off sends nothing to sponsor.ajay.app.",
                                 );
                             if sb.changed() {
-                                resume_toggled = Some(id.clone());
+                                library_state_toggled = Some(id.clone());
                             }
                             controls.push(sb);
                         });
@@ -665,13 +666,14 @@ impl MediaApp {
             g.focused = 0;
         }
 
-        // Same for "Resume playback": turning it on loads that library's saved
-        // positions (and may offer to continue an item); turning it off drops
-        // them, so the next play starts from the beginning.
-        if let Some(id) = resume_toggled
+        // Same for "Resume playback" and "Skip sponsors", which are attached
+        // together: turning resume on loads that library's saved positions (and
+        // may offer to continue an item) and turning it off drops them, while
+        // the segment skipper exists only while its own box is ticked.
+        if let Some(id) = library_state_toggled
             && self.grid.as_ref().is_some_and(|g| g.library_id == id)
         {
-            self.attach_resume(&id);
+            self.attach_library_state(&id);
         }
 
         // Drive D-pad Up/Down through every control (the Limit drag value is left
@@ -1045,19 +1047,22 @@ impl MediaApp {
             columns: 4,
             scroll: grid::ScrollState::default(),
             resume: None,
-            resume_attached: false,
+            state_attached: false,
             resume_offer: None,
             prompt: prompt::ResumePrompt::new(),
         });
     }
 
-    /// Attach the library's saved playback positions once its contents are
-    /// known, and work out whether to offer to continue the last item watched.
+    /// Attach the per-library playback state once the library's contents are
+    /// known: its saved positions (and whether to offer to continue the last
+    /// item watched), and its SponsorBlock skipper.
     ///
-    /// Deferred until the library resolves because both halves need its item
-    /// ids: positions for departed items are dropped, and an offer is only made
-    /// for an item the library still has.
-    fn attach_resume(&mut self, library_id: &str) {
+    /// Deferred until the library resolves because the resume half needs its
+    /// item ids: positions for departed items are dropped, and an offer is only
+    /// made for an item the library still has. The skipper does not need them,
+    /// but it is switched per library by the same settings card, so the two
+    /// travel together and a toggle of either re-runs this.
+    fn attach_library_state(&mut self, library_id: &str) {
         // The segment skipper follows the same library switch, and off is the
         // absence of one.
         self.sponsorblock = self
@@ -1084,7 +1089,7 @@ impl MediaApp {
         let GridState::Loaded(lib) = &g.state else {
             return;
         };
-        g.resume_attached = true;
+        g.state_attached = true;
         if !enabled {
             g.resume = None;
             g.resume_offer = None;
@@ -1232,9 +1237,9 @@ impl MediaApp {
             return None;
         }
 
-        // The library has resolved: its saved positions can be attached now.
-        if !self.grid.as_ref().is_some_and(|g| g.resume_attached) {
-            self.attach_resume(library_id);
+        // The library has resolved: its per-library state can be attached now.
+        if !self.grid.as_ref().is_some_and(|g| g.state_attached) {
+            self.attach_library_state(library_id);
         }
 
         // Move the focus index with the D-pad / arrow keys (the grid tiles are

@@ -393,6 +393,13 @@ video, from the shared overlay.
 mpv decoded with `mediacodec` zero-copy throughout, so this also exercised the
 path that matters on the hardware this targets.
 
+A second pass drove the **settings UI** rather than a hand-written
+`settings.toml`, which is the path a parent actually takes: ticking
+**Skip sponsors** on the library card wrote `sponsorblock = true`, survived a
+force-stop, and the next play planned its skip and reached 100.6s in 50s of wall
+clock. Worth doing separately — seeding the file tests everything except the
+control that turns it on.
+
 One change came out of running it: the Android plan line was logged at `debug`,
 and the app filters to `info` (`lib.rs`), so the one line that says whether
 anything was planned — and against which duration — was invisible in logcat,
