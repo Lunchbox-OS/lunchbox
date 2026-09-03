@@ -6,6 +6,7 @@ mod connectivity;
 mod ordering;
 mod paths;
 mod posters;
+mod skipping;
 mod ui;
 
 use std::path::Path;
@@ -26,8 +27,10 @@ use tracing_subscriber::EnvFilter;
 use crate::caching_player::CachingPlayer;
 use crate::cli::{Cli, Command, SortBy};
 use crate::ordering::apply_ordering;
+use crate::skipping::SkipWatcher;
 use crate::ui::StartMode;
-use shepherd_media_cache::VideoCache;
+use shepherd_media_cache::{SponsorBlockCache, VideoCache};
+use shepherd_media_core::sponsorblock::Category;
 
 /// Exit codes per the spec; keep in sync with `docs/shepherd-media.md`.
 const EXIT_OK: u8 = 0;
@@ -52,6 +55,18 @@ fn main() -> ExitCode {
     let reverse = cli.reverse;
     let watched_grace = shepherd_media_cache::grace_from_days(cli.watched_grace_days);
     let cache_max_bytes = cli.cache_max_bytes;
+
+    // Resolved once, up front: a typo here is a parent asking for something
+    // this build will not do, and failing the launch says so where an ignored
+    // flag would leave them believing sponsors were being skipped.
+    let sponsorblock = match cli::parse_categories(&cli.sponsorblock_categories) {
+        Ok(categories) => categories,
+        Err(e) => {
+            eprintln!("invalid --sponsorblock-categories: {e}");
+            return ExitCode::from(EXIT_INVOCATION);
+        }
+    };
+
     let result = match &cli.command {
         Command::Validate { library } => run_validate(library, sort_by, reverse),
         Command::Play { library, item } => run_play(
@@ -64,6 +79,7 @@ fn main() -> ExitCode {
             cli.resume,
             watched_grace,
             cache_max_bytes,
+            skip_watcher(&cli.sponsorblock_api, &sponsorblock),
         ),
         Command::Browse { library } => run_browse(
             library,
@@ -75,10 +91,17 @@ fn main() -> ExitCode {
             cli.resume,
             watched_grace,
             cache_max_bytes,
+            skip_watcher(&cli.sponsorblock_api, &sponsorblock),
         ),
     };
 
     ExitCode::from(result)
+}
+
+/// The SponsorBlock watcher for this run, or `None` when no categories are
+/// enabled — which is the default, and which means no lookup is ever started.
+fn skip_watcher(api: &str, categories: &[Category]) -> Option<SkipWatcher> {
+    SkipWatcher::new(SponsorBlockCache::new(api), categories.to_vec())
 }
 
 /// Load a library from either a file path or a YouTube playlist URL,
@@ -158,6 +181,7 @@ fn run_play(
     resume: bool,
     watched_grace: Duration,
     cache_max_bytes: u64,
+    skipping: Option<SkipWatcher>,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -201,6 +225,7 @@ fn run_play(
         cache,
         StartMode::Playing(item_id.to_string()),
         resume,
+        skipping,
     ) {
         Ok(ui::ExitCause::User) => EXIT_OK,
         Ok(ui::ExitCause::Signal) => EXIT_SIGNAL,
@@ -222,6 +247,7 @@ fn run_browse(
     resume: bool,
     watched_grace: Duration,
     cache_max_bytes: u64,
+    skipping: Option<SkipWatcher>,
 ) -> u8 {
     let library = match load_library_from_source(library_source, sort_by, reverse) {
         Ok(l) => l,
@@ -252,7 +278,15 @@ fn run_browse(
 
     info!("starting browse UI");
     let term = install_signal_handler();
-    match ui::run(session, term, online, cache, StartMode::Browsing, resume) {
+    match ui::run(
+        session,
+        term,
+        online,
+        cache,
+        StartMode::Browsing,
+        resume,
+        skipping,
+    ) {
         Ok(ui::ExitCause::User) => EXIT_OK,
         Ok(ui::ExitCause::Signal) => EXIT_SIGNAL,
         Err(e) => {
