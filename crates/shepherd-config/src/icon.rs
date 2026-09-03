@@ -299,6 +299,7 @@ mod tests {
             reverse: false,
             resume: false,
             prefetch: None,
+            sponsorblock: None,
         }
     }
 

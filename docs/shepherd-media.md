@@ -601,6 +601,94 @@ file just forgets that library's positions. Only item ids, second offsets, and
 durations are stored — no timestamps, no history of what was watched when. With
 the option off nothing is recorded and no file is written.
 
+## Skipping sponsors (SponsorBlock)
+
+Off by default. Turn it on and a sponsor read, a "like and subscribe", or an end
+card in a YouTube video is jumped over, with a brief notice naming what was
+skipped. Issue #159.
+
+```toml
+[service.media.sponsorblock]
+enabled = true
+# categories = ["sponsor", "selfpromo", "interaction", "intro", "outro"]
+# api = "https://sponsor.ajay.app"
+```
+
+A single library opts out — or in — with `sponsorblock` under its
+`[entries.kind]`, for a channel whose sponsor reads are part of the show:
+
+```toml
+[entries.kind]
+type = "media"
+library = "https://www.youtube.com/playlist?list=…"
+sponsorblock = false
+```
+
+*Which* categories to skip stays a household decision on the service table;
+the per-entry setting is only whether to skip at all.
+
+### Categories
+
+| Category | What it marks | In the default set |
+|---|---|---|
+| `sponsor` | A paid promotion | yes |
+| `selfpromo` | Unpaid self-promotion, merchandise | yes |
+| `interaction` | "Like and subscribe" | yes |
+| `intro` | Title sequence, intermission | yes |
+| `outro` | End cards, credits | yes |
+| `preview` | Recap of an earlier episode | no |
+| `filler` | Tangential filler | no |
+| `music_offtopic` | Non-music section of a music video | no |
+| `hook` | Opening hook | no |
+
+The last four are left out of the default because they are judgement calls: a
+recap is part of the episode for a viewer who missed last week, and "filler" is
+one contributor's opinion about what a video is for. The service's
+`poi_highlight` and `chapter` are markers rather than spans and are rejected by
+config validation.
+
+### What leaves the device
+
+A four-character hash prefix, and nothing else.
+
+The lookup asks for every video whose id hashes into the same bucket — around a
+hundred videos, ~40 KB — and picks the right one out on the device, so the
+service cannot tell which video is playing. The exact-video endpoint, which
+would be a description of somebody's viewing, is never used. Nothing is
+submitted and nothing is voted on: this is a read-only client.
+
+With `enabled = false` — the default — **no request is made at all**: not at
+launch, not on a play, not in the background. An entry that set
+`sponsorblock = false` launches a player that was never told any categories, so
+it has nothing to look up.
+
+Buckets are cached under `$XDG_CACHE_HOME/shepherd/media/sponsorblock/` for a
+day, and served stale when a refresh fails, so a device that went offline keeps
+skipping what it knew about. shepherdd's prefetcher warms the bucket alongside
+the video it downloads, so a library prefetched while online still skips when it
+is played offline.
+
+### When it does not skip
+
+- **Non-YouTube sources.** The database is YouTube-only.
+- **A video whose upload was replaced.** Submissions are made against a
+  particular cut; when the duration of the file being played disagrees with the
+  duration it was submitted for, the segment is dropped rather than applied to
+  the wrong content. The tolerance is yt-dlp's.
+- **A downvoted submission**, or an unlocked one overlapping a
+  moderator-confirmed one.
+- **A span the viewer has already been skipped past** and deliberately seeked
+  back into. Seeking back to *before* a span arms it again.
+- **A live stream**, or any file the player cannot report a duration for.
+
+### Attribution
+
+Segment data comes from [SponsorBlock](https://sponsor.ajay.app) and is licensed
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). No
+segment data is redistributed with shepherd-launcher: it is fetched at runtime
+and cached on the device that fetched it. The non-commercial clause applies to
+how this project is used and distributed, not to its own licence.
+
 ## Non-features
 
 These are deliberately not implemented:
@@ -613,3 +701,6 @@ These are deliberately not implemented:
 - Subscription-service DRM playback.
 - Any animated/celebratory UI affordances (the touch overlay is plain;
   the scrubber doesn't bounce, no on-completion confetti).
+- Submitting or voting on SponsorBlock segments, and any UI for them: no
+  category picker in the player, no "unskip" button. What to skip is a parent's
+  configuration, not a decision handed to the child mid-video.

@@ -496,6 +496,16 @@ export type RawEntryKind =
        * `category`, `duration`.
        */
       sort_by?: RawMediaSortBy;
+      /**
+       * Skip SponsorBlock segments in this library (issue #159). `None`
+       * inherits `service.media.sponsorblock.enabled`; `false` turns it off
+       * for this library alone, which is the shape the need actually takes —
+       * a channel whose "sponsor" spans are part of the show.
+       *
+       * Which categories to skip stays a household decision, on the service
+       * table; this is only whether to skip at all.
+       */
+      sponsorblock?: boolean | null;
     }
   /**
    * A single piece of content played through RetroArch. See
@@ -815,6 +825,11 @@ export interface RawMediaServiceConfig {
    */
   prefetch_while_session_active?: boolean;
   /**
+   * Skipping sponsored and self-promotional spans in YouTube videos, using
+   * the SponsorBlock database (issue #159). Off unless a parent turns it on.
+   */
+  sponsorblock?: RawSponsorBlockConfig;
+  /**
    * How long, in days, watching a video protects its cached copy from being
    * displaced by a speculative download.
    *
@@ -915,6 +930,38 @@ export interface RawServiceConfig {
    * Global volume restrictions
    */
   volume?: RawVolumeConfig | null;
+}
+
+/**
+ * SponsorBlock segment skipping (issue #159).
+ *
+ * Off by default, and deliberately so: it is the one media feature that talks
+ * to a third-party service, and in a product that promises no telemetry
+ * nothing should reach a new host because a default said so. A parent turns it
+ * on; the device is otherwise silent.
+ */
+export interface RawSponsorBlockConfig {
+  /**
+   * Base URL of the SponsorBlock instance to query. Point it at a mirror to
+   * avoid the public one.
+   */
+  api?: string;
+  /**
+   * Which categories to skip. See `SPONSORBLOCK_CATEGORIES` for the full
+   * list; the default is the five spans that are reliably not the video.
+   *
+   * `preview` (a recap of an earlier episode), `filler` and `music_offtopic`
+   * are left out of the default on purpose: their submissions are judgement
+   * calls that can cut content somebody wanted.
+   */
+  categories?: string[];
+  /**
+   * Skip SponsorBlock segments during playback.
+   *
+   * While this is false nothing is looked up and no request is made — not at
+   * launch, not on a play, not in the background.
+   */
+  enabled?: boolean;
 }
 
 /**

@@ -126,6 +126,26 @@ pub struct SpawnOptions {
     /// prefetches into, so a disagreement about how big it may be has the two
     /// undoing each other's work. `None` for every other kind.
     pub media_cache_max_bytes: Option<u64>,
+
+    /// Service-wide SponsorBlock settings (`service.media.sponsorblock`),
+    /// resolved by the caller like the two above. `None` for every other kind.
+    ///
+    /// The entry's own `sponsorblock` override is *not* folded in here: it
+    /// lives on the entry kind, which the host already has, and keeping the
+    /// service default separate is what lets an entry turn the feature on for
+    /// itself as well as off.
+    pub media_sponsorblock: Option<SponsorBlockSpec>,
+}
+
+/// Service-wide SponsorBlock settings for a media activity (issue #159).
+#[derive(Debug, Clone)]
+pub struct SponsorBlockSpec {
+    /// The service-wide default, which an entry may override either way.
+    pub enabled: bool,
+    /// Category names to skip.
+    pub categories: Vec<String>,
+    /// Base URL of the instance to query.
+    pub api: String,
 }
 
 /// Network firewall specification for a session.

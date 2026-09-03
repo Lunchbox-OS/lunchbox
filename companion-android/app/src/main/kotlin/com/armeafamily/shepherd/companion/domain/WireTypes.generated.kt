@@ -605,6 +605,11 @@ sealed interface EntryKind {
          * Field used to order library items before display or lookup.
          */
         val sortBy: MediaSortBy? = null,
+        /**
+         * Whether to skip SponsorBlock segments in this library. `None`
+         * inherits `service.media.sponsorblock.enabled`.
+         */
+        val sponsorblock: Boolean? = null,
     ) : EntryKind
 
     /**

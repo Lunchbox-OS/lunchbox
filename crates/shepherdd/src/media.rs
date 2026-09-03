@@ -576,6 +576,26 @@ fn expand_tilde(path: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `shepherd-config` compiles to wasm for the config editor, so it cannot
+    /// depend on the media crates and carries its own copy of the SponsorBlock
+    /// category names. This is the guard: shepherdd links both, and a category
+    /// added to (or renamed in) the core must reach the config that validates
+    /// what a parent typed, or one of the two would silently stop matching.
+    #[test]
+    fn the_configs_sponsorblock_categories_match_the_cores() {
+        let core: Vec<&str> = shepherd_media_core::sponsorblock::Category::all()
+            .iter()
+            .filter(|c| c.is_skippable())
+            .map(|c| c.as_str())
+            .collect();
+        assert_eq!(core, shepherd_config::SPONSORBLOCK_CATEGORIES);
+
+        // And the shipped default must be a subset of what the service knows.
+        for category in shepherd_config::DEFAULT_SPONSORBLOCK_CATEGORIES {
+            assert!(core.contains(category), "unknown default `{category}`");
+        }
+    }
+
     /// The selector shepherdd prefetches with must be the one `shepherd-media`
     /// plays with, or every prefetched file lands under a content key the
     /// player never looks up.

@@ -538,6 +538,11 @@ export type EntryKind =
        * Field used to order library items before display or lookup.
        */
       sort_by?: MediaSortBy;
+      /**
+       * Whether to skip SponsorBlock segments in this library. `None`
+       * inherits `service.media.sponsorblock.enabled`.
+       */
+      sponsorblock?: boolean | null;
     }
   /**
    * A single piece of content played through the RetroArch libretro
