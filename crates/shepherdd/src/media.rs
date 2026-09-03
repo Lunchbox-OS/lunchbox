@@ -624,11 +624,19 @@ mod tests {
             .filter(|c| c.is_skippable())
             .map(|c| c.as_str())
             .collect();
-        assert_eq!(core, shepherd_config::SPONSORBLOCK_CATEGORIES);
+        let config: Vec<&str> = shepherd_config::RawSponsorBlockCategory::ALL
+            .iter()
+            .map(|c| c.as_str())
+            .collect();
+        assert_eq!(core, config);
 
         // And the shipped default must be a subset of what the service knows.
         for category in shepherd_config::DEFAULT_SPONSORBLOCK_CATEGORIES {
-            assert!(core.contains(category), "unknown default `{category}`");
+            assert!(
+                core.contains(&category.as_str()),
+                "unknown default `{}`",
+                category.as_str()
+            );
         }
     }
 

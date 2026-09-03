@@ -93,16 +93,36 @@ export function KindEditor({ kind, onChange }: Props) {
     const base = { type } as Record<string, unknown>;
     switch (type) {
       case "process":
-        onChange({ ...base, command: "", args: args ?? [], env: env ?? {} } as RawEntryKind);
+        onChange({
+          ...base,
+          command: "",
+          args: args ?? [],
+          env: env ?? {},
+        } as RawEntryKind);
         break;
       case "snap":
-        onChange({ ...base, snap_name: "", args: args ?? [], env: env ?? {} } as RawEntryKind);
+        onChange({
+          ...base,
+          snap_name: "",
+          args: args ?? [],
+          env: env ?? {},
+        } as RawEntryKind);
         break;
       case "steam":
-        onChange({ ...base, app_id: 0, args: args ?? [], env: env ?? {} } as RawEntryKind);
+        onChange({
+          ...base,
+          app_id: 0,
+          args: args ?? [],
+          env: env ?? {},
+        } as RawEntryKind);
         break;
       case "flatpak":
-        onChange({ ...base, app_id: "", args: args ?? [], env: env ?? {} } as RawEntryKind);
+        onChange({
+          ...base,
+          app_id: "",
+          args: args ?? [],
+          env: env ?? {},
+        } as RawEntryKind);
         break;
       case "vm":
         onChange({ ...base, driver: "", args: {} } as RawEntryKind);
@@ -253,7 +273,9 @@ export function KindEditor({ kind, onChange }: Props) {
             size="small"
             label="Maximum quality"
             value={kind.quality ?? "1080p"}
-            onChange={(e) => patch({ quality: e.target.value as RawMediaQuality })}
+            onChange={(e) =>
+              patch({ quality: e.target.value as RawMediaQuality })
+            }
           >
             {(Object.keys(MEDIA_QUALITIES) as RawMediaQuality[]).map((q) => (
               <MenuItem key={q} value={q}>
@@ -266,7 +288,9 @@ export function KindEditor({ kind, onChange }: Props) {
             size="small"
             label="Order items by"
             value={kind.sort_by ?? "library"}
-            onChange={(e) => patch({ sort_by: e.target.value as RawMediaSortBy })}
+            onChange={(e) =>
+              patch({ sort_by: e.target.value as RawMediaSortBy })
+            }
           >
             {(Object.keys(MEDIA_SORTS) as RawMediaSortBy[]).map((o) => (
               <MenuItem key={o} value={o}>
@@ -302,13 +326,44 @@ export function KindEditor({ kind, onChange }: Props) {
             select
             size="small"
             label="Prefetch remote items"
-            value={kind.prefetch == null ? "inherit" : kind.prefetch ? "on" : "off"}
+            value={
+              kind.prefetch == null ? "inherit" : kind.prefetch ? "on" : "off"
+            }
             onChange={(e) =>
               patch({
-                prefetch: e.target.value === "inherit" ? null : e.target.value === "on",
+                prefetch:
+                  e.target.value === "inherit" ? null : e.target.value === "on",
               })
             }
             helperText="Download this library in the background."
+          >
+            <MenuItem value="inherit">Follow the service setting</MenuItem>
+            <MenuItem value="on">Always</MenuItem>
+            <MenuItem value="off">Never</MenuItem>
+          </TextField>
+          {/* Tri-state for the same reason: null inherits
+              service.media.sponsorblock.enabled, which is not the same as
+              false. Which categories to skip stays on the service table — the
+              need here is "not in this library", e.g. a channel whose sponsor
+              reads are part of the show. */}
+          <TextField
+            select
+            size="small"
+            label="Skip sponsors"
+            value={
+              kind.sponsorblock == null
+                ? "inherit"
+                : kind.sponsorblock
+                  ? "on"
+                  : "off"
+            }
+            onChange={(e) =>
+              patch({
+                sponsorblock:
+                  e.target.value === "inherit" ? null : e.target.value === "on",
+              })
+            }
+            helperText="Jump over sponsored spans in this library's YouTube videos."
           >
             <MenuItem value="inherit">Follow the service setting</MenuItem>
             <MenuItem value="on">Always</MenuItem>
@@ -371,7 +426,9 @@ export function KindEditor({ kind, onChange }: Props) {
             size="small"
             label="On reopening"
             value={kind.save_state ?? "auto"}
-            onChange={(e) => patch({ save_state: e.target.value as RetroarchSaveState })}
+            onChange={(e) =>
+              patch({ save_state: e.target.value as RetroarchSaveState })
+            }
             helperText="The emulator's snapshot. The in-game save carries over either way."
           >
             {(Object.keys(SAVE_STATES) as RetroarchSaveState[]).map((v) => (

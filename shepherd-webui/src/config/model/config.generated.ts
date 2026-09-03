@@ -933,6 +933,31 @@ export interface RawServiceConfig {
 }
 
 /**
+ * Every category the service defines that describes a *span* a player can jump
+ * over. Mirrors `shepherd_media_core::sponsorblock::Category`, which this crate
+ * cannot depend on (it compiles to wasm for the config editor); shepherdd holds
+ * the test that the two lists agree.
+ *
+ * An enum rather than a free string so the config editor gets a generated union
+ * type to build its picker from — a category added here and not there is then a
+ * build error rather than a control quietly missing an option. It also means a
+ * typo is refused when the file is parsed, naming the alternatives.
+ *
+ * The service's two marker categories, `poi_highlight` and `chapter`, are
+ * absent: they label a point rather than describe content to remove.
+ */
+export type RawSponsorBlockCategory =
+  | "sponsor"
+  | "selfpromo"
+  | "interaction"
+  | "intro"
+  | "outro"
+  | "preview"
+  | "filler"
+  | "music_offtopic"
+  | "hook";
+
+/**
  * SponsorBlock segment skipping (issue #159).
  *
  * Off by default, and deliberately so: it is the one media feature that talks
@@ -947,14 +972,14 @@ export interface RawSponsorBlockConfig {
    */
   api?: string;
   /**
-   * Which categories to skip. See `SPONSORBLOCK_CATEGORIES` for the full
-   * list; the default is the five spans that are reliably not the video.
+   * Which categories to skip. The default is the five spans that are
+   * reliably not the video.
    *
    * `preview` (a recap of an earlier episode), `filler` and `music_offtopic`
    * are left out of the default on purpose: their submissions are judgement
    * calls that can cut content somebody wanted.
    */
-  categories?: string[];
+  categories?: RawSponsorBlockCategory[];
   /**
    * Skip SponsorBlock segments during playback.
    *

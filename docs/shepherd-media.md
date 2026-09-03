@@ -632,6 +632,11 @@ in its settings page, also off by default, using the default category set. Both
 front-ends share the categories, the filtering and the skip logic, so a video
 skips the same way whichever one is playing it.
 
+Both are editable in the config editor: **Service → Media** carries the switch,
+the category checkboxes and the instance URL, and a media activity's own
+**Skip sponsors** control sits beside its prefetch setting with the same
+three-way "follow the service setting / always / never".
+
 ### Categories
 
 | Category | What it marks | In the default set |

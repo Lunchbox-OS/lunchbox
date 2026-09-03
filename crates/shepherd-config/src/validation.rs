@@ -3,7 +3,7 @@
 use crate::internet::InternetCheckTarget;
 use crate::schema::{
     RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawGroup,
-    RawMediaMode, RawTimeWindow, RawTokens, SPONSORBLOCK_CATEGORIES,
+    RawMediaMode, RawTimeWindow, RawTokens,
 };
 use shepherd_util::GROUP_SUBJECT_PREFIX;
 use std::collections::HashSet;
@@ -90,14 +90,8 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
                     .into(),
             ));
         }
-        for category in &sb.categories {
-            if !SPONSORBLOCK_CATEGORIES.contains(&category.as_str()) {
-                errors.push(ValidationError::GlobalError(format!(
-                    "Unknown SponsorBlock category '{category}'; valid categories are {}",
-                    SPONSORBLOCK_CATEGORIES.join(", ")
-                )));
-            }
-        }
+        // An unknown category name never reaches here: `RawSponsorBlockCategory`
+        // is an enum, so the parse refuses it and names the alternatives.
         if let Err(e) = validate_http_url(&sb.api) {
             errors.push(ValidationError::GlobalError(format!(
                 "Invalid service.media.sponsorblock.api '{}': {e}",
@@ -1725,11 +1719,17 @@ mod tests {
             .collect()
     }
 
-    /// The default: off, and therefore nothing to check. An unread category
-    /// list under `enabled = false` is not an error anybody needs told about.
+    /// The default: off, and therefore nothing to check. Settings nobody is
+    /// acting on are not worth an error — an empty category list and an api
+    /// that is not a URL are both faults only once the feature is on.
+    ///
+    /// (A category *name* is checked either way, because the parse refuses an
+    /// unknown one before validation sees the file at all.)
     #[test]
     fn sponsorblock_is_not_validated_while_it_is_off() {
-        assert!(sponsorblock_errors("enabled = false\ncategories = [\"nonsense\"]").is_empty());
+        assert!(
+            sponsorblock_errors("enabled = false\ncategories = []\napi = \"nonsense\"").is_empty()
+        );
     }
 
     #[test]
@@ -1738,20 +1738,28 @@ mod tests {
     }
 
     /// A typo must not quietly stop skipping the category a parent asked for.
+    /// It is refused by the parse now rather than by validation, and the error
+    /// names the alternatives, which is what the hand-rolled check used to do.
     #[test]
-    fn an_unknown_sponsorblock_category_is_rejected() {
-        let errors = sponsorblock_errors("enabled = true\ncategories = [\"sponsors\"]");
-        assert!(errors.iter().any(|e| e.contains("sponsors")), "{errors:?}");
-        assert!(errors.iter().any(|e| e.contains("selfpromo")), "{errors:?}");
+    fn an_unknown_sponsorblock_category_is_refused_by_the_parse() {
+        let toml =
+            "config_version = 1\n\n[service.media.sponsorblock]\ncategories = [\"sponsors\"]\n";
+        let err = toml::from_str::<RawConfig>(toml).expect_err("a typo must not parse");
+        let message = err.to_string();
+        assert!(message.contains("sponsors"), "{message}");
+        assert!(message.contains("selfpromo"), "{message}");
     }
 
-    /// The service's marker categories are real names, and rejecting them with
-    /// the same message as a typo is the honest answer: neither describes a
-    /// span to jump over.
+    /// The service's marker categories are real names, and refusing them
+    /// alongside the typos is the honest answer: neither describes a span to
+    /// jump over.
     #[test]
-    fn a_marker_category_is_rejected() {
-        let errors = sponsorblock_errors("enabled = true\ncategories = [\"poi_highlight\"]");
-        assert!(!errors.is_empty(), "markers are not skippable");
+    fn a_marker_category_is_refused() {
+        let toml = "config_version = 1\n\n[service.media.sponsorblock]\ncategories = [\"poi_highlight\"]\n";
+        assert!(
+            toml::from_str::<RawConfig>(toml).is_err(),
+            "markers are not skippable"
+        );
     }
 
     #[test]

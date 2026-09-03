@@ -281,7 +281,7 @@ impl Default for SponsorBlockConfig {
             enabled: false,
             categories: crate::schema::DEFAULT_SPONSORBLOCK_CATEGORIES
                 .iter()
-                .map(|s| s.to_string())
+                .map(|c| c.as_str().to_string())
                 .collect(),
             api: "https://sponsor.ajay.app".to_string(),
         }
@@ -361,7 +361,12 @@ impl ServiceConfig {
                 watched_grace_days: m.watched_grace_days,
                 sponsorblock: SponsorBlockConfig {
                     enabled: m.sponsorblock.enabled,
-                    categories: m.sponsorblock.categories.clone(),
+                    categories: m
+                        .sponsorblock
+                        .categories
+                        .iter()
+                        .map(|c| c.as_str().to_string())
+                        .collect(),
                     api: m.sponsorblock.api.clone(),
                 },
                 cache_max_bytes: m.cache_max_bytes,

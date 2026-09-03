@@ -787,14 +787,14 @@ pub struct RawSponsorBlockConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Which categories to skip. See `SPONSORBLOCK_CATEGORIES` for the full
-    /// list; the default is the five spans that are reliably not the video.
+    /// Which categories to skip. The default is the five spans that are
+    /// reliably not the video.
     ///
     /// `preview` (a recap of an earlier episode), `filler` and `music_offtopic`
     /// are left out of the default on purpose: their submissions are judgement
     /// calls that can cut content somebody wanted.
     #[serde(default = "default_sponsorblock_categories")]
-    pub categories: Vec<String>,
+    pub categories: Vec<RawSponsorBlockCategory>,
 
     /// Base URL of the SponsorBlock instance to query. Point it at a mirror to
     /// avoid the public one.
@@ -817,29 +817,70 @@ impl Default for RawSponsorBlockConfig {
 /// cannot depend on (it compiles to wasm for the config editor); shepherdd holds
 /// the test that the two lists agree.
 ///
+/// An enum rather than a free string so the config editor gets a generated union
+/// type to build its picker from — a category added here and not there is then a
+/// build error rather than a control quietly missing an option. It also means a
+/// typo is refused when the file is parsed, naming the alternatives.
+///
 /// The service's two marker categories, `poi_highlight` and `chapter`, are
 /// absent: they label a point rather than describe content to remove.
-pub const SPONSORBLOCK_CATEGORIES: &[&str] = &[
-    "sponsor",
-    "selfpromo",
-    "interaction",
-    "intro",
-    "outro",
-    "preview",
-    "filler",
-    "music_offtopic",
-    "hook",
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RawSponsorBlockCategory {
+    Sponsor,
+    #[serde(rename = "selfpromo")]
+    SelfPromo,
+    Interaction,
+    Intro,
+    Outro,
+    Preview,
+    Filler,
+    MusicOfftopic,
+    Hook,
+}
+
+impl RawSponsorBlockCategory {
+    /// The spelling the service and the player's CLI use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sponsor => "sponsor",
+            Self::SelfPromo => "selfpromo",
+            Self::Interaction => "interaction",
+            Self::Intro => "intro",
+            Self::Outro => "outro",
+            Self::Preview => "preview",
+            Self::Filler => "filler",
+            Self::MusicOfftopic => "music_offtopic",
+            Self::Hook => "hook",
+        }
+    }
+
+    /// Every category, for the guard test that keeps this in step with the core.
+    pub const ALL: &'static [RawSponsorBlockCategory] = &[
+        Self::Sponsor,
+        Self::SelfPromo,
+        Self::Interaction,
+        Self::Intro,
+        Self::Outro,
+        Self::Preview,
+        Self::Filler,
+        Self::MusicOfftopic,
+        Self::Hook,
+    ];
+}
 
 /// The categories enabled when `sponsorblock.enabled` is set and none are named.
-pub const DEFAULT_SPONSORBLOCK_CATEGORIES: &[&str] =
-    &["sponsor", "selfpromo", "interaction", "intro", "outro"];
+pub const DEFAULT_SPONSORBLOCK_CATEGORIES: &[RawSponsorBlockCategory] = &[
+    RawSponsorBlockCategory::Sponsor,
+    RawSponsorBlockCategory::SelfPromo,
+    RawSponsorBlockCategory::Interaction,
+    RawSponsorBlockCategory::Intro,
+    RawSponsorBlockCategory::Outro,
+];
 
-fn default_sponsorblock_categories() -> Vec<String> {
-    DEFAULT_SPONSORBLOCK_CATEGORIES
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+fn default_sponsorblock_categories() -> Vec<RawSponsorBlockCategory> {
+    DEFAULT_SPONSORBLOCK_CATEGORIES.to_vec()
 }
 
 fn default_sponsorblock_api() -> String {
