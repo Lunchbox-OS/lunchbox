@@ -393,6 +393,13 @@ impl TestHarness {
             } else {
                 &["--no-restrict-ipc-peers"][..]
             })
+            // Unconditional, unlike the peer check above: there is no state
+            // custodian for the harness to talk to, and it starts its own
+            // shepherdd with an explicit `-d <temp dir>`, so it keeps the
+            // pre-#157 local store. Without this every e2e run would fall back
+            // and raise a Critical diagnostic several tests would have to know
+            // to ignore (issue #157).
+            .arg("--no-state-custodian")
             // The suite stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` and
             // points `SHEPHERD_FIREWALL_HELPER` at a fake, so it needs the
             // daemon to take binaries from the environment (issue #144). Its

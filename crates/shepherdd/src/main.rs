@@ -33,8 +33,11 @@ use shepherd_ipc::{IpcServer, ServerMessage};
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementService,
 };
+use shepherd_state_proto::{RemoteFiles, RemoteStore};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
-use shepherd_util::{MonotonicInstant, RateLimiter, default_config_path};
+use shepherd_util::{
+    MonotonicInstant, ProtectedFile, ProtectedFiles, RateLimiter, default_config_path,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,6 +173,26 @@ struct Args {
     /// session leaves it off and exercises the same resolution a device does.
     #[arg(long = "trust-environment")]
     trust_environment: bool,
+
+    /// Keep policy and state in this user's home instead of asking the state
+    /// custodian for them (issue #157).
+    ///
+    /// On a device the files an activity must not reach — `shepherdd.db`, and
+    /// later `config.toml` and the BLE admin record — are owned by
+    /// `shepherd-state` and served over a socket that admits only this
+    /// session's cgroup. This flag keeps them where they used to be: in the
+    /// home directory of the uid every activity runs as, where an activity can
+    /// reset today's usage and rewrite the policy. Measured, not theoretical —
+    /// `docs/ai/history/2026-08-29 005`.
+    ///
+    /// A third flag rather than a meaning bolted onto one of the two above,
+    /// for the reason those two were split: they are different risks wanted at
+    /// different times. One decides who may *drive* the daemon, one decides
+    /// which code it *runs*, and this one decides whether its state is
+    /// reachable by the software it supervises. `shepherd install sway-config`
+    /// strips all three and refuses to finish if a strip did not take.
+    #[arg(long = "no-state-custodian")]
+    no_state_custodian: bool,
 }
 
 /// Main service state
@@ -198,6 +221,14 @@ struct Service {
     /// Carried so `run()` can report a downgrade once the diagnostics channel
     /// exists — the IPC server is started well before it.
     ipc_peer_hardening: IpcPeerHardening,
+    /// Where policy and state ended up living (issue #157). Carried for the
+    /// same reason, and decided at the same end of startup: the store is opened
+    /// before there is anywhere to report to.
+    state_protection: StateProtection,
+    /// The custodian's files when the policy came from there, which decides
+    /// both how it is watched (shepherdd cannot inotify a directory it cannot
+    /// open) and where a reload reads from.
+    policy_files: Option<Arc<dyn ProtectedFiles>>,
 }
 
 /// What arming the management socket's peer allow-list actually achieved.
@@ -216,17 +247,455 @@ enum IpcPeerHardening {
     Degraded(String),
 }
 
+/// Where shepherd's state ended up living, and why.
+///
+/// Three outcomes for the same reason [`IpcPeerHardening`] has three: "the
+/// operator asked for the old behaviour" and "the protection was wanted and
+/// could not be had" look identical from the database and mean opposite things
+/// to whoever is responsible for the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StateProtection {
+    /// Served by the custodian, at a uid no activity has.
+    Custodian,
+    /// Deliberately local (`--no-state-custodian`).
+    OptedOut,
+    /// Wanted, but the custodian could not be reached; the store is a file in
+    /// the home directory of the uid activities run as. Carries the reason.
+    Degraded(String),
+}
+
+/// What [`StateSource::into_parts`] settles into: the store, the policy source
+/// when it is the custodian's, and how protected that combination is.
+type StateParts = (
+    Arc<dyn Store>,
+    Option<Arc<dyn ProtectedFiles>>,
+    StateProtection,
+);
+
+/// Whatever has to stay alive for policy auto-reload to keep working.
+///
+/// Both arms are just ownership: a dropped `notify` watcher stops watching, and
+/// a dropped [`shepherd_state_proto::ConfigWatch`] closes its connection.
+enum PolicyWatch {
+    // Both fields are held for their `Drop` and never read, which is the whole
+    // job: a dropped watcher stops watching. Named rather than `_`-prefixed so
+    // the variants still say what is keeping the watch alive.
+    #[allow(dead_code)]
+    Local(RecommendedWatcher),
+    #[allow(dead_code)]
+    Custodian(shepherd_state_proto::ConfigWatch),
+    None,
+}
+
+/// Where this daemon's policy and state come from, decided once at startup.
+///
+/// Holds the connections rather than re-making them, and answers both questions
+/// — the policy file and the database — from the same decision, so a device
+/// cannot end up half protected.
+enum StateSource {
+    /// The custodian answered. Policy and database both come from it.
+    Custodian {
+        files: Arc<dyn ProtectedFiles>,
+        store: Arc<RemoteStore>,
+    },
+    /// Deliberately local (`--no-state-custodian`), or the custodian could not
+    /// be reached. `reason` is `None` for the first and the failure for the
+    /// second — which is the difference between "the operator asked" and "the
+    /// protection was wanted and could not be had".
+    Local { reason: Option<String> },
+}
+
+impl StateSource {
+    /// Whether the custodian answered *and* holds a policy.
+    ///
+    /// Both halves matter: a custodian with no policy file means the database
+    /// is protected and the policy is not, which is the half that decides what
+    /// a child may do.
+    fn holds_policy(&self) -> bool {
+        match self {
+            StateSource::Custodian { files, .. } => {
+                matches!(files.read(ProtectedFile::Config), Ok(Some(_)))
+            }
+            StateSource::Local { .. } => false,
+        }
+    }
+
+    /// The custodian's policy text, when there is one.
+    fn custodial_policy(&self) -> Option<String> {
+        match self {
+            StateSource::Custodian { files, .. } => {
+                files.read(ProtectedFile::Config).ok().flatten()
+            }
+            StateSource::Local { .. } => None,
+        }
+    }
+
+    /// The policy, from wherever this device keeps it.
+    ///
+    /// A custodian that answers but holds no policy falls back to the file at
+    /// `local` rather than refusing to start: a device whose migration has not
+    /// run should boot with its old policy and say so, not present a child with
+    /// a dead screen.
+    fn load_policy(&self, local: &Path) -> Result<shepherd_config::Policy> {
+        if let StateSource::Custodian { files, .. } = self
+            && let Some(text) = files
+                .read(ProtectedFile::Config)
+                .context("reading the policy from the state custodian")?
+        {
+            return shepherd_config::parse_config(&text)
+                .context("parsing the policy the state custodian returned");
+        }
+        load_config(local).with_context(|| format!("Failed to load config from {local:?}"))
+    }
+
+    /// Where [`Self::load_policy`] read from, for the log line.
+    fn policy_source(&self, local: &Path) -> String {
+        if self.holds_policy() {
+            "the state custodian".to_string()
+        } else {
+            local.display().to_string()
+        }
+    }
+
+    /// Settle into a store and a policy source, reporting how protected the
+    /// result is.
+    ///
+    /// The files handle comes back rather than being dropped because the policy
+    /// is read again on every reload, and from the same place it was read the
+    /// first time — a device that reloaded from a different source than it
+    /// booted from would be the worst kind of surprise.
+    fn into_parts(self, data_dir: &Path) -> Result<StateParts> {
+        let holds_policy = self.holds_policy();
+        match self {
+            StateSource::Custodian { store, files } => {
+                let protection = if holds_policy {
+                    StateProtection::Custodian
+                } else {
+                    // Database protected, policy not. Degraded rather than
+                    // Custodian, because a policy an activity can rewrite is
+                    // exactly what this issue is about.
+                    StateProtection::Degraded(
+                        "the custodian holds no policy file, so the policy is still read from \
+                         this user's home where every activity can rewrite it; run `shepherd \
+                         install state --user <user>` to migrate it"
+                            .to_string(),
+                    )
+                };
+                // `None` when the custodian holds no policy: the policy is
+                // then a local file, and the reload has to read it from where
+                // it was actually read at boot.
+                let policy_files = holds_policy.then_some(files);
+                Ok((store, policy_files, protection))
+            }
+            StateSource::Local { reason } => {
+                let store = Service::open_local_store(data_dir)?;
+                let protection = match reason {
+                    Some(reason) => StateProtection::Degraded(reason),
+                    None => StateProtection::OptedOut,
+                };
+                Ok((store, None, protection))
+            }
+        }
+    }
+}
+
 impl Service {
-    async fn new(args: &Args) -> Result<Self> {
-        // Load configuration
-        let policy = load_config(&args.config)
-            .with_context(|| format!("Failed to load config from {:?}", args.config))?;
+    /// Connect to the custodian, or decide not to.
+    ///
+    /// **The choice is made once, here, and never revisited.** That is a
+    /// security property, not tidiness: a daemon that could fall back
+    /// *mid-session* would be one an activity could push into falling back, by
+    /// making the custodian unreachable — handing back everything this is for.
+    /// After startup a broken connection is an error the caller sees, and the
+    /// client reconnects; it never becomes a local file.
+    ///
+    /// Falling back at all follows the trade #144 already made twice: an
+    /// unprotected kiosk beats a child staring at a dead screen. What makes
+    /// that honest is that it is never silent — see
+    /// [`Self::state_not_protected_diagnostic`].
+    fn open_state(args: &Args) -> Result<StateSource> {
+        if args.no_state_custodian {
+            warn!(
+                "Policy and state are in this user's home; every activity runs as this uid \
+                 and can read and rewrite them (issue #157)"
+            );
+            return Ok(StateSource::Local { reason: None });
+        }
+
+        // Whose state to ask for is *this process's* user, not a name from the
+        // environment: on a device the environment belongs to the kiosk user,
+        // and so to every activity (issue #144, finding 1).
+        let user = match nix::unistd::User::from_uid(nix::unistd::getuid()) {
+            Ok(Some(user)) => user.name,
+            Ok(None) | Err(_) => {
+                let reason =
+                    "this process's own uid has no user entry, so there is no custodian to ask"
+                        .to_string();
+                warn!(%reason, "Falling back to local policy and state");
+                return Ok(StateSource::Local {
+                    reason: Some(reason),
+                });
+            }
+        };
+
+        // Retry briefly before giving up. The fallback is a *startup-only*
+        // decision that lasts the whole session, so trading a few seconds at
+        // boot against running unprotected until the next restart is not a
+        // close call — and the custodian is socket-activated, so the first
+        // connection is also what starts it.
+        let store = match Self::connect_with_retries(&user) {
+            Ok(store) => store,
+            Err(e) => {
+                let reason = format!("{e}");
+                warn!(error = %reason, "Falling back to local policy and state");
+                return Ok(StateSource::Local {
+                    reason: Some(reason),
+                });
+            }
+        };
+        let files = match RemoteFiles::connect(&user) {
+            Ok(files) => files,
+            Err(e) => {
+                let reason = format!("{e}");
+                warn!(error = %reason, "Falling back to local policy and state");
+                return Ok(StateSource::Local {
+                    reason: Some(reason),
+                });
+            }
+        };
 
         info!(
-            config_path = %args.config.display(),
+            socket = %store.socket_path().display(),
+            "Policy and state served by the custodian; not reachable by activities"
+        );
+        Ok(StateSource::Custodian {
+            files: Arc::new(files),
+            store: Arc::new(store),
+        })
+    }
+
+    /// Connect to the custodian, retrying a transient failure.
+    ///
+    /// Bounded and short: this runs before the session is up, so every second
+    /// here is a second the child waits at a blank screen. Long enough to cover
+    /// the custodian starting under socket activation and resolving the session
+    /// logind may only just have registered.
+    fn connect_with_retries(user: &str) -> Result<RemoteStore, shepherd_store::StoreError> {
+        const ATTEMPTS: u32 = 5;
+        const GAP: std::time::Duration = std::time::Duration::from_millis(600);
+
+        let mut last = None;
+        for attempt in 1..=ATTEMPTS {
+            match RemoteStore::connect(user) {
+                Ok(store) => return Ok(store),
+                Err(e) => {
+                    if attempt < ATTEMPTS {
+                        debug!(attempt, error = %e, "The state custodian is not answering yet");
+                        std::thread::sleep(GAP);
+                    }
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.expect("at least one attempt"))
+    }
+
+    /// Say something when the policy the daemon read is not the policy sitting
+    /// at the path an operator edits.
+    ///
+    /// The home copy is deliberately kept: it is the seed migration copies
+    /// from, and the fallback shepherdd reads when the custodian is
+    /// unreachable — without it, a custodian that fails to start would take the
+    /// whole session down, which is the trade #144 refuses to make.
+    ///
+    /// The cost of keeping it is that an operator can edit it and see nothing
+    /// happen. That is the trap this warning exists to close: it fires exactly
+    /// when the two have diverged, which is exactly when someone has edited the
+    /// wrong one.
+    fn warn_if_the_policy_diverged(local: &Path, custodial: &str) {
+        let Ok(home) = std::fs::read_to_string(local) else {
+            return;
+        };
+        if home != custodial {
+            warn!(
+                path = %local.display(),
+                "The policy here differs from the one shepherd is running. The custodian's \
+                 copy is what takes effect; this one is the seed and the fallback. Apply an \
+                 edit with `sudo shepherd install policy --user <user>` (issue #157)"
+            );
+        }
+    }
+
+    /// Say something when a protected device still has the old database in the
+    /// user's home.
+    ///
+    /// It gets there two ways, and both are worth an operator knowing about: an
+    /// upgrade where migration did not run, or a boot where the custodian was
+    /// unreachable and the daemon fell back — accruing usage into a file that
+    /// is now stale and, unlike the live one, readable and writable by every
+    /// activity.
+    ///
+    /// Deliberately not deleted here. The daemon cannot know whether that file
+    /// holds a day of a child's usage that nobody has looked at yet, and
+    /// discarding a device's history to tidy up is the same mistake `uninstall`
+    /// declines to make. Say where it is and let a person decide.
+    fn warn_about_a_superseded_local_store(data_dir: &Path) {
+        let stale = data_dir.join("shepherdd.db");
+        if stale.exists() {
+            warn!(
+                path = %stale.display(),
+                "State is served by the custodian, but an old database is still in this \
+                 user's home. Nothing reads it, and every activity can read and rewrite it. \
+                 The protected copy is the live one, so `shepherd install state` will not \
+                 migrate over it: if this file holds usage worth keeping, move it \
+                 deliberately, then remove it (issue #157)"
+            );
+        }
+    }
+
+    /// Start watching the policy, returning whatever has to stay alive for the
+    /// watch to keep running.
+    ///
+    /// Auto-reload is best-effort on both paths: a device whose watch could not
+    /// be established still runs, and still reloads on an explicit
+    /// `reload_config`. It says so rather than pretending.
+    fn watch_policy(
+        custodial: bool,
+        config_path: &Path,
+        tx: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> PolicyWatch {
+        if custodial {
+            let user = match nix::unistd::User::from_uid(nix::unistd::getuid()) {
+                Ok(Some(user)) => user.name,
+                _ => {
+                    warn!("Cannot name this user, so the policy watch is disabled");
+                    return PolicyWatch::None;
+                }
+            };
+            let notify_tx = tx.clone();
+            return match shepherd_state_proto::ConfigWatch::start(
+                &user,
+                move || {
+                    let _ = notify_tx.send(());
+                },
+                |e| {
+                    warn!(error = %e, "The policy watch ended; auto-reload is off until restart");
+                },
+            ) {
+                Ok(watch) => {
+                    info!("Watching the custodian's policy file for changes");
+                    PolicyWatch::Custodian(watch)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Could not watch the custodian's policy, auto-reload disabled");
+                    PolicyWatch::None
+                }
+            };
+        }
+
+        let watched_path = config_path.to_path_buf();
+        let watcher = RecommendedWatcher::new(
+            move |result: notify::Result<notify::Event>| {
+                if let Ok(event) = result {
+                    let is_relevant = matches!(
+                        event.kind,
+                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                    );
+                    if is_relevant && event.paths.iter().any(|p| p == &watched_path) {
+                        let _ = tx.send(());
+                    }
+                }
+            },
+            notify::Config::default(),
+        );
+        match (watcher, config_path.parent()) {
+            (Ok(mut watcher), Some(dir)) => match watcher.watch(dir, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    info!(config_path = %config_path.display(), "Watching config file for changes");
+                    PolicyWatch::Local(watcher)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to watch config directory, auto-reload disabled");
+                    PolicyWatch::None
+                }
+            },
+            (Ok(_), None) => {
+                warn!("Config path has no parent directory, auto-reload disabled");
+                PolicyWatch::None
+            }
+            (Err(e), _) => {
+                warn!(error = %e, "Failed to create config watcher, auto-reload disabled");
+                PolicyWatch::None
+            }
+        }
+    }
+
+    /// The pre-#157 store: a SQLite file in the data directory.
+    fn open_local_store(data_dir: &Path) -> Result<Arc<dyn Store>> {
+        let db_path = data_dir.join("shepherdd.db");
+        let store = SqliteStore::open(&db_path)
+            .with_context(|| format!("Failed to open database {:?}", db_path))?;
+        info!(db_path = %db_path.display(), "Store initialized (local)");
+        Ok(Arc::new(store))
+    }
+
+    /// The administrator-facing form of "this device's state is reachable by
+    /// the software it supervises".
+    ///
+    /// `Critical` and `Service`-scoped for the same reasons
+    /// [`Self::ipc_not_hardened_diagnostic`] is: it is true of the device
+    /// rather than of one activity, and a device shipped this way has no
+    /// working boundary around its quota, usage or audit trail.
+    fn state_not_protected_diagnostic(reason: &str) -> Diagnostic {
+        Diagnostic {
+            code: DiagnosticCode::StateNotProtected,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Critical,
+            message: format!(
+                "shepherd's usage, quota and audit state is a file owned by the user every \
+                 activity runs as, so an activity can reset today's usage or grant itself \
+                 time — {reason}"
+            ),
+            remedy: Some(
+                "Install and enable the state custodian (`shepherd install state --user \
+                 <user>`, or `shepherd-admin setup-user <user>` on a packaged system), and \
+                 do not pass --no-state-custodian on a device."
+                    .to_string(),
+            ),
+            since: shepherd_util::now(),
+        }
+    }
+
+    /// Report a degraded state store once diagnostics exist.
+    ///
+    /// Separate from choosing the store for the same ordering reason
+    /// [`Self::degraded_ipc_hardening_is_reported`] is separate: the store is
+    /// built before there is anywhere to report to.
+    fn degraded_state_protection_is_reported(
+        state: &StateProtection,
+        diagnostics: &dyn DiagnosticSink,
+    ) {
+        if let StateProtection::Degraded(reason) = state {
+            diagnostics.raise(Self::state_not_protected_diagnostic(reason));
+        }
+    }
+
+    async fn new(args: &Args) -> Result<Self> {
+        // Where policy and state come from, decided once and for both. Splitting
+        // the decision would let a device end up with a protected database and a
+        // policy any activity can rewrite, which is the half that matters most:
+        // the policy is what says how long a child may play.
+        let state = Self::open_state(args)?;
+
+        let policy = state.load_policy(&args.config)?;
+        info!(
             entry_count = policy.entries.len(),
+            source = state.policy_source(&args.config),
             "Configuration loaded"
         );
+        if let Some(custodial) = state.custodial_policy() {
+            Self::warn_if_the_policy_diverged(&args.config, &custodial);
+        }
 
         // Determine paths
         let socket_path = args
@@ -244,13 +713,10 @@ impl Service {
             .with_context(|| format!("Failed to create data directory {:?}", data_dir))?;
 
         // Initialize store
-        let db_path = data_dir.join("shepherdd.db");
-        let store: Arc<dyn Store> = Arc::new(
-            SqliteStore::open(&db_path)
-                .with_context(|| format!("Failed to open database {:?}", db_path))?,
-        );
-
-        info!(db_path = %db_path.display(), "Store initialized");
+        let (store, policy_files, state_protection) = state.into_parts(&data_dir)?;
+        if state_protection == StateProtection::Custodian {
+            Self::warn_about_a_superseded_local_store(&data_dir);
+        }
 
         // Log service start
         store.append_audit(AuditEvent::new(AuditEventType::ServiceStarted))?;
@@ -356,6 +822,8 @@ impl Service {
             sway_ipc_alias: args.sway_ipc_alias.clone(),
             harden_sway_ipc: !args.no_harden_sway_ipc,
             ipc_peer_hardening,
+            state_protection,
+            policy_files,
         })
     }
 
@@ -676,6 +1144,8 @@ impl Service {
         let sway_ipc_alias = self.sway_ipc_alias.clone();
         let harden_sway_ipc = self.harden_sway_ipc;
         let ipc_peer_hardening = self.ipc_peer_hardening.clone();
+        let state_protection = self.state_protection.clone();
+        let policy_files = self.policy_files.clone();
 
         let config_path = self.config_path.clone();
 
@@ -960,8 +1430,11 @@ impl Service {
                     firmware_version: env!("CARGO_PKG_VERSION").to_string(),
                     admin_record_path: ble_cfg.admin_record_path,
                     reset_sentinel_path: ble_cfg.reset_sentinel_path,
-                    // Wired up in the commit that connects to the custodian.
-                    files: None,
+                    // The admin record carries the minted HTTP token, so when
+                    // the custodian is holding shepherd's state it holds this
+                    // too — otherwise the credential sits at the uid every
+                    // activity runs as (issue #157).
+                    files: policy_files.clone(),
                     adapter: ble_cfg.adapter,
                 };
                 // `shepherd-pairing-display` is spawned per pairing
@@ -1098,6 +1571,7 @@ impl Service {
         // anywhere to report to; say so now if it did not end up a boundary
         // (issue #144).
         Self::degraded_ipc_hardening_is_reported(&ipc_peer_hardening, &diagnostic_publisher);
+        Self::degraded_state_protection_is_reported(&state_protection, &diagnostic_publisher);
 
         // Every sway connection this daemon needs is now open, so the socket's
         // name in the filesystem has done its job (issue #144).
@@ -1110,49 +1584,15 @@ impl Service {
 
         // Set up config file watcher
         let (config_change_tx, mut config_change_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let watched_path = config_path.clone();
-        let _config_watcher: Option<RecommendedWatcher> = {
-            let tx = config_change_tx;
-            match RecommendedWatcher::new(
-                move |result: notify::Result<notify::Event>| {
-                    if let Ok(event) = result {
-                        let is_relevant = matches!(
-                            event.kind,
-                            notify::EventKind::Modify(_) | notify::EventKind::Create(_)
-                        );
-                        if is_relevant && event.paths.iter().any(|p| p == &watched_path) {
-                            let _ = tx.send(());
-                        }
-                    }
-                },
-                notify::Config::default(),
-            ) {
-                Ok(mut watcher) => {
-                    if let Some(dir) = config_path.parent() {
-                        match watcher.watch(dir, RecursiveMode::NonRecursive) {
-                            Ok(()) => {
-                                info!(
-                                    config_path = %config_path.display(),
-                                    "Watching config file for changes"
-                                );
-                                Some(watcher)
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "Failed to watch config directory, auto-reload disabled");
-                                None
-                            }
-                        }
-                    } else {
-                        warn!("Config path has no parent directory, auto-reload disabled");
-                        None
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to create config watcher, auto-reload disabled");
-                    None
-                }
-            }
-        };
+        // Watch the policy for changes, from whichever side owns it.
+        //
+        // When the custodian holds it, shepherdd cannot use inotify: it cannot
+        // watch a directory it cannot open. The custodian watches instead and
+        // pushes on a second connection, which is the same behaviour by a
+        // different route — and a strictly better one, because the file being
+        // watched is then one no activity can write.
+        let _config_watcher =
+            Self::watch_policy(policy_files.is_some(), &config_path, config_change_tx);
 
         // Set up signal handlers as a spawned listener that flips the shared
         // shutdown signal. This unifies the OS-signal path with the
@@ -1259,7 +1699,14 @@ impl Service {
                 Some(()) = config_change_rx.recv() => {
                     // Drain any additional buffered events to debounce rapid saves
                     while config_change_rx.try_recv().is_ok() {}
-                    Self::handle_config_reload(&engine, &ipc_ref, &event_tx, &config_path).await;
+                    Self::handle_config_reload(
+                        &engine,
+                        &ipc_ref,
+                        &event_tx,
+                        &config_path,
+                        policy_files.as_ref(),
+                    )
+                    .await;
                     // Re-probe against the new policy. Without this an admin who
                     // adds a YouTube entry sees no missing-yt-dlp diagnostic
                     // until the next restart, and one who removes the entry
@@ -1368,8 +1815,27 @@ impl Service {
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
+        policy_files: Option<&Arc<dyn ProtectedFiles>>,
     ) {
-        match load_config(config_path) {
+        // Read from wherever the policy was read at boot. Reloading from a
+        // different source than the one that started the session would mean a
+        // device silently changing which file decides what a child may do.
+        let loaded = match policy_files {
+            Some(files) => files
+                .read(ProtectedFile::Config)
+                .map_err(shepherd_config::ConfigError::ReadError)
+                .and_then(|text| match text {
+                    Some(text) => shepherd_config::parse_config(&text),
+                    None => Err(shepherd_config::ConfigError::ReadError(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "the state custodian holds no policy file",
+                        ),
+                    )),
+                }),
+            None => load_config(config_path),
+        };
+        match loaded {
             Ok(policy) => {
                 let entry_count = {
                     let event = engine.lock().await.reload_policy(policy);
@@ -1381,7 +1847,13 @@ impl Service {
                 };
                 info!(
                     entry_count,
-                    config_path = %config_path.display(),
+                    source = match policy_files {
+                        // Naming the home path here would be wrong and
+                        // confusing in exactly the case that matters: the
+                        // custodian's copy is what was read.
+                        Some(_) => "the state custodian".to_string(),
+                        None => config_path.display().to_string(),
+                    },
                     "Config reloaded"
                 );
                 Self::broadcast(
@@ -2119,5 +2591,47 @@ mod harden_diagnostic_tests {
             d.message
         );
         assert!(d.remedy.is_some(), "a Critical condition needs an answer");
+    }
+
+    /// Same contract for #157's downgrade, and for the same reason: falling
+    /// back to a store in the kiosk user's home leaves the session running and
+    /// looking healthy, so the only trace is this.
+    #[test]
+    fn an_unprotected_state_store_is_a_critical_service_condition() {
+        let d = Service::state_not_protected_diagnostic(
+            "connecting to the state custodian at /run/shepherdd/state/kiosk.sock: \
+             No such file or directory",
+        );
+
+        assert_eq!(d.code, DiagnosticCode::StateNotProtected);
+        assert_eq!(d.severity, DiagnosticSeverity::Critical);
+        assert!(matches!(d.subject, DiagnosticSubject::Service));
+        assert!(
+            d.message.contains("No such file or directory"),
+            "the underlying reason has to survive into the message: {}",
+            d.message
+        );
+        assert!(d.remedy.is_some(), "a Critical condition needs an answer");
+    }
+
+    /// Only a *degraded* store is reported. An operator who passed
+    /// `--no-state-custodian` asked for this and does not need telling, and a
+    /// device using the custodian has nothing to report — so a diagnostic in
+    /// either case would be noise that trains people to ignore the channel.
+    #[test]
+    fn only_a_degraded_state_store_reports() {
+        for (state, expected) in [
+            (StateProtection::Custodian, 0),
+            (StateProtection::OptedOut, 0),
+            (StateProtection::Degraded("socket missing".into()), 1),
+        ] {
+            let sink = RecordingSink::default();
+            Service::degraded_state_protection_is_reported(&state, &sink);
+            assert_eq!(
+                sink.raised.lock().expect("lock").len(),
+                expected,
+                "{state:?} reported the wrong number of diagnostics"
+            );
+        }
     }
 }

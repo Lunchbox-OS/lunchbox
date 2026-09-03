@@ -4743,6 +4743,7 @@ dependencies = [
  "shepherd-media-app",
  "shepherd-media-cache",
  "shepherd-media-core",
+ "shepherd-state-proto",
  "shepherd-store",
  "shepherd-util",
  "tempfile",

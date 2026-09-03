@@ -324,6 +324,20 @@ enum class DiagnosticCode {
      */
     @SerialName("ipc_socket_not_hardened") IPC_SOCKET_NOT_HARDENED,
     /**
+     * shepherd's policy and state are files at the uid activities run as,
+     * because the state custodian could not be reached (issue #157).
+     *
+     * The session is deliberately left running — an unprotected kiosk beats a
+     * child staring at a dead screen — so, like
+     * [`Self::IpcSocketNotHardened`], nothing else about the device looks
+     * wrong and the downgrade is invisible unless it is said out loud.
+     *
+     * Raised only at startup. A device that fell back mid-session would be a
+     * device an activity could *push* into falling back, which is the one
+     * thing this must not be.
+     */
+    @SerialName("state_not_protected") STATE_NOT_PROTECTED,
+    /**
      * Something at this uid tried to drive the daemon from outside the
      * session and was refused (issue #144). Worth an administrator's
      * attention: an activity probing the management socket is not something
