@@ -11,6 +11,7 @@ pub mod protocol;
 pub mod resolver;
 pub mod schema;
 pub mod session;
+pub mod sponsorblock;
 pub mod uri;
 pub mod youtube;
 pub mod youtube_playlist;
@@ -26,6 +27,10 @@ pub use player::{
 pub use protocol::{ProtocolEmitter, ProtocolEvent, UriClass};
 pub use resolver::{PlatformInfo, resolve_source};
 pub use session::{Session, SessionInput, SessionState};
+pub use sponsorblock::{
+    ActionType, Category, DEFAULT_CATEGORIES, RawSegment, Segment, SegmentSkipper, Skip,
+    SponsorBlockError, parse_bucket, plan_skips,
+};
 pub use uri::DrmRejection;
 pub use youtube::YOUTUBE_EXTRACTOR_ARGS;
 pub use youtube_playlist::{
