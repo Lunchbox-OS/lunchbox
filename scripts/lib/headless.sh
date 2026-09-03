@@ -103,6 +103,32 @@ headless_wait_socket() {
     return 1
 }
 
+# Prefix that runs the session in a cgroup the peer check can mean something in.
+#
+# `PeerPolicy::restricted()` degrades wherever shepherd's cgroup is one an
+# activity could join, and a stack started from a shell sits under
+# `user@<uid>.service` — the user manager's delegated subtree, which anything at
+# this uid can join. A **system**-manager scope owned by the same uid is not
+# delegated, which is structurally what a display manager's session scope is, so
+# the check arms there exactly as it does on a device.
+#
+# The two `--setenv`s are load-bearing rather than tidy: without them
+# `systemd-run --user --scope` inside the session cannot reach the user bus, so
+# activities get no cgroup of their own — and the daemon then refuses to arm the
+# peer check anyway, correctly, because it would be separating nothing.
+#
+#   headless_scope_prefix <runtime_dir>
+headless_scope_prefix() {
+    local rt="$1" uid gid
+    uid="$(id -u)"; gid="$(id -g)"
+    printf '%s\n' \
+        sudo systemd-run --uid="$uid" --gid="$gid" --scope \
+        --slice="user-$uid.slice" --unit="shepherd-dev-headless-$$" --quiet --collect \
+        "--setenv=XDG_RUNTIME_DIR=$rt" \
+        "--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+        "--setenv=HOME=$HOME" "--setenv=USER=${USER:-$(id -un)}" "--setenv=PATH=$PATH"
+}
+
 # Wait until the compositor exists, by either name.
 #
 # Under `--harden-ipc` (and on a device, where hardening is the default)
@@ -136,14 +162,33 @@ headless_wait_ipc() {
 }
 
 # Poll the tree until the launcher surface is mapped (deciseconds in $1).
+# Wait for the launcher to map a surface, in 0.1s ticks.
+#
+# The budget is generous because GTK can stall long before it paints: with no
+# `xdg-desktop-portal` answering — an SSH-only box with no graphical login, which
+# is exactly where this harness is meant to run — each of two portal lookups
+# blocks for 25s, so the UI appears about 50s in. A 20s budget reported that as
+# "surface not detected", which reads as a broken stack rather than a slow one,
+# and cost an afternoon of chasing a regression that was not there.
+#
+# `hint_after` keeps the shorter feedback: past that point it says once that it
+# is still waiting and why, so a genuinely dead launcher is not a silent
+# minute-and-a-half.
+#   headless_wait_launcher [tries] [hint_after]
 headless_wait_launcher() {
-    local tries="${1:-200}"
+    local tries="${1:-900}" hint_after="${2:-200}" i=0
     # The launcher registers as "org.shepherd.launcher" (older builds used the
     # bare "shepherd-launcher"); accept either.
     for _ in $(seq 1 "$tries"); do
         if headless_run swaymsg -t get_tree 2>/dev/null \
             | grep -qE '"app_id": *"(org\.)?shepherd[.-]launcher"'; then
             return 0
+        fi
+        i=$((i + 1))
+        if [[ "$i" -eq "$hint_after" ]]; then
+            info "Still waiting for the launcher to paint. GTK blocks ~25s per"
+            info "portal lookup when no xdg-desktop-portal answers, so this can"
+            info "take about a minute on a box with no graphical login."
         fi
         sleep 0.1
     done
@@ -201,6 +246,14 @@ headless_precheck_user() {
 #   --time "..."    SHEPHERD_MOCK_TIME passthrough (e.g. "2025-12-25 21:00:00")
 #   --gpu           use the GL renderer against a DRM node instead of pixman
 #   --no-build      skip the cargo build (use existing target/debug binaries)
+#   --harden-ipc-peers
+#                   exercise the production management-socket peer check: only
+#                   shepherdd's own cgroup and root may drive the daemon (issue
+#                   #144). Needs sudo, because the check only means anything in
+#                   a cgroup an activity cannot join, and a stack started from a
+#                   shell sits in the user manager's delegated subtree; the
+#                   session runs in a system-manager scope instead. Fails loudly
+#                   if the daemon degrades rather than arms.
 #   --harden-ipc    exercise the production sway-IPC hardening: shepherdd
 #                   unlinks the compositor's socket once it has connected, so
 #                   nothing else can reach it (issue #144). This is shepherdd's
@@ -210,7 +263,7 @@ headless_precheck_user() {
 #                   first, which this harness always asks for and always uses.
 headless_start() {
     local size="$HEADLESS_SIZE_DEFAULT" mock_time="" renderer="pixman" do_build=1
-    local config="" user="" harden=0
+    local config="" user="" harden=0 harden_peers=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --config)
@@ -224,6 +277,7 @@ headless_start() {
             --gpu)  renderer="gles2"; shift ;;
             --no-build) do_build=0; shift ;;
             --harden-ipc) harden=1; shift ;;
+            --harden-ipc-peers) harden_peers=1; shift ;;
             -h|--help) headless_usage; return 0 ;;
             *) die "Unknown option for 'dev headless': $1 (try: shepherd dev headless --help)" ;;
         esac
@@ -330,6 +384,27 @@ headless_start() {
         die "sway.conf no longer passes --no-harden-sway-ipc on its shepherdd exec line, so a plain 'dev headless' would unlink the compositor socket (issue #144)"
     fi
 
+    # The management socket's peer check stays off by default, for the reason
+    # `sway.conf` gives: it accepts peers in shepherdd's own cgroup, and
+    # everything a plain dev session starts shares the cgroup of the shell that
+    # launched it, so arming it would only refuse clients run from another
+    # terminal without separating anything.
+    #
+    # `--harden-ipc-peers` takes the opt-out back off, the same way
+    # `--harden-ipc` does — and, because stripping the flag is not by itself
+    # enough, `headless_scope_prefix` puts the session somewhere the check can
+    # mean something. See the recipe in `crates/shepherd-ipc/README.md`.
+    if [[ "$harden_peers" -eq 1 ]]; then
+        sed -i "/^exec .*shepherdd -c /s# --no-restrict-ipc-peers##g" "$sway_config"
+        exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+        if [[ "$exec_line" == *--no-restrict-ipc-peers* ]]; then
+            die "Failed to strip --no-restrict-ipc-peers from the derived sway config, so --harden-ipc-peers would not have armed anything"
+        fi
+        info "Arming the management-socket peer check: only this session and root may drive the daemon"
+    elif [[ "$exec_line" != *--no-restrict-ipc-peers* ]]; then
+        die "sway.conf no longer passes --no-restrict-ipc-peers on its shepherdd exec line, so a dev session would refuse clients started from any other terminal (issue #144)"
+    fi
+
     if [[ "$do_build" -eq 1 ]]; then
         info "Building shepherd binaries..."
         build_cargo false
@@ -362,6 +437,14 @@ headless_start() {
         maybe_sudo mkdir -p "$rt"
         maybe_sudo chown "$user" "$rt"
         maybe_sudo chmod 700 "$rt"
+
+        if [[ "$harden_peers" -eq 1 ]]; then
+            # The scope would have to run as root and drop to `$user` through
+            # the existing `sudo -u`, and that path uses `env -i`, which would
+            # wipe the bus address the arming depends on. Refusing beats
+            # handing back a session that quietly degraded.
+            die "--harden-ipc-peers is not supported with --user yet; run it without --user"
+        fi
 
         headless_precheck_user "$user" "$repo_root" "$sway_config" "$config"
 
@@ -411,7 +494,11 @@ headless_start() {
         local before; before="$(headless_wayland_sockets "$rt")"
 
         info "Starting headless Sway ($renderer renderer, $size)..."
-        setsid env "${sway_env[@]}" \
+        local -a scope=()
+        if [[ "$harden_peers" -eq 1 ]]; then
+            mapfile -t scope < <(headless_scope_prefix "$rt")
+        fi
+        setsid "${scope[@]}" env "${sway_env[@]}" \
             sway -c "$sway_config" --unsupported-gpu \
             >"$log" 2>&1 &
         pid=$!
@@ -471,12 +558,29 @@ SHEPHERD_HEADLESS_SIZE=$size
 SHEPHERD_HEADLESS_OUTPUT=$HEADLESS_OUTPUT
 EOF
 
+    # Asking for the armed check and getting a degraded one is the failure this
+    # flag exists to prevent, and it is invisible unless someone reads the log:
+    # the session comes up and every client still connects, because they all
+    # share shepherdd's cgroup either way. So confirm it, and hand back the
+    # daemon's own reason when it did not arm.
+    if [[ "$harden_peers" -eq 1 ]]; then
+        if grep -aq "accepts only this session and root" "$log"; then
+            success "Peer check armed: only shepherdd's own cgroup and root may drive the daemon"
+        else
+            local why
+            why="$(grep -aoE "(delegated cgroup subtree|Activities will share shepherd's own cgroup)[^\"]*" "$log" | head -1)"
+            error "--harden-ipc-peers did not arm the peer check. The daemon said:"
+            printf '  %s\n' "${why:-<no reason logged; see $log>}" >&2
+            die "Refusing to hand back a session that looks hardened and is not (issue #144)"
+        fi
+    fi
+
     success "Headless session up (pid $pid${user:+, user=$user}, WAYLAND_DISPLAY=$wd, SWAYSOCK=$swaysock)"
 
-    if headless_wait_launcher 200; then
+    if headless_wait_launcher 900 200; then
         success "Launcher surface is mapped and ready to screenshot."
     else
-        warn "Launcher surface not detected within 20s — the stack is up but the"
+        warn "Launcher surface not detected within 90s — the stack is up but the"
         warn "GTK UI may not have painted. Check $log and 'shepherd dev tree'."
     fi
 
@@ -630,6 +734,15 @@ Start options:
                    development config, and this flag takes the opt-out back off.
                    The session stays drivable through the alias shepherdd
                    creates first, which this harness always uses either way.
+    --harden-ipc-peers
+                   Exercise the production management-socket peer check (issue
+                   #144): only shepherdd's own cgroup and root may drive the
+                   daemon. Needs sudo. The check only means anything in a cgroup
+                   an activity cannot join, and a stack started from a shell
+                   sits in the user manager's delegated subtree, so the session
+                   is run in a system-manager scope instead. Fails loudly if the
+                   daemon degrades rather than arms, since a degraded session
+                   looks identical from the outside.
 
 The session runs with no login session, no parent compositor, and no GPU, so an
 agent can drive it over SSH. Connection details live in

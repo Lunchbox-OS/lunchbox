@@ -1,5 +1,6 @@
 //! Process management utilities
 
+use crate::helpers;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -18,8 +19,15 @@ pub const DEFAULT_FIREWALL_HELPER_PATH: &str = "/usr/libexec/shepherd-firewall-h
 
 /// Resolve the firewall helper path, honoring the env override.
 pub fn firewall_helper_path() -> String {
-    std::env::var("SHEPHERD_FIREWALL_HELPER")
-        .unwrap_or_else(|_| DEFAULT_FIREWALL_HELPER_PATH.to_string())
+    // The override is honoured only in a development session (issue #144). It
+    // names a binary `pkexec` is asked to run, and the environment is exactly
+    // what an activity can choose, so on a device it must not be read at all.
+    // polkit pins the action to the default path anyway, so an override that
+    // slipped through would fail rather than escalate — this is the belt to
+    // that brace.
+    helpers::env_override("SHEPHERD_FIREWALL_HELPER")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DEFAULT_FIREWALL_HELPER_PATH.to_string())
 }
 
 /// Whether the host can actually enforce per-cgroup IP filters.
@@ -102,7 +110,7 @@ fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
 /// only if the action is granted with no auth prompt required.
 fn probe_polkit_grant() -> Result<(), String> {
     let pid = std::process::id();
-    let output = std::process::Command::new("pkcheck")
+    let output = helpers::command("pkcheck")
         .args([
             "--action-id",
             "org.shepherd.firewall.apply-process",
@@ -117,6 +125,186 @@ fn probe_polkit_grant() -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(stderr.trim().to_string())
     }
+}
+
+/// Whether an activity can be launched into a cgroup of its own without
+/// privilege (issue #144).
+///
+/// The peer allow-list on shepherdd's management socket accepts exactly the
+/// processes in shepherdd's own cgroup. That is only a boundary if activities
+/// are somewhere else — and a plain `Process` entry launched by `fork`/`exec`
+/// inherits shepherdd's cgroup *exactly*, character for character, so it is
+/// not merely hard to tell from the launcher, it is identical to it.
+///
+/// The privileged firewall helper already moves an activity out, via a
+/// system-manager scope. This is the unprivileged path for everything that
+/// does not go through it: `systemd-run --user --scope` asks shepherd's own
+/// user manager for a transient scope. That is enough here even though it is
+/// not enough for the firewall (BPF attach needs the *system* manager), because
+/// all this has to achieve is "not shepherd's cgroup".
+///
+/// Snap and flatpak activities need nothing: their runtimes already place them
+/// under `user@<uid>.service/app.slice` — the same fact
+/// [`apply_firewall_to_existing_scope`] relies on to find their scope.
+#[derive(Debug, Clone)]
+pub enum ActivityIsolationStatus {
+    Supported,
+    Unsupported { reason: String },
+}
+
+impl ActivityIsolationStatus {
+    pub fn is_supported(&self) -> bool {
+        matches!(self, ActivityIsolationStatus::Supported)
+    }
+}
+
+static ISOLATION_STATUS: RwLock<Option<ActivityIsolationStatus>> = RwLock::new(None);
+
+/// Cached probe of whether `systemd-run --user --scope` works from here.
+///
+/// Cached for the same reason the firewall probe is: the launch path consults
+/// it on every spawn and the probe execs a process. Refreshable so a user
+/// manager that appears later (or a session that gains a bus) is picked up
+/// without a daemon restart.
+pub fn activity_isolation_status() -> ActivityIsolationStatus {
+    if let Some(cached) = ISOLATION_STATUS.read().expect("isolation lock").clone() {
+        return cached;
+    }
+    refresh_activity_isolation()
+}
+
+/// Re-run the probe and replace the cached value.
+pub fn refresh_activity_isolation() -> ActivityIsolationStatus {
+    let fresh = probe_activity_isolation();
+    *ISOLATION_STATUS.write().expect("isolation lock") = Some(fresh.clone());
+    fresh
+}
+
+fn probe_activity_isolation() -> ActivityIsolationStatus {
+    // Actually create a throwaway scope rather than inferring from the
+    // environment. Whether the user manager is reachable depends on
+    // XDG_RUNTIME_DIR, a live bus, and the manager itself — the e2e harness,
+    // for instance, runs with a temp XDG_RUNTIME_DIR and no bus at all. The
+    // only reliable test is the thing we are about to do for real.
+    let scope = format!("shepherd-isolation-probe-{}.scope", std::process::id());
+    let output = helpers::command("systemd-run")
+        .args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--quiet",
+            &format!("--unit={}", scope),
+            "--",
+            "/bin/true",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => ActivityIsolationStatus::Supported,
+        Ok(out) => ActivityIsolationStatus::Unsupported {
+            reason: format!(
+                "`systemd-run --user --scope` failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        },
+        Err(e) => ActivityIsolationStatus::Unsupported {
+            reason: format!("could not exec systemd-run: {}", e),
+        },
+    }
+}
+
+/// Build the argv prefix that launches an activity into a transient scope of
+/// its own in shepherd's *user* manager (issue #144).
+///
+/// `--collect` so the scope is reaped when the activity exits: there is no
+/// teardown call to forget, unlike the privileged path's `stop_firewall_scope`.
+///
+/// Like the firewall helper's `systemd-run --scope`, this execs the command in
+/// its own process rather than forking one — so the pid shepherdd records is
+/// the activity's, already inside the scope, and every existing pid, pgid and
+/// kill path keeps working unchanged.
+pub fn user_scope_argv_prefix(scope_name: &str) -> Vec<String> {
+    vec![
+        helpers::resolve_arg("systemd-run"),
+        "--user".into(),
+        "--scope".into(),
+        "--collect".into(),
+        "--quiet".into(),
+        format!("--unit={}", scope_name),
+        "--".into(),
+    ]
+}
+
+/// The argv prefix that puts one of shepherd's own **helper subprocesses** into
+/// a transient scope of its own (issue #144).
+///
+/// Distinct from [`user_scope_argv_prefix`], which isolates an *activity*, and
+/// the reasoning is different. A helper is shepherd's own choice of binary with
+/// shepherd's own argv, so it is not the untrusted party — but some helpers
+/// parse data that is. `yt-dlp` is the one that matters: it runs on a
+/// background prefetch timer with no activity launched, and it parses whatever
+/// a remote host returns. Being a direct child of shepherdd puts it inside the
+/// management socket's allow-list, so a parser bug there would be a peer the
+/// daemon trusts.
+///
+/// Returns an **empty** prefix when the user manager cannot be reached, meaning
+/// "run it bare" — the same trade the activity path makes, and reported by the
+/// same `ipc_socket_not_hardened` diagnostic at startup.
+///
+/// `tag` names the helper for the scope, so a stray unit is identifiable in
+/// `systemctl --user list-units`. The counter keeps concurrent helpers from
+/// colliding on a unit name, which would fail the launch outright.
+pub fn helper_scope_argv_prefix(tag: &str) -> Vec<String> {
+    match activity_isolation_status() {
+        ActivityIsolationStatus::Supported => {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            user_scope_argv_prefix(&make_scope_name(&format!(
+                "{tag}-{}-{n}",
+                std::process::id()
+            )))
+        }
+        ActivityIsolationStatus::Unsupported { .. } => Vec::new(),
+    }
+}
+
+/// The argv for the preloaded Steam client, in a scope of its own (issue #144).
+///
+/// `scope` is `None` when [`activity_isolation_status`] says the user manager
+/// cannot be reached, in which case the client is preloaded unwrapped rather
+/// than not at all.
+///
+/// This looks redundant and is not. `snap run` re-scopes the client into
+/// `snap.steam.steam-<uuid>.scope` moments later, so the scope built here
+/// empties and `--collect` reaps it. It is here so that "nothing shepherd
+/// starts for an activity is ever in shepherd's cgroup" holds because of what
+/// this code does, not because snapd usually moves the process quickly enough
+/// — and the preloaded client is the parent every Steam game inherits from, so
+/// it is the launch that matters.
+pub fn steam_preload_argv(scope: Option<&str>) -> Vec<String> {
+    // -silent tells Steam not to show its main window on startup.
+    let client = [
+        helpers::resolve_arg("snap"),
+        "run".into(),
+        "steam".into(),
+        "-silent".into(),
+    ]
+    .into_iter();
+    match scope {
+        Some(scope) => user_scope_argv_prefix(scope)
+            .into_iter()
+            .chain(client)
+            .collect(),
+        None => client.collect(),
+    }
+}
+
+/// The scope name for the preloaded Steam client.
+///
+/// Keyed by pid rather than a session id because the preload belongs to the
+/// daemon, not to a session — and because a name reused across a restart would
+/// collide with a scope the previous daemon had not finished releasing.
+pub fn steam_preload_scope_name() -> String {
+    make_scope_name(&format!("steam-preload-{}", std::process::id()))
 }
 
 /// Build the argv prefix for spawning a Process-kind activity through the
@@ -135,7 +323,7 @@ pub fn firewall_helper_argv_prefix(
     cwd: Option<&std::path::Path>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
-        "pkexec".into(),
+        helpers::resolve_arg("pkexec"),
         // Preserve shepherdd's cwd so the activity's effective cwd matches
         // the no-firewall path (pkexec otherwise resets to root's home).
         "--keep-cwd".into(),
@@ -300,6 +488,18 @@ pub fn init() {
             );
         }
     }
+    match activity_isolation_status() {
+        ActivityIsolationStatus::Supported => {
+            info!("Activities will be launched into a cgroup of their own");
+        }
+        ActivityIsolationStatus::Unsupported { reason } => {
+            warn!(
+                reason = %reason,
+                "Activities will share shepherd's own cgroup, so the management socket \
+                 cannot tell one from the launcher (issue #144)"
+            );
+        }
+    }
 }
 
 /// Apply a firewall spec to an already-running systemd scope (e.g. a flatpak
@@ -354,10 +554,7 @@ pub async fn apply_firewall_to_existing_scope(
         args.push(rule.clone());
     }
 
-    let result = tokio::process::Command::new("pkexec")
-        .args(&args)
-        .output()
-        .await;
+    let result = helpers::tokio_command("pkexec").args(&args).output().await;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -438,7 +635,7 @@ pub fn kill_snap_cgroup(snap_name: &str, _signal: Signal) -> bool {
 
                 // Always use SIGKILL for snap apps to prevent self-restart behavior
                 // Using systemctl kill --signal=KILL sends SIGKILL to all processes in scope
-                let result = Command::new("systemctl")
+                let result = helpers::command("systemctl")
                     .args(["--user", "kill", "--signal=KILL", &scope_name])
                     .output();
 
@@ -505,7 +702,7 @@ pub fn kill_flatpak_cgroup(app_id: &str, _signal: Signal) -> bool {
 
                 // Always use SIGKILL for flatpak apps to prevent self-restart behavior
                 // Using systemctl kill --signal=KILL sends SIGKILL to all processes in scope
-                let result = Command::new("systemctl")
+                let result = helpers::command("systemctl")
                     .args(["--user", "kill", "--signal=KILL", &scope_name])
                     .output();
 
@@ -641,7 +838,7 @@ pub fn kill_steam_game_processes(app_id: u32, signal: Signal) -> bool {
 /// The helper's single polkit action gates the binary as a whole, so this needs
 /// no grant beyond the one `apply-process` already requires.
 pub fn stop_firewall_scope(scope_name: &str) -> bool {
-    let output = Command::new("pkexec")
+    let output = helpers::command("pkexec")
         .args([
             &firewall_helper_path(),
             "stop-scope",
@@ -758,7 +955,10 @@ pub fn kill_by_command(
     signal: Signal,
     protected_pgids: &std::collections::HashSet<u32>,
 ) -> bool {
-    let output = match Command::new("pgrep").args(["-f", command_name]).output() {
+    let output = match helpers::command("pgrep")
+        .args(["-f", command_name])
+        .output()
+    {
         Ok(output) => output,
         Err(e) => {
             warn!(command = command_name, error = %e, "Failed to run pgrep");
@@ -855,7 +1055,7 @@ impl ManagedProcess {
                     .join(" ");
 
                 let script_argv = vec![
-                    "script".to_string(),
+                    helpers::resolve_arg("script"),
                     "-q".to_string(),
                     "-c".to_string(),
                     original_cmd,
@@ -871,6 +1071,13 @@ impl ManagedProcess {
         let program = &actual_argv[0];
         let args = &actual_argv[1..];
 
+        // Deliberately not resolved here (issue #144). `program` is
+        // `actual_argv[0]`, which is either an activity's own command from
+        // `config.toml` — the admin's string, and not shepherd's to reinterpret
+        // — or a helper the caller already resolved before building the argv.
+        // Resolving again would be wrong for the first and redundant for the
+        // second.
+        #[allow(clippy::disallowed_methods)]
         let mut cmd = Command::new(program);
         cmd.args(args);
 
@@ -1158,6 +1365,11 @@ impl Drop for ManagedProcess {
     }
 }
 
+// Tests spawn stand-ins by name on purpose — `sh`, `true`, `setsid`, a stubbed
+// `flatpak` — which is the case `Command::new`'s ban exists to make deliberate
+// rather than accidental (issue #144). A test process is not a daemon on a
+// device, and what it execs is its own fixture.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,7 +1440,9 @@ mod tests {
             Some(std::path::Path::new("/tmp")),
         );
 
-        assert_eq!(prefix[0], "pkexec");
+        // Resolved, not bare: `$PATH` must not get to choose which pkexec
+        // runs (issue #144).
+        assert_eq!(prefix[0], helpers::resolve_arg("pkexec"));
         assert!(prefix.iter().any(|a| a == "--keep-cwd"));
         assert!(prefix.iter().any(|a| a == "apply-process"));
         assert!(prefix.iter().any(|a| a == "shepherd-test.scope"));
@@ -1302,7 +1516,14 @@ mod tests {
         // A uniquely named stand-in, so the `pgrep` cannot match anything on
         // the machine running the test but these two processes.
         let script = scratch.path().join("shepherd-killtest-stand-in.sh");
-        std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 0.05; done\n").unwrap();
+        // Bounded rather than endless: a failing assertion unwinds past the
+        // kill this test ends with, and an orphaned stand-in then outlives the
+        // suite. 60s is longer than the test needs and shorter than a run.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ni=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
 
@@ -1401,6 +1622,63 @@ mod tests {
             !pgid_is_live(pgid),
             "signalling the group must reach the survivor"
         );
+    }
+
+    #[test]
+    fn the_preloaded_steam_client_is_launched_into_a_scope_of_its_own() {
+        // Deliberate, and it looks redundant: `snap run` re-scopes the client
+        // into `snap.steam.steam-<uuid>.scope` a moment later, so the scope
+        // built here empties out and is reaped. Keeping it is what makes
+        // "nothing shepherd starts for an activity is ever in shepherd's
+        // cgroup" a property of this code rather than of snapd's timing — and
+        // the preloaded client is the parent every Steam game inherits from,
+        // so dropping it would reopen the window for every game at once.
+        let argv = steam_preload_argv(Some("shepherd-steam-preload-42.scope"));
+        assert_eq!(
+            argv,
+            vec![
+                helpers::resolve_arg("systemd-run"),
+                "--user".into(),
+                "--scope".into(),
+                "--collect".into(),
+                "--quiet".into(),
+                "--unit=shepherd-steam-preload-42.scope".into(),
+                "--".into(),
+                helpers::resolve_arg("snap"),
+                "run".into(),
+                "steam".into(),
+                "-silent".into(),
+            ],
+            "the preloaded Steam client must be wrapped, not spawned bare"
+        );
+    }
+
+    #[test]
+    fn steam_is_still_preloaded_when_it_cannot_be_isolated() {
+        // Without a reachable user manager the client is preloaded unwrapped
+        // rather than not at all — the same trade the activity path makes. The
+        // downgrade is reported as `ipc_socket_not_hardened` at startup.
+        assert_eq!(
+            steam_preload_argv(None),
+            vec![
+                helpers::resolve_arg("snap"),
+                "run".into(),
+                "steam".into(),
+                "-silent".into()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_preload_scope_is_named_per_daemon_not_per_session() {
+        let name = steam_preload_scope_name();
+        assert!(
+            name.starts_with("shepherd-steam-preload-") && name.ends_with(".scope"),
+            "unexpected preload scope name {name:?}"
+        );
+        // Distinguishable from a session scope, so a stale preload scope can
+        // never be mistaken for an activity's during teardown or triage.
+        assert_ne!(name, make_scope_name(&format!("{}", std::process::id())));
     }
 
     /// `command_name` is the `pkill -f` fallback, so it must name the

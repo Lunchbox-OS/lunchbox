@@ -19,6 +19,10 @@
 //! skips into failures — CI sets it, so a missing precondition is reported
 //! rather than passing quietly.
 
+// Fixture code: spawns probes and stand-ins by name, which the ban makes
+// deliberate rather than accidental (issue #144).
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket};

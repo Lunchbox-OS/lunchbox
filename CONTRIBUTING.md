@@ -99,6 +99,20 @@ Connection state lives in `dev-runtime/headless/session.env`; the compositor log
 is `dev-runtime/headless/sway.log`. See the design notes in
 [`docs/ai/history`](./docs/ai/history/) for internals.
 
+**Not usable for the management socket's peer check** (issue #144). `shepherdd`
+normally accepts a client on its own socket only from its own cgroup, which on a
+device is the display manager's root-owned session scope — one no activity can
+join. Started from a shell, the whole stack instead shares the launching
+terminal's cgroup, inside the user manager's delegated subtree where anything at
+this uid can join anything. So a dev session can neither pass the check
+meaningfully nor fail it honestly, and every dev entry point passes
+`--no-restrict-ipc-peers`; `dev headless --harden-ipc` deliberately does *not*
+take that off, unlike the compositor unlink. The check itself is covered by unit
+tests in `shepherd-ipc`, which can put a peer in a cgroup of its own without a
+session. To see it work end to end, run `shepherdd` by hand without the flag and
+connect from `systemd-run --user --scope`; the measurements are in
+[`docs/ai/history/2026-08-29 002`](./docs/ai/history/).
+
 **Not usable for GPU performance work.** The headless session exports
 `LIBGL_ALWAYS_SOFTWARE=1` for every client, so even `--gpu` (which only swaps
 wlroots' own renderer) leaves the launcher, HUD and `shepherd-media` on

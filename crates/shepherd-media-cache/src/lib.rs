@@ -39,11 +39,15 @@ pub mod lock;
 pub mod paths;
 pub mod playlist;
 pub mod store;
+pub mod subprocess;
 
 pub use download::{DEFAULT_DOWNLOAD_INTERVAL, DownloadKind, RETRY_COOLDOWN};
 pub use key::{content_key, interest_key, source_url};
 pub use paths::media_cache_dir;
 pub use playlist::{fetch_playlist, ytdlp_available};
+pub use subprocess::{
+    ProgramResolverFn, ScopePrefixFn, set_program_resolver_fn, set_scope_prefix_fn,
+};
 // The shared eviction scoring; re-exported so callers of this crate need not
 // reach into `shepherd-media-app` for it.
 pub use shepherd_media_app::lru::{DEFAULT_WATCHED_GRACE, Score, ScoreWeights as CacheWeights};

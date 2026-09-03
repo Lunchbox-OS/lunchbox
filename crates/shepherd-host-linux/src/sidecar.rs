@@ -16,24 +16,22 @@ use tracing::{debug, info, warn};
 /// Locate a sidecar binary by name.
 ///
 /// Resolution order:
-/// 1. The matching `SHEPHERD_*_BIN` env var override, if set and non-empty.
-/// 2. A sibling of the running daemon binary (`current_exe()`'s directory).
-/// 3. The literal binary name, which `Command` resolves via `PATH`.
+/// 1. The matching `SHEPHERD_*_BIN` env var override — **development only**,
+///    gated by [`crate::helpers::env_override`]. It names a binary the daemon
+///    will exec as a direct child, and on a device the environment is chosen by
+///    the kiosk user (issue #144).
+/// 2. A sibling of the running daemon binary (`current_exe()`'s directory),
+///    which is where an install puts them and where a `cargo build` leaves them.
+/// 3. A trusted system directory.
+///
+/// Step 3 used to be the bare name, resolved through `$PATH`. That is the hole
+/// #144's peer check exists to close: a sidecar is a direct child of the daemon,
+/// so it lands in the daemon's cgroup and is accepted on the management socket.
 fn sidecar_binary(name: &str, env_override: &str) -> PathBuf {
-    if let Ok(val) = std::env::var(env_override)
-        && !val.is_empty()
-    {
-        return PathBuf::from(val);
+    if let Some(path) = crate::helpers::env_override(env_override) {
+        return path;
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    PathBuf::from(name)
+    crate::helpers::resolve_daemon_sibling(name)
 }
 
 /// Locate the `shepherd-touch-bridge` binary.
@@ -51,6 +49,18 @@ pub fn gamepad_bridge_binary() -> PathBuf {
     sidecar_binary("shepherd-gamepad-bridge", "SHEPHERD_GAMEPAD_BRIDGE_BIN")
 }
 
+/// A command for a sidecar binary whose path is already resolved.
+///
+/// `Command::new` is banned workspace-wide so that naming a binary is always a
+/// deliberate act (issue #144). This is the sanctioned exception for the input
+/// sidecars: `bin` comes from [`sidecar_binary`], which has already resolved it
+/// through `helpers::resolve_daemon_sibling` — a sibling of the running daemon,
+/// else a trusted system directory, never a bare name `$PATH` could reinterpret.
+#[allow(clippy::disallowed_methods)]
+fn sidecar_command(bin: &std::path::Path) -> Command {
+    Command::new(bin)
+}
+
 /// Spawn the touch-to-mouse bridge as a child of the daemon.
 ///
 /// The bridge maps absolute coordinates onto the output's logical space, which
@@ -58,7 +68,7 @@ pub fn gamepad_bridge_binary() -> PathBuf {
 pub fn spawn_touch_bridge() -> std::io::Result<Child> {
     let bin = touch_bridge_binary();
     debug!(binary = %bin.display(), "Launching touch-to-mouse bridge");
-    let child = Command::new(&bin)
+    let child = sidecar_command(&bin)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -76,7 +86,7 @@ pub fn spawn_touch_bridge() -> std::io::Result<Child> {
 pub fn spawn_disable_touch() -> std::io::Result<Child> {
     let bin = touch_bridge_binary();
     debug!(binary = %bin.display(), "Launching touchscreen grab (disable touch)");
-    let child = Command::new(&bin)
+    let child = sidecar_command(&bin)
         .arg("--grab-only")
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -93,7 +103,7 @@ pub fn spawn_disable_touch() -> std::io::Result<Child> {
 pub fn spawn_tablet_bridge() -> std::io::Result<Child> {
     let bin = tablet_bridge_binary();
     debug!(binary = %bin.display(), "Launching tablet-to-touch bridge");
-    let child = Command::new(&bin)
+    let child = sidecar_command(&bin)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -109,7 +119,7 @@ pub fn spawn_gamepad_bridge(
     options: &InputCompatOptions,
 ) -> std::io::Result<Child> {
     let bin = gamepad_bridge_binary();
-    let mut cmd = Command::new(&bin);
+    let mut cmd = sidecar_command(&bin);
     cmd.arg("--preset").arg(preset.as_cli());
     if let Some(v) = options.gamepad_deadzone {
         cmd.arg("--deadzone").arg(format!("{v}"));

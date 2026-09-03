@@ -189,6 +189,13 @@ fn apply_process(args: impl Iterator<Item = OsString>) -> ExitCode {
     sd_args.push("--".into());
     sd_args.extend(command_argv);
 
+    // Bare names are safe here, unlike anywhere in the daemon (issue #144).
+    // This binary only ever runs under `pkexec`, which replaces the environment
+    // with "a minimal known and safe" one — measured: `PATH` comes through as
+    // `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:...`, all
+    // root-owned. The caller's `$PATH` never reaches here, which is the whole
+    // reason the helper is reached through `pkexec` rather than called directly.
+    #[allow(clippy::disallowed_methods)]
     let err = Command::new("systemd-run").args(&sd_args).exec();
     eprintln!("{}: execvp(systemd-run): {}", HELPER_NAME, err);
     ExitCode::from(127)
@@ -290,6 +297,8 @@ fn stop_scope(args: impl Iterator<Item = OsString>) -> ExitCode {
     }
     let scope_name = scope_name.unwrap_or_else(|| die("--scope-name is required"));
 
+    // Same as `apply_process`: pkexec has already replaced the environment.
+    #[allow(clippy::disallowed_methods)]
     let err = Command::new("systemctl").args(["stop", &scope_name]).exec();
     eprintln!("{}: execvp(systemctl): {}", HELPER_NAME, err);
     ExitCode::from(127)

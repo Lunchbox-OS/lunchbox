@@ -153,7 +153,7 @@ pub fn chrome_flatpak_argv(
     chrome_flags: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
-        "flatpak".to_string(),
+        crate::helpers::resolve_arg("flatpak"),
         "run".to_string(),
         "--command=bash".to_string(),
         format!("--env=SHEPHERD_POLICY={}", policy_file.display()),
@@ -235,6 +235,11 @@ pub fn chrome_flags(spec: &BrowserSpec, user_data_dir: Option<&Path>) -> Vec<Str
     args
 }
 
+// Tests spawn stand-ins by name on purpose — `sh`, `true`, `setsid`, a stubbed
+// `flatpak` — which is the case `Command::new`'s ban exists to make deliberate
+// rather than accidental (issue #144). A test process is not a daemon on a
+// device, and what it execs is its own fixture.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +447,14 @@ mod tests {
             &env,
             &["--user-data-dir=/x".to_string(), "--kiosk".to_string()],
         );
-        assert_eq!(&argv[0..3], &["flatpak", "run", "--command=bash"]);
+        // argv[0] is resolved from a trusted directory rather than left bare
+        // (issue #144), so compare against the resolution rather than "flatpak".
+        assert_eq!(argv[0], crate::helpers::resolve_arg("flatpak"));
+        assert!(
+            std::path::Path::new(&argv[0]).is_absolute(),
+            "flatpak must not be exec'd by a name $PATH could redirect"
+        );
+        assert_eq!(&argv[1..3], &["run", "--command=bash"]);
         assert!(argv.contains(
             &"--env=SHEPHERD_POLICY=/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/e.json"
                 .to_string()

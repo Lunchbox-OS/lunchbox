@@ -2,7 +2,7 @@
 //! a plain HTTP fetch per item, then eviction back to the cap.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
@@ -216,7 +216,10 @@ fn download_youtube(
     ordinal: Option<u32>,
 ) -> Result<(), String> {
     let output_template = cache_dir.join(format!("{key}.%(ext)s"));
-    let output = Command::new("yt-dlp")
+    // In a cgroup of its own where one can be had (issue #144): this parses
+    // whatever the remote host sends back, and a direct child of shepherdd is
+    // inside the management socket's allow-list. See `crate::subprocess`.
+    let output = crate::subprocess::ytdlp_command("ytdlp-download")
         .args([
             "--quiet",
             "--no-warnings",

@@ -10,6 +10,10 @@
 //! provisions a tiny test flatpak via flatpak-builder and exports the env
 //! the test needs.
 
+// Fixture code: spawns probes and stand-ins by name, which the ban makes
+// deliberate rather than accidental (issue #144).
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result};
 use serde_json::json;
 use shepherd_e2e::{TestHarness, json_body};

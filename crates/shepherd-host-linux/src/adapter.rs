@@ -1,5 +1,6 @@
 //! Linux host adapter implementation
 
+use crate::helpers;
 use async_trait::async_trait;
 use shepherd_api::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
@@ -21,11 +22,12 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::process::{
-    FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
-    build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
-    firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name, pgid_is_live, pid_in_group, pid_is_live,
-    signal_group, steam_webhelper_running, stop_firewall_scope,
+    ActivityIsolationStatus, FirewallEnforcementStatus, ManagedProcess, activity_isolation_status,
+    apply_firewall_to_existing_scope, build_inherited_env, find_steam_game_pids,
+    firewall_enforcement_status, firewall_helper_argv_prefix, init, kill_by_command,
+    kill_flatpak_cgroup, kill_snap_cgroup, kill_steam_game_processes, make_scope_name,
+    pgid_is_live, pid_in_group, pid_is_live, signal_group, steam_preload_argv,
+    steam_preload_scope_name, steam_webhelper_running, stop_firewall_scope, user_scope_argv_prefix,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -194,11 +196,22 @@ fn media_argv(
 }
 
 /// Resolve the base directory under which browser policy/profile dirs are
-/// materialized. Honors `SHEPHERD_BROWSER_ROOT` (used by tests to redirect
-/// writes away from the real `~/.var/app/...`), otherwise the user's home.
+/// materialized: the user's home, or `SHEPHERD_BROWSER_ROOT` where the
+/// environment is trusted.
+///
+/// Gated, because redirecting this is a policy bypass rather than a
+/// convenience (issue #144): the managed-policy JSON lands somewhere Chrome
+/// never reads, the browser lockdown silently does not apply, and the daemon
+/// still logs "Materialized Chrome browser policy". On a device the kiosk user
+/// owns the environment, so an activity could switch off the restrictions
+/// meant to contain it.
+///
+/// Nothing production reads it — the variable exists so the e2e suite can
+/// redirect writes away from the real `~/.var/app/...`, and that harness passes
+/// `--trust-environment`.
 fn resolve_browser_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("SHEPHERD_BROWSER_ROOT") {
-        return PathBuf::from(root);
+    if let Some(root) = crate::helpers::env_override("SHEPHERD_BROWSER_ROOT") {
+        return root;
     }
     dirs::home_dir().unwrap_or_default()
 }
@@ -781,20 +794,36 @@ impl LinuxHost {
             steam_interstitial::ensure_cef_debug_enabled();
         }
 
-        // -silent tells Steam not to show its main window on startup
-        let argv = vec![
-            "snap".to_string(),
-            "run".to_string(),
-            "steam".to_string(),
-            "-silent".to_string(),
-        ];
+        // Into a scope of its own, like an activity (issue #144). The preloaded
+        // client is the parent every Steam game inherits from, so this is the
+        // launch that matters; `spawn` wraps the per-game `steam://rungameid`
+        // request for the same reason. See `steam_preload_argv` for why the
+        // wrapping is not redundant even though `snap run` re-scopes.
+        let scope = match activity_isolation_status() {
+            ActivityIsolationStatus::Supported => Some(steam_preload_scope_name()),
+            ActivityIsolationStatus::Unsupported { reason } => {
+                // Same trade as the activity path: preload anyway rather than
+                // leave Steam entries gated forever. shepherdd already raises
+                // `ipc_socket_not_hardened` at startup when the probe fails.
+                warn!(
+                    reason = %reason,
+                    "Cannot give the preloaded Steam client a cgroup of its own"
+                );
+                None
+            }
+        };
+        let argv = steam_preload_argv(scope.as_deref());
+
         match ManagedProcess::spawn(
             &argv,
             &HashMap::new(),
             None,
             None,
             Some("steam".to_string()),
-            None,
+            // Not `argv[0]`: that is `systemd-run` once wrapped, and was
+            // `snap` before — `pkill -f snap` on shutdown would reach every
+            // snap on the device, not just Steam.
+            Some("steam"),
         ) {
             Ok(proc) => {
                 let pid = proc.pid;
@@ -1686,7 +1715,11 @@ impl HostAdapter for LinuxHost {
                 // For snap apps, we need to use 'snap run <snap_name>' to launch them.
                 // The command (if specified) is passed as an argument after the snap name,
                 // followed by any additional args.
-                let mut argv = vec!["snap".to_string(), "run".to_string(), snap_name.clone()];
+                let mut argv = vec![
+                    helpers::resolve_arg("snap"),
+                    "run".to_string(),
+                    snap_name.clone(),
+                ];
                 // If a custom command is specified (different from snap_name), add it
                 if let Some(cmd) = command
                     && cmd != snap_name
@@ -1699,7 +1732,7 @@ impl HostAdapter for LinuxHost {
             EntryKind::Steam { app_id, args, env } => {
                 // Steam games are launched via the Steam snap: snap run steam steam://rungameid/<app_id>
                 let mut argv = vec![
-                    "snap".to_string(),
+                    helpers::resolve_arg("snap"),
                     "run".to_string(),
                     "steam".to_string(),
                     format!("steam://rungameid/{}", app_id),
@@ -1713,7 +1746,7 @@ impl HostAdapter for LinuxHost {
                 // `[entries.kind.env]` entries only reach the app via the
                 // explicit `--env=KEY=VAL` flag. Build them into the argv
                 // (sorted for deterministic ordering and easier debugging).
-                let mut argv = vec!["flatpak".to_string(), "run".to_string()];
+                let mut argv = vec![helpers::resolve_arg("flatpak"), "run".to_string()];
                 let mut keys: Vec<&String> = env.keys().collect();
                 keys.sort();
                 for k in keys {
@@ -1864,12 +1897,19 @@ impl HostAdapter for LinuxHost {
         // doesn't grant us, skip the wrapper rather than spawning under a
         // silent no-op.
         let mut firewall_scope: Option<String> = None;
+        // Whether the activity is already being launched into a cgroup of its
+        // own. The privileged path below does that as a side effect of
+        // filtering; everything else needs the unprivileged scope further down,
+        // or it inherits shepherdd's cgroup and becomes indistinguishable from
+        // the launcher on the management socket (issue #144).
+        let mut scoped_by_helper = false;
         let final_argv = if let Some(ref spec) = options.firewall {
             if sandboxed_app_name.is_none() && steam_app_id.is_none() {
                 match firewall_enforcement_status() {
                     FirewallEnforcementStatus::Supported => {
                         let scope_name = make_scope_name(&session_id.to_string());
                         firewall_scope = Some(scope_name.clone());
+                        scoped_by_helper = true;
                         let activity_env = build_inherited_env(&env);
                         let uid = nix::unistd::getuid().as_raw();
                         let gid = nix::unistd::getgid().as_raw();
@@ -1898,6 +1938,52 @@ impl HostAdapter for LinuxHost {
             }
         } else {
             argv
+        };
+
+        // Put the activity in a cgroup that is not shepherdd's, so the peer
+        // check on the management socket has something to tell apart (#144).
+        //
+        // Skipped for snap and flatpak: their runtimes already scope them under
+        // `user@<uid>.service/app.slice`, which is where
+        // `apply_firewall_to_existing_scope` goes looking. Wrapping them again
+        // would nest a scope around a launcher that immediately hands off to a
+        // long-lived runtime process elsewhere — more moving parts, no cgroup
+        // we did not already have.
+        //
+        // Steam is *not* skipped, though `snap run` re-scopes it into
+        // `snap.steam.steam-<uuid>.scope` the same way, and though the game
+        // itself is a child of the preloaded client rather than of this
+        // process. The scope this creates empties out at that hand-off and
+        // `--collect` reaps it. It is kept because the alternative is an
+        // invariant with a hole in it: "an activity is never in shepherd's
+        // cgroup" should hold because of what this function does, not because
+        // snapd usually moves the process quickly enough. `preload_steam` wraps
+        // the client for the same reason, and that is the launch a game
+        // actually inherits its cgroup from.
+        let final_argv = if scoped_by_helper || sandboxed_app_name.is_some() {
+            final_argv
+        } else {
+            match activity_isolation_status() {
+                ActivityIsolationStatus::Supported => {
+                    let mut prefixed =
+                        user_scope_argv_prefix(&make_scope_name(&session_id.to_string()));
+                    prefixed.extend(final_argv);
+                    prefixed
+                }
+                ActivityIsolationStatus::Unsupported { reason } => {
+                    // Launch anyway rather than leaving a child staring at a
+                    // dead screen — the same trade the compositor hardening
+                    // makes. The daemon reports the downgrade as a diagnostic
+                    // at startup, so it is not silent.
+                    warn!(
+                        command = ?final_argv.first(),
+                        reason = %reason,
+                        "Cannot give this activity a cgroup of its own; it will share \
+                         shepherd's, and the management socket cannot tell it from the launcher"
+                    );
+                    final_argv
+                }
+            }
         };
 
         // Spawn any input-compat sidecars before the activity. We log
@@ -2333,6 +2419,11 @@ impl HostAdapter for LinuxHost {
     }
 }
 
+// Tests spawn stand-ins by name on purpose — `sh`, `true`, `setsid`, a stubbed
+// `flatpak` — which is the case `Command::new`'s ban exists to make deliberate
+// rather than accidental (issue #144). A test process is not a daemon on a
+// device, and what it execs is its own fixture.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3175,20 +3266,32 @@ mod tests {
 
         std::fs::write(
             &fake,
+            // Bounded, not `while true`: the test stops what it spawned on
+            // its way out, but a failing assertion unwinds past that, and this
+            // runs in a scope of its own that outlives the test process. One
+            // such escape sat on this box for six hours and then failed an
+            // unrelated e2e test, which asserts that no `sleep` is running.
+            // 60s is far longer than the test needs and far shorter than a
+            // suite run.
             "#!/bin/sh\n\
              for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$ARGV_FILE\"; done\n\
-             while true; do sleep 0.05; done\n",
+             i=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
 
         let state_root = scratch.path().join("state");
-        let _guard = crate::retroarch::ROOT_ENV_LOCK
+        let _guard = crate::retroarch::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(crate::retroarch::RETROARCH_ROOT_ENV, &state_root) };
+        // The root override is gated now (issue #144), and this test drives the
+        // real `spawn` rather than `retroarch::prepare_in`, so it is the one
+        // case that still needs the variable honoured. The trust flag is
+        // process-global like the variable itself, so `ENV_LOCK` covers both.
+        crate::helpers::set_trust_environment(true);
 
         let host = LinuxHost::new();
         let _rx = host.subscribe();
@@ -3216,6 +3319,9 @@ mod tests {
             )
             .await
             .unwrap();
+        // Put it back before the assertions, so a failing one cannot leave the
+        // rest of this test binary resolving binaries from `$PATH`.
+        crate::helpers::set_trust_environment(false);
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -3276,7 +3382,7 @@ mod tests {
              # First SIGTERM: start saving. Reset the handler first, so a\n\
              # second one kills us outright -- what RetroArch's exit(1) does.\n\
              trap 'trap - TERM; sleep 1; printf saved > \"$MARKER_FILE\"; exit 0' TERM\n\
-             while true; do sleep 0.05; done\n",
+             i=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))

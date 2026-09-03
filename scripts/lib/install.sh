@@ -128,11 +128,23 @@ install_sway_config() {
     # every activity — `exec`, which starts a process outside supervision *and*
     # outside the cgroup the per-entry firewall is attached to.
     #
-    # `sway.conf` carries the flag because it is the development config, where
+    # `--trust-environment` is stripped for the same reason again: it lets the
+    # environment name the binaries shepherdd execs and redirect where the
+    # browser policy is written, and on a device the kiosk user chooses the
+    # environment (GDM's PAM stack reads `~/.pam_environment`). Only the e2e
+    # suite passes it, but a hand-edited config could.
+    #
+    # `--no-restrict-ipc-peers` is stripped for the same reason. It opens
+    # shepherdd's *own* management socket to every process at this uid, which is
+    # every activity: without the check a game can call `logout`, `stop_current`
+    # or `launch`. It is in `sway.conf` because a dev stack runs entirely inside
+    # one shell's cgroup, where the check cannot mean anything.
+    #
+    # `sway.conf` carries both flags because it is the development config, where
     # the unlink would take the socket away from `swaymsg` and the headless
-    # harness. An installed kiosk wants the default, so the flag comes back out
-    # here — and the check below is the one that matters: a rename upstream that
-    # silently left it in would ship an unhardened device.
+    # harness. An installed kiosk wants the defaults, so they come back out
+    # here — and the checks below are the ones that matter: a rename upstream
+    # that silently left one in would ship an unhardened device.
     sed \
         -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
         -e "s|./target/debug/shepherd-hud|$bindir/shepherd-hud|g" \
@@ -140,6 +152,8 @@ install_sway_config() {
         -e "s|./config.example.toml|~/.config/shepherd/config.toml|g" \
         -e "s|-c ./sway.conf|-c $dst_config|g" \
         -e "s| --no-harden-sway-ipc||g" \
+        -e "s| --no-restrict-ipc-peers||g" \
+        -e "s| --trust-environment||g" \
         "$src_config" > "$dst_config"
 
     # Scoped to the exec line: the comment above it names the flag too, and a
@@ -151,6 +165,12 @@ install_sway_config() {
     fi
     if [[ "$dst_exec_line" == *--no-harden-sway-ipc* ]]; then
         die "Failed to strip --no-harden-sway-ipc from $dst_config; the installed device would leave sway's IPC socket reachable by every activity (issue #144)"
+    fi
+    if [[ "$dst_exec_line" == *--no-restrict-ipc-peers* ]]; then
+        die "Failed to strip --no-restrict-ipc-peers from $dst_config; the installed device would let every activity drive shepherd's own management socket (issue #144)"
+    fi
+    if [[ "$dst_exec_line" == *--trust-environment* ]]; then
+        die "Failed to strip --trust-environment from $dst_config; the installed device would take helper binaries, and the browser-policy root, from an environment the kiosk user can write (issue #144)"
     fi
     
     chmod 0644 "$dst_config"
