@@ -176,8 +176,9 @@ sudo shepherd-admin power-key suspend
 (reset a user to unclaimed); run `shepherd-admin --help` for the full list.
 
 Then have `kiosk` log out and back in (so the new group memberships take
-effect) and pick the "Shepherd Kiosk" session at login. Kiosk hardening is
-still optional — see [below](#kiosk-hardening-optional).
+effect) and pick the "Shepherd Kiosk" session at login. Then run
+[kiosk hardening](#kiosk-hardening) — it is what two of shepherd's own
+protections rest on, not just a lockdown preference.
 
 > The companion `.apk` is attached to the same release; see
 > [Installing the Android apps](#installing-the-android-apps) below.
@@ -319,7 +320,7 @@ To hand a device to a different phone, or to recover when no phone can
 administer it, factory-reset the management state on the device itself:
 
 ```sh
-sudo touch /var/lib/shepherdd/.factory-reset-ble
+sudo touch /var/lib/shepherdd/state/<kiosk-user>/.factory-reset-ble
 sudo reboot
 ```
 
@@ -327,6 +328,13 @@ The reset is applied at startup, and `shepherdd` runs as part of the kiosk
 session rather than as a system service — so a reboot (or signing out of the
 kiosk session and back in) is what applies it. The file is consumed in the
 process, so this happens once rather than on every boot.
+
+That directory belongs to the state custodian, so `sudo` is doing real work
+here rather than being habit: the kiosk user cannot write it, which is the
+point — a factory reset an activity could trigger would be a way for a game to
+unpair the phone that supervises it (issue #157). On a device installed before
+the custodian existed, the sentinel is `~<kiosk-user>/.local/share/shepherdd/.factory-reset-ble`
+instead.
 
 That clears the admin record and the Bluetooth bond and returns the device to
 unclaimed, so the next phone to pair claims it. The old phone's stored
@@ -544,10 +552,62 @@ the daemon checks theirs. The device raises the `Critical` diagnostic
 `ipc_socket_replaced` when it happens, and the session needs restarting.
 
 **This does not close every path to the same effects.** The management HTTP API
-and the BLE transport are separate surfaces with their own authentication, and
-policy and usage state are files owned by the same uid the activities run as. An
-activity that can read `config.toml` or `<data_dir>/admin.toml` is not stopped by
-anything here. Those are tracked as #156 and #157.
+and the BLE transport are separate surfaces with their own authentication
+(#156). Policy and state used to be reachable the same way; that is the section
+below.
+
+### Policy and state live at a uid activities do not have (issue #157)
+
+The third door, and the one with the sharpest demonstration. `shepherdd` runs as
+the same uid as every activity it launches, and so did its files. Measured on an
+installed device, an activity reset today's usage to zero, wiped the audit log,
+appended an entry with `max_run_seconds = 0` to the policy, and launched it under
+supervision with no deadline — the config is watched for changes, so the policy
+edit took about three seconds and needed no restart.
+
+File permissions cannot separate them while `shepherdd` runs at that uid, so the
+files move to one it does not have: a system user, `shepherd-state`, owning
+`/var/lib/shepherdd/state/<user>/` at mode `0700`. It holds the database, the
+policy, the BLE admin record and the factory-reset sentinel, and serves them to
+`shepherdd` over `/run/shepherdd/state/<user>.sock` — a socket that accepts only
+peers in the kiosk's logind session scope, a cgroup an activity can neither join
+nor persuade logind to create another of.
+
+```sh
+systemctl status shepherd-stated@kiosk.socket   # owns the name, always up
+systemctl status shepherd-stated@kiosk.service  # starts when shepherdd connects
+journalctl -u shepherd-stated@kiosk.service     # what it trusted, what it refused
+```
+
+Installed by `shepherd install all --user kiosk`, or on a packaged system by
+`shepherd-admin setup-user kiosk` — the per-user socket cannot be enabled at
+package time, because the kiosk user is not known then.
+
+Consequences worth knowing before you debug a device:
+
+- **Editing `~/.config/shepherd/config.toml` no longer takes effect on its own.**
+  That file is now the seed and the fallback; the custodian's copy is what the
+  daemon reads. Push an edit with `sudo shepherd install policy --user kiosk`,
+  which reloads within a second. `shepherdd` warns at startup when the two have
+  diverged, which is what a forgotten push looks like.
+- **The state is not in the user's home.** `/var/lib/shepherdd/state/<user>/` is,
+  and only `root` and `shepherd-state` can read it.
+- **The socket is created by systemd, not by the daemon**, which is what stops an
+  activity taking its name the way it can with shepherd's own management socket
+  (above).
+- **If the custodian cannot be reached, the session still starts.** `shepherdd`
+  falls back to the files in the user's home — unprotected, and reported as the
+  `Critical` diagnostic `state_not_protected` rather than shipping quiet. That
+  decision is made once at startup and never revisited: a daemon that could fall
+  back mid-session would be one an activity could *push* into falling back.
+- **The `shepherd-state` user and the state survive an uninstall.** Removing them
+  would discard a device's usage history and its BLE admin record, which an
+  uninstall is not entitled to do.
+- **Hardening matters more than it used to.** The trusted cgroup is the kiosk's
+  *graphical* session, so a second login for the same user is refused — but
+  `shepherd harden apply` is what stops that second login existing, and it also
+  stops PAM reading a `~/.pam_environment` the kiosk user writes. See
+  [Kiosk hardening](#kiosk-hardening).
 
 ### External monitor / docking (issue #87)
 
@@ -691,10 +751,21 @@ is **not** required. If the daemon can't read `/dev/input` the gate fails open
 — gated activities stay visible and a warning is logged — so a missing group
 never silently hides content.
 
-## Kiosk hardening (optional)
+## Kiosk hardening
 
-Kiosk hardening is optional and intended for devices primarily used by
-children, not developer machines.
+Intended for devices used by children rather than developer machines — but on
+such a device it is **not optional**, because two of shepherd's own protections
+depend on it:
+
+- It strips `user_readenv=1` from `/etc/pam.d`, which is what stops PAM handing
+  the session an environment the kiosk user wrote. Without it, an activity can
+  put `~/.pam_environment` in place and choose the next session's `PATH` and
+  variables — including where shepherd looks for its state (issue #144).
+- It denies the kiosk user SSH and console login, which is what stops a second
+  session existing. The state custodian trusts the kiosk's *graphical* session
+  specifically, and refuses any other (issue #157).
+
+An unhardened device still runs; it just runs with those two doors open.
 
 ```sh
 sudo ./scripts/shepherd harden apply --user kiosk
