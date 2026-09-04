@@ -88,6 +88,69 @@ headless_load_session() {
     return 0
 }
 
+# Wait for a socket to appear, checking as its owner ($2 empty = the invoker).
+#   headless_wait_socket <path> <user|""> <deciseconds>
+headless_wait_socket() {
+    local path="$1" who="$2" tries="${3:-100}"
+    for _ in $(seq 1 "$tries"); do
+        if [[ -n "$who" && "$who" != "$(id -un)" ]]; then
+            sudo -u "$who" test -S "$path" && return 0
+        else
+            [[ -S "$path" ]] && return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+# Prefix that runs the session in a cgroup the peer check can mean something in.
+#
+# `PeerPolicy::restricted()` degrades wherever shepherd's cgroup is one an
+# activity could join, and a stack started from a shell sits under
+# `user@<uid>.service` — the user manager's delegated subtree, which anything at
+# this uid can join. A **system**-manager scope owned by the same uid is not
+# delegated, which is structurally what a display manager's session scope is, so
+# the check arms there exactly as it does on a device.
+#
+# The two `--setenv`s are load-bearing rather than tidy: without them
+# `systemd-run --user --scope` inside the session cannot reach the user bus, so
+# activities get no cgroup of their own — and the daemon then refuses to arm the
+# peer check anyway, correctly, because it would be separating nothing.
+#
+#   headless_scope_prefix <runtime_dir>
+headless_scope_prefix() {
+    local rt="$1" uid gid
+    uid="$(id -u)"; gid="$(id -g)"
+    printf '%s\n' \
+        sudo systemd-run --uid="$uid" --gid="$gid" --scope \
+        --slice="user-$uid.slice" --unit="shepherd-dev-headless-$$" --quiet --collect \
+        "--setenv=XDG_RUNTIME_DIR=$rt" \
+        "--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+        "--setenv=HOME=$HOME" "--setenv=USER=${USER:-$(id -un)}" "--setenv=PATH=$PATH"
+}
+
+# Wait until the compositor exists, by either name.
+#
+# Under `--harden-ipc` (and on a device, where hardening is the default)
+# shepherdd unlinks the socket sway created as soon as it has connected, so the
+# ambient name is short-lived and a harness that only watched for it would race. Either name proves sway is up, which is all this
+# stage claims — whether *shepherdd* is up is the separate wait on the alias.
+#   headless_wait_compositor <runtime_dir> <user|""> <alias> <deciseconds>
+headless_wait_compositor() {
+    local rt="$1" who="$2" alias="$3" tries="${4:-100}"
+    local probe="self"; [[ -n "$who" ]] && probe="$who"
+    for _ in $(seq 1 "$tries"); do
+        [[ -n "$(headless_socket_as "$rt" "$probe" ipc)" ]] && return 0
+        if [[ -n "$who" && "$who" != "$(id -un)" ]]; then
+            sudo -u "$who" test -S "$alias" && return 0
+        else
+            [[ -S "$alias" ]] && return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 # Poll `swaymsg` until it answers or we time out (deciseconds in $1).
 headless_wait_ipc() {
     local tries="${1:-100}"
@@ -99,14 +162,33 @@ headless_wait_ipc() {
 }
 
 # Poll the tree until the launcher surface is mapped (deciseconds in $1).
+# Wait for the launcher to map a surface, in 0.1s ticks.
+#
+# The budget is generous because GTK can stall long before it paints: with no
+# `xdg-desktop-portal` answering — an SSH-only box with no graphical login, which
+# is exactly where this harness is meant to run — each of two portal lookups
+# blocks for 25s, so the UI appears about 50s in. A 20s budget reported that as
+# "surface not detected", which reads as a broken stack rather than a slow one,
+# and cost an afternoon of chasing a regression that was not there.
+#
+# `hint_after` keeps the shorter feedback: past that point it says once that it
+# is still waiting and why, so a genuinely dead launcher is not a silent
+# minute-and-a-half.
+#   headless_wait_launcher [tries] [hint_after]
 headless_wait_launcher() {
-    local tries="${1:-200}"
+    local tries="${1:-900}" hint_after="${2:-200}" i=0
     # The launcher registers as "org.shepherd.launcher" (older builds used the
     # bare "shepherd-launcher"); accept either.
     for _ in $(seq 1 "$tries"); do
         if headless_run swaymsg -t get_tree 2>/dev/null \
             | grep -qE '"app_id": *"(org\.)?shepherd[.-]launcher"'; then
             return 0
+        fi
+        i=$((i + 1))
+        if [[ "$i" -eq "$hint_after" ]]; then
+            info "Still waiting for the launcher to paint. GTK blocks ~25s per"
+            info "portal lookup when no xdg-desktop-portal answers, so this can"
+            info "take about a minute on a box with no graphical login."
         fi
         sleep 0.1
     done
@@ -164,9 +246,24 @@ headless_precheck_user() {
 #   --time "..."    SHEPHERD_MOCK_TIME passthrough (e.g. "2025-12-25 21:00:00")
 #   --gpu           use the GL renderer against a DRM node instead of pixman
 #   --no-build      skip the cargo build (use existing target/debug binaries)
+#   --harden-ipc-peers
+#                   exercise the production management-socket peer check: only
+#                   shepherdd's own cgroup and root may drive the daemon (issue
+#                   #144). Needs sudo, because the check only means anything in
+#                   a cgroup an activity cannot join, and a stack started from a
+#                   shell sits in the user manager's delegated subtree; the
+#                   session runs in a system-manager scope instead. Fails loudly
+#                   if the daemon degrades rather than arms.
+#   --harden-ipc    exercise the production sway-IPC hardening: shepherdd
+#                   unlinks the compositor's socket once it has connected, so
+#                   nothing else can reach it (issue #144). This is shepherdd's
+#                   default; `sway.conf` opts out because it is the development
+#                   config, and this flag takes that opt-out back off. The
+#                   session stays drivable through the alias shepherdd creates
+#                   first, which this harness always asks for and always uses.
 headless_start() {
     local size="$HEADLESS_SIZE_DEFAULT" mock_time="" renderer="pixman" do_build=1
-    local config="" user=""
+    local config="" user="" harden=0 harden_peers=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --config)
@@ -179,6 +276,8 @@ headless_start() {
             --time) mock_time="$2"; shift 2 ;;
             --gpu)  renderer="gles2"; shift ;;
             --no-build) do_build=0; shift ;;
+            --harden-ipc) harden=1; shift ;;
+            --harden-ipc-peers) harden_peers=1; shift ;;
             -h|--help) headless_usage; return 0 ;;
             *) die "Unknown option for 'dev headless': $1 (try: shepherd dev headless --help)" ;;
         esac
@@ -206,12 +305,35 @@ headless_start() {
         fi
     fi
 
+    # The runtime dir has to be known before the sway config is written, because
+    # the config carries the alias path shepherdd will create inside it.
+    local rt
+    if [[ "$user_mode" -eq 1 ]]; then
+        # Dedicated, short-pathed, target-owned runtime dir (the target user may
+        # have no /run/user/<uid> without a login session).
+        rt="/run/shepherd-headless/$(id -u "$user")"
+    else
+        rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        [[ -d "$rt" ]] || die "XDG_RUNTIME_DIR ($rt) does not exist; a headless session still needs a short-pathed runtime dir for its wayland socket"
+    fi
+
+    # Where shepherdd will hard-link sway's IPC socket. Every `swaymsg` this
+    # harness runs goes through this path rather than the one sway chose, so the
+    # hardened and unhardened sessions are driven identically — and `--harden-ipc`
+    # changes only whether the original name survives.
+    #
+    # Named for this shell so two concurrent sessions in one runtime dir do not
+    # collide, and inside $rt because a hard link cannot cross filesystems.
+    local sway_alias="$rt/shepherd-dev-sway.$$.sock"
+
     # Default sway config boots ./config.example.toml (hard-coded in sway.conf).
-    # When a config is chosen (--config, or the --user default), generate a
-    # derived sway config that rewrites the shepherdd exec line to boot it. Only
-    # the shepherdd -c token is touched; every other kiosk rule is preserved.
+    # The derived copy rewrites the shepherdd exec line: its `-c` token when a
+    # config is chosen (--config, or the --user default), always the alias, and
+    # the hardening opt-out sway.conf carries when --harden-ipc says to drop it.
+    # Every other kiosk rule is preserved.
     mkdir -p "$HEADLESS_DIR_DEFAULT"
-    local sway_config="$repo_root/sway.conf"
+    local sway_config="$HEADLESS_DIR_DEFAULT/sway.headless.conf"
+    cp "$repo_root/sway.conf" "$sway_config"
     if [[ -n "$config" ]]; then
         # Check existence as the user who will actually read it: under --user the
         # config lives in that user's home, which the invoker may not traverse.
@@ -227,14 +349,60 @@ headless_start() {
             fi
             die "Config not found: $config"
         fi
-        sway_config="$HEADLESS_DIR_DEFAULT/sway.headless.conf"
         # Match `shepherdd -c <token>` regardless of the default path/spacing.
-        sed -E "s#(target/debug/shepherdd -c )[^ ]+#\1$config#" \
-            "$repo_root/sway.conf" > "$sway_config"
+        sed -E -i "s#(target/debug/shepherdd -c )[^ ]+#\1$config#" "$sway_config"
         if ! grep -qF "shepherdd -c $config" "$sway_config"; then
             die "Failed to inject --config into a derived sway config (sway.conf's shepherdd exec line may have changed; expected 'target/debug/shepherdd -c <path>')"
         fi
         info "Booting config: $config${user:+ (as $user)}"
+    fi
+
+    sed -E -i "s#(target/debug/shepherdd -c [^ ]+)#\1 --sway-ipc-alias $sway_alias#" "$sway_config"
+    if ! grep -qF -- "--sway-ipc-alias $sway_alias" "$sway_config"; then
+        die "Failed to inject the sway-IPC flags into the derived sway config (expected 'target/debug/shepherdd -c <path>')"
+    fi
+
+    # shepherdd hardens by default; `sway.conf` opts out because it is the
+    # development config. `--harden-ipc` therefore takes the opt-out back off
+    # rather than adding a flag, so a dev session that does not ask for it keeps
+    # a compositor `swaymsg` can reach.
+    # Scoped to the exec line: sway.conf's comment names the flag too, so a
+    # whole-file grep answers the wrong question in both directions.
+    local exec_line
+    exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+    if [[ "$harden" -eq 1 ]]; then
+        sed -i "/^exec .*shepherdd -c /s# --no-harden-sway-ipc##g" "$sway_config"
+        exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+        if [[ "$exec_line" == *--no-harden-sway-ipc* ]]; then
+            die "Failed to strip --no-harden-sway-ipc from the derived sway config, so --harden-ipc would not have hardened anything"
+        fi
+        info "Hardening sway IPC: shepherdd will unlink the compositor socket"
+    elif [[ "$exec_line" != *--no-harden-sway-ipc* ]]; then
+        # Without the opt-out the session would harden itself and every later
+        # `swaymsg` would fail, which reads as a broken harness rather than a
+        # missing flag.
+        die "sway.conf no longer passes --no-harden-sway-ipc on its shepherdd exec line, so a plain 'dev headless' would unlink the compositor socket (issue #144)"
+    fi
+
+    # The management socket's peer check stays off by default, for the reason
+    # `sway.conf` gives: it accepts peers in shepherdd's own cgroup, and
+    # everything a plain dev session starts shares the cgroup of the shell that
+    # launched it, so arming it would only refuse clients run from another
+    # terminal without separating anything.
+    #
+    # `--harden-ipc-peers` takes the opt-out back off, the same way
+    # `--harden-ipc` does — and, because stripping the flag is not by itself
+    # enough, `headless_scope_prefix` puts the session somewhere the check can
+    # mean something. See the recipe in `crates/shepherd-ipc/README.md`.
+    if [[ "$harden_peers" -eq 1 ]]; then
+        sed -i "/^exec .*shepherdd -c /s# --no-restrict-ipc-peers##g" "$sway_config"
+        exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+        if [[ "$exec_line" == *--no-restrict-ipc-peers* ]]; then
+            die "Failed to strip --no-restrict-ipc-peers from the derived sway config, so --harden-ipc-peers would not have armed anything"
+        fi
+        info "Arming the management-socket peer check: only this session and root may drive the daemon"
+    elif [[ "$exec_line" != *--no-restrict-ipc-peers* ]]; then
+        die "sway.conf no longer passes --no-restrict-ipc-peers on its shepherdd exec line, so a dev session would refuse clients started from any other terminal (issue #144)"
     fi
 
     if [[ "$do_build" -eq 1 ]]; then
@@ -262,16 +430,21 @@ headless_start() {
     )
     [[ -n "$mock_time" ]] && sway_env+=("SHEPHERD_MOCK_TIME=$mock_time")
 
-    local rt pid swaysock wd
+    local pid swaysock wd
     if [[ "$user_mode" -eq 1 ]]; then
-        # Dedicated, short-pathed, target-owned runtime dir (the target user may
-        # have no /run/user/<uid> without a login session). Fresh each start so
-        # socket discovery is unambiguous.
-        rt="/run/shepherd-headless/$(id -u "$user")"
+        # Fresh each start so socket discovery is unambiguous.
         maybe_sudo rm -rf "$rt"
         maybe_sudo mkdir -p "$rt"
         maybe_sudo chown "$user" "$rt"
         maybe_sudo chmod 700 "$rt"
+
+        if [[ "$harden_peers" -eq 1 ]]; then
+            # The scope would have to run as root and drop to `$user` through
+            # the existing `sudo -u`, and that path uses `env -i`, which would
+            # wipe the bus address the arming depends on. Refusing beats
+            # handing back a session that quietly degraded.
+            die "--harden-ipc-peers is not supported with --user yet; run it without --user"
+        fi
 
         headless_precheck_user "$user" "$repo_root" "$sway_config" "$config"
 
@@ -290,45 +463,52 @@ headless_start() {
             >"$log" 2>&1 &
         disown 2>/dev/null || true
 
-        # Discover sway's sockets/PID by inspecting the dedicated dir as $user.
-        swaysock=""
-        for _ in $(seq 1 100); do
-            swaysock="$(headless_socket_as "$rt" "$user" ipc)"
-            [[ -n "$swaysock" ]] && break
-            sleep 0.1
-        done
-        if [[ -z "$swaysock" ]]; then
+        # Wait for sway itself. Under --harden-ipc the ambient socket is
+        # short-lived, so accept either name — this stage only answers "did the
+        # compositor start", which is the failure `dev headless` most often
+        # needs to distinguish.
+        if ! headless_wait_compositor "$rt" "$user" "$sway_alias" 100; then
             error "Headless Sway (as $user) did not create its IPC socket within 10s. Last log lines:"
             tail -n 20 "$log" >&2 || true
             maybe_sudo pkill -u "$user" -f "sway -c $sway_config" 2>/dev/null || true
             die "Failed to start headless session"
         fi
-        # sway-ipc.<uid>.<pid>.sock
-        local base="${swaysock##*/}"; base="${base%.sock}"; pid="${base##*.}"
+        # From the process, not the socket name: under --harden-ipc the
+        # `sway-ipc.<uid>.<pid>.sock` name we used to parse may already be gone.
+        pid="$(maybe_sudo pgrep -u "$user" -f "sway -c $sway_config" | head -1)"
+        [[ -n "$pid" ]] || die "Headless Sway (as $user) answered but could not be found in the process table"
         wd="$(headless_socket_as "$rt" "$user" wayland)"; wd="${wd##*/}"
     else
-        rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-        [[ -d "$rt" ]] || die "XDG_RUNTIME_DIR ($rt) does not exist; a headless session still needs a short-pathed runtime dir for its wayland socket"
-
         # Invoker-owned session: reuse the shared dev runtime env + media seeding,
         # and clear any prior instance first.
         sway_setup_env
         sway_ensure_dev_media_library
         headless_stop quiet || true
         sway_kill_existing
+        # Aliases from a session that died without running `dev stop` point at
+        # a socket that no longer exists; nothing can connect through them.
+        rm -f "$rt"/shepherd-dev-sway.*.sock
 
         # Snapshot wayland-N sockets to identify the one sway creates (sway
         # ignores a preset WAYLAND_DISPLAY and picks the lowest free slot).
         local before; before="$(headless_wayland_sockets "$rt")"
 
         info "Starting headless Sway ($renderer renderer, $size)..."
-        setsid env "${sway_env[@]}" \
+        local -a scope=()
+        if [[ "$harden_peers" -eq 1 ]]; then
+            mapfile -t scope < <(headless_scope_prefix "$rt")
+        fi
+        setsid "${scope[@]}" env "${sway_env[@]}" \
             sway -c "$sway_config" --unsupported-gpu \
             >"$log" 2>&1 &
         pid=$!
         disown "$pid" 2>/dev/null || true
 
-        swaysock="$rt/sway-ipc.$(id -u).$pid.sock"
+        if ! headless_wait_compositor "$rt" "" "$sway_alias" 100; then
+            error "Headless Sway did not create its IPC socket within 10s. Last log lines:"
+            tail -n 20 "$log" >&2 || true
+            die "Failed to start headless session"
+        fi
         local after
         after="$(headless_wayland_sockets "$rt")"
         wd="$(comm -13 <(printf '%s\n' "$before" | sort) <(printf '%s\n' "$after" | sort) | head -1)"
@@ -336,6 +516,18 @@ headless_start() {
 
     export SHEPHERD_HEADLESS_USER="$user"
     export XDG_RUNTIME_DIR="$rt"
+
+    # Second stage: the alias exists only once shepherdd has connected to the
+    # compositor, so waiting for it distinguishes "sway did not start" (above)
+    # from "shepherdd did not" — the two used to be one indistinguishable
+    # timeout, and the second is by far the more common dev failure.
+    if ! headless_wait_socket "$sway_alias" "$user" 300; then
+        error "shepherdd did not connect to the compositor within 30s (no $sway_alias). Last log lines:"
+        tail -n 20 "$log" >&2 || true
+        headless_stop quiet || true
+        die "Failed to start headless session"
+    fi
+    swaysock="$sway_alias"
     export SWAYSOCK="$swaysock"
 
     if ! headless_wait_ipc 100; then
@@ -366,12 +558,29 @@ SHEPHERD_HEADLESS_SIZE=$size
 SHEPHERD_HEADLESS_OUTPUT=$HEADLESS_OUTPUT
 EOF
 
+    # Asking for the armed check and getting a degraded one is the failure this
+    # flag exists to prevent, and it is invisible unless someone reads the log:
+    # the session comes up and every client still connects, because they all
+    # share shepherdd's cgroup either way. So confirm it, and hand back the
+    # daemon's own reason when it did not arm.
+    if [[ "$harden_peers" -eq 1 ]]; then
+        if grep -aq "accepts only this session and root" "$log"; then
+            success "Peer check armed: only shepherdd's own cgroup and root may drive the daemon"
+        else
+            local why
+            why="$(grep -aoE "(delegated cgroup subtree|Activities will share shepherd's own cgroup)[^\"]*" "$log" | head -1)"
+            error "--harden-ipc-peers did not arm the peer check. The daemon said:"
+            printf '  %s\n' "${why:-<no reason logged; see $log>}" >&2
+            die "Refusing to hand back a session that looks hardened and is not (issue #144)"
+        fi
+    fi
+
     success "Headless session up (pid $pid${user:+, user=$user}, WAYLAND_DISPLAY=$wd, SWAYSOCK=$swaysock)"
 
-    if headless_wait_launcher 200; then
+    if headless_wait_launcher 900 200; then
         success "Launcher surface is mapped and ready to screenshot."
     else
-        warn "Launcher surface not detected within 20s — the stack is up but the"
+        warn "Launcher surface not detected within 90s — the stack is up but the"
         warn "GTK UI may not have painted. Check $log and 'shepherd dev tree'."
     fi
 
@@ -487,6 +696,9 @@ headless_stop() {
         pkill -x shepherd-hud 2>/dev/null || true
         pkill -x shepherd-media 2>/dev/null || true
         [[ -n "${SHEPHERD_SOCKET:-}" ]] && rm -f "$SHEPHERD_SOCKET"
+        # The alias outlives sway: it is a second name for a socket whose
+        # inode is now gone, so it would sit there dangling.
+        [[ -n "${SWAYSOCK:-}" ]] && rm -f "$SWAYSOCK"
         shopt -s extglob
         sway_purge_stale_sockets
     fi
@@ -515,6 +727,22 @@ Start options:
     --time "..."   SHEPHERD_MOCK_TIME for the session (e.g. "2025-12-25 21:00:00")
     --gpu          Use the GL renderer against a DRM node instead of pixman
     --no-build     Skip the cargo build; use existing target/debug binaries
+    --harden-ipc   Exercise the production sway-IPC hardening (issue #144):
+                   shepherdd unlinks the compositor's socket once it has
+                   connected, so no other process can reach it. That is
+                   shepherdd's default; sway.conf opts out because it is the
+                   development config, and this flag takes the opt-out back off.
+                   The session stays drivable through the alias shepherdd
+                   creates first, which this harness always uses either way.
+    --harden-ipc-peers
+                   Exercise the production management-socket peer check (issue
+                   #144): only shepherdd's own cgroup and root may drive the
+                   daemon. Needs sudo. The check only means anything in a cgroup
+                   an activity cannot join, and a stack started from a shell
+                   sits in the user manager's delegated subtree, so the session
+                   is run in a system-manager scope instead. Fails loudly if the
+                   daemon degrades rather than arms, since a degraded session
+                   looks identical from the outside.
 
 The session runs with no login session, no parent compositor, and no GPU, so an
 agent can drive it over SSH. Connection details live in

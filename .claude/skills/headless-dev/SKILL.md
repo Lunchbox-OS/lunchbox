@@ -42,6 +42,31 @@ can screenshot and drive.
 `dev-runtime/headless/session.env`, so every later `dev` subcommand reattaches
 automatically. Always `dev stop` when finished (or before starting a fresh one).
 
+**`SWAYSOCK` is not the socket sway made.** shepherdd hard-links the compositor
+socket to `$XDG_RUNTIME_DIR/shepherd-dev-sway.<n>.sock` and `session.env` records
+*that* — because in production shepherdd unlinks the original so no activity can
+reach the compositor (issue #144). Finding the socket yourself
+(`sway --get-socketpath`, globbing `sway-ipc.*`) is therefore not reliable; go
+through `headless_run` in `scripts/lib/headless.sh`, which sources `session.env`,
+or source it yourself. Add `--harden-ipc` to `dev headless` to boot the way an
+installed device does, with the original name removed — everything above still
+works, because it all goes through the alias either way.
+
+**The management socket's peer check is off in dev, and `--harden-ipc` does not
+turn it on.** shepherdd otherwise accepts a client on its own socket only from
+its own cgroup (issue #144). On a device that is the display manager's
+root-owned session scope; here the whole stack shares the cgroup of the shell
+that launched it, so the check would only refuse clients started from another
+terminal while protecting nothing. Every dev entry point passes
+`--no-restrict-ipc-peers`, and `headless.sh` fails loudly if `sway.conf` stops
+doing so. Nothing you drive through `dev shot` / `dev tree` / `dev key` is
+affected — those go through sway, not shepherdd.
+
+shepherdd hardens by default; `sway.conf` opts out with `--no-harden-sway-ipc`
+because it is the development config, and `--harden-ipc` takes that opt-out back
+off. So a plain `dev headless` leaves the compositor reachable by `swaymsg`, and
+nothing you write by hand needs to remember a flag to keep it that way.
+
 ## Commands
 
 | Command | Purpose |
@@ -213,6 +238,12 @@ Example (bedtime restriction):
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
   `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
+- **"shepherdd did not connect to the compositor" is a different failure from
+  "Sway did not create its IPC socket"**, and the harness now tells them apart:
+  the first waits on the alias (which only exists once shepherdd has connected),
+  the second on either socket name. If you get the first, sway is fine and the
+  daemon is the problem — read `dev-runtime/headless/sway.log` rather than
+  suspecting the compositor.
 
 ## Seeing the web UI (not just the native surfaces)
 

@@ -202,6 +202,10 @@ impl ManagementService for MockSvc {
     async fn toggle_auto_brightness(&self) -> ManagementResult<BrightnessInfo> {
         Err(ManagementError::Internal("nope".into()))
     }
+
+    async fn set_screen_power(&self, _on: bool) -> ManagementResult<bool> {
+        Err(ManagementError::Internal("nope".into()))
+    }
     async fn get_hud_scale(&self) -> f64 {
         1.0
     }

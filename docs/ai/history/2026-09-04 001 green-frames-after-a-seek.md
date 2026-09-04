@@ -141,6 +141,26 @@ asked for, which is the #115 symptom and worth keeping.
   parent sets per activity. That is the right shape for an escape hatch that
   exists to work around a driver bug.
 
+### `SHEPHERD_MPV_HWDEC` against #144's environment audit
+
+Merging `main` brought in the audit of what an activity can set in *shepherdd's*
+environment (`2026-08-29 004`), which gated `SHEPHERD_*_BIN`,
+`SHEPHERD_FIREWALL_HELPER`, `SHEPHERD_BROWSER_ROOT` and
+`SHEPHERD_RETROARCH_ROOT` behind a trust flag. This new variable is not in that
+class and is deliberately ungated, for two reasons:
+
+- **Wrong process.** It is read by `shepherd-media` — an activity, in its own
+  cgroup, at its own uid — not by the daemon. An activity setting it is setting
+  its own decode path, which it could equally do by being a different program.
+- **Nothing behind it.** It selects among mpv's `--hwdec` values. There is no
+  path lookup, no `dlopen`, no file location, and no policy or usage state
+  reachable through it; the worst a bad value does is fall back to software
+  decoding, which mpv already does on its own.
+
+It sits with `SHEPHERD_LIBRETRO_DIR` and `SHEPHERD_RETROARCH_CONFIG_DIR`
+instead: documented, production-facing, and ungated because gating would break
+the configuration it exists to serve.
+
 ## Reproducing it again
 
 The scaffolding is worth rebuilding if this comes back on other hardware:

@@ -31,6 +31,33 @@ taken with `default-features = false`, so even the mpv-backed `PlayerHandle` is
 absent. The player-side wrapper that substitutes cached files at play time stays
 behind in `shepherd-media` as `caching_player.rs`.
 
+## `yt-dlp` runs in a cgroup of its own (issue #144)
+
+`shepherdd` accepts a client on its management socket only from its own cgroup,
+and a subprocess it spawns is a direct child, so it inherits that cgroup and
+lands inside the allow-list. That is fine for a helper with fixed argv whose
+output is read straight back. It is not fine for `yt-dlp`: it runs on a
+background prefetch timer with no activity launched, and it parses whatever a
+remote host returns.
+
+So the two invocations that touch the network — the download in `download.rs`
+and the playlist fetch in `playlist.rs` — go through
+`subprocess::ytdlp_command`, which puts them in a transient scope of their own.
+The `yt-dlp --version` liveness probe does not: it parses no remote input, and
+it runs on every playlist fetch and diagnostics pass.
+
+`shepherdd` likewise injects a resolver (`set_program_resolver_fn`) so `yt-dlp`
+is found in a root-owned directory rather than through `$PATH` — the scope
+contains a substituted `yt-dlp`, but the `--version` liveness probe runs
+unscoped, so the lookup has to be safe on its own (issue #144).
+
+This crate does **not** build that wrapper. It is shared with the player and the
+Android build, neither of which has a systemd user manager, and the probe for
+whether scoping works at all lives in `shepherd-host-linux`. Instead `shepherdd`
+injects one at startup via `set_scope_prefix_fn`. Anything that has not called
+it runs `yt-dlp` bare, exactly as before — which is what every test, the player,
+and Android do.
+
 ## Layout on disk
 
 One flat directory, four kinds of file per entry:

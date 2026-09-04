@@ -8,6 +8,12 @@
 //! See the crate README for usage. The harness is intentionally Linux-only
 //! and assumes the workspace binaries have been built (`cargo build`).
 
+// The harness spawns `sway` and the shepherd binaries by name on purpose: it is
+// test scaffolding running as the developer, not a daemon on a device choosing a
+// helper through a `$PATH` the kiosk user wrote (issue #144). Tests also stub
+// binaries on `$PATH` precisely so they can be intercepted.
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result, anyhow, bail};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -91,6 +97,7 @@ pub struct HarnessBuilder {
     config_toml: Option<String>,
     spawn_launcher: bool,
     spawn_hud: bool,
+    restrict_ipc_peers: bool,
     auth_token: Option<String>,
     extra_env: Vec<(String, String)>,
 }
@@ -107,6 +114,7 @@ impl HarnessBuilder {
             config_toml: None,
             spawn_launcher: false,
             spawn_hud: false,
+            restrict_ipc_peers: false,
             auth_token: None,
             extra_env: Vec::new(),
         }
@@ -141,6 +149,19 @@ impl HarnessBuilder {
     /// Add an environment variable to shepherdd's process. Applied after the
     /// harness's standard `env_clear()` + base env, so it can override the
     /// defaults (e.g. `PATH` to inject fakes for `pkcheck`/`pkexec`).
+    /// Arm the management socket's peer allow-list instead of opting out of it
+    /// (issue #144).
+    ///
+    /// Off by default for the reason the opt-out exists: this harness spawns
+    /// shepherdd as a child, so the two share a cgroup and every client is
+    /// accepted anyway. Armed, a peer placed in a cgroup of its own is refused
+    /// — which is what `tests/ipc_peer_check.rs` needs, and what nothing else
+    /// should want.
+    pub fn restrict_ipc_peers(mut self, yes: bool) -> Self {
+        self.restrict_ipc_peers = yes;
+        self
+    }
+
     pub fn shepherdd_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_env.push((key.into(), value.into()));
         self
@@ -350,6 +371,34 @@ impl TestHarness {
             .arg(&socket_path)
             .arg("-d")
             .arg(&data_dir)
+            // shepherdd unlinks sway's IPC socket by default (issue #144). This
+            // harness owns the sway it started, so hardening would not reach a
+            // developer's desktop — but it would take the socket away from
+            // anything a test wants to ask the compositor, and leave every
+            // `SwayIpcBackend` call in a fixture unable to reconnect. Tests
+            // exercising the hardened path should drop this deliberately.
+            .arg("--no-harden-sway-ipc")
+            // shepherdd otherwise accepts a client on its own socket only from
+            // its own cgroup (issue #144). This harness spawns shepherdd as a
+            // child of the test process, so the two share a cgroup and clients
+            // would in fact be accepted — but only by accident of where the
+            // test runner happens to sit, and a runner that scoped its tests
+            // would start failing every RPC with no clue why. The check is
+            // exercised by the unit tests in `shepherd-ipc`, which can put a
+            // peer in a cgroup of its own without a whole session.
+            .args(if builder.restrict_ipc_peers {
+                // Armed: `tests/ipc_peer_check.rs` puts a peer in its own
+                // cgroup and expects a refusal.
+                &[][..]
+            } else {
+                &["--no-restrict-ipc-peers"][..]
+            })
+            // The suite stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` and
+            // points `SHEPHERD_FIREWALL_HELPER` at a fake, so it needs the
+            // daemon to take binaries from the environment (issue #144). Its
+            // own flag, deliberately: an ordinary dev session does not stub
+            // anything and so resolves binaries exactly as a device does.
+            .arg("--trust-environment")
             .arg("--log-level")
             .arg(std::env::var("SHEPHERD_E2E_LOG").unwrap_or_else(|_| "info".into()))
             .env_clear()

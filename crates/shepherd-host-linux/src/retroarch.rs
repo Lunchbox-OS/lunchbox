@@ -90,11 +90,23 @@ pub struct Launch {
     pub paths: Paths,
 }
 
-/// Serializes tests that point [`RETROARCH_ROOT_ENV`] at a scratch directory.
-/// The variable is process-global, and the crate's tests share one binary, so
-/// two of them running at once would read each other's root.
+/// Serializes the tests that still have to set an environment variable.
+///
+/// `SHEPHERD_LIBRETRO_DIR` and `SHEPHERD_RETROARCH_CONFIG_DIR` both document a
+/// production use — installs that keep cores or RetroArch's own config
+/// somewhere unusual — so they stay environment-driven and ungated, and their
+/// tests still need this: the variables are process-global and the crate's
+/// tests share one binary, so two at once would read each other's directory.
+///
+/// `SHEPHERD_RETROARCH_ROOT` used to be in that set. It is not any more: its
+/// tests pass a root to [`paths_for_in`] / [`prepare_in`] instead, which is
+/// what let it be gated (issue #144). One holdout still needs it —
+/// `adapter::tests::retroarch_spawn_materializes_config_and_argv` drives the
+/// real `spawn`, not the seam — and that test also flips
+/// `helpers::set_trust_environment`, which is process-global in the same way,
+/// so this lock covers that too.
 #[cfg(test)]
-pub(crate) static ROOT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Root for all per-entry RetroArch state.
 ///
@@ -104,8 +116,12 @@ pub(crate) static ROOT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 /// than the daemon's — so a relative data dir (the dev harness uses
 /// `./dev-runtime/data`) would silently scatter saves.
 fn root_dir() -> PathBuf {
-    let root = match std::env::var_os(RETROARCH_ROOT_ENV) {
-        Some(root) => PathBuf::from(root),
+    // Gated like the other environment redirects (issue #144): on a device the
+    // kiosk user owns the environment, and this decides where a child's saves
+    // and save states are written. Nothing production needs it — tests use
+    // [`paths_for_in`] instead, which is why gating it costs nothing.
+    let root = match crate::helpers::env_override(RETROARCH_ROOT_ENV) {
+        Some(root) => root,
         None => shepherd_util::default_data_dir().join("retroarch"),
     };
     std::path::absolute(&root).unwrap_or(root)
@@ -138,6 +154,22 @@ fn sanitize_segment(s: &str) -> String {
 /// Callers without an entry id (a direct `spawn` in a test) fall back to the
 /// content's file stem, which is stable for the same content.
 pub fn paths_for(entry_id: Option<&str>, content: &Path) -> Paths {
+    paths_for_in(&root_dir(), entry_id, content)
+}
+
+/// [`paths_for`], against a root the caller supplies.
+///
+/// The seam tests use, so they can point the tree at a scratch directory by
+/// passing one rather than exporting `SHEPHERD_RETROARCH_ROOT`. That variable
+/// is process-global and this crate's tests share a binary, so setting it meant
+/// a mutex and a `# SAFETY` note on every test that touched saves — and it kept
+/// the variable ungatable, because gating it would have made those tests read
+/// the real data dir instead (issue #144).
+///
+/// `root` is made absolute here, not by the caller: these paths become
+/// `savefile_directory` / `savestate_directory` in the fragment, which RetroArch
+/// resolves against *its own* working directory.
+pub fn paths_for_in(root: &Path, entry_id: Option<&str>, content: &Path) -> Paths {
     let key = entry_id
         .map(sanitize_segment)
         .filter(|k| !k.is_empty())
@@ -145,7 +177,8 @@ pub fn paths_for(entry_id: Option<&str>, content: &Path) -> Paths {
             sanitize_segment(&content.file_stem().unwrap_or_default().to_string_lossy())
         });
 
-    let root = root_dir().join(key);
+    let absolute = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let root = absolute.join(key);
     Paths {
         states: root.join("states"),
         config: root.join("append.cfg"),
@@ -697,8 +730,21 @@ pub fn prepare<F>(spec: &Spec<'_>, entry_id: Option<&str>, expand: F) -> io::Res
 where
     F: Fn(&str) -> String,
 {
+    prepare_in(&root_dir(), spec, entry_id, expand)
+}
+
+/// [`prepare`], against a root the caller supplies. See [`paths_for_in`].
+pub fn prepare_in<F>(
+    root: &Path,
+    spec: &Spec<'_>,
+    entry_id: Option<&str>,
+    expand: F,
+) -> io::Result<Launch>
+where
+    F: Fn(&str) -> String,
+{
     let content = expand(&spec.content.to_string_lossy());
-    let paths = paths_for(entry_id, Path::new(&content));
+    let paths = paths_for_in(root, entry_id, Path::new(&content));
 
     materialize(&paths, spec.save_state, spec.kiosk)?;
 
@@ -764,7 +810,7 @@ mod tests {
             std::fs::write(dir.join(so), b"").unwrap();
         }
 
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(LIBRETRO_DIR_ENV, dir) };
 
@@ -820,7 +866,7 @@ mod tests {
         let dir = scratch.path();
         std::fs::write(dir.join("mgba_libretro.so"), b"").unwrap();
 
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(LIBRETRO_DIR_ENV, dir) };
 
@@ -944,16 +990,14 @@ mod tests {
     /// daemon's, so a relative data dir would scatter saves.
     #[test]
     fn paths_are_absolute_even_from_a_relative_root() {
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: no other thread reads the variable while the lock is held.
-        unsafe { std::env::set_var(RETROARCH_ROOT_ENV, "./dev-runtime/data/retroarch") };
-
-        let paths = paths_for(Some("e"), Path::new("/roms/game.gba"));
+        let paths = paths_for_in(
+            Path::new("./dev-runtime/data/retroarch"),
+            Some("e"),
+            Path::new("/roms/game.gba"),
+        );
         assert!(paths.root.is_absolute(), "root: {}", paths.root.display());
         assert!(paths.states.is_absolute());
         assert!(paths.config.is_absolute());
-
-        unsafe { std::env::remove_var(RETROARCH_ROOT_ENV) };
     }
 
     #[test]
@@ -1081,15 +1125,15 @@ mod tests {
 
     #[test]
     fn prepare_writes_the_fragment_and_creates_dirs() {
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let scratch = tempfile::tempdir().expect("tempdir");
-        // SAFETY: no other thread reads the variable while the lock is held.
-        unsafe { std::env::set_var(RETROARCH_ROOT_ENV, scratch.path()) };
 
         let content = PathBuf::from("~/roms/game.gba");
         let args = Vec::new();
         let spec = spec_for(&content, &args);
-        let launch = prepare(&spec, Some("my-game"), |s| s.replace('~', "/home/kid")).unwrap();
+        let launch = prepare_in(scratch.path(), &spec, Some("my-game"), |s| {
+            s.replace('~', "/home/kid")
+        })
+        .unwrap();
 
         assert!(launch.paths.states.is_dir());
         assert!(launch.paths.config.is_file());
@@ -1105,11 +1149,7 @@ mod tests {
     #[test]
     fn discarding_the_auto_state_keeps_the_in_game_save() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: no other thread reads the variable while the lock is held.
-        unsafe { std::env::set_var(RETROARCH_ROOT_ENV, scratch.path()) };
-
-        let paths = paths_for(Some("game"), Path::new("/roms/game.gba"));
+        let paths = paths_for_in(scratch.path(), Some("game"), Path::new("/roms/game.gba"));
         // RetroArch files states under a per-core subdirectory of the one we
         // give it, so seed both layouts.
         let core_dir = paths.states.join("mGBA");
@@ -1140,14 +1180,12 @@ mod tests {
     #[test]
     fn discarding_state_that_was_never_written_is_not_an_error() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: no other thread reads the variable while the lock is held.
-        unsafe { std::env::set_var(RETROARCH_ROOT_ENV, scratch.path()) };
-
-        let paths = paths_for(Some("never-launched"), Path::new("/roms/game.gba"));
+        let paths = paths_for_in(
+            scratch.path(),
+            Some("never-launched"),
+            Path::new("/roms/game.gba"),
+        );
         assert_eq!(discard_auto_state(&paths).unwrap(), 0);
-
-        unsafe { std::env::remove_var(RETROARCH_ROOT_ENV) };
     }
 
     /// Build a RetroArch config tree with a per-core override, and a core
@@ -1184,7 +1222,7 @@ mod tests {
               kiosk_mode_enable = \"false\"\n",
         );
 
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
 
@@ -1209,7 +1247,7 @@ mod tests {
             b"video_smooth = \"true\"\ninput_player1_a = \"x\"\n",
         );
 
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
 
@@ -1229,7 +1267,7 @@ mod tests {
             b"savestate_auto_load = \"false\"\n",
         );
 
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
 
@@ -1245,7 +1283,7 @@ mod tests {
     fn a_missing_config_tree_reports_nothing() {
         let scratch = tempfile::tempdir().expect("tempdir");
 
-        let _guard = ROOT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(RETROARCH_CONFIG_DIR_ENV, scratch.path()) };
 

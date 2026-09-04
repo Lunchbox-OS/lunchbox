@@ -51,10 +51,20 @@ struct Args {
     #[arg(long)]
     stop_current: bool,
 
-    /// Exit 0 if no activity is running (idle/screen-off is allowed), 1 if a session
-    /// is active (idle should be suppressed). Used by swayidle to gate DPMS.
+    /// Blank the displays, unless an activity is on screen. Used by swayidle's
+    /// idle timeout: on a hardened device `swaymsg "output * dpms off"` cannot
+    /// reach the compositor, so the blanking goes through shepherdd's held
+    /// connection instead (issue #144).
+    ///
+    /// Replaces the old `--is-idle-allowed` gate, which was a separate process
+    /// whose answer could be stale by the time the blank ran. shepherdd now
+    /// checks and acts under one lock.
     #[arg(long)]
-    is_idle_allowed: bool,
+    screen_off: bool,
+
+    /// Wake the displays (swayidle's `resume` command).
+    #[arg(long)]
+    screen_on: bool,
 
     /// Send VolumeUp to shepherdd and exit. Intended for compositor
     /// keybindings on XF86AudioRaiseVolume so the change goes through the
@@ -214,18 +224,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.is_idle_allowed {
+    if args.screen_off || args.screen_on {
+        let on = args.screen_on;
         let runtime = tokio::runtime::Runtime::new()?;
-        let session_active = runtime.block_on(async {
-            let client = CommandClient::new(&socket_path);
-            match client.get_state().await {
-                Ok(state) => state.current_session.is_some(),
-                Err(_) => false,
+        runtime.block_on(async {
+            let mut client = IpcClient::connect(&socket_path).await?;
+            match client.set_screen_power(on).await {
+                // A suppressed blank is the expected answer while an activity
+                // is up, not a failure: swayidle fires on its timer regardless.
+                Ok(false) => tracing::info!("Screen blank suppressed: an activity is running"),
+                Ok(true) => tracing::info!(on, "Screen power set"),
+                Err(e) => anyhow::bail!("Screen power request failed: {}", e),
             }
-        });
-        // Exit 1 (false) when a session is active so swayidle skips the DPMS command.
-        // Exit 0 (true/success) when idle is allowed.
-        std::process::exit(if session_active { 1 } else { 0 });
+            Ok::<(), anyhow::Error>(())
+        })?;
+        return Ok(());
     }
 
     // Run GTK application

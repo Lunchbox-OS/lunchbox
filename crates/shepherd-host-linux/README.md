@@ -20,10 +20,17 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
   channel (`LinuxLightSensor`), used by the automatic-brightness feature.
   Read-only and world-readable, so no helper or privilege is needed. Absent
   on hosts without an ALS.
+- **Compositor IPC** (`sway_ipc.rs`) — a client for sway's own socket
+  (`sway-ipc(7)`): one connection behind a mutex for requests, a second per
+  event subscription. Replaces the `swaymsg` subprocess every compositor call
+  used to spawn, which stopped being defensible once the escape sweep started
+  reading the window tree twice a second (issue #147). Losing an established
+  connection is terminal — shepherdd is `exec`'d by sway and dies with it.
 - **Compositor output primitives** (`sway.rs`) — query/enable/disable outputs,
   set modes and scales, and pick a mirror mode; behind the `OutputBackend`
   trait so the docking state machine in `shepherdd` is unit-testable. Used for
-  external monitor / docking support (issue #87).
+  external monitor / docking support (issue #87). The parsing is separate from
+  the transport and is tested against literals, with no compositor.
 - **Audio topology** (`audio.rs`) — parse `pw-dump` into the list of selectable
   audio outputs, identify which one is active, and read its volume. Shared by
   the two consumers below.
@@ -306,9 +313,12 @@ When `SpawnOptions::firewall` is set, the adapter applies a per-session
 network filter via systemd's BPF address controls
 (`IPAddressAllow=`/`IPAddressDeny=`).
 
-- **Process kind**: the spawn argv is wrapped in
-  `systemd-run --user --scope --collect --quiet --property=...` so the
-  firewall is in place from the first instruction.
+- **Process kind**: the spawn argv is wrapped in `pkexec
+  shepherd-firewall-helper apply-process`, which execs `systemd-run --scope
+  --property=...` against the **system** manager, so the firewall is in place
+  from the first instruction. The system manager is required: attaching the
+  `cgroup_skb` programs behind `IPAddress*=` needs privileges the per-user
+  manager does not have.
 - **Flatpak / Snap**: the runtime creates its own scope
   (`app-flatpak-<id>-*.scope`, `snap.<name>.<name>-*.scope`). The adapter
   spawns the app, polls for that scope, and then has
@@ -328,6 +338,185 @@ network filter via systemd's BPF address controls
   (no systemd user manager, say) loses these activities ~5s in, loudly,
   instead of running them unprotected, quietly.
 - **Steam**: not yet supported (logged as a warning).
+
+## Every activity gets a cgroup of its own (issue #144)
+
+Independent of the firewall, and for a different reason: `shepherdd` accepts a
+client on its management socket only from its own cgroup, and an activity
+launched by a plain `fork`/`exec` inherits that cgroup *exactly* — not merely
+hard to tell from the launcher, but the same string. So the adapter makes sure
+every activity is somewhere else before it starts:
+
+- **Firewalled Process kind**: already handled — the helper's system-manager
+  scope above.
+- **Snap / Flatpak**: already handled — the runtime scopes them under
+  `user@<uid>.service/app.slice`, which is the same fact
+  `apply_firewall_to_existing_scope` relies on to find them. Wrapping them again
+  would nest a scope around a launcher that immediately hands off elsewhere.
+- **Everything else, Steam included**: wrapped in
+  `systemd-run --user --scope --collect` (`user_scope_argv_prefix`).
+  Unprivileged — no helper, no polkit — because all this has to achieve is "not
+  shepherd's cgroup", which the *user* manager can do even though it cannot
+  attach BPF.
+
+Like the firewall helper's `systemd-run --scope`, this execs the command in its
+own process rather than forking one, so the pid the adapter records is the
+activity's, already inside the scope, and every pid, pgid and kill path is
+unchanged.
+
+### Steam is wrapped at both ends, and why it looks redundant
+
+Steam reaches the same place by a different route, so the wrapper around it is
+easy to mistake for dead code. It is deliberate, and the reasoning is worth
+keeping:
+
+- A Steam entry launches `snap run steam steam://rungameid/<id>`, which is a
+  short-lived request to the **preloaded** client. `snap run` re-scopes itself
+  into `snap.steam.steam-<uuid>.scope` almost immediately, so the
+  `shepherd-<session>.scope` around it empties and `--collect` reaps it. Measured:
+  the scope is `inactive` within a second and no units accumulate.
+- The game is a child of the preloaded client, not of that request — so
+  `preload_steam` is the launch a game actually inherits its cgroup from, and it
+  is wrapped too (`shepherd-steam-preload-<pid>.scope`).
+
+Both scopes empty out the moment `snap run` hands off. What the wrapping buys is
+that "nothing shepherd starts for an activity is ever in shepherd's cgroup"
+holds because of what this crate does, rather than because snapd happens to move
+the process quickly enough. Removing either wrapper would restore a window —
+short, and not obviously reachable, but one whose width is set by a third party.
+
+Neither wrapper changes where Steam ends up: the client and its games live in
+snapd's `snap.steam.steam-*` scope under `user@<uid>.service/app.slice`, which is
+already outside shepherd's cgroup. `snap run` does not preserve the pid either,
+with or without the wrapper, which is why Steam sessions are tracked by
+`find_steam_game_pids` rather than by the pid the adapter recorded.
+
+`activity_isolation_status()` probes whether the user manager can be reached at
+all (a temp `XDG_RUNTIME_DIR` with no bus, as in the e2e harness, cannot), and
+caches the answer. When it cannot, the activity is launched anyway rather than
+lost — the trade the compositor hardening makes — and `shepherdd` raises the
+`ipc_socket_not_hardened` diagnostic, because the socket check has nothing left
+to tell apart.
+
+## Shepherd's own helpers get one too (issue #144)
+
+Being in shepherdd's cgroup is what the management socket trusts, so it is worth
+knowing what else is in there. Most of shepherd's helper subprocesses are
+uninteresting — fixed argv, output read straight back: `wpctl`/`pactl`/`amixer`,
+`pw-dump`, `brightnessctl`, `pgrep`, `pkcheck`, `flatpak --version`.
+
+`yt-dlp` is the exception, and it is scoped like an activity.
+`helper_scope_argv_prefix` builds the wrapper; `shepherdd` injects it into
+`shepherd-media-cache` at startup, because that crate is shared with the player
+and the Android build and must not depend on this one. It applies to the two
+invocations that touch the network — the download and the playlist fetch — and
+not to the `yt-dlp --version` liveness probe, which parses no remote input and
+runs on every diagnostics pass.
+
+The reasoning is not that yt-dlp is untrusted code: it is shepherd's own choice
+of binary with shepherd's own argv. It is that yt-dlp runs on a background
+prefetch timer, with no activity launched, parsing whatever a remote host
+returns — so a parser bug there would be a peer the daemon trusts. The URLs come
+from admin-configured libraries, so an activity cannot choose the target.
+
+Still unscoped, and deliberately: the input-compat sidecars (`sidecar.rs`),
+`wl-mirror`, and the pairing overlay. All three are shepherd's own furniture
+with no remote input, and two of them need the session's own devices.
+
+## Helper binaries come from trusted directories, not `$PATH` (issue #144)
+
+`shepherdd` execs a good deal it did not write — `systemd-run`, `pkexec`,
+`snap`, `flatpak`, `systemctl`, `pgrep`, `pkcheck`, `script`, `wpctl`, `pactl`,
+`amixer`, `pw-dump`, `wl-mirror`. Every one used to be named bare and resolved
+through `$PATH`.
+
+That is not safe here, because on a stock 26.04 + GDM host **the kiosk user
+chooses the session's environment**: `/etc/pam.d/gdm-password` and
+`gdm-autologin` carry `pam_env.so … user_readenv=1`, and `libpam-modules` still
+honours it, so `~/.pam_environment` sets `PATH` outright. Every activity runs as
+that uid. An activity could write one file, drop its own `systemd-run` on the
+resulting `PATH`, and at the next login have shepherd exec it — as a direct
+child of the daemon, in the daemon's cgroup, which the management socket accepts
+as `Admin`. The same substitution turns `user_scope_argv_prefix` into a no-op,
+so every activity would land in shepherd's cgroup too, and nothing would fail
+loudly.
+
+`helpers::resolve` therefore does not read the environment at all. It searches a
+**compiled-in** list of root-owned directories (`/usr/local/sbin`,
+`/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`, `/snap/bin`) and
+returns an absolute path. Lookups are lazy and cached — `pactl` and `wl-mirror`
+are optional, so eager resolution would only have to decide what to do about
+tools that are legitimately absent.
+
+- A name that already contains `/` is a caller's deliberate path and is returned
+  untouched.
+- A name found nowhere resolves to `/usr/bin/<name>` rather than the bare name.
+  Returning the bare name would hand the lookup back to `$PATH`; an absolute
+  path under a root-owned directory fails at spawn exactly as a missing tool
+  always did, and an activity cannot satisfy it.
+- `helpers::resolve_daemon_sibling` is the variant for shepherd's *own*
+  binaries: `current_exe()`'s directory first (where both an install and a
+  `cargo build` put them), then the trusted directories. The input-compat
+  sidecars and the pairing overlay use it.
+- **In a development session `$PATH` is searched first**, which is exactly the
+  behaviour from before #144. It has to be: stubbing a helper by putting a fake
+  one on `$PATH` is how the e2e suite tests the flatpak and polkit paths without
+  installing either. A device never takes that branch —
+  `helpers::set_trust_environment` is off unless `--trust-environment` was
+  passed, and `shepherd install sway-config` strips that flag and refuses to
+  finish if the strip did not take. Only the e2e suite passes it, because it
+  stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH`; an ordinary dev session
+  leaves it off and so resolves helpers exactly as a device does.
+
+`SHEPHERD_*_BIN`, `SHEPHERD_FIREWALL_HELPER` and `SHEPHERD_BROWSER_ROOT` all go
+through the single gate `helpers::env_override` and are **ignored by default**.
+The first two are binary-substitution primitives; the third redirects where the
+Chrome managed-policy JSON is written, so leaving it open would let an activity
+land the policy somewhere Chrome never reads — the browser lockdown silently not
+applying, while the daemon still logs that it did. `shepherdd` enables them with
+`helpers::set_trust_environment`, from its own flag `--trust-environment`.
+
+That is deliberately *not* the flag that disarms the peer check. Both are
+development opt-outs, but they are different risks wanted at different times:
+`--no-restrict-ipc-peers` decides who may **drive** the daemon, this one decides
+which code the daemon **runs**. Coupling them meant every dev and e2e run took
+binaries from `$PATH`, so the trusted-directory path was exercised only by unit
+tests and on a device.
+
+An activity's own command from `[entries]` is still resolved however the admin
+wrote it. `config.toml` is owned by the same uid the activities run as, so that
+is the same class of problem — tracked as #156/#157, and a policy decision
+rather than a lookup bug.
+
+### The rule is enforced, not just documented
+
+`clippy.toml` disallows `std::process::Command::new` and
+`tokio::process::Command::new` workspace-wide, pointing at
+`helpers::command()` / `helpers::tokio_command()` instead. Prose in a README
+does not survive the next person adding a call site; a denied method does.
+
+Spawning something that is *not* a shepherd-chosen helper is still legitimate
+and takes an `#[allow(clippy::disallowed_methods)]` with a comment saying which
+exception it is. There are five kinds, and they are the whole list:
+
+- `ManagedProcess::spawn` — `argv[0]` is the activity's own command from
+  `config.toml`, the admin's string and not shepherd's to reinterpret.
+- The input sidecars and the pairing overlay — already resolved by
+  `resolve_daemon_sibling`.
+- `shepherd-firewall-helper` — only ever runs under `pkexec`, which replaces the
+  environment with a minimal one; measured, its `PATH` is root-owned throughout.
+- `shepherd-media-cache` — must not depend on this crate, which is why its
+  resolver is injected instead.
+- Tests, fixtures and build scripts — spawning stand-ins by name is what they
+  are for.
+
+The ban caught a live gap the moment it was armed: `brightness.rs` was exec'ing
+`brightnessctl` through `$PATH`, missed by the original sweep because the name
+was in a `const` rather than a string literal.
+
+The measurements are in
+`docs/ai/history/2026-08-29 004 ipc-peer-cgroup-hole-hunt.md`; the regression
+tests are `crates/shepherd-host-linux/tests/helper_resolution.rs`.
 
 ## Browser policy
 

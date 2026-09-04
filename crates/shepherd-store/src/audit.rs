@@ -86,6 +86,20 @@ pub enum AuditEventType {
 
     /// Client disconnected
     ClientDisconnected { client_id: String },
+
+    /// A peer was refused at accept by the management socket's allow-list
+    /// (issue #144).
+    ///
+    /// Recorded because a refusal is more interesting than an acceptance: it
+    /// is something at this uid reaching for a control surface it is not part
+    /// of. The cgroup is best-effort — it is read after the decision, and a
+    /// peer that has already exited leaves none — and an activity's scope is
+    /// named after its session id, so it usually names what went looking.
+    ClientRejected {
+        reason: String,
+        peer_cgroup: Option<String>,
+        peer_pid: Option<u32>,
+    },
 }
 
 /// Full audit event with metadata

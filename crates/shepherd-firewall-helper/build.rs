@@ -31,6 +31,10 @@ fn main() {
     //   the host toolchain; strip them.
     // - CARGO_TARGET_DIR would redirect target/ outside the BPF crate;
     //   strip it so artifacts land where build.rs expects.
+    // A build script, not a daemon: this runs on a developer's machine or a
+    // CI runner at compile time, where `$PATH` is the toolchain's own and there
+    // is no kiosk user to have chosen it (issue #144).
+    #[allow(clippy::disallowed_methods)]
     let status = Command::new("rustup")
         .args(["run", "nightly", "cargo", "build", "--release"])
         .current_dir(&bpf_dir)

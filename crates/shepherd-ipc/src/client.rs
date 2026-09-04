@@ -7,6 +7,7 @@
 //! something more exotic can drop down to [`IpcClient::call`] with a
 //! method name and a JSON blob.
 
+use crate::ServerCheck;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use shepherd_api::{
@@ -15,10 +16,12 @@ use shepherd_api::{
     VolumeInfo,
 };
 use shepherd_util::EntryId;
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tracing::warn;
 
 use crate::{IpcError, IpcResult};
 
@@ -30,16 +33,77 @@ pub struct IpcClient {
 }
 
 impl IpcClient {
-    /// Connect to shepherdd
+    /// Connect to shepherdd, refusing anything that is not this session's own
+    /// daemon (issue #144).
+    ///
+    /// The socket sits in a directory owned by the uid every activity runs as,
+    /// so an activity can `unlink()` it and bind its own listener at the same
+    /// path. No file mode prevents that — see [`shepherd_ipc::ServerCheck`] —
+    /// so the client identifies who answered instead, exactly as the daemon
+    /// identifies who called.
+    ///
+    /// Use [`Self::connect_unverified`] for a client that legitimately lives
+    /// outside the session.
     pub async fn connect(socket_path: impl AsRef<Path>) -> IpcResult<Self> {
         let stream = UnixStream::connect(socket_path).await?;
-        let (read_half, write_half) = stream.into_split();
 
-        Ok(Self {
+        match crate::classify_server(stream.as_fd()) {
+            ServerCheck::Ours => {}
+            // `sudo` reaches the daemon from an operator's own login session,
+            // which is never shepherd's cgroup — the same exemption the daemon
+            // makes for root, for the same reason.
+            ServerCheck::Foreign { .. } if nix::unistd::getuid().is_root() => {}
+            ServerCheck::Foreign { server, ours } => {
+                warn!(
+                    server_cgroup_id = server,
+                    our_cgroup_id = ours,
+                    "Something other than this session's shepherdd answered on the management \
+                     socket; refusing to talk to it"
+                );
+                return Err(IpcError::ServerError(format!(
+                    "the process listening on this socket is in cgroup {server}, not this \
+                     session's ({ours}); it is not shepherd's daemon"
+                )));
+            }
+            ServerCheck::Unknown(e) => {
+                // Refused rather than trusted: an impostor can *cause* this by
+                // exiting once the connection is accepted.
+                warn!(error = %e, "Could not identify what answered on the management socket");
+                return Err(IpcError::ServerError(format!(
+                    "could not identify the process listening on this socket: {e}"
+                )));
+            }
+            ServerCheck::SelfUnknown(e) => {
+                // Nothing an activity does causes this, and refusing would
+                // leave a device with a launcher that will not start.
+                warn!(
+                    error = %e,
+                    "Could not read our own cgroup, so the daemon on this socket was not verified"
+                );
+            }
+        }
+
+        Ok(Self::from_stream(stream))
+    }
+
+    /// Connect without checking who answered.
+    ///
+    /// For clients that legitimately live outside the session's cgroup and
+    /// therefore cannot pass the check — an operator's own tooling, and the e2e
+    /// harness when it deliberately drives a daemon it placed elsewhere. Never
+    /// what the launcher, the HUD or a keybinding one-shot should use: those are
+    /// exactly the clients an impostor is worth deceiving.
+    pub async fn connect_unverified(socket_path: impl AsRef<Path>) -> IpcResult<Self> {
+        Ok(Self::from_stream(UnixStream::connect(socket_path).await?))
+    }
+
+    fn from_stream(stream: UnixStream) -> Self {
+        let (read_half, write_half) = stream.into_split();
+        Self {
             reader: BufReader::new(read_half),
             writer: write_half,
             next_request_id: 1,
-        })
+        }
     }
 
     /// Low-level call: send a method name + JSON params, get back the
@@ -210,6 +274,13 @@ impl IpcClient {
 
     pub async fn brightness_down(&mut self, step: u8) -> IpcResult<BrightnessInfo> {
         self.call("brightness_down", serde_json::json!({ "step": step }))
+            .await
+    }
+
+    /// Turn the displays on or off. Answers `false` when a blank was suppressed
+    /// because an activity is on screen (issue #144).
+    pub async fn set_screen_power(&mut self, on: bool) -> IpcResult<bool> {
+        self.call("set_screen_power", serde_json::json!({ "on": on }))
             .await
     }
 

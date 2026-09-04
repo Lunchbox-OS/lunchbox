@@ -184,6 +184,11 @@ object RpcParams {
     /** Params for `toggle_auto_brightness`, which takes none. */
     fun toggleAutoBrightness(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `set_screen_power`. */
+    fun setScreenPower(on: Boolean): JsonObject = buildJsonObject {
+        put("on", JsonPrimitive(on))
+    }
+
     /** Params for `get_hud_scale`, which takes none. */
     fun getHudScale(): JsonObject = JsonObject(emptyMap())
 

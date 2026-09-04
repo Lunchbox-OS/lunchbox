@@ -1,16 +1,19 @@
 //! IPC server implementation
 
-use shepherd_api::{ClientInfo, ClientRole, Event, Request, Response};
+use shepherd_api::{ClientInfo, Event, Request, Response};
 use shepherd_util::ClientId;
 use std::collections::HashMap;
+use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
+use crate::peer::{PeerPolicy, Rejection};
 use crate::{IpcError, IpcResult};
 
 /// Message from client to server
@@ -25,6 +28,13 @@ pub enum ServerMessage {
     },
     ClientDisconnected {
         client_id: ClientId,
+    },
+    /// A peer was refused at accept (issue #144). Reported rather than only
+    /// logged: something at this uid tried to drive the daemon from outside
+    /// the session, which is an administrator-facing condition, not a debug
+    /// detail.
+    ClientRejected {
+        rejection: Rejection,
     },
 }
 
@@ -50,10 +60,15 @@ pub struct IpcServer {
     /// exists. `None` until [`Self::start`] has bound successfully.
     socket_id: Option<(u64, u64)>,
     listener: Option<UnixListener>,
+    /// `(st_dev, st_ino)` of the socket this server bound, for [`Self::socket_was_replaced`].
+    bound_identity: Option<(u64, u64)>,
     clients: Arc<RwLock<HashMap<ClientId, ClientHandle>>>,
     event_tx: broadcast::Sender<Event>,
     message_tx: mpsc::UnboundedSender<ServerMessage>,
     message_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<ServerMessage>>>>,
+    /// Which peers may connect (issue #144). Unrestricted unless the daemon
+    /// arms it, so a caller that never opts in behaves as it always did.
+    peer_policy: PeerPolicy,
 }
 
 struct ClientHandle {
@@ -71,11 +86,43 @@ impl IpcServer {
             socket_path: socket_path.as_ref().to_path_buf(),
             socket_id: None,
             listener: None,
+            bound_identity: None,
             clients: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             message_tx,
             message_rx: Arc::new(Mutex::new(Some(message_rx))),
+            peer_policy: PeerPolicy::unrestricted(),
         }
+    }
+
+    /// Whether the socket at our path is no longer the one we bound.
+    ///
+    /// `true` means something replaced or removed it — an activity can, since
+    /// it shares this uid and no file mode prevents it (see
+    /// [`crate::ServerCheck`]). Clients refuse to talk to the impostor, so this
+    /// is not a breach; it is the daemon becoming unreachable, which is worth
+    /// saying out loud rather than leaving as a launcher that mysteriously
+    /// stops working.
+    ///
+    /// `false` when we never bound, or when the path cannot be read — an
+    /// unreadable path is not evidence of replacement.
+    pub fn socket_was_replaced(&self) -> bool {
+        let Some(bound) = self.bound_identity else {
+            return false;
+        };
+        match socket_identity(&self.socket_path) {
+            Some(now) => now != bound,
+            // Gone entirely. The unlink half of the same act.
+            None => true,
+        }
+    }
+
+    /// Restrict which peers this server will accept (issue #144).
+    ///
+    /// Must be called before [`Self::run`]; the policy is consulted once per
+    /// connection at accept.
+    pub fn set_peer_policy(&mut self, policy: PeerPolicy) {
+        self.peer_policy = policy;
     }
 
     /// Start listening
@@ -92,7 +139,23 @@ impl IpcServer {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Deliberately a filesystem socket, and it must stay one (issue #144).
+        //
+        // An abstract socket would be tempting: it has no directory entry, so
+        // the takeover this file guards against with `socket_was_replaced`
+        // would be impossible. But an abstract name ignores filesystem
+        // permissions entirely, and that forecloses the fix that actually ends
+        // this whole class — separating shepherd's uid from the activities'
+        // (#105/#157), after which a 0700 socket directory does the job that no
+        // amount of peer checking can do while the uid is shared.
         let listener = UnixListener::bind(&self.socket_path)?;
+
+        // Remember which file we bound, so a replacement can be noticed
+        // (issue #144). An activity shares this uid and so can `unlink()` the
+        // socket and bind its own at the same path; clients refuse to talk to
+        // the impostor, but the daemon would otherwise never learn that it had
+        // become unreachable.
+        self.bound_identity = socket_identity(&self.socket_path);
 
         // Set socket permissions (readable/writable by owner and group)
         if let Err(err) =
@@ -132,6 +195,8 @@ impl IpcServer {
             .as_ref()
             .ok_or_else(|| IpcError::ServerError("Server not started".into()))?;
 
+        let mut rejections = RejectionReporter::default();
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -140,11 +205,37 @@ impl IpcServer {
                     // Get peer credentials
                     let uid = get_peer_uid(&stream);
 
-                    // Determine role based on UID
-                    let role = match uid {
-                        Some(0) => ClientRole::Admin, // root
-                        Some(u) if u == nix::unistd::getuid().as_raw() => ClientRole::Admin,
-                        _ => ClientRole::Shell,
+                    // Decide here, at accept, rather than at dispatch: one
+                    // decision per connection instead of one per call, it
+                    // cannot be forgotten when a method is added, and a peer
+                    // that should not read state at all never reaches the
+                    // event stream (issue #144).
+                    let role = match self.peer_policy.classify(stream.as_fd(), uid) {
+                        Ok(role) => role,
+                        Err(rejection) => {
+                            // Reported at most once a minute: a refused peer can
+                            // reconnect as fast as the kernel allows, and each
+                            // report wakes every diagnostics subscriber.
+                            if let Some(suppressed) = rejections.should_report(Instant::now()) {
+                                warn!(
+                                    client_id = %client_id,
+                                    uid = ?uid,
+                                    peer_pid = ?rejection.peer_pid,
+                                    peer_cgroup = ?rejection.peer_cgroup,
+                                    reason = %rejection.reason,
+                                    suppressed_since_last_report = suppressed,
+                                    "Refused a client on the management socket"
+                                );
+                                let _ = self
+                                    .message_tx
+                                    .send(ServerMessage::ClientRejected { rejection });
+                            }
+                            // Dropping the stream closes the connection. The
+                            // peer sees EOF rather than an error frame: there
+                            // is nothing useful to tell it, and a refusal that
+                            // answers is a refusal that can be probed.
+                            continue;
+                        }
                     };
 
                     let info = ClientInfo::new(role);
@@ -391,6 +482,56 @@ impl Drop for IpcServer {
 }
 
 /// Get peer UID from Unix socket
+/// How long after reporting a refused peer before another is reported.
+///
+/// The first refusal is always reported, so a single probe is never silent.
+const REJECTION_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Rate-limits reporting of refused peers (issue #144).
+///
+/// A refusal costs more than the connection that caused it: a `warn!` line, and
+/// a `ClientRejected` message that becomes a diagnostic — and raising a
+/// diagnostic whose text has changed wakes every subscriber, which is the web
+/// UI, the companion app and the launcher. The peer's cgroup is deliberately
+/// part of that text (it is what turns "something probed the socket" into
+/// "this activity did"), so every refusal is a distinct diagnostic and every
+/// one would broadcast.
+///
+/// An activity can call `connect()` in a loop. Nothing is breached — it is
+/// refused every time — but it would be noise it controls, aimed squarely at
+/// the channel an administrator watches for exactly this warning. So the first
+/// refusal is reported in full and the rest are counted, with the tally carried
+/// on the next report.
+#[derive(Debug, Default)]
+struct RejectionReporter {
+    last_report: Option<Instant>,
+    suppressed: u64,
+}
+
+impl RejectionReporter {
+    /// `Some(suppressed_since_last_report)` when this refusal should be
+    /// reported, `None` when it should only be counted.
+    fn should_report(&mut self, now: Instant) -> Option<u64> {
+        let due = match self.last_report {
+            None => true,
+            Some(last) => now.duration_since(last) >= REJECTION_REPORT_INTERVAL,
+        };
+        if due {
+            self.last_report = Some(now);
+            Some(std::mem::take(&mut self.suppressed))
+        } else {
+            self.suppressed += 1;
+            None
+        }
+    }
+}
+
+/// `(st_dev, st_ino)` for the socket at `path`, or `None` if it cannot be read.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
 fn get_peer_uid(stream: &UnixStream) -> Option<u32> {
     use std::os::unix::io::AsFd;
 
@@ -405,6 +546,41 @@ fn get_peer_uid(stream: &UnixStream) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use super::{REJECTION_REPORT_INTERVAL, RejectionReporter};
+    use std::time::Instant;
+
+    /// A single probe must never be silent — that is the whole point of the
+    /// warning — while a peer that reconnects in a loop must not get to wake
+    /// every diagnostics subscriber each time (issue #144).
+    #[test]
+    fn the_first_refusal_is_reported_and_a_flood_is_counted() {
+        let mut r = RejectionReporter::default();
+        let t0 = Instant::now();
+
+        assert_eq!(
+            r.should_report(t0),
+            Some(0),
+            "the first refusal must always be reported"
+        );
+
+        for _ in 0..10_000 {
+            assert_eq!(
+                r.should_report(t0),
+                None,
+                "a flood inside the window must be counted, not reported"
+            );
+        }
+
+        // The tally rides along on the next report, so the flood is visible
+        // without having been broadcast ten thousand times.
+        assert_eq!(
+            r.should_report(t0 + REJECTION_REPORT_INTERVAL),
+            Some(10_000)
+        );
+        // ...and resets once carried.
+        assert_eq!(r.should_report(t0 + REJECTION_REPORT_INTERVAL * 2), Some(0));
+    }
+
     use super::*;
     use tempfile::tempdir;
 

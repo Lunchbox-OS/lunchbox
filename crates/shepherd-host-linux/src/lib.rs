@@ -14,12 +14,14 @@ mod audio;
 mod audio_route;
 mod brightness;
 mod browser;
+pub mod helpers;
 mod light;
 mod process;
 mod retroarch;
 mod sidecar;
 mod steam_interstitial;
 mod sway;
+pub mod sway_ipc;
 mod volume;
 
 pub use adapter::*;
@@ -27,11 +29,14 @@ pub use audio::{AudioOutput, AudioOutputKind, AudioTopology, SinkNode};
 pub use audio_route::{AudioRouter, NoOpAudioRouter, PipeWireAudioRouter};
 pub use brightness::*;
 pub use browser::is_supported_browser_flatpak;
+pub use helpers::{
+    resolve as resolve_helper, resolve_arg as resolve_helper_arg, resolve_daemon_sibling,
+};
 pub use light::*;
 pub use process::*;
 pub use retroarch::{MissingCore, missing_content, missing_core};
 pub use sway::{
-    DisplayInfo, OutputBackend, OutputScale, SwaymsgBackend, disable_output, enable_output,
+    DisplayInfo, OutputBackend, OutputScale, SwayIpcBackend, disable_output, enable_output,
     get_displays, get_outputs, map_pointer_to_output, move_to_output_fullscreen, pick_mirror_mode,
     select_primary, set_output_mode, set_output_scale,
 };

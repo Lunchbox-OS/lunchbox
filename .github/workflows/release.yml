@@ -157,8 +157,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -241,8 +241,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -251,6 +251,12 @@ jobs:
       # wasm-pack builds crates/shepherd-config-wasm, then rsbuild writes
       # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
       # shepherdd by rust-embed.
+      #
+      # Building and uploading in one job is forced: Forgejo does not implement
+      # upload-artifact@v4, so `dist-standalone/` cannot be handed from a
+      # Rust-capable job to a Node-capable one. That means the base image has to
+      # satisfy wrangler's Node floor (>= 22) as well as carry the Rust
+      # toolchain, which is one of the reasons it moved to 26.04.
       - name: Build the standalone bundle
         run: ./scripts/shepherd build config-editor
 
@@ -324,8 +330,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |

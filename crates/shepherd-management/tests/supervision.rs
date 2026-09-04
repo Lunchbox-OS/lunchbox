@@ -191,6 +191,56 @@ async fn launch(svc: &DefaultManagementService, id: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// #144 — the idle blank runs through shepherdd, and respects a live activity
+// ---------------------------------------------------------------------------
+
+/// `swayidle` fires on its own timer and cannot see shepherd's state, so the
+/// "don't blank over a running activity" rule has to hold on this side.
+///
+/// It used to live in the sway config as `--is-idle-allowed && swaymsg …`,
+/// which was two processes with a gap between them: a launch landing in that
+/// gap blanked the screen on a child mid-activity. Folding the check into the
+/// same call is what closes it, so the check has to actually be here.
+#[tokio::test]
+async fn a_blank_is_suppressed_while_an_activity_is_running() {
+    let h = harness();
+    launch(&h.svc, "tetris").await;
+
+    assert!(
+        !h.svc.set_screen_power(false).await.unwrap(),
+        "set_screen_power(false) must report that it did not act"
+    );
+    assert!(
+        h.host.screen_power_calls.lock().unwrap().is_empty(),
+        "the compositor must not be asked to blank while an activity is on screen"
+    );
+}
+
+/// The idle path still has to work, or the device never sleeps — which is the
+/// regression that shipped when `swaymsg` stopped being able to connect.
+#[tokio::test]
+async fn a_blank_reaches_the_compositor_when_nothing_is_running() {
+    let h = harness();
+
+    assert!(
+        h.svc.set_screen_power(false).await.unwrap(),
+        "set_screen_power(false) must report that it acted"
+    );
+    assert_eq!(*h.host.screen_power_calls.lock().unwrap(), vec![false]);
+}
+
+/// Waking is never suppressed. A device that blanked just before a launch has
+/// to come back, and `swayidle`'s `resume` is the only thing that asks.
+#[tokio::test]
+async fn waking_is_never_suppressed() {
+    let h = harness();
+    launch(&h.svc, "tetris").await;
+
+    assert!(h.svc.set_screen_power(true).await.unwrap());
+    assert_eq!(*h.host.screen_power_calls.lock().unwrap(), vec![true]);
+}
+
+// ---------------------------------------------------------------------------
 // #136 — escape on close
 // ---------------------------------------------------------------------------
 

@@ -23,7 +23,6 @@ use shepherd_host_api::{
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{debug, info, warn};
 
 const BACKLIGHT_ROOT: &str = "/sys/class/backlight";
@@ -96,7 +95,7 @@ fn read_u32(path: &Path) -> BrightnessResult<u32> {
 /// Probe `brightnessctl --version` so a missing binary is caught at startup
 /// rather than the first user interaction with the slider.
 fn brightnessctl_available() -> bool {
-    Command::new(BACKEND_NAME)
+    crate::helpers::command(BACKEND_NAME)
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -154,7 +153,7 @@ impl LinuxBrightnessController {
         // `%` is interpreted relative to max_brightness even when multiple
         // backlights exist.
         let arg = format!("{}%", percent);
-        let output = Command::new(BACKEND_NAME)
+        let output = crate::helpers::command(BACKEND_NAME)
             .args(["--device", &dev.name, "set", &arg])
             .output()
             .map_err(|e| BrightnessError::Backend(format!("brightnessctl: {}", e)))?;

@@ -50,7 +50,7 @@ The Shepherd background service.
 - `display` (`DisplayManager`) + `display_watch` — external monitor / docking
   support (issue #87). Captures the primary output at boot, mirrors it onto a
   docked display via `wl-mirror` by default, and exposes a HUD toggle to switch
-  to external-only at native resolution. A `swaymsg` output-event subscription
+  to external-only at native resolution. A sway IPC output-event subscription
   drives reconciliation on hotplug. Exactly one logical output is active in
   every mode, preserving the one-activity-at-a-time invariant.
 - `input_devices` (`InputMonitor`) — input-device dependencies (issue #96).

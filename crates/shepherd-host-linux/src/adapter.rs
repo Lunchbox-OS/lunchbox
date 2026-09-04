@@ -1,9 +1,10 @@
 //! Linux host adapter implementation
 
+use crate::helpers;
 use async_trait::async_trait;
 use shepherd_api::{
-    EntryKind, EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo,
-    WindowOwner,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
+    EntryKindTag, InputCompatMode, InterstitialKind, WindowAction, WindowInfo, WindowOwner,
 };
 use shepherd_host_api::{
     ExitStatus, FirewallSpec, HostAdapter, HostCapabilities, HostError, HostEvent,
@@ -16,16 +17,17 @@ use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::process::{
-    FirewallEnforcementStatus, ManagedProcess, apply_firewall_to_existing_scope,
-    build_inherited_env, find_steam_game_pids, firewall_enforcement_status,
-    firewall_helper_argv_prefix, init, kill_by_command, kill_flatpak_cgroup, kill_snap_cgroup,
-    kill_steam_game_processes, make_scope_name, pgid_is_live, pid_in_group, pid_is_live,
-    signal_group, steam_webhelper_running, stop_firewall_scope,
+    ActivityIsolationStatus, FirewallEnforcementStatus, ManagedProcess, activity_isolation_status,
+    apply_firewall_to_existing_scope, build_inherited_env, find_steam_game_pids,
+    firewall_enforcement_status, firewall_helper_argv_prefix, init, kill_by_command,
+    kill_flatpak_cgroup, kill_snap_cgroup, kill_steam_game_processes, make_scope_name,
+    pgid_is_live, pid_in_group, pid_is_live, signal_group, steam_preload_argv,
+    steam_preload_scope_name, steam_webhelper_running, stop_firewall_scope, user_scope_argv_prefix,
 };
 use crate::sidecar::{
     GamepadPreset, spawn_disable_touch, spawn_gamepad_bridge, spawn_tablet_bridge,
@@ -65,15 +67,32 @@ const STEAM_ORPHAN_WATCH: Duration = Duration::from_secs(180);
 /// session, so erring long is the safe direction.
 const WINDOW_READY_WATCH: Duration = Duration::from_secs(300);
 
-/// How often to look for that window. Polls `list_windows` rather than
-/// subscribing to sway, because the poll only runs while an activity is
-/// starting and reuses a code path that is already covered by tests.
-const WINDOW_READY_POLL: Duration = Duration::from_millis(500);
+/// How often the first-window watch re-checks in the absence of any event.
+///
+/// The window itself now arrives as a `window::new` event, so this is no longer
+/// how the window is found — it only bounds the liveness and deadline checks,
+/// and catches a window that was already mapped before the watch subscribed.
+/// It was 500ms of polling `list_windows`, i.e. up to 600 compositor round
+/// trips per launch (issue #147).
+const WINDOW_READY_TICK: Duration = Duration::from_secs(5);
 
-/// Monitor ticks (100ms each) between reconciliation sweeps for escaped
-/// activities. The sweep talks to the compositor, so it is deliberately much
-/// slower than the process poll it rides on.
-const RECONCILE_EVERY_TICKS: u64 = 20;
+/// Monitor ticks (100ms each) between *unprompted* reconciliation sweeps.
+///
+/// Reconciliation is event-driven now — a `window` event nudges the monitor,
+/// which sweeps on its next tick — so this is only the safety net for anything
+/// the event stream missed, including a bug in the event handling itself. That
+/// is worth keeping and worth running rarely: it used to fire every 2s for the
+/// daemon's whole uptime whether or not anything had happened.
+const RECONCILE_SAFETY_NET_TICKS: u64 = 600;
+
+/// The `window` event change types that can alter what is on screen, and so
+/// are worth a sweep.
+///
+/// `title` and `focus` are deliberately absent: a browser or a game retitles
+/// constantly, and reconciling on those would make more compositor traffic than
+/// the 2s poll this replaces. `move` and `floating` are what a scratchpad
+/// transition looks like, which is how the Steam client is parked.
+const RECONCILE_CHANGES: &[&str] = &["new", "close", "move", "floating"];
 
 /// Expand `~` at the beginning of a path to the user's home directory
 pub(crate) fn expand_tilde(path: &str) -> String {
@@ -194,11 +213,22 @@ fn media_argv(
 }
 
 /// Resolve the base directory under which browser policy/profile dirs are
-/// materialized. Honors `SHEPHERD_BROWSER_ROOT` (used by tests to redirect
-/// writes away from the real `~/.var/app/...`), otherwise the user's home.
+/// materialized: the user's home, or `SHEPHERD_BROWSER_ROOT` where the
+/// environment is trusted.
+///
+/// Gated, because redirecting this is a policy bypass rather than a
+/// convenience (issue #144): the managed-policy JSON lands somewhere Chrome
+/// never reads, the browser lockdown silently does not apply, and the daemon
+/// still logs "Materialized Chrome browser policy". On a device the kiosk user
+/// owns the environment, so an activity could switch off the restrictions
+/// meant to contain it.
+///
+/// Nothing production reads it — the variable exists so the e2e suite can
+/// redirect writes away from the real `~/.var/app/...`, and that harness passes
+/// `--trust-environment`.
 fn resolve_browser_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("SHEPHERD_BROWSER_ROOT") {
-        return PathBuf::from(root);
+    if let Some(root) = crate::helpers::env_override("SHEPHERD_BROWSER_ROOT") {
+        return root;
     }
     dirs::home_dir().unwrap_or_default()
 }
@@ -309,6 +339,21 @@ pub struct LinuxHost {
     /// is already over, so nothing else is watching them — the monitor keeps
     /// working on these rather than letting them run unsupervised (issue #136).
     escaped: Arc<Mutex<HashMap<u32, EscapedActivity>>>,
+    /// Where to report administrator-facing conditions the host notices
+    /// (issue #143). `None` until the daemon supplies one, and in tests, so a
+    /// host built without a registry simply reports nothing.
+    diagnostics: Arc<Mutex<Option<Arc<dyn DiagnosticSink>>>>,
+    /// Signals the monitor that something on screen changed, so it sweeps on
+    /// its next tick instead of waiting for the safety net. Unbounded and
+    /// drained rather than counted: a burst of events collapsing into one
+    /// sweep is the behaviour reconciliation's idempotence already relies on,
+    /// and the 100ms tick is the debounce.
+    window_nudge_tx: mpsc::UnboundedSender<()>,
+    window_nudge_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<()>>>>,
+    /// Broadcast to every in-flight first-window watch when a window is
+    /// created. Broadcast rather than a channel per watch because several
+    /// activities can be starting at once and each needs the same event.
+    window_created_tx: broadcast::Sender<()>,
 }
 
 /// An activity that survived teardown and is still on the machine.
@@ -398,6 +443,7 @@ fn in_any_group(pid: u32, group: &[(u32, u32)]) -> bool {
 impl LinuxHost {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
 
         // Initialize process management
         init();
@@ -416,7 +462,22 @@ impl LinuxHost {
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
             steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
             escaped: Arc::new(Mutex::new(HashMap::new())),
+            diagnostics: Arc::new(Mutex::new(None)),
+            window_nudge_tx: nudge_tx,
+            window_nudge_rx: Arc::new(Mutex::new(Some(nudge_rx))),
+            // Capacity is generous only so a slow watcher lags rather than
+            // stalls the subscription; a lagged watcher re-checks anyway.
+            window_created_tx: broadcast::channel(64).0,
         }
+    }
+
+    /// Give the host somewhere to report administrator-facing conditions.
+    ///
+    /// A setter rather than a constructor argument because the daemon builds
+    /// the adapter before the diagnostic registry exists, the same way
+    /// [`Self::configure_steam`] arrives after construction.
+    pub fn set_diagnostics(&self, sink: Arc<dyn DiagnosticSink>) {
+        *self.diagnostics.lock().unwrap() = Some(sink);
     }
 
     /// Apply `[service.steam]` config. Call before [`preload_steam`] so the CEF
@@ -750,20 +811,36 @@ impl LinuxHost {
             steam_interstitial::ensure_cef_debug_enabled();
         }
 
-        // -silent tells Steam not to show its main window on startup
-        let argv = vec![
-            "snap".to_string(),
-            "run".to_string(),
-            "steam".to_string(),
-            "-silent".to_string(),
-        ];
+        // Into a scope of its own, like an activity (issue #144). The preloaded
+        // client is the parent every Steam game inherits from, so this is the
+        // launch that matters; `spawn` wraps the per-game `steam://rungameid`
+        // request for the same reason. See `steam_preload_argv` for why the
+        // wrapping is not redundant even though `snap run` re-scopes.
+        let scope = match activity_isolation_status() {
+            ActivityIsolationStatus::Supported => Some(steam_preload_scope_name()),
+            ActivityIsolationStatus::Unsupported { reason } => {
+                // Same trade as the activity path: preload anyway rather than
+                // leave Steam entries gated forever. shepherdd already raises
+                // `ipc_socket_not_hardened` at startup when the probe fails.
+                warn!(
+                    reason = %reason,
+                    "Cannot give the preloaded Steam client a cgroup of its own"
+                );
+                None
+            }
+        };
+        let argv = steam_preload_argv(scope.as_deref());
+
         match ManagedProcess::spawn(
             &argv,
             &HashMap::new(),
             None,
             None,
             Some("steam".to_string()),
-            None,
+            // Not `argv[0]`: that is `systemd-run` once wrapped, and was
+            // `snap` before — `pkill -f snap` on shutdown would reach every
+            // snap on the device, not just Steam.
+            Some("steam"),
         ) {
             Ok(proc) => {
                 let pid = proc.pid;
@@ -971,6 +1048,123 @@ impl LinuxHost {
             .collect()
     }
 
+    /// Subscribe to sway's `window` events and turn them into sweeps.
+    ///
+    /// Reconciliation used to be a sampling detector: a 2s sweep asking "is
+    /// there a surface on screen that shepherd does not own?". For a problem
+    /// whose entire symptom is an unexpected window, sampling is the wrong
+    /// shape — an orphan went unnoticed for up to 2s, and one that mapped and
+    /// unmapped inside a single sweep was never noticed at all (issue #147).
+    ///
+    /// The event is only a trigger, never the data. A `window` event's
+    /// `container` carries `pid` and `app_id` but **no workspace**, so
+    /// `in_scratchpad` cannot be derived from it — and both consumers filter on
+    /// that. So this nudges the monitor, which re-reads the whole tree, exactly
+    /// as `display_watch` does for outputs. That also leaves `walk`,
+    /// `report_unowned_windows` and [`Self::is_infrastructure`] untouched and
+    /// still tested.
+    ///
+    /// The subscription is opened before this returns, so a failure is the
+    /// caller's to report and the connection exists before anything downstream
+    /// (including the socket hardening) depends on it.
+    pub async fn start_window_watch(&self) -> HostResult<tokio::task::JoinHandle<()>> {
+        let mut subscription = crate::sway_ipc::Subscription::open(&["window"]).await?;
+        let nudge = self.window_nudge_tx.clone();
+        let created = self.window_created_tx.clone();
+        info!("Watching sway window events for supervision escapes");
+
+        Ok(tokio::spawn(async move {
+            loop {
+                let (_, body) = match subscription.next_event().await {
+                    Ok(event) => event,
+                    Err(e) => {
+                        // shepherdd is exec'd by sway and dies with it, so a
+                        // stream that ends means the session is ending.
+                        warn!(error = %e, "Sway window event stream ended");
+                        return;
+                    }
+                };
+                let Some(change) = Self::window_event_change(&body) else {
+                    continue;
+                };
+                if change == "new" {
+                    // A watcher that has already gone away is the normal case.
+                    let _ = created.send(());
+                }
+                if RECONCILE_CHANGES.contains(&change.as_str()) {
+                    let _ = nudge.send(());
+                }
+            }
+        }))
+    }
+
+    /// Pull the `change` field out of a `window` event payload.
+    fn window_event_change(body: &[u8]) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct WindowEvent {
+            change: String,
+        }
+        match serde_json::from_slice::<WindowEvent>(body) {
+            Ok(event) => Some(event.change),
+            Err(e) => {
+                debug!(error = %e, "Unparsable sway window event");
+                None
+            }
+        }
+    }
+
+    /// Read the window list for a sweep, and say so when we cannot.
+    ///
+    /// `list_windows()` returning `Err` used to be flattened to an empty list
+    /// (`unwrap_or_default`), which made "the compositor did not answer"
+    /// indistinguishable from "nothing is on screen" — so the escape sweep
+    /// closed nothing, `report_unowned_windows` reported nothing, and the
+    /// daemon concluded the screen was clear. Nothing was logged, because the
+    /// error had already been discarded (issue #147).
+    ///
+    /// Now the failure is a `None` the sweep can act on, and an
+    /// administrator-facing condition that clears itself the moment the
+    /// compositor answers again.
+    async fn windows_for_sweep(
+        diagnostics: &Arc<Mutex<Option<Arc<dyn DiagnosticSink>>>>,
+    ) -> Option<Vec<WindowInfo>> {
+        let sink = diagnostics.lock().unwrap().clone();
+        match crate::sway::list_windows().await {
+            Ok(windows) => {
+                if let Some(sink) = sink {
+                    sink.clear(
+                        DiagnosticCode::CompositorUnreachable,
+                        &DiagnosticSubject::Service,
+                    );
+                }
+                Some(windows)
+            }
+            Err(e) => {
+                // `raise` is idempotent on `(code, subject)` and preserves the
+                // original `since`, so a compositor that stays unreachable
+                // says so once rather than every two seconds.
+                if let Some(sink) = sink {
+                    sink.raise(Diagnostic {
+                        code: DiagnosticCode::CompositorUnreachable,
+                        subject: DiagnosticSubject::Service,
+                        severity: DiagnosticSeverity::Critical,
+                        message: "shepherd cannot see the compositor, so it cannot tell what is \
+                                  on screen or close a window that escaped supervision"
+                            .to_string(),
+                        remedy: Some(
+                            "Check that shepherdd is running inside the sway session and that \
+                             SWAYSOCK is set in its environment."
+                                .to_string(),
+                        ),
+                        since: shepherd_util::now(),
+                    });
+                }
+                warn!(error = %e, "Could not read the window list from the compositor");
+                None
+            }
+        }
+    }
+
     /// Keep working on activities that survived teardown, and close any window
     /// they still have.
     ///
@@ -984,6 +1178,7 @@ impl LinuxHost {
         session_info: &Arc<Mutex<HashMap<SessionId, SessionInfo>>>,
         processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
         sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
+        windows: Option<&[WindowInfo]>,
         unowned_reported: &mut HashSet<u32>,
         event_tx: &mpsc::UnboundedSender<HostEvent>,
     ) {
@@ -992,17 +1187,21 @@ impl LinuxHost {
             map.iter().map(|(pid, a)| (*pid, a.clone())).collect()
         };
 
-        // Windows still on screen: both to close activities we cannot kill,
-        // and to notice surfaces that belong to nothing we know about.
-        let windows = crate::sway::list_windows().await.unwrap_or_default();
-
-        let known: HashSet<u32> = {
-            let mut k: HashSet<u32> = processes.lock().unwrap().keys().copied().collect();
-            k.extend(sidecars.lock().unwrap().keys().copied());
-            k.extend(snapshot.iter().map(|(pid, _)| *pid));
-            k
-        };
-        let _ = Self::report_unowned_windows(&windows, &known, unowned_reported);
+        // `None` means the compositor could not be asked. That is emphatically
+        // not an empty screen: reporting "no orphans" from a failed query is
+        // the false negative this whole change exists to remove, and pruning
+        // `unowned_reported` against a list we do not have would forget
+        // orphans we already know about. So skip the window half entirely and
+        // still work the kills — the caller has raised a diagnostic.
+        if let Some(windows) = windows {
+            let known: HashSet<u32> = {
+                let mut k: HashSet<u32> = processes.lock().unwrap().keys().copied().collect();
+                k.extend(sidecars.lock().unwrap().keys().copied());
+                k.extend(snapshot.iter().map(|(pid, _)| *pid));
+                k
+            };
+            let _ = Self::report_unowned_windows(windows, &known, unowned_reported);
+        }
 
         if snapshot.is_empty() {
             return;
@@ -1051,8 +1250,10 @@ impl LinuxHost {
 
             // Close any surface it is still showing. A window we can close is
             // the difference between "unsupervised activity on the child's
-            // screen" and "gone from view while we keep killing it".
-            for w in windows.iter().filter(|w| w.pid == Some(pid)) {
+            // screen" and "gone from view while we keep killing it". With no
+            // window list there is nothing to close — the kills above are all
+            // this sweep can do until the compositor answers again.
+            for w in windows.unwrap_or(&[]).iter().filter(|w| w.pid == Some(pid)) {
                 if let Err(e) = crate::sway::act_on_window(w.id, WindowAction::Close).await {
                     debug!(pid, window = w.id, error = %e, "Could not close escaped window");
                 }
@@ -1083,6 +1284,16 @@ impl LinuxHost {
     /// The window is often owned by a descendant rather than the process we
     /// spawned, and for Steam by a process that is not in our tree at all, so
     /// match on the group and on the game's own pids as well as the pid.
+    ///
+    /// Woken by `window::new` rather than by a 500ms poll, so the first window
+    /// is now billed exactly rather than to within half a second. The slow tick
+    /// remains for two jobs the event stream cannot do: bounding the liveness
+    /// and deadline checks, and catching a window that was already mapped
+    /// before this task subscribed.
+    ///
+    /// The event is a trigger, not the answer — the tree is re-read and the
+    /// same predicate applied, because `window::new` carries no workspace and
+    /// so cannot say whether the surface went straight to the scratchpad.
     fn spawn_window_watch(
         &self,
         handle: HostSessionHandle,
@@ -1091,11 +1302,24 @@ impl LinuxHost {
         steam_app_id: Option<u32>,
     ) {
         let event_tx = self.event_tx.clone();
+        let mut created = self.window_created_tx.subscribe();
 
         tokio::spawn(async move {
             let deadline = Instant::now() + WINDOW_READY_WATCH;
+            // Cleared if the broadcast ever closes — awaiting a closed
+            // receiver returns immediately, which would spin this loop.
+            let mut watching_events = true;
             loop {
-                tokio::time::sleep(WINDOW_READY_POLL).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(WINDOW_READY_TICK) => {}
+                    // A lagged receiver missed events but still wants to look;
+                    // a closed one leaves only the tick.
+                    result = created.recv(), if watching_events => {
+                        if matches!(result, Err(broadcast::error::RecvError::Closed)) {
+                            watching_events = false;
+                        }
+                    }
+                }
 
                 // A non-Steam activity that is already gone will never map a
                 // window. Steam's launch process exits immediately, so it has
@@ -1106,6 +1330,11 @@ impl LinuxHost {
 
                 let steam_pids: Vec<i32> =
                     steam_app_id.map(find_steam_game_pids).unwrap_or_default();
+                // Unlike the sweep, a failed query here is genuinely harmless:
+                // it costs at most one `WindowReady`, and billing then falls
+                // back to the whole session — the documented safe direction.
+                // The sweep's version of this was the actual defect; see
+                // [`Self::windows_for_sweep`].
                 let windows = crate::sway::list_windows().await.unwrap_or_default();
                 let found = windows.iter().find(|w| {
                     let Some(wpid) = w.pid else { return false };
@@ -1295,6 +1524,8 @@ impl LinuxHost {
         let event_tx = self.event_tx.clone();
         let escaped = self.escaped.clone();
         let session_info = self.session_info.clone();
+        let diagnostics = self.diagnostics.clone();
+        let mut window_nudge_rx = self.window_nudge_rx.lock().unwrap().take();
 
         tokio::spawn(async move {
             let mut ticks: u64 = 0;
@@ -1306,15 +1537,30 @@ impl LinuxHost {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 ticks += 1;
 
-                // Reconciliation is a rescue path, not a hot loop: it shells
-                // out to the compositor, so run it every ~2s rather than on
-                // every poll. Cheap no-op when nothing has escaped.
-                if ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
+                // Sweep when the compositor says something changed, and
+                // otherwise only on the slow safety net. Draining the channel
+                // rather than sweeping per event is the debounce: sway emits a
+                // burst for one user-visible change, and reconciliation is
+                // idempotent, so the whole burst collapses into this tick.
+                let nudged = match window_nudge_rx.as_mut() {
+                    Some(rx) => {
+                        let mut any = false;
+                        while rx.try_recv().is_ok() {
+                            any = true;
+                        }
+                        any
+                    }
+                    None => false,
+                };
+
+                if nudged || ticks.is_multiple_of(RECONCILE_SAFETY_NET_TICKS) {
+                    let windows = Self::windows_for_sweep(&diagnostics).await;
                     Self::reconcile_escaped(
                         &escaped,
                         &session_info,
                         &processes,
                         &sidecars,
+                        windows.as_deref(),
                         &mut unowned_reported,
                         &event_tx,
                     )
@@ -1486,7 +1732,11 @@ impl HostAdapter for LinuxHost {
                 // For snap apps, we need to use 'snap run <snap_name>' to launch them.
                 // The command (if specified) is passed as an argument after the snap name,
                 // followed by any additional args.
-                let mut argv = vec!["snap".to_string(), "run".to_string(), snap_name.clone()];
+                let mut argv = vec![
+                    helpers::resolve_arg("snap"),
+                    "run".to_string(),
+                    snap_name.clone(),
+                ];
                 // If a custom command is specified (different from snap_name), add it
                 if let Some(cmd) = command
                     && cmd != snap_name
@@ -1499,7 +1749,7 @@ impl HostAdapter for LinuxHost {
             EntryKind::Steam { app_id, args, env } => {
                 // Steam games are launched via the Steam snap: snap run steam steam://rungameid/<app_id>
                 let mut argv = vec![
-                    "snap".to_string(),
+                    helpers::resolve_arg("snap"),
                     "run".to_string(),
                     "steam".to_string(),
                     format!("steam://rungameid/{}", app_id),
@@ -1513,7 +1763,7 @@ impl HostAdapter for LinuxHost {
                 // `[entries.kind.env]` entries only reach the app via the
                 // explicit `--env=KEY=VAL` flag. Build them into the argv
                 // (sorted for deterministic ordering and easier debugging).
-                let mut argv = vec!["flatpak".to_string(), "run".to_string()];
+                let mut argv = vec![helpers::resolve_arg("flatpak"), "run".to_string()];
                 let mut keys: Vec<&String> = env.keys().collect();
                 keys.sort();
                 for k in keys {
@@ -1665,12 +1915,19 @@ impl HostAdapter for LinuxHost {
         // doesn't grant us, skip the wrapper rather than spawning under a
         // silent no-op.
         let mut firewall_scope: Option<String> = None;
+        // Whether the activity is already being launched into a cgroup of its
+        // own. The privileged path below does that as a side effect of
+        // filtering; everything else needs the unprivileged scope further down,
+        // or it inherits shepherdd's cgroup and becomes indistinguishable from
+        // the launcher on the management socket (issue #144).
+        let mut scoped_by_helper = false;
         let final_argv = if let Some(ref spec) = options.firewall {
             if sandboxed_app_name.is_none() && steam_app_id.is_none() {
                 match firewall_enforcement_status() {
                     FirewallEnforcementStatus::Supported => {
                         let scope_name = make_scope_name(&session_id.to_string());
                         firewall_scope = Some(scope_name.clone());
+                        scoped_by_helper = true;
                         let activity_env = build_inherited_env(&env);
                         let uid = nix::unistd::getuid().as_raw();
                         let gid = nix::unistd::getgid().as_raw();
@@ -1699,6 +1956,52 @@ impl HostAdapter for LinuxHost {
             }
         } else {
             argv
+        };
+
+        // Put the activity in a cgroup that is not shepherdd's, so the peer
+        // check on the management socket has something to tell apart (#144).
+        //
+        // Skipped for snap and flatpak: their runtimes already scope them under
+        // `user@<uid>.service/app.slice`, which is where
+        // `apply_firewall_to_existing_scope` goes looking. Wrapping them again
+        // would nest a scope around a launcher that immediately hands off to a
+        // long-lived runtime process elsewhere — more moving parts, no cgroup
+        // we did not already have.
+        //
+        // Steam is *not* skipped, though `snap run` re-scopes it into
+        // `snap.steam.steam-<uuid>.scope` the same way, and though the game
+        // itself is a child of the preloaded client rather than of this
+        // process. The scope this creates empties out at that hand-off and
+        // `--collect` reaps it. It is kept because the alternative is an
+        // invariant with a hole in it: "an activity is never in shepherd's
+        // cgroup" should hold because of what this function does, not because
+        // snapd usually moves the process quickly enough. `preload_steam` wraps
+        // the client for the same reason, and that is the launch a game
+        // actually inherits its cgroup from.
+        let final_argv = if scoped_by_helper || sandboxed_app_name.is_some() {
+            final_argv
+        } else {
+            match activity_isolation_status() {
+                ActivityIsolationStatus::Supported => {
+                    let mut prefixed =
+                        user_scope_argv_prefix(&make_scope_name(&session_id.to_string()));
+                    prefixed.extend(final_argv);
+                    prefixed
+                }
+                ActivityIsolationStatus::Unsupported { reason } => {
+                    // Launch anyway rather than leaving a child staring at a
+                    // dead screen — the same trade the compositor hardening
+                    // makes. The daemon reports the downgrade as a diagnostic
+                    // at startup, so it is not silent.
+                    warn!(
+                        command = ?final_argv.first(),
+                        reason = %reason,
+                        "Cannot give this activity a cgroup of its own; it will share \
+                         shepherd's, and the management socket cannot tell it from the launcher"
+                    );
+                    final_argv
+                }
+            }
         };
 
         // Spawn any input-compat sidecars before the activity. We log
@@ -2094,14 +2397,11 @@ impl HostAdapter for LinuxHost {
     }
 
     async fn logout(&self) -> HostResult<()> {
-        match tokio::process::Command::new("swaymsg")
-            .arg("exit")
-            .status()
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(HostError::Internal(format!("swaymsg exit failed: {e}"))),
-        }
+        crate::sway::exit().await
+    }
+
+    async fn set_screen_power(&self, on: bool) -> HostResult<()> {
+        crate::sway::set_screen_power(on).await
     }
 
     async fn list_windows(&self) -> HostResult<Vec<WindowInfo>> {
@@ -2137,6 +2437,11 @@ impl HostAdapter for LinuxHost {
     }
 }
 
+// Tests spawn stand-ins by name on purpose — `sh`, `true`, `setsid`, a stubbed
+// `flatpak` — which is the case `Command::new`'s ban exists to make deliberate
+// rather than accidental (issue #144). A test process is not a daemon on a
+// device, and what it execs is its own fixture.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2734,6 +3039,9 @@ mod tests {
             &host.session_info,
             &host.processes,
             &host.sidecars,
+            // The compositor answered and there is nothing on screen — these
+            // tests are about the kill path, not the window path.
+            Some(&[]),
             &mut unowned,
             &host.event_tx,
         )
@@ -2767,6 +3075,9 @@ mod tests {
             &host.session_info,
             &host.processes,
             &host.sidecars,
+            // The compositor answered and there is nothing on screen — these
+            // tests are about the kill path, not the window path.
+            Some(&[]),
             &mut unowned,
             &host.event_tx,
         )
@@ -2830,6 +3141,7 @@ mod tests {
                 &host.session_info,
                 &host.processes,
                 &host.sidecars,
+                Some(&[]),
                 &mut unowned,
                 &host.event_tx,
             )
@@ -2950,6 +3262,83 @@ mod tests {
         );
     }
 
+    /// A `window` subscription is noisy: one terminal's life emits
+    /// `new, title, focus, floating, move, close, move`, and `title`/`focus`
+    /// fire constantly under a browser or a game. Reconciling on those would
+    /// make more compositor traffic than the 2s poll this replaces.
+    #[test]
+    fn only_change_types_that_alter_the_screen_trigger_a_sweep() {
+        for change in ["new", "close", "move", "floating"] {
+            assert!(
+                RECONCILE_CHANGES.contains(&change),
+                "{change} changes what is on screen and must sweep"
+            );
+        }
+        for change in ["title", "focus", "urgent", "mark", "fullscreen_mode"] {
+            assert!(
+                !RECONCILE_CHANGES.contains(&change),
+                "{change} is noise and must not sweep"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_change_off_a_window_event() {
+        // Shape taken from sway-ipc(7): a `change` plus the full container.
+        // Note the container carries a pid but no workspace, which is why the
+        // event is only ever a trigger to re-read the tree.
+        let payload = br#"{"change":"new","container":{"id":12,"name":null,
+            "type":"con","pid":19787,"app_id":null,
+            "window_properties":{"class":"URxvt"}}}"#;
+        assert_eq!(
+            LinuxHost::window_event_change(payload).as_deref(),
+            Some("new")
+        );
+        assert_eq!(LinuxHost::window_event_change(b"not json"), None);
+        assert_eq!(LinuxHost::window_event_change(b"{}"), None);
+    }
+
+    /// The defect at the centre of issue #147: `list_windows()` returning an
+    /// error used to be flattened to an empty list, which the sweep read as a
+    /// clear screen. Now the sweep is told the difference.
+    #[tokio::test]
+    async fn an_unreadable_compositor_does_not_read_as_a_clear_screen() {
+        let host = LinuxHost::new();
+        let mut unowned: HashSet<u32> = [4242].into_iter().collect();
+
+        LinuxHost::reconcile_escaped(
+            &host.escaped,
+            &host.session_info,
+            &host.processes,
+            &host.sidecars,
+            None, // the compositor could not be asked
+            &mut unowned,
+            &host.event_tx,
+        )
+        .await;
+        assert!(
+            unowned.contains(&4242),
+            "a failed query must not retire an orphan we already know about"
+        );
+
+        // With an answer — genuinely nothing on screen — the same orphan is
+        // correctly forgotten, so it will be announced again if it returns.
+        LinuxHost::reconcile_escaped(
+            &host.escaped,
+            &host.session_info,
+            &host.processes,
+            &host.sidecars,
+            Some(&[]),
+            &mut unowned,
+            &host.event_tx,
+        )
+        .await;
+        assert!(
+            unowned.is_empty(),
+            "an empty screen really is empty and should retire the orphan"
+        );
+    }
+
     #[test]
     fn scratchpad_windows_are_not_orphans() {
         // Steam's own client is moved to the scratchpad by sway.conf rather
@@ -3036,20 +3425,32 @@ mod tests {
 
         std::fs::write(
             &fake,
+            // Bounded, not `while true`: the test stops what it spawned on
+            // its way out, but a failing assertion unwinds past that, and this
+            // runs in a scope of its own that outlives the test process. One
+            // such escape sat on this box for six hours and then failed an
+            // unrelated e2e test, which asserts that no `sleep` is running.
+            // 60s is far longer than the test needs and far shorter than a
+            // suite run.
             "#!/bin/sh\n\
              for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$ARGV_FILE\"; done\n\
-             while true; do sleep 0.05; done\n",
+             i=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
 
         let state_root = scratch.path().join("state");
-        let _guard = crate::retroarch::ROOT_ENV_LOCK
+        let _guard = crate::retroarch::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // SAFETY: no other thread reads the variable while the lock is held.
         unsafe { std::env::set_var(crate::retroarch::RETROARCH_ROOT_ENV, &state_root) };
+        // The root override is gated now (issue #144), and this test drives the
+        // real `spawn` rather than `retroarch::prepare_in`, so it is the one
+        // case that still needs the variable honoured. The trust flag is
+        // process-global like the variable itself, so `ENV_LOCK` covers both.
+        crate::helpers::set_trust_environment(true);
 
         let host = LinuxHost::new();
         let _rx = host.subscribe();
@@ -3077,6 +3478,9 @@ mod tests {
             )
             .await
             .unwrap();
+        // Put it back before the assertions, so a failing one cannot leave the
+        // rest of this test binary resolving binaries from `$PATH`.
+        crate::helpers::set_trust_environment(false);
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -3137,7 +3541,7 @@ mod tests {
              # First SIGTERM: start saving. Reset the handler first, so a\n\
              # second one kills us outright -- what RetroArch's exit(1) does.\n\
              trap 'trap - TERM; sleep 1; printf saved > \"$MARKER_FILE\"; exit 0' TERM\n\
-             while true; do sleep 0.05; done\n",
+             i=0; while [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\n",
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
