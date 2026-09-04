@@ -565,6 +565,36 @@ already exposes global volume controls that work the same everywhere.
 In direct-play mode the same UI opens straight into playback and the
 process exits once the item finishes; the grid is never shown.
 
+### Hardware decoding
+
+The Linux front-end asks mpv for `hwdec=auto-copy-safe`: decode on the GPU, then
+read each frame back into system RAM for the render API to composite. Android
+is unaffected — it decodes straight into a `SurfaceView` (`mediacodec`), a
+different path entirely.
+
+The obvious choice is the zero-copy `auto-safe`, and that is what issue #115
+moved to. **It renders the wrong picture after a seek.** A second or so after
+seeking, the frame turns green and blocky — luma roughly intact, chroma read
+from the wrong place — and stays that way until some later seek happens to clear
+it. Measured on an Ivy Bridge iGPU (i965 VA driver, Mesa crocus) against a 720p
+H.264 file from the video cache:
+
+| `hwdec` | corrupt seeks | CPU (one core) |
+|---|---|---|
+| `vaapi` (zero-copy) | 4 of 12 | 19.1 % |
+| `vaapi-copy` | 0 of 12 | 21.7 % |
+| `no` (software) | 0 of 12 | 55.2 % |
+
+Bare `mpv` reproduces it with no `shepherd-media` involved, identically under
+`vo=gpu` and `vo=gpu-next`, with `hr-seek-framedrop` either way, and with a
+larger surface pool — so it is a driver bug in the DMABUF export rather than
+anything the player can seek its way around. The only thing that changes it is
+whether the decoded surface is read back, which is what a `-copy` mode does.
+
+Set **`SHEPHERD_MPV_HWDEC`** to take a different path: `auto-safe` for zero-copy
+on a GPU that renders it correctly, `no` to force software, or any other value
+mpv's `--hwdec` accepts. The per-file log line says which path mpv settled on.
+
 ## Resuming playback
 
 Off by default. Pass `--resume` (Linux) or turn on **Resume playback** for a
@@ -693,19 +723,15 @@ is played offline.
 
 ### Seeking
 
-Skips are issued as `seek <t> absolute+exact`, and mpv is configured with
-`hr-seek-framedrop=no`.
+Skips are issued as `seek <t> absolute+exact`. Exactness is spelled out rather
+than left to mpv's `--hr-seek` default, which the manual calls "implementation
+specific": landing on the preceding keyframe would put playback back *inside*
+the span it just skipped, with the span already marked as skipped, so the rest
+of the sponsor would play with nothing left to stop it.
 
-Both are about landing cleanly. Exactness is spelled out rather than left to
-mpv's `--hr-seek` default, which the manual calls "implementation specific":
-landing on the preceding keyframe would put playback back *inside* the span it
-just skipped, with the span already marked as skipped, so the rest of the
-sponsor would play with nothing left to stop it. And `hr-seek-framedrop`, which
-mpv defaults to `yes`, lets the decoder drop frames between the keyframe and the
-seek target — safe in software, but a hardware decoder that skips a frame later
-frames reference leaves everything after the seek decoded against a picture that
-was never produced, which is visible corruption until the next keyframe. It
-costs part of one GOP of decoding per seek.
+Seeking is also what exposed the decode-path bug in [Hardware
+decoding](#hardware-decoding) — a skip is a seek nobody asked for, so a
+front-end that never seeks on its own can hide it for a long time.
 
 ### Checking what it sends
 

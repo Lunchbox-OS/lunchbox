@@ -150,6 +150,24 @@ Example (bedtime restriction):
 - **GTK renderer.** The session sets `GSK_RENDERER=cairo` (GTK4's GL renderer
   needs EGL, absent on the pixman/no-GPU path). If the UI doesn't paint, check
   `dev-runtime/headless/sway.log` and try `--gpu`.
+- **`--gpu` is not enough for hardware video decoding.** logind grants
+  `/dev/dri/renderD128` by ACL to whoever holds the *active seat* session, and an
+  SSH or agent shell has no seat — so `mpv`/`shepherd-media` silently decode in
+  software and anything GPU-specific (VA-API decode paths, driver bugs) cannot be
+  reproduced. There is no error; `hwdec-current` just reads `no`. Grant yourself
+  the node first:
+
+  ```sh
+  sudo setfacl -m u:$USER:rw /dev/dri/renderD128   # revoke with -x u:$USER
+  ffmpeg -init_hw_device vaapi=va:/dev/dri/renderD128 -f lavfi -i testsrc2 -f null -  # check
+  ```
+
+  Then boot with `--gpu` and *confirm* the path is live before trusting a result
+  — `shepherd-media --log-level info` logs which decoder mpv settled on, and bare
+  `mpv` answers `{"command":["get_property","hwdec-current"]}` over
+  `--input-ipc-server`. This is what made an earlier session conclude the machine
+  was "a VM with no GPU access" and ship an unverified fix
+  (`docs/ai/history/2026-09-04 001 green-frames-after-a-seek.md`).
 - **Config edits.** `config.example.toml` must pass `./scripts/shepherd config
   validate` (CI checks this). Test config-driven changes with `--config` against
   a fixture first.
