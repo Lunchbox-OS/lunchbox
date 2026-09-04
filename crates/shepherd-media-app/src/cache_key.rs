@@ -63,19 +63,40 @@ pub fn interest_key(url: &str) -> String {
     hash_parts(&[url])
 }
 
-/// Hex characters of the digest that name a SponsorBlock bucket. Four is what
-/// the service recommends and what every other client uses; a different number
-/// would ask for a bucket size the server does not serve.
+/// Hex characters of the digest that name a SponsorBlock bucket.
+///
+/// This is a *privacy* length, not a cache-naming one, and it is a real choice:
+/// the service serves any prefix from 3 to 32 characters, so a longer one would
+/// work and would be cheaper. Measured against the live service on 2026-09-04,
+/// with the exact query `shepherd_media_core::sponsorblock::bucket_url` sends:
+///
+/// | prefix | response | videos in it |
+/// |---|---|---|
+/// | 3 | 810 KB | 2187 |
+/// | **4** | **50 KB** | **130** |
+/// | 5 | 3.8 KB | 11 |
+///
+/// Four is the knee, and it is what yt-dlp and the browser extension use. At
+/// five the crowd is small enough that the server can reasonably guess what is
+/// being watched — the whole point of the endpoint is that it cannot — and at
+/// three the download is sixteen times larger for privacy nobody needs.
 pub const SPONSORBLOCK_PREFIX_LEN: usize = 4;
 
 /// The SponsorBlock bucket a YouTube video falls into: the first four hex
 /// characters of the SHA-256 of its *video id* (issue #159).
 ///
 /// This is not a cache-naming decision like the two keys above — it is the
-/// service's own convention, and asking for anything else would query a bucket
-/// nobody serves. It lives here anyway because both front-ends need it and both
-/// already depend on this crate for its SHA-256, and because the bucket doubles
-/// as the name of the file the response is cached in.
+/// service's own convention, and its length is argued for at
+/// [`SPONSORBLOCK_PREFIX_LEN`]. It lives here anyway because both front-ends
+/// need it and both already depend on this crate for its SHA-256, and because
+/// the bucket doubles as the name of the file the response is cached in.
+///
+/// Nothing downstream relies on the prefix being unique to one video: a bucket
+/// is *meant* to hold about a hundred of them, and
+/// `shepherd_media_core::sponsorblock::parse_bucket` picks out the one asked
+/// for by exact `videoID` after the response arrives. Sharing a
+/// bucket costs bytes, never a wrong segment — and it is a cache win, since one
+/// fetch warms every video in it.
 ///
 /// The id alone is hashed, with no separator and no URL around it: the digest
 /// has to match the one the service computed, so it cannot go through
