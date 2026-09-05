@@ -742,6 +742,63 @@ Two things the work turned up on the way:
   the buttons *also* cannot work — touch-only device **and** `/dev/uinput` not
   writable — and names both fixes.
 
+### Correction: the toolbar goes another way (found on a device, 2026-09-05)
+
+Phase 0 result 6b above says a local XMLGUI document hides Okular's toolbar, and
+the first implementation shipped one. **On a real device it does nothing.** What
+actually hides the toolbar is at the end of this section; the middle is why the
+wrong answer survived verification, which is the part worth keeping.
+
+What was measured on the device session, each an independent attempt to remove
+the toolbar, all with the toolbar still there afterwards: an empty config
+directory; `[MainWindow][Toolbar mainToolBar][$i] Hidden=true` in `okularrc`; a
+minimal local XMLGUI document declaring `hidden="true"`; and a *full* copy of
+Okular's own `part.rc`/`shell.rc` with the attribute added and the version
+stamped past Okular's own. `strace` shows the reader opening our `shell.rc` and
+ignoring the attribute — and never opening `part.rc` at all, in either session.
+
+Why Phase 0 read the other way is the uncomfortable part: **in the headless dev
+session Okular shows no toolbar under any configuration**, including an empty
+one. So the original experiment — add the file, watch the toolbar disappear —
+was a coincidence of ordering, and every later "verified" screenshot was taken
+on a machine that could not have shown a toolbar anyway. The control that would
+have caught it (delete the file, expect the toolbar back) was not run until the
+device contradicted the claim.
+
+The lesson worth keeping: a negative result needs a positive control on the same
+machine, and this project's headless harness is not the same machine as a device
+for anything the *client* draws.
+
+**Resolved the same evening, by the maintainer testing rather than by me
+debugging.** They found the toolbar gone after turning on Okular's own
+full-screen mode, closing the activity and reopening it — which is a config
+setting shepherd can write:
+
+```ini
+[Desktop Entry][$i]
+FullScreen=true
+shouldShowMenuBarComingFromFullScreen=false
+shouldShowToolBarComingFromFullScreen=false
+```
+
+Okular's full-screen mode hides the menubar and toolbar together. shepherd's
+compositor then refuses the fullscreen surface state — which is what keeps the
+HUD visible — so Okular leaves the mode immediately and restores exactly what
+the two `shouldShow…` keys say, which is nothing. The window keeps its ordinary
+geometry inside the HUD's exclusive zone throughout, because the fullscreen
+state was never granted. `FullScreen=true` on its own is *worse* than nothing:
+leaving the mode then restores both bars.
+
+Verified on the device with the config the code generates: no menubar, no
+toolbar, no sidebar, pages under the HUD.
+
+The `hamburger_menu` and `show_leftpanel` restrictions stay as depth — if the
+toolbar ever returns on some other reader version, the doors it opens are shut.
+The obsolete XMLGUI documents are deleted from any state directory an earlier
+build wrote them to. One trap for whoever edits the restriction list: the
+`fullscreen` action must stay unrestricted, because the chrome hiding hangs off
+it.
+
 ### Left undone, deliberately
 
 - **The polite close is opt-in for one kind.** Extending it to plain `process`

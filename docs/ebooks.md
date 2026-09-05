@@ -184,7 +184,6 @@ entry id:
 │   ├── okularpartrc                   #   page view, layout, background
 │   └── okular_epub_generator_settings #   reading font
 ├── data/                              # XDG_DATA_HOME
-│   ├── kxmlgui5/…/{shell,part}.rc     #   toolbar hidden
 │   └── okular/docdata/                #   ← the reading positions
 └── cache/                             # XDG_CACHE_HOME
 ```
@@ -198,13 +197,13 @@ settings are not something a child can reach.
 
 ## What shepherd generates, and what it leaves alone
 
-Every file under `config/` and the `kxmlgui5` overrides are re-rendered
-**before each launch**. Okular rewrites its own configuration when it exits, so
+Every file under `config/` is re-rendered **before each launch**. Okular rewrites its own configuration when it exits, so
 a one-time seed would decay; re-rendering means the restrictions hold across
 sessions as well as within one. Hand edits to those files are overwritten. The
 `docdata/` directory is never touched.
 
-Okular has no single "kiosk" switch, so three mechanisms are needed.
+Okular has no single "kiosk" switch, so three mechanisms are needed — and the
+third is not the one the documentation would lead you to.
 
 ### 1. Action restrictions (`kdeglobals`)
 
@@ -219,8 +218,10 @@ What is closed: `file_open` (Ctrl+O, a filesystem browser), `file_open_recent`,
 `file_save_as`, `file_export_as`, `file_print`, `file_print_preview`,
 `file_share`, `open_containing_folder` (spawns the file manager),
 `embedded_files` (extracts files embedded in a PDF), `import_ps`, the four
-`options_configure*` dialogs, `options_show_menubar`, the help and bug-report
-items, plus the generic `shell_access` and `movable_toolbars`.
+`options_configure*` dialogs, `options_show_menubar`, `options_show_toolbar`,
+the help and bug-report items, plus the generic `shell_access` and
+`movable_toolbars` — and the two the *toolbar* opens, `hamburger_menu` (the
+menubar in one button) and `show_leftpanel` (the sidebar toggle).
 
 ### 2. The view (`okularrc`, `okularpartrc`)
 
@@ -228,12 +229,35 @@ Menubar off, sidebar off, scrollbars off, on-screen messages off; page at a
 time (`ViewContinuous=false`) fitted to the screen (`ZoomMode=2`); the surround
 painted white so a portrait page on a landscape screen is not framed in grey.
 
-### 3. The toolbar (a local XMLGUI `.rc`)
+### 3. The toolbar, via full-screen mode
 
-Toolbar visibility is not a config setting: `KToolBar` reads it from the
-`hidden` attribute of the XMLGUI definition. shepherd writes a minimal GUI
-document declaring just that, into `data/kxmlgui5/`, where it merges with
-Okular's own.
+The toolbar takes the most explaining. Its visibility is not a config key —
+`KToolBar` reads it from the `hidden` attribute of the XMLGUI definition — and
+supplying that definition does not work either. Measured on a device, the
+toolbar survives an empty config, `[MainWindow][Toolbar mainToolBar]
+Hidden=true`, and a local XMLGUI document declaring `hidden="true"`, whether
+minimal or a full copy of Okular's own with a version stamp beating it.
+
+What does work is Okular's **own full-screen mode**, which hides the menubar and
+the toolbar together. shepherd asks for it in the generated `okularrc`:
+
+```ini
+[Desktop Entry][$i]
+FullScreen=true
+shouldShowMenuBarComingFromFullScreen=false
+shouldShowToolBarComingFromFullScreen=false
+```
+
+The second and third lines are the half that makes it stick. shepherd's
+compositor refuses the fullscreen surface state — that is what keeps the HUD
+visible — so Okular leaves the mode again immediately, and on the way out it
+restores exactly what those keys say, which is nothing. The window keeps its
+ordinary geometry inside the HUD's exclusive zone throughout, because the
+fullscreen state was never granted.
+
+One consequence for anyone editing the restrictions: **the `fullscreen` action
+must stay unrestricted.** Hiding the chrome hangs off that action, so a Kiosk
+restriction on it puts the toolbar back.
 
 ### What is left
 
@@ -316,6 +340,6 @@ that turns a page — see "Touch". Use the HUD's `‹` `›` buttons, or set
 logs a warning at the first press. Give that user the same uinput access the
 input-compat bridges need.
 
-**A menu or toolbar is back.** The generated configuration is re-rendered on
+**A toolbar, menubar or sidebar is showing.** The generated configuration is re-rendered on
 every launch, so this means the entry is not `kiosk = true`, or is not an
 `ebook` entry at all.

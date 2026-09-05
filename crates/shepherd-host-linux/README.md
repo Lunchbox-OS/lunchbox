@@ -274,13 +274,21 @@ reader's entire configuration into a per-entry `XDG_CONFIG_HOME` /
 Okular rewrites its own config on exit, so a one-time seed would decay. The
 admin's own KDE configuration is never touched.
 
-Three mechanisms, because Okular has no single kiosk switch: KDE's Kiosk
-*action restrictions* in `kdeglobals` (immutable via `[$i]`, enforced by
+Two mechanisms, because Okular has no single kiosk switch: KDE's Kiosk *action
+restrictions* in `kdeglobals` (immutable via `[$i]`, enforced by
 `KActionCollection` so the menu item, toolbar button and shortcut all die
-together), the view settings in `okularrc`/`okularpartrc` (no menubar, sidebar
-or scrollbars; a page at a time, fitted to the screen), and a local XMLGUI
-`.rc` to hide the toolbar — which is not a config setting at all, but an
-attribute of the GUI definition. Reading positions live in
+together), and the view settings in `okularrc`/`okularpartrc` (no menubar,
+sidebar or scrollbars; a page at a time, fitted to the screen).
+
+The toolbar takes a third mechanism, and not the documented one: the XMLGUI
+`hidden` attribute that is supposed to control it does nothing here (measured on
+a device, not assumed), so the generated `okularrc` asks Okular to start in its
+own full-screen mode — which hides menubar and toolbar together — and sets
+`shouldShow{MenuBar,ToolBar}ComingFromFullScreen=false` so that leaving the mode
+restores neither. The compositor refuses the fullscreen state to keep the HUD
+visible, which is exactly what makes Okular leave the mode, and the window keeps
+its ordinary geometry throughout. The `fullscreen` action must therefore stay
+unrestricted, since the chrome hiding hangs off it. Reading positions live in
 `<data>/okular/docdata/` and are never written by shepherd. See
 `docs/ebooks.md`.
 
