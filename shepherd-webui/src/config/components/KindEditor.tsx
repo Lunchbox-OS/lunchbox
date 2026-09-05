@@ -22,6 +22,7 @@ import type {
 } from "../model/config.generated";
 import { KeyValueEditor } from "./KeyValueEditor";
 import { StringListEditor } from "./StringListEditor";
+import { KIND_FIELD_DEFAULTS } from "../model/field-defaults.generated";
 
 type KindTag = RawEntryKind["type"];
 
@@ -261,7 +262,7 @@ export function KindEditor({ kind, onChange }: Props) {
             select
             size="small"
             label="Opens"
-            value={kind.mode ?? "browse"}
+            value={kind.mode ?? KIND_FIELD_DEFAULTS.media.mode}
             onChange={(e) => patch({ mode: e.target.value as RawMediaMode })}
           >
             {(Object.keys(MEDIA_MODES) as RawMediaMode[]).map((m) => (
@@ -271,7 +272,7 @@ export function KindEditor({ kind, onChange }: Props) {
             ))}
           </TextField>
           {/* `item` is required by, and only valid with, mode = "play". */}
-          {(kind.mode ?? "browse") === "play" && (
+          {(kind.mode ?? KIND_FIELD_DEFAULTS.media.mode) === "play" && (
             <TextField
               size="small"
               label="Item id"
@@ -300,7 +301,7 @@ export function KindEditor({ kind, onChange }: Props) {
             select
             size="small"
             label="Order items by"
-            value={kind.sort_by ?? "library"}
+            value={kind.sort_by ?? KIND_FIELD_DEFAULTS.media.sort_by}
             onChange={(e) =>
               patch({ sort_by: e.target.value as RawMediaSortBy })
             }
@@ -314,7 +315,7 @@ export function KindEditor({ kind, onChange }: Props) {
           <FormControlLabel
             control={
               <Switch
-                checked={kind.reverse ?? false}
+                checked={kind.reverse ?? KIND_FIELD_DEFAULTS.media.reverse}
                 onChange={(e) => patch({ reverse: e.target.checked })}
               />
             }
@@ -323,7 +324,7 @@ export function KindEditor({ kind, onChange }: Props) {
           <FormControlLabel
             control={
               <Switch
-                checked={kind.resume ?? false}
+                checked={kind.resume ?? KIND_FIELD_DEFAULTS.media.resume}
                 onChange={(e) => patch({ resume: e.target.checked })}
               />
             }
@@ -438,7 +439,7 @@ export function KindEditor({ kind, onChange }: Props) {
             select
             size="small"
             label="On reopening"
-            value={kind.save_state ?? "auto"}
+            value={kind.save_state ?? KIND_FIELD_DEFAULTS.retroarch.save_state}
             onChange={(e) =>
               patch({ save_state: e.target.value as RetroarchSaveState })
             }
@@ -453,7 +454,7 @@ export function KindEditor({ kind, onChange }: Props) {
           <FormControlLabel
             control={
               <Switch
-                checked={kind.kiosk ?? true}
+                checked={kind.kiosk ?? KIND_FIELD_DEFAULTS.retroarch.kiosk}
                 onChange={(e) => patch({ kiosk: e.target.checked })}
               />
             }
@@ -462,7 +463,7 @@ export function KindEditor({ kind, onChange }: Props) {
           <FormControlLabel
             control={
               <Switch
-                checked={kind.reset ?? true}
+                checked={kind.reset ?? KIND_FIELD_DEFAULTS.retroarch.reset}
                 onChange={(e) => patch({ reset: e.target.checked })}
               />
             }
@@ -473,7 +474,7 @@ export function KindEditor({ kind, onChange }: Props) {
             label="RetroArch binary (optional)"
             value={kind.command ?? ""}
             onChange={(e) => patch({ command: e.target.value })}
-            placeholder="retroarch"
+            placeholder={KIND_FIELD_DEFAULTS.retroarch.command}
           />
         </>
       )}
@@ -493,7 +494,7 @@ export function KindEditor({ kind, onChange }: Props) {
             select
             size="small"
             label="Layout"
-            value={kind.layout ?? "facing_first_centered"}
+            value={kind.layout ?? KIND_FIELD_DEFAULTS.ebook.layout}
             onChange={(e) => patch({ layout: e.target.value as EbookLayout })}
             helperText="Facing pages suit a landscape screen, single a portrait one. A touch-only screen needs the scrolling column: there is no way to turn a page without a key, D-pad or wheel."
           >
@@ -507,7 +508,7 @@ export function KindEditor({ kind, onChange }: Props) {
             size="small"
             type="number"
             label="Text size"
-            value={kind.font_size ?? 16}
+            value={kind.font_size ?? KIND_FIELD_DEFAULTS.ebook.font_size}
             onChange={(e) => patch({ font_size: Number(e.target.value) })}
             helperText="Points, for a reflowed EPUB. Changing it repaginates the book, which moves a saved place -- set it before the first read."
           />
@@ -516,7 +517,7 @@ export function KindEditor({ kind, onChange }: Props) {
             label="Font"
             value={kind.font_family ?? ""}
             onChange={(e) => patch({ font_family: e.target.value })}
-            placeholder="Noto Serif"
+            placeholder={KIND_FIELD_DEFAULTS.ebook.font_family}
           />
           <TextField
             size="small"
@@ -531,7 +532,7 @@ export function KindEditor({ kind, onChange }: Props) {
           <FormControlLabel
             control={
               <Switch
-                checked={kind.kiosk ?? true}
+                checked={kind.kiosk ?? KIND_FIELD_DEFAULTS.ebook.kiosk}
                 onChange={(e) => patch({ kiosk: e.target.checked })}
               />
             }

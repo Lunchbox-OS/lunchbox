@@ -23,6 +23,7 @@ import type {
   RawSponsorBlockCategory,
 } from "../model/config.generated";
 import {
+  DEFAULT_HUD_ORIENTATION_LABEL,
   HUD_ORIENTATIONS,
   VERTICAL_HUD_DESCRIPTION,
 } from "../model/hudOrientation";
@@ -34,6 +35,10 @@ import {
 import { Section } from "../components/Section";
 import { StringListEditor } from "../components/StringListEditor";
 import { WarningTimeline } from "../components/WarningTimeline";
+import {
+  FIELD_DEFAULTS,
+  LOAD_TIME_DEFAULTS,
+} from "../model/field-defaults.generated";
 
 export function ServicePage({ config }: { config: RawConfig }) {
   const { apply, endGesture } = useConfigDoc();
@@ -58,7 +63,7 @@ export function ServicePage({ config }: { config: RawConfig }) {
               onChange={(v) =>
                 f.setField("default_max_run_seconds", v ?? undefined)
               }
-              placeholder="1h (the daemon's own default)"
+              placeholder={`${secondsPlaceholder(LOAD_TIME_DEFAULTS.max_run_seconds)} (the daemon's own default)`}
               helperText="Applies to any activity that does not set its own."
               fullWidth
             />
@@ -68,7 +73,9 @@ export function ServicePage({ config }: { config: RawConfig }) {
               onChange={(v) =>
                 f.setField("cooldown_min_session_seconds", v ?? undefined)
               }
-              placeholder="2m"
+              placeholder={secondsPlaceholder(
+                LOAD_TIME_DEFAULTS.cooldown_min_session_seconds,
+              )}
               helperText="A session shorter than this leaves the cooldown alone, so an activity that crashes on launch does not lock anyone out. Overridable per activity and per category."
               fullWidth
             />
@@ -76,7 +83,7 @@ export function ServicePage({ config }: { config: RawConfig }) {
               label="Time to save when the schedule closes"
               value={service.save_grace_seconds ?? null}
               onChange={(v) => f.setField("save_grace_seconds", v ?? undefined)}
-              placeholder="2m"
+              placeholder={secondsPlaceholder(LOAD_TIME_DEFAULTS.save_grace_seconds)}
               helperText="If the device wakes from sleep after an activity's hours have passed, this is how long it stays open — with a warning — so nothing in progress is lost. Overridable per activity and per category."
               fullWidth
             />
@@ -90,18 +97,16 @@ export function ServicePage({ config }: { config: RawConfig }) {
           onTogglePresent={(on) =>
             on
               ? apply(
-                  set(warningsPath, [
-                    { seconds_before: 300, severity: "info" },
-                    { seconds_before: 60, severity: "warn" },
-                    { seconds_before: 10, severity: "critical" },
-                  ] as never),
+                  set(warningsPath, [...LOAD_TIME_DEFAULTS.warnings] as never),
                 )
               : apply(unset(warningsPath))
           }
         >
           <WarningTimeline
             warnings={warnings}
-            maxRunSeconds={service.default_max_run_seconds ?? 3600}
+            maxRunSeconds={
+          service.default_max_run_seconds ?? LOAD_TIME_DEFAULTS.max_run_seconds
+        }
             onChange={(i, next) => {
               for (const [key, value] of Object.entries(next)) {
                 const path = `${warningsPath}[${i}].${key}`;
@@ -129,6 +134,12 @@ export function ServicePage({ config }: { config: RawConfig }) {
           onTogglePresent={(on) =>
             on
               ? apply(
+                  // Deliberately not `LOAD_TIME_DEFAULTS`: the daemon falls
+                  // back to a 10s interval, which is right for a check that
+                  // gates an activity, and wrong as a starting point for one
+                  // an admin just switched on. This seeds what
+                  // `config.example.toml` recommends. The placeholders below
+                  // still show the real fallback, for a field left empty.
                   set(servicePath("internet"), {
                     check: "https://connectivitycheck.gstatic.com/generate_204",
                     interval_seconds: 300,
@@ -260,6 +271,7 @@ function InternetServiceEditor({ config }: { config: RawConfig }) {
           type="number"
           label="Interval (s)"
           value={v?.interval_seconds ?? ""}
+          placeholder={String(LOAD_TIME_DEFAULTS.internet_check_interval_seconds)}
           onChange={(e) =>
             f.setField(
               "interval_seconds",
@@ -272,6 +284,7 @@ function InternetServiceEditor({ config }: { config: RawConfig }) {
           type="number"
           label="Timeout (ms)"
           value={v?.timeout_ms ?? ""}
+          placeholder={String(LOAD_TIME_DEFAULTS.internet_check_timeout_ms)}
           onChange={(e) =>
             f.setField(
               "timeout_ms",
@@ -337,21 +350,27 @@ const SPONSORBLOCK_CATEGORIES: Record<RawSponsorBlockCategory, string> = {
   hook: "Opening hook",
 };
 
-/// The default set, mirrored from `DEFAULT_SPONSORBLOCK_CATEGORIES`. Shown
-/// ticked while the config names none, so the boxes match what would happen.
-const DEFAULT_SPONSORBLOCK_CATEGORIES: RawSponsorBlockCategory[] = [
-  "sponsor",
-  "selfpromo",
-  "interaction",
-  "intro",
-  "outro",
-];
+/**
+ * A duration default, spelled the way the field's own control would show it.
+ *
+ * The value comes from `LOAD_TIME_DEFAULTS`, which carries seconds because
+ * that is what the config key holds; a placeholder reading "120" beside a
+ * control that accepts "2m" would be its own small lie.
+ */
+function secondsPlaceholder(seconds: number): string {
+  if (seconds === 0) return "0";
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
 
 function SponsorBlockEditor({ config }: { config: RawConfig }) {
   const f = useFields("service.media.sponsorblock");
   const v = config.service?.media?.sponsorblock;
-  const enabled = v?.enabled ?? false;
-  const categories = v?.categories ?? DEFAULT_SPONSORBLOCK_CATEGORIES;
+  const enabled = v?.enabled ?? FIELD_DEFAULTS.RawSponsorBlockConfig.enabled;
+  // Ticked while the config names none, so the boxes match what would happen.
+  const categories: readonly RawSponsorBlockCategory[] =
+    v?.categories ?? FIELD_DEFAULTS.RawSponsorBlockConfig.categories;
 
   const toggle = (category: RawSponsorBlockCategory, on: boolean) => {
     const next = (
@@ -422,7 +441,7 @@ function MediaServiceEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.prefetch ?? true}
+            checked={v?.prefetch ?? FIELD_DEFAULTS.RawMediaServiceConfig.prefetch}
             onChange={(e) => f.setField("prefetch", e.target.checked)}
           />
         }
@@ -435,7 +454,10 @@ function MediaServiceEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.prefetch_while_session_active ?? false}
+            checked={
+              v?.prefetch_while_session_active ??
+              FIELD_DEFAULTS.RawMediaServiceConfig.prefetch_while_session_active
+            }
             onChange={(e) =>
               f.setField("prefetch_while_session_active", e.target.checked)
             }
@@ -471,6 +493,7 @@ function MediaServiceEditor({ config }: { config: RawConfig }) {
         type="number"
         label="Watched grace (days)"
         value={v?.watched_grace_days ?? ""}
+        placeholder={String(FIELD_DEFAULTS.RawMediaServiceConfig.watched_grace_days)}
         onChange={(e) =>
           f.setField(
             "watched_grace_days",
@@ -500,7 +523,7 @@ function SteamEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.allow_risky_dismiss ?? false}
+            checked={v?.allow_risky_dismiss ?? FIELD_DEFAULTS.RawSteamConfig.allow_risky_dismiss}
             onChange={(e) =>
               f.setField("allow_risky_dismiss", e.target.checked)
             }
@@ -517,6 +540,7 @@ function SteamEditor({ config }: { config: RawConfig }) {
         type="number"
         label="Launch timeout (s)"
         value={v?.launch_timeout_seconds ?? ""}
+        placeholder={String(LOAD_TIME_DEFAULTS.steam_launch_timeout_seconds)}
         onChange={(e) =>
           f.setField(
             "launch_timeout_seconds",
@@ -540,7 +564,8 @@ function HudEditor({ config }: { config: RawConfig }) {
         select
         size="small"
         label="HUD edge"
-        // Unset has to *read* as "top", not as a blank box: which edge the
+        // Unset has to *read* as the default edge, not as a blank box: which
+        // edge the
         // device uses when nothing says otherwise is the whole question this
         // control answers, and a blank field leaves it unanswered. MUI renders
         // an empty value as nothing unless told otherwise, and the label then
@@ -552,9 +577,9 @@ function HudEditor({ config }: { config: RawConfig }) {
         value={v?.orientation ?? ""}
         onChange={(e) =>
           // Clearing removes the whole `[service.hud]` table rather than
-          // leaving an empty one behind: the daemon's default is "top" either
-          // way, and a table with nothing in it is noise in a file people
-          // hand-annotate.
+          // leaving an empty one behind: the daemon falls back to
+          // `LOAD_TIME_DEFAULTS.hud_orientation` either way, and a table with
+          // nothing in it is noise in a file people hand-annotate.
           e.target.value
             ? f.setField("orientation", e.target.value)
             : apply(unset(servicePath("hud")))
@@ -562,7 +587,7 @@ function HudEditor({ config }: { config: RawConfig }) {
         helperText="Applies to the launcher and to every activity that does not choose its own."
         fullWidth
       >
-        <MenuItem value="">Top (the default)</MenuItem>
+        <MenuItem value="">{DEFAULT_HUD_ORIENTATION_LABEL} (the default)</MenuItem>
         {HUD_ORIENTATIONS.map((o) => (
           <MenuItem key={o.value} value={o.value}>
             {o.label}
@@ -585,7 +610,7 @@ function DisplayEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.docking_enabled ?? true}
+            checked={v?.docking_enabled ?? FIELD_DEFAULTS.RawDisplayConfig.docking_enabled}
             onChange={(e) => f.setField("docking_enabled", e.target.checked)}
           />
         }
@@ -594,7 +619,7 @@ function DisplayEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.mirror_audio ?? true}
+            checked={v?.mirror_audio ?? FIELD_DEFAULTS.RawDisplayConfig.mirror_audio}
             onChange={(e) => f.setField("mirror_audio", e.target.checked)}
           />
         }
@@ -612,7 +637,7 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.enabled ?? false}
+            checked={v?.enabled ?? FIELD_DEFAULTS.RawManagementApiConfig.enabled}
             onChange={(e) => f.setField("enabled", e.target.checked)}
           />
         }
@@ -624,7 +649,7 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
           type="number"
           label="Port"
           value={v?.port ?? ""}
-          placeholder="7890"
+          placeholder={String(LOAD_TIME_DEFAULTS.management_api_port)}
           onChange={(e) =>
             f.setField(
               "port",
@@ -636,7 +661,7 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
           size="small"
           label="Bind address"
           value={v?.bind ?? ""}
-          placeholder="127.0.0.1"
+          placeholder={LOAD_TIME_DEFAULTS.management_api_bind}
           onChange={(e) => f.setField("bind", e.target.value)}
           sx={{ flex: 1 }}
         />
@@ -659,7 +684,7 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
         type="number"
         label="Bind retry (s)"
         value={v?.bind_retry_seconds ?? ""}
-        placeholder="300"
+        placeholder={String(LOAD_TIME_DEFAULTS.management_api_bind_retry_seconds)}
         onChange={(e) =>
           f.setField(
             "bind_retry_seconds",
@@ -681,7 +706,7 @@ function BleEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={v?.enabled ?? false}
+            checked={v?.enabled ?? FIELD_DEFAULTS.RawBleManagementConfig.enabled}
             onChange={(e) => f.setField("enabled", e.target.checked)}
           />
         }
@@ -752,7 +777,10 @@ function PathsEditor({ config }: { config: RawConfig }) {
       <FormControlLabel
         control={
           <Switch
-            checked={s.capture_child_output ?? false}
+            checked={
+              s.capture_child_output ??
+              FIELD_DEFAULTS.RawServiceConfig.capture_child_output
+            }
             onChange={(e) =>
               f.setField("capture_child_output", e.target.checked)
             }

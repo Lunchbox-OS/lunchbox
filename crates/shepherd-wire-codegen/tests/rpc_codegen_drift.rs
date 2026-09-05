@@ -103,6 +103,16 @@ fn codegen_outputs_match_checked_in() {
             "shepherd-webui/src/config/model/kind-defaults.generated.ts",
             "kind-defaults.generated.ts",
         ),
+        // The per-*field* defaults, from both places the daemon keeps them:
+        // serde's, which reach the JSON Schema on their own, and the ones
+        // `Policy::from_raw` resolves at load time, which do not. About forty
+        // of these were spelled out in the editor by hand — a `?? true`, a
+        // `?? "kiosk"`, a `const DEFAULT_COOLDOWN_MIN_SESSION = 120` — with
+        // nothing anywhere to notice when the Rust moved.
+        (
+            "shepherd-webui/src/config/model/field-defaults.generated.ts",
+            "field-defaults.generated.ts",
+        ),
     ];
 
     for (checked_in, temp_name) in files {

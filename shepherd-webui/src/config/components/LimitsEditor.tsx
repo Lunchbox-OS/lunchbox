@@ -5,19 +5,19 @@
  * `service.default_max_run_seconds`, and `cooldown_min_session_seconds`
  * cascades service -> group -> entry (`policy.rs`). What applies when a field
  * is left unset is drawn on the slider track rather than explained in prose.
+ *
+ * The daemon's own fallbacks come from `field-defaults.generated.ts` rather
+ * than being restated here — they are resolved at policy load, so the JSON
+ * Schema cannot carry them and they are generated from
+ * `shepherd-config::LoadTimeDefaults` instead.
  */
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { dragKey, set, subjectPath, unset, type Subject } from "../doc/patches";
 import type { RawLimits } from "../model/config.generated";
+import { LOAD_TIME_DEFAULTS } from "../model/field-defaults.generated";
 import { DurationSlider, type InheritedValue } from "./DurationSlider";
-
-/** The daemon's own fallback when nothing sets it (`DEFAULT_COOLDOWN_MIN_SESSION`). */
-const DEFAULT_COOLDOWN_MIN_SESSION = 120;
-
-/** Likewise for the save-progress grace (`DEFAULT_SAVE_GRACE`, issue #155). */
-const DEFAULT_SAVE_GRACE = 120;
 
 interface Props {
   subject: Subject;
@@ -75,13 +75,13 @@ export function LimitsEditor({
     });
   inheritedSaveGrace.push({
     label: serviceSaveGrace != null ? "Service default" : "Daemon default",
-    seconds: serviceSaveGrace ?? DEFAULT_SAVE_GRACE,
+    seconds: serviceSaveGrace ?? LOAD_TIME_DEFAULTS.save_grace_seconds,
   });
 
   const inheritedGrace: InheritedValue[] = [
     {
       label: serviceCooldownGrace ? "Service default" : "Daemon default",
-      seconds: serviceCooldownGrace ?? DEFAULT_COOLDOWN_MIN_SESSION,
+      seconds: serviceCooldownGrace ?? LOAD_TIME_DEFAULTS.cooldown_min_session_seconds,
     },
   ];
 

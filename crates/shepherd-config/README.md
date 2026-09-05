@@ -464,6 +464,31 @@ Notes:
 - Validation rejects unknown `mode`, non-http(s) `start_url`, empty/whitespace
   URL patterns, and unsafe `profile_id` values.
 
+## Defaults, and who else needs to know them
+
+A field left out of `config.toml` gets its default one of two ways, and the
+difference matters to anything outside this crate that has to predict what the
+daemon will do — the web config editor above all, which renders an unset control
+as the value it will actually take.
+
+**Serde defaults** (`#[serde(default = "…")]` in `schema.rs`) are applied at
+deserialization. `schemars` reads the attribute and writes the value into the
+JSON Schema, so they travel out of the crate on their own.
+
+**Load-time defaults** are `Option<T>` fields whose `None` means "fall back",
+resolved in `Policy::from_raw`. `schemars` sees only `"default": null` for
+these, so they travel through
+[`LoadTimeDefaults`](src/load_defaults.rs) instead — a struct that exists purely
+so `shepherd-wire-codegen` can enumerate them, carrying `default_max_run_seconds`,
+the two cooldown/save-grace fallbacks, the Steam launch timeout, the internet
+check interval and timeout, the management API's port, bind and bind-retry, the
+token earn ratio, the default HUD edge, and the default warning schedule.
+
+Adding a load-time default means adding a field there as well, or the editor
+goes back to guessing. The module's own test parses a config that sets none of
+them and asserts what it advertises is what the parser produces; see
+`CONTRIBUTING.md` for how the generated file is refreshed and checked.
+
 ## Validation
 
 The configuration is validated at load time. Validation catches:

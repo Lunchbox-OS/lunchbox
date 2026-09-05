@@ -30,6 +30,7 @@ import { KindEditor } from "./KindEditor";
 import { Section } from "./Section";
 import { SubjectDetail } from "./SubjectDetail";
 import { WarningTimeline } from "./WarningTimeline";
+import { FIELD_DEFAULTS } from "../model/field-defaults.generated";
 
 export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawConfig }) {
   const { apply, endGesture } = useConfigDoc();
@@ -180,7 +181,7 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
                     sx={{ mt: 1 }}
                     control={
                       <Switch
-                        checked={entry.xwayland_native_resolution ?? false}
+                        checked={entry.xwayland_native_resolution ?? FIELD_DEFAULTS.RawEntry.xwayland_native_resolution}
                         onChange={(e) =>
                           e.target.checked
                             ? f.setField("xwayland_native_resolution", true)

@@ -22,6 +22,7 @@ import { alpha, useTheme } from "@mui/material/styles";
 import { formatDurationHuman } from "../../shared/duration";
 import type { RawWarningThreshold } from "../model/config.generated";
 import { DurationField } from "./DurationField";
+import { FIELD_DEFAULTS } from "../model/field-defaults.generated";
 
 const SEVERITIES = ["info", "warn", "critical"] as const;
 type Severity = (typeof SEVERITIES)[number];
@@ -117,7 +118,7 @@ export function WarningTimeline({
       >
         {warnings.map((w, i) => {
           const ratio = 1 - Math.min(1, w.seconds_before / span);
-          const severity = (w.severity ?? "warn") as Severity;
+          const severity = (w.severity ?? FIELD_DEFAULTS.RawWarningThreshold.severity) as Severity;
           return (
             <Tooltip
               key={i}
@@ -203,7 +204,7 @@ export function WarningTimeline({
               select
               size="small"
               label="Severity"
-              value={w.severity ?? "warn"}
+              value={w.severity ?? FIELD_DEFAULTS.RawWarningThreshold.severity}
               onChange={(e) => onChange(i, { severity: e.target.value })}
               sx={{ minWidth: 120 }}
             >

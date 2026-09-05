@@ -26,6 +26,9 @@
 //! - `shepherd-webui/src/config/model/kind-defaults.generated.ts` — what
 //!   each entry kind supplies for a field the entry leaves unset, so the
 //!   editor shows what the daemon will actually do.
+//! - `shepherd-webui/src/config/model/field-defaults.generated.ts` — what
+//!   each *field* falls back to, both the serde defaults the schema carries
+//!   and the ones `Policy::from_raw` resolves at load time.
 //!
 //! Run as `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 //! from the repo root. The binary is deterministic: same schema in,
@@ -114,7 +117,8 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 9] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 10] = if let Ok(dir) =
+        std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
@@ -132,6 +136,10 @@ fn main() -> anyhow::Result<()> {
             (
                 base.join("kind-defaults.generated.ts"),
                 shepherd_wire_codegen::kind_defaults::render(),
+            ),
+            (
+                base.join("field-defaults.generated.ts"),
+                shepherd_wire_codegen::config_defaults::render(),
             ),
         ]
     } else {
@@ -177,6 +185,10 @@ fn main() -> anyhow::Result<()> {
             (
                 repo.join("shepherd-webui/src/config/model/kind-defaults.generated.ts"),
                 shepherd_wire_codegen::kind_defaults::render(),
+            ),
+            (
+                repo.join("shepherd-webui/src/config/model/field-defaults.generated.ts"),
+                shepherd_wire_codegen::config_defaults::render(),
             ),
         ]
     };
