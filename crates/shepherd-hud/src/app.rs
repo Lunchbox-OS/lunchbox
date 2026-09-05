@@ -4,6 +4,8 @@
 //! Uses gtk4-layer-shell to create an always-visible overlay.
 
 use crate::battery::BatteryStatus;
+use crate::orientation::HudOrientation;
+use crate::rotated_label::RotatedLabel;
 use crate::state::{SessionState, SharedState};
 use crate::time_display::TimeDisplay;
 use gtk4::glib;
@@ -130,25 +132,244 @@ const READING_SLIDER_WIDTH: i32 = 66;
 
 /// Size the two sliders for the current HUD scale, and for whether the bar is
 /// also carrying the page-turn buttons.
-fn apply_slider_widths(volume: &gtk4::Scale, brightness: &gtk4::Scale, scale: f64, reading: bool) {
+///
+/// The request goes on whichever axis the slider runs along, which follows the
+/// bar: a vertical HUD holds vertical sliders, so their length is a height.
+fn apply_slider_lengths(
+    volume: &gtk4::Scale,
+    brightness: &gtk4::Scale,
+    scale: f64,
+    reading: bool,
+    orientation: HudOrientation,
+) {
     let base = |full: i32| {
         let base = if reading { READING_SLIDER_WIDTH } else { full };
         (f64::from(base) * scale).round() as i32
     };
-    volume.set_width_request(base(BASE_VOLUME_SLIDER_WIDTH));
-    brightness.set_width_request(base(BASE_BRIGHTNESS_SLIDER_WIDTH));
+    for (slider, full) in [
+        (volume, BASE_VOLUME_SLIDER_WIDTH),
+        (brightness, BASE_BRIGHTNESS_SLIDER_WIDTH),
+    ] {
+        if orientation.is_vertical() {
+            slider.set_height_request(base(full));
+        } else {
+            slider.set_width_request(base(full));
+        }
+    }
+}
+
+/// The time-remaining warning, in whichever form the bar can hold.
+///
+/// Horizontally this is the banner it has always been: icon and message side
+/// by side in the middle of the bar. Vertically the message has nowhere to go
+/// — warning text is operator-authored free prose (`config.example.toml`:
+/// "10 minutes left - start wrapping up!"), a 48px bar cannot hold a sentence
+/// laid out horizontally, and GTK clips rather than wraps. So the bar keeps
+/// the icon, which carries the severity colour and the critical blink on its
+/// own, and the message drops out of it as a popover that is as wide as it
+/// needs to be. The exclusive zone stays 48px either way.
+#[derive(Clone)]
+struct WarningBanner {
+    /// What sits in the bar.
+    container: gtk4::Box,
+    icon: gtk4::Image,
+    /// The message. In the bar horizontally; inside `popover` vertically.
+    label: gtk4::Label,
+    /// Present only for the vertical bar.
+    popover: Option<gtk4::Popover>,
+}
+
+impl WarningBanner {
+    fn build(orientation: HudOrientation) -> Self {
+        let container = gtk4::Box::builder()
+            .orientation(orientation.group())
+            .spacing(8)
+            .halign(gtk4::Align::Center)
+            .visible(false)
+            .build();
+        container.add_css_class("warning-banner");
+
+        let icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
+        icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+        container.append(&icon);
+
+        let label = gtk4::Label::new(Some("Time running out!"));
+        label.add_css_class("warning-text");
+
+        let popover = if orientation.is_vertical() {
+            // Operator-authored prose of no fixed length, so bound it and let
+            // it wrap. Without this a long message runs off the right of the
+            // screen, where a layer-shell popup is clipped rather than moved.
+            label.set_wrap(true);
+            label.set_max_width_chars(28);
+            // Drops to the right, into the screen, for the same reason the
+            // confirmation prompts do — see `align_popover_to_button`.
+            let popover = gtk4::Popover::builder()
+                .autohide(false)
+                .position(gtk4::PositionType::Right)
+                .child(&label)
+                .build();
+            popover.add_css_class("warning-popover");
+            popover.set_parent(&container);
+            Some(popover)
+        } else {
+            container.append(&label);
+            None
+        };
+
+        Self {
+            container,
+            icon,
+            label,
+            popover,
+        }
+    }
+
+    fn set_text(&self, text: &str) {
+        self.label.set_text(text);
+    }
+
+    /// Show or hide the warning. The popover follows the icon, so a warning
+    /// that clears takes its message with it.
+    fn set_visible(&self, visible: bool) {
+        self.container.set_visible(visible);
+        if let Some(popover) = &self.popover {
+            if visible {
+                popover.popup();
+            } else {
+                popover.popdown();
+            }
+        }
+    }
+
+    /// Apply the severity styling. The class goes on the bar element in both
+    /// layouts, and on the popover too when there is one, so the message is
+    /// tinted to match the icon that produced it.
+    fn set_severity_class(&self, class: Option<&str>) {
+        for target in ["warning-info", "warning-warn", "warning-critical"] {
+            self.container.remove_css_class(target);
+            if let Some(popover) = &self.popover {
+                popover.remove_css_class(target);
+            }
+        }
+        if let Some(class) = class {
+            self.container.add_css_class(class);
+            if let Some(popover) = &self.popover {
+                popover.add_css_class(class);
+            }
+        }
+    }
+}
+
+/// The activity name, laid out for whichever bar it lives in.
+///
+/// Horizontally it is a plain `GtkLabel`; vertically it is the same label
+/// turned a quarter turn by [`RotatedLabel`], because GTK4 removed the label
+/// `angle` property that would otherwise have done this. Both carry identical
+/// styling and identical ellipsize rules — see [`build_title_label`].
+#[derive(Clone)]
+enum TitleLabel {
+    Horizontal(gtk4::Label),
+    Vertical(RotatedLabel),
+}
+
+impl TitleLabel {
+    fn set_text(&self, text: &str) {
+        match self {
+            Self::Horizontal(label) => label.set_text(text),
+            Self::Vertical(label) => label.set_text(text),
+        }
+    }
+
+    fn widget(&self) -> gtk4::Widget {
+        match self {
+            Self::Horizontal(label) => label.clone().upcast(),
+            Self::Vertical(label) => label.clone().upcast(),
+        }
+    }
+}
+
+/// Number of characters of activity name the bar guarantees, and the most it
+/// will give up to.
+///
+/// Horizontally these are measured, not guessed: the bar is full at 1280
+/// logical pixels, and twelve characters is the most that leaves room for the
+/// reading buttons *and* the end-session button. At eighteen the "X" fell off
+/// the end, where GTK clips rather than wraps, and a session the child cannot
+/// end is a worse failure than a truncated title.
+///
+/// The vertical bar runs the height of the screen and holds the same widgets,
+/// so the same reasoning allows a much longer name before anything is at risk.
+const TITLE_CHARS: (i32, i32) = (12, 28);
+const VERTICAL_TITLE_CHARS: (i32, i32) = (12, 48);
+
+/// Build the activity-name label with the ellipsize behaviour issue #160
+/// settled, in whichever of the two forms this bar needs.
+fn build_title_label(orientation: HudOrientation) -> TitleLabel {
+    let vertical = orientation.is_vertical();
+    let title = if vertical {
+        TitleLabel::Vertical(RotatedLabel::new())
+    } else {
+        TitleLabel::Horizontal(gtk4::Label::new(None))
+    };
+
+    // The inner label is a real `GtkLabel` either way, so one setup serves
+    // both and the two layouts cannot drift apart.
+    let label = match &title {
+        TitleLabel::Horizontal(label) => label.clone(),
+        TitleLabel::Vertical(rotated) => rotated.label(),
+    };
+    label.set_text("No session");
+    label.add_css_class("app-name");
+    // The left box expands, so without this a long activity name ("Alice's
+    // Adventures in Wonderland") takes its natural width and pushes the
+    // right-hand controls off the end of the bar — where they are simply
+    // clipped, not wrapped. Ellipsizing gives the label a small minimum size
+    // so the controls always fit (issue #160 added two more of them).
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    // An ellipsizing label asks for the ellipsis as its *minimum*, and GTK
+    // hands out minimums unless a child claims the leftover — so without
+    // `hexpand` the name collapses to "..." with hundreds of pixels going
+    // spare. `xalign` then keeps the text against the start edge as it grows.
+    // On the rotated label these are set on the child, whose own axes are
+    // still the text's: it expands along the text, and the wrapper turns that
+    // into vertical expansion.
+    label.set_hexpand(true);
+    label.set_xalign(0.0);
+    // Bound the request explicitly rather than trusting expand semantics: an
+    // ellipsizing label asks for the ellipsis as its minimum and GTK hands out
+    // minimums first, so "Alice in Wonderland" rendered as "..." with 400px of
+    // the bar unused. A floor keeps the name readable; the ceiling stops a
+    // very long one from crowding out the controls it shares the bar with.
+    let (min_chars, max_chars) = if vertical {
+        VERTICAL_TITLE_CHARS
+    } else {
+        TITLE_CHARS
+    };
+    label.set_width_chars(min_chars);
+    label.set_max_width_chars(max_chars);
+
+    if let TitleLabel::Vertical(rotated) = &title {
+        // The wrapper claims the bar's slack on the bar's own axis; the child
+        // above claims it on the text's.
+        rotated.set_vexpand(true);
+        rotated.set_halign(gtk4::Align::Center);
+        rotated.set_valign(gtk4::Align::Fill);
+    }
+
+    title
 }
 
 /// The HUD application
 pub struct HudApp {
     app: gtk4::Application,
     socket_path: PathBuf,
-    anchor: String,
+    orientation: HudOrientation,
     height: i32,
 }
 
 impl HudApp {
-    pub fn new(socket_path: PathBuf, anchor: String, height: i32) -> Self {
+    pub fn new(socket_path: PathBuf, orientation: HudOrientation, height: i32) -> Self {
         let app = gtk4::Application::builder()
             .application_id("org.shepherd.hud")
             .build();
@@ -156,19 +377,19 @@ impl HudApp {
         Self {
             app,
             socket_path,
-            anchor,
+            orientation,
             height,
         }
     }
 
     pub fn run(&self) -> i32 {
         let socket_path = self.socket_path.clone();
-        let anchor = self.anchor.clone();
+        let orientation = self.orientation;
         let height = self.height;
 
         self.app.connect_activate(move |app| {
             let state = SharedState::new();
-            let window = build_hud_window(app, &anchor, height, state.clone());
+            let window = build_hud_window(app, orientation, height, state.clone());
 
             // Start the IPC event listener
             let state_clone = state.clone();
@@ -198,13 +419,15 @@ impl HudApp {
 
 fn build_hud_window(
     app: &gtk4::Application,
-    anchor: &str,
-    height: i32,
+    orientation: HudOrientation,
+    thickness: i32,
     state: SharedState,
 ) -> gtk4::ApplicationWindow {
+    // `thickness` is the bar's short axis: its height when horizontal, its
+    // width when it runs down the side. `apply_scale` sets the corresponding
+    // default size and exclusive zone, so nothing is requested here.
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
-        .default_height(height)
         .decorated(false)
         .build();
 
@@ -225,15 +448,21 @@ fn build_hud_window(
     window.set_margin(Edge::Left, 0);
     window.set_margin(Edge::Right, 0);
 
-    // Set anchors based on position
-    match anchor {
-        "bottom" => {
+    // Anchor to three edges: the one the bar sits on plus the two it spans,
+    // which is what makes the surface stretch the full length of that edge and
+    // gives the compositor an exclusive zone to reserve on the fourth.
+    match orientation {
+        HudOrientation::Bottom => {
             window.set_anchor(Edge::Bottom, true);
             window.set_anchor(Edge::Left, true);
             window.set_anchor(Edge::Right, true);
         }
-        _ => {
-            // Default to top
+        HudOrientation::Left => {
+            window.set_anchor(Edge::Left, true);
+            window.set_anchor(Edge::Top, true);
+            window.set_anchor(Edge::Bottom, true);
+        }
+        HudOrientation::Top => {
             window.set_anchor(Edge::Top, true);
             window.set_anchor(Edge::Left, true);
             window.set_anchor(Edge::Right, true);
@@ -243,12 +472,18 @@ fn build_hud_window(
     // Build the HUD content. apply_scale (below) is responsible for the
     // dynamic dimensions (default height, exclusive zone, font/padding) so
     // they stay in sync with the current UI scale factor.
-    let content = build_hud_content(state.clone(), css_provider.clone(), window.clone(), height);
+    let content = build_hud_content(
+        state.clone(),
+        css_provider.clone(),
+        window.clone(),
+        thickness,
+        orientation,
+    );
     window.set_child(Some(&content));
 
     // Populate the stylesheet and set initial dimensions at scale 1.0
     // before the window maps.
-    apply_scale(&css_provider, &window, height, 1.0);
+    apply_scale(&css_provider, &window, thickness, 1.0, orientation);
 
     window
 }
@@ -257,15 +492,27 @@ fn build_hud_content(
     state: SharedState,
     css_provider: gtk4::CssProvider,
     window: gtk4::ApplicationWindow,
-    base_height: i32,
+    base_thickness: i32,
+    orientation: HudOrientation,
 ) -> gtk4::Box {
+    // Every box below runs along the bar, and every `flow_append` puts its
+    // child at the far end of it — which for a bar rotated to the left means
+    // the top of the screen. See `HudOrientation::flow_append`.
+    let vertical = orientation.is_vertical();
     let container = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.flow())
         .spacing(16)
-        .hexpand(true)
+        .hexpand(!vertical)
+        .vexpand(vertical)
         .build();
 
     container.add_css_class("hud-bar");
+    if vertical {
+        // Lets the stylesheet swap the bar's padding onto the other axis and
+        // shrink the readouts that have to fit across 48px rather than along
+        // it. Everything else is the same rule for both layouts.
+        container.add_css_class("hud-vertical");
+    }
 
     // Left section: App name and time
     // `halign(Fill)`, not `Start`: with `Start` the box is allocated its
@@ -274,10 +521,12 @@ fn build_hud_content(
     // of pixels to spare. Filling gives the name the leftover room, and the
     // ellipsis then only appears when the bar is genuinely full.
     let left_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.flow())
         .spacing(12)
-        .hexpand(true)
+        .hexpand(!vertical)
+        .vexpand(vertical)
         .halign(gtk4::Align::Fill)
+        .valign(gtk4::Align::Fill)
         .build();
 
     // Page-turn buttons, shown only for activities that read (issue #160).
@@ -287,100 +536,98 @@ fn build_hud_content(
     // far left of the bar, as far as it is possible to be from the reset and
     // end-session buttons on the right: the two controls a child uses on every
     // page should not share an edge with the two that throw the session away.
-    let page_back_icon = gtk4::Image::from_icon_name("go-previous-symbolic");
+    //
+    // They live in a box of their own so the pair stays together and in
+    // reading order when the bar is reversed for the vertical layout: the box
+    // lands at the bottom as a unit, with "back" still ahead of "forward".
+    // Sideways `‹`/`›` arrows would be meaningless stacked vertically, so the
+    // vertical bar names the keys they actually synthesize — Page Up above
+    // Page Down.
+    let page_box = gtk4::Box::builder()
+        .orientation(orientation.group())
+        .spacing(0)
+        .visible(false)
+        .build();
+
+    let page_back_icon = gtk4::Image::from_icon_name(if vertical {
+        "go-up-symbolic"
+    } else {
+        "go-previous-symbolic"
+    });
     page_back_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let page_back_button = gtk4::Button::builder()
         .child(&page_back_icon)
         .has_frame(false)
         .tooltip_text("Previous page")
-        .visible(false)
         .build();
     page_back_button.add_css_class("indicator-button");
     page_back_button.add_css_class("page-button");
-    left_box.append(&page_back_button);
+    page_box.append(&page_back_button);
 
-    let page_forward_icon = gtk4::Image::from_icon_name("go-next-symbolic");
+    let page_forward_icon = gtk4::Image::from_icon_name(if vertical {
+        "go-down-symbolic"
+    } else {
+        "go-next-symbolic"
+    });
     page_forward_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let page_forward_button = gtk4::Button::builder()
         .child(&page_forward_icon)
         .has_frame(false)
         .tooltip_text("Next page")
-        .visible(false)
         .build();
     page_forward_button.add_css_class("indicator-button");
     page_forward_button.add_css_class("page-button");
-    left_box.append(&page_forward_button);
+    page_box.append(&page_forward_button);
 
-    let app_label = gtk4::Label::new(Some("No session"));
-    app_label.add_css_class("app-name");
-    // The left box expands, so without this a long activity name ("Alice's
-    // Adventures in Wonderland") takes its natural width and pushes the
-    // right-hand controls off the end of the bar — where they are simply
-    // clipped, not wrapped. Ellipsizing gives the label a small minimum width
-    // so the controls always fit (issue #160 added two more of them).
-    app_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    // An ellipsizing label asks for the ellipsis as its *minimum*, and GTK
-    // hands out minimums unless a child claims the leftover — so without
-    // `hexpand` the name collapses to "..." with hundreds of pixels going
-    // spare. `xalign` then keeps the text against the left edge as it grows.
-    app_label.set_hexpand(true);
-    app_label.set_xalign(0.0);
-    // Bound the request explicitly rather than trusting expand semantics: an
-    // ellipsizing label asks for the ellipsis as its minimum and GTK hands out
-    // minimums first, so "Alice in Wonderland" rendered as "..." with 400px of
-    // the bar unused. A width floor keeps the name readable; the ceiling stops
-    // a very long one from crowding out the controls it shares the bar with.
-    // The HUD surface is sized to its content, so the label's *minimum* is
-    // what it actually gets. Twelve characters is the most that leaves room
-    // for the reading buttons *and* the end-session button on a 1280-wide
-    // panel — measured, not guessed; at 18 the "X" fell off the end, where GTK
-    // clips rather than wraps, and a session the child cannot end is a worse
-    // failure than a truncated title. The ceiling does the same job for a very
-    // long name.
-    app_label.set_width_chars(12);
-    app_label.set_max_width_chars(28);
-    left_box.append(&app_label);
+    orientation.flow_append(&left_box, &page_box);
+
+    let app_label = build_title_label(orientation);
+    orientation.flow_append(&left_box, &app_label.widget());
 
     let time_display = TimeDisplay::new();
-    left_box.append(&time_display);
+    time_display.set_compact(vertical);
+    orientation.flow_append(&left_box, &time_display);
 
-    container.append(&left_box);
+    orientation.flow_append(&container, &left_box);
 
     // Center section: Warning banner (hidden by default)
-    let warning_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .halign(gtk4::Align::Center)
-        .visible(false)
-        .build();
-
-    let warning_icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
-    warning_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    warning_box.append(&warning_icon);
-
-    let warning_label = gtk4::Label::new(Some("Time running out!"));
-    warning_label.add_css_class("warning-text");
-    warning_box.append(&warning_label);
-
-    warning_box.add_css_class("warning-banner");
-    container.append(&warning_box);
+    let warning = WarningBanner::build(orientation);
+    let warning_box = warning.container.clone();
+    let warning_icon = warning.icon.clone();
+    orientation.flow_append(&container, &warning_box);
 
     // Right section: System indicators and close button
     let right_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.flow())
         .spacing(8)
-        .halign(gtk4::Align::End)
+        .halign(if vertical {
+            gtk4::Align::Center
+        } else {
+            gtk4::Align::End
+        })
+        .valign(if vertical {
+            gtk4::Align::Start
+        } else {
+            gtk4::Align::Center
+        })
         .build();
 
     // Wall clock display (shows mock time indicator in debug builds)
     let clock_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.group())
         .spacing(4)
         .build();
 
+    // `HH:MM` is wider than a 48px bar can hold, and a clock read sideways is
+    // worse than none — so the vertical bar shows a round face instead, which
+    // is the one form of a clock as wide as it is tall (issue #171).
+    let analog_clock = vertical.then(crate::analog_clock::build);
     let clock_label = gtk4::Label::new(Some("--:--"));
     clock_label.add_css_class("clock-label");
-    clock_box.append(&clock_label);
+    match &analog_clock {
+        Some(face) => clock_box.append(face),
+        None => clock_box.append(&clock_label),
+    }
     let mut clock_format_full = false;
 
     // Add mock indicator if mock time is active (debug builds only)
@@ -394,11 +641,11 @@ fn build_hud_content(
         }
     }
 
-    right_box.append(&clock_box);
+    orientation.flow_append(&right_box, &clock_box);
 
     // Volume control with slider
     let volume_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.group())
         .spacing(4)
         .build();
     volume_box.add_css_class("volume-control");
@@ -422,13 +669,16 @@ fn build_hud_content(
     });
     volume_box.append(&volume_button);
 
-    // Volume slider. The `width_request` is rescaled by the timer below to
-    // follow the HUD scale factor (see `BASE_VOLUME_SLIDER_WIDTH`).
+    // Volume slider. Its length request is rescaled by the timer below to
+    // follow the HUD scale factor (see `BASE_VOLUME_SLIDER_WIDTH`), on
+    // whichever axis it runs along.
     let volume_slider = gtk4::Scale::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .width_request(BASE_VOLUME_SLIDER_WIDTH)
+        .orientation(orientation.group())
         .draw_value(false)
         .build();
+    // GTK puts a vertical range's *minimum* at the top, so a slider left at
+    // the default would turn the volume down as the child dragged it up.
+    volume_slider.set_inverted(vertical);
     volume_slider.set_range(0.0, 100.0);
     volume_slider.set_increments(5.0, 10.0);
     volume_slider.add_css_class("volume-slider");
@@ -492,15 +742,19 @@ fn build_hud_content(
     let volume_label = gtk4::Label::new(Some("--%"));
     volume_label.add_css_class("volume-label");
     volume_label.set_width_chars(4);
+    // The vertical bar drops the percentage for good: "100%" does not fit
+    // across 48px at the bar's font size, and a full-length slider already
+    // says how loud and how bright at a glance.
+    volume_label.set_visible(!vertical);
     volume_box.append(&volume_label);
 
-    right_box.append(&volume_box);
+    orientation.flow_append(&right_box, &volume_box);
 
     // Brightness control. Hidden when the host has no backlight (every
     // desktop machine, plus laptops missing `/sys/class/backlight/*`); on
     // hosts with one this is the laptop-style screen-dimmer slider.
     let brightness_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.group())
         .spacing(4)
         .visible(false)
         .build();
@@ -538,13 +792,20 @@ fn build_hud_content(
     brightness_box.append(&brightness_button);
 
     let brightness_slider = gtk4::Scale::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .width_request(BASE_BRIGHTNESS_SLIDER_WIDTH)
+        .orientation(orientation.group())
         .draw_value(false)
         .build();
+    // Same inversion as the volume slider: up must mean brighter.
+    brightness_slider.set_inverted(vertical);
     brightness_slider.set_range(0.0, 100.0);
     brightness_slider.set_increments(5.0, 10.0);
     brightness_slider.add_css_class("brightness-slider");
+
+    // The sliders' length used to come from the builder's `width_request`,
+    // which only ever made sense on one axis. Set it once here for both, at
+    // scale 1.0 and with no page-turn buttons; the timer revisits it whenever
+    // either of those changes.
+    apply_slider_lengths(&volume_slider, &brightness_slider, 1.0, false, orientation);
 
     if let Some(info) = crate::brightness::get_brightness_status() {
         brightness_slider.set_value(info.percent as f64);
@@ -592,9 +853,13 @@ fn build_hud_content(
     let brightness_label = gtk4::Label::new(Some("--%"));
     brightness_label.add_css_class("brightness-label");
     brightness_label.set_width_chars(4);
+    // The vertical bar drops the percentage for good: "100%" does not fit
+    // across 48px at the bar's font size, and a full-length slider already
+    // says how loud and how bright at a glance.
+    brightness_label.set_visible(!vertical);
     brightness_box.append(&brightness_label);
 
-    right_box.append(&brightness_box);
+    orientation.flow_append(&right_box, &brightness_box);
 
     // Display mode toggle (issue #87): mirror ⇄ external-only. Hidden unless an
     // external display is connected. Uses an explicit child Image so its pixel
@@ -619,14 +884,14 @@ fn build_hud_content(
             );
         }
     });
-    right_box.append(&display_button);
+    orientation.flow_append(&right_box, &display_button);
 
     // Network connectivity indicator. Shown only when at least one
     // connectivity check is configured. Icon reflects the worst status across
     // all configured checks; the tooltip lists every check and its result so
     // operators can see which target failed.
     let network_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.group())
         .spacing(4)
         .visible(false)
         .build();
@@ -636,11 +901,11 @@ fn build_hud_content(
     network_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     network_box.append(&network_icon);
 
-    right_box.append(&network_box);
+    orientation.flow_append(&right_box, &network_box);
 
     // Battery indicator
     let battery_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
+        .orientation(orientation.group())
         .spacing(4)
         .build();
 
@@ -652,7 +917,7 @@ fn build_hud_content(
     battery_label.add_css_class("battery-label");
     battery_box.append(&battery_label);
 
-    right_box.append(&battery_box);
+    orientation.flow_append(&right_box, &battery_box);
 
     // Reset ("reboot the console") button, shown only for activities that
     // support it (issue #125). With RetroArch's save-state resume on, every
@@ -667,7 +932,7 @@ fn build_hud_content(
         .visible(false)
         .build();
     reset_button.add_css_class("indicator-button");
-    right_box.append(&reset_button);
+    orientation.flow_append(&right_box, &reset_button);
 
     // Action button: shows as "End session" when a session is active, "Log out" otherwise.
     // Uses an explicit child Image for the same reason as `volume_button`.
@@ -687,6 +952,7 @@ fn build_hud_content(
         &window,
         1.0,
         ConfirmAction::EndActivity,
+        orientation,
     )));
     // The reset button gets its own prompt, parented to its own button so it
     // drops from the right place. Same rebuild-on-scale-change rules apply.
@@ -695,6 +961,7 @@ fn build_hud_content(
         &window,
         1.0,
         ConfirmAction::ResetActivity,
+        orientation,
     )));
 
     let state_for_action = state.clone();
@@ -725,7 +992,13 @@ fn build_hud_content(
                 }
                 window_for_action.set_keyboard_mode(KeyboardMode::OnDemand);
                 // Right-align the popover to the button (issue #97).
-                align_popover_to_button(&popover, &content, btn, state_for_action.scale_factor());
+                align_popover_to_button(
+                    &popover,
+                    &content,
+                    btn,
+                    state_for_action.scale_factor(),
+                    orientation,
+                );
                 popover.popup();
             } else {
                 request_stop_current(socket_path);
@@ -737,7 +1010,7 @@ fn build_hud_content(
             });
         }
     });
-    right_box.append(&action_button);
+    orientation.flow_append(&right_box, &action_button);
 
     // One virtual keyboard for the life of the HUD, created on the first
     // press. See `page_turn` for why the key rather than an RPC.
@@ -779,7 +1052,13 @@ fn build_hud_content(
         };
         label.set_text(&ConfirmAction::ResetActivity.message(session_state.entry_name()));
         window_for_reset.set_keyboard_mode(KeyboardMode::OnDemand);
-        align_popover_to_button(&popover, &content, btn, state_for_reset.scale_factor());
+        align_popover_to_button(
+            &popover,
+            &content,
+            btn,
+            state_for_reset.scale_factor(),
+            orientation,
+        );
         popover.popup();
     });
 
@@ -830,13 +1109,12 @@ fn build_hud_content(
         });
     }
 
-    container.append(&right_box);
+    orientation.flow_append(&container, &right_box);
 
     // Set up state updates
     let app_label_clone = app_label.clone();
     let time_display_clone = time_display.clone();
-    let warning_box_clone = warning_box.clone();
-    let warning_label_clone = warning_label.clone();
+    let warning_for_timer = warning.clone();
     let battery_box_clone = battery_box.clone();
     let battery_icon_clone = battery_icon.clone();
     let battery_label_clone = battery_label.clone();
@@ -858,10 +1136,11 @@ fn build_hud_content(
     let confirm_prompt_for_timer = confirm_prompt.clone();
     let action_button_for_rebuild = action_button.clone();
     let reset_button_clone = reset_button.clone();
-    let page_back_button_clone = page_back_button.clone();
+    let page_box_clone = page_box.clone();
+    let analog_clock_for_timer = analog_clock.clone();
+    let analog_clock_for_scale = analog_clock.clone();
     let volume_label_for_pages = volume_label.clone();
     let brightness_label_for_pages = brightness_label.clone();
-    let page_forward_button_clone = page_forward_button.clone();
     let reset_prompt_for_timer = reset_prompt.clone();
     let reset_button_for_rebuild = reset_button.clone();
     let window_for_rebuild = window.clone();
@@ -917,22 +1196,31 @@ fn build_hud_content(
             apply_scale(
                 &css_provider_for_timer,
                 &window_for_timer,
-                base_height,
+                base_thickness,
                 desired_scale,
+                orientation,
             );
             let icon_size = (f64::from(BASE_ICON_PIXEL_SIZE) * desired_scale).round() as i32;
             for icon in &scaled_icons {
                 icon.set_pixel_size(icon_size);
             }
             time_display_for_scale.set_icon_pixel_size(icon_size);
+            if let Some(face) = &analog_clock_for_scale {
+                crate::analog_clock::set_diameter(
+                    face,
+                    (f64::from(crate::analog_clock::BASE_CLOCK_DIAMETER) * desired_scale).round()
+                        as i32,
+                );
+            }
             for (boxed, base_spacing) in &scaled_boxes {
                 boxed.set_spacing((f64::from(*base_spacing) * desired_scale).round() as i32);
             }
-            apply_slider_widths(
+            apply_slider_lengths(
                 &volume_slider_clone,
                 &brightness_slider_clone,
                 desired_scale,
                 state.session_state().can_turn_pages(),
+                orientation,
             );
             // Rebuild the close-confirmation prompt for the new factor. It is
             // hidden right now, and GTK does not restyle hidden widgets, so the
@@ -949,6 +1237,7 @@ fn build_hud_content(
                     &window_for_rebuild,
                     desired_scale,
                     ConfirmAction::EndActivity,
+                    orientation,
                 );
             }
             {
@@ -960,6 +1249,7 @@ fn build_hud_content(
                     &window_for_rebuild,
                     desired_scale,
                     ConfirmAction::ResetActivity,
+                    orientation,
                 );
             }
             applied_scale_for_timer.set(desired_scale);
@@ -971,8 +1261,16 @@ fn build_hud_content(
         // stale status (issue #73).
         let suspended = state.is_suspended();
 
-        // Update wall clock display
-        if suspended {
+        // Update wall clock display. The analog face reads the clock in its own
+        // draw function, so it only needs to be told that something changed --
+        // but it still has to be told, or it would keep the frame it first
+        // rendered for the life of the session.
+        if let Some(face) = &analog_clock_for_timer {
+            face.set_visible(!suspended);
+            if !suspended {
+                face.queue_draw();
+            }
+        } else if suspended {
             clock_label_clone.set_text("--:--");
         } else {
             let current_time = shepherd_util::now();
@@ -1014,29 +1312,32 @@ fn build_hud_content(
         // Same rule for the page buttons: they belong to the activity, so a
         // session that is not a reading one never shows them.
         let can_turn_pages = session_state.can_turn_pages();
-        if page_back_button_clone.is_visible() != can_turn_pages {
-            page_back_button_clone.set_visible(can_turn_pages);
-            page_forward_button_clone.set_visible(can_turn_pages);
+        if page_box_clone.is_visible() != can_turn_pages {
+            page_box_clone.set_visible(can_turn_pages);
             // The bar is full: the two buttons have to come out of something.
             // The sliders give up a third of their width and the numeric
             // readouts step aside — the slider position already says how loud
             // and how bright, and neither is worth the activity name or the
             // end-session button, which is what would otherwise be pushed off
             // the end (see `READING_SLIDER_WIDTH`).
-            apply_slider_widths(
+            apply_slider_lengths(
                 &volume_slider_clone,
                 &brightness_slider_clone,
                 applied_scale_for_timer.get(),
                 can_turn_pages,
+                orientation,
             );
-            volume_label_for_pages.set_visible(!can_turn_pages);
-            brightness_label_for_pages.set_visible(!can_turn_pages);
+            // The vertical bar has already given these up for good (they do
+            // not fit across 48px), so there is nothing left for a reading
+            // session to reclaim there.
+            volume_label_for_pages.set_visible(!vertical && !can_turn_pages);
+            brightness_label_for_pages.set_visible(!vertical && !can_turn_pages);
         }
         match &session_state {
             SessionState::NoSession => {
                 app_label_clone.set_text("No session");
                 time_display_clone.set_remaining(None);
-                warning_box_clone.set_visible(false);
+                warning_for_timer.set_visible(false);
             }
             SessionState::Active {
                 entry_name,
@@ -1051,7 +1352,7 @@ fn build_hud_content(
                     limit.saturating_sub(elapsed)
                 });
                 time_display_clone.set_remaining(remaining);
-                warning_box_clone.set_visible(false);
+                warning_for_timer.set_visible(false);
             }
             SessionState::Warning {
                 entry_name,
@@ -1070,30 +1371,21 @@ fn build_hud_content(
                 let warning_text = message
                     .clone()
                     .unwrap_or_else(|| format!("Only {} seconds remaining!", remaining));
-                warning_label_clone.set_text(&warning_text);
+                warning_for_timer.set_text(&warning_text);
 
                 // Apply severity-based CSS classes
-                warning_box_clone.remove_css_class("warning-info");
-                warning_box_clone.remove_css_class("warning-warn");
-                warning_box_clone.remove_css_class("warning-critical");
-                match severity {
-                    shepherd_api::WarningSeverity::Info => {
-                        warning_box_clone.add_css_class("warning-info");
-                    }
-                    shepherd_api::WarningSeverity::Warn => {
-                        warning_box_clone.add_css_class("warning-warn");
-                    }
-                    shepherd_api::WarningSeverity::Critical => {
-                        warning_box_clone.add_css_class("warning-critical");
-                    }
-                }
+                warning_for_timer.set_severity_class(Some(match severity {
+                    shepherd_api::WarningSeverity::Info => "warning-info",
+                    shepherd_api::WarningSeverity::Warn => "warning-warn",
+                    shepherd_api::WarningSeverity::Critical => "warning-critical",
+                }));
 
-                warning_box_clone.set_visible(true);
+                warning_for_timer.set_visible(true);
             }
             SessionState::Ending { reason, .. } => {
                 app_label_clone.set_text("Session ending...");
-                warning_label_clone.set_text(reason);
-                warning_box_clone.set_visible(true);
+                warning_for_timer.set_text(reason);
+                warning_for_timer.set_visible(true);
             }
         }
 
@@ -1343,6 +1635,7 @@ fn build_confirm_prompt(
     window: &gtk4::ApplicationWindow,
     factor: f64,
     action: ConfirmAction,
+    orientation: HudOrientation,
 ) -> ConfirmPrompt {
     // Parented to the button, so on the layer-shell overlay it renders as a
     // child popup above the running activity.
@@ -1356,7 +1649,16 @@ fn build_confirm_prompt(
     // so it gets clipped (issue #97). `align_popover_to_button` additionally
     // offsets it left to keep it fully visible; Bottom gives it unlimited
     // vertical room.
-    popover.set_position(gtk4::PositionType::Bottom);
+    //
+    // The vertical bar puts the same buttons down the left edge instead, so
+    // the prompt drops to the *right*, into the screen, for exactly the same
+    // reason: that is the direction with room. `align_popover_to_button` then
+    // does the along-the-bar nudge on whichever axis the bar runs.
+    popover.set_position(if orientation.is_vertical() {
+        gtk4::PositionType::Right
+    } else {
+        gtk4::PositionType::Bottom
+    });
     // Autohide so the prompt dismisses itself when it loses focus (the user
     // taps the activity, presses Escape, etc.). Autohide relies on an input
     // grab that needs the layer surface to accept keyboard focus, so we switch
@@ -1438,37 +1740,66 @@ fn align_popover_to_button(
     content: &gtk4::Box,
     button: &gtk4::Button,
     factor: f64,
+    orientation: HudOrientation,
 ) {
-    let (_, content_w, _, _) = content.measure(gtk4::Orientation::Horizontal, -1);
+    // The clipping is always along the bar, so the measurement is taken on the
+    // bar's own axis: a horizontal bar runs out of room to the right of the
+    // "X", a vertical one runs out above it.
+    let axis = orientation.flow();
+    let (_, content_len, _, _) = content.measure(axis, -1);
     let chrome = (2.0 * POPOVER_PADDING_PX * factor).round() as i32;
-    let popover_w = content_w + chrome;
-    let (_, button_w, _, _) = button.measure(gtk4::Orientation::Horizontal, -1);
-    let offset = (button_w - popover_w) / 2;
+    let popover_len = content_len + chrome;
+    let (_, button_len, _, _) = button.measure(axis, -1);
+    let offset = (button_len - popover_len) / 2;
     tracing::debug!(
         factor,
-        content_w,
+        ?orientation,
+        content_len,
         chrome,
-        button_w,
+        button_len,
         offset,
         "Aligning confirm popover"
     );
-    popover.set_offset(offset, 0);
+    // A vertical bar anchors the button at the *top*, so the overhang to pull
+    // back is below the button rather than beside it -- the same shift, on the
+    // other axis.
+    if orientation.is_vertical() {
+        popover.set_offset(0, -offset);
+    } else {
+        popover.set_offset(offset, 0);
+    }
 }
 
 /// Apply the current scale factor to the HUD: regenerate the stylesheet
 /// with px values multiplied by `factor`, and resize the window so its
-/// physical height stays consistent with the pre-scale value. Called once
+/// physical thickness stays consistent with the pre-scale value. Called once
 /// on construction and again every time shepherdd sends a HudScaleChanged.
+///
+/// "Thickness" is the bar's short axis, and which axis that is depends on
+/// `orientation`: a vertical bar reserves its exclusive zone horizontally, so
+/// it has to request a default *width* — requesting a height would let the
+/// surface size itself to its content and give the compositor nothing to
+/// reserve.
 fn apply_scale(
     provider: &gtk4::CssProvider,
     window: &gtk4::ApplicationWindow,
-    base_height: i32,
+    base_thickness: i32,
     factor: f64,
+    orientation: HudOrientation,
 ) {
-    let scaled_height = ((base_height as f64) * factor).round() as i32;
-    tracing::info!(factor, height = scaled_height, "Applying HUD scale");
-    window.set_default_height(scaled_height);
-    window.set_exclusive_zone(scaled_height);
+    let scaled = ((base_thickness as f64) * factor).round() as i32;
+    tracing::info!(
+        factor,
+        thickness = scaled,
+        ?orientation,
+        "Applying HUD scale"
+    );
+    if orientation.is_vertical() {
+        window.set_default_width(scaled);
+    } else {
+        window.set_default_height(scaled);
+    }
+    window.set_exclusive_zone(scaled);
     provider.load_from_data(&css_for_scale(factor));
 }
 
@@ -1543,6 +1874,78 @@ const CSS_TEMPLATE: &str = r#"
             color: var(--text-primary);
         }
 
+        /* The vertical bar (issue #171). Everything above applies to it
+           unchanged; these are the handful of rules that cannot be the same
+           when the long axis is the other one.
+
+           Each still has to be written in px here for `scale_px_literals` to
+           counter-scale it -- the vertical layout gets no exemption from the
+           rule at the top of this stylesheet. */
+        .hud-bar.hud-vertical {
+            /* The bar's own padding, turned with it: the 6px that used to be
+               above and below the row is now beside the column. */
+            padding: 12px 6px;
+        }
+
+        /* The slider rules further down name a specific axis -- 80px of
+           length, a 4px-thick trough -- because a horizontal bar only ever
+           held horizontal sliders. Turned on their side those two swap, and
+           leaving them alone is what makes the vertical bar demand its 80px of
+           slider *across* the bar: the surface measured 124px wide instead of
+           48px until these overrode it. */
+        .hud-vertical .volume-slider,
+        .hud-vertical .brightness-slider {
+            min-width: 0px;
+            min-height: 80px;
+        }
+
+        .hud-vertical .volume-slider trough,
+        .hud-vertical .volume-slider highlight,
+        .hud-vertical .brightness-slider trough,
+        .hud-vertical .brightness-slider highlight {
+            min-width: 4px;
+            min-height: 0px;
+        }
+
+        /* The separation these give a control group is meant to run *along*
+           the bar. Left alone on a vertical bar it runs across it instead,
+           where every pixel is thickness the activity pays for -- 8px of the
+           bar's width bought nothing. Turned with the bar it does the job it
+           was written for. */
+        .hud-vertical .volume-control,
+        .hud-vertical .brightness-control {
+            padding: 4px 0;
+        }
+
+        .hud-vertical .network-indicator {
+            padding: 2px 0;
+        }
+
+        /* The readouts that have to fit *across* a 48px bar rather than along
+           it. At the bar's 14px "100%" is wider than the space between the
+           paddings; the battery percentage is the one worth keeping, so it
+           gets a size that fits instead of being dropped like the volume and
+           brightness ones. */
+        .hud-vertical .battery-label {
+            font-size: 11px;
+        }
+
+        /* The message that no longer fits in the bar. It is a popover rather
+           than part of the bar (see `WarningBanner`), so it needs the bar's
+           own background -- a popover does not inherit it -- and a width bound
+           so an operator's long sentence wraps instead of running off the
+           screen. */
+        .warning-popover > contents {
+            background-color: var(--hud-bg);
+            border: none;
+            border-radius: 4px;
+            padding: 8px 12px;
+        }
+
+        .warning-popover .warning-text {
+            font-size: 14px;
+        }
+
         .time-display {
             font-family: monospace;
             font-size: 14px;
@@ -1599,6 +2002,14 @@ const CSS_TEMPLATE: &str = r#"
         }
 
         image {
+            color: var(--text-primary);
+        }
+
+        /* The analog clock draws itself in whatever colour CSS resolves for
+           it (`Widget::color`), and a `GtkDrawingArea` is not an `image` node,
+           so without this it inherits the *theme's* default text colour --
+           near-black, and all but invisible against the bar. */
+        .analog-clock {
             color: var(--text-primary);
         }
 

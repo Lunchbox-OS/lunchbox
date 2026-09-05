@@ -129,6 +129,10 @@ Example (bedtime restriction):
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/shepherd-ipc/src/client.rs`.
+  - **The vertical HUD** (issue #171): export `SHEPHERD_HUD_ANCHOR=left` before
+    `dev headless`. `sway.conf` starts the HUD with no flags, so this env var is
+    the only way to select the anchor in a dev session; `headless.sh` forwards
+    it explicitly so it survives the `env -i` on the `--user` path too.
   - **The HUD's confirm popovers** have a permanent debug-build hook:
     export `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>` before `dev headless`
     (env propagates from the invocation into the sway-spawned HUD), then
