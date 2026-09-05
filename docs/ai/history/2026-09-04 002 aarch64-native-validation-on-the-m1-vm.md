@@ -18,7 +18,8 @@ systemd as PID 1.
 make it.** 1015 unit/integration tests pass, the e2e suite passes with the
 IPC peer check *required*, clippy is clean at `-D warnings`, the full
 sway + shepherdd + launcher + HUD stack boots headless and paints correctly,
-and `shepherd package deb --arch arm64` produces a well-formed arm64 package.
+`shepherd package deb --arch arm64` produces a well-formed arm64 package, and
+**the eBPF cgroup firewall loads into this kernel and filters real packets**.
 
 That retires most of the risk the scope doc listed as "built, not validated",
 and it answers the unverified-link-step question from a different direction
@@ -32,7 +33,9 @@ the binaries were linked *and* run here.
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | `shepherd dev headless` + `dev shot` | launcher grid + HUD paint correctly |
 | `shepherd package deb --arch arm64` | `shepherd-launcher_0.4.1_arm64.deb`, valid |
-| Firewall BPF suites (`firewall_cgroup`, `firewall_real*`) | **not run** — need root |
+| `firewall_cgroup` (writable + read-only cgroupfs), as root | passed, real packets filtered |
+| `firewall_real` (polkit + helper + systemd-run), as `tester` | passed |
+| `firewall_real_flatpak` / `_snap` | skipped — no flatpak, no probe snap |
 
 ## What each check settles
 
@@ -106,29 +109,66 @@ The cross build therefore passes `--target` on the command line, which never
 reaches the child at all; the `env_remove` is the belt to that braces, for
 anyone who cross-compiles the obvious way instead.
 
-## Still open: the firewall BPF suites
+## The firewall BPF suites: the check this VM existed for
 
-`firewall_cgroup`, `firewall_real`, `firewall_real_flatpak` and
-`firewall_real_snap` all report `ok` **in 0.00s** — they self-skip on
-`geteuid() != 0`. `SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` is what turns that
-silence into a failure, and CI sets it for exactly this reason.
+These are the reason tier 2 is a native machine rather than a cross build. The
+verifier runs on the *target* kernel, and #151 is the standing reminder that
+"it linked" and "the kernel accepts it" are different claims. On kernel
+7.0.0-30-generic, aarch64:
 
-They did not run here because `sudo` on this VM asks for a password despite a
-`NOPASSWD: ALL` rule: `sudo -l` lists that rule *before* `(ALL : ALL) ALL`, and
-sudo takes the **last** matching rule, so the group rule wins. Ubuntu's
-`/etc/sudoers` ends with `@includedir /etc/sudoers.d`, so a NOPASSWD rule has
-to live in a file there to come last:
+- **`firewall_cgroup`** (the #151 path — drives `apply-cgroup` directly, loads
+  the embedded BPF object, checks that packets really are filtered) passes as
+  root with `SHEPHERD_FIREWALL_CGROUP_REQUIRED=1`:
+  `cgroup firewall filtered as configured (allow=127.0.0.1, deny=192.168.64.12)`.
+- **The read-only-`/sys/fs/cgroup` fallback** passes too, run the way `ci.yml`
+  does it, under `unshare -m --propagation private` with the hierarchy
+  remounted read-only. The log confirms it really took the fallback
+  (`creating cgroups through a private cgroup2 mount at …`) rather than finding
+  a writable cgroupfs after all.
+- **`firewall_real`** — the whole privileged path: polkit authorisation, the
+  installed helper, a `systemd-run` scope, real filtering — passes as a
+  non-root `tester` user in the `shepherd-firewall` group: `allow=OPEN`,
+  `deny=BLOCKED`.
+
+So the BPF object this workspace emits is accepted and enforced by an arm64
+kernel. That was the largest single unknown in the issue.
+
+`firewall_real_flatpak` and `firewall_real_snap` skipped explicitly (no
+flatpak CLI; no probe snap). CI's firewall job does not run them either, and
+what they cover — cgroup *path* shapes for flatpak and snap — is
+architecture-independent, so provisioning them here would buy nothing.
+
+### How to re-run them here
+
+`sudo` was the only obstacle, for the reason in the CONTRIBUTING note: a
+`NOPASSWD` rule listed *before* the `%sudo` group rule loses, because sudo
+applies the last match.
+
+To avoid leaving root-owned files in `target/`, build as the normal user and
+run the **test binary** under sudo rather than running `cargo` as root:
 
 ```sh
-echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/99-$USER
-sudo chmod 0440 /etc/sudoers.d/99-$USER
+cargo test -p shepherd-e2e --test firewall_cgroup --no-run   # prints the path
+sudo env SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+    ./target/debug/deps/firewall_cgroup-<hash> \
+        --include-ignored --test-threads=1 --nocapture
 ```
 
-This is the single most valuable check left for this VM: the BPF verifier runs
-on the target kernel, and #151 is the standing reminder that "it linked" and
-"the kernel accepts it" are different claims. `bpf-linker` and the nightly
-toolchain do work here — `shepherd-firewall-helper` builds and emits a valid
-eBPF object — but nothing has yet asked this kernel to *load* it.
+CI instead `chown -R`s the whole workspace to `tester`, which it can afford
+because the checkout is disposable.
+
+### State this left on the VM
+
+`firewall_real` needs a real install, so the following is now present and is
+*not* cleaned up (re-running the suite would only have to redo it). All of it
+is reversible:
+
+- `/usr/libexec/shepherd-firewall-helper`
+- `/usr/share/polkit-1/actions/org.shepherd.firewall.policy`
+- `/etc/polkit-1/rules.d/50-shepherd-firewall.rules`
+- the `shepherd-firewall` system group
+- a `tester` user, in that group, plus an ACL granting it traversal of
+  `/home/shepherd-dev`
 
 ## Two setup gaps this VM exposed
 
@@ -194,5 +234,6 @@ amd64 side, where it can actually be exercised:
   because `check-workflows.sh` rejects duplicate job names.
 - The optional native-arm64 workflow for this VM (`workflow_dispatch` +
   `schedule`, own runner label, never referenced from `ci.yml`).
-- Docs: `docs/INSTALL.md`, `CONTRIBUTING.md`, `scripts/README.md`.
-- Running the firewall BPF suites here, once sudo is passwordless.
+- `docs/INSTALL.md`, once `release.yml` actually publishes an arm64 package —
+  it should not advertise one before then. `CONTRIBUTING.md` and
+  `scripts/README.md` are done.

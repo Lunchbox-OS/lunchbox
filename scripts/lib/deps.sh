@@ -423,6 +423,9 @@ _deps_enable_foreign_arch() {
     # already declare their architectures are left alone -- this has to be safe
     # to run twice.
     maybe_sudo cp -n "$sources" "$sources.pre-cross" || true
+    # The `$` below belong to awk (an end-of-line anchor), not to the shell, so
+    # the program has to stay single-quoted. The architecture reaches it via -v.
+    # shellcheck disable=SC2016
     maybe_sudo awk -v arches="$native" '
         /^[[:space:]]*$/ { flush(); print; next }
         /^Architectures:/ { seen = 1 }
