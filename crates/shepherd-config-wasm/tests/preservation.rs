@@ -217,6 +217,51 @@ fn a_new_entry_lands_as_an_array_of_tables() {
     assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
 }
 
+/// A field on the newest kind survives the round trip the editor makes.
+///
+/// The failure this guards against is silent and specific (see CONTRIBUTING,
+/// "Rebuild it after changing the config schema"): the editor's write path is
+/// `toml_edit` and needs no schema, so a parser that does not know a field
+/// accepts the edit, writes it to the document, and then drops it on the way
+/// back — a control that renders, refuses to hold its value, and reports
+/// nothing wrong. Reading the value back through `view()` is what catches it.
+#[test]
+fn an_ebook_entrys_own_fields_survive_the_round_trip() {
+    let mut doc = ConfigDoc::open(&example()).unwrap();
+    doc.apply(
+        &set(
+            "entries[id=the-hobbit].kind.font_size",
+            serde_json::json!(22),
+        ),
+        None,
+    )
+    .unwrap();
+    doc.apply(
+        &set(
+            "entries[id=the-hobbit].kind.layout",
+            serde_json::json!("single"),
+        ),
+        None,
+    )
+    .unwrap();
+
+    assert!(doc.text().contains("font_size = 22"), "got: {}", doc.text());
+
+    let view: serde_json::Value = serde_json::from_str(&doc.view().unwrap()).unwrap();
+    let entry = view["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "the-hobbit")
+        .expect("the example config still has the ebook entry");
+    assert_eq!(entry["kind"]["type"], "ebook", "{entry}");
+    assert_eq!(entry["kind"]["font_size"], 22, "{entry}");
+    assert_eq!(entry["kind"]["layout"], "single", "{entry}");
+
+    let report: serde_json::Value = serde_json::from_str(&doc.validate()).unwrap();
+    assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
+}
+
 #[test]
 fn creating_a_missing_sub_table_uses_standard_table_style() {
     // `[entries.limits]`, not `limits = { ... }`, matching the house style.
