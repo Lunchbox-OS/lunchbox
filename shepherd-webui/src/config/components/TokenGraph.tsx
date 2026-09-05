@@ -14,6 +14,7 @@ import Typography from "@mui/material/Typography";
 import { useTheme } from "@mui/material/styles";
 import type { RawConfig } from "../model/config.generated";
 import type { Subject } from "../doc/patches";
+import { LOAD_TIME_DEFAULTS } from "../model/field-defaults.generated";
 
 const GROUP_PREFIX = "group:";
 const ROW_HEIGHT = 34;
@@ -49,7 +50,8 @@ export function TokenGraph({
   const edges: Edge[] = [];
   for (const entry of config.entries ?? []) {
     for (const from of entry.tokens?.from ?? []) {
-      edges.push({ from, to: entry.id, ratio: entry.tokens?.earn_ratio ?? 1 });
+      edges.push({ from, to: entry.id, ratio: entry.tokens?.earn_ratio ?? LOAD_TIME_DEFAULTS.token_earn_ratio,
+      });
     }
   }
   // A category can be gated too, and its gate unlocks every member at once.
@@ -58,7 +60,7 @@ export function TokenGraph({
       edges.push({
         from,
         to: `${GROUP_PREFIX}${group.id}`,
-        ratio: group.tokens?.earn_ratio ?? 1,
+        ratio: group.tokens?.earn_ratio ?? LOAD_TIME_DEFAULTS.token_earn_ratio,
       });
     }
   }

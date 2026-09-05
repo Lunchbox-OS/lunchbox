@@ -29,6 +29,10 @@ import { tokenSources, type TokenSource } from "../model/tokenSources";
 import { DurationField } from "./DurationField";
 import { Section } from "./Section";
 import { TokenGraph } from "./TokenGraph";
+import {
+  FIELD_DEFAULTS,
+  LOAD_TIME_DEFAULTS,
+} from "../model/field-defaults.generated";
 
 export function TokensEditor({
   subject,
@@ -127,7 +131,7 @@ export function TokensEditor({
             label="Earn ratio"
             slotProps={{ htmlInput: { step: 0.1, min: 0 } }}
             value={tokens?.earn_ratio ?? ""}
-            placeholder="1.0"
+            placeholder={String(LOAD_TIME_DEFAULTS.token_earn_ratio)}
             onChange={(e) =>
               f.setField("earn_ratio", e.target.value === "" ? undefined : Number(e.target.value))
             }
@@ -152,7 +156,7 @@ export function TokensEditor({
         <FormControlLabel
           control={
             <Switch
-              checked={tokens?.carry_over ?? false}
+              checked={tokens?.carry_over ?? FIELD_DEFAULTS.RawTokens.carry_over}
               onChange={(e) => f.setField("carry_over", e.target.checked)}
             />
           }

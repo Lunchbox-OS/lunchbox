@@ -6,6 +6,7 @@
 //! not, since `shepherd-ble` depends on it. And being outside the workspace's
 //! `default-members` keeps `schemars` out of the binaries that ship.
 
+pub mod config_defaults;
 pub mod config_schema;
 pub mod editor_schema;
 pub mod kind_defaults;

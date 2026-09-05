@@ -10,6 +10,7 @@
  * rather than silently going missing from both menus.
  */
 import type { RawHudOrientation } from "./config.generated";
+import { LOAD_TIME_DEFAULTS } from "./field-defaults.generated";
 
 export const HUD_ORIENTATIONS: ReadonlyArray<{
   value: RawHudOrientation;
@@ -19,6 +20,24 @@ export const HUD_ORIENTATIONS: ReadonlyArray<{
   { value: "bottom", label: "Bottom" },
   { value: "left", label: "Left (vertical)" },
 ];
+
+/**
+ * The edge a device uses when nothing chooses one, and its human name.
+ *
+ * `[service.hud] orientation` is an `Option` the daemon resolves in
+ * `Policy::from_raw` via `HudOrientation::default()`, so `schemars` reports no
+ * default for it and the value comes from `LoadTimeDefaults` instead. Both
+ * menus offer an empty "unset" row that has to say which edge that means, and
+ * saying "Top" in prose would be a mirror of the Rust with nothing to keep it
+ * honest — the more so because this is one of the few defaults a person might
+ * plausibly want changed later.
+ */
+export const DEFAULT_HUD_ORIENTATION: RawHudOrientation =
+  LOAD_TIME_DEFAULTS.hud_orientation;
+
+export const DEFAULT_HUD_ORIENTATION_LABEL: string =
+  HUD_ORIENTATIONS.find((o) => o.value === DEFAULT_HUD_ORIENTATION)?.label ??
+  DEFAULT_HUD_ORIENTATION;
 
 /**
  * What the vertical HUD actually is, for the help text under either menu.

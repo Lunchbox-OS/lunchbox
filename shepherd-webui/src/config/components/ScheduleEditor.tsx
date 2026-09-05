@@ -40,6 +40,7 @@ import {
   toggleDay,
 } from "../model/windows";
 import { ScheduleGrid } from "./ScheduleGrid";
+import { FIELD_DEFAULTS } from "../model/field-defaults.generated";
 
 interface Props {
   subject: Subject;
@@ -53,7 +54,7 @@ export function ScheduleEditor({ subject, availability, step = 15 }: Props) {
   const [selected, setSelected] = useState<number | null>(null);
 
   const windows = availability?.windows ?? [];
-  const always = availability?.always ?? false;
+  const always = availability?.always ?? FIELD_DEFAULTS.RawAvailability.always;
   const view = availabilityFor(subject);
   const path = (...rest: string[]) => subjectPath(subject, ...rest);
   const winPath = (i: number, ...rest: string[]) =>

@@ -8,11 +8,13 @@
 
 mod icon;
 mod internet;
+mod load_defaults;
 mod policy;
 mod schema;
 mod validation;
 
 pub use internet::*;
+pub use load_defaults::*;
 pub use policy::*;
 pub use schema::*;
 pub use validation::*;

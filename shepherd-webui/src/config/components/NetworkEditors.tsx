@@ -22,6 +22,7 @@ import type {
 } from "../model/config.generated";
 import { Section } from "./Section";
 import { StringListEditor } from "./StringListEditor";
+import { FIELD_DEFAULTS } from "../model/field-defaults.generated";
 
 export function InternetEditor({
   path,
@@ -44,7 +45,7 @@ export function InternetEditor({
         <FormControlLabel
           control={
             <Switch
-              checked={value?.required ?? false}
+              checked={value?.required ?? FIELD_DEFAULTS.RawEntryInternet.required}
               onChange={(e) => f.setField("required", e.target.checked)}
             />
           }
@@ -53,7 +54,7 @@ export function InternetEditor({
         <FormControlLabel
           control={
             <Switch
-              checked={value?.forward_check ?? true}
+              checked={value?.forward_check ?? FIELD_DEFAULTS.RawEntryInternet.forward_check}
               onChange={(e) => f.setField("forward_check", e.target.checked)}
             />
           }
@@ -85,7 +86,7 @@ export function FirewallEditor({
   value: RawFirewallConfig | null | undefined;
 }) {
   const f = useFields(path);
-  const policy = value?.default ?? "deny";
+  const policy = value?.default ?? FIELD_DEFAULTS.RawFirewallConfig.default;
 
   return (
     <Section
@@ -172,7 +173,7 @@ export function BrowserEditor({
             select
             size="small"
             label="Window mode"
-            value={value?.mode ?? "kiosk"}
+            value={value?.mode ?? FIELD_DEFAULTS.RawBrowserConfig.mode}
             onChange={(e) => f.setField("mode", e.target.value)}
             sx={{ minWidth: 180 }}
           >
@@ -209,7 +210,7 @@ export function BrowserEditor({
           <FormControlLabel
             control={
               <Switch
-                checked={value?.disable_dev_tools ?? true}
+                checked={value?.disable_dev_tools ?? FIELD_DEFAULTS.RawBrowserConfig.disable_dev_tools}
                 onChange={(e) => f.setField("disable_dev_tools", e.target.checked)}
               />
             }
@@ -218,7 +219,7 @@ export function BrowserEditor({
           <FormControlLabel
             control={
               <Switch
-                checked={value?.disable_incognito ?? true}
+                checked={value?.disable_incognito ?? FIELD_DEFAULTS.RawBrowserConfig.disable_incognito}
                 onChange={(e) => f.setField("disable_incognito", e.target.checked)}
               />
             }
@@ -227,7 +228,7 @@ export function BrowserEditor({
           <FormControlLabel
             control={
               <Switch
-                checked={value?.disable_extensions ?? true}
+                checked={value?.disable_extensions ?? FIELD_DEFAULTS.RawBrowserConfig.disable_extensions}
                 onChange={(e) => f.setField("disable_extensions", e.target.checked)}
               />
             }
@@ -236,7 +237,7 @@ export function BrowserEditor({
           <FormControlLabel
             control={
               <Switch
-                checked={value?.wipe_on_exit ?? false}
+                checked={value?.wipe_on_exit ?? FIELD_DEFAULTS.RawBrowserConfig.wipe_on_exit}
                 onChange={(e) => f.setField("wipe_on_exit", e.target.checked)}
               />
             }

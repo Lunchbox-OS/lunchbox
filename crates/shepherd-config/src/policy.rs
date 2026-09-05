@@ -47,6 +47,28 @@ pub const DEFAULT_COOLDOWN_MIN_SESSION: Duration = Duration::from_secs(120);
 /// `limits.save_grace_seconds`.
 pub const DEFAULT_SAVE_GRACE: Duration = Duration::from_secs(120);
 
+/// Default per-session cap for an entry that sets no `max_run_seconds` and
+/// whose service sets no `default_max_run_seconds`.
+///
+/// A cap rather than "unlimited": an activity nobody thought about is still
+/// bounded. Configurable with `service.default_max_run_seconds`, per subject
+/// with `limits.max_run_seconds`, and `0` in either means unlimited.
+pub const DEFAULT_MAX_RUN: Duration = Duration::from_secs(3600);
+
+/// Default TCP port for the management API.
+pub const DEFAULT_MANAGEMENT_API_PORT: u16 = 7890;
+
+/// Default bind address for the management API — loopback, so enabling it
+/// without a token does not expose the device to the network.
+pub const DEFAULT_MANAGEMENT_API_BIND: &str = "127.0.0.1";
+
+/// Default window for retrying the management API's initial bind, for an
+/// interface that is not up yet. `bind_retry_seconds = 0` retries forever.
+pub const DEFAULT_MANAGEMENT_API_BIND_RETRY: Duration = Duration::from_secs(300);
+
+/// Default seconds banked per second spent on a token gate's source activity.
+pub const DEFAULT_TOKEN_EARN_RATIO: f64 = 1.0;
+
 /// The service-level defaults a subject's `[limits]` table falls back to.
 ///
 /// Bundled rather than passed as three loose `Duration`s: two of them have the
@@ -105,12 +127,12 @@ impl Policy {
             .map(|w| w.into_iter().map(convert_warning).collect())
             .unwrap_or_else(default_warning_thresholds);
 
-        // 0 means unlimited, None means use 1 hour default
+        // 0 means unlimited, None means use DEFAULT_MAX_RUN
         let default_max_run = raw
             .service
             .default_max_run_seconds
             .map(seconds_to_duration_or_unlimited)
-            .unwrap_or(Some(Duration::from_secs(3600))); // 1 hour default
+            .unwrap_or(Some(DEFAULT_MAX_RUN));
 
         let limit_defaults = LimitDefaults {
             max_run: default_max_run,
@@ -522,14 +544,14 @@ impl ManagementApiConfig {
             .bind
             .as_deref()
             .and_then(|s| IpAddr::from_str(s).ok())
-            .unwrap_or_else(|| IpAddr::from_str("127.0.0.1").unwrap());
+            .unwrap_or_else(|| IpAddr::from_str(DEFAULT_MANAGEMENT_API_BIND).unwrap());
         let bind_retry = match raw.bind_retry_seconds {
             Some(0) => None,
             Some(s) => Some(Duration::from_secs(s)),
-            None => Some(Duration::from_secs(300)),
+            None => Some(DEFAULT_MANAGEMENT_API_BIND_RETRY),
         };
         Self {
-            port: raw.port.unwrap_or(7890),
+            port: raw.port.unwrap_or(DEFAULT_MANAGEMENT_API_PORT),
             bind,
             bind_retry,
             auth_token: raw.auth_token.clone(),
@@ -1338,7 +1360,7 @@ fn convert_tokens(raw: &crate::schema::RawTokens) -> TokensPolicy {
 
     TokensPolicy {
         from,
-        earn_ratio: raw.earn_ratio.unwrap_or(1.0),
+        earn_ratio: raw.earn_ratio.unwrap_or(DEFAULT_TOKEN_EARN_RATIO),
         minimum: Duration::from_secs(raw.minimum_seconds.unwrap_or(0)),
         max_balance: raw
             .max_balance_seconds
@@ -1361,7 +1383,7 @@ fn convert_warning(raw: RawWarningThreshold) -> WarningThreshold {
     }
 }
 
-fn default_warning_thresholds() -> Vec<WarningThreshold> {
+pub(crate) fn default_warning_thresholds() -> Vec<WarningThreshold> {
     vec![
         WarningThreshold {
             seconds_before: 300, // 5 minutes

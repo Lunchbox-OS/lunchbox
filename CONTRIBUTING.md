@@ -210,14 +210,14 @@ reachable as an RPC parameter), then:
 cargo run -p shepherd-wire-codegen --bin rpc-codegen
 ```
 
-That rewrites six checked-in files: `docs/rpc-schema.json`, the two method-name
-mirrors, the payload mirrors for each client —
+That rewrites every checked-in mirror: `docs/rpc-schema.json`, the two
+method-name mirrors, the payload mirrors for each client —
 `companion-android/.../WireTypes.generated.kt` and
-`shepherd-webui/src/api/wire-types.generated.ts` — and the config editor's
-mirrors of the `config.toml` schema,
-`shepherd-webui/src/config/model/config.generated.ts`. Editing any of them by
-hand is pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs`
-fails until the regenerated output is committed.
+`shepherd-webui/src/api/wire-types.generated.ts` — the config editor's mirrors
+of the `config.toml` schema, `shepherd-webui/src/config/model/config.generated.ts`,
+and the two *value* mirrors described below. Editing any of them by hand is
+pointless; the next run overwrites it, and `tests/rpc_codegen_drift.rs` fails
+until the regenerated output is committed.
 
 The last of those comes from `crates/shepherd-config/src/schema.rs` rather than
 the wire types, but goes through the same renderer: `ts_types.rs` takes a
@@ -226,6 +226,45 @@ which Rust file the banner tells you to edit. It refuses, loudly, to render a
 schema shape it does not recognise rather than emitting a plausible mirror —
 so an exotic serde attribute on either side fails codegen instead of quietly
 producing types that typecheck and decode wrongly.
+
+### Generated defaults
+
+Two of the generated files carry *values* rather than types: what a field falls
+back to when the config leaves it out, which the editor has to show so an unset
+control reads as what the daemon will actually do.
+
+| File | Answers |
+| --- | --- |
+| `kind-defaults.generated.ts` | What an entry's **kind** supplies for a field on the entry (`confirm_on_close`, `input_compat`) |
+| `field-defaults.generated.ts` | What each **field** falls back to, in three tables |
+
+The second has three tables because the daemon applies defaults two ways, and
+only one of them is visible to `schemars`:
+
+- `FIELD_DEFAULTS` and `KIND_FIELD_DEFAULTS` — serde defaults
+  (`#[serde(default = "…")]`). These reach the JSON Schema on their own, so
+  adding one needs no work beyond re-running the generator.
+- `LOAD_TIME_DEFAULTS` — `Option<T>` fields whose `None` means "fall back",
+  resolved in `Policy::from_raw` long after deserialization. `schemars` sees
+  only `"default": null` for these, so they come from
+  `crates/shepherd-config/src/load_defaults.rs`. **Adding one means adding a
+  field there too**, and its module doc explains what belongs (and what
+  deliberately does not — a percentage slider's `0`/`100` extents are not a
+  default).
+
+`load_defaults.rs` carries a test that parses a config setting none of these
+fields and asserts the advertised values are what the parser actually produces.
+That catches a call site drifting from its constant, which is how the editor and
+the daemon came to disagree in the first place. It cannot catch *changing* a
+constant — both sides read the same one — but a change flows into the generated
+TypeScript on the next codegen run, and the drift test fails until someone makes
+that run.
+
+About forty of these were spelled out in the editor by hand before this existed:
+a `?? true`, a `?? "kiosk"`, a `const DEFAULT_COOLDOWN_MIN_SESSION = 120`, a
+`placeholder="2m"`. `shepherd-webui/src/config/defaults.test.tsx` renders real
+controls with nothing set and asserts the generated value comes out, because the
+drift test can only see the file's contents, not whether any component reads it.
 
 The mirrors were hand-written once and drifted: four `ReasonCode` variants went
 missing from the companion, and a renamed `DailyOverride` field went unnoticed

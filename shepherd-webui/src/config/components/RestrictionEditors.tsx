@@ -20,6 +20,7 @@ import type {
   RawVolumeConfig,
 } from "../model/config.generated";
 import { Section } from "./Section";
+import { FIELD_DEFAULTS } from "../model/field-defaults.generated";
 
 function PercentRange({
   label,
@@ -74,6 +75,10 @@ export function VolumeEditor({ path, value }: { path: string; value: RawVolumeCo
       <Stack spacing={2}>
         <PercentRange
           label="Allowed range"
+          // Not `FIELD_DEFAULTS`: these are the extents of a percentage
+          // slider, not a fallback the daemon applies. `clamp_volume`'s
+          // matching `unwrap_or(0)` / `unwrap_or(100)` is the same thing on
+          // the Rust side, and `load_defaults.rs` says why neither is listed.
           min={value?.min_volume ?? 0}
           max={value?.max_volume ?? 100}
           onChange={(lo, hi) => {
@@ -85,7 +90,7 @@ export function VolumeEditor({ path, value }: { path: string; value: RawVolumeCo
         <FormControlLabel
           control={
             <Switch
-              checked={value?.allow_change ?? true}
+              checked={value?.allow_change ?? FIELD_DEFAULTS.RawVolumeConfig.allow_change}
               onChange={(e) => f.setField("allow_change", e.target.checked)}
             />
           }
@@ -94,7 +99,7 @@ export function VolumeEditor({ path, value }: { path: string; value: RawVolumeCo
         <FormControlLabel
           control={
             <Switch
-              checked={value?.allow_mute ?? true}
+              checked={value?.allow_mute ?? FIELD_DEFAULTS.RawVolumeConfig.allow_mute}
               onChange={(e) => f.setField("allow_mute", e.target.checked)}
             />
           }
@@ -142,7 +147,7 @@ export function BrightnessEditor({
         <FormControlLabel
           control={
             <Switch
-              checked={value?.allow_change ?? true}
+              checked={value?.allow_change ?? FIELD_DEFAULTS.RawBrightnessConfig.allow_change}
               onChange={(e) => f.setField("allow_change", e.target.checked)}
             />
           }
@@ -179,7 +184,7 @@ function AutoBrightnessEditor({
         <FormControlLabel
           control={
             <Switch
-              checked={value?.enabled ?? false}
+              checked={value?.enabled ?? FIELD_DEFAULTS.RawAutoBrightnessConfig.enabled}
               onChange={(e) => fields.setField("enabled", e.target.checked)}
             />
           }
