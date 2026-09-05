@@ -86,6 +86,75 @@ watched_grace_days = 90
         assert_eq!(policy.service.media.watched_grace_days, 90);
     }
 
+    /// The HUD's "are you sure" exists to protect unsaved work. A book has
+    /// none — the page is written on the way out — so a reading activity
+    /// closes on one tap, while everything else keeps the prompt.
+    #[test]
+    fn a_reading_activity_closes_without_confirming() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+
+[[entries]]
+id = "book"
+label = "A Book"
+kind = { type = "ebook", book = "~/Books/a.epub" }
+
+[[entries]]
+id = "game"
+label = "A Game"
+kind = { type = "process", command = "/usr/bin/true" }
+"#,
+        )
+        .unwrap();
+
+        let by_id = |id: &str| {
+            policy
+                .entries
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("entry exists")
+                .confirm_on_close
+        };
+        assert!(!by_id("book"), "a book has nothing to lose by closing");
+        assert!(by_id("game"), "everything else keeps the prompt");
+    }
+
+    /// …and an entry that states its preference is obeyed either way, which is
+    /// the whole reason the field became optional rather than kind-derived.
+    #[test]
+    fn an_explicit_confirm_on_close_overrides_the_kind_default() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+
+[[entries]]
+id = "book"
+label = "A Book"
+confirm_on_close = true
+kind = { type = "ebook", book = "~/Books/a.epub" }
+
+[[entries]]
+id = "game"
+label = "A Game"
+confirm_on_close = false
+kind = { type = "process", command = "/usr/bin/true" }
+"#,
+        )
+        .unwrap();
+
+        let by_id = |id: &str| {
+            policy
+                .entries
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("entry exists")
+                .confirm_on_close
+        };
+        assert!(by_id("book"));
+        assert!(!by_id("game"));
+    }
+
     #[test]
     fn media_cache_size_and_grace_have_defaults() {
         let policy = parse_config("config_version = 1\n").unwrap();

@@ -799,6 +799,24 @@ build wrote them to. One trap for whoever edits the restriction list: the
 `fullscreen` action must stay unrestricted, because the chrome hiding hangs off
 it.
 
+### Two defaults, changed after the first real reading session (2026-09-05)
+
+**Closing a book does not ask.** `confirm_on_close` existed as a plain
+`bool` defaulting to `true`, which is right for anything that might lose work
+and wrong for a reader: the position is written on the way out, so there is
+nothing to protect and the prompt is one extra tap between a child and the
+launcher. The field is now `Option<bool>` in the raw schema and resolved in
+`policy.rs` against a new `EntryKind::confirms_on_close_by_default()`, which
+answers `false` only for `Ebook`. An explicit setting still wins in either
+direction, and every other kind is unchanged — the resolution happens once, at
+policy load, so nothing downstream (the wire event, the HUD, the editor) had to
+learn about kinds. The editor mirrors the same rule through
+`kindDefaults.ts` so an unset switch shows the value the daemon will use.
+
+Putting the default on the kind rather than on the field is the part worth
+keeping: the next kind that has nothing to save (a photo frame, a clock) answers
+the same question in one line, and the config file stays silent about it.
+
 ### Left undone, deliberately
 
 - **The polite close is opt-in for one kind.** Extending it to plain `process`

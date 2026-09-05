@@ -671,6 +671,22 @@ impl EntryKind {
         matches!(self, EntryKind::Retroarch { reset: true, .. })
     }
 
+    /// Whether the HUD's "X" should confirm before ending this activity, when
+    /// the entry does not say either way (issue #78).
+    ///
+    /// The prompt exists because the button is easy to hit by accident and most
+    /// activities lose unsaved state when they are closed — a game mid-level, a
+    /// drawing. A reading activity has nothing to lose: the position is written
+    /// on the way out, and reopening returns to the page. So the prompt is pure
+    /// friction there, on the one activity a child is most likely to open and
+    /// close repeatedly.
+    ///
+    /// An entry that sets `confirm_on_close` explicitly always wins; this is
+    /// only what happens when it is silent.
+    pub fn confirms_on_close_by_default(&self) -> bool {
+        !matches!(self, EntryKind::Ebook { .. })
+    }
+
     /// Whether the HUD should offer page-turn buttons for this activity
     /// (issue #160).
     ///

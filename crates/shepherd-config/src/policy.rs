@@ -582,6 +582,12 @@ impl Entry {
         _global_brightness: &BrightnessPolicy,
     ) -> Self {
         let kind = convert_entry_kind(raw.kind);
+        // Resolved before `kind` is moved into the policy below: an entry that
+        // says nothing about confirming inherits its kind's answer, and a
+        // reader has nothing unsaved to protect.
+        let confirm_on_close = raw
+            .confirm_on_close
+            .unwrap_or_else(|| kind.confirms_on_close_by_default());
         let availability = raw
             .availability
             .map(convert_availability)
@@ -636,7 +642,7 @@ impl Entry {
             input_compat_options,
             requires_input,
             xwayland_native_resolution: raw.xwayland_native_resolution,
-            confirm_on_close: raw.confirm_on_close,
+            confirm_on_close,
         }
     }
 }

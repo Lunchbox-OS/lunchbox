@@ -223,10 +223,14 @@ pub struct RawEntry {
     /// activities lose unsaved state when force-closed, the HUD shows a
     /// confirmation prompt first (issue #78). Only affects the "X" button —
     /// closing via the API, time expiration, or the process exiting is
-    /// unaffected. Enabled by default; set `false` for activities that are
-    /// safe to close instantly.
-    #[serde(default = "default_true")]
-    pub confirm_on_close: bool,
+    /// unaffected.
+    ///
+    /// Absent, the default comes from the entry's kind: on for everything that
+    /// can lose work, off for `ebook`, which cannot — see
+    /// [`shepherd_api::EntryKind::confirms_on_close_by_default`]. Set it
+    /// explicitly to override that either way.
+    #[serde(default)]
+    pub confirm_on_close: Option<bool>,
 }
 
 /// Per-entry firewall configuration
@@ -1217,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_on_close_defaults_true_and_parses_false() {
+    fn confirm_on_close_is_unset_by_default_and_parses_false() {
         // Absent -> enabled by default (issue #78).
         let default_toml = r#"
             config_version = 1
@@ -1228,7 +1232,7 @@ mod tests {
             kind = { type = "process", command = "/bin/g" }
         "#;
         let config: RawConfig = toml::from_str(default_toml).unwrap();
-        assert!(config.entries[0].confirm_on_close);
+        assert_eq!(config.entries[0].confirm_on_close, None);
 
         // Explicit opt-out.
         let opt_out_toml = r#"
@@ -1241,7 +1245,7 @@ mod tests {
             confirm_on_close = false
         "#;
         let config: RawConfig = toml::from_str(opt_out_toml).unwrap();
-        assert!(!config.entries[0].confirm_on_close);
+        assert_eq!(config.entries[0].confirm_on_close, Some(false));
     }
 
     #[test]

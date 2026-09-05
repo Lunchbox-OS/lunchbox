@@ -1273,7 +1273,7 @@ mod tests {
                 tokens: None,
                 group: None,
                 xwayland_native_resolution: false,
-                confirm_on_close: true,
+                confirm_on_close: None,
             }],
         }
     }
@@ -1359,7 +1359,7 @@ mod tests {
                     tokens: None,
                     group: None,
                     xwayland_native_resolution: false,
-                    confirm_on_close: true,
+                    confirm_on_close: None,
                 },
                 RawEntry {
                     id: "game".into(),
@@ -1387,7 +1387,7 @@ mod tests {
                     tokens: None,
                     group: None,
                     xwayland_native_resolution: false,
-                    confirm_on_close: true,
+                    confirm_on_close: None,
                 },
             ],
         };

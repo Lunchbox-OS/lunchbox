@@ -293,10 +293,14 @@ export interface RawEntry {
    * activities lose unsaved state when force-closed, the HUD shows a
    * confirmation prompt first (issue #78). Only affects the "X" button —
    * closing via the API, time expiration, or the process exiting is
-   * unaffected. Enabled by default; set `false` for activities that are
-   * safe to close instantly.
+   * unaffected.
+   *
+   * Absent, the default comes from the entry's kind: on for everything that
+   * can lose work, off for `ebook`, which cannot — see
+   * [`shepherd_api::EntryKind::confirms_on_close_by_default`]. Set it
+   * explicitly to override that either way.
    */
-  confirm_on_close?: boolean;
+  confirm_on_close?: boolean | null;
   /**
    * Explicitly disabled
    */

@@ -171,6 +171,22 @@ crash or a power cut still costs the current page.
 different edition of the same name and size — an unlikely accident — inherits
 the old position; renaming it, or re-downloading a different scan, starts over.
 
+## Closing a book
+
+The HUD's close button ends most activities behind an "are you sure" prompt,
+because something unsaved may be lost. A book has nothing to lose: the page is
+written on the way out, and reopening lands back on it. So an `ebook` entry
+defaults to `confirm_on_close = false` — one tap and the book closes.
+
+That is a default of the kind, not of the field. Setting `confirm_on_close`
+explicitly on the entry always wins, in either direction:
+
+```toml
+[[entries]]
+id = "hobbit"
+confirm_on_close = true   # ask anyway
+```
+
 ## Where files live
 
 Everything the reader writes goes under the daemon's data directory, keyed by
