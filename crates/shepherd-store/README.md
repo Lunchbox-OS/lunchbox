@@ -74,13 +74,12 @@ pub trait Store: Send + Sync {
 ### Recording Session Usage
 
 ```rust
-use chrono::Local;
-
-// When a session ends
+// When a session ends. The day is the one the session *started* on, not the
+// one it ended on (issue #170) — see the engine's README for why.
 let duration = session.actual_duration();
-let today = Local::now().date_naive();
+let day = session.started_at.date_naive();
 
-store.add_usage(&entry_id, today, duration)?;
+store.add_usage(&entry_id, day, duration)?;
 ```
 
 ### Checking Quota Remaining
@@ -202,7 +201,9 @@ CREATE TABLE usage (
 
 -- Token balances (one row per gated subject). `updated_day` is the local date
 -- of the last mutation, so a non-carrying balance resets lazily at midnight
--- rather than needing a sweep job. `ratcheted` records that the balance has
+-- rather than needing a sweep job. This is a live balance, not a per-day
+-- ledger: callers pass the *current* day, never a past one, so the stamp can
+-- never move backwards over a balance written since (issue #170). `ratcheted` records that the balance has
 -- already reached `minimum_seconds`; it is cleared when the balance is spent to
 -- zero, and it expires with the balance. Only the engine knows the threshold,
 -- so the engine sets it and the store just remembers it.
