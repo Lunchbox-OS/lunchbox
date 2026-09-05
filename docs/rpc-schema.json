@@ -458,6 +458,13 @@
       }
     },
     {
+      "name": "get_hud_orientation",
+      "params": [],
+      "result": {
+        "type": "HudOrientation"
+      }
+    },
+    {
       "name": "get_display_state",
       "params": [],
       "result": {

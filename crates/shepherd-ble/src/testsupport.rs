@@ -209,6 +209,9 @@ impl ManagementService for MockSvc {
     async fn get_hud_scale(&self) -> f64 {
         1.0
     }
+    async fn get_hud_orientation(&self) -> shepherd_api::HudOrientation {
+        shepherd_api::HudOrientation::default()
+    }
     async fn get_display_state(&self) -> DisplayState {
         DisplayState {
             mode: DisplayMode::SingleInternal,

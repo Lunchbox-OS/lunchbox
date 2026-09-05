@@ -321,6 +321,16 @@ export interface RawEntry {
    */
   group?: string | null;
   /**
+   * Put the HUD on a different screen edge while this activity runs
+   * (issue #171). Absent, the activity inherits `[service.hud]`.
+   *
+   * Unlike `confirm_on_close` this has no kind-dependent default: which
+   * edge suits an activity is a property of its own UI and of the panel it
+   * runs on, not of how it is launched, so nothing is inferred from the
+   * entry kind.
+   */
+  hud_orientation?: RawHudOrientation | null;
+  /**
    * Icon reference (opaque, interpreted by shell)
    */
   icon?: string | null;
@@ -725,6 +735,36 @@ export interface RawGroup {
 }
 
 /**
+ * Global HUD settings.
+ */
+export interface RawHudConfig {
+  /**
+   * Which screen edge the HUD occupies, for every activity that does not
+   * override it. Defaults to `top`.
+   */
+  orientation?: RawHudOrientation | null;
+}
+
+/**
+ * Screen edge for the HUD (issue #171).
+ */
+export type RawHudOrientation =
+  /**
+   * A horizontal bar along the top edge (the default).
+   */
+  | "top"
+  /**
+   * A horizontal bar along the bottom edge.
+   */
+  | "bottom"
+  /**
+   * A vertical bar down the left edge: the HUD rotated a quarter turn, for
+   * hardware or activities where a side strip costs less of the screen than
+   * a top bar.
+   */
+  | "left";
+
+/**
  * Input compatibility mode
  */
 export type RawInputCompat =
@@ -1016,6 +1056,10 @@ export interface RawServiceConfig {
    * External monitor / docking behaviour (issue #87).
    */
   display?: RawDisplayConfig | null;
+  /**
+   * HUD placement (issue #171).
+   */
+  hud?: RawHudConfig | null;
   /**
    * Internet connectivity check settings
    */

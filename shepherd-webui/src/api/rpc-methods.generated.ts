@@ -15,6 +15,7 @@ import type {
   EntryView,
   GroupView,
   HealthStatus,
+  HudOrientation,
   IsoDate,
   IsoTimestamp,
   LaunchOutcome,
@@ -71,6 +72,7 @@ export type RpcMethod =
   | "toggle_auto_brightness"
   | "set_screen_power"
   | "get_hud_scale"
+  | "get_hud_orientation"
   | "get_display_state"
   | "set_display_mode"
   | "ping"
@@ -194,6 +196,7 @@ export interface RpcParamsMap {
     on: boolean;
   };
   "get_hud_scale": Record<string, never>;
+  "get_hud_orientation": Record<string, never>;
   "get_display_state": Record<string, never>;
   "set_display_mode": {
     mode: DisplayMode;
@@ -255,6 +258,7 @@ export interface RpcResultMap {
   "toggle_auto_brightness": BrightnessInfo;
   "set_screen_power": boolean;
   "get_hud_scale": number;
+  "get_hud_orientation": HudOrientation;
   "get_display_state": DisplayState;
   "set_display_mode": DisplayState;
   "ping": null;

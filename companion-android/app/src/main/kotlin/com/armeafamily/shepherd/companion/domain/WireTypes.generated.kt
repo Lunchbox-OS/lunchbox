@@ -982,6 +982,35 @@ data class HealthStatus(
 )
 
 /**
+ * Which screen edge the HUD occupies (issue #171).
+ *
+ * Configurable globally under `[service.hud]` and per entry, because the
+ * right answer depends on both the hardware (a tall panel gives up less to a
+ * side bar) and the activity (a game whose own UI lives along the top).
+ *
+ * The vertical form is "the HUD rotated 90 degrees to the left": same
+ * controls, same order, read bottom-to-top with the end-session button at the
+ * top. `Right` is deliberately not offered yet — nothing in the layout
+ * forecloses it, but no config or code path ships for it.
+ */
+@Serializable
+enum class HudOrientation {
+    /**
+     * A horizontal bar along the top edge. The default, and what every device
+     * shipped before issue #171 uses.
+     */
+    @SerialName("top") TOP,
+    /**
+     * A horizontal bar along the bottom edge.
+     */
+    @SerialName("bottom") BOTTOM,
+    /**
+     * A vertical bar down the left edge.
+     */
+    @SerialName("left") LEFT,
+}
+
+/**
  * Input compatibility mode for an activity.
  *
  * Some activities don't process raw touch or gamepad events from Wayland and

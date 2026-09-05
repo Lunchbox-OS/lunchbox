@@ -16,8 +16,8 @@ use shepherd_config::{
 };
 use shepherd_core::CoreEngine;
 use shepherd_host_api::{
-    HidpiController, HostCapabilities, MockHost, NoOpBrightnessController, NoOpDisplayController,
-    NoOpVolumeController,
+    HidpiController, HostCapabilities, HudLayoutController, MockHost, NoOpBrightnessController,
+    NoOpDisplayController, NoOpVolumeController,
 };
 use shepherd_management::{
     AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementService,
@@ -50,6 +50,27 @@ impl HidpiController for RecordingHidpi {
     }
     async fn factor(&self) -> f64 {
         1.0
+    }
+}
+
+/// Records the HUD-placement calls the service makes, so a test can assert
+/// that an activity's edge override is handed back on every path a session can
+/// end by (issue #171). Shares the compositor log with [`RecordingHidpi`] so
+/// the ordering between the two is visible too.
+struct RecordingHudLayout {
+    log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl HudLayoutController for RecordingHudLayout {
+    async fn apply(&self, _orientation: Option<shepherd_api::HudOrientation>) {
+        self.log.lock().unwrap().push("hud.apply");
+    }
+    async fn restore(&self) {
+        self.log.lock().unwrap().push("hud.restore");
+    }
+    async fn orientation(&self) -> shepherd_api::HudOrientation {
+        shepherd_api::HudOrientation::default()
     }
 }
 
@@ -90,6 +111,7 @@ fn entry(id: &str) -> Entry {
         group: None,
         xwayland_native_resolution: false,
         confirm_on_close: false,
+        hud_orientation: None,
     }
 }
 
@@ -104,6 +126,7 @@ fn test_policy() -> Policy {
         volume: VolumePolicy::unrestricted(),
         brightness: BrightnessPolicy::default(),
         auto_brightness: AutoBrightnessPolicy::default(),
+        hud_orientation: Default::default(),
     }
 }
 
@@ -119,6 +142,9 @@ fn harness() -> Harness {
     let host = Arc::new(MockHost::new());
     let hidpi_log: Arc<std::sync::Mutex<Vec<&'static str>>> = Default::default();
     let hidpi = Arc::new(RecordingHidpi {
+        log: hidpi_log.clone(),
+    });
+    let hud_layout = Arc::new(RecordingHudLayout {
         log: hidpi_log.clone(),
     });
     let engine = Arc::new(Mutex::new(CoreEngine::new(
@@ -146,6 +172,7 @@ fn harness() -> Harness {
         media_refresh_tx: None,
         shutdown_tx,
         hidpi,
+        hud_layout,
         display: Arc::new(NoOpDisplayController),
         last_audio_state: Arc::new(Mutex::new(None)),
         diagnostics: None,
@@ -315,8 +342,37 @@ async fn hidpi_is_restored_after_teardown_not_before() {
     stopping.await.unwrap();
     assert_eq!(
         h.hidpi_log.lock().unwrap().clone(),
-        vec!["hidpi.restore"],
-        "expected exactly one restore, after teardown"
+        vec!["hidpi.restore", "hud.restore"],
+        "expected exactly one restore of each, after teardown"
+    );
+    let _ = drained(&mut h.events);
+}
+
+/// An activity's HUD edge is handed back when its session ends (issue #171).
+///
+/// The HUD is one long-lived process, not something respawned per session, so
+/// an override that is never lifted is permanent: every later activity, and
+/// the launcher itself, would keep an edge that one activity asked for. This
+/// pins the apply/restore pairing on the ordinary stop path.
+#[tokio::test]
+async fn a_hud_edge_override_is_lifted_when_the_session_ends() {
+    let mut h = harness();
+
+    launch(&h.svc, "tetris").await;
+    // Unlike the scale hack, which only runs for `xwayland_native_resolution`
+    // entries, this runs on every launch: the controller compares *effective*
+    // edges and stays silent when nothing moved, so an unconditional call is
+    // both cheaper to reason about and impossible to forget.
+    assert_eq!(
+        h.hidpi_log.lock().unwrap().clone(),
+        vec!["hud.apply"],
+        "the edge must be set before the activity maps, like the scale hack"
+    );
+
+    h.svc.stop_current(StopMode::Graceful).await.unwrap();
+    assert!(
+        h.hidpi_log.lock().unwrap().contains(&"hud.restore"),
+        "the activity's edge outlived its session"
     );
     let _ = drained(&mut h.events);
 }

@@ -156,7 +156,12 @@ evdev = "0.13"
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # GTK4 UI
-gtk4 = "0.9"
+# `v4_10` unlocks `gtk_widget_get_color`, which the HUD's analog clock face
+# needs to draw itself in the colour CSS resolved for it rather than carrying a
+# second copy of the palette (issue #171). The feature only gates which
+# bindings are compiled; shepherd already requires Ubuntu 26.04 (GTK 4.18+),
+# well past the 4.10 it asks for, so it cannot raise the bar.
+gtk4 = { version = "0.9", features = ["v4_10"] }
 gtk4-layer-shell = "0.4"
 
 # HTTP API

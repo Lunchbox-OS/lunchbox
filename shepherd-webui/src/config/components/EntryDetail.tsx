@@ -19,6 +19,10 @@ import { useFields } from "../doc/useFields";
 import { entryPath, insert, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry, RawEntryKind } from "../model/config.generated";
 import { confirmsOnCloseByDefault, defaultInputCompat } from "../model/kindDefaults";
+import {
+  HUD_ORIENTATIONS,
+  VERTICAL_HUD_DESCRIPTION,
+} from "../model/hudOrientation";
 import { BrowserEditor, FirewallEditor, InternetEditor } from "./NetworkEditors";
 import { BrightnessEditor, VolumeEditor } from "./RestrictionEditors";
 import { InputCompatEditor, RequiresInputEditor } from "./InputEditors";
@@ -190,6 +194,36 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
                     For XWayland games that would otherwise render into a corner of the
                     panel.
                   </Typography>
+                  <TextField
+                    select
+                    size="small"
+                    sx={{ mt: 2 }}
+                    label="HUD edge while this runs"
+                    // Inheriting must read as inheriting rather than as a blank
+                    // box — see the matching control on the Device page.
+                    slotProps={{
+                      select: { displayEmpty: true },
+                      inputLabel: { shrink: true },
+                    }}
+                    value={entry.hud_orientation ?? ""}
+                    onChange={(e) =>
+                      e.target.value
+                        ? f.setField("hud_orientation", e.target.value)
+                        : f.unsetField("hud_orientation")
+                    }
+                  >
+                    <MenuItem value="">Use the device setting</MenuItem>
+                    {HUD_ORIENTATIONS.map((o) => (
+                      <MenuItem key={o.value} value={o.value}>
+                        {o.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+                    {VERTICAL_HUD_DESCRIPTION} Worth it for an activity whose own UI lives
+                    along the top, or one that wants every horizontal pixel. The HUD moves
+                    back to the device setting when the activity ends.
+                  </Typography>
                 </Stack>
               </Section>
             </Stack>
@@ -213,6 +247,7 @@ function hasAdvanced(entry: RawEntry): boolean {
       // sidecar its kind would otherwise run — so it counts as set.
       (entry.input_compat?.length === 0 && defaultInputCompat(entry.kind).length > 0) ||
       (entry.requires_input?.length ?? 0) > 0 ||
+      Boolean(entry.hud_orientation) ||
       entry.xwayland_native_resolution ||
       entry.confirm_on_close === false,
   );

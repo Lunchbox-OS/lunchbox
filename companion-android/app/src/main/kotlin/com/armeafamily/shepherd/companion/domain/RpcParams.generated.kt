@@ -192,6 +192,9 @@ object RpcParams {
     /** Params for `get_hud_scale`, which takes none. */
     fun getHudScale(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `get_hud_orientation`, which takes none. */
+    fun getHudOrientation(): JsonObject = JsonObject(emptyMap())
+
     /** Params for `get_display_state`, which takes none. */
     fun getDisplayState(): JsonObject = JsonObject(emptyMap())
 

@@ -429,6 +429,11 @@ headless_start() {
         XDG_SESSION_TYPE=wayland
     )
     [[ -n "$mock_time" ]] && sway_env+=("SHEPHERD_MOCK_TIME=$mock_time")
+    # Pass the HUD anchor through when the caller sets it, so the vertical HUD
+    # (issue #171) can be driven from a shell. sway.conf starts the HUD with no
+    # flags, and `env -i` in the `--user` path would drop anything not listed
+    # here.
+    [[ -n "${SHEPHERD_HUD_ANCHOR:-}" ]] && sway_env+=("SHEPHERD_HUD_ANCHOR=$SHEPHERD_HUD_ANCHOR")
 
     local pid swaysock wd
     if [[ "$user_mode" -eq 1 ]]; then

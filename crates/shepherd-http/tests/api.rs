@@ -190,12 +190,14 @@ fn test_policy() -> Policy {
             group: None,
             xwayland_native_resolution: false,
             confirm_on_close: false,
+            hud_orientation: None,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
         volume: VolumePolicy::unrestricted(),
         brightness: BrightnessPolicy::default(),
         auto_brightness: AutoBrightnessPolicy::default(),
+        hud_orientation: Default::default(),
     }
 }
 
@@ -253,6 +255,7 @@ fn make_app_with_admin_and_policy(
         media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
+        hud_layout: Arc::new(shepherd_host_api::NoOpHudLayoutController),
         display: Arc::new(shepherd_host_api::NoOpDisplayController),
         last_audio_state: Arc::new(tokio::sync::Mutex::new(None)),
         diagnostics: None,

@@ -129,6 +129,21 @@ Example (bedtime restriction):
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/shepherd-ipc/src/client.rs`.
+  - **The vertical HUD** (issue #171): export `SHEPHERD_HUD_ANCHOR=left` before
+    `dev headless`. That **pins** the bar, so it also stops the HUD following
+    shepherdd — which is what you want to look at the layout, and not what you
+    want to test the config path. `headless.sh` forwards the variable
+    explicitly so it survives the `env -i` on the `--user` path.
+
+    To exercise the *config* path instead, leave it unset and boot
+    `dev headless --config <path>` with either `[service.hud] orientation` or
+    an entry's `hud_orientation`, then launch that entry over the socket. The
+    daemon's view is readable at any time with the `get_hud_orientation` RPC,
+    and both sides log the transition (`HUD orientation changed` from
+    `shepherdd::hud_layout`, `Rebuilding the HUD` from `shepherd_hud::app`).
+    Note that a `media`-kind activity exits within a second or two in the
+    headless session, so for anything you want to screenshot mid-session use a
+    long-lived `process` entry (`command = "/usr/bin/sleep"`, `args = ["600"]`).
   - **The HUD's confirm popovers** have a permanent debug-build hook:
     export `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>` before `dev headless`
     (env propagates from the invocation into the sway-spawned HUD), then

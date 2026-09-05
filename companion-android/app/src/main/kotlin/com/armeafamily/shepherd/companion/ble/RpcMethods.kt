@@ -48,6 +48,7 @@ object RpcMethods {
     const val TOGGLE_AUTO_BRIGHTNESS: String = "toggle_auto_brightness"
     const val SET_SCREEN_POWER: String = "set_screen_power"
     const val GET_HUD_SCALE: String = "get_hud_scale"
+    const val GET_HUD_ORIENTATION: String = "get_hud_orientation"
     const val GET_DISPLAY_STATE: String = "get_display_state"
     const val SET_DISPLAY_MODE: String = "set_display_mode"
     const val PING: String = "ping"

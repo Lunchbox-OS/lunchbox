@@ -7,14 +7,14 @@ use shepherd_api::{
     AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, Diagnostic,
     DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject,
     DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
-    ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat,
-    VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    HudOrientation, ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus,
+    UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
-    BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
-    SpawnOptions, SponsorBlockSpec, VolumeController, VolumeError,
+    BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
+    LightSensor, SpawnOptions, SponsorBlockSpec, VolumeController, VolumeError,
 };
 use shepherd_store::Store;
 use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
@@ -171,6 +171,14 @@ pub trait ManagementService: Send + Sync {
     /// un-counter-scaled for the rest of the session (issue #118).
     async fn get_hud_scale(&self) -> f64;
 
+    /// The screen edge the HUD should occupy (issue #171): the running
+    /// activity's `hud_orientation` if it asked for one, else the global
+    /// `[service.hud]` setting. Fetched on every connect for the same reason
+    /// as `get_hud_scale` — `HudOrientationChanged` fires only on change, so a
+    /// HUD that was not subscribed at that instant would otherwise lay itself
+    /// out on the wrong edge for the rest of the session.
+    async fn get_hud_orientation(&self) -> HudOrientation;
+
     // Display / docking (issue #87)
     async fn get_display_state(&self) -> DisplayState;
     async fn set_display_mode(&self, mode: DisplayMode) -> DisplayState;
@@ -296,6 +304,9 @@ pub struct DefaultManagementService {
     /// operation flips this to `true`.
     pub shutdown_tx: watch::Sender<bool>,
     pub hidpi: Arc<dyn HidpiController>,
+    /// HUD placement (issue #171). A launch hands it the entry's
+    /// `hud_orientation`; a session end drops back to the global setting.
+    pub hud_layout: Arc<dyn HudLayoutController>,
     pub display: Arc<dyn DisplayController>,
     /// What [`Self::audio_watch_tick`] last observed, so the poll loop only
     /// broadcasts on a real change. `None` until the first tick establishes a
@@ -374,6 +385,7 @@ impl ManagementService for DefaultManagementService {
         let plan_confirm_on_close = plan.confirm_on_close;
         let plan_can_reset = plan.can_reset;
         let plan_can_turn_pages = plan.can_turn_pages;
+        let plan_hud_orientation = plan.hud_orientation;
 
         {
             let mut eng = self.engine.lock().await;
@@ -397,6 +409,10 @@ impl ManagementService for DefaultManagementService {
         if needs_hidpi {
             self.hidpi.apply().await;
         }
+        // Before the spawn, like the scale hack above and for the same reason:
+        // the HUD should already be on the right edge, with its exclusive zone
+        // reserved on the right side, when the activity first maps.
+        self.hud_layout.apply(plan_hud_orientation).await;
 
         match self.host.spawn(session_id.clone(), &kind, spawn_opts).await {
             Ok(handle) => {
@@ -424,8 +440,9 @@ impl ManagementService for DefaultManagementService {
             Err(e) => {
                 warn!(error = %e, "Spawn failed from management launch");
                 // Roll back the scale change so the launcher reappears
-                // with a correctly-sized HUD.
+                // with a correctly-sized HUD, and its edge with it.
                 self.hidpi.restore().await;
+                self.hud_layout.restore().await;
                 let snap = {
                     let mut eng = self.engine.lock().await;
                     eng.notify_launch_failed(None, e.to_string(), now_mono, now);
@@ -508,8 +525,9 @@ impl ManagementService for DefaultManagementService {
         };
 
         // Now that the window is down, hand the compositor back to the
-        // launcher; idempotent when no workaround was active.
+        // launcher; both are idempotent when nothing was overridden.
         self.hidpi.restore().await;
+        self.hud_layout.restore().await;
 
         let settled = {
             let mut eng = self.engine.lock().await;
@@ -599,6 +617,7 @@ impl ManagementService for DefaultManagementService {
                 warn!(error = %e, "Relaunch after reset failed");
                 // The session has no process behind it now, so it ends.
                 self.hidpi.restore().await;
+                self.hud_layout.restore().await;
                 self.finish_reset(None, now_mono, now).await;
                 Err(ManagementError::Internal(format!(
                     "Relaunch after reset failed: {e}"
@@ -1163,6 +1182,10 @@ impl ManagementService for DefaultManagementService {
 
     async fn get_hud_scale(&self) -> f64 {
         self.hidpi.factor().await
+    }
+
+    async fn get_hud_orientation(&self) -> HudOrientation {
+        self.hud_layout.orientation().await
     }
 
     // --------------------------------------------------------------- display

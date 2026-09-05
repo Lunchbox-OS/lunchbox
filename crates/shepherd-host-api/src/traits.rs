@@ -386,6 +386,48 @@ impl HidpiController for NoOpHidpiController {
     }
 }
 
+/// HUD placement controller (issue #171).
+///
+/// Owns the screen edge the HUD occupies: a global default from
+/// `[service.hud]`, which an activity can override for the life of its session
+/// with its own `hud_orientation`. Threaded into the management service the
+/// same way [`HidpiController`] is, and for the same reason — a launch is the
+/// moment the override takes effect, and a session end is the moment it lifts.
+///
+/// Two implementations ship in the workspace:
+/// - `HudLayout` in `shepherdd` — the production implementation, which
+///   broadcasts `HudOrientationChanged` when the effective edge changes.
+/// - [`NoOpHudLayoutController`] — for tests and HTTP-only contexts.
+#[async_trait]
+pub trait HudLayoutController: Send + Sync {
+    /// Apply an activity's override for the session about to start. `None`
+    /// means the activity expressed no preference, so the global setting
+    /// stands.
+    async fn apply(&self, orientation: Option<shepherd_api::HudOrientation>);
+    /// Drop any override and go back to the global setting. Idempotent, so it
+    /// is safe on every session end.
+    async fn restore(&self);
+    /// The edge currently in force, for `get_hud_orientation`.
+    ///
+    /// Exists for exactly the reason [`HidpiController::factor`] does: the
+    /// edge is otherwise only announced as a one-shot event on change, so a
+    /// HUD that started late or reconnected mid-session would lay itself out
+    /// on the wrong edge for the rest of the session with no way to notice.
+    async fn orientation(&self) -> shepherd_api::HudOrientation;
+}
+
+/// No-op [`HudLayoutController`] for tests and hosts with no HUD to place.
+pub struct NoOpHudLayoutController;
+
+#[async_trait]
+impl HudLayoutController for NoOpHudLayoutController {
+    async fn apply(&self, _orientation: Option<shepherd_api::HudOrientation>) {}
+    async fn restore(&self) {}
+    async fn orientation(&self) -> shepherd_api::HudOrientation {
+        shepherd_api::HudOrientation::default()
+    }
+}
+
 /// External-display / docking controller (issue #87).
 ///
 /// Owns the compositor's display arrangement: on boot it records the primary

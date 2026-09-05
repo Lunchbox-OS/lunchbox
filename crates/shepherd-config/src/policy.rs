@@ -7,14 +7,15 @@ use crate::internet::{
 };
 use crate::schema::{
     RawAutoBrightnessConfig, RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig,
-    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawInputCompat, RawInputCompatOptions,
-    RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawMediaMode, RawMediaQuality,
-    RawMediaSortBy, RawServiceConfig, RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
+    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawHudOrientation, RawInputCompat,
+    RawInputCompatOptions, RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawMediaMode,
+    RawMediaQuality, RawMediaSortBy, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
+    RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
-    BrowserMode, EntryKind, InputCompatMode, InputCompatOptions, InputDeviceType, InterstitialKind,
-    MediaMode, MediaQuality, MediaSortBy, WarningSeverity, WarningThreshold,
+    BrowserMode, EntryKind, HudOrientation, InputCompatMode, InputCompatOptions, InputDeviceType,
+    InterstitialKind, MediaMode, MediaQuality, MediaSortBy, WarningSeverity, WarningThreshold,
 };
 use shepherd_util::{
     DaysOfWeek, EntryId, GroupId, LimitSubject, TimeWindow, WallClock, default_data_dir,
@@ -87,6 +88,11 @@ pub struct Policy {
 
     /// Automatic (ambient-light) brightness settings (device-global)
     pub auto_brightness: AutoBrightnessPolicy,
+
+    /// Which screen edge the HUD occupies by default (issue #171). An entry
+    /// with its own `hud_orientation` overrides this for the life of its
+    /// session.
+    pub hud_orientation: HudOrientation,
 }
 
 impl Policy {
@@ -142,6 +148,14 @@ impl Policy {
             .map(convert_auto_brightness_config)
             .unwrap_or_default();
 
+        let hud_orientation = raw
+            .service
+            .hud
+            .as_ref()
+            .and_then(|h| h.orientation)
+            .map(convert_hud_orientation)
+            .unwrap_or_default();
+
         let groups: Vec<Group> = raw
             .groups
             .iter()
@@ -188,6 +202,7 @@ impl Policy {
             volume: global_volume,
             brightness: global_brightness,
             auto_brightness,
+            hud_orientation,
         }
     }
 
@@ -620,6 +635,10 @@ pub struct Entry {
     /// activity (issue #78). Enabled by default; only affects the "X" button,
     /// not API/expiration/process-exit closes.
     pub confirm_on_close: bool,
+
+    /// Put the HUD on a different screen edge while this activity runs
+    /// (issue #171). `None` inherits the global `[service.hud]` setting.
+    pub hud_orientation: Option<HudOrientation>,
 }
 
 impl Entry {
@@ -703,7 +722,17 @@ impl Entry {
             requires_input,
             xwayland_native_resolution: raw.xwayland_native_resolution,
             confirm_on_close,
+            hud_orientation: raw.hud_orientation.map(convert_hud_orientation),
         }
+    }
+}
+
+/// Map the config spelling of a HUD edge onto the wire type (issue #171).
+fn convert_hud_orientation(raw: RawHudOrientation) -> HudOrientation {
+    match raw {
+        RawHudOrientation::Top => HudOrientation::Top,
+        RawHudOrientation::Bottom => HudOrientation::Bottom,
+        RawHudOrientation::Left => HudOrientation::Left,
     }
 }
 

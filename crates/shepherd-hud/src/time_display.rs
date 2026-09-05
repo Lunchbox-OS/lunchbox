@@ -5,7 +5,7 @@
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 mod imp {
     use super::*;
@@ -16,6 +16,10 @@ mod imp {
         pub label: RefCell<Option<gtk4::Label>>,
         pub total_secs: RefCell<Option<u64>>,
         pub remaining_secs: RefCell<Option<u64>>,
+        /// Render at most three characters (`90m`, `1h`) instead of
+        /// `HH:MM:SS`. Set for the vertical HUD, where the bar is 48px wide
+        /// and a clock-style readout does not fit (issue #171).
+        pub compact: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -72,6 +76,20 @@ impl TimeDisplay {
         }
     }
 
+    /// Lay the icon out above the readout rather than beside it, and switch
+    /// to the three-character duration format. Both are what the vertical HUD
+    /// needs, and neither makes sense without the other, so they are one call.
+    pub fn set_compact(&self, compact: bool) {
+        let imp = self.imp();
+        imp.compact.set(compact);
+        self.set_orientation(if compact {
+            gtk4::Orientation::Vertical
+        } else {
+            gtk4::Orientation::Horizontal
+        });
+        self.update_display();
+    }
+
     /// Set the time limit in seconds
     pub fn set_time_limit(&self, total_secs: Option<u64>) {
         let imp = self.imp();
@@ -93,10 +111,12 @@ impl TimeDisplay {
         if let Some(label) = imp.label.borrow().as_ref() {
             let remaining = *imp.remaining_secs.borrow();
 
-            let text = if let Some(secs) = remaining {
-                format_duration(secs)
-            } else {
-                "--:--".to_string()
+            let compact = imp.compact.get();
+            let text = match remaining {
+                Some(secs) if compact => format_compact(secs),
+                Some(secs) => format_duration(secs),
+                None if compact => "--".to_string(),
+                None => "--:--".to_string(),
             };
 
             label.set_text(&text);
@@ -135,9 +155,71 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
+/// Format a duration in at most three characters, for the vertical HUD
+/// (issue #171): one unit and one number, never more than two digits of it.
+///
+/// The 48px-wide bar has room for about three characters at the bar's font
+/// size, so the format is chosen to fit that budget rather than to be precise:
+/// seconds below a minute, then whole minutes for as long as they fit two
+/// digits, then whole hours.
+///
+/// The cost is the 100-119 minute band, which reads `1h` and so hides up to
+/// 59 minutes. That is deliberate and was chosen over letting the readout grow
+/// to `119m`: a bar this narrow cannot afford a fourth character, and the
+/// child has the hour to notice the number changing. The horizontal HUD keeps
+/// its precise `H:MM:SS` and is unaffected.
+fn format_compact(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 100 * 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_format_never_exceeds_three_characters() {
+        // Whatever else changes, the width budget is the point of this format:
+        // a fourth character does not fit the 48px bar. Walk a full day.
+        for secs in (0..=24 * 3600).step_by(7) {
+            let text = format_compact(secs);
+            assert!(
+                text.chars().count() <= 3,
+                "format_compact({secs}) = {text:?} is wider than the bar"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_format_switches_units_at_the_agreed_cutoffs() {
+        assert_eq!(format_compact(0), "0s");
+        assert_eq!(format_compact(59), "59s");
+        // A minute is the first value shown in minutes, not "60s".
+        assert_eq!(format_compact(60), "1m");
+        assert_eq!(format_compact(59 * 60), "59m");
+        // Past an hour the readout stays in minutes rather than rounding to
+        // "1h" -- the deciding case for the format (issue #171).
+        assert_eq!(format_compact(90 * 60), "90m");
+        assert_eq!(format_compact(99 * 60 + 59), "99m");
+        // Minutes stop where the second digit does.
+        assert_eq!(format_compact(100 * 60), "1h");
+        assert_eq!(format_compact(119 * 60), "1h");
+        assert_eq!(format_compact(120 * 60), "2h");
+        assert_eq!(format_compact(9 * 3600), "9h");
+    }
+
+    #[test]
+    fn compact_format_rounds_down_so_the_readout_never_overpromises() {
+        // A child who sees "2m" must not find the session ending in 61
+        // seconds' time; truncation is the safe direction.
+        assert_eq!(format_compact(119), "1m");
+        assert_eq!(format_compact(2 * 3600 - 1), "1h");
+    }
 
     #[test]
     fn test_format_duration() {

@@ -16,6 +16,10 @@ Always-visible HUD overlay for Shepherd.
 - **Reset** - Restart an activity in place, for kinds that offer it (`type = "retroarch"`)
 - **Page turning** - `‹` / `›` for reading activities (`type = "ebook"`), which synthesize `Page Up` / `Page Down` through `/dev/uinput`. They exist because a touchscreen cannot turn a page any other way: readers bind paging to keys, a D-pad or a wheel, and have no swipe gesture. The HUD is where they belong — it is on the overlay layer, above the activity, and it is shepherd's own surface rather than something a reader's own restrictions could take away. See `src/page_turn.rs` and `docs/ebooks.md`.
 
+  On the vertical bar these become Page Up / Page Down arrows stacked at the
+  bottom, since sideways `‹`/`›` would be meaningless in a column — and they
+  name the keys they actually synthesize.
+
   A reading session is the one case where the bar runs out of room, so while those buttons are shown the volume and brightness percentages are hidden and their sliders shorten. The activity name ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
 - **Power controls** - Suspend, shutdown, restart
 - **Warning display** - Visual and audio alerts for time warnings
@@ -63,8 +67,8 @@ shepherd-hud --anchor top --height 48
 |--------|---------|-------------|
 | `-s, --socket` | `$XDG_RUNTIME_DIR/shepherdd/shepherdd.sock` | Service socket path |
 | `-l, --log-level` | `info` | Log verbosity |
-| `-a, --anchor` | `top` | Screen edge (`top` or `bottom`) |
-| `--height` | `48` | HUD bar height in pixels |
+| `-a, --anchor` | *(unset)* | **Pin** the HUD to `top`, `bottom`, or `left`, ignoring config. Also readable from `SHEPHERD_HUD_ANCHOR`, which is how the headless dev session drives it. Unset — how `sway.conf` starts the HUD — the edge comes from shepherdd instead (see below). |
+| `--height` | `48` | HUD bar thickness in pixels — its height when horizontal, its width when it runs down the side |
 
 ## Display Elements
 
@@ -140,6 +144,114 @@ The HUD is designed to be:
 - **High contrast** - Readable over any background
 - **Touch-friendly** - Large touch targets
 - **Minimal** - Icons over text where possible
+
+## Where the edge comes from (issue #171)
+
+The HUD does not read `config.toml`; shepherdd does. So the edge arrives over
+IPC, by the same two-part mechanism as the scale factor:
+
+- `HudOrientationChanged` is broadcast when the **effective** edge moves — an
+  activity with its own `hud_orientation` starts, or one ends and the global
+  `[service.hud]` setting takes over.
+- `get_hud_orientation` is asked on **every connect**, because that event fires
+  only on change. A HUD that started late or reconnected mid-session would
+  otherwise sit on the wrong edge, with its exclusive zone reserved on the
+  wrong side of the activity, for the rest of the session. This is the same
+  hole issue #118 found for the scale factor.
+
+Passing `--anchor` **pins** the bar and makes the HUD ignore both. That is what
+makes `SHEPHERD_HUD_ANCHOR=left` useful in development, and a footgun on a
+device — `sway.conf` deliberately passes no flags.
+
+Unpinned, the bar starts at `top` and follows shepherdd from there, so a device
+configured for a side bar shows a top bar for the fraction of a second before
+the first connect. That is the deliberate trade: a HUD that waits for the
+daemon before showing itself is a HUD a child cannot end a session from when
+the daemon is slow or down.
+
+### Changing edge at runtime
+
+An orientation change **rebuilds the bar** rather than restyling it, for the
+reason issue #118 documents: GTK validates a widget's style when it is
+*mapped* and leaves it alone while hidden, so anything currently hidden — the
+confirm prompts, the warning — would keep the previous layout's sizes and paint
+at them the next time it is shown. A fresh widget has no cached style.
+
+Two consequences worth knowing before touching `build_hud_content`:
+
+- **Every timer it registers is generation-guarded.** The rebuild bumps a
+  shared counter; each timer compares it to the generation it was built as and
+  returns `ControlFlow::Break` when they differ. Without that, each rebuild
+  would leave another 500ms timer driving widgets that are no longer on screen.
+  Anything new that registers a timer needs the same guard.
+- **`HudContent::teardown` exists because popovers are not box children.** A
+  `GtkPopover` attached with `set_parent` must be unparented explicitly, and
+  the confirm prompts are themselves rebuilt on every scale change — so the
+  teardown reads the *current* popover through the `Rc<RefCell<..>>` rather
+  than one captured at build time.
+
+Changing anchors on an already-mapped layer surface does not move it; the
+surface has to be rebuilt with an unmap → reconfigure → remap, the same dance
+the output switch uses.
+
+## The vertical HUD (`--anchor left`, issue #171)
+
+On hardware or activities where a strip down the side costs less of the screen
+than a bar across the top, the HUD runs vertically. The specification is "the
+HUD rotated 90 degrees to the left", and the code takes that literally: same
+widgets, same update loop, same stylesheet, with the flow axis swapped and the
+order reversed.
+
+The reversal is the whole of the layout difference and lives in one place —
+`HudOrientation::flow_append`, which prepends instead of appending. Rotating
+the bar to the left maps its **right** end to the **top** of the screen, so the
+end-session button that sits at the far right lands at the top, and the
+page-turn buttons that sit at the far left land at the bottom. Nothing else in
+the construction code is reordered, so the two layouts cannot drift apart.
+
+A group *within* the bar (a mute button and its slider) follows the bar's axis
+but is **not** reversed: an icon labels the control it sits above.
+
+Three things are genuinely different rather than rotated, because rotation
+alone would not work:
+
+- **The activity title** (`rotated_label.rs`). GTK4 removed
+  `gtk_label_set_angle`, so this is a `GtkWidget` subclass that wraps a real
+  `GtkLabel`, swaps the axes in `measure`, and hands the child a
+  `translate(0, height) · rotate(-90°)` in `size_allocate`. Keeping a real
+  label is what preserves the CSS-driven font size *and* the `EllipsizeMode`
+  that stops a long book title pushing the end-session button off the bar.
+- **The wall clock** (`analog_clock.rs`). `HH:MM` is wider than the bar, and a
+  clock read sideways is worse than none, so it becomes a round face — the one
+  form of a clock as wide as it is tall. First `GtkDrawingArea` in the repo.
+- **The warning banner** (`WarningBanner` in `app.rs`). Warning text is
+  operator-authored prose of no fixed length, a 48px bar cannot hold a sentence
+  laid out horizontally, and GTK clips rather than wraps. So the bar keeps the
+  icon — which carries the severity colour and the critical blink on its own —
+  and the message drops out of it as a popover.
+
+Two further notes:
+
+- **Both sliders are `set_inverted`.** GTK puts a vertical range's *minimum* at
+  the top, so a slider left at the default turns the volume **down** as the
+  child drags it **up**.
+- **Axis-specific CSS has to be swapped, not inherited.** Rules written for a
+  horizontal bar name one axis — 80px of slider length, a 4px-thick trough,
+  `padding: 0 4px` separating a control group. Left alone on a vertical bar
+  they are demanded *across* the bar, and the surface measured **124px** wide
+  instead of the intended 48. The `.hud-vertical` rules in `CSS_TEMPLATE` turn
+  each of them; anything axis-specific added later needs the same treatment.
+
+### The bar is thicker than its exclusive zone, in both layouts
+
+`--height 48` sets the layer-shell **exclusive zone**. The surface itself is
+sized to its content, and the content is thicker than that: an
+`.indicator-button` is 32px plus its own 4px padding plus the bar's 6px, so
+both bars actually render **54px** and overhang their reserved zone by 6px.
+That is pre-existing behaviour, not something the vertical layout introduced —
+the note on `.page-button` about a taller child pushing the window past the
+exclusive zone is the same effect. The vertical bar was deliberately brought to
+the same 54px rather than to a nominal 48.
 
 ## HUD scale factor (the XWayland DPI hack)
 

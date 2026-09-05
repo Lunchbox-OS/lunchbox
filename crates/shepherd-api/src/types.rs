@@ -1359,6 +1359,37 @@ impl VideoMode {
     }
 }
 
+/// Which screen edge the HUD occupies (issue #171).
+///
+/// Configurable globally under `[service.hud]` and per entry, because the
+/// right answer depends on both the hardware (a tall panel gives up less to a
+/// side bar) and the activity (a game whose own UI lives along the top).
+///
+/// The vertical form is "the HUD rotated 90 degrees to the left": same
+/// controls, same order, read bottom-to-top with the end-session button at the
+/// top. `Right` is deliberately not offered yet — nothing in the layout
+/// forecloses it, but no config or code path ships for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HudOrientation {
+    /// A horizontal bar along the top edge. The default, and what every device
+    /// shipped before issue #171 uses.
+    #[default]
+    Top,
+    /// A horizontal bar along the bottom edge.
+    Bottom,
+    /// A vertical bar down the left edge.
+    Left,
+}
+
+impl HudOrientation {
+    /// Whether the bar runs down the screen rather than across it.
+    pub fn is_vertical(self) -> bool {
+        matches!(self, Self::Left)
+    }
+}
+
 /// How the kiosk drives displays when an external monitor is docked (issue #87).
 ///
 /// Exactly one logical output is ever active in every variant, so the
