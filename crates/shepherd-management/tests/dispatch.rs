@@ -20,8 +20,8 @@ use shepherd_core::CoreEngine;
 use shepherd_host_api::{
     BrightnessCapabilities, BrightnessController, BrightnessResult, BrightnessStatus,
     HostCapabilities, LightSensor, LightSensorCapabilities, LightSensorResult, MockHost,
-    NoOpDisplayController, NoOpHidpiController, VolumeCapabilities, VolumeController, VolumeResult,
-    VolumeStatus,
+    NoOpDisplayController, NoOpHidpiController, NoOpHudLayoutController, VolumeCapabilities,
+    VolumeController, VolumeResult, VolumeStatus,
 };
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
@@ -296,12 +296,14 @@ fn test_policy() -> Policy {
             group: None,
             xwayland_native_resolution: false,
             confirm_on_close: false,
+            hud_orientation: None,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
         volume: VolumePolicy::unrestricted(),
         brightness: BrightnessPolicy::default(),
         auto_brightness: AutoBrightnessPolicy::default(),
+        hud_orientation: Default::default(),
     }
 }
 
@@ -369,6 +371,7 @@ fn make_svc_full(
         media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
+        hud_layout: Arc::new(NoOpHudLayoutController),
         display: Arc::new(NoOpDisplayController),
         last_audio_state: Arc::new(Mutex::new(None)),
         diagnostics: None,

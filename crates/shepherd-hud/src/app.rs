@@ -4,13 +4,14 @@
 //! Uses gtk4-layer-shell to create an always-visible overlay.
 
 use crate::battery::BatteryStatus;
-use crate::orientation::HudOrientation;
+use crate::orientation::HudOrientationExt;
 use crate::rotated_label::RotatedLabel;
 use crate::state::{SessionState, SharedState};
 use crate::time_display::TimeDisplay;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use shepherd_api::HudOrientation;
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use std::path::PathBuf;
@@ -154,6 +155,36 @@ fn apply_slider_lengths(
             slider.set_height_request(base(full));
         } else {
             slider.set_width_request(base(full));
+        }
+    }
+}
+
+/// One built bar, plus the handles a rebuild needs to take it down again.
+///
+/// A `GtkPopover` attached with `set_parent` is not owned by its parent the
+/// way a box child is: GTK requires it to be unparented explicitly, and warns
+/// when a widget is finalized with one still attached. The confirm prompts are
+/// additionally rebuilt in place on every scale change, so a rebuild has to
+/// read whichever popover is current rather than one captured at build time —
+/// hence the `Rc<RefCell<..>>` handles rather than the popovers themselves.
+struct HudContent {
+    container: gtk4::Box,
+    confirm_prompt: std::rc::Rc<std::cell::RefCell<ConfirmPrompt>>,
+    reset_prompt: std::rc::Rc<std::cell::RefCell<ConfirmPrompt>>,
+    warning_popover: Option<gtk4::Popover>,
+}
+
+impl HudContent {
+    /// Dismiss and detach everything that would otherwise outlive the bar.
+    fn teardown(&self) {
+        for prompt in [&self.confirm_prompt, &self.reset_prompt] {
+            let prompt = prompt.borrow();
+            prompt.popover.popdown();
+            prompt.popover.unparent();
+        }
+        if let Some(popover) = &self.warning_popover {
+            popover.popdown();
+            popover.unparent();
         }
     }
 }
@@ -364,12 +395,19 @@ fn build_title_label(orientation: HudOrientation) -> TitleLabel {
 pub struct HudApp {
     app: gtk4::Application,
     socket_path: PathBuf,
-    orientation: HudOrientation,
+    /// An edge pinned on the command line, which wins over config and makes
+    /// the HUD ignore `HudOrientationChanged`. `None` — how `sway.conf` starts
+    /// it — follows shepherdd instead.
+    pinned_orientation: Option<HudOrientation>,
     height: i32,
 }
 
 impl HudApp {
-    pub fn new(socket_path: PathBuf, orientation: HudOrientation, height: i32) -> Self {
+    pub fn new(
+        socket_path: PathBuf,
+        pinned_orientation: Option<HudOrientation>,
+        height: i32,
+    ) -> Self {
         let app = gtk4::Application::builder()
             .application_id("org.shepherd.hud")
             .build();
@@ -377,19 +415,19 @@ impl HudApp {
         Self {
             app,
             socket_path,
-            orientation,
+            pinned_orientation,
             height,
         }
     }
 
     pub fn run(&self) -> i32 {
         let socket_path = self.socket_path.clone();
-        let orientation = self.orientation;
+        let pinned_orientation = self.pinned_orientation;
         let height = self.height;
 
         self.app.connect_activate(move |app| {
             let state = SharedState::new();
-            let window = build_hud_window(app, orientation, height, state.clone());
+            let window = build_hud_window(app, pinned_orientation, height, state.clone());
 
             // Start the IPC event listener
             let state_clone = state.clone();
@@ -419,10 +457,17 @@ impl HudApp {
 
 fn build_hud_window(
     app: &gtk4::Application,
-    orientation: HudOrientation,
+    pinned_orientation: Option<HudOrientation>,
     thickness: i32,
     state: SharedState,
 ) -> gtk4::ApplicationWindow {
+    // Unpinned, the bar starts where every device before issue #171 had it and
+    // follows shepherdd from there. On a device configured for a side bar that
+    // means a brief top bar at boot, until the first connect seeds the real
+    // edge — which is the right trade: a HUD that waits for the daemon before
+    // showing itself is a HUD a child cannot end a session from if the daemon
+    // is slow or down.
+    let orientation = pinned_orientation.unwrap_or_default();
     // `thickness` is the bar's short axis: its height when horizontal, its
     // width when it runs down the side. `apply_scale` sets the corresponding
     // default size and exclusive zone, so nothing is requested here.
@@ -448,44 +493,114 @@ fn build_hud_window(
     window.set_margin(Edge::Left, 0);
     window.set_margin(Edge::Right, 0);
 
-    // Anchor to three edges: the one the bar sits on plus the two it spans,
-    // which is what makes the surface stretch the full length of that edge and
-    // gives the compositor an exclusive zone to reserve on the fourth.
-    match orientation {
-        HudOrientation::Bottom => {
-            window.set_anchor(Edge::Bottom, true);
-            window.set_anchor(Edge::Left, true);
-            window.set_anchor(Edge::Right, true);
-        }
-        HudOrientation::Left => {
-            window.set_anchor(Edge::Left, true);
-            window.set_anchor(Edge::Top, true);
-            window.set_anchor(Edge::Bottom, true);
-        }
-        HudOrientation::Top => {
-            window.set_anchor(Edge::Top, true);
-            window.set_anchor(Edge::Left, true);
-            window.set_anchor(Edge::Right, true);
-        }
-    }
+    apply_anchors(&window, orientation);
 
     // Build the HUD content. apply_scale (below) is responsible for the
     // dynamic dimensions (default height, exclusive zone, font/padding) so
     // they stay in sync with the current UI scale factor.
-    let content = build_hud_content(
+    let generation = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+    let content = std::rc::Rc::new(std::cell::RefCell::new(build_hud_content(
         state.clone(),
         css_provider.clone(),
         window.clone(),
         thickness,
         orientation,
-    );
-    window.set_child(Some(&content));
+        generation.clone(),
+    )));
+    window.set_child(Some(&content.borrow().container));
 
     // Populate the stylesheet and set initial dimensions at scale 1.0
     // before the window maps.
     apply_scale(&css_provider, &window, thickness, 1.0, orientation);
 
+    // Follow shepherdd's idea of which edge the HUD belongs on (issue #171).
+    // The global `[service.hud]` setting applies while the launcher is up; an
+    // activity with its own `hud_orientation` moves the bar for the life of
+    // its session and it moves back when the session ends.
+    let applied_orientation = std::rc::Rc::new(std::cell::Cell::new(orientation));
+    let follow_daemon = pinned_orientation.is_none();
+    let window_for_orientation = window.clone();
+    let css_for_orientation = css_provider.clone();
+    let state_for_orientation = state.clone();
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        if !follow_daemon {
+            return glib::ControlFlow::Continue;
+        }
+        let desired = state_for_orientation.orientation();
+        if desired == applied_orientation.get() {
+            return glib::ControlFlow::Continue;
+        }
+        tracing::info!(
+            before = ?applied_orientation.get(),
+            after = ?desired,
+            "Rebuilding the HUD for a new orientation"
+        );
+        applied_orientation.set(desired);
+
+        // The bar is rebuilt rather than restyled, for the reason issue #118
+        // documents: GTK validates a widget's style when it is *mapped* and
+        // leaves it alone while hidden, so anything currently hidden — the
+        // confirm prompts, the warning — would keep the previous layout's
+        // sizes and paint at them the next time it is shown. A fresh widget
+        // has no cached style. Rebuilding also spares every widget below from
+        // having to know how to change its own axis.
+        //
+        // Bumping the generation first is what retires the old bar's 500ms
+        // update timer: it sees a generation that is no longer its own on its
+        // next tick and stops, so two timers never drive the HUD at once.
+        generation.set(generation.get() + 1);
+        content.borrow().teardown();
+
+        let rebuilt = build_hud_content(
+            state_for_orientation.clone(),
+            css_for_orientation.clone(),
+            window_for_orientation.clone(),
+            thickness,
+            desired,
+            generation.clone(),
+        );
+        window_for_orientation.set_child(Some(&rebuilt.container));
+        *content.borrow_mut() = rebuilt;
+
+        // Changing anchors on a surface the compositor has already mapped does
+        // not move it; the layer surface has to be built again. Same unmap →
+        // reconfigure → remap dance the output switch uses, and for the same
+        // reason (see the `set_monitor` call in the update timer).
+        let visible = window_for_orientation.is_visible();
+        window_for_orientation.set_visible(false);
+        apply_anchors(&window_for_orientation, desired);
+        apply_scale(
+            &css_for_orientation,
+            &window_for_orientation,
+            thickness,
+            state_for_orientation.scale_factor(),
+            desired,
+        );
+        window_for_orientation.set_visible(visible);
+
+        glib::ControlFlow::Continue
+    });
+
     window
+}
+
+/// Anchor the layer surface to the edge the bar sits on plus the two it spans.
+///
+/// Spanning is what makes the surface stretch the full length of its edge and
+/// gives the compositor an exclusive zone to reserve on the fourth. Every
+/// anchor is set explicitly, including the ones being turned *off*, because
+/// this is called again on an orientation change and a stale anchor left
+/// behind would pin the bar to two opposite edges at once.
+fn apply_anchors(window: &gtk4::ApplicationWindow, orientation: HudOrientation) {
+    let (top, bottom, left, right) = match orientation {
+        HudOrientation::Top => (true, false, true, true),
+        HudOrientation::Bottom => (false, true, true, true),
+        HudOrientation::Left => (true, true, true, false),
+    };
+    window.set_anchor(Edge::Top, top);
+    window.set_anchor(Edge::Bottom, bottom);
+    window.set_anchor(Edge::Left, left);
+    window.set_anchor(Edge::Right, right);
 }
 
 fn build_hud_content(
@@ -494,7 +609,8 @@ fn build_hud_content(
     window: gtk4::ApplicationWindow,
     base_thickness: i32,
     orientation: HudOrientation,
-) -> gtk4::Box {
+    generation: std::rc::Rc<std::cell::Cell<u64>>,
+) -> HudContent {
     // Every box below runs along the bar, and every `flow_append` puts its
     // child at the far end of it — which for a bar rotated to the left means
     // the top of the screen. See `HudOrientation::flow_append`.
@@ -1062,6 +1178,12 @@ fn build_hud_content(
         popover.popup();
     });
 
+    // The generation this bar was built as. An orientation change bumps the
+    // shared counter and builds a new bar; every timer below notices on its
+    // next tick and retires, so a replaced bar's widgets stop being driven and
+    // two bars never fight over the same window.
+    let my_generation = generation.get();
+
     // Debug-build test hook for the headless dev harness, which has no way to
     // click a GTK button (the synthetic pointer does not fire `clicked`; see the
     // `headless-dev` skill). With `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
@@ -1083,7 +1205,14 @@ fn build_hud_content(
         let reset_button_for_debug = reset_button.clone();
         let prompt_for_debug = confirm_prompt.clone();
         let reset_prompt_for_debug = reset_prompt.clone();
+        let generation_for_debug = generation.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
+            // Retire with the bar this hook was built for, like the update
+            // timer above; otherwise an orientation change would leave one
+            // trigger watcher per bar ever built, all firing at once.
+            if generation_for_debug.get() != my_generation {
+                return glib::ControlFlow::Break;
+            }
             if up.exists() {
                 let _ = std::fs::remove_file(&up);
                 action_button_for_debug.emit_clicked();
@@ -1188,6 +1317,10 @@ fn build_hud_content(
     let window_for_timer = window.clone();
 
     glib::timeout_add_local(Duration::from_millis(500), move || {
+        if generation.get() != my_generation {
+            return glib::ControlFlow::Break;
+        }
+
         // Re-apply scaling if shepherdd has changed it since the last tick.
         // The HUD bar height, exclusive zone, and stylesheet all derive from
         // this factor.
@@ -1564,7 +1697,12 @@ fn build_hud_content(
         glib::ControlFlow::Continue
     });
 
-    container
+    HudContent {
+        container,
+        confirm_prompt,
+        reset_prompt,
+        warning_popover: warning.popover.clone(),
+    }
 }
 
 /// Find the GDK monitor whose connector name matches `connector` (e.g.
@@ -2320,6 +2458,21 @@ fn run_event_loop(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()
                             ));
                         }
                         Err(e) => tracing::warn!("Failed to get initial HUD scale: {}", e),
+                    }
+
+                    // Seed the screen edge for exactly the same reason
+                    // (issue #171). `HudOrientationChanged` fires only when
+                    // the effective edge moves — when an activity with its own
+                    // `hud_orientation` starts, and again when it ends — so a
+                    // HUD that connected in between would lay itself out on
+                    // the wrong edge, with its exclusive zone reserved on the
+                    // wrong side of the activity, for the rest of the session.
+                    match client.get_hud_orientation().await {
+                        Ok(orientation) => {
+                            tracing::debug!(?orientation, "Seeded HUD orientation");
+                            state.set_orientation(orientation);
+                        }
+                        Err(e) => tracing::warn!("Failed to get initial HUD orientation: {}", e),
                     }
 
                     // Seed the display arrangement so the mirror/external toggle

@@ -33,12 +33,19 @@ struct Args {
     #[arg(short, long, default_value = "info")]
     log_level: String,
 
-    /// Anchor position (top, bottom, left)
+    /// Pin the HUD to a screen edge (top, bottom, left), ignoring config
     ///
     /// `left` gives the vertical HUD (issue #171): the same bar rotated a
     /// quarter turn, down the left edge of the screen.
-    #[arg(short, long, env = "SHEPHERD_HUD_ANCHOR", default_value = "top")]
-    anchor: String,
+    ///
+    /// **Absent — which is how `sway.conf` starts the HUD — the edge comes
+    /// from shepherdd**, which resolves `[service.hud]` against the running
+    /// activity's own `hud_orientation` and pushes changes as they happen.
+    /// Passing this pins the bar and makes the HUD ignore those, which is what
+    /// makes it useful for development (`SHEPHERD_HUD_ANCHOR=left`) and a
+    /// footgun on a device.
+    #[arg(short, long, env = "SHEPHERD_HUD_ANCHOR")]
+    anchor: Option<String>,
 
     /// Thickness of the HUD bar in pixels — its height when the bar is
     /// horizontal, its width when it runs down the side.
@@ -62,8 +69,8 @@ fn main() -> Result<()> {
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
 
     // Run GTK application
-    let orientation = orientation::HudOrientation::parse(&args.anchor);
-    let application = app::HudApp::new(socket_path, orientation, args.height);
+    let pinned = args.anchor.as_deref().map(orientation::parse_anchor);
+    let application = app::HudApp::new(socket_path, pinned, args.height);
     let exit_code = application.run();
 
     std::process::exit(exit_code);

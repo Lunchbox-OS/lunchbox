@@ -237,6 +237,18 @@ enabled = true
                                         # removed. Default:
                                         # <data_dir>/.factory-reset-ble.
 
+# HUD placement (issue #171). "top" (the default) and "bottom" give the
+# horizontal bar; "left" gives the vertical one -- the same HUD rotated a
+# quarter turn down the left edge, for a tall panel or any device where a side
+# strip costs less of the screen than a top bar.
+#
+# This is the device-wide default. An individual activity can override it with
+# `hud_orientation` on its entry (see the example further down), and the HUD
+# moves back to this edge when that activity ends.
+#
+# [service.hud]
+# orientation = "left"
+
 # Default warning thresholds
 [[service.default_warnings]]
 seconds_before = 300
@@ -668,6 +680,30 @@ always = true
 # id = "example-safe-to-close"
 # label = "Example (no close confirmation)"
 # confirm_on_close = false
+#
+# [entries.kind]
+# type = "process"
+# command = "/usr/bin/example"
+
+# `hud_orientation` puts the HUD on a different screen edge while this activity
+# runs (issue #171). Accepts "top", "bottom" or "left"; left is the vertical
+# HUD -- the same bar rotated a quarter turn, with the end-session button at
+# the top, the sliders vertical, the activity name read bottom-to-top and the
+# wall clock as an analog face.
+#
+# Use it for an activity whose own UI lives along the top of the screen, or one
+# that wants every horizontal pixel it can get. Left unset, the activity uses
+# the device-wide `[service.hud] orientation` (default "top"). Unlike
+# `confirm_on_close` this has no per-kind default: which edge suits an activity
+# depends on its own layout and on the panel, not on how it is launched.
+#
+# The HUD moves when the activity starts and moves back when it ends, so the
+# launcher is always on the device's configured edge.
+#
+# [[entries]]
+# id = "example-wide-game"
+# label = "Example (side HUD)"
+# hud_orientation = "left"
 #
 # [entries.kind]
 # type = "process"

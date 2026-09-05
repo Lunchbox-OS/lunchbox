@@ -1130,6 +1130,7 @@ impl CoreEngine {
             confirm_on_close: entry.confirm_on_close,
             can_reset: entry.kind.supports_reset(),
             can_turn_pages: entry.kind.supports_page_turn(),
+            hud_orientation: entry.hud_orientation,
         };
 
         if let Some(max_dur) = max_duration {
@@ -1936,12 +1937,14 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             default_warnings: vec![],
             default_max_run: Some(Duration::from_secs(3600)),
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         }
     }
 
@@ -2228,6 +2231,7 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             service: Default::default(),
             default_warnings: vec![],
@@ -2235,6 +2239,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2328,6 +2333,7 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             service: Default::default(),
             default_warnings: vec![],
@@ -2335,6 +2341,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2436,6 +2443,7 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             service: Default::default(),
             default_warnings: vec![],
@@ -2443,6 +2451,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2520,12 +2529,14 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2626,12 +2637,14 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2715,12 +2728,14 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2815,12 +2830,14 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: true,
+                hud_orientation: None,
             }],
             default_warnings: vec![],
             default_max_run: None,
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         };
 
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -2920,6 +2937,7 @@ mod tests {
             group: None,
             xwayland_native_resolution: false,
             confirm_on_close: true,
+            hud_orientation: None,
         }
     }
 
@@ -2939,6 +2957,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         }
     }
 
@@ -3229,6 +3248,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         }
     }
 
@@ -3361,6 +3381,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         }
     }
 
@@ -4312,6 +4333,7 @@ mod tests {
             volume: Default::default(),
             brightness: Default::default(),
             auto_brightness: Default::default(),
+            hud_orientation: Default::default(),
         }
     }
 

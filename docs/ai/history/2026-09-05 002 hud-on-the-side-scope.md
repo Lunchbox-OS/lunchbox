@@ -238,3 +238,70 @@ refreshes every widget from `SharedState`.
   same corner.
 * **The analog clock replaces the digital one** in vertical mode rather than
   sitting alongside it; the digital wall clock is unchanged horizontally.
+
+
+---
+
+# Implementation notes (2026-09-05)
+
+Built in two commits. What the plan got right, and the three places it was
+wrong:
+
+## The phasing held, except for phase 1
+
+Phase 1 was "refactor `build_hud_content` so construction and the update timer
+can be re-run", and it was expected to be the expensive part — a 600-line
+function with ~40 clones threaded into one closure. **It was not needed.** The
+timer is registered *inside* `build_hud_content`, so re-running the function
+re-registers it; all a rebuild needs is for the *old* timer to stop. A shared
+generation counter does that in five lines: the rebuild bumps it, and each
+timer compares it to the generation it was built as and returns
+`ControlFlow::Break`. The 40 clones stayed exactly where they were.
+
+That is worth remembering as a general shape: when a builder owns its own
+update loop, "rebuild" is cheaper than "make the update loop re-targetable".
+
+## Three things the investigation did not predict
+
+1. **Axis-specific CSS was the real sizing bug.** The plan noted that new
+   dimensions must go through `scale_px_literals`. What it missed is that
+   *existing* rules name an axis — `min-width: 80px` on a slider, `min-height:
+   4px` on its trough, `padding: 0 4px` separating a control group. On a
+   vertical bar all three are demanded *across* the bar, and the surface
+   measured **124px** wide instead of 48. The fix is a `.hud-vertical` block
+   that turns each of them.
+2. **The bar was already thicker than its exclusive zone.** `--height 48` sets
+   the layer-shell zone; the surface is sized to its content, which is 54px
+   (a 32px `.indicator-button` plus its 4px padding plus the bar's 6px). So the
+   horizontal bar has always overhung its reserved zone by 6px. The vertical
+   bar was brought to the same 54 rather than to a nominal 48 — parity with
+   what ships, not with what the flag says.
+3. **`gtk_widget_get_color` is feature-gated.** The drawn clock face takes its
+   colour from CSS, which needs `v4_10` on the `gtk4` crate. Enabling it is
+   safe (shepherd requires Ubuntu 26.04, GTK 4.18+) but it is a workspace-wide
+   dependency change, not a local one.
+
+## What the plan got right
+
+* The `can_turn_pages` route was exactly the template for the per-entry field.
+* The `HudScaleChanged` + `get_hud_scale` pairing was the right model for the
+  wire protocol, and for the same reason (#118): the event fires only on
+  change, so a HUD that connected late needs to be able to ask.
+* `align_popover_to_button` did need redoing, and the warning popover made it
+  two popovers rather than one — they now share the helper.
+* The #118 hidden-widget trap is why the bar is rebuilt rather than restyled.
+
+## Verified end to end in the headless session
+
+Layout, exclusive zone, inverted sliders, the analog face reading a mocked
+2:37, a live session's sideways "Big Buck Bunny" and "60m", the end-session
+prompt dropping to the right, a real "5 minutes remaining" warning popover, and
+the full config round trip: a `hud_orientation = "left"` entry flipping the bar
+on launch (`Rebuilding the HUD ... before=Top after=Left`) and flipping it back
+on stop.
+
+## Not built
+
+The web editor got the per-entry control; **the global `[service.hud]` setting
+has no editor control yet** and must be typed into `config.toml`. It is
+documented in `config.example.toml` and validated like everything else.

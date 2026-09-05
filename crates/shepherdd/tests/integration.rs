@@ -49,6 +49,7 @@ fn make_test_entry(id: &str) -> Entry {
         group: None,
         xwayland_native_resolution: false,
         confirm_on_close: true,
+        hud_orientation: None,
     }
 }
 
@@ -103,12 +104,14 @@ fn make_test_policy() -> Policy {
             group: None,
             xwayland_native_resolution: false,
             confirm_on_close: true,
+            hud_orientation: None,
         }],
         default_warnings: vec![],
         default_max_run: Some(Duration::from_secs(3600)),
         volume: Default::default(),
         brightness: Default::default(),
         auto_brightness: Default::default(),
+        hud_orientation: Default::default(),
     }
 }
 
@@ -394,6 +397,7 @@ fn test_reload_policy_emits_event() {
         volume: Default::default(),
         brightness: Default::default(),
         auto_brightness: Default::default(),
+        hud_orientation: Default::default(),
     };
 
     let event = engine.reload_policy(new_policy);
@@ -428,6 +432,7 @@ fn test_reload_policy_updates_entry_list() {
         volume: Default::default(),
         brightness: Default::default(),
         auto_brightness: Default::default(),
+        hud_orientation: Default::default(),
     };
     engine.reload_policy(new_policy);
 
@@ -471,6 +476,7 @@ fn test_reload_policy_preserves_active_session() {
         volume: Default::default(),
         brightness: Default::default(),
         auto_brightness: Default::default(),
+        hud_orientation: Default::default(),
     };
     engine.reload_policy(new_policy);
 

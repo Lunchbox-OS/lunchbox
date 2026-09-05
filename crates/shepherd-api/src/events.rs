@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::types::default_confirm_on_close;
 use crate::{
-    API_VERSION, AudioOutput, ServiceStateSnapshot, SessionEndReason, VolumeRestrictions,
-    WarningSeverity,
+    API_VERSION, AudioOutput, HudOrientation, ServiceStateSnapshot, SessionEndReason,
+    VolumeRestrictions, WarningSeverity,
 };
 
 /// Event envelope
@@ -118,6 +118,16 @@ pub enum EventPayload {
     /// is the captured pre-launch output scale, and on entry exit it
     /// returns to 1.0. Clients that don't care can ignore it.
     HudScaleChanged { factor: f64 },
+
+    /// The screen edge the HUD should occupy has changed (issue #171).
+    ///
+    /// Emitted when an activity whose `hud_orientation` differs from the
+    /// global one starts, and again when it ends and the global setting takes
+    /// over. Like `HudScaleChanged` this fires only on *change*, so a shell
+    /// that connected late or reconnected mid-session must seed itself with
+    /// `get_hud_orientation` rather than assume the default (the reconnect
+    /// hole issue #118 opened for the scale factor).
+    HudOrientationChanged { orientation: HudOrientation },
 
     /// Internet connectivity check changed. `target` matches the
     /// `InternetStatusView::target` field in `ServiceStateSnapshot`.

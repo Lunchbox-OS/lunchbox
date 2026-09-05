@@ -20,8 +20,9 @@ use shepherd_ble::{BleServer, BleServerConfig};
 use shepherd_config::load_config;
 use shepherd_core::{CoreEngine, CoreEvent};
 use shepherd_host_api::{
-    BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent, LightSensor,
-    NoOpDisplayController, StopMode as HostStopMode, VolumeController,
+    BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
+    HudLayoutController, LightSensor, NoOpDisplayController, StopMode as HostStopMode,
+    VolumeController,
 };
 use shepherd_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxVolumeController,
@@ -56,6 +57,7 @@ mod diagnostics;
 mod display;
 mod display_watch;
 mod hidpi;
+mod hud_layout;
 mod input_devices;
 mod internet;
 mod media;
@@ -64,6 +66,7 @@ mod system_events;
 
 use display::{DisplayManager, WlMirrorLauncher};
 use hidpi::XwaylandHidpi;
+use hud_layout::HudLayout;
 
 /// How often to re-read the PipeWire audio topology (issue #124).
 ///
@@ -790,6 +793,15 @@ impl Service {
             display_manager.clone(),
         ));
 
+        // HUD placement (issue #171). Same shape and the same reasons as the
+        // hidpi manager above: it holds both subscriber channels so it can
+        // announce a change of edge to IPC and SSE alike, and the global
+        // setting it falls back to is fixed at load time.
+        let hud_layout = {
+            let global = engine.lock().await.policy().hud_orientation;
+            Arc::new(HudLayout::new(global, ipc_ref.clone(), event_tx.clone()))
+        };
+
         // Start management transports (HTTP and/or BLE). Both speak the
         // same shepherd_management::ManagementService, so the service is
         // constructed once and shared.
@@ -867,6 +879,7 @@ impl Service {
                 media_refresh_tx: Some(media_refresh_tx),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
+                hud_layout: hud_layout.clone() as Arc<dyn HudLayoutController>,
                 display: display_svc.clone(),
                 last_audio_state: Arc::new(tokio::sync::Mutex::new(None)),
                 diagnostics: Some(
@@ -1191,7 +1204,7 @@ impl Service {
                     };
 
                     for event in events {
-                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, &hidpi, event, now_mono, now).await;
+                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, &hidpi, &hud_layout, event, now_mono, now).await;
                     }
                 }
 
@@ -1214,7 +1227,7 @@ impl Service {
 
                 // Host events (process exit)
                 Some(host_event) = host_events.recv() => {
-                    Self::handle_host_event(&engine, &ipc_ref, &event_tx, &hidpi, host_event).await;
+                    Self::handle_host_event(&engine, &ipc_ref, &event_tx, &hidpi, &hud_layout, host_event).await;
                 }
 
                 // Resumed from suspend - reconcile the running session with the
@@ -1236,7 +1249,7 @@ impl Service {
                     Self::broadcast(&ipc_ref, &event_tx, Event::new(EventPayload::StateChanged(state)));
 
                     for event in events {
-                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, &hidpi, event, now_mono, now).await;
+                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, &hidpi, &hud_layout, event, now_mono, now).await;
                     }
                 }
 
@@ -1288,9 +1301,11 @@ impl Service {
         }
 
         // Restore sway output scales if the XWayland HiDPI workaround was
-        // active for the session we just stopped. host.logout() below tears
-        // down sway anyway, but this keeps us tidy if logout fails.
+        // active for the session we just stopped, and the HUD's edge with
+        // them. host.logout() below tears down sway anyway, but this keeps us
+        // tidy if logout fails.
         hidpi.restore().await;
+        hud_layout.restore().await;
 
         // Stop preloaded Steam (if any) after active sessions are terminated
         host.stop_steam_preload();
@@ -1459,6 +1474,7 @@ impl Service {
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         hidpi: &Arc<XwaylandHidpi>,
+        hud_layout: &Arc<HudLayout>,
         event: CoreEvent,
         _now_mono: MonotonicInstant,
         _now: chrono::DateTime<chrono::Local>,
@@ -1565,8 +1581,10 @@ impl Service {
                 );
 
                 // Restore the compositor scale if an XWayland HiDPI workaround
-                // was in effect (no-op otherwise).
+                // was in effect, and the HUD's edge if the activity moved it
+                // (both no-ops otherwise).
                 hidpi.restore().await;
+                hud_layout.restore().await;
 
                 // Broadcast state change
                 let state = {
@@ -1613,6 +1631,7 @@ impl Service {
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         hidpi: &Arc<XwaylandHidpi>,
+        hud_layout: &Arc<HudLayout>,
         event: HostEvent,
     ) {
         match event {
@@ -1667,8 +1686,10 @@ impl Service {
                     );
 
                     // Restore the compositor scale (and HUD factor) if an
-                    // XWayland HiDPI workaround was in effect for this session.
+                    // XWayland HiDPI workaround was in effect for this session,
+                    // and the HUD's edge if the activity moved it.
                     hidpi.restore().await;
+                    hud_layout.restore().await;
 
                     // Broadcast state change
                     let state = {
@@ -1737,6 +1758,7 @@ impl Service {
                         }),
                     );
                     hidpi.restore().await;
+                    hud_layout.restore().await;
                     let state = {
                         let engine = engine.lock().await;
                         engine.get_state()

@@ -1274,6 +1274,7 @@ mod tests {
                 group: None,
                 xwayland_native_resolution: false,
                 confirm_on_close: None,
+                hud_orientation: None,
             }],
         }
     }
@@ -1360,6 +1361,7 @@ mod tests {
                     group: None,
                     xwayland_native_resolution: false,
                     confirm_on_close: None,
+                    hud_orientation: None,
                 },
                 RawEntry {
                     id: "game".into(),
@@ -1388,6 +1390,7 @@ mod tests {
                     group: None,
                     xwayland_native_resolution: false,
                     confirm_on_close: None,
+                    hud_orientation: None,
                 },
             ],
         };

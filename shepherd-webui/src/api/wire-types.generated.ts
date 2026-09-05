@@ -957,6 +957,20 @@ export type EventPayload =
       factor: number;
     }
   /**
+   * The screen edge the HUD should occupy has changed (issue #171).
+   *
+   * Emitted when an activity whose `hud_orientation` differs from the
+   * global one starts, and again when it ends and the global setting takes
+   * over. Like `HudScaleChanged` this fires only on *change*, so a shell
+   * that connected late or reconnected mid-session must seed itself with
+   * `get_hud_orientation` rather than assume the default (the reconnect
+   * hole issue #118 opened for the scale factor).
+   */
+  | {
+      type: "hud_orientation_changed";
+      orientation: HudOrientation;
+    }
+  /**
    * Internet connectivity check changed. `target` matches the
    * `InternetStatusView::target` field in `ServiceStateSnapshot`.
    */
@@ -1074,6 +1088,33 @@ export interface HealthStatus {
   ready: boolean;
   store_ok: boolean;
 }
+
+/**
+ * Which screen edge the HUD occupies (issue #171).
+ *
+ * Configurable globally under `[service.hud]` and per entry, because the
+ * right answer depends on both the hardware (a tall panel gives up less to a
+ * side bar) and the activity (a game whose own UI lives along the top).
+ *
+ * The vertical form is "the HUD rotated 90 degrees to the left": same
+ * controls, same order, read bottom-to-top with the end-session button at the
+ * top. `Right` is deliberately not offered yet — nothing in the layout
+ * forecloses it, but no config or code path ships for it.
+ */
+export type HudOrientation =
+  /**
+   * A horizontal bar along the top edge. The default, and what every device
+   * shipped before issue #171 uses.
+   */
+  | "top"
+  /**
+   * A horizontal bar along the bottom edge.
+   */
+  | "bottom"
+  /**
+   * A vertical bar down the left edge.
+   */
+  | "left";
 
 /**
  * Input compatibility mode for an activity.

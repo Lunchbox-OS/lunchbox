@@ -4,7 +4,7 @@
 
 use shepherd_api::{
     AudioOutput, BrightnessInfo, BrightnessRestrictions, DisplayState, Event, EventPayload,
-    InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
+    HudOrientation, InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
 };
 use shepherd_util::{EntryId, SessionId};
 use std::sync::Arc;
@@ -151,6 +151,13 @@ pub struct SharedState {
     /// `EventPayload::HudScaleChanged`.
     scale_tx: Arc<watch::Sender<f64>>,
     scale_rx: watch::Receiver<f64>,
+    /// Which screen edge the HUD should occupy (issue #171). Follows the
+    /// global `[service.hud]` setting except while an activity with its own
+    /// `hud_orientation` is running. Like the scale factor this only ever
+    /// arrives on *change*, so the event loop also seeds it from
+    /// `get_hud_orientation` on every connect.
+    orientation_tx: Arc<watch::Sender<HudOrientation>>,
+    orientation_rx: watch::Receiver<HudOrientation>,
     /// Latest known status of each configured internet connectivity check.
     /// Empty when no checks are configured; in that case the HUD hides the
     /// indicator. Order matches the order in `ServiceStateSnapshot`.
@@ -176,6 +183,7 @@ impl SharedState {
         let (volume_tx, volume_rx) = watch::channel(None);
         let (brightness_tx, brightness_rx) = watch::channel(None);
         let (scale_tx, scale_rx) = watch::channel(1.0_f64);
+        let (orientation_tx, orientation_rx) = watch::channel(HudOrientation::default());
         let (internet_tx, internet_rx) = watch::channel(Vec::new());
         let (suspended_tx, suspended_rx) = watch::channel(false);
         let (display_tx, display_rx) = watch::channel(None);
@@ -188,6 +196,8 @@ impl SharedState {
             brightness_tx: Arc::new(brightness_tx),
             brightness_rx,
             scale_tx: Arc::new(scale_tx),
+            orientation_tx: Arc::new(orientation_tx),
+            orientation_rx,
             scale_rx,
             internet_tx: Arc::new(internet_tx),
             internet_rx,
@@ -223,6 +233,17 @@ impl SharedState {
     /// Current UI scale factor (1.0 = unmodified).
     pub fn scale_factor(&self) -> f64 {
         *self.scale_rx.borrow()
+    }
+
+    /// The screen edge the HUD should currently occupy.
+    pub fn orientation(&self) -> HudOrientation {
+        *self.orientation_rx.borrow()
+    }
+
+    /// Record a new HUD edge. Also used by the event loop to seed the value on
+    /// connect, which is why it is not confined to the event match below.
+    pub fn set_orientation(&self, orientation: HudOrientation) {
+        let _ = self.orientation_tx.send(orientation);
     }
 
     /// Current internet connectivity check status, in the order reported by
@@ -540,6 +561,10 @@ impl SharedState {
                     1.0
                 };
                 let _ = self.scale_tx.send(clamped);
+            }
+
+            EventPayload::HudOrientationChanged { orientation } => {
+                self.set_orientation(*orientation);
             }
 
             EventPayload::SystemSuspending => {

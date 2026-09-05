@@ -128,6 +128,36 @@ pub struct RawServiceConfig {
     /// Background media prefetch (issue #127).
     #[serde(default)]
     pub media: Option<RawMediaServiceConfig>,
+
+    /// HUD placement (issue #171).
+    #[serde(default)]
+    pub hud: Option<RawHudConfig>,
+}
+
+/// Global HUD settings.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RawHudConfig {
+    /// Which screen edge the HUD occupies, for every activity that does not
+    /// override it. Defaults to `top`.
+    #[serde(default)]
+    pub orientation: Option<RawHudOrientation>,
+}
+
+/// Screen edge for the HUD (issue #171).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RawHudOrientation {
+    /// A horizontal bar along the top edge (the default).
+    Top,
+    /// A horizontal bar along the bottom edge.
+    Bottom,
+    /// A vertical bar down the left edge: the HUD rotated a quarter turn, for
+    /// hardware or activities where a side strip costs less of the screen than
+    /// a top bar.
+    Left,
 }
 
 /// Raw entry definition
@@ -245,6 +275,16 @@ pub struct RawEntry {
     /// explicitly to override that either way.
     #[serde(default)]
     pub confirm_on_close: Option<bool>,
+
+    /// Put the HUD on a different screen edge while this activity runs
+    /// (issue #171). Absent, the activity inherits `[service.hud]`.
+    ///
+    /// Unlike `confirm_on_close` this has no kind-dependent default: which
+    /// edge suits an activity is a property of its own UI and of the panel it
+    /// runs on, not of how it is launched, so nothing is inferred from the
+    /// entry kind.
+    #[serde(default)]
+    pub hud_orientation: Option<RawHudOrientation>,
 }
 
 /// Per-entry firewall configuration

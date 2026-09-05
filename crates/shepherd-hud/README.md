@@ -67,7 +67,7 @@ shepherd-hud --anchor top --height 48
 |--------|---------|-------------|
 | `-s, --socket` | `$XDG_RUNTIME_DIR/shepherdd/shepherdd.sock` | Service socket path |
 | `-l, --log-level` | `info` | Log verbosity |
-| `-a, --anchor` | `top` | Screen edge (`top`, `bottom`, or `left`). Also readable from `SHEPHERD_HUD_ANCHOR`, which is how the headless dev session drives it. |
+| `-a, --anchor` | *(unset)* | **Pin** the HUD to `top`, `bottom`, or `left`, ignoring config. Also readable from `SHEPHERD_HUD_ANCHOR`, which is how the headless dev session drives it. Unset — how `sway.conf` starts the HUD — the edge comes from shepherdd instead (see below). |
 | `--height` | `48` | HUD bar thickness in pixels — its height when horizontal, its width when it runs down the side |
 
 ## Display Elements
@@ -144,6 +144,55 @@ The HUD is designed to be:
 - **High contrast** - Readable over any background
 - **Touch-friendly** - Large touch targets
 - **Minimal** - Icons over text where possible
+
+## Where the edge comes from (issue #171)
+
+The HUD does not read `config.toml`; shepherdd does. So the edge arrives over
+IPC, by the same two-part mechanism as the scale factor:
+
+- `HudOrientationChanged` is broadcast when the **effective** edge moves — an
+  activity with its own `hud_orientation` starts, or one ends and the global
+  `[service.hud]` setting takes over.
+- `get_hud_orientation` is asked on **every connect**, because that event fires
+  only on change. A HUD that started late or reconnected mid-session would
+  otherwise sit on the wrong edge, with its exclusive zone reserved on the
+  wrong side of the activity, for the rest of the session. This is the same
+  hole issue #118 found for the scale factor.
+
+Passing `--anchor` **pins** the bar and makes the HUD ignore both. That is what
+makes `SHEPHERD_HUD_ANCHOR=left` useful in development, and a footgun on a
+device — `sway.conf` deliberately passes no flags.
+
+Unpinned, the bar starts at `top` and follows shepherdd from there, so a device
+configured for a side bar shows a top bar for the fraction of a second before
+the first connect. That is the deliberate trade: a HUD that waits for the
+daemon before showing itself is a HUD a child cannot end a session from when
+the daemon is slow or down.
+
+### Changing edge at runtime
+
+An orientation change **rebuilds the bar** rather than restyling it, for the
+reason issue #118 documents: GTK validates a widget's style when it is
+*mapped* and leaves it alone while hidden, so anything currently hidden — the
+confirm prompts, the warning — would keep the previous layout's sizes and paint
+at them the next time it is shown. A fresh widget has no cached style.
+
+Two consequences worth knowing before touching `build_hud_content`:
+
+- **Every timer it registers is generation-guarded.** The rebuild bumps a
+  shared counter; each timer compares it to the generation it was built as and
+  returns `ControlFlow::Break` when they differ. Without that, each rebuild
+  would leave another 500ms timer driving widgets that are no longer on screen.
+  Anything new that registers a timer needs the same guard.
+- **`HudContent::teardown` exists because popovers are not box children.** A
+  `GtkPopover` attached with `set_parent` must be unparented explicitly, and
+  the confirm prompts are themselves rebuilt on every scale change — so the
+  teardown reads the *current* popover through the `Rc<RefCell<..>>` rather
+  than one captured at build time.
+
+Changing anchors on an already-mapped layer surface does not move it; the
+surface has to be rebuilt with an unmap → reconfigure → remap, the same dance
+the output switch uses.
 
 ## The vertical HUD (`--anchor left`, issue #171)
 

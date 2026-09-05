@@ -159,8 +159,8 @@ impl SharedState {
             EventPayload::BrightnessChanged { .. } => {
                 // Brightness events are handled by HUD
             }
-            EventPayload::HudScaleChanged { .. } => {
-                // HUD-only event; ignored by the launcher.
+            EventPayload::HudScaleChanged { .. } | EventPayload::HudOrientationChanged { .. } => {
+                // HUD-only events; ignored by the launcher.
             }
             EventPayload::InternetStatusChanged { .. } => {
                 // The launcher receives entry availability updates via

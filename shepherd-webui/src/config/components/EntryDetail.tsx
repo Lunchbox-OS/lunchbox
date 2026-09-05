@@ -190,6 +190,29 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
                     For XWayland games that would otherwise render into a corner of the
                     panel.
                   </Typography>
+                  <TextField
+                    select
+                    size="small"
+                    sx={{ mt: 2 }}
+                    label="HUD edge while this runs"
+                    value={entry.hud_orientation ?? ""}
+                    onChange={(e) =>
+                      e.target.value
+                        ? f.setField("hud_orientation", e.target.value)
+                        : f.unsetField("hud_orientation")
+                    }
+                  >
+                    <MenuItem value="">Use the device setting</MenuItem>
+                    <MenuItem value="top">Top</MenuItem>
+                    <MenuItem value="bottom">Bottom</MenuItem>
+                    <MenuItem value="left">Left (vertical)</MenuItem>
+                  </TextField>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+                    The vertical HUD is the same bar rotated a quarter turn down the left
+                    edge. Worth it for an activity whose own UI lives along the top, or one
+                    that wants every horizontal pixel. The HUD moves back when the activity
+                    ends.
+                  </Typography>
                 </Stack>
               </Section>
             </Stack>
@@ -213,6 +236,7 @@ function hasAdvanced(entry: RawEntry): boolean {
       // sidecar its kind would otherwise run — so it counts as set.
       (entry.input_compat?.length === 0 && defaultInputCompat(entry.kind).length > 0) ||
       (entry.requires_input?.length ?? 0) > 0 ||
+      Boolean(entry.hud_orientation) ||
       entry.xwayland_native_resolution ||
       entry.confirm_on_close === false,
   );

@@ -253,6 +253,15 @@ impl IpcClient {
         self.call("get_hud_scale", Value::Null).await
     }
 
+    /// The screen edge the HUD should occupy (issue #171). Fetched on every
+    /// connect for the same reason as `get_hud_scale`:
+    /// `HudOrientationChanged` is only broadcast when it changes, so a HUD
+    /// that started late or reconnected mid-session has no other way to learn
+    /// that the running activity moved it.
+    pub async fn get_hud_orientation(&mut self) -> IpcResult<shepherd_api::HudOrientation> {
+        self.call("get_hud_orientation", Value::Null).await
+    }
+
     pub async fn get_display_state(&mut self) -> IpcResult<DisplayState> {
         self.call("get_display_state", Value::Null).await
     }

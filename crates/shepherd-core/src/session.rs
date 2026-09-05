@@ -27,6 +27,9 @@ pub struct SessionPlan {
     /// [`shepherd_api::EntryKind::supports_page_turn`]. Derived the same way,
     /// and for the same reason.
     pub can_turn_pages: bool,
+    /// The screen edge this activity wants the HUD on, if it asked for one
+    /// (issue #171). `None` leaves the global `[service.hud]` setting alone.
+    pub hud_orientation: Option<shepherd_api::HudOrientation>,
 }
 
 impl SessionPlan {
@@ -371,6 +374,7 @@ mod tests {
             ],
             confirm_on_close: true,
             can_reset: false,
+            hud_orientation: None,
             can_turn_pages: false,
         }
     }
@@ -422,6 +426,7 @@ mod tests {
             }],
             confirm_on_close: true,
             can_reset: false,
+            hud_orientation: None,
             can_turn_pages: false,
         };
 
