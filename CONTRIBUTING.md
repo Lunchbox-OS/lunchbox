@@ -539,6 +539,76 @@ sudo apt install --no-install-recommends fdroidserver default-jdk-headless
 ./scripts/shepherd package fdroid --debug-keys    # --debug-keys: local debug-signed APKs
 ```
 
+### Cross-compiling for arm64 (aarch64)
+
+`--arch` takes a Debian architecture name and applies to both the build and the
+package:
+
+```sh
+./scripts/shepherd deps install cross --arch arm64   # one-time; ~1.5-2.5 GB
+./scripts/shepherd build --arch arm64                # target/aarch64-unknown-linux-gnu/
+./scripts/shepherd package deb --arch arm64          # dist/pkg/..._arm64.deb
+```
+
+`deps install cross` installs the cross toolchain, the target architecture's
+half of `deps/build.pkgs` (Ubuntu's multiarch makes it co-installable with the
+host's own), and rustc's std for the derived triple. It tells dpkg about the
+architecture and, only if the configured mirror does not already serve it, adds
+an entry for Ubuntu's ports mirror — many mirrors carry every architecture in
+one tree, so that is decided by probing rather than assumed.
+
+An `--arch` naming the **host's own** architecture builds natively, into the
+usual `target/{debug,release}`, so it is a no-op rather than a second target
+directory. `build --target <triple>` forces the triple path when you want it.
+
+Two things not to do:
+
+- **Do not export `CARGO_BUILD_TARGET`.** It beats
+  `crates/shepherd-firewall-bpf/.cargo/config.toml` and makes the eBPF program
+  build for your triple instead of `bpfel-unknown-none`. `shepherd build`
+  passes `--target` on the command line for this reason, and
+  `shepherd-firewall-helper`'s build script strips the variable.
+- **Do not treat a cross build as tested.** It buys no coverage at all: nothing
+  in `cargo test`, `shepherd-e2e`, the firewall BPF suites or the headless
+  session runs on the target architecture. The BPF path is the most exposed,
+  because the verifier runs on the *target* kernel — see issue #151.
+
+### Running the suites natively on arm64
+
+Because of that last point, correctness on arm64 is covered by a native
+aarch64 Ubuntu 26.04 machine rather than by the cross build. Any aarch64 host
+will do — a VM on an Apple-silicon Mac is what this project uses — and it needs
+no special setup beyond the usual:
+
+```sh
+./scripts/shepherd deps install dev
+cargo test --workspace --all-targets
+cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
+./scripts/shepherd dev headless && ./scripts/shepherd dev shot && ./scripts/shepherd dev stop
+```
+
+Set `SHEPHERD_REQUIRE_PEER_CGROUP=1` for the e2e run, so a kernel too old for
+the socket peer check fails rather than skips (issue #144).
+
+The firewall suites need **root**, and self-skip without it — reporting `ok` in
+0.00s, which reads exactly like a pass. Run them the way `ci.yml` does, with
+`SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` to turn "not applicable here" into a
+failure:
+
+```sh
+sudo -E env "PATH=$PATH" SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+    cargo test -p shepherd-e2e --test firewall_cgroup -- \
+        --include-ignored --test-threads=1 --nocapture
+```
+
+If `sudo` asks for a password despite a `NOPASSWD` rule, check the *order*:
+`sudo -l` applies the **last** matching rule, and Ubuntu's `/etc/sudoers` ends
+with `@includedir /etc/sudoers.d`, so a NOPASSWD rule must live in a file there
+to beat the `%sudo` group rule.
+
+Results from the first such run are in
+[`docs/ai/history/2026-09-04 002`](./docs/ai/history/).
+
 ### Testing and linting
 
 Run the test suite:
