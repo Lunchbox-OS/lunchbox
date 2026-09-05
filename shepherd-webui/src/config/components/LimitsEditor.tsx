@@ -16,6 +16,9 @@ import { DurationSlider, type InheritedValue } from "./DurationSlider";
 /** The daemon's own fallback when nothing sets it (`DEFAULT_COOLDOWN_MIN_SESSION`). */
 const DEFAULT_COOLDOWN_MIN_SESSION = 120;
 
+/** Likewise for the save-progress grace (`DEFAULT_SAVE_GRACE`, issue #155). */
+const DEFAULT_SAVE_GRACE = 120;
+
 interface Props {
   subject: Subject;
   limits: RawLimits | null | undefined;
@@ -23,6 +26,8 @@ interface Props {
   serviceMaxRun?: number | null;
   /** `service.cooldown_min_session_seconds`, when set. */
   serviceCooldownGrace?: number | null;
+  /** `service.save_grace_seconds`, when set. */
+  serviceSaveGrace?: number | null;
   /** The group's limits, for an entry that belongs to one. */
   groupLimits?: RawLimits | null;
   groupLabel?: string;
@@ -33,6 +38,7 @@ export function LimitsEditor({
   limits,
   serviceMaxRun,
   serviceCooldownGrace,
+  serviceSaveGrace,
   groupLimits,
   groupLabel,
 }: Props) {
@@ -57,6 +63,20 @@ export function LimitsEditor({
       label: `${groupLabel ?? "Category"} shared quota`,
       seconds: groupLimits.daily_quota_seconds,
     });
+
+  // Unlike the budgets above, this one really cascades service -> group ->
+  // entry (`policy.rs`): one session has one answer, so a category's value is
+  // what its members fall back to rather than a second limit they also meet.
+  const inheritedSaveGrace: InheritedValue[] = [];
+  if (groupLimits?.save_grace_seconds != null)
+    inheritedSaveGrace.push({
+      label: `${groupLabel ?? "Category"} default`,
+      seconds: groupLimits.save_grace_seconds,
+    });
+  inheritedSaveGrace.push({
+    label: serviceSaveGrace != null ? "Service default" : "Daemon default",
+    seconds: serviceSaveGrace ?? DEFAULT_SAVE_GRACE,
+  });
 
   const inheritedGrace: InheritedValue[] = [
     {
@@ -111,6 +131,16 @@ export function LimitsEditor({
           helperText="A session shorter than this leaves the cooldown alone, so an activity that crashes on launch does not lock anyone out."
         />
       )}
+
+      <DurationSlider
+        label="Time to save when the schedule closes"
+        value={limits?.save_grace_seconds ?? null}
+        onChange={update("save_grace_seconds")}
+        onCommit={endGesture}
+        inherited={inheritedSaveGrace}
+        unlimitedLabel="Close immediately"
+        helperText="If the device wakes from sleep after this activity's hours have passed, how long it stays open — with a warning — so nothing in progress is lost."
+      />
 
       {!limits && (
         <Typography variant="caption" color="text.secondary">

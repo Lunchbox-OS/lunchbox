@@ -23,6 +23,7 @@ socket_path = "/run/shepherdd/shepherdd.sock"
 data_dir = "/var/lib/shepherdd"
 default_max_run_seconds = 1800  # 30 minutes default
 cooldown_min_session_seconds = 120  # sessions shorter than this skip the cooldown
+save_grace_seconds = 120  # time to save when a resume lands after the hours
 
 # Internet connectivity check (optional)
 [service.internet]
@@ -177,6 +178,7 @@ max_run_seconds = 1800        # Max duration per session
 daily_quota_seconds = 7200    # Total daily limit
 cooldown_seconds = 600        # Wait time between sessions
 cooldown_min_session_seconds = 120  # sessions shorter than this skip the cooldown
+save_grace_seconds = 120      # time to save when a resume lands after the hours
 ```
 
 `cooldown_min_session_seconds` is a workaround for unstable activities: a
@@ -187,6 +189,22 @@ something they never got to play. It defaults to
 the plain behaviour of cooling down after every session however short. Groups
 take the same key in `[groups.limits]` and apply it to the group cooldown
 independently of their members' own settings.
+
+`save_grace_seconds` (issue #155) covers the case where the device sleeps
+mid-session and wakes after the activity's hours have passed. The session clock
+is monotonic, so sleeping never spends a child's time — but it does carry a
+session past the wall-clock window that bounded it, and an overnight sleep would
+otherwise leave a bedtime activity running the next morning. On waking outside
+its hours the session is clamped to this long, with a warning, instead of being
+cut off mid-sentence; `0` closes it as soon as the device wakes.
+
+It is the one limit that genuinely **cascades** rather than being evaluated at
+both levels — an entry's own value, else its group's, else
+`service.save_grace_seconds` (itself 120 by default). A session belongs to one
+activity, so there is no sense in which an entry and its group could each be held
+to their own answer, and the entry's resolved value is used even when it was the
+*group's* window that closed: the child is saving the activity in front of them
+either way.
 
 ### Token Gates
 
@@ -227,6 +245,7 @@ max_run_seconds = 900        # short bursts, per session, for any member
 daily_quota_seconds = 3600   # COMBINED across all members
 cooldown_seconds = 600       # any member's session cools down the whole group
 cooldown_min_session_seconds = 120  # unless that session was shorter than this
+save_grace_seconds = 300     # members fall back to this unless they set their own
 
 # A group can be token-gated too: earning unlocks every member at once.
 [groups.tokens]

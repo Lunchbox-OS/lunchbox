@@ -83,6 +83,16 @@ pub struct ActiveSession {
     /// launcher back over a still-running activity.
     pub stopping: Option<SessionEndReason>,
 
+    /// Set once a resume from sleep landed outside this activity's allowed
+    /// hours and clamped the session to its save-progress grace (issue #155).
+    ///
+    /// Latched, so a second resume inside the same grace cannot hand out a
+    /// fresh two minutes. Suspend/resume is a loop a child can drive from the
+    /// lid switch, and the monotonic clock does not burn the grace down while
+    /// the machine is asleep — without the latch, closing the lid whenever the
+    /// warning appears would extend the session indefinitely.
+    pub save_grace_started: bool,
+
     /// When the activity's first window actually appeared, if it has.
     ///
     /// Usage is billed from here rather than from approval. The session clock
@@ -115,8 +125,81 @@ impl ActiveSession {
             warnings_issued: Vec::new(),
             host_handle: None,
             stopping: None,
+            save_grace_started: false,
             window_ready_at_mono: None,
         }
+    }
+
+    /// Re-derive the wall-clock deadline from the monotonic one (issue #155).
+    ///
+    /// The two are set together at launch and then diverge: `deadline_mono` is
+    /// `CLOCK_MONOTONIC`, which stops while the machine is asleep, and
+    /// `deadline` is not. Every countdown a human sees — the HUD, the launcher
+    /// cover, the admin dashboard — is computed from `deadline`, so after a
+    /// sleep they all read low by however long the machine was out, and can sit
+    /// at 0:00 while the session runs happily on.
+    ///
+    /// Returns how far the two had drifted, for logging. Does nothing to an
+    /// unlimited session, which has neither deadline.
+    pub fn resync_deadline(
+        &mut self,
+        now: DateTime<Local>,
+        now_mono: MonotonicInstant,
+    ) -> Duration {
+        let Some(remaining) = self.time_remaining(now_mono) else {
+            return Duration::ZERO;
+        };
+        let corrected = now + chrono::Duration::from_std(remaining).unwrap_or_default();
+        let drift = self
+            .deadline
+            .map(|stale| corrected.signed_duration_since(stale))
+            .unwrap_or_default();
+        self.deadline = Some(corrected);
+        drift.to_std().unwrap_or_default()
+    }
+
+    /// Clamp this session to `grace` from now because the wall clock has left
+    /// the activity's allowed hours (issue #155), and latch that it happened.
+    ///
+    /// Returns the remaining time the child is left with, or `None` when the
+    /// session already ends sooner than the grace would — there is nothing to
+    /// clamp then, and no reason to warn about a limit that is not binding.
+    /// An unlimited session *does* get clamped: a force-enable that expired
+    /// with the date leaves the activity running with no deadline at all.
+    pub fn start_save_grace(
+        &mut self,
+        grace: Duration,
+        now: DateTime<Local>,
+        now_mono: MonotonicInstant,
+    ) -> Option<Duration> {
+        self.save_grace_started = true;
+
+        if self
+            .time_remaining(now_mono)
+            .is_some_and(|left| left <= grace)
+        {
+            return None;
+        }
+
+        self.deadline_mono = Some(now_mono + grace);
+        self.deadline = Some(now + chrono::Duration::from_std(grace).unwrap_or_default());
+
+        // Thresholds at or beyond the grace would all fire on the next tick,
+        // and the last one to arrive would overwrite the HUD's explanation
+        // with a bare "only N seconds remaining". Retire them; the ones inside
+        // the grace still escalate as it runs down.
+        let retired: Vec<u64> = self
+            .plan
+            .warnings
+            .iter()
+            .map(|w| w.seconds_before)
+            .filter(|secs| Duration::from_secs(*secs) >= grace)
+            .collect();
+        for threshold in retired {
+            self.mark_warning_issued(threshold);
+        }
+
+        Some(grace)
     }
 
     /// Whether this exit event describes *this* session's activity.

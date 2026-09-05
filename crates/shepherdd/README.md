@@ -102,7 +102,8 @@ The service runs an async event loop that processes:
 1. **IPC messages** - Commands from clients
 2. **Host events** - Process exits, window events
 3. **Timer ticks** - Check for warnings and expiry
-4. **Signals** - SIGHUP for config reload, SIGTERM for shutdown
+4. **System events** - logind suspend/resume, NetworkManager state changes
+5. **Signals** - SIGHUP for config reload, SIGTERM for shutdown
 
 ```
 ┌────────────────────────────────────────────────────┐
@@ -184,6 +185,25 @@ Response + Events ──────▶ Broadcast to Subscribers
 4. At deadline: initiate graceful stop
 5. After grace period: force kill
 6. `SessionEnded` event broadcast
+
+### Across a suspend (issue #155)
+
+The countdown is monotonic, so sleeping never spends a child's time. But the
+wall clock moves on, and two things follow that the tick loop cannot see:
+
+- The displayed deadline (`SessionInfo::deadline`, which every countdown is
+  derived from) is now stale by the length of the sleep, and can read 0:00 while
+  the session runs on.
+- The session may have outlived the availability window that bounded it at
+  launch — unbounded, for an overnight sleep.
+
+`system_events.rs` already watches logind's `PrepareForSleep` for the suspend
+cover, so the resume arm of the main loop calls `CoreEngine::notify_resumed`
+before broadcasting the fresh snapshot. That re-derives the wall deadline and,
+if the machine woke outside the activity's allowed hours, clamps the session to
+its `save_grace` (default 2 minutes) with a `Critical` warning. The snapshot is
+broadcast *before* the warning: clients rebuild their countdown from it, so a
+warning sent first would be overwritten by the state that followed.
 
 ### Termination
 

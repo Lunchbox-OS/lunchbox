@@ -88,6 +88,14 @@ pub struct RawServiceConfig {
     /// per group via `limits.cooldown_min_session_seconds`.
     pub cooldown_min_session_seconds: Option<u64>,
 
+    /// How long a running activity gets to save its progress when a resume
+    /// from sleep lands outside its allowed hours, in seconds (default 120).
+    /// The session is clamped to this much time and a warning is shown, rather
+    /// than being cut the instant the machine wakes (issue #155). Set to 0 to
+    /// end it immediately; overridable per group and per entry via
+    /// `limits.save_grace_seconds`.
+    pub save_grace_seconds: Option<u64>,
+
     /// Global volume restrictions
     #[serde(default)]
     pub volume: Option<RawVolumeConfig>,
@@ -716,6 +724,13 @@ pub struct RawLimits {
     /// seconds. Overrides `service.cooldown_min_session_seconds` (default 120).
     /// 0 means the cooldown always starts, however short the session was.
     pub cooldown_min_session_seconds: Option<u64>,
+
+    /// How long this activity gets to save its progress when a resume from
+    /// sleep lands outside its allowed hours, in seconds (issue #155).
+    /// Cascades: an entry's own value, else its group's, else
+    /// `service.save_grace_seconds` (default 120). 0 ends the session as soon
+    /// as the machine wakes.
+    pub save_grace_seconds: Option<u64>,
 }
 
 /// Token gate (issue #8)

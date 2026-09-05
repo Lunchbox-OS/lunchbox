@@ -133,6 +133,7 @@ export function SubjectDetail({
             limits={self?.limits}
             serviceMaxRun={config.service?.default_max_run_seconds}
             serviceCooldownGrace={config.service?.cooldown_min_session_seconds}
+            serviceSaveGrace={config.service?.save_grace_seconds}
             groupLimits={isGroup ? undefined : group?.limits}
             groupLabel={isGroup ? undefined : group?.label}
           />

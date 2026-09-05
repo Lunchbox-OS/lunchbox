@@ -1217,14 +1217,27 @@ impl Service {
                     Self::handle_host_event(&engine, &ipc_ref, &event_tx, &hidpi, host_event).await;
                 }
 
-                // Resumed from suspend - push a fresh state snapshot so clients
-                // can drop the suspend cover with up-to-date content.
+                // Resumed from suspend - reconcile the running session with the
+                // wall clock (issue #155) and push a fresh state snapshot so
+                // clients can drop the suspend cover with up-to-date content.
                 Some(()) = resume_rx.recv() => {
-                    let state = {
-                        let engine = engine.lock().await;
-                        engine.get_state()
+                    let now_mono = MonotonicInstant::now();
+                    let now = shepherd_util::now();
+
+                    let (events, state) = {
+                        let mut engine = engine.lock().await;
+                        let events = engine.notify_resumed(now, now_mono);
+                        (events, engine.get_state())
                     };
+
+                    // Snapshot first, warning second. Clients rebuild their
+                    // countdown from the snapshot, so a warning delivered
+                    // before it would be overwritten by the state that follows.
                     Self::broadcast(&ipc_ref, &event_tx, Event::new(EventPayload::StateChanged(state)));
+
+                    for event in events {
+                        Self::handle_core_event(&engine, &host, &ipc_ref, &event_tx, &hidpi, event, now_mono, now).await;
+                    }
                 }
 
                 // Config file changed on disk
