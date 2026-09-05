@@ -95,6 +95,14 @@ fn codegen_outputs_match_checked_in() {
             "shepherd-webui/src/config/model/wasm-types.generated.ts",
             "wasm-types.generated.ts",
         ),
+        // The per-kind defaults. Not a type mirror but a *value* one: what an
+        // entry gets for a field it leaves unset, which the editor has to show
+        // before the daemon has resolved anything. Two of these were mirrored
+        // by hand first (issues #78 and #160), which is how they got here.
+        (
+            "shepherd-webui/src/config/model/kind-defaults.generated.ts",
+            "kind-defaults.generated.ts",
+        ),
     ];
 
     for (checked_in, temp_name) in files {

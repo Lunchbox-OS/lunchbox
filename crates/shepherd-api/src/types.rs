@@ -23,6 +23,56 @@ pub enum EntryKindTag {
     Custom,
 }
 
+impl EntryKindTag {
+    /// Every kind, in declaration order.
+    ///
+    /// Exists so the per-kind defaults below can be *enumerated* rather than
+    /// mirrored: the config editor needs the same answers, and
+    /// `shepherd-wire-codegen` walks this list to generate them.
+    pub const ALL: [EntryKindTag; 9] = [
+        EntryKindTag::Process,
+        EntryKindTag::Snap,
+        EntryKindTag::Steam,
+        EntryKindTag::Flatpak,
+        EntryKindTag::Vm,
+        EntryKindTag::Media,
+        EntryKindTag::Retroarch,
+        EntryKindTag::Ebook,
+        EntryKindTag::Custom,
+    ];
+
+    /// The wire and config spelling of this tag, matching its serde rename.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryKindTag::Process => "process",
+            EntryKindTag::Snap => "snap",
+            EntryKindTag::Steam => "steam",
+            EntryKindTag::Flatpak => "flatpak",
+            EntryKindTag::Vm => "vm",
+            EntryKindTag::Media => "media",
+            EntryKindTag::Retroarch => "retroarch",
+            EntryKindTag::Ebook => "ebook",
+            EntryKindTag::Custom => "custom",
+        }
+    }
+
+    /// Whether the HUD's "X" confirms before ending this activity, absent an
+    /// explicit `confirm_on_close` (issue #78).
+    ///
+    /// The prompt exists because the button is easy to hit by accident and
+    /// most activities lose unsaved state when they are closed — a game
+    /// mid-level, a drawing. A reading activity has nothing to lose: the
+    /// position is written on the way out, and reopening returns to the page.
+    /// So the prompt is pure friction there, on the one activity a child is
+    /// most likely to open and close repeatedly.
+    ///
+    /// An entry that sets the field explicitly always wins; this is only what
+    /// happens when it is silent.
+    pub fn confirms_on_close_by_default(self) -> bool {
+        !matches!(self, EntryKindTag::Ebook)
+    }
+}
+
 /// A known Steam "launch interstitial" — one of the blocking modals Steam can
 /// show between a launch request and the game actually starting (cloud-sync
 /// warnings, controller advisories, etc.). The kiosk can be configured to
@@ -676,17 +726,11 @@ impl EntryKind {
     /// Whether the HUD's "X" should confirm before ending this activity, when
     /// the entry does not say either way (issue #78).
     ///
-    /// The prompt exists because the button is easy to hit by accident and most
-    /// activities lose unsaved state when they are closed — a game mid-level, a
-    /// drawing. A reading activity has nothing to lose: the position is written
-    /// on the way out, and reopening returns to the page. So the prompt is pure
-    /// friction there, on the one activity a child is most likely to open and
-    /// close repeatedly.
-    ///
-    /// An entry that sets `confirm_on_close` explicitly always wins; this is
-    /// only what happens when it is silent.
+    /// The answer depends only on the kind, so it lives on
+    /// [`EntryKindTag::confirms_on_close_by_default`] — where the config
+    /// editor's copy can be generated from it instead of mirrored by hand.
     pub fn confirms_on_close_by_default(&self) -> bool {
-        !matches!(self, EntryKind::Ebook { .. })
+        self.tag().confirms_on_close_by_default()
     }
 
     /// Whether the HUD should offer page-turn buttons for this activity

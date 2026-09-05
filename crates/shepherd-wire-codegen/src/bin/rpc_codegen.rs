@@ -23,6 +23,9 @@
 //! - `shepherd-webui/src/config/model/wasm-types.generated.ts` — the
 //!   validation report and availability view the config editor decodes
 //!   back out of `shepherd-config-wasm`.
+//! - `shepherd-webui/src/config/model/kind-defaults.generated.ts` — what
+//!   each entry kind supplies for a field the entry leaves unset, so the
+//!   editor shows what the daemon will actually do.
 //!
 //! Run as `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
 //! from the repo root. The binary is deterministic: same schema in,
@@ -111,7 +114,7 @@ fn main() -> anyhow::Result<()> {
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
-    let outputs: [(PathBuf, String); 8] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+    let outputs: [(PathBuf, String); 9] = if let Ok(dir) = std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
@@ -126,6 +129,10 @@ fn main() -> anyhow::Result<()> {
             (base.join("wire-types.generated.ts"), render_wire_types_ts()),
             (base.join("config.generated.ts"), render_config_types()),
             (base.join("wasm-types.generated.ts"), render_editor_types()),
+            (
+                base.join("kind-defaults.generated.ts"),
+                shepherd_wire_codegen::kind_defaults::render(),
+            ),
         ]
     } else {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -166,6 +173,10 @@ fn main() -> anyhow::Result<()> {
             (
                 repo.join("shepherd-webui/src/config/model/wasm-types.generated.ts"),
                 render_editor_types(),
+            ),
+            (
+                repo.join("shepherd-webui/src/config/model/kind-defaults.generated.ts"),
+                shepherd_wire_codegen::kind_defaults::render(),
             ),
         ]
     };
