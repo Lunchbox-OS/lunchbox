@@ -333,3 +333,66 @@ loads its validator as wasm, so `firefox --screenshot` catches it mid-load and
 a real screenshot would need browser automation this environment has no
 selenium for. The tests assert the rendered text of each closed menu in both
 states, which is what a screenshot would have shown.
+
+
+## Under the XWayland DPI hack (tested after the fact)
+
+The crate README's scale-factor rule is the thing a new widget is most likely
+to break, and the vertical layout adds several dimensions that have to follow
+the factor. Tested at counter-scale 2.0 and 1.5 by raising the headless output
+scale and launching an `xwayland_native_resolution` activity.
+
+Everything follows: bar thickness (112px at 2.0, 80px at 1.5, against a nominal
+54 × f — per-literal rounding accounts for the drift), icons, the vertical
+slider, the rotated title, and the analog clock. The clock is the only one that
+needed wiring by hand, being drawn rather than styled. The restore path works,
+and a scale change and an orientation change fire together correctly on launch,
+with the rebuilt bar re-applying the current factor.
+
+Two findings.
+
+**A hypothesis from reading the code was wrong.** The scale-change path rebuilds
+the two confirm prompts and not the new warning popover, which looked like the
+#118 hidden-widget trap. It is not. The confirm prompts are rebuilt because
+their *measured* width feeds `align_popover_to_button` and a stale style gives a
+stale measurement; the warning popover is never measured, only popped, so GTK
+validates its style at map time against the current stylesheet. Verified at 2.0
+with a scale-only change (device already vertical, so nothing rebuilt) — the
+message renders correctly. No rebuild was added.
+
+The general lesson: "rebuild on scale change" in this file is a rule about
+*measurement*, not about visibility. A hidden widget that is only ever shown is
+fine; one whose size is read before it is shown is not.
+
+**A real pre-existing bug, now fixed.** The page-turn icons added in #160 were
+never listed in `scaled_icons`, so under counter-scale they stayed 20px beside
+neighbours that doubled — the #114 rule, broken. Latent, since a book is not an
+XWayland activity, but real. Fixed in its own commit.
+
+## The vertical bar has no overflow strategy
+
+Worth recording because it is a difference from the horizontal bar rather than a
+bug. The horizontal bar has the #160 machinery for running out of room: the
+title ellipsizes, the sliders shorten, and the end-session button is protected.
+The vertical bar has none of that — it relies on the screen being tall enough,
+which on real hardware it is, because the counter-scale only doubles when the
+panel's pixel count does.
+
+Forced past it (factor 2.0 on a 720px-tall test screen — a configuration sway
+would not produce, since it would not run a 720p panel at scale 2) GTK clips the
+bottom of the bar: the activity title and the page-turn buttons. The
+end-session button, at the top, survives. That is the right ordering, and it is
+what the `flow_append` reversal buys — but if a device ever does run out of
+vertical room, this is the place to add the equivalent of `READING_SLIDER_WIDTH`.
+
+## Harness notes for the next person
+
+* `swaymsg output <name> scale N` on a headless output **resets its custom mode**
+  to 1280x720. Set both together (`output HEADLESS-1 mode 1280x1600 scale 2`) or
+  the tall screen silently goes away.
+* Env vars do not persist between shell invocations, so `export FOO=1` and
+  `shepherd dev headless` have to be in the same command for the variable to
+  reach the sway-spawned clients.
+* There is no way to run a real reading activity here (okular is not installed),
+  so the page-turn buttons were made visible with a temporary env-gated override
+  in the update timer, screenshotted at both factors, and the override removed.
