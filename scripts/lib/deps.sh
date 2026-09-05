@@ -123,6 +123,35 @@ install_rust() {
     fi
 }
 
+# Add clippy and rustfmt to the stable toolchain.
+#
+# install_rust asks rustup for `--profile minimal`, which has neither, and it
+# returns early on a host that already has Rust -- so nothing put them back.
+# CONTRIBUTING tells developers to run `cargo clippy` and `cargo fmt`, and
+# .ci/Dockerfile has carried its own `rustup component add clippy rustfmt` for
+# the same reason, which is why CI never noticed.
+install_lint_components() {
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env" 2>/dev/null || true
+    command_exists rustup || return 0
+
+    local missing=()
+    local component
+    for component in clippy rustfmt; do
+        if ! rustup component list --installed 2>/dev/null | grep -q "^$component"; then
+            missing+=("$component")
+        fi
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        info "clippy and rustfmt are already installed"
+        return 0
+    fi
+
+    info "Adding Rust components: ${missing[*]}..."
+    rustup component add "${missing[@]}"
+}
+
 # Install the BPF authoring toolchain: nightly Rust (for `-Zbuild-std`),
 # rust-src (so the BPF crate can build core for bpfel-unknown-none), and
 # `bpf-linker` (which crates/shepherd-firewall-bpf uses to emit the
@@ -567,6 +596,12 @@ deps_install() {
         install_wasm_toolchain
     fi
 
+    # Only for dev: CI's image adds these itself, and a build-only host has no
+    # use for them.
+    if [[ "$set_name" == "dev" ]]; then
+        install_lint_components
+    fi
+
     # For run and dev sets, add shepherd-media's non-apt dependencies: yt-dlp in
     # its virtualenv, and the VA-API drivers for this host's GPU. Neither can
     # live in run.pkgs — that file is installed as one unconditional apt
@@ -630,6 +665,18 @@ deps_check() {
             warn "yt-dlp is not installed (run: shepherd deps install run)"
             return 1
         fi
+    fi
+
+    # For the dev set, also check the components CONTRIBUTING asks developers
+    # to run: `cargo clippy` and `cargo fmt`.
+    if [[ "$set_name" == "dev" ]] && command_exists rustup; then
+        local component
+        for component in clippy rustfmt; do
+            if ! rustup component list --installed 2>/dev/null | grep -q "^$component"; then
+                warn "$component is not installed (run: shepherd deps install dev)"
+                return 1
+            fi
+        done
     fi
 
     # For the cross set, also check rustc's std for the target.
