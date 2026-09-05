@@ -7,13 +7,20 @@
 #   pair.sh tap <text>      tap a node by label (exact match wins)
 #   pair.sh run             run the full flow from the "Pair a device" list
 #
-# Env: PKG (package id), SWAYLOG (daemon log), SHOTDIR (screenshot output).
+# Env: PKG (package id), SWAYLOG (daemon log), SHOTDIR (screenshot output),
+#      DEVICE (which scan row to tap — a label or the controller address,
+#      for when more than one shepherd is in range).
 set -uo pipefail
 
 PKG=${PKG:-com.armeafamily.shepherd.companion}
 REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 SWAYLOG=${SWAYLOG:-$REPO/dev-runtime/headless/sway.log}
 SHOTDIR=${SHOTDIR:-${TMPDIR:-/tmp}/shepherd-pairing}
+# Every device advertises as "shepherd", and the advertised name is capped at
+# 8 bytes so they cannot be told apart by name. With a second shepherd in
+# range, set DEVICE to the serving controller address — the app prints it
+# under the row — or the run taps whichever one the scan listed first.
+DEVICE=${DEVICE:-shepherd}
 UIXML=$SHOTDIR/ui.xml
 mkdir -p "$SHOTDIR"
 
@@ -65,6 +72,45 @@ if hit: print(hit[0] + "\t" + hit[1])
 
 tap_hit() { local xy; xy=$(echo "$1" | cut -f1); adb shell input tap ${xy/,/ }; }
 
+# Exact-label lookup over a dump already in hand. "Pair" must not match
+# "Pair & connect" or "Pair a device", so find_text's substring fallback is the
+# wrong tool for the OS prompts.
+pick_exact() {
+  python3 -c '
+import sys
+needle = sys.argv[1].lower()
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if "\t" not in line: continue
+    xy, lab = line.split("\t", 1)
+    if lab.strip().lower() == needle:
+        print(xy + "\t" + lab); break
+' "$1"
+}
+find_exact() { texts | pick_exact "$1"; }
+
+dialog_up() { adb shell dumpsys window 2>/dev/null | grep -qi BluetoothPairingDialog; }
+
+# Open an OS pairing prompt from its notification, and verify it actually
+# opened. The shade reflows as notifications come and go, so a coordinate read
+# a second ago can land on whatever slid into its place — a mis-tap silently
+# opens Settings and the 30 s SMP window runs out. Snoozing the other
+# notifications first makes this first-try reliable:
+#   adb shell cmd notification list
+#   adb shell "cmd notification snooze --for 1800000 '<key>'"
+open_prompt() {
+  for _ in $(seq 1 12); do
+    dialog_up && return 0
+    adb shell cmd statusbar expand-notifications >/dev/null 2>&1
+    sleep 1.5
+    local h; h=$(find_exact "pair & connect")
+    [ -n "$h" ] && { tap_hit "$h"; sleep 1.5; }
+    adb shell cmd statusbar collapse >/dev/null 2>&1
+    sleep 0.5
+  done
+  dialog_up
+}
+
 cmd_ui() { texts; }
 
 cmd_tap() {
@@ -80,13 +126,31 @@ cmd_run() {
   log "waiting for the scan to list the device"
   local hit=""
   for _ in $(seq 1 25); do
-    local cand; cand=$(find_text "shepherd")
+    local cand; cand=$(find_text "$DEVICE")
     if [ -n "$cand" ] && ! echo "$cand" | grep -qiE "scanning|make sure"; then hit="$cand"; break; fi
     sleep 1
   done
   [ -z "$hit" ] && { log "device row never appeared — is shepherdd advertising?"; exit 1; }
   log "tapping row: $(echo "$hit" | cut -f2)"
   tap_hit "$hit"
+
+  # Android asks twice, and only the second prompt carries digits:
+  #   1. consent (pairingVariant=3) — nothing is on the wire yet; confirming
+  #      this is what makes Android send the SMP Pairing Request at all.
+  #   2. comparison (pairingVariant=2) — the digits to check against the TV.
+  # Each arrives as its own "Pairing request" notification whose
+  # `Pair & connect` action only OPENS the dialog; the dialog's button is the
+  # confirmation. Waiting for the device's passkey before touching the first
+  # prompt deadlocks: the device cannot ask until consent has been given.
+  log "opening the consent prompt"
+  open_prompt || { log "consent prompt never opened"; shot no-consent.png; exit 1; }
+  local h=""
+  for _ in $(seq 1 8); do
+    h=$(find_exact "pair"); [ -n "$h" ] && break
+    sleep 0.5
+  done
+  [ -z "$h" ] && { log "consent dialog has no Pair button"; shot no-consent.png; exit 1; }
+  tap_hit "$h"; log "consented — SMP starts here"
 
   # Only ever confirm a prompt this attempt caused. A leftover notification
   # from an earlier attempt is indistinguishable on screen.
@@ -105,52 +169,23 @@ cmd_run() {
   done
   [ -z "$devcode" ] && { log "device never requested numeric comparison"; shot no-passkey.png; exit 1; }
 
-  # The heads-up auto-dismisses; the shade keeps it. This action only
-  # OPENS the comparison dialog, it does not confirm the pairing.
-  log "opening the pairing prompt"
-  for _ in $(seq 1 12); do
-    adb shell cmd statusbar expand-notifications >/dev/null 2>&1
-    sleep 0.6
-    local h; h=$(texts | python3 -c '
-import sys
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if "\t" not in line: continue
-    xy, lab = line.split("\t", 1)
-    if lab.strip().lower() in ("pair & connect", "pair and connect"):
-        print(xy + "\t" + lab); break
-')
-    if [ -n "$h" ]; then tap_hit "$h"; log "opened via '$(echo "$h" | cut -f2)'"; break; fi
-  done
-
-  # THE confirmation. Collapse the shade first: expanded, a "Pair" label up
-  # there shadows the dialog's button, the tap lands on the notification,
-  # and the phone silently sits out the 30s SMP timeout.
-  adb shell cmd statusbar collapse >/dev/null 2>&1
-  sleep 1
+  # THE confirmation. Read the digits and the button out of one dump: the
+  # dialog is only up for the rest of the 30 s SMP window.
+  log "opening the comparison prompt"
   local confirmed=0
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 12); do
+    dialog_up || open_prompt
     local all; all=$(texts)
     local phonecode; phonecode=$(echo "$all" | grep -oE '\b[0-9]{6}\b' | head -1)
-    local h; h=$(echo "$all" | python3 -c '
-import sys
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if "\t" not in line: continue
-    xy, lab = line.split("\t", 1)
-    if lab.strip().lower() == "pair":
-        print(xy + "\t" + lab); break
-')
-    if [ -n "$h" ]; then
+    local hc; hc=$(echo "$all" | pick_exact "pair")
+    if [ -n "$hc" ] && [ -n "$phonecode" ]; then
       shot prompt.png >/dev/null
-      if [ -n "$phonecode" ] && [ "$phonecode" = "$devcode" ]; then
-        log "MATCH: phone $phonecode == device $devcode"
-      elif [ -n "$phonecode" ]; then
-        log "MISMATCH: phone $phonecode != device $devcode — do NOT confirm this in a real check"
-      else
-        log "no 6-digit code visible in the dialog"
+      if [ "$phonecode" != "$devcode" ]; then
+        log "MISMATCH: phone $phonecode != device $devcode — NOT confirming"
+        break
       fi
-      tap_hit "$h"; log "confirmed"
+      log "MATCH: phone $phonecode == device $devcode"
+      tap_hit "$hc"; log "confirmed"
       confirmed=1
       break
     fi
@@ -162,7 +197,7 @@ for line in sys.stdin:
   log "result: $(shot result.png)"
   texts | sed 's/^/    /' | head -8
   log "daemon:"; sed -r 's/\x1b\[[0-9;]*m//g' "$SWAYLOG" | grep -aiE "pairing complete|claim|passkey" | tail -4
-  log "phone bond:"; adb shell dumpsys bluetooth_manager 2>/dev/null | grep -A6 "Bonded devices" | grep -E "=>" | tail -2
+  log "phone bond:"; adb shell dumpsys bluetooth_manager 2>/dev/null | grep -aA6 "Bonded devices" | grep -aE "=>" | tail -2
   log "admin record:"; ls "$REPO/dev-runtime/data/" 2>/dev/null | grep -i admin || echo "    (none — still unclaimed)"
 }
 

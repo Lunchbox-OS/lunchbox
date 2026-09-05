@@ -1,5 +1,10 @@
 # BLE management advertising fails to register (companion can't pair)
 
+> **Status (2026-09-04): fixed upstream.** Ubuntu 26.04's
+> `7.0.0-31-generic` advertises correctly again; only `-28` through `-30`
+> are affected. See "Fixed in `7.0.0-31-generic`" below before acting on
+> the pin instructions in this note.
+
 ## Symptom
 
 The companion Android app could not pair with a shepherd device. It
@@ -75,6 +80,37 @@ Verify on any device: `sudo btmgmt add-adv -c 1` (legacy) should
 succeed while `bluetoothctl advertise peripheral` (bluetoothd's extended
 path) fails with `0x0d`. See <docs/INSTALL.md> "BLE management doesn't
 advertise" for the operator-facing version and remediation.
+
+## Fixed in `7.0.0-31-generic` (2026-09-04)
+
+Re-tested on `7.0.0-31.31` after a reboot: **the extended path works
+again.** `bluetoothctl advertise peripheral` registers on both of the
+dev box's controllers — the Realtek 5.4 dongle (`8C:68:8B:41:02:DC`)
+and the Qualcomm 5.3 radio (`DC:56:7B:1F:7D:EA`) — and `btmon` shows the
+command that used to fail returning success:
+
+```
+@ MGMT Event: Command Complete (0x0001)
+      Add Extended Advertising Data (0x0055) plen 1
+        Status: Success (0x00)
+```
+
+That holds for a shepherd-shaped payload too (Flags + the 128-bit
+management service UUID, 21 bytes of advertising data, name in the scan
+response), and shepherdd itself now goes on air unaided:
+
+```
+INFO shepherd_ble::server: BLE management advertising started device=shepherd
+     advertised=shepherd service=8c0c0001-3b21-4abc-9e3f-0a9c1f2e3d40
+```
+
+A companion pairing then ran end to end on that kernel — Numeric
+Comparison, bond, `claim`, and an encrypted-link reconnect — see
+<docs/ai/history/2026-09-04 003 ble-advertising-fixed-on-7.0.0-31.md>.
+So the affected range is `-28` through `-30`, and `-27` is no longer the
+only good kernel: **`-31` and later need no pin, and the `apt-mark hold`
+from the remediation should be lifted** so kernel security updates
+resume.
 
 ## Dead ends ruled out along the way
 

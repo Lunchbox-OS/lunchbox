@@ -720,9 +720,13 @@ mainline 6.18 regression in
 (a length-accounting bug in the MGMT `Add Extended Advertising Data`
 handler).
 
-Remediation is kernel-level. On Ubuntu 26.04 it regressed **between
-`7.0.0-27.27` (works) and `7.0.0-28.28` (broken)**, so pin the last-good
-kernel until a fixed one ships:
+**This was fixed in `7.0.0-31-generic`** (verified 2026-09-04: both a
+Realtek 5.4 dongle and a Qualcomm 5.3 controller register D-Bus
+advertisements again, and a companion pairing completes end to end). Only
+`7.0.0-28` through `-30` are affected. If you are on one of those, either
+upgrade to `-31` or later — the simple fix — or pin the last-good kernel,
+which on Ubuntu 26.04 regressed **between `7.0.0-27.27` (works) and
+`7.0.0-28.28` (broken)**:
 
 ```sh
 # reinstall 7.0.0-27 if it was autoremoved:
@@ -736,9 +740,17 @@ sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu
 sudo update-grub
 ```
 
-Holding the kernel pauses kernel security updates, so unpin
-(`apt-mark unhold …`) once a fixed kernel is available — track that via
-the Ubuntu bug
+Holding the kernel pauses kernel security updates, so if a host is still
+pinned, unpin it now that `-31` is out:
+
+```sh
+sudo apt-mark unhold linux-image-7.0.0-27-generic linux-modules-7.0.0-27-generic \
+                     linux-generic linux-image-generic
+sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=0/' /etc/default/grub
+sudo update-grub
+```
+
+The upstream history is in the Ubuntu bug
 [LP #2161852](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2161852).
 Swapping the Bluetooth adapter does **not** help — a BT 5 controller
 fails the same way. (LL Privacy, advertising name length, and instance limits were
