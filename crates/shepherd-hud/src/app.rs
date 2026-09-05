@@ -1611,12 +1611,13 @@ const CSS_TEMPLATE: &str = r#"
         }
 
         /* The page-turn buttons exist for a finger, on a panel with no
-           keyboard, so they get a real touch target rather than the 32px an
+           keyboard, so they get a wider touch target than the 32px an
            indicator gets — a mis-tap here turns no page and reads as the
-           activity being broken. */
+           activity being broken. Width only: the bar's height is its
+           layer-shell exclusive zone, and a taller child pushes the window
+           past it, so the HUD grows over the activity while a book is open. */
         .page-button {
             min-width: 44px;
-            min-height: 40px;
         }
 
         .indicator-button:hover,
