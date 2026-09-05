@@ -758,18 +758,28 @@ jobs:
 
   arch-neutral:
     name: Arch neutrality
-    # Static guard: fails if an amd64/x86-specific literal creeps into the build
-    # & packaging path, which would mislabel or break non-amd64 (e.g. arm64)
-    # packages. `shepherd package deb` derives the Debian arch from the host at
-    # runtime (dpkg --print-architecture); this keeps it that way. Needs no build
-    # or container — just bash + grep — so it runs on the default runner even
-    # though the rest of CI executes on amd64 only.
+    # Two static guards over the same concern: that this repo can build and
+    # package for an architecture other than amd64. Neither needs a build or a
+    # container — just bash, grep and awk — so they run on the default runner
+    # even though the rest of CI executes on amd64 only.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Fails if an amd64/x86-specific literal creeps into the build &
+      # packaging path, which would mislabel or break a non-amd64 (e.g. arm64)
+      # package. `shepherd package deb` derives the Debian arch at runtime
+      # (dpkg --print-architecture); this keeps it that way.
       - name: Check build/packaging path is architecture-neutral
         run: ./scripts/ci/check-arch-neutral.sh
+
+      # Fails if scripts/deps/cross.pkgs has drifted from build.pkgs. Without
+      # this the drift is silent and lands far from its cause: adding a -dev
+      # dependency goes green on every native build here and breaks the cross
+      # build later, with a pkg-config error naming a library nobody connects
+      # to the commit.
+      - name: Check the cross dependency set covers the build set
+        run: ./scripts/ci/check-cross-pkgs.sh
 
   workflows:
     name: Workflow syntax
