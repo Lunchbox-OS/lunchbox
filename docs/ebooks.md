@@ -103,7 +103,9 @@ the scroll wheel at the top or bottom of a page (`wheelEvent`), and to nothing
 else. A touchscreen produces none of those.
 
 **So shepherd puts the page buttons in the HUD.** A reading session adds a
-`‹` and a `›` to the HUD bar, beside the reset and end-session buttons. They are
+`‹` and a `›` at the far left of the HUD bar, before the activity's name — the
+opposite end from the reset and end-session buttons, so the two controls used on
+every page never share an edge with the two that end the session. They are
 shepherd's own surface — on the overlay layer, above the activity, and outside
 anything the reader's own restrictions could take away — and pressing one
 synthesizes the `Page Up` / `Page Down` the reader is already listening for,

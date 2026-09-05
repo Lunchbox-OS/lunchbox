@@ -280,6 +280,37 @@ fn build_hud_content(
         .halign(gtk4::Align::Fill)
         .build();
 
+    // Page-turn buttons, shown only for activities that read (issue #160).
+    // A reader turns pages on a key, a D-pad or a wheel; a touchscreen
+    // produces none of those and has no swipe gesture to fall back on, so on a
+    // touch-only panel these are the only way through a book. They sit at the
+    // far left of the bar, as far as it is possible to be from the reset and
+    // end-session buttons on the right: the two controls a child uses on every
+    // page should not share an edge with the two that throw the session away.
+    let page_back_icon = gtk4::Image::from_icon_name("go-previous-symbolic");
+    page_back_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let page_back_button = gtk4::Button::builder()
+        .child(&page_back_icon)
+        .has_frame(false)
+        .tooltip_text("Previous page")
+        .visible(false)
+        .build();
+    page_back_button.add_css_class("indicator-button");
+    page_back_button.add_css_class("page-button");
+    left_box.append(&page_back_button);
+
+    let page_forward_icon = gtk4::Image::from_icon_name("go-next-symbolic");
+    page_forward_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
+    let page_forward_button = gtk4::Button::builder()
+        .child(&page_forward_icon)
+        .has_frame(false)
+        .tooltip_text("Next page")
+        .visible(false)
+        .build();
+    page_forward_button.add_css_class("indicator-button");
+    page_forward_button.add_css_class("page-button");
+    left_box.append(&page_forward_button);
+
     let app_label = gtk4::Label::new(Some("No session"));
     app_label.add_css_class("app-name");
     // The left box expands, so without this a long activity name ("Alice's
@@ -622,36 +653,6 @@ fn build_hud_content(
     battery_box.append(&battery_label);
 
     right_box.append(&battery_box);
-
-    // Page-turn buttons, shown only for activities that read (issue #160).
-    // A reader turns pages on a key, a D-pad or a wheel; a touchscreen
-    // produces none of those and has no swipe gesture to fall back on, so on a
-    // touch-only panel these are the only way through a book. They sit left of
-    // the reset and end-session buttons — the two a child should have to reach
-    // past, not the ones they use every page.
-    let page_back_icon = gtk4::Image::from_icon_name("go-previous-symbolic");
-    page_back_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    let page_back_button = gtk4::Button::builder()
-        .child(&page_back_icon)
-        .has_frame(false)
-        .tooltip_text("Previous page")
-        .visible(false)
-        .build();
-    page_back_button.add_css_class("indicator-button");
-    page_back_button.add_css_class("page-button");
-    right_box.append(&page_back_button);
-
-    let page_forward_icon = gtk4::Image::from_icon_name("go-next-symbolic");
-    page_forward_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    let page_forward_button = gtk4::Button::builder()
-        .child(&page_forward_icon)
-        .has_frame(false)
-        .tooltip_text("Next page")
-        .visible(false)
-        .build();
-    page_forward_button.add_css_class("indicator-button");
-    page_forward_button.add_css_class("page-button");
-    right_box.append(&page_forward_button);
 
     // Reset ("reboot the console") button, shown only for activities that
     // support it (issue #125). With RetroArch's save-state resume on, every
