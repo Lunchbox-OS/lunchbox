@@ -23,15 +23,30 @@ a pass through this skill before they land.**
 ## Prerequisites
 
 1. **A kernel without the extended-advertising regression.** On Ubuntu
-   26.04 that means `7.0.0-27-generic`; `-28` and `-29` cannot register
-   *any* LE advertisement, so the device never goes on air and nothing
-   below works. Check with `uname -r`, and see
+   26.04, `7.0.0-28` through `-30` cannot register *any* LE
+   advertisement, so the device never goes on air and nothing below
+   works. `-27` and `-31`-and-later are fine (the fix landed in `-31`,
+   confirmed 2026-09-04). Check with `uname -r`, and see
    <docs/ai/history/2026-07-26 001 ble-advertisement-name-overflow.md>
    and the "BLE management doesn't advertise" section of
-   <docs/INSTALL.md> for the pin.
+   <docs/INSTALL.md>.
 2. **A phone on USB with debugging authorised.** `adb devices` must show
    `device`, not `unauthorized` — the phone shows an RSA-fingerprint
    prompt the first time and a human has to accept it.
+
+   Over SSH it can instead say **`no permissions (missing udev rules?)`
+   even though you are in `plugdev`**: `uaccess` hands the USB node to
+   whoever holds the graphical seat (`gdm-greeter` on a box sitting at
+   the login screen), and an SSH session is not a seat. Grant the group
+   explicitly, once:
+
+   ```sh
+   echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", MODE="0664", GROUP="plugdev"' \
+     | sudo tee /etc/udev/rules.d/51-android.rules
+   sudo udevadm control --reload-rules
+   sudo udevadm trigger --subsystem-match=usb --action=change
+   adb kill-server && adb start-server
+   ```
 
    It must also be **usable**: `uiautomator dump` on a lock screen returns
    a tree with no app labels, so `pair.sh ui` prints nothing and every
@@ -95,12 +110,19 @@ done
 ./scripts/shepherd dev headless          # device side (see the headless-dev skill)
 adb shell am start -n com.armeafamily.shepherd.companion/.MainActivity
 ./.claude/skills/companion-pairing/pair.sh tap "Pair a device"
-./.claude/skills/companion-pairing/pair.sh run
+DEVICE=8C:68:8B:41:02:DC ./.claude/skills/companion-pairing/pair.sh run
 ```
 
-`run` waits for the scan list, taps the device, waits for a *fresh*
-device-side passkey request, opens the OS prompt, compares the digits
-against the daemon's, confirms, and reports both sides. A successful run
+`DEVICE` picks the scan row. Leave it unset for the plain `shepherd`
+label; set it to the serving controller's address when a second shepherd
+is in range (see the two-radios gotcha below) — the app prints the
+address under each row, so this is the only way to tell them apart.
+
+`run` waits for the scan list, taps the device, confirms the OS
+*consent* prompt (which is what puts SMP on the wire), waits for a
+*fresh* device-side passkey request, opens the comparison prompt,
+compares the digits against the daemon's, confirms, and reports both
+sides. A successful run
 ends with `Paired`, a `claim` RPC in the daemon log, an `admin.toml`, and
 a phone bond showing `LE:Y` with `EncryptionStatus{keySize=16`.
 
@@ -109,6 +131,9 @@ a phone bond showing `LE:Y` with `EncryptionStatus{keySize=16`.
 | `pair.sh ui` | Every on-screen label with tap coordinates |
 | `pair.sh tap <text>` | Tap a node by label (exact match wins over substring) |
 | `pair.sh run` | The full flow, from the "Pair a device" list |
+
+Before a run, clear the notification shade — see the shade-reflow gotcha
+below.
 
 Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
 `result.png` to actually see the end state.
@@ -130,15 +155,41 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
 
 ## Gotchas (each of these cost an hour)
 
-- **The notification action is not the confirmation.** The OS shows a
-  heads-up "Pairing request" whose `Pair & connect` action only *opens*
-  the numeric-comparison dialog; the dialog's `Pair` button is what
-  completes SMP. Confirm with the notification shade **collapsed** — with
-  it expanded, a `Pair` label up there shadows the dialog button, the tap
-  lands on the notification, and the phone silently sits out the 30s SMP
-  timeout. On the wire that appears as `Remote User Terminated
-  Connection` exactly 30.0s after `User Confirmation Request`, with no
-  SMP `Pairing Failed` at all — it looks exactly like a product bug.
+- **Android asks twice, and the first ask is not the comparison.** On
+  Android 16 / SDK 37 the phone raises `ACTION_PAIRING_REQUEST` with
+  `pairingVariant=3` (consent) *before* it sends anything: `btmon` shows
+  the device answering a read with `Insufficient Authentication (0x05)`,
+  the phone going `BT_BOND_STATE_BONDING`, and then **nothing on the
+  wire** until that consent is confirmed. Only then does it send the SMP
+  Pairing Request and raise a second prompt, `pairingVariant=2`, carrying
+  the six digits. Waiting for the daemon's `Numeric Comparison pairing
+  requested` before touching the first prompt therefore **deadlocks**:
+  the device cannot ask until consent has been given, and the run dies
+  with "device never requested numeric comparison" after the phone's 30 s
+  `SMP_RSP_TIMEOUT`. `pair.sh run` handles both rounds; drive them in the
+  same order by hand.
+- **The notification action is not the confirmation.** Each round arrives
+  as a "Pairing request" notification whose `Pair & connect` action only
+  *opens* the dialog; the dialog's own `Pair` button is what proceeds.
+  Confirm with the notification shade **collapsed** — with it expanded, a
+  `Pair` label up there shadows the dialog button, the tap lands on the
+  notification, and the phone silently sits out the 30s SMP timeout. On
+  the wire that appears as `Remote User Terminated Connection` exactly
+  30.0s after `User Confirmation Request`, with no SMP `Pairing Failed`
+  at all — it looks exactly like a product bug.
+- **Clear the notification shade before a run.** The shade reflows as
+  notifications arrive and leave, so a coordinate read a second ago lands
+  on whatever slid into its place: a tap meant for `Pair & connect` opened
+  *Battery settings* twice in a row off the phone's ongoing "Charging on
+  hold to protect battery" notification, and the 30 s window ran out.
+  `pair.sh` now verifies the dialog actually opened (`dumpsys window` →
+  `BluetoothPairingDialog`) and retries, but the reliable fix is to snooze
+  the noise first:
+
+  ```sh
+  adb shell cmd notification list
+  adb shell "cmd notification snooze --for 1800000 '<key>'"   # quote it: | is a shell pipe
+  ```
 - **Confirm promptly.** The prompt times out in 30s. Don't interleave
   screenshots and image reads between the taps; let `run` do it.
 - **Only trust a *fresh* prompt.** A leftover notification from an
@@ -169,7 +220,16 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   failed (0x0b)` on otherwise-valid attempts, cleared by
   `sudo systemctl restart bluetooth`. Rule that out before believing a
   pairing bug reproduces.
-- **The phone's stack can wedge too, and only a settings reset clears
+- **`smp_send_app_cback: Unexpected event:2` is not a wedged phone.**
+  It is logged on *every* pairing, at the moment the framework enters
+  `BOND_BONDING` and posts the consent prompt, and a healthy run carries
+  straight on through it. Paired with the 30 s `SMP_RSP_TIMEOUT` that
+  follows an unanswered consent prompt it looks exactly like the wedge
+  below — it is not one, and a phone-side reset will not help. Check
+  whether a `pairingVariant=3` prompt is waiting before concluding
+  anything (confirmed 2026-09-04; see
+  <docs/ai/history/2026-09-04 003 ble-advertising-fixed-on-7.0.0-31.md>).
+- **The phone's stack really can wedge, and only a settings reset clears
   it.** After `pm clear com.google.android.bluetooth`, the phone stopped
   answering the device's `SMP: Security Request` — its framework reported
   `BOND_BONDING` while nothing went on the wire, and logcat showed
@@ -180,6 +240,13 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   networks but leaves cellular alone). Clearing the Bluetooth package's
   storage is *not* a safe reset — prefer the settings reset if you need
   to clear phone-side Bluetooth state at all.
+- **Two shepherds in range look identical in the app.** The advertised
+  name is capped at 8 bytes, so every device is just `shepherd` and
+  `pair.sh`'s label match taps whichever the scan listed first — which may
+  be a *different machine on the desk*, and then nothing works and the
+  daemon log stays silent because it was never involved. The app prints
+  each row's controller address; pass it as `DEVICE=`. `bluetoothctl scan
+  le` from the host's other radio enumerates who is actually advertising.
 - **With two radios present, shepherdd serves whichever BlueZ lists
   first** — not the one you meant, and not necessarily the one the phone
   is bonded to. Symptom: the app sits on "Connecting…" forever while the
