@@ -29,6 +29,19 @@ default_max_run_seconds = 3600
 # or per group with `limits.cooldown_min_session_seconds`.
 # cooldown_min_session_seconds = 120
 
+# How long a running activity gets to save its progress when the device wakes
+# from sleep after the activity's hours have passed (default 120).
+#
+# The session clock is monotonic, so sleeping never spends a child's time — but
+# it does carry a session past the wall-clock window that bounded it, and an
+# overnight sleep would otherwise leave a bedtime activity running the next
+# morning. On waking outside its hours the session is clamped to this long, with
+# a warning, rather than being cut off mid-sentence.
+#
+# Set to 0 to close the activity as soon as the device wakes. Cascades: an
+# entry's own `limits.save_grace_seconds`, else its group's, else this.
+# save_grace_seconds = 120
+
 # Global volume restrictions (optional)
 # These apply when no entry-specific restrictions are defined.
 #

@@ -35,6 +35,32 @@ use std::time::Duration;
 /// `limits.cooldown_min_session_seconds`.
 pub const DEFAULT_COOLDOWN_MIN_SESSION: Duration = Duration::from_secs(120);
 
+/// Default time a running activity gets to save its progress when a resume
+/// from sleep lands outside its allowed hours (issue #155).
+///
+/// The clock is monotonic, so sleeping does not spend the session's budget —
+/// but it does move the session past the wall-clock window that bounded it.
+/// Rather than cut the activity dead the instant the machine wakes, the child
+/// gets this long, with a warning, to put their progress somewhere safe.
+/// Configurable with `service.save_grace_seconds`, per entry with
+/// `limits.save_grace_seconds`.
+pub const DEFAULT_SAVE_GRACE: Duration = Duration::from_secs(120);
+
+/// The service-level defaults a subject's `[limits]` table falls back to.
+///
+/// Bundled rather than passed as three loose `Duration`s: two of them have the
+/// same type, and a swapped pair would silently mis-resolve every entry.
+#[derive(Debug, Clone, Copy)]
+pub struct LimitDefaults {
+    /// Default per-session cap. `None` means unlimited. Groups pass `None`
+    /// regardless: an absent group limit means "no group-level cap".
+    pub max_run: Option<Duration>,
+    /// Default minimum session length before a cooldown starts.
+    pub cooldown_min_session: Duration,
+    /// Default save-progress grace on a resume outside allowed hours.
+    pub save_grace: Duration,
+}
+
 /// Validated policy ready for use by the core engine
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -80,11 +106,19 @@ impl Policy {
             .map(seconds_to_duration_or_unlimited)
             .unwrap_or(Some(Duration::from_secs(3600))); // 1 hour default
 
-        let default_cooldown_min_session = raw
-            .service
-            .cooldown_min_session_seconds
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_COOLDOWN_MIN_SESSION);
+        let limit_defaults = LimitDefaults {
+            max_run: default_max_run,
+            cooldown_min_session: raw
+                .service
+                .cooldown_min_session_seconds
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_COOLDOWN_MIN_SESSION),
+            save_grace: raw
+                .service
+                .save_grace_seconds
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_SAVE_GRACE),
+        };
 
         let global_volume = raw
             .service
@@ -108,21 +142,37 @@ impl Policy {
             .map(convert_auto_brightness_config)
             .unwrap_or_default();
 
-        let groups = raw
+        let groups: Vec<Group> = raw
             .groups
             .iter()
-            .map(|g| Group::from_raw(g, default_cooldown_min_session))
+            .map(|g| Group::from_raw(g, limit_defaults))
             .collect();
 
         let entries = raw
             .entries
             .into_iter()
             .map(|e| {
+                // The save-progress grace is the one limit that cascades
+                // service -> group -> entry, because unlike the others it
+                // describes a single session rather than a budget: a "bedtime"
+                // category sets how long its activities get to save, once, and
+                // there is no sense in which an entry and its group could each
+                // be held to their own answer.
+                let defaults = match e
+                    .group
+                    .as_deref()
+                    .and_then(|id| groups.iter().find(|g| g.id.as_str() == id))
+                {
+                    Some(group) => LimitDefaults {
+                        save_grace: group.limits.save_grace,
+                        ..limit_defaults
+                    },
+                    None => limit_defaults,
+                };
                 Entry::from_raw(
                     e,
                     &default_warnings,
-                    default_max_run,
-                    default_cooldown_min_session,
+                    defaults,
                     &global_volume,
                     &global_brightness,
                 )
@@ -189,7 +239,13 @@ pub struct Group {
 }
 
 impl Group {
-    fn from_raw(raw: &crate::schema::RawGroup, default_cooldown_min_session: Duration) -> Self {
+    fn from_raw(raw: &crate::schema::RawGroup, defaults: LimitDefaults) -> Self {
+        // Unlike an entry, a group has no service-level max_run default: an
+        // absent group limit means "no group-level cap", not "one hour".
+        let defaults = LimitDefaults {
+            max_run: None,
+            ..defaults
+        };
         Self {
             id: GroupId::new(raw.id.clone()),
             label: raw.label.clone(),
@@ -198,17 +254,16 @@ impl Group {
                 .clone()
                 .map(convert_availability)
                 .unwrap_or_default(),
-            // Unlike an entry, a group has no service-level max_run default:
-            // an absent group limit means "no group-level cap", not "one hour".
             limits: raw
                 .limits
                 .clone()
-                .map(|l| convert_limits(l, None, default_cooldown_min_session))
+                .map(|l| convert_limits(l, defaults))
                 .unwrap_or(LimitsPolicy {
                     max_run: None,
                     daily_quota: None,
                     cooldown: None,
-                    cooldown_min_session: default_cooldown_min_session,
+                    cooldown_min_session: defaults.cooldown_min_session,
+                    save_grace: defaults.save_grace,
                 }),
             tokens: raw.tokens.as_ref().map(convert_tokens),
         }
@@ -576,8 +631,7 @@ impl Entry {
     fn from_raw(
         raw: RawEntry,
         default_warnings: &[WarningThreshold],
-        default_max_run: Option<Duration>,
-        default_cooldown_min_session: Duration,
+        defaults: LimitDefaults,
         _global_volume: &VolumePolicy,
         _global_brightness: &BrightnessPolicy,
     ) -> Self {
@@ -594,12 +648,13 @@ impl Entry {
             .unwrap_or_default();
         let limits = raw
             .limits
-            .map(|l| convert_limits(l, default_max_run, default_cooldown_min_session))
+            .map(|l| convert_limits(l, defaults))
             .unwrap_or_else(|| LimitsPolicy {
-                max_run: default_max_run,
+                max_run: defaults.max_run,
                 daily_quota: None, // None means unlimited
                 cooldown: None,
-                cooldown_min_session: default_cooldown_min_session,
+                cooldown_min_session: defaults.cooldown_min_session,
+                save_grace: defaults.save_grace,
             });
         let tokens = raw.tokens.as_ref().map(convert_tokens);
         let group = raw.group.as_ref().map(GroupId::new);
@@ -742,6 +797,18 @@ pub struct LimitsPolicy {
     /// `limits.cooldown_min_session_seconds`, falling back to
     /// `service.cooldown_min_session_seconds`.
     pub cooldown_min_session: Duration,
+    /// How long a running session gets to save its progress when a resume from
+    /// sleep lands outside its allowed hours (issue #155). `Duration::ZERO`
+    /// ends it as soon as the machine wakes.
+    ///
+    /// Resolved at config load time from `limits.save_grace_seconds`, falling
+    /// back to the group's, then to `service.save_grace_seconds`. Unlike the
+    /// other limits this genuinely cascades rather than being evaluated at both
+    /// levels: a session belongs to one activity, so only the entry's resolved
+    /// value is ever read — including when it was the *group's* window that
+    /// closed, since the child is saving the activity in front of them either
+    /// way.
+    pub save_grace: Duration,
 }
 
 /// Network firewall policy applied to a session at spawn time.
@@ -1209,16 +1276,12 @@ fn seconds_to_duration_or_unlimited(secs: u64) -> Option<Duration> {
     }
 }
 
-fn convert_limits(
-    raw: crate::schema::RawLimits,
-    default_max_run: Option<Duration>,
-    default_cooldown_min_session: Duration,
-) -> LimitsPolicy {
+fn convert_limits(raw: crate::schema::RawLimits, defaults: LimitDefaults) -> LimitsPolicy {
     LimitsPolicy {
         max_run: raw
             .max_run_seconds
             .map(seconds_to_duration_or_unlimited)
-            .unwrap_or(default_max_run),
+            .unwrap_or(defaults.max_run),
         daily_quota: raw
             .daily_quota_seconds
             .and_then(seconds_to_duration_or_unlimited),
@@ -1226,7 +1289,11 @@ fn convert_limits(
         cooldown_min_session: raw
             .cooldown_min_session_seconds
             .map(Duration::from_secs)
-            .unwrap_or(default_cooldown_min_session),
+            .unwrap_or(defaults.cooldown_min_session),
+        save_grace: raw
+            .save_grace_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(defaults.save_grace),
     }
 }
 

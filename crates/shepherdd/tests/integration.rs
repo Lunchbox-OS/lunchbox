@@ -32,6 +32,7 @@ fn make_test_entry(id: &str) -> Entry {
             daily_quota: None,
             cooldown: None,
             cooldown_min_session: Duration::ZERO,
+            save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
         },
         warnings: vec![],
         volume: None,
@@ -74,6 +75,7 @@ fn make_test_policy() -> Policy {
                 daily_quota: None,
                 cooldown: None,
                 cooldown_min_session: Duration::ZERO,
+                save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
             },
             warnings: vec![
                 WarningThreshold {

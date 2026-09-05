@@ -1384,6 +1384,153 @@ impl CoreEngine {
         events
     }
 
+    /// Reconcile the running session with the wall clock after a resume from
+    /// sleep (issue #155).
+    ///
+    /// Two things go wrong across a suspend, and they pull in opposite
+    /// directions:
+    ///
+    /// 1. **The displayed countdown is wrong.** Enforcement is monotonic and
+    ///    correctly excludes the time asleep, but every countdown a human sees
+    ///    is derived from the wall-clock `deadline`, which is not. The child's
+    ///    HUD therefore loses the sleep time and can sit at 0:00 while the
+    ///    session runs on — which reads, from the outside, as "the activity
+    ///    never exits". [`ActiveSession::resync_deadline`] corrects it.
+    ///
+    /// 2. **The session may have outlived its schedule.** `compute_max_duration`
+    ///    clamps a session to what is left of its window *at launch*, and
+    ///    nothing re-checks it afterwards. Because the monotonic clock stops,
+    ///    an N-second sleep moves the real end of the session N seconds past
+    ///    the window that bounded it — unbounded for an overnight sleep. When
+    ///    the machine wakes outside the activity's allowed hours the session is
+    ///    clamped to the entry's save-progress grace and the child is warned,
+    ///    rather than being cut off mid-sentence.
+    ///
+    /// Returns the events to broadcast. Callers should push the resulting state
+    /// snapshot *before* these, so the corrected deadline lands first and the
+    /// warning is not immediately overwritten by it.
+    pub fn notify_resumed(
+        &mut self,
+        now: DateTime<Local>,
+        now_mono: MonotonicInstant,
+    ) -> Vec<CoreEvent> {
+        let Some(entry_id) = self
+            .current_session
+            .as_ref()
+            .map(|s| s.plan.entry_id.clone())
+        else {
+            return Vec::new();
+        };
+
+        let session = self
+            .current_session
+            .as_mut()
+            .expect("a session is current: its entry id was just read");
+
+        let drift = session.resync_deadline(now, now_mono);
+        if !drift.is_zero() {
+            info!(
+                session_id = %session.plan.session_id,
+                slept_secs = drift.as_secs(),
+                deadline = ?session.deadline,
+                "Resumed; corrected the displayed deadline for time spent asleep"
+            );
+        }
+
+        // Stopping already, or already inside a grace this resume would only
+        // reset. The latch is what stops a lid-switch loop from renewing the
+        // grace forever — see `ActiveSession::save_grace_started`.
+        if session.stopping.is_some() || session.save_grace_started {
+            return Vec::new();
+        }
+
+        if !self.outside_allowed_hours(&entry_id, now) {
+            return Vec::new();
+        }
+
+        let grace = match self.policy.get_entry(&entry_id) {
+            Some(entry) => entry.limits.save_grace,
+            None => return Vec::new(),
+        };
+
+        let session = self
+            .current_session
+            .as_mut()
+            .expect("a session is current: its entry id was just read");
+        let Some(remaining) = session.start_save_grace(grace, now, now_mono) else {
+            info!(
+                session_id = %session.plan.session_id,
+                entry_id = %entry_id,
+                "Resumed outside allowed hours; session already ends within its save grace"
+            );
+            return Vec::new();
+        };
+
+        let session_id = session.plan.session_id.clone();
+        let threshold_seconds = remaining.as_secs();
+
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::WarningIssued {
+                session_id: session_id.clone(),
+                threshold_seconds,
+            }));
+
+        info!(
+            session_id = %session_id,
+            entry_id = %entry_id,
+            grace_secs = threshold_seconds,
+            "Resumed outside allowed hours; granting save-progress grace"
+        );
+
+        vec![CoreEvent::Warning {
+            session_id,
+            threshold_seconds,
+            time_remaining: remaining,
+            severity: WarningSeverity::Critical,
+            message: Some(format!(
+                "Time is up for now. You have {} to save.",
+                shepherd_util::format_duration(remaining)
+            )),
+        }]
+    }
+
+    /// Whether `now` falls outside the hours this entry is allowed to run —
+    /// its own window, or the window of the group it belongs to (issue #5).
+    ///
+    /// Deliberately narrower than [`Self::evaluate_entry`]: only the *schedule*
+    /// is consulted, because only the schedule can be violated by the passage
+    /// of time alone. A daily quota resets at midnight (so a long sleep can
+    /// only leave more of it), and a cooldown is not a reason to stop an
+    /// activity that is already running.
+    ///
+    /// A parent's force-enable for the day lifts the window here exactly as it
+    /// does in `evaluate_entry` — a force-enabled activity has no allowed hours
+    /// to be outside of. Note that the override is keyed by date, so a sleep
+    /// across midnight correctly puts the entry back on its own schedule.
+    fn outside_allowed_hours(&self, entry_id: &EntryId, now: DateTime<Local>) -> bool {
+        let Some(entry) = self.policy.get_entry(entry_id) else {
+            return false;
+        };
+        let today = now.date_naive();
+        let group = self.policy.group_of(entry);
+
+        let enabled_today = |subject: &LimitSubject| {
+            self.store
+                .get_daily_override(subject, today)
+                .ok()
+                .flatten()
+                .and_then(|o| o.availability)
+                == Some(true)
+        };
+        if enabled_today(&entry.subject()) || group.is_some_and(|g| enabled_today(&g.subject())) {
+            return false;
+        }
+
+        !entry.availability.is_available(&now)
+            || group.is_some_and(|g| !g.availability.is_available(&now))
+    }
+
     /// Notify that the activity behind `handle` has exited.
     ///
     /// Returns `None` — leaving the current session untouched — when the exit
@@ -1772,6 +1919,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2059,6 +2207,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![shepherd_api::WarningThreshold {
                     seconds_before: 60,
@@ -2158,6 +2307,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![shepherd_api::WarningThreshold {
                     seconds_before: 60,
@@ -2269,6 +2419,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2352,6 +2503,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2457,6 +2609,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2545,6 +2698,7 @@ mod tests {
                     daily_quota: None,
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2644,6 +2798,7 @@ mod tests {
                     daily_quota: Some(Duration::from_secs(3600)),
                     cooldown: None,
                     cooldown_min_session: Duration::ZERO,
+                    save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 },
                 warnings: vec![],
                 volume: None,
@@ -2748,6 +2903,7 @@ mod tests {
                 daily_quota: None,
                 cooldown: None,
                 cooldown_min_session: Duration::ZERO,
+                save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
             },
             tokens,
             warnings: vec![],
@@ -3053,6 +3209,7 @@ mod tests {
             daily_quota: None,
             cooldown: None,
             cooldown_min_session: Duration::ZERO,
+            save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
         }
     }
 
@@ -3158,6 +3315,7 @@ mod tests {
             LimitsPolicy {
                 cooldown: Some(Duration::from_secs(600)),
                 cooldown_min_session: Duration::ZERO,
+                save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 ..no_limits()
             },
             None,
@@ -3260,6 +3418,7 @@ mod tests {
             LimitsPolicy {
                 cooldown: Some(Duration::from_secs(600)),
                 cooldown_min_session: Duration::from_secs(120),
+                save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 ..no_limits()
             },
             None,
@@ -3288,6 +3447,7 @@ mod tests {
             LimitsPolicy {
                 cooldown: Some(Duration::from_secs(600)),
                 cooldown_min_session: Duration::from_secs(120),
+                save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
                 ..no_limits()
             },
             None,
@@ -3295,6 +3455,7 @@ mod tests {
         policy.entries[0].limits = LimitsPolicy {
             cooldown: Some(Duration::from_secs(600)),
             cooldown_min_session: Duration::ZERO,
+            save_grace: shepherd_config::DEFAULT_SAVE_GRACE,
             ..no_limits()
         };
         let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -4099,5 +4260,336 @@ mod tests {
         );
         assert!(engine.begin_restart().is_none());
         assert!(!engine.is_restarting());
+    }
+
+    // --- Resume from sleep (issue #155) ------------------------------------
+
+    /// Two hour-capped entries: one playable only 19:00-20:00, one with no
+    /// hours at all, so a test can pick whether the resume lands outside the
+    /// schedule or merely later than the display believes.
+    fn make_bedtime_policy() -> Policy {
+        use shepherd_api::WarningThreshold;
+        use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
+
+        let mut entry = token_entry("bedtime-game", None);
+        entry.availability = AvailabilityPolicy {
+            windows: vec![TimeWindow::new(
+                DaysOfWeek::ALL_DAYS,
+                WallClock::new(19, 0).unwrap(),
+                WallClock::new(20, 0).unwrap(),
+            )],
+            always: false,
+        };
+        entry.limits = LimitsPolicy {
+            max_run: Some(Duration::from_secs(3600)),
+            ..no_limits()
+        };
+        entry.warnings = vec![
+            WarningThreshold {
+                seconds_before: 300,
+                severity: WarningSeverity::Warn,
+                message_template: None,
+            },
+            WarningThreshold {
+                seconds_before: 60,
+                severity: WarningSeverity::Critical,
+                message_template: None,
+            },
+        ];
+
+        let mut anytime = token_entry("anytime-game", None);
+        anytime.limits = LimitsPolicy {
+            max_run: Some(Duration::from_secs(3600)),
+            ..no_limits()
+        };
+
+        Policy {
+            service: Default::default(),
+            groups: vec![],
+            entries: vec![entry, anytime],
+            default_warnings: vec![],
+            default_max_run: None,
+            volume: Default::default(),
+            brightness: Default::default(),
+            auto_brightness: Default::default(),
+        }
+    }
+
+    fn at(hour: u32, minute: u32) -> DateTime<Local> {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 27, hour, minute, 0)
+            .unwrap()
+    }
+
+    /// Launch `entry_id` at `now` and hand back the monotonic instant the
+    /// session started from, so a test can advance the two clocks separately —
+    /// which is the whole point: a sleep advances the wall clock and not the
+    /// monotonic one.
+    fn launch_at(
+        engine: &mut CoreEngine,
+        entry_id: &str,
+        now: DateTime<Local>,
+    ) -> MonotonicInstant {
+        let entry_id = EntryId::new(entry_id);
+        let plan = match engine.request_launch(&entry_id, now) {
+            LaunchDecision::Approved(plan) => plan,
+            LaunchDecision::Denied { reasons } => panic!("launch denied: {reasons:?}"),
+        };
+        let started = MonotonicInstant::now();
+        engine.start_session(plan, now, started);
+        started
+    }
+
+    /// The bug the issue actually describes: the enforcement clock correctly
+    /// ignores the time asleep, but the wall-clock deadline every UI counts
+    /// down from does not, so the HUD reads low by the length of the sleep and
+    /// can sit at 0:00 while the session runs on.
+    #[test]
+    fn a_resume_corrects_the_displayed_deadline_for_time_asleep() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        // An activity with no hours of its own, so the resume is late but not
+        // out of bounds: this test is only about the displayed deadline.
+        let started = launch_at(&mut engine, "anytime-game", at(19, 0));
+        assert_eq!(engine.current_session().unwrap().deadline, Some(at(20, 0)));
+
+        // Five minutes of play, then three hours asleep. Monotonic time only
+        // advanced by the five minutes.
+        let awake = Duration::from_secs(5 * 60);
+        let events = engine.notify_resumed(at(22, 5), started + awake);
+
+        let session = engine.current_session().unwrap();
+        assert_eq!(
+            session.time_remaining(started + awake),
+            Some(Duration::from_secs(55 * 60)),
+            "the monotonic budget must not be spent by sleeping"
+        );
+        assert_eq!(
+            session.deadline,
+            Some(at(23, 0)),
+            "the displayed deadline must be re-derived from the monotonic one"
+        );
+        assert!(
+            events.is_empty(),
+            "an activity with no hours cannot be woken outside them: {events:?}"
+        );
+    }
+
+    /// The safety hole underneath it: the window is checked once, at launch.
+    /// A sleep pushes the real end of the session past it, so waking outside
+    /// the activity's hours has to end the session — with time to save first.
+    #[test]
+    fn a_resume_outside_allowed_hours_clamps_the_session_to_its_save_grace() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        // 19:30 leaves half an hour of window, which is what clamps the session.
+        let started = launch_at(&mut engine, "bedtime-game", at(19, 30));
+        assert_eq!(engine.current_session().unwrap().deadline, Some(at(20, 0)));
+
+        let resumed_at = started + Duration::from_secs(5 * 60);
+        let events = engine.notify_resumed(at(22, 35), resumed_at);
+
+        let grace = shepherd_config::DEFAULT_SAVE_GRACE;
+        let session = engine.current_session().unwrap();
+        assert_eq!(
+            session.time_remaining(resumed_at),
+            Some(grace),
+            "25 minutes of budget survived the sleep, but bedtime has passed"
+        );
+        assert_eq!(session.deadline, Some(at(22, 37)));
+        assert!(session.save_grace_started);
+
+        let [
+            CoreEvent::Warning {
+                time_remaining,
+                severity,
+                message,
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected exactly one warning, got {events:?}");
+        };
+        assert_eq!(*time_remaining, grace);
+        assert_eq!(*severity, WarningSeverity::Critical);
+        assert!(
+            message.as_ref().is_some_and(|m| m.contains("save")),
+            "the child needs to be told why, not just that: {message:?}"
+        );
+
+        // The five-minute threshold would otherwise fire on the very next tick
+        // and overwrite that explanation with a bare countdown.
+        assert!(session.warnings_issued.contains(&300));
+        assert!(!session.warnings_issued.contains(&60));
+
+        // And the grace really is a deadline.
+        let expiry = engine.tick(resumed_at + grace, at(22, 37));
+        assert!(
+            expiry
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ExpireDue { .. })),
+            "expected the session to expire when the grace ran out: {expiry:?}"
+        );
+    }
+
+    /// Suspend/resume is a loop a child can drive from the lid switch, and the
+    /// grace does not burn down while the machine is asleep. Renewing it on
+    /// every wake would make the session unbounded.
+    #[test]
+    fn a_second_resume_does_not_renew_the_save_grace() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        let started = launch_at(&mut engine, "bedtime-game", at(19, 30));
+        let first = started + Duration::from_secs(5 * 60);
+        assert_eq!(engine.notify_resumed(at(22, 35), first).len(), 1);
+
+        // Thirty seconds of the grace spent, then asleep again.
+        let second = first + Duration::from_secs(30);
+        let events = engine.notify_resumed(at(23, 40), second);
+
+        assert!(events.is_empty(), "the grace is granted once: {events:?}");
+        assert_eq!(
+            engine.current_session().unwrap().time_remaining(second),
+            Some(Duration::from_secs(90)),
+            "the second wake must not hand back the thirty seconds already spent"
+        );
+    }
+
+    /// A parent who force-enabled the activity for the day has said the
+    /// schedule does not apply, exactly as `evaluate_entry` reads it.
+    #[test]
+    fn a_force_enabled_entry_has_no_allowed_hours_to_be_outside_of() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        store
+            .upsert_daily_override(
+                &LimitSubject::Entry(EntryId::new("bedtime-game")),
+                at(19, 30).date_naive(),
+                Some(true),
+                None,
+            )
+            .unwrap();
+        let mut engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        let started = launch_at(&mut engine, "bedtime-game", at(19, 30));
+        let resumed_at = started + Duration::from_secs(5 * 60);
+        let events = engine.notify_resumed(at(22, 35), resumed_at);
+
+        assert!(
+            events.is_empty(),
+            "a force-enable lifts the window: {events:?}"
+        );
+        let session = engine.current_session().unwrap();
+        assert!(!session.save_grace_started);
+        assert_eq!(
+            session.time_remaining(resumed_at),
+            Some(Duration::from_secs(55 * 60)),
+            "the force-enabled session keeps its full remaining budget"
+        );
+    }
+
+    /// The group carries the same schedule an entry does (issue #5), so its
+    /// window has to close a member's session too.
+    #[test]
+    fn a_group_window_that_has_closed_ends_a_members_session() {
+        use shepherd_util::{DaysOfWeek, TimeWindow, WallClock};
+
+        let mut group = group("evening", no_limits(), None);
+        group.availability = AvailabilityPolicy {
+            windows: vec![TimeWindow::new(
+                DaysOfWeek::ALL_DAYS,
+                WallClock::new(19, 0).unwrap(),
+                WallClock::new(20, 0).unwrap(),
+            )],
+            always: false,
+        };
+        let mut policy = make_group_policy(group);
+        // The member itself is always available; only the category has hours.
+        policy.entries[0].limits = LimitsPolicy {
+            max_run: Some(Duration::from_secs(3600)),
+            ..no_limits()
+        };
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+
+        let started = launch_at(&mut engine, "game-a", at(19, 30));
+        let resumed_at = started + Duration::from_secs(5 * 60);
+        let events = engine.notify_resumed(at(22, 35), resumed_at);
+
+        assert_eq!(
+            events.len(),
+            1,
+            "expected the category's hours to bind: {events:?}"
+        );
+        assert_eq!(
+            engine.current_session().unwrap().time_remaining(resumed_at),
+            Some(shepherd_config::DEFAULT_SAVE_GRACE)
+        );
+    }
+
+    /// A session that was already ending sooner than the grace is left alone:
+    /// there is nothing to clamp, and warning about a limit that is not
+    /// binding would only confuse the child.
+    #[test]
+    fn a_session_ending_sooner_than_the_grace_is_not_extended_by_it() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        let started = launch_at(&mut engine, "bedtime-game", at(19, 30));
+        // Wake with 30 seconds of the half-hour window budget left.
+        let resumed_at = started + Duration::from_secs(30 * 60 - 30);
+        let events = engine.notify_resumed(at(22, 35), resumed_at);
+
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            engine.current_session().unwrap().time_remaining(resumed_at),
+            Some(Duration::from_secs(30)),
+            "the grace is a ceiling, never a floor"
+        );
+    }
+
+    /// `save_grace_seconds = 0` is the documented way to say "cut it off on
+    /// wake", so it has to actually expire rather than quietly do nothing.
+    #[test]
+    fn a_zero_save_grace_ends_the_session_on_the_next_tick() {
+        let mut policy = make_bedtime_policy();
+        policy.entries[0].limits.save_grace = Duration::ZERO;
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+
+        let started = launch_at(&mut engine, "bedtime-game", at(19, 30));
+        let resumed_at = started + Duration::from_secs(5 * 60);
+        engine.notify_resumed(at(22, 35), resumed_at);
+
+        assert_eq!(
+            engine.current_session().unwrap().time_remaining(resumed_at),
+            Some(Duration::ZERO)
+        );
+        let events = engine.tick(resumed_at, at(22, 35));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ExpireDue { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// Nothing to reconcile with no session, and nothing to crash on either —
+    /// most resumes happen with the launcher on screen.
+    #[test]
+    fn a_resume_with_no_session_is_a_no_op() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        assert!(
+            engine
+                .notify_resumed(at(22, 35), MonotonicInstant::now())
+                .is_empty()
+        );
     }
 }

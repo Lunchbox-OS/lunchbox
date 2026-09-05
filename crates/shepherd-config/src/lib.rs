@@ -364,4 +364,88 @@ kind = { type = "ebook", book = "~/Books/b.epub" }
             "a group sets its own grace period independently of its members"
         );
     }
+
+    /// The save-progress grace (issue #155) is the one limit that cascades
+    /// service -> group -> entry, so a "bedtime" category can set it once.
+    #[test]
+    fn save_grace_cascades_from_service_through_the_group_to_the_entry() {
+        let config = r#"
+            config_version = 1
+
+            [service]
+            save_grace_seconds = 30
+
+            [[groups]]
+            id = "bedtime"
+            label = "Bedtime"
+            [groups.limits]
+            save_grace_seconds = 300
+
+            [[entries]]
+            id = "inherits-group"
+            label = "Inherits the category"
+            kind = { type = "process", command = "/usr/bin/game" }
+            group = "bedtime"
+
+            [[entries]]
+            id = "own-value"
+            label = "Sets its own"
+            kind = { type = "process", command = "/usr/bin/game" }
+            group = "bedtime"
+            [entries.limits]
+            save_grace_seconds = 45
+
+            [[entries]]
+            id = "ungrouped"
+            label = "No category"
+            kind = { type = "process", command = "/usr/bin/game" }
+
+            [[entries]]
+            id = "no-grace"
+            label = "Cut off on wake"
+            kind = { type = "process", command = "/usr/bin/game" }
+            [entries.limits]
+            save_grace_seconds = 0
+        "#;
+
+        let policy = parse_config(config).unwrap();
+        let grace = |id: &str| {
+            policy
+                .get_entry(&shepherd_util::EntryId::new(id))
+                .unwrap()
+                .limits
+                .save_grace
+        };
+        assert_eq!(grace("inherits-group"), Duration::from_secs(300));
+        assert_eq!(grace("own-value"), Duration::from_secs(45));
+        assert_eq!(grace("ungrouped"), Duration::from_secs(30));
+        assert_eq!(grace("no-grace"), Duration::ZERO);
+    }
+
+    #[test]
+    fn save_grace_defaults_to_two_minutes() {
+        let config = r#"
+            config_version = 1
+
+            [[groups]]
+            id = "games"
+            label = "Games"
+
+            [[entries]]
+            id = "plain"
+            label = "Plain"
+            kind = { type = "process", command = "/usr/bin/game" }
+        "#;
+
+        let policy = parse_config(config).unwrap();
+        assert_eq!(
+            policy.entries[0].limits.save_grace,
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            policy.groups[0].limits.save_grace,
+            Duration::from_secs(120),
+            "a group with no limits table should get it too"
+        );
+    }
 }

@@ -67,6 +67,14 @@ export function ServicePage({ config }: { config: RawConfig }) {
               helperText="A session shorter than this leaves the cooldown alone, so an activity that crashes on launch does not lock anyone out. Overridable per activity and per category."
               fullWidth
             />
+            <DurationField
+              label="Time to save when the schedule closes"
+              value={service.save_grace_seconds ?? null}
+              onChange={(v) => f.setField("save_grace_seconds", v ?? undefined)}
+              placeholder="2m"
+              helperText="If the device wakes from sleep after an activity's hours have passed, this is how long it stays open — with a warning — so nothing in progress is lost. Overridable per activity and per category."
+              fullWidth
+            />
           </Stack>
         </Section>
 

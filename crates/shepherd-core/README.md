@@ -154,6 +154,35 @@ let is_available = entry.availability.is_available(&Local::now());
 let remaining = session.time_remaining(MonotonicInstant::now());
 ```
 
+### Sleep, and where the two clocks disagree (issue #155)
+
+`MonotonicInstant` is `CLOCK_MONOTONIC`, which **stops while the machine is
+asleep**. That is the behaviour we want for enforcement — a child is not charged
+for a closed lid — but it makes the two clocks drift apart, in both directions
+at once:
+
+- `ActiveSession::deadline`, the wall-clock copy, keeps running. Every countdown
+  a human sees is derived from it (the HUD, the launcher cover, the admin
+  dashboard), so after a sleep they all read low by however long the machine was
+  out, and can sit at 0:00 while the session runs on.
+- The *session* meanwhile outlives its schedule. `compute_max_duration` clamps a
+  session to what is left of its window at launch and nothing re-checks it, so an
+  N-second sleep moves the real end N seconds past that window — unbounded for an
+  overnight sleep.
+
+[`CoreEngine::notify_resumed`] fixes both, and `shepherdd` calls it from the
+logind resume signal it already listens for. It re-derives `deadline` from
+`deadline_mono`, and if the wall clock has left the activity's allowed hours
+(its own window or its group's) it clamps the session to the entry's
+`save_grace` and emits a `Critical` warning, so the child gets a bounded, warned
+window to save rather than being cut off mid-sentence. The grace is granted once
+per session — see `ActiveSession::save_grace_started`, which is what stops a
+lid-switch loop from renewing it forever.
+
+Only the *schedule* is re-checked, not the whole of `evaluate_entry`: a daily
+quota resets at midnight (so sleeping can only leave more of it), and a cooldown
+is not a reason to stop an activity that is already running.
+
 ## Policy Evaluation
 
 For each entry, the engine evaluates:
