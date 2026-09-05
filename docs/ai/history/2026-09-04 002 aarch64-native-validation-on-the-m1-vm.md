@@ -199,41 +199,85 @@ build (triple unset, existing output paths and fingerprints). That is what lets
 a CI matrix pass `--arch` on every leg without giving the native leg a second,
 redundant `target/` directory.
 
-### One thing the mirror probing found
+### What the mirror probing found — and a correction
 
-`_deps_enable_foreign_arch` decides whether a ports source is needed by probing
-`dists/<suite>/<component>/binary-<arch>/Release` on the configured mirror. Two
-reasons it does not just encode Ubuntu's archive/ports split:
+`_deps_enable_foreign_arch` decides whether a fallback source is needed by
+probing `dists/<suite>/<component>/binary-<arch>/Release` on the configured
+mirror, rather than encoding Ubuntu's archive/ports split. Three reasons, the
+third of which only became clear after this was written:
 
-- It would be an `amd64` literal in a file `check-arch-neutral.sh` scans.
-- **It would be wrong.** This VM's mirror (`mirrors.mit.edu`) serves `arm64`
-  *and* `amd64`, so it needs no ports entry at all. Ubuntu's own
-  `archive.ubuntu.com` is the special case, not the rule.
+1. The split would be an `amd64` literal in a file `check-arch-neutral.sh`
+   scans.
+2. The suite `Release` file cannot answer the question. Its `Architectures:`
+   field lists everything the *suite* defines (`amd64 arm64 armhf ppc64el
+   riscv64 s390x …`) regardless of what the mirror holds, and every mirror
+   returns the identical list. The per-arch binary index is the discriminator.
+3. **The split is no longer true.** On 26.04, `archive.ubuntu.com` serves
+   arm64: `dists/resolute/main/binary-arm64/Release` returns `Architecture:
+   arm64` with a real `Packages.gz` behind it. Ports still 404s for amd64, so
+   it remains a genuinely non-primary mirror — but "arm64 lives on ports" is
+   stale.
 
-The suite `Release` file cannot answer the question — its `Architectures:`
-field lists everything the *suite* defines (`amd64 arm64 armhf ppc64el riscv64
-s390x …`) regardless of what the mirror holds, and both mirrors return the
-identical list. The per-arch binary index is the discriminator: present on
-`ports.ubuntu.com` for `arm64`, 404 there for `amd64`.
+**This corrects two earlier claims in this branch**, both made while
+Canonical's archive was mid-outage and could not be probed:
 
-The ports fallback branch is therefore **unvalidated** — this host's mirror
-never takes it, and Canonical was mid-outage during the session, so
-`archive.ubuntu.com` could not be probed as a counter-example either.
+- The commit that added `deps install cross` says archive.ubuntu.com is "the
+  special case, not the rule". It is not a special case; it carries both.
+- The CI commit predicted that the container — whose mirror is
+  archive.ubuntu.com — would take the ports fallback, and that CI would
+  therefore exercise that branch for the first time. **It will not.** The probe
+  will find archive already serves arm64, and `deps install cross` will add no
+  source and rewrite nothing.
+
+That is a better outcome than predicted (the riskiest branch is not on the CI
+path at all), but it means **the ports fallback is exercised nowhere** — not
+here, not in CI. It stands as a safety net for a partial mirror, unproven.
+
+The episode is also the argument for the probe. A hardcoded "arm64 → ports"
+rule would have been written against a world that had already changed, and
+would now be rewriting a perfectly good sources file to add a redundant mirror.
 
 ## What is left on #166
 
-Unchanged from the issue, minus what is above. The remaining work is all on the
-amd64 side, where it can actually be exercised:
+The CI pieces are now written but **unrun** — they could not be exercised from
+this VM, since the cross build happens on the amd64 runner:
 
-- `.ci/Dockerfile.cross` and the `image-cross` job in `images.yml` (its content
-  hash must include `Dockerfile.cross` and `cross.pkgs`).
-- `ci.yml`: a `build-arm64` job, the `package` job matrixed over both arches,
-  arm64-specific `target/` cache keys. The optional clippy leg now looks
-  droppable — see above.
-- `release.yml`: matrix the `deb` job, with `name: Build .deb (${{ matrix.arch }})`
-  because `check-workflows.sh` rejects duplicate job names.
+- `.ci/Dockerfile.cross` + the `image-cross` job in `images.yml` (hash covers
+  `Dockerfile.cross`, `cross.pkgs`, `deps.sh`, the base ref and `TARGET_ARCH`).
+- `ci.yml`: a `build-arm64` job, and `package` matrixed over both arches.
+- `release.yml`: the `deb` job matrixed over both arches.
+
+One thing to watch on the first run:
+
+- **The final link is still unproven.** The original probe died on ENOSPC
+  before linking; native aarch64 links fine, but nothing has yet linked
+  *cross*. That is what `build-arm64`'s "Assert the binaries are actually
+  arm64" step is there to catch, along with a silent fallback to the host.
+
+The `deps install cross` step in the cross image should be uneventful: the
+container's `archive.ubuntu.com` serves arm64 (see the correction above), so
+the probe finds it already available and no source is added or rewritten.
+
+Also still open:
+
 - The optional native-arm64 workflow for this VM (`workflow_dispatch` +
-  `schedule`, own runner label, never referenced from `ci.yml`).
+  `schedule`, own runner label, never referenced from `ci.yml`) — this machine
+  is not yet registered as a Forgejo runner.
 - `docs/INSTALL.md`, once `release.yml` actually publishes an arm64 package —
   it should not advertise one before then. `CONTRIBUTING.md` and
   `scripts/README.md` are done.
+- Installing the published arm64 `.deb` on the Pi 4 and booting it.
+
+### Notes for whoever runs the first CI pass
+
+- The `images` reusable workflow now has a third job, and every job that
+  `needs: images` waits for the whole workflow. `image-cross` runs in parallel
+  with `image-android` (both `needs: image`), so the critical path only grows
+  if the cross layer is slower than the SDK download — but on a hash miss both
+  are minutes, and a `deps.sh` change invalidates all three images at once.
+- The `package` cache key gained an arch segment, so the amd64 leg takes one
+  cold `target/` cache on the first run after this lands.
+- `Dockerfile.cross` derives the triple with `sed`, not `${var/a/b}`: Docker
+  runs each `RUN` through `/bin/sh`, which is dash on Ubuntu, and dash has no
+  such substitution. The first draft of that file used the bash form and would
+  have failed the image build with `Bad substitution`.

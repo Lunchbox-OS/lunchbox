@@ -142,11 +142,23 @@ jobs:
   # (on publish) upload it + a .sha256 to the release.
   # --------------------------------------------------------------------------
   deb:
-    name: Build .deb (amd64)
+    # The interpolation in `name:` is required, not cosmetic: two jobs in one
+    # workflow file may not share a name — Forgejo rejects the *entire* file
+    # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
+    # catches that locally.
+    name: Build .deb (${{ matrix.arch }})
     needs: [guard, images, create-release]
     runs-on: ubuntu-latest
+    strategy:
+      # Publish whichever architecture succeeded rather than losing both to
+      # one failure: each leg uploads its own asset independently.
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      # arm64 is cross-compiled on this amd64 runner and so needs the cross
+      # image; amd64 builds natively in the base one.
+      image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -160,14 +172,29 @@ jobs:
             /usr/local/cargo/registry
             /usr/local/cargo/git
             target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-
 
       - name: Build .deb
         # Builds --release, stages via `DESTDIR=… shepherd install …`, runs
         # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
-        run: ./scripts/shepherd package deb --out dist/pkg
+        run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
+
+      - name: Assert the package is labelled for the right architecture
+        # A cross build that silently fell back to the host would otherwise be
+        # published under the wrong Architecture: and installed by apt on
+        # machines that cannot run it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(echo dist/pkg/*.deb)"
+          got="$(dpkg-deb -f "$deb" Architecture)"
+          echo "$deb declares Architecture: $got"
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "::error::expected Architecture: ${{ matrix.arch }}, got $got"
+            exit 1
+          }
 
       - name: Upload .deb to the release
         if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
@@ -180,8 +207,11 @@ jobs:
 
       # Also publish to Forgejo's Debian package registry so users get an
       # `apt update`/`apt upgrade` path (the release asset above stays the
-      # offline/manual download). Forgejo signs the repo metadata itself, so the
-      # .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1) are
+      # offline/manual download). Both this and the upload above take file
+      # globs and need no per-arch handling: each matrix leg has exactly one
+      # .deb in dist/pkg/, and Forgejo reads `Architecture:` out of the control
+      # file, serving both arches from one distribution/component. Forgejo
+      # signs the repo metadata itself, so the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1) are
       # skipped so RC builds never reach `apt upgrade` users — they still get the
       # signed release asset for manual testing. See docs/INSTALL.md.
       - name: Publish .deb to the apt registry

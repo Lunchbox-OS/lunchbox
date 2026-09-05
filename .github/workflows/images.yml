@@ -1,6 +1,6 @@
 name: CI images
 
-# Reusable workflow that builds (on content-hash miss) and publishes the two
+# Reusable workflow that builds (on content-hash miss) and publishes the
 # pre-baked CI images, then exposes their refs as outputs. Called by both
 # ci.yml and release.yml via `uses: ./.github/workflows/images.yml` so the
 # build-if-missing logic lives in exactly one place.
@@ -18,6 +18,12 @@ on:
       android-ref:
         description: Android CI image ref (JDK + Android SDK layered on base)
         value: ${{ jobs.image-android.outputs.ref }}
+      cross-ref:
+        description: >-
+          arm64 cross CI image ref (cross toolchain + arm64 sysroot layered on
+          base). Only the arm64 build/package jobs pull this; it is 1.5-2.5 GB
+          larger than the base.
+        value: ${{ jobs.image-cross.outputs.ref }}
 
 jobs:
   image:
@@ -205,4 +211,99 @@ jobs:
           docker build \
             --build-arg BASE_IMAGE="$BASE_REF" \
             -t "$ref" -f .ci/Dockerfile.android .
+          docker push "$ref"
+
+  image-cross:
+    name: CI image (arm64 cross)
+    # Layers the cross toolchain + arm64 sysroot onto the base CI image so the
+    # arm64 build and package jobs get a ready multiarch sysroot. Kept separate
+    # from the base image because that set is 1.5-2.5 GB and every other job
+    # pulls the base on every run. Same build-push-on-hash-miss shape as the
+    # two jobs above; see .ci/Dockerfile.cross.
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
+    # See the note on the base image job: job-level env so CI_IMAGE_NAME
+    # survives inside the reusable workflow.
+    env:
+      CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
+      TARGET_ARCH: arm64
+    steps:
+      - name: Install docker CLI
+        run: |
+          apt-get update
+          apt-get install -y docker.io
+
+      - name: Point DOCKER_HOST at the DinD bridge gateway
+        run: |
+          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
+          if [ -z "$gateway" ]; then
+            echo "::error::could not determine bridge gateway IP"
+            ip route || true
+            exit 1
+          fi
+          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=tcp://${gateway}:2375"
+
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        env:
+          BASE_REF: ${{ needs.image.outputs.ref }}
+        run: |
+          # Hash the cross-layer inputs plus the base image ref. cross.pkgs and
+          # Dockerfile.cross must be in here or a dependency change would not
+          # trigger a rebuild; the base ref folds in the base Dockerfile + deps
+          # hashes, so a base rebuild forces this one too. TARGET_ARCH is in
+          # the hash because it changes what the layer installs. Year+week
+          # prefix keeps the weekly security-update rebuild.
+          hash=$( { cat \
+                .ci/Dockerfile.cross \
+                scripts/deps/cross.pkgs \
+                scripts/lib/deps.sh; \
+              printf '%s%s' "$BASE_REF" "$TARGET_ARCH"; \
+            } | sha256sum | cut -c1-12)
+          year_week=$(date -u +%Gw%V)
+          ref="${CI_IMAGE_NAME}-cross-${TARGET_ARCH}:${year_week}-${hash}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Image ref: ${ref}"
+
+      - name: Wait for DinD daemon
+        run: |
+          for _ in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready at $DOCKER_HOST"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::docker daemon at $DOCKER_HOST never became ready."
+          exit 1
+
+      - name: Log in to Forgejo container registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" \
+            | docker login git.armeafamily.com \
+                --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and push if tag is missing
+        env:
+          BASE_REF: ${{ needs.image.outputs.ref }}
+        run: |
+          ref="${{ steps.tag.outputs.ref }}"
+          if docker manifest inspect "$ref" >/dev/null 2>&1; then
+            echo "Image already published: $ref"
+            exit 0
+          fi
+          # Pull the base image explicitly so the dind daemon has it locally
+          # for the FROM (it may not be in the daemon's cache).
+          docker pull "$BASE_REF"
+          docker build \
+            --build-arg BASE_IMAGE="$BASE_REF" \
+            --build-arg TARGET_ARCH="$TARGET_ARCH" \
+            -t "$ref" -f .ci/Dockerfile.cross .
           docker push "$ref"

@@ -111,6 +111,98 @@ jobs:
       - name: Build
         run: ./scripts/shepherd build
 
+  build-arm64:
+    name: Build (arm64 cross)
+    # Cross-compiles the workspace for arm64 on this amd64 runner. It is the
+    # only arm64 build that can be a required check, because it is the only one
+    # that runs on always-up hardware -- correctness on arm64 is covered
+    # separately on a native machine, since cross-compiling buys no test
+    # coverage at all (see CONTRIBUTING, "Running the suites natively on
+    # arm64").
+    #
+    # What this catches is what actually recurs: a new dependency that does not
+    # cross, an arch-specific compile error, and packaging breakage via the
+    # arm64 leg of `package` below.
+    #
+    # No clippy leg. Running `cargo clippy --workspace --all-targets -D
+    # warnings` natively on aarch64 produced zero findings -- no integer-width
+    # or c_char-signedness lints -- and the workspace has no cfg(target_arch)
+    # gates outside the wasm crate, so a second clippy target would cost
+    # minutes per PR to re-report what the amd64 `lint` job already says.
+    # Measurements: docs/ai/history/2026-09-04 002.
+    needs: [images, warmup]
+    runs-on: ubuntu-latest
+    container:
+      # The cross image, not the base one: it carries the cross toolchain and
+      # the arm64 sysroot, and is 1.5-2.5 GB larger. Only this job and the
+      # arm64 leg of `package` pull it.
+      image: ${{ needs.images.outputs.cross-ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-v2-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          # A cross build lands in target/<triple>/, not target/, so it shares
+          # nothing with the amd64 jobs' artifacts -- hence its own key, per
+          # the per-job-key convention already in this file.
+          path: target
+          key: ${{ runner.os }}-cargo-target-build-arm64-v1-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-build-arm64-v1-
+
+      - name: Build for arm64
+        # --arch (not --target): build.sh derives the triple with
+        # dpkg-architecture and passes --target on the command line, which is
+        # what keeps CARGO_BUILD_TARGET out of the environment and so out of
+        # the sibling eBPF build. See crates/shepherd-firewall-helper/build.rs.
+        run: ./scripts/shepherd build --arch arm64
+
+      - name: Assert the binaries are actually arm64
+        # A cross build that silently fell back to the host would otherwise
+        # pass this job and only be caught when someone installed the .deb.
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=target/aarch64-unknown-linux-gnu/debug
+          for bin in shepherdd shepherd-launcher shepherd-hud shepherd-media; do
+            out="$(file -b "$dir/$bin")"
+            echo "$bin: $out"
+            grep -q "ARM aarch64" <<<"$out" || {
+              echo "::error::$bin is not an arm64 binary: $out"
+              exit 1
+            }
+          done
+
+      - name: Assert the eBPF object stayed on its own target
+        # The failure this guards is silent and specific: an exported
+        # CARGO_BUILD_TARGET would retarget the BPF crate off
+        # bpfel-unknown-none. Nothing here sets it, which is precisely why a
+        # regression would go unnoticed without an assertion.
+        shell: bash
+        run: |
+          set -euo pipefail
+          obj=crates/shepherd-firewall-bpf/target/bpfel-unknown-none/release/shepherd-firewall-bpf
+          out="$(file -b "$obj")"
+          echo "$obj: $out"
+          grep -q "eBPF" <<<"$out" || {
+            echo "::error::BPF object is not eBPF: $out"
+            exit 1
+          }
+
   test:
     name: Test
     needs: [images, warmup]
@@ -321,15 +413,29 @@ jobs:
         run: npm test
 
   package:
-    name: Package (.deb smoke build)
-    # Builds the amd64 .deb on every push/PR to catch packaging breakage before
-    # a release tag ever runs release.yml. Nothing is published — this only
+    name: Package (.deb smoke build, ${{ matrix.arch }})
+    # Builds the .deb on every push/PR to catch packaging breakage before a
+    # release tag ever runs release.yml. Nothing is published — this only
     # proves `shepherd package deb` (release build → DESTDIR stage → dpkg-deb)
     # still works. Runs as root in the container, so no fakeroot is needed.
+    #
+    # Matrixed over both architectures so the arm64 package -- which is what
+    # release.yml will publish -- gets the same smoke build and the same
+    # xz assertion. The two legs differ only in the image and the --arch value:
+    # `dpkg-deb -I` and `ar t` are arch-agnostic, and the arch-neutral job
+    # exists to keep the packaging path that way.
     needs: [images, warmup]
     runs-on: ubuntu-latest
+    strategy:
+      # Don't let one architecture's failure hide the other's result.
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      # arm64 needs the cross image (toolchain + sysroot); amd64 builds
+      # natively in the base one. Selected here rather than in the matrix
+      # because `container:` is where both `needs` and `matrix` are available.
+      image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
@@ -349,16 +455,45 @@ jobs:
       - name: Cache build artifacts
         uses: actions/cache@v4
         with:
+          # Per-arch key: a cross build lands in target/<triple>/ and shares
+          # nothing with the amd64 leg's artifacts. (This renames the amd64
+          # key too, so that leg takes one cold cache on the first run after
+          # this lands.)
           path: target
-          key: ${{ runner.os }}-cargo-target-package-v1-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-target-package-v1-
+            ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v1-
 
       - name: Build .deb
-        run: ./scripts/shepherd package deb --out dist/pkg
+        run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
 
       - name: Inspect package metadata
         run: dpkg-deb -I dist/pkg/*.deb
+
+      - name: Assert the package is labelled for the right architecture
+        # `Architecture:` comes from --arch and the staged binaries come from
+        # target/<triple>/; if those two ever disagree the package installs on
+        # the wrong machine and fails at exec time. Check both.
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(echo dist/pkg/*.deb)"
+          got="$(dpkg-deb -f "$deb" Architecture)"
+          echo "$deb declares Architecture: $got"
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "::error::expected Architecture: ${{ matrix.arch }}, got $got"
+            exit 1
+          }
+          dpkg-deb -x "$deb" /tmp/debcheck
+          out="$(file -b /tmp/debcheck/usr/bin/shepherdd)"
+          echo "shepherdd: $out"
+          case "${{ matrix.arch }}" in
+            arm64) grep -q "ARM aarch64" <<<"$out" ;;
+            *)     ! grep -q "ARM aarch64" <<<"$out" ;;
+          esac || {
+            echo "::error::staged binary does not match ${{ matrix.arch }}: $out"
+            exit 1
+          }
 
       - name: Assert .deb uses xz compression
         # Forgejo's Debian registry (Gitea-compat 1.22) answers the apt-registry

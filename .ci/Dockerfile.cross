@@ -1,0 +1,75 @@
+# arm64 cross-compilation CI image for shepherd-launcher.
+#
+# Layers the cross toolchain and the target-architecture sysroot on top of the
+# base CI image (.ci/Dockerfile), so the arm64 build and package jobs get a
+# ready multiarch sysroot. The base image -- including its own year-week +
+# content hash -- is passed in via the BASE_IMAGE build arg by the
+# `image-cross` workflow job, which rebuilds this layer on a content-hash miss.
+#
+# A separate image rather than an extension of the base one, deliberately: the
+# target architecture's GTK + mpv + D-Bus dev set is 1.5-2.5 GB, and every
+# other job pulls the base image on every run. Only the cross jobs pay for it.
+#
+# Tag scheme mirrors the Android image: `<isoyear>w<isoweek>-<sha256-12>`, here
+# over .ci/Dockerfile.cross, scripts/deps/cross.pkgs, scripts/lib/deps.sh, and
+# the base image ref (so a base rebuild forces a cross rebuild too).
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The architecture this image cross-compiles for. A build arg rather than a
+# hardcode so one Dockerfile serves any target; `image-cross` passes the same
+# value the ci.yml / release.yml jobs pass to `--arch`.
+ARG TARGET_ARCH=arm64
+
+# Install the cross toolchain, the target architecture's half of build.pkgs,
+# and rustc's std for the derived triple -- via the project's own installer, so
+# the image stays in lockstep with `shepherd deps install cross` on a host and
+# the multiarch/mirror setup is exercised here rather than reimplemented.
+#
+# Re-copy scripts (and VERSION, which `scripts/shepherd` reads at startup for
+# any subcommand) so this layer reflects the current checkout rather than
+# whatever the base image baked.
+COPY VERSION /opt/shepherd-deps/VERSION
+COPY scripts /opt/shepherd-deps/scripts
+WORKDIR /opt/shepherd-deps
+RUN ./scripts/shepherd deps install cross --arch "${TARGET_ARCH}" && \
+    rm -rf /var/lib/apt/lists/*
+
+# `deps install cross` adds the Rust target as root, so re-open the toolchain
+# to the unprivileged `ci` user the base image creates. Without this the new
+# target's std is root-owned and a job that steps down to `ci` cannot read it.
+RUN chmod -R a+rwX "$CARGO_HOME" "$RUSTUP_HOME"
+
+# Fail the *image* build, not every job that uses it, if the sysroot is not
+# actually usable: resolve the two heaviest native dependencies for the target
+# and confirm the cross linker is on PATH. A missing or half-installed arm64
+# -dev package otherwise surfaces much later as a build-script error in one
+# job, with nothing pointing at the image.
+#
+# These are the same variables scripts/lib/build.sh exports for a foreign
+# target. They are deliberately NOT baked in as ENV: build.sh sets each one
+# only where it is unset, so it supplies them for every job that goes through
+# `shepherd build`, and duplicating them here would be a second copy to keep in
+# step. This RUN sets them for the length of the check only.
+#
+# Never set CARGO_BUILD_TARGET, here or in a job. It would override
+# crates/shepherd-firewall-bpf's own `[build] target = "bpfel-unknown-none"`
+# and compile the eBPF program for the host triple; `shepherd build` passes
+# --target on the command line for exactly that reason.
+# `sh` here, not bash: Docker runs each RUN through /bin/sh, which on Ubuntu is
+# dash -- and dash has no ${var/a/b} substitution, so the triple is derived with
+# sed rather than the parameter expansion scripts/lib/build.sh can afford to use.
+RUN gnu="$(dpkg-architecture -a"${TARGET_ARCH}" -qDEB_HOST_GNU_TYPE)" && \
+    triple="$(echo "$gnu" | sed 's/-linux-/-unknown-linux-/')" && \
+    echo "verifying the $triple sysroot..." && \
+    command -v "$gnu-gcc" && \
+    rustup target list --installed | grep -qx "$triple" && \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_SYSROOT_DIR=/ \
+    PKG_CONFIG_LIBDIR="/usr/lib/$gnu/pkgconfig:/usr/share/pkgconfig" \
+      pkg-config --libs gtk4 libadwaita-1 mpv dbus-1 gtk4-layer-shell-0
+
+WORKDIR /

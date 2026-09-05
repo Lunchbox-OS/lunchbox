@@ -352,10 +352,19 @@ install_cargo_ndk() {
     fi
 }
 
-# Ubuntu's mirror for architectures the primary archive does not carry. Named
-# for the role, not for any architecture: which arches live here differs between
-# Ubuntu's own mirrors and the many that carry everything in one tree, which is
-# why the code below probes rather than assumes.
+# Fallback mirror, for the case where the configured one does not carry the
+# target architecture. Named for its role, not for any architecture, because
+# which arches live where is not stable enough to encode: on Ubuntu 26.04 the
+# main archive serves arm64 too (verified 2026-09-04 --
+# dists/resolute/main/binary-arm64/Release is present and real), so the old
+# rule that ports carried arm64 and the archive carried amd64/i386 no longer
+# holds. Hardcoding it would add a redundant source and rewrite a working
+# sources file for nothing. Hence the probe below.
+#
+# This is only the right fallback for an architecture the primary archive
+# lacks. Ports carries arm64 but not amd64, so cross-compiling towards amd64
+# from a host whose only mirror is ports is not something it can rescue -- that
+# fails with a clear error rather than adding a source that would not work.
 DEPS_PORTS_URI="http://ports.ubuntu.com/ubuntu-ports/"
 
 # Does the apt mirror at $1 actually serve architecture $3 for suite $2?
@@ -384,67 +393,88 @@ _deps_mirror_serves() {
 # the 404 for the new one, and only then can a ports entry be added.
 _deps_enable_foreign_arch() {
     local arch="$1"
-    local sources="/etc/apt/sources.list.d/ubuntu.sources"
+    local ports_file="/etc/apt/sources.list.d/ubuntu-ports-$arch.sources"
 
     if ! dpkg --print-foreign-architectures | grep -qx -- "$arch"; then
         info "Telling dpkg about the $arch architecture..."
         maybe_sudo dpkg --add-architecture "$arch"
     fi
 
-    if [[ ! -f "$sources" ]]; then
-        warn "$sources not found; assuming apt can already fetch $arch packages"
+    if [[ -f "$ports_file" ]]; then
+        info "A ports entry for $arch is already configured ($ports_file)"
         return 0
     fi
 
-    if grep -q "^URIs: $DEPS_PORTS_URI" "$sources"; then
-        info "A ports entry for $arch is already configured"
-        return 0
-    fi
+    # Every deb822 source, whatever it is called: Ubuntu ships ubuntu.sources,
+    # but images and derivatives rename and split it.
+    local -a sources=()
+    local f
+    for f in /etc/apt/sources.list.d/*.sources; do
+        [[ -f "$f" ]] && sources+=("$f")
+    done
 
     local uri suite
-    uri="$(awk '/^URIs:/ {print $2; exit}' "$sources")"
-    suite="$(awk '/^Suites:/ {print $2; exit}' "$sources")"
-    [[ -n "$uri" && -n "$suite" ]] \
-        || die "Could not read a URI and suite out of $sources"
+    if [[ ${#sources[@]} -gt 0 ]]; then
+        uri="$(awk '/^URIs:/ {print $2; exit}' "${sources[@]}")"
+        suite="$(awk '/^Suites:/ {print $2; exit}' "${sources[@]}")"
+    fi
 
-    if _deps_mirror_serves "$uri" "$suite" "$arch"; then
-        info "The configured mirror ($uri) already serves $arch"
+    if [[ -z "${uri:-}" || -z "${suite:-}" ]]; then
+        # Nothing to probe or pin. If apt can already reach the architecture
+        # (a full mirror, or a source configured some other way) the install
+        # below simply works; if it cannot, apt's own error is the honest one.
+        warn "No deb822 apt source found to read a mirror and suite from."
+        warn "Assuming apt can already fetch $arch packages; if it cannot, add a"
+        warn "$arch source manually and re-run."
         return 0
     fi
 
+    if _deps_mirror_serves "$uri" "$suite" "$arch"; then
+        info "The configured mirror ($uri) already serves $arch; no ports entry needed"
+        return 0
+    fi
+
+    info "$uri does not serve $arch; falling back to $DEPS_PORTS_URI"
     _deps_mirror_serves "$DEPS_PORTS_URI" "$suite" "$arch" \
         || die "Neither $uri nor $DEPS_PORTS_URI serves $arch packages for $suite"
 
-    info "Pinning the existing sources to their own architectures..."
+    # Pin every existing stanza to the architectures it does serve, or
+    # `apt-get update` fails hard on the 404 for the new one. Stanzas that
+    # already declare `Architectures:` are left alone, so this is safe to run
+    # twice.
     local native
     native="$(dpkg --print-architecture)"
-    # Add `Architectures:` to every stanza that has none, so the new
-    # architecture is not requested from a mirror that lacks it. Stanzas that
-    # already declare their architectures are left alone -- this has to be safe
-    # to run twice.
-    maybe_sudo cp -n "$sources" "$sources.pre-cross" || true
-    # The `$` below belong to awk (an end-of-line anchor), not to the shell, so
-    # the program has to stay single-quoted. The architecture reaches it via -v.
-    # shellcheck disable=SC2016
-    maybe_sudo awk -v arches="$native" '
-        /^[[:space:]]*$/ { flush(); print; next }
-        /^Architectures:/ { seen = 1 }
-        { buf[n++] = $0 }
-        END { flush() }
-        function flush(   i) {
-            for (i = 0; i < n; i++) {
-                print buf[i]
-                if (buf[i] ~ /^Types:/ && !seen) print "Architectures: " arches
+    for f in "${sources[@]}"; do
+        if grep -q '^Architectures:' "$f"; then
+            info "$f already declares its architectures; leaving it alone"
+            continue
+        fi
+        info "Pinning $f to $native..."
+        maybe_sudo cp -n "$f" "$f.pre-cross" || true
+        # The `$` below belong to awk (an end-of-line anchor), not to the
+        # shell, so the program has to stay single-quoted. The architecture
+        # reaches it via -v.
+        # shellcheck disable=SC2016
+        maybe_sudo awk -v arches="$native" '
+            /^[[:space:]]*$/ { flush(); print; next }
+            { buf[n++] = $0 }
+            END { flush() }
+            function flush(   i) {
+                for (i = 0; i < n; i++) {
+                    print buf[i]
+                    if (buf[i] ~ /^Types:/) print "Architectures: " arches
+                }
+                n = 0
             }
-            n = 0; seen = 0
-        }
-    ' "$sources" | maybe_sudo tee "$sources.new" >/dev/null
-    maybe_sudo mv "$sources.new" "$sources"
+        ' "$f" | maybe_sudo tee "$f.new" >/dev/null
+        maybe_sudo mv "$f.new" "$f"
+    done
 
     info "Adding a $DEPS_PORTS_URI entry for $arch..."
     local components
-    components="$(awk '/^Components:/ {sub(/^Components: /, ""); print; exit}' "$sources")"
-    maybe_sudo tee "/etc/apt/sources.list.d/ubuntu-ports-$arch.sources" >/dev/null <<EOF
+    components="$(awk '/^Components:/ {sub(/^Components: /, ""); print; exit}' "${sources[@]}")"
+    : "${components:=main restricted universe multiverse}"
+    maybe_sudo tee "$ports_file" >/dev/null <<EOF
 # Added by \`shepherd deps install cross --arch $arch\`: the configured mirror
 # does not carry $arch, so its packages come from Ubuntu's ports mirror.
 Types: deb
