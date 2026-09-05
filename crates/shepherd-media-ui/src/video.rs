@@ -30,6 +30,12 @@ use shepherd_media_core::Transport;
 pub const SEEK_DELTA_SECONDS: f64 = 10.0;
 /// How long the control overlay stays visible after the last input event.
 pub const CONTROLS_VISIBLE_FOR: Duration = Duration::from_secs(3);
+
+/// How long the "skipped a sponsor" notice stays on screen (issue #159).
+///
+/// Long enough for a viewer to read why the video jumped, short enough that it
+/// is gone before it becomes part of the picture.
+pub const SKIP_NOTICE_FOR: Duration = Duration::from_secs(3);
 /// Height (logical px) of the bottom control bar, sized for thumb taps.
 const CONTROL_BAR_HEIGHT: f32 = 160.0;
 /// Minimum hit-box size for a touch-friendly button.
@@ -395,6 +401,28 @@ pub fn transport_overlay<T: Transport + ?Sized>(
     }
 
     action
+}
+
+/// Paint the notice that a segment was just skipped.
+///
+/// Deliberately inert: no animation, no button, nothing to dismiss. It sits
+/// above where the control bar would be so it does not collide with the
+/// transport when both are up, and it is drawn whether or not the controls are
+/// visible — the jump it explains happens with the overlay hidden.
+pub fn skip_notice(painter: &egui::Painter, rect: egui::Rect, text: &str, theme: &OverlayTheme) {
+    let galley = painter.layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(22.0),
+        theme.text,
+    );
+    let anchor = egui::pos2(
+        rect.min.x + 32.0,
+        rect.max.y - CONTROL_BAR_HEIGHT - 32.0 - galley.size().y,
+    );
+    let background =
+        egui::Rect::from_min_size(anchor, galley.size()).expand2(egui::vec2(16.0, 10.0));
+    painter.rect_filled(background, 8.0, Color32::from_black_alpha(180));
+    painter.galley(anchor, galley, theme.text);
 }
 
 /// Toggle play/pause on any transport.

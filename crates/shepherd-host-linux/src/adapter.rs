@@ -8,7 +8,7 @@ use shepherd_api::{
 };
 use shepherd_host_api::{
     ExitStatus, FirewallSpec, HostAdapter, HostCapabilities, HostError, HostEvent,
-    HostHandlePayload, HostResult, HostSessionHandle, SpawnOptions, StopMode,
+    HostHandlePayload, HostResult, HostSessionHandle, SpawnOptions, SponsorBlockSpec, StopMode,
 };
 use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
@@ -135,6 +135,7 @@ fn media_argv(
     connectivity_check: Option<&str>,
     watched_grace_days: Option<u64>,
     cache_max_bytes: Option<u64>,
+    sponsorblock: Option<&SponsorBlockSpec>,
 ) -> Vec<String> {
     let EntryKind::Media {
         library,
@@ -147,6 +148,7 @@ fn media_argv(
         // Prefetch is shepherdd's business, not the player's: it never reaches
         // the command line.
         prefetch: _,
+        sponsorblock: sponsorblock_override,
     } = kind
     else {
         unreachable!("media_argv called with a non-media kind");
@@ -190,6 +192,21 @@ fn media_argv(
     if let Some(bytes) = cache_max_bytes {
         argv.push("--cache-max-bytes".to_string());
         argv.push(bytes.to_string());
+    }
+
+    // SponsorBlock (issue #159). The entry decides *whether* to skip, falling
+    // back to the service default; which categories, and which instance, stay
+    // the household's decision. Passing no `--sponsorblock-categories` is what
+    // turns the feature off in the activity, so an entry that opted out — or a
+    // service nobody switched on — launches a player that makes no request.
+    if let Some(spec) = sponsorblock
+        && sponsorblock_override.unwrap_or(spec.enabled)
+        && !spec.categories.is_empty()
+    {
+        argv.push("--sponsorblock-categories".to_string());
+        argv.push(spec.categories.join(","));
+        argv.push("--sponsorblock-api".to_string());
+        argv.push(spec.api.clone());
     }
 
     argv
@@ -1775,6 +1792,7 @@ impl HostAdapter for LinuxHost {
                     options.connectivity_check.as_deref(),
                     options.media_watched_grace_days,
                     options.media_cache_max_bytes,
+                    options.media_sponsorblock.as_ref(),
                 ),
                 HashMap::new(),
                 None,
@@ -2501,13 +2519,14 @@ mod tests {
             reverse: false,
             resume: false,
             prefetch: None,
+            sponsorblock: None,
         }
     }
 
     #[test]
     fn media_argv_browse_defaults() {
         assert_eq!(
-            media_argv(&media(MediaMode::Browse, None), None, None, None),
+            media_argv(&media(MediaMode::Browse, None), None, None, None, None),
             vec![
                 "shepherd-media",
                 "browse",
@@ -2525,6 +2544,7 @@ mod tests {
     fn media_argv_play_passes_the_item() {
         let argv = media_argv(
             &media(MediaMode::Play, Some("big-buck-bunny")),
+            None,
             None,
             None,
             None,
@@ -2557,8 +2577,9 @@ mod tests {
             reverse: true,
             resume: true,
             prefetch: None,
+            sponsorblock: None,
         };
-        let argv = media_argv(&kind, Some("https://example.com"), None, None);
+        let argv = media_argv(&kind, Some("https://example.com"), None, None, None);
         assert!(argv.contains(&"--reverse".to_string()), "{argv:?}");
         assert!(argv.contains(&"--resume".to_string()), "{argv:?}");
         assert!(
@@ -2583,7 +2604,7 @@ mod tests {
         // The activity writes to the same video cache shepherdd prefetches
         // into, so the eviction policy has to travel with the launch or the two
         // processes would undo each other's trims.
-        let argv = media_argv(&media(MediaMode::Browse, None), None, Some(90), None);
+        let argv = media_argv(&media(MediaMode::Browse, None), None, Some(90), None, None);
         assert!(
             argv.windows(2)
                 .any(|w| w == ["--watched-grace-days", "90"].map(String::from)),
@@ -2600,6 +2621,7 @@ mod tests {
             None,
             None,
             Some(5_000_000_000),
+            None,
         );
         assert!(
             argv.windows(2)
@@ -2612,7 +2634,7 @@ mod tests {
     fn media_argv_omits_the_watched_grace_for_a_non_media_launch_path() {
         // `None` is what every other kind resolves to; the player then falls
         // back to the shared default rather than being told a wrong number.
-        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None);
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None, None);
         assert!(
             !argv.iter().any(|a| a == "--watched-grace-days"),
             "{argv:?}"
@@ -2623,9 +2645,144 @@ mod tests {
     fn media_argv_omits_the_check_when_not_forwarded() {
         // `forward_check = false` reaches the adapter as `None`, and browse
         // mode then shows every item regardless of connectivity.
-        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None);
+        let argv = media_argv(&media(MediaMode::Browse, None), None, None, None, None);
         assert!(
             !argv.iter().any(|a| a == "--connectivity-check"),
+            "{argv:?}"
+        );
+    }
+
+    /// The household's setting reaches the player as one flag, and the
+    /// instance travels with it so the activity never falls back to a default
+    /// this side has moved.
+    #[test]
+    fn media_argv_forwards_sponsorblock_when_the_service_enables_it() {
+        let spec = SponsorBlockSpec {
+            enabled: true,
+            categories: vec!["sponsor".into(), "intro".into()],
+            api: "https://sb.example".into(),
+        };
+        let argv = media_argv(
+            &media(MediaMode::Browse, None),
+            None,
+            None,
+            None,
+            Some(&spec),
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--sponsorblock-categories", "sponsor,intro"].map(String::from)),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--sponsorblock-api", "https://sb.example"].map(String::from)),
+            "{argv:?}"
+        );
+    }
+
+    /// The default. No flag means the player starts no lookup at all, which is
+    /// what "off" has to mean for a feature that talks to a third party.
+    #[test]
+    fn media_argv_says_nothing_about_sponsorblock_when_the_service_is_off() {
+        let spec = SponsorBlockSpec {
+            enabled: false,
+            categories: vec!["sponsor".into()],
+            api: "https://sponsor.ajay.app".into(),
+        };
+        for sponsorblock in [None, Some(&spec)] {
+            let argv = media_argv(
+                &media(MediaMode::Browse, None),
+                None,
+                None,
+                None,
+                sponsorblock,
+            );
+            assert!(
+                !argv.iter().any(|a| a.starts_with("--sponsorblock")),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_media_entry_can_opt_out_of_sponsorblock_and_into_it() {
+        let spec = SponsorBlockSpec {
+            enabled: true,
+            categories: vec!["sponsor".into()],
+            api: "https://sponsor.ajay.app".into(),
+        };
+        let with_override = |value: Option<bool>| {
+            let EntryKind::Media {
+                library,
+                mode,
+                item,
+                quality,
+                sort_by,
+                reverse,
+                resume,
+                prefetch,
+                ..
+            } = media(MediaMode::Browse, None)
+            else {
+                unreachable!()
+            };
+            EntryKind::Media {
+                library,
+                mode,
+                item,
+                quality,
+                sort_by,
+                reverse,
+                resume,
+                prefetch,
+                sponsorblock: value,
+            }
+        };
+
+        let off = media_argv(&with_override(Some(false)), None, None, None, Some(&spec));
+        assert!(
+            !off.iter().any(|a| a.starts_with("--sponsorblock")),
+            "an entry that opted out must launch a silent player: {off:?}"
+        );
+
+        // And the other direction: the service default is off, this library is on.
+        let service_off = SponsorBlockSpec {
+            enabled: false,
+            ..spec.clone()
+        };
+        let on = media_argv(
+            &with_override(Some(true)),
+            None,
+            None,
+            None,
+            Some(&service_off),
+        );
+        assert!(
+            on.iter().any(|a| a == "--sponsorblock-categories"),
+            "{on:?}"
+        );
+    }
+
+    /// An enabled service with an empty category list would launch a player
+    /// that fetches and skips nothing; validation rejects that config, and the
+    /// argv builder does not emit a bare flag for it either.
+    #[test]
+    fn media_argv_omits_sponsorblock_with_no_categories() {
+        let spec = SponsorBlockSpec {
+            enabled: true,
+            categories: Vec::new(),
+            api: "https://sponsor.ajay.app".into(),
+        };
+        let argv = media_argv(
+            &media(MediaMode::Browse, None),
+            None,
+            None,
+            None,
+            Some(&spec),
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--sponsorblock")),
             "{argv:?}"
         );
     }
@@ -2645,8 +2802,9 @@ mod tests {
             reverse: false,
             resume: false,
             prefetch: None,
+            sponsorblock: None,
         };
-        assert_eq!(media_argv(&kind, None, None, None)[3], url);
+        assert_eq!(media_argv(&kind, None, None, None, None)[3], url);
 
         let kind = EntryKind::Media {
             library: "~/.config/shepherd/movies.toml".into(),
@@ -2657,8 +2815,9 @@ mod tests {
             reverse: false,
             resume: false,
             prefetch: None,
+            sponsorblock: None,
         };
-        let expanded = &media_argv(&kind, None, None, None)[3];
+        let expanded = &media_argv(&kind, None, None, None, None)[3];
         assert!(!expanded.starts_with('~'), "{expanded}");
         assert!(
             expanded.ends_with("/.config/shepherd/movies.toml"),

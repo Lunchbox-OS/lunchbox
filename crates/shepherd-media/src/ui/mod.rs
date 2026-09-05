@@ -17,6 +17,7 @@ use shepherd_media_core::{
 use shepherd_util::gamepad_nav::{NavDir, StickNav};
 
 use crate::posters::{self, PosterCache};
+use crate::skipping::SkipWatcher;
 use shepherd_media_cache::VideoCache;
 
 /// How long the "continue watching" offer waits for its item to show up in the
@@ -62,6 +63,7 @@ pub fn run(
     cache: Option<Arc<VideoCache>>,
     start_mode: StartMode,
     resume: Option<ResumeTracker>,
+    skipping: Option<SkipWatcher>,
 ) -> Result<ExitCause, eframe::Error> {
     let posters = posters::prefetch(session.library());
 
@@ -157,6 +159,7 @@ pub fn run(
                 resume_offer,
                 resume_offer_until: Instant::now() + OFFER_WINDOW,
                 prompt: prompt::ResumePrompt::new(),
+                skipping,
             }))
         }),
     )?;
@@ -222,6 +225,9 @@ struct App {
     resume_offer_until: Instant,
     /// Focus state of that card.
     prompt: prompt::ResumePrompt,
+    /// SponsorBlock skipping, when a parent enabled it. `None` turns the whole
+    /// feature off: nothing is looked up and nothing is skipped.
+    skipping: Option<SkipWatcher>,
 }
 
 impl App {
@@ -306,6 +312,18 @@ impl eframe::App for App {
                 && let Some(item) = self.session.item_by_id(id)
             {
                 self.playback.note_item_started(&item.title);
+                // Start the segment lookup here rather than at play time: this
+                // is the transition that knows *which* item, and the fetch runs
+                // off-thread, so a cold lookup costs the opening seconds of the
+                // video at worst.
+                if let Some(watcher) = self.skipping.as_mut() {
+                    watcher.note_item_started(item);
+                }
+            }
+            if now_playing.is_none()
+                && let Some(watcher) = self.skipping.as_mut()
+            {
+                watcher.note_stopped();
             }
             // Resume bookkeeping rides the same transition: a new item becomes
             // the one being tracked, and leaving `Playing` (EOF, stop, error)
@@ -323,6 +341,17 @@ impl eframe::App for App {
             self.session.state(),
             SessionState::Playing { .. } | SessionState::Stopping { .. }
         ) {
+            // Before the resume bookkeeping, so a position saved this frame is
+            // the one on the far side of a skip rather than inside it.
+            if let Some(watcher) = self.skipping.as_mut()
+                && let Some(skip) = watcher.poll(self.session.position(), self.session.duration())
+            {
+                match self.session.seek_absolute(skip.target) {
+                    Ok(()) => self.playback.note_skipped(skip.category),
+                    Err(e) => tracing::warn!("could not skip a SponsorBlock segment: {e}"),
+                }
+            }
+
             if let Some(tracker) = self.resume.as_mut() {
                 tracker.progress(
                     self.session.position(),

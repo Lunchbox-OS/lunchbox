@@ -63,6 +63,50 @@ pub fn interest_key(url: &str) -> String {
     hash_parts(&[url])
 }
 
+/// Hex characters of the digest that name a SponsorBlock bucket.
+///
+/// This is a *privacy* length, not a cache-naming one, and it is a real choice:
+/// the service serves any prefix from 3 to 32 characters, so a longer one would
+/// work and would be cheaper. Measured against the live service on 2026-09-04,
+/// with the exact query `shepherd_media_core::sponsorblock::bucket_url` sends:
+///
+/// | prefix | response | videos in it |
+/// |---|---|---|
+/// | 3 | 810 KB | 2187 |
+/// | **4** | **50 KB** | **130** |
+/// | 5 | 3.8 KB | 11 |
+///
+/// Four is the knee, and it is what yt-dlp and the browser extension use. At
+/// five the crowd is small enough that the server can reasonably guess what is
+/// being watched — the whole point of the endpoint is that it cannot — and at
+/// three the download is sixteen times larger for privacy nobody needs.
+pub const SPONSORBLOCK_PREFIX_LEN: usize = 4;
+
+/// The SponsorBlock bucket a YouTube video falls into: the first four hex
+/// characters of the SHA-256 of its *video id* (issue #159).
+///
+/// This is not a cache-naming decision like the two keys above — it is the
+/// service's own convention, and its length is argued for at
+/// [`SPONSORBLOCK_PREFIX_LEN`]. It lives here anyway because both front-ends
+/// need it and both already depend on this crate for its SHA-256, and because
+/// the bucket doubles as the name of the file the response is cached in.
+///
+/// Nothing downstream relies on the prefix being unique to one video: a bucket
+/// is *meant* to hold about a hundred of them, and
+/// `shepherd_media_core::sponsorblock::parse_bucket` picks out the one asked
+/// for by exact `videoID` after the response arrives. Sharing a
+/// bucket costs bytes, never a wrong segment — and it is a cache win, since one
+/// fetch warms every video in it.
+///
+/// The id alone is hashed, with no separator and no URL around it: the digest
+/// has to match the one the service computed, so it cannot go through
+/// [`content_key`]'s NUL-joined form.
+pub fn sponsorblock_prefix(video_id: &str) -> String {
+    let mut prefix = hash_parts(&[video_id]);
+    prefix.truncate(SPONSORBLOCK_PREFIX_LEN);
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +133,19 @@ mod tests {
         assert_eq!(
             interest_key("https://example.com/a.mp4"),
             "0e06dca0234da29358bb3b0f700b1473"
+        );
+    }
+
+    /// Pinned against the service: this is the bucket `dQw4w9WgXcQ` is served
+    /// from, and the digest is SHA-256 of the bare id — the same value yt-dlp's
+    /// SponsorBlock postprocessor computes.
+    #[test]
+    fn a_sponsorblock_prefix_matches_the_service() {
+        assert_eq!(sponsorblock_prefix("dQw4w9WgXcQ"), "5f6b");
+        assert_eq!(sponsorblock_prefix("eXjGWlJOhWg"), "5f6b");
+        assert_eq!(
+            sponsorblock_prefix("dQw4w9WgXcQ").len(),
+            SPONSORBLOCK_PREFIX_LEN
         );
     }
 

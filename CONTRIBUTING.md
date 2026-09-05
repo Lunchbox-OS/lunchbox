@@ -284,6 +284,14 @@ the artifact is missing; pass `--wasm` to the latter to force a rebuild after
 changing the crate. `src/config/wasm/` is generated and gitignored;
 `npm run typecheck` needs it to exist.
 
+**Rebuild it after changing the config schema, too** — not only after changing
+`shepherd-config-wasm` itself. The artifact embeds the parser, so a stale one
+does not know a field you have just added: the editor writes it to the document
+happily (that path is `toml_edit`, which needs no schema) and then drops it when
+parsing back, so a new control renders, refuses to hold its value, and reports
+nothing wrong. `tsc` and the component tests do not catch it, because neither
+runs the wasm.
+
 #### Hosting
 
 The standalone bundle is published to Cloudflare Pages at

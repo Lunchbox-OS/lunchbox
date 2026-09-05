@@ -99,7 +99,7 @@ EOF
 # ---------------------------------------------------------------------------
 #
 # libva dispatches to a per-vendor `<name>_drv_video.so`. With none installed,
-# mpv's `hwdec=auto-safe` finds nothing and shepherd-media decodes every frame
+# mpv's `hwdec` auto-detection finds nothing and shepherd-media decodes every frame
 # on the CPU — roughly 6x the CPU for 1080p30 on an Intel HD 4000 (issue #115).
 # Ubuntu's `mpv` package neither depends on nor recommends a driver, so a fresh
 # install usually has none.

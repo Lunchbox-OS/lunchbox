@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use shepherd_media_core::sponsorblock::Category;
 use shepherd_media_core::{Session, SessionInput};
 
 use shepherd_media_ui::theme;
@@ -41,6 +42,9 @@ pub struct PlaybackView {
     /// Latched into `true` by the mpv update callback running on a background
     /// thread; cleared once we've issued a render this frame.
     needs_render: Arc<std::sync::atomic::AtomicBool>,
+    /// The most recent SponsorBlock skip, and when it happened, so the viewer
+    /// gets told why the video jumped. `None` once the notice has expired.
+    skipped: Option<(Category, Instant)>,
 }
 
 impl PlaybackView {
@@ -50,12 +54,23 @@ impl PlaybackView {
             last_input_at: Instant::now(),
             item_title: String::new(),
             needs_render,
+            skipped: None,
         }
     }
 
     pub fn note_item_started(&mut self, title: &str) {
         self.item_title = title.to_string();
         self.last_input_at = Instant::now();
+        self.skipped = None;
+    }
+
+    /// A SponsorBlock segment was just skipped; show why for a few seconds.
+    ///
+    /// Deliberately does *not* touch `last_input_at`: the skip is the player
+    /// acting on its own, and summoning the whole transport overlay for it
+    /// would put a control bar over the video nobody asked for.
+    pub fn note_skipped(&mut self, category: Category) {
+        self.skipped = Some((category, Instant::now()));
     }
 
     /// Called every frame while playback is active, before `draw`.
@@ -164,11 +179,27 @@ impl PlaybackView {
                 {
                     session.handle_input(SessionInput::StopPlayback);
                 }
+
+                match self.skipped {
+                    Some((category, at)) if at.elapsed() < video::SKIP_NOTICE_FOR => {
+                        video::skip_notice(
+                            ui.painter(),
+                            rect,
+                            &format!("Skipped {}", category.label()),
+                            &OVERLAY_THEME,
+                        );
+                    }
+                    Some(_) => self.skipped = None,
+                    None => {}
+                }
             });
 
         // Keep redrawing while the overlay is visible (so the elapsed
         // time updates) and at a slower cadence otherwise.
-        let next = if self.last_input_at.elapsed() < video::CONTROLS_VISIBLE_FOR {
+        let showing_notice = self
+            .skipped
+            .is_some_and(|(_, at)| at.elapsed() < video::SKIP_NOTICE_FOR);
+        let next = if showing_notice || self.last_input_at.elapsed() < video::CONTROLS_VISIBLE_FOR {
             Duration::from_millis(33)
         } else {
             Duration::from_millis(250)

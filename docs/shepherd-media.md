@@ -565,6 +565,36 @@ already exposes global volume controls that work the same everywhere.
 In direct-play mode the same UI opens straight into playback and the
 process exits once the item finishes; the grid is never shown.
 
+### Hardware decoding
+
+The Linux front-end asks mpv for `hwdec=auto-copy-safe`: decode on the GPU, then
+read each frame back into system RAM for the render API to composite. Android
+is unaffected — it decodes straight into a `SurfaceView` (`mediacodec`), a
+different path entirely.
+
+The obvious choice is the zero-copy `auto-safe`, and that is what issue #115
+moved to. **It renders the wrong picture after a seek.** A second or so after
+seeking, the frame turns green and blocky — luma roughly intact, chroma read
+from the wrong place — and stays that way until some later seek happens to clear
+it. Measured on an Ivy Bridge iGPU (i965 VA driver, Mesa crocus) against a 720p
+H.264 file from the video cache:
+
+| `hwdec` | corrupt seeks | CPU (one core) |
+|---|---|---|
+| `vaapi` (zero-copy) | 4 of 12 | 19.1 % |
+| `vaapi-copy` | 0 of 12 | 21.7 % |
+| `no` (software) | 0 of 12 | 55.2 % |
+
+Bare `mpv` reproduces it with no `shepherd-media` involved, identically under
+`vo=gpu` and `vo=gpu-next`, with `hr-seek-framedrop` either way, and with a
+larger surface pool — so it is a driver bug in the DMABUF export rather than
+anything the player can seek its way around. The only thing that changes it is
+whether the decoded surface is read back, which is what a `-copy` mode does.
+
+Set **`SHEPHERD_MPV_HWDEC`** to take a different path: `auto-safe` for zero-copy
+on a GPU that renders it correctly, `no` to force software, or any other value
+mpv's `--hwdec` accepts. The per-file log line says which path mpv settled on.
+
 ## Resuming playback
 
 Off by default. Pass `--resume` (Linux) or turn on **Resume playback** for a
@@ -601,6 +631,125 @@ file just forgets that library's positions. Only item ids, second offsets, and
 durations are stored — no timestamps, no history of what was watched when. With
 the option off nothing is recorded and no file is written.
 
+## Skipping sponsors (SponsorBlock)
+
+Off by default. Turn it on and a sponsor read, a "like and subscribe", or an end
+card in a YouTube video is jumped over, with a brief notice naming what was
+skipped. Issue #159.
+
+```toml
+[service.media.sponsorblock]
+enabled = true
+# categories = ["sponsor", "selfpromo", "interaction", "intro", "outro"]
+# api = "https://sponsor.ajay.app"
+```
+
+A single library opts out — or in — with `sponsorblock` under its
+`[entries.kind]`, for a channel whose sponsor reads are part of the show:
+
+```toml
+[entries.kind]
+type = "media"
+library = "https://www.youtube.com/playlist?list=…"
+sponsorblock = false
+```
+
+*Which* categories to skip stays a household decision on the service table;
+the per-entry setting is only whether to skip at all.
+
+The Android app has the same feature as a per-library **Skip sponsors** toggle
+in its settings page, also off by default, using the default category set. Both
+front-ends share the categories, the filtering and the skip logic, so a video
+skips the same way whichever one is playing it.
+
+Both are editable in the config editor: **Service → Media** carries the switch,
+the category checkboxes and the instance URL, and a media activity's own
+**Skip sponsors** control sits beside its prefetch setting with the same
+three-way "follow the service setting / always / never".
+
+### Categories
+
+| Category | What it marks | In the default set |
+|---|---|---|
+| `sponsor` | A paid promotion | yes |
+| `selfpromo` | Unpaid self-promotion, merchandise | yes |
+| `interaction` | "Like and subscribe" | yes |
+| `intro` | Title sequence, intermission | yes |
+| `outro` | End cards, credits | yes |
+| `preview` | Recap of an earlier episode | no |
+| `filler` | Tangential filler | no |
+| `music_offtopic` | Non-music section of a music video | no |
+| `hook` | Opening hook | no |
+
+The last four are left out of the default because they are judgement calls: a
+recap is part of the episode for a viewer who missed last week, and "filler" is
+one contributor's opinion about what a video is for. The service's
+`poi_highlight` and `chapter` are markers rather than spans and are rejected by
+config validation.
+
+### What leaves the device
+
+A four-character hash prefix, and nothing else.
+
+The lookup asks for every video whose id hashes into the same bucket — around a
+hundred videos, ~40 KB — and picks the right one out on the device, so the
+service cannot tell which video is playing. The exact-video endpoint, which
+would be a description of somebody's viewing, is never used. Nothing is
+submitted and nothing is voted on: this is a read-only client.
+
+With `enabled = false` — the default — **no request is made at all**: not at
+launch, not on a play, not in the background. An entry that set
+`sponsorblock = false` launches a player that was never told any categories, so
+it has nothing to look up.
+
+Buckets are cached under `$XDG_CACHE_HOME/shepherd/media/sponsorblock/` for a
+day, and served stale when a refresh fails, so a device that went offline keeps
+skipping what it knew about. shepherdd's prefetcher warms the bucket alongside
+the video it downloads, so a library prefetched while online still skips when it
+is played offline.
+
+### When it does not skip
+
+- **Non-YouTube sources.** The database is YouTube-only.
+- **A video whose upload was replaced.** Submissions are made against a
+  particular cut; when the duration of the file being played disagrees with the
+  duration it was submitted for, the segment is dropped rather than applied to
+  the wrong content. The tolerance is yt-dlp's.
+- **A downvoted submission**, or an unlocked one overlapping a
+  moderator-confirmed one.
+- **A span the viewer has already been skipped past** and deliberately seeked
+  back into. Seeking back to *before* a span arms it again.
+- **A live stream**, or any file the player cannot report a duration for.
+
+### Seeking
+
+Skips are issued as `seek <t> absolute+exact`. Exactness is spelled out rather
+than left to mpv's `--hr-seek` default, which the manual calls "implementation
+specific": landing on the preceding keyframe would put playback back *inside*
+the span it just skipped, with the span already marked as skipped, so the rest
+of the sponsor would play with nothing left to stop it.
+
+Seeking is also what exposed the decode-path bug in [Hardware
+decoding](#hardware-decoding) — a skip is a seek nobody asked for, so a
+front-end that never seeks on its own can hide it for a long time.
+
+### Checking what it sends
+
+`scripts/integration-tests/test-sponsorblock.sh` drives the real player in the
+headless dev session under `strace` and asserts what actually goes out: with the
+feature off, no connection to any address `sponsor.ajay.app` resolves to and no
+bucket on disk; with it on, one request to a stand-in instance, and that request
+is the hash-prefix endpoint asking for every skippable category. It needs
+`strace`, `python3` and a network.
+
+### Attribution
+
+Segment data comes from [SponsorBlock](https://sponsor.ajay.app) and is licensed
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). No
+segment data is redistributed with shepherd-launcher: it is fetched at runtime
+and cached on the device that fetched it. The non-commercial clause applies to
+how this project is used and distributed, not to its own licence.
+
 ## Non-features
 
 These are deliberately not implemented:
@@ -613,3 +762,6 @@ These are deliberately not implemented:
 - Subscription-service DRM playback.
 - Any animated/celebratory UI affordances (the touch overlay is plain;
   the scrubber doesn't bounce, no on-completion confetti).
+- Submitting or voting on SponsorBlock segments, and any UI for them: no
+  category picker in the player, no "unskip" button. What to skip is a parent's
+  configuration, not a decision handed to the child mid-video.

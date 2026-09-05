@@ -15,9 +15,17 @@ import Typography from "@mui/material/Typography";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { insert, servicePath, set, unset } from "../doc/patches";
 import { useFields } from "../doc/useFields";
-import type { RawConfig } from "../model/config.generated";
+import Checkbox from "@mui/material/Checkbox";
+import FormGroup from "@mui/material/FormGroup";
+import type {
+  RawConfig,
+  RawSponsorBlockCategory,
+} from "../model/config.generated";
 import { DurationField } from "../components/DurationField";
-import { BrightnessEditor, VolumeEditor } from "../components/RestrictionEditors";
+import {
+  BrightnessEditor,
+  VolumeEditor,
+} from "../components/RestrictionEditors";
 import { Section } from "../components/Section";
 import { StringListEditor } from "../components/StringListEditor";
 import { WarningTimeline } from "../components/WarningTimeline";
@@ -42,7 +50,9 @@ export function ServicePage({ config }: { config: RawConfig }) {
             <DurationField
               label="Default session length"
               value={service.default_max_run_seconds ?? null}
-              onChange={(v) => f.setField("default_max_run_seconds", v ?? undefined)}
+              onChange={(v) =>
+                f.setField("default_max_run_seconds", v ?? undefined)
+              }
               placeholder="1h (the daemon's own default)"
               helperText="Applies to any activity that does not set its own."
               fullWidth
@@ -50,7 +60,9 @@ export function ServicePage({ config }: { config: RawConfig }) {
             <DurationField
               label="Minimum session before a cooldown starts"
               value={service.cooldown_min_session_seconds ?? null}
-              onChange={(v) => f.setField("cooldown_min_session_seconds", v ?? undefined)}
+              onChange={(v) =>
+                f.setField("cooldown_min_session_seconds", v ?? undefined)
+              }
               placeholder="2m"
               helperText="A session shorter than this leaves the cooldown alone, so an activity that crashes on launch does not lock anyone out. Overridable per activity and per category."
               fullWidth
@@ -91,7 +103,11 @@ export function ServicePage({ config }: { config: RawConfig }) {
         </Section>
 
         <VolumeEditor path="service.volume" value={service.volume} />
-        <BrightnessEditor path="service.brightness" value={service.brightness} allowAuto />
+        <BrightnessEditor
+          path="service.brightness"
+          value={service.brightness}
+          allowAuto
+        />
 
         <Section
           title="Connectivity check"
@@ -131,7 +147,11 @@ export function ServicePage({ config }: { config: RawConfig }) {
           present={service.steam != null}
           onTogglePresent={(on) =>
             on
-              ? apply(set(servicePath("steam"), { allow_risky_dismiss: false } as never))
+              ? apply(
+                  set(servicePath("steam"), {
+                    allow_risky_dismiss: false,
+                  } as never),
+                )
               : apply(unset(servicePath("steam")))
           }
         >
@@ -162,7 +182,11 @@ export function ServicePage({ config }: { config: RawConfig }) {
           present={service.management_api != null}
           onTogglePresent={(on) =>
             on
-              ? apply(set(servicePath("management_api"), { enabled: true } as never))
+              ? apply(
+                  set(servicePath("management_api"), {
+                    enabled: true,
+                  } as never),
+                )
               : apply(unset(servicePath("management_api")))
           }
         >
@@ -175,7 +199,11 @@ export function ServicePage({ config }: { config: RawConfig }) {
           present={service.ble_management != null}
           onTogglePresent={(on) =>
             on
-              ? apply(set(servicePath("ble_management"), { enabled: true } as never))
+              ? apply(
+                  set(servicePath("ble_management"), {
+                    enabled: true,
+                  } as never),
+                )
               : apply(unset(servicePath("ble_management")))
           }
         >
@@ -225,7 +253,10 @@ function InternetServiceEditor({ config }: { config: RawConfig }) {
           label="Timeout (ms)"
           value={v?.timeout_ms ?? ""}
           onChange={(e) =>
-            f.setField("timeout_ms", e.target.value === "" ? undefined : Number(e.target.value))
+            f.setField(
+              "timeout_ms",
+              e.target.value === "" ? undefined : Number(e.target.value),
+            )
           }
         />
       </Stack>
@@ -260,11 +291,106 @@ function GibField({
       label={label}
       value={value === undefined ? "" : value / GIB}
       onChange={(e) =>
-        onChange(e.target.value === "" ? undefined : Math.round(Number(e.target.value) * GIB))
+        onChange(
+          e.target.value === ""
+            ? undefined
+            : Math.round(Number(e.target.value) * GIB),
+        )
       }
       slotProps={{ htmlInput: { step: 0.5, min: 0 } }}
       helperText={helperText}
     />
+  );
+}
+
+/// Keyed by the generated union, so a category added to the config schema and
+/// not here fails the build rather than quietly missing from the picker.
+const SPONSORBLOCK_CATEGORIES: Record<RawSponsorBlockCategory, string> = {
+  sponsor: "Sponsor",
+  selfpromo: "Self-promotion",
+  interaction: "\u201cLike and subscribe\u201d",
+  intro: "Intro",
+  outro: "End cards",
+  preview: "Recap of an earlier episode",
+  filler: "Filler tangent",
+  music_offtopic: "Non-music section",
+  hook: "Opening hook",
+};
+
+/// The default set, mirrored from `DEFAULT_SPONSORBLOCK_CATEGORIES`. Shown
+/// ticked while the config names none, so the boxes match what would happen.
+const DEFAULT_SPONSORBLOCK_CATEGORIES: RawSponsorBlockCategory[] = [
+  "sponsor",
+  "selfpromo",
+  "interaction",
+  "intro",
+  "outro",
+];
+
+function SponsorBlockEditor({ config }: { config: RawConfig }) {
+  const f = useFields("service.media.sponsorblock");
+  const v = config.service?.media?.sponsorblock;
+  const enabled = v?.enabled ?? false;
+  const categories = v?.categories ?? DEFAULT_SPONSORBLOCK_CATEGORIES;
+
+  const toggle = (category: RawSponsorBlockCategory, on: boolean) => {
+    const next = (
+      Object.keys(SPONSORBLOCK_CATEGORIES) as RawSponsorBlockCategory[]
+    ).filter((c) => (c === category ? on : categories.includes(c)));
+    f.setField("categories", next);
+  };
+
+  return (
+    <Stack spacing={2} sx={{ maxWidth: 520 }}>
+      <FormControlLabel
+        control={
+          <Switch
+            checked={enabled}
+            onChange={(e) => f.setField("enabled", e.target.checked)}
+          />
+        }
+        label="Skip sponsored spans in YouTube videos"
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        Off by default. With it off nothing is looked up and nothing reaches
+        sponsor.ajay.app — not at launch, not on a play, not in the background.
+        Segment data is CC BY-NC-SA 4.0 from SponsorBlock.
+      </Typography>
+      {enabled && (
+        <>
+          <FormGroup>
+            {(
+              Object.keys(SPONSORBLOCK_CATEGORIES) as RawSponsorBlockCategory[]
+            ).map((c) => (
+              <FormControlLabel
+                key={c}
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={categories.includes(c)}
+                    onChange={(e) => toggle(c, e.target.checked)}
+                  />
+                }
+                label={SPONSORBLOCK_CATEGORIES[c]}
+              />
+            ))}
+          </FormGroup>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+            The last four are off by default: their submissions are judgement
+            calls that can cut something a child wanted — a recap is part of the
+            episode for a viewer who missed last week.
+          </Typography>
+          <TextField
+            size="small"
+            label="SponsorBlock instance"
+            value={v?.api ?? ""}
+            onChange={(e) => f.setField("api", e.target.value)}
+            placeholder="https://sponsor.ajay.app"
+            helperText="Point this at a mirror to keep lookups inside your own infrastructure."
+          />
+        </>
+      )}
+    </Stack>
   );
 }
 
@@ -290,7 +416,9 @@ function MediaServiceEditor({ config }: { config: RawConfig }) {
         control={
           <Switch
             checked={v?.prefetch_while_session_active ?? false}
-            onChange={(e) => f.setField("prefetch_while_session_active", e.target.checked)}
+            onChange={(e) =>
+              f.setField("prefetch_while_session_active", e.target.checked)
+            }
           />
         }
         label="Keep downloading while an activity is running"
@@ -332,6 +460,7 @@ function MediaServiceEditor({ config }: { config: RawConfig }) {
         slotProps={{ htmlInput: { min: 0 } }}
         helperText="How long watching a video protects its copy from being displaced. 0 orders purely by age."
       />
+      <SponsorBlockEditor config={config} />
     </Stack>
   );
 }
@@ -352,14 +481,16 @@ function SteamEditor({ config }: { config: RawConfig }) {
         control={
           <Switch
             checked={v?.allow_risky_dismiss ?? false}
-            onChange={(e) => f.setField("allow_risky_dismiss", e.target.checked)}
+            onChange={(e) =>
+              f.setField("allow_risky_dismiss", e.target.checked)
+            }
           />
         }
         label="Allow risky interstitial kinds"
       />
       <Alert severity="warning">
-        Risky kinds dismiss modals whose game cannot actually be played without missing
-        hardware — the activity launches into something unusable.
+        Risky kinds dismiss modals whose game cannot actually be played without
+        missing hardware — the activity launches into something unusable.
       </Alert>
       <TextField
         size="small"
@@ -428,7 +559,10 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
           value={v?.port ?? ""}
           placeholder="7890"
           onChange={(e) =>
-            f.setField("port", e.target.value === "" ? undefined : Number(e.target.value))
+            f.setField(
+              "port",
+              e.target.value === "" ? undefined : Number(e.target.value),
+            )
           }
         />
         <TextField
@@ -449,8 +583,8 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
       />
       {v?.enabled && !v?.auth_token && v?.bind && v.bind !== "127.0.0.1" && (
         <Alert severity="warning">
-          This binds beyond loopback with no token, so anything on the network can control
-          the device.
+          This binds beyond loopback with no token, so anything on the network
+          can control the device.
         </Alert>
       )}
       <TextField
@@ -552,7 +686,9 @@ function PathsEditor({ config }: { config: RawConfig }) {
         control={
           <Switch
             checked={s.capture_child_output ?? false}
-            onChange={(e) => f.setField("capture_child_output", e.target.checked)}
+            onChange={(e) =>
+              f.setField("capture_child_output", e.target.checked)
+            }
           />
         }
         label="Capture output from launched activities"

@@ -64,6 +64,16 @@ pub struct LibraryEntry {
     /// [`crate::resume`]. Positions are stored per library, outside this file.
     #[serde(default)]
     pub resume: bool,
+    /// Skip SponsorBlock segments in this library's YouTube videos (mirrors the
+    /// Linux binary's `--sponsorblock-categories`, which shepherdd fills in from
+    /// `service.media.sponsorblock`). Off by default, and while it is off
+    /// nothing about this library reaches sponsor.ajay.app.
+    ///
+    /// Which categories to skip is not per library here either: it is the
+    /// default set, for the same reason the Linux side keeps it on the service
+    /// table — it is a household judgement, not a property of one playlist.
+    #[serde(default)]
+    pub sponsorblock: bool,
 }
 
 /// Where a library's content comes from. The variants mirror the dispatch the
@@ -535,6 +545,7 @@ mod tests {
             caching: CachingSettings::default(),
             reverse: false,
             resume: false,
+            sponsorblock: false,
         }
     }
 
@@ -677,6 +688,7 @@ mod tests {
             caching: CachingSettings::default(),
             reverse: false,
             resume: false,
+            sponsorblock: false,
         })
         .unwrap();
 
@@ -941,6 +953,7 @@ mod tests {
             caching: CachingSettings::default(),
             reverse: false,
             resume: false,
+            sponsorblock: false,
         })
         .unwrap();
         assert_eq!(id, "weekend-movies");

@@ -38,6 +38,7 @@ pub mod key;
 pub mod lock;
 pub mod paths;
 pub mod playlist;
+pub mod sponsorblock;
 pub mod store;
 pub mod subprocess;
 
@@ -45,6 +46,7 @@ pub use download::{DEFAULT_DOWNLOAD_INTERVAL, DownloadKind, RETRY_COOLDOWN};
 pub use key::{content_key, interest_key, source_url};
 pub use paths::media_cache_dir;
 pub use playlist::{fetch_playlist, ytdlp_available};
+pub use sponsorblock::{DEFAULT_API as SPONSORBLOCK_API, SponsorBlockCache};
 pub use subprocess::{
     ProgramResolverFn, ScopePrefixFn, set_program_resolver_fn, set_scope_prefix_fn,
 };

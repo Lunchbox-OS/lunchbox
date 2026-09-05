@@ -48,6 +48,14 @@ desktop and reused by any platform binary.
   here even though the Linux binary is otherwise stateless. Where the file lives
   stays with each binary (`$XDG_STATE_HOME` vs app-private storage).
 
+- **SponsorBlock buckets** (`sponsorblock.rs`) — the on-disk half of the segment
+  lookup (issue #159): one file per hash prefix holding the server's own bytes,
+  a TTL judged from the file's mtime, and the stale-on-failure fallback that
+  keeps an offline device skipping. Split from the HTTP fetch exactly as
+  the poster cache is, so both front-ends spend the same bytes on the same
+  schedule. `cache_key::sponsorblock_prefix` is the bucket name, and it is the
+  service's convention rather than ours.
+
 ## What lives elsewhere
 
 Turning a [`LibraryEntry`] into a resolved `shepherd_media_core::Library` needs

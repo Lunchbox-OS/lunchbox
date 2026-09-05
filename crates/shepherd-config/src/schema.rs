@@ -550,6 +550,14 @@ pub enum RawEntryKind {
         /// `false` to exclude just this library — e.g. a live stream, or a
         /// playlist too large to be worth the disk.
         prefetch: Option<bool>,
+        /// Skip SponsorBlock segments in this library (issue #159). `None`
+        /// inherits `service.media.sponsorblock.enabled`; `false` turns it off
+        /// for this library alone, which is the shape the need actually takes —
+        /// a channel whose "sponsor" spans are part of the show.
+        ///
+        /// Which categories to skip stays a household decision, on the service
+        /// table; this is only whether to skip at all.
+        sponsorblock: Option<bool>,
     },
     /// A single piece of content played through RetroArch. See
     /// [`shepherd_api::EntryKind::Retroarch`] for what shepherd sets up around
@@ -756,6 +764,127 @@ pub struct RawMediaServiceConfig {
     /// player trimming it agree on how big it may be.
     #[serde(default = "default_cache_max_bytes")]
     pub cache_max_bytes: u64,
+
+    /// Skipping sponsored and self-promotional spans in YouTube videos, using
+    /// the SponsorBlock database (issue #159). Off unless a parent turns it on.
+    #[serde(default)]
+    pub sponsorblock: RawSponsorBlockConfig,
+}
+
+/// SponsorBlock segment skipping (issue #159).
+///
+/// Off by default, and deliberately so: it is the one media feature that talks
+/// to a third-party service, and in a product that promises no telemetry
+/// nothing should reach a new host because a default said so. A parent turns it
+/// on; the device is otherwise silent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RawSponsorBlockConfig {
+    /// Skip SponsorBlock segments during playback.
+    ///
+    /// While this is false nothing is looked up and no request is made — not at
+    /// launch, not on a play, not in the background.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Which categories to skip. The default is the five spans that are
+    /// reliably not the video.
+    ///
+    /// `preview` (a recap of an earlier episode), `filler` and `music_offtopic`
+    /// are left out of the default on purpose: their submissions are judgement
+    /// calls that can cut content somebody wanted.
+    #[serde(default = "default_sponsorblock_categories")]
+    pub categories: Vec<RawSponsorBlockCategory>,
+
+    /// Base URL of the SponsorBlock instance to query. Point it at a mirror to
+    /// avoid the public one.
+    #[serde(default = "default_sponsorblock_api")]
+    pub api: String,
+}
+
+impl Default for RawSponsorBlockConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            categories: default_sponsorblock_categories(),
+            api: default_sponsorblock_api(),
+        }
+    }
+}
+
+/// Every category the service defines that describes a *span* a player can jump
+/// over. Mirrors `shepherd_media_core::sponsorblock::Category`, which this crate
+/// cannot depend on (it compiles to wasm for the config editor); shepherdd holds
+/// the test that the two lists agree.
+///
+/// An enum rather than a free string so the config editor gets a generated union
+/// type to build its picker from — a category added here and not there is then a
+/// build error rather than a control quietly missing an option. It also means a
+/// typo is refused when the file is parsed, naming the alternatives.
+///
+/// The service's two marker categories, `poi_highlight` and `chapter`, are
+/// absent: they label a point rather than describe content to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RawSponsorBlockCategory {
+    Sponsor,
+    #[serde(rename = "selfpromo")]
+    SelfPromo,
+    Interaction,
+    Intro,
+    Outro,
+    Preview,
+    Filler,
+    MusicOfftopic,
+    Hook,
+}
+
+impl RawSponsorBlockCategory {
+    /// The spelling the service and the player's CLI use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sponsor => "sponsor",
+            Self::SelfPromo => "selfpromo",
+            Self::Interaction => "interaction",
+            Self::Intro => "intro",
+            Self::Outro => "outro",
+            Self::Preview => "preview",
+            Self::Filler => "filler",
+            Self::MusicOfftopic => "music_offtopic",
+            Self::Hook => "hook",
+        }
+    }
+
+    /// Every category, for the guard test that keeps this in step with the core.
+    pub const ALL: &'static [RawSponsorBlockCategory] = &[
+        Self::Sponsor,
+        Self::SelfPromo,
+        Self::Interaction,
+        Self::Intro,
+        Self::Outro,
+        Self::Preview,
+        Self::Filler,
+        Self::MusicOfftopic,
+        Self::Hook,
+    ];
+}
+
+/// The categories enabled when `sponsorblock.enabled` is set and none are named.
+pub const DEFAULT_SPONSORBLOCK_CATEGORIES: &[RawSponsorBlockCategory] = &[
+    RawSponsorBlockCategory::Sponsor,
+    RawSponsorBlockCategory::SelfPromo,
+    RawSponsorBlockCategory::Interaction,
+    RawSponsorBlockCategory::Intro,
+    RawSponsorBlockCategory::Outro,
+];
+
+fn default_sponsorblock_categories() -> Vec<RawSponsorBlockCategory> {
+    DEFAULT_SPONSORBLOCK_CATEGORIES.to_vec()
+}
+
+fn default_sponsorblock_api() -> String {
+    "https://sponsor.ajay.app".to_string()
 }
 
 impl Default for RawMediaServiceConfig {
@@ -766,6 +895,7 @@ impl Default for RawMediaServiceConfig {
             free_space_floor_bytes: default_free_space_floor(),
             watched_grace_days: default_watched_grace_days(),
             cache_max_bytes: default_cache_max_bytes(),
+            sponsorblock: RawSponsorBlockConfig::default(),
         }
     }
 }

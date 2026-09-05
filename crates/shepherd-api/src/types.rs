@@ -277,6 +277,10 @@ pub enum EntryKind {
         /// background. `None` inherits `service.media.prefetch`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefetch: Option<bool>,
+        /// Whether to skip SponsorBlock segments in this library. `None`
+        /// inherits `service.media.sponsorblock.enabled`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sponsorblock: Option<bool>,
     },
     /// A single piece of content played through the RetroArch libretro
     /// frontend, launched directly on its CLI (`retroarch -L <core> <content>`).

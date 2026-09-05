@@ -48,10 +48,12 @@ use shepherd_api::{
 use shepherd_config::{MediaServiceConfig, Policy};
 use shepherd_core::CoreEngine;
 use shepherd_media_app::Quality;
-use shepherd_media_cache::{QueueOutcome, VideoCache, fetch_playlist, ytdlp_available};
+use shepherd_media_cache::{
+    QueueOutcome, SponsorBlockCache, VideoCache, fetch_playlist, ytdlp_available,
+};
 use shepherd_media_core::{
-    Library, PlatformInfo, build_library_from_entries, is_youtube_playlist_url, load_library,
-    resolve_source,
+    ClassifiedUri, Library, PlatformInfo, build_library_from_entries, is_youtube_playlist_url,
+    load_library, resolve_source,
 };
 use shepherd_util::EntryId;
 use tokio::sync::{Mutex, broadcast};
@@ -77,6 +79,11 @@ struct PrefetchTarget {
     /// For a `mode = "play"` entry, the single item it launches. Browse entries
     /// leave this `None` and take the whole library.
     only_item: Option<String>,
+    /// Whether this entry skips SponsorBlock segments, with its own override
+    /// already resolved against the service default (issue #159). Prefetch
+    /// warms the segment buckets for the videos it caches, so a library filled
+    /// while online still skips when it is played offline.
+    sponsorblock: bool,
 }
 
 /// Everything a sweep needs, as of the last time policy was read.
@@ -246,6 +253,11 @@ impl MediaPrefetcher {
             let watched_grace =
                 shepherd_media_cache::grace_from_days(self.settings.watched_grace_days);
             let cache_max_bytes = self.settings.cache_max_bytes;
+            // `Some` only when this entry skips segments; the prefetcher makes
+            // no request otherwise, exactly as the player does not.
+            let sponsorblock_api = target
+                .sponsorblock
+                .then(|| self.settings.sponsorblock.api.clone());
 
             // Library loading shells out to yt-dlp for playlists and reads
             // files otherwise; queueing hands work to the cache's own thread.
@@ -258,6 +270,7 @@ impl MediaPrefetcher {
                     only_item.as_deref(),
                     watched_grace,
                     cache_max_bytes,
+                    sponsorblock_api.as_deref(),
                 )
             })
             .await;
@@ -276,6 +289,7 @@ impl MediaPrefetcher {
                         queued = tally.queued,
                         cached = tally.cached,
                         cooling = tally.cooling,
+                        warmed = tally.warmed,
                         "media prefetch sweep"
                     );
                     // The same site that notices the failure notices the
@@ -348,6 +362,7 @@ fn read_policy(policy: &Policy) -> PolicyRead {
             item,
             quality,
             prefetch,
+            sponsorblock,
             ..
         } = &entry.kind
         else {
@@ -377,6 +392,8 @@ fn read_policy(policy: &Policy) -> PolicyRead {
                 MediaMode::Play => item.clone(),
                 MediaMode::Browse => None,
             },
+            sponsorblock: sponsorblock.unwrap_or(policy.service.media.sponsorblock.enabled)
+                && !policy.service.media.sponsorblock.categories.is_empty(),
         });
     }
 
@@ -414,6 +431,9 @@ struct SweepTally {
     cooling: usize,
     /// Items in the library, including ones with nothing to cache.
     total: usize,
+    /// Items whose SponsorBlock bucket was fetched or confirmed present, so
+    /// they still skip once the device is offline (issue #159).
+    warmed: usize,
 }
 
 /// Load `library_source` and queue every remote item in it. Returns what the
@@ -425,6 +445,7 @@ fn queue_library(
     only_item: Option<&str>,
     watched_grace: Duration,
     cache_max_bytes: u64,
+    sponsorblock_api: Option<&str>,
 ) -> Result<SweepTally, String> {
     let library = match load_prefetch_library(library_source) {
         Ok(l) => l,
@@ -443,6 +464,7 @@ fn queue_library(
     };
 
     let platform_info = PlatformInfo::current();
+    let segments = sponsorblock_api.map(SponsorBlockCache::new);
     let mut tally = SweepTally::default();
     // The ordinal is the item's place in the library as browse would show it,
     // which is how eviction orders one sweep's guesses against each other — a
@@ -457,11 +479,25 @@ fn queue_library(
         if let Some(source) = resolve_source(item, &platform_info)
             && shepherd_media_cache::source_url(source).is_some()
         {
-            match cache.queue_prefetch(&item.id, source, ordinal as u32) {
+            let outcome = cache.queue_prefetch(&item.id, source, ordinal as u32);
+            match outcome {
                 QueueOutcome::Queued => tally.queued += 1,
                 QueueOutcome::AlreadyCached => tally.cached += 1,
                 QueueOutcome::FailedRecently => tally.cooling += 1,
                 QueueOutcome::NotCacheable => {}
+            }
+
+            // Warm the segments for the videos this cache is actually going to
+            // hold. A video nobody is downloading can look its segments up when
+            // it plays, because playing it needs the network anyway; a cached
+            // one is the case that has to work with the network gone.
+            if let Some(segments) = segments.as_ref()
+                && matches!(outcome, QueueOutcome::Queued | QueueOutcome::AlreadyCached)
+                && let ClassifiedUri::YouTube(url) = &source.uri
+                && let Some(video_id) = shepherd_media_core::uri::youtube_video_id(url)
+                && segments.warm(&video_id)
+            {
+                tally.warmed += 1;
             }
         }
     }
@@ -576,6 +612,34 @@ fn expand_tilde(path: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `shepherd-config` compiles to wasm for the config editor, so it cannot
+    /// depend on the media crates and carries its own copy of the SponsorBlock
+    /// category names. This is the guard: shepherdd links both, and a category
+    /// added to (or renamed in) the core must reach the config that validates
+    /// what a parent typed, or one of the two would silently stop matching.
+    #[test]
+    fn the_configs_sponsorblock_categories_match_the_cores() {
+        let core: Vec<&str> = shepherd_media_core::sponsorblock::Category::all()
+            .iter()
+            .filter(|c| c.is_skippable())
+            .map(|c| c.as_str())
+            .collect();
+        let config: Vec<&str> = shepherd_config::RawSponsorBlockCategory::ALL
+            .iter()
+            .map(|c| c.as_str())
+            .collect();
+        assert_eq!(core, config);
+
+        // And the shipped default must be a subset of what the service knows.
+        for category in shepherd_config::DEFAULT_SPONSORBLOCK_CATEGORIES {
+            assert!(
+                core.contains(&category.as_str()),
+                "unknown default `{}`",
+                category.as_str()
+            );
+        }
+    }
+
     /// The selector shepherdd prefetches with must be the one `shepherd-media`
     /// plays with, or every prefetched file lands under a content key the
     /// player never looks up.
@@ -599,6 +663,40 @@ mod tests {
         // A URL has no leading `~/`, so it passes through untouched.
         let url = "https://www.youtube.com/playlist?list=PL1";
         assert_eq!(expand_tilde(url), url);
+    }
+
+    /// A policy from TOML, for exercising `read_policy`'s resolution.
+    fn policy_from(config: &str) -> Policy {
+        shepherd_config::parse_config(config).expect("test config parses")
+    }
+
+    const MEDIA_ENTRY: &str = r#"
+        [[entries]]
+        id = "movies"
+        label = "Movies"
+        [entries.kind]
+        type = "media"
+        library = "/etc/shepherd/movies.toml"
+    "#;
+
+    /// Prefetch warms the segment buckets only for entries that skip. An entry
+    /// nobody enabled must leave the daemon as silent as the player.
+    #[test]
+    fn prefetch_warms_segments_only_where_sponsorblock_is_on() {
+        let off = policy_from(&format!("config_version = 1\n{MEDIA_ENTRY}"));
+        assert!(!read_policy(&off).targets[0].sponsorblock, "off by default");
+
+        let on = policy_from(&format!(
+            "config_version = 1\n[service.media.sponsorblock]\nenabled = true\n{MEDIA_ENTRY}"
+        ));
+        assert!(read_policy(&on).targets[0].sponsorblock);
+
+        // An entry that opted out is not warmed either, so its bucket is never
+        // requested on its behalf.
+        let opted_out = policy_from(&format!(
+            "config_version = 1\n[service.media.sponsorblock]\nenabled = true\n{MEDIA_ENTRY}\nsponsorblock = false\n"
+        ));
+        assert!(!read_policy(&opted_out).targets[0].sponsorblock);
     }
 
     /// A prefetcher with no targets, carrying `settings`. Enough to exercise

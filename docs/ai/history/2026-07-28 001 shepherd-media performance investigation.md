@@ -474,7 +474,7 @@ quiet.
 
 | lever | Fire TV | Linux |
 |---|---|---|
-| 1. zero-copy decode | the dominant cost | **already done** — and it is why Linux is now fixed-cost rather than source-scaled |
+| 1. zero-copy decode | the dominant cost | **done, then partly undone** — see the note below |
 | 2. skip frames never presented | ~⅓ of the work at 1080p60 | little — already presents 30.1/s, same as bare mpv, and idles correctly when paused |
 | 3. FBO sized to the video | helps (source-scaled) | ~nothing — uncore is identical for a 720p and a 1080p source |
 | 4. remove the FBO round trip | second-order | the only lever aimed at Linux's 3.4 W, but the bare-mpv comparison says its marginal cost is small |
@@ -482,6 +482,15 @@ quiet.
 So the two platforms want opposite work, and the Linux build has already had its
 big win: 76 % → 11.3 % of a core, with playback now costing ~5.6 W over idle of
 which ~3.4 W is the iGPU.
+
+> **Correction, 2026-09-04.** Lever 1 has since been walked back on Linux, and
+> should not be walked forward again without testing seeks. Zero-copy VA-API
+> renders the wrong picture after a seek on this hardware — a green, blocky
+> frame that persists — so `shepherd-media` now asks for `auto-copy-safe` and
+> reads each frame back. The measured cost of that on the 720p content this
+> device plays is 2.6 points of one core, far less than the 1080p numbers above
+> imply. See
+> [`2026-09-04 001 green-frames-after-a-seek.md`](./2026-09-04%20001%20green-frames-after-a-seek.md).
 
 ### The two platforms are not symmetric — mpv has no Wayland embedding
 

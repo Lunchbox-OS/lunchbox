@@ -1,6 +1,7 @@
 //! `clap`-derived CLI surface for `shepherd-media`.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use shepherd_media_core::sponsorblock::Category;
 
 /// Video quality preset. Re-exported from `shepherd-media-app` (shared with the
 /// Android app) so both front-ends map `--quality` to the same yt-dlp format
@@ -84,6 +85,67 @@ pub struct Cli {
     /// local debugging escape hatch.
     #[arg(long, default_value_t = shepherd_media_cache::DEFAULT_MAX_CACHE_BYTES, global = true)]
     pub cache_max_bytes: u64,
+
+    /// SponsorBlock categories to skip in YouTube videos, comma-separated
+    /// (e.g. `sponsor,selfpromo,interaction,intro,outro`).
+    ///
+    /// Absent or empty turns the feature off entirely, which is the default:
+    /// with no categories no lookup is started and nothing reaches
+    /// sponsor.ajay.app. shepherdd passes its
+    /// `service.media.sponsorblock.categories` here when a parent has enabled
+    /// it.
+    ///
+    /// Valid names are the service's own: sponsor, selfpromo, interaction,
+    /// intro, outro, preview, filler, music_offtopic, hook. `poi_highlight`
+    /// and `chapter` are markers rather than spans and are rejected.
+    #[arg(long, value_delimiter = ',', global = true)]
+    pub sponsorblock_categories: Vec<String>,
+
+    /// SponsorBlock API base URL, for a self-hosted mirror.
+    #[arg(long, default_value = shepherd_media_cache::SPONSORBLOCK_API, global = true)]
+    pub sponsorblock_api: String,
+}
+
+/// Resolve `--sponsorblock-categories` into the core's category type.
+///
+/// An unrecognised name is an error rather than a warning: it is a parent's
+/// config saying "skip this" and silently not skipping it is the wrong failure.
+/// The two marker categories are named explicitly in the message because
+/// they *are* real SponsorBlock categories — they just do not describe a span
+/// anything can jump over.
+pub fn parse_categories(names: &[String]) -> Result<Vec<Category>, String> {
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match Category::parse(name) {
+            Some(c) if c.is_skippable() => {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+            Some(c) => {
+                return Err(format!(
+                    "`{}` is a SponsorBlock marker, not a skippable span",
+                    c.as_str()
+                ));
+            }
+            None => {
+                let valid: Vec<&str> = Category::all()
+                    .iter()
+                    .filter(|c| c.is_skippable())
+                    .map(|c| c.as_str())
+                    .collect();
+                return Err(format!(
+                    "unknown SponsorBlock category `{name}`; valid categories are {}",
+                    valid.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// How to order library items before display or lookup.
@@ -197,5 +259,38 @@ mod tests {
     fn this_cli_has_no_presets_the_api_cannot_name() {
         assert_eq!(Quality::value_variants().len(), 4);
         assert_eq!(SortBy::value_variants().len(), 6);
+    }
+
+    #[test]
+    fn categories_parse_and_deduplicate() {
+        let names = ["sponsor", "intro", "sponsor"].map(String::from);
+        assert_eq!(
+            parse_categories(&names).unwrap(),
+            vec![Category::Sponsor, Category::Intro]
+        );
+    }
+
+    #[test]
+    fn no_categories_is_the_off_switch_not_an_error() {
+        assert!(parse_categories(&[]).unwrap().is_empty());
+        assert!(parse_categories(&[String::from("")]).unwrap().is_empty());
+    }
+
+    /// A typo in a parent's config must not quietly stop skipping.
+    #[test]
+    fn an_unknown_category_is_rejected_with_the_valid_ones() {
+        let err = parse_categories(&[String::from("sponsors")]).unwrap_err();
+        assert!(err.contains("sponsors"), "{err}");
+        assert!(err.contains("selfpromo"), "{err}");
+        assert!(
+            !err.contains("poi_highlight"),
+            "markers are not offered: {err}"
+        );
+    }
+
+    #[test]
+    fn a_marker_category_is_rejected_as_unskippable() {
+        let err = parse_categories(&[String::from("chapter")]).unwrap_err();
+        assert!(err.contains("marker"), "{err}");
     }
 }

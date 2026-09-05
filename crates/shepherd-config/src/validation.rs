@@ -76,6 +76,30 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
+    // Validate SponsorBlock settings (issue #159). Only reachable when a
+    // parent turned the feature on — an unread `categories` list under
+    // `enabled = false` is not worth an error.
+    if let Some(media) = &config.service.media
+        && media.sponsorblock.enabled
+    {
+        let sb = &media.sponsorblock;
+        if sb.categories.is_empty() {
+            errors.push(ValidationError::GlobalError(
+                "service.media.sponsorblock is enabled with no categories, so nothing \
+                 would be skipped; list categories or set enabled = false"
+                    .into(),
+            ));
+        }
+        // An unknown category name never reaches here: `RawSponsorBlockCategory`
+        // is an enum, so the parse refuses it and names the alternatives.
+        if let Err(e) = validate_http_url(&sb.api) {
+            errors.push(ValidationError::GlobalError(format!(
+                "Invalid service.media.sponsorblock.api '{}': {e}",
+                sb.api
+            )));
+        }
+    }
+
     // Validate automatic-brightness settings (if set).
     if let Some(brightness) = &config.service.brightness
         && let Some(auto) = &brightness.auto
@@ -1682,6 +1706,78 @@ mod tests {
             errors.iter().any(|e| e.contains("member of this group")),
             "expected a member-source error, got: {errors:?}"
         );
+    }
+
+    // --- SponsorBlock (issue #159) ---
+
+    fn sponsorblock_errors(table: &str) -> Vec<String> {
+        let toml = format!("config_version = 1\n\n[service.media.sponsorblock]\n{table}\n");
+        let config: RawConfig = toml::from_str(&toml).expect("test config parses");
+        validate_config(&config)
+            .iter()
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    /// The default: off, and therefore nothing to check. Settings nobody is
+    /// acting on are not worth an error — an empty category list and an api
+    /// that is not a URL are both faults only once the feature is on.
+    ///
+    /// (A category *name* is checked either way, because the parse refuses an
+    /// unknown one before validation sees the file at all.)
+    #[test]
+    fn sponsorblock_is_not_validated_while_it_is_off() {
+        assert!(
+            sponsorblock_errors("enabled = false\ncategories = []\napi = \"nonsense\"").is_empty()
+        );
+    }
+
+    #[test]
+    fn sponsorblock_defaults_validate() {
+        assert!(sponsorblock_errors("enabled = true").is_empty());
+    }
+
+    /// A typo must not quietly stop skipping the category a parent asked for.
+    /// It is refused by the parse now rather than by validation, and the error
+    /// names the alternatives, which is what the hand-rolled check used to do.
+    #[test]
+    fn an_unknown_sponsorblock_category_is_refused_by_the_parse() {
+        let toml =
+            "config_version = 1\n\n[service.media.sponsorblock]\ncategories = [\"sponsors\"]\n";
+        let err = toml::from_str::<RawConfig>(toml).expect_err("a typo must not parse");
+        let message = err.to_string();
+        assert!(message.contains("sponsors"), "{message}");
+        assert!(message.contains("selfpromo"), "{message}");
+    }
+
+    /// The service's marker categories are real names, and refusing them
+    /// alongside the typos is the honest answer: neither describes a span to
+    /// jump over.
+    #[test]
+    fn a_marker_category_is_refused() {
+        let toml = "config_version = 1\n\n[service.media.sponsorblock]\ncategories = [\"poi_highlight\"]\n";
+        assert!(
+            toml::from_str::<RawConfig>(toml).is_err(),
+            "markers are not skippable"
+        );
+    }
+
+    #[test]
+    fn sponsorblock_enabled_with_no_categories_is_rejected() {
+        let errors = sponsorblock_errors("enabled = true\ncategories = []");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("nothing would be skipped")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_sponsorblock_api_must_be_an_http_url() {
+        let errors = sponsorblock_errors("enabled = true\napi = \"sponsor.ajay.app\"");
+        assert!(errors.iter().any(|e| e.contains("api")), "{errors:?}");
+        assert!(sponsorblock_errors("enabled = true\napi = \"http://sb.lan:8080\"").is_empty());
     }
 
     // --- media kind (issue #127) ---

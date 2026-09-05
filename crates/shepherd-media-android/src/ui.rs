@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -233,9 +234,10 @@ struct GridView {
     /// resolve. `None` when its "Resume playback" option is off — which is what
     /// turns the whole feature off: nothing is recorded and nothing offered.
     resume: Option<ResumeTracker>,
-    /// Whether the resume state has been attached yet (the library has to
-    /// resolve first, so this can't be done when the view is created).
-    resume_attached: bool,
+    /// Whether the per-library state (resume, and the SponsorBlock skipper)
+    /// has been attached yet — the library has to resolve first, so it cannot
+    /// be done when the view is created.
+    state_attached: bool,
     /// The item the "continue watching" card is offering, until the viewer
     /// answers it.
     resume_offer: Option<String>,
@@ -292,6 +294,19 @@ pub struct MediaApp {
     player: Option<Box<dyn PlayerHandle>>,
     playback: PlaybackView,
     playing: Option<PlayingItem>,
+    /// Where the video sits inside the window, in egui points: what the
+    /// SurfaceView is placed at, and what the letterbox bars are painted
+    /// around. `None` when no file is open. Held so the activity is only told
+    /// when it changes rather than every frame.
+    video_rect: Option<crate::surface::VideoRect>,
+    /// Shared bucket cache for SponsorBlock lookups (issue #159). Buckets are
+    /// not per library — a video's segments are the same whichever playlist
+    /// reached it — so one cache serves them all.
+    sponsorblock_cache: Arc<crate::sponsorblock::SponsorBlockCache>,
+    /// The active library's skipper, or `None` when that library has the
+    /// setting off. `None` is the off switch: with no watcher there is no path
+    /// that contacts the service.
+    sponsorblock: Option<crate::sponsorblock::SkipWatcher>,
     /// A YouTube item whose stream URLs are being resolved on a worker thread
     /// before playback can start.
     playback_pending: Option<PendingPlayback>,
@@ -354,6 +369,9 @@ impl MediaApp {
         // `render` and the redraw callback are all no-ops in this mode.
         let player = make_player();
         let playback = PlaybackView::new();
+        let sponsorblock_cache = Arc::new(crate::sponsorblock::SponsorBlockCache::new(
+            cache_dir.join("sponsorblock"),
+        ));
 
         let resume_dir = settings_path
             .parent()
@@ -375,6 +393,9 @@ impl MediaApp {
             poster_rx,
             player,
             playback,
+            video_rect: None,
+            sponsorblock_cache,
+            sponsorblock: None,
             playing: None,
             playback_pending: None,
             stream_cache: HashMap::new(),
@@ -545,9 +566,9 @@ impl MediaApp {
         // A library whose "Reverse" toggle flipped this frame, applied to its
         // already-loaded grid below (so it takes effect without re-resolving).
         let mut reverse_toggled: Option<String> = None;
-        // Likewise for "Resume playback": the grid's resume state is attached
-        // per library, so a flip has to re-attach it.
-        let mut resume_toggled: Option<String> = None;
+        // Likewise for "Resume playback" and "Skip sponsors": both are attached
+        // to the grid per library, so a flip of either has to re-attach them.
+        let mut library_state_toggled: Option<String> = None;
         let active = self.settings.active_library.clone();
         let count = ids.len();
 
@@ -592,9 +613,24 @@ impl MediaApp {
                                      continue the last one watched.",
                                 );
                             if res.changed() {
-                                resume_toggled = Some(id.clone());
+                                library_state_toggled = Some(id.clone());
                             }
                             controls.push(res);
+                            // Skip sponsored spans (mirrors the Linux
+                            // `--sponsorblock-categories`, which shepherdd fills
+                            // in from `service.media.sponsorblock`).
+                            let sb = ui
+                                .checkbox(&mut entry.sponsorblock, "Skip sponsors")
+                                .on_hover_text(
+                                    "Jump over sponsor reads, self-promotion, \
+                                     \"like and subscribe\", intros and end cards in \
+                                     YouTube videos, using the SponsorBlock database. \
+                                     Off sends nothing to sponsor.ajay.app.",
+                                );
+                            if sb.changed() {
+                                library_state_toggled = Some(id.clone());
+                            }
+                            controls.push(sb);
                         });
                     }
 
@@ -636,13 +672,14 @@ impl MediaApp {
             g.focused = 0;
         }
 
-        // Same for "Resume playback": turning it on loads that library's saved
-        // positions (and may offer to continue an item); turning it off drops
-        // them, so the next play starts from the beginning.
-        if let Some(id) = resume_toggled
+        // Same for "Resume playback" and "Skip sponsors", which are attached
+        // together: turning resume on loads that library's saved positions (and
+        // may offer to continue an item) and turning it off drops them, while
+        // the segment skipper exists only while its own box is ticked.
+        if let Some(id) = library_state_toggled
             && self.grid.as_ref().is_some_and(|g| g.library_id == id)
         {
-            self.attach_resume(&id);
+            self.attach_library_state(&id);
         }
 
         // Drive D-pad Up/Down through every control (the Limit drag value is left
@@ -813,6 +850,7 @@ impl MediaApp {
                 caching: CachingSettings::default(),
                 reverse: false,
                 resume: false,
+                sponsorblock: false,
             };
             match self.settings.add_library(entry) {
                 Ok(()) => {
@@ -1015,19 +1053,36 @@ impl MediaApp {
             columns: 4,
             scroll: grid::ScrollState::default(),
             resume: None,
-            resume_attached: false,
+            state_attached: false,
             resume_offer: None,
             prompt: prompt::ResumePrompt::new(),
         });
     }
 
-    /// Attach the library's saved playback positions once its contents are
-    /// known, and work out whether to offer to continue the last item watched.
+    /// Attach the per-library playback state once the library's contents are
+    /// known: its saved positions (and whether to offer to continue the last
+    /// item watched), and its SponsorBlock skipper.
     ///
-    /// Deferred until the library resolves because both halves need its item
-    /// ids: positions for departed items are dropped, and an offer is only made
-    /// for an item the library still has.
-    fn attach_resume(&mut self, library_id: &str) {
+    /// Deferred until the library resolves because the resume half needs its
+    /// item ids: positions for departed items are dropped, and an offer is only
+    /// made for an item the library still has. The skipper does not need them,
+    /// but it is switched per library by the same settings card, so the two
+    /// travel together and a toggle of either re-runs this.
+    fn attach_library_state(&mut self, library_id: &str) {
+        // The segment skipper follows the same library switch, and off is the
+        // absence of one.
+        self.sponsorblock = self
+            .settings
+            .get(library_id)
+            .is_some_and(|e| e.sponsorblock)
+            .then(|| {
+                crate::sponsorblock::SkipWatcher::new(
+                    self.sponsorblock_cache.clone(),
+                    shepherd_media_core::sponsorblock::DEFAULT_CATEGORIES.to_vec(),
+                )
+            })
+            .flatten();
+
         let enabled = self
             .settings
             .get(library_id)
@@ -1040,7 +1095,7 @@ impl MediaApp {
         let GridState::Loaded(lib) = &g.state else {
             return;
         };
-        g.resume_attached = true;
+        g.state_attached = true;
         if !enabled {
             g.resume = None;
             g.resume_offer = None;
@@ -1188,9 +1243,9 @@ impl MediaApp {
             return None;
         }
 
-        // The library has resolved: its saved positions can be attached now.
-        if !self.grid.as_ref().is_some_and(|g| g.resume_attached) {
-            self.attach_resume(library_id);
+        // The library has resolved: its per-library state can be attached now.
+        if !self.grid.as_ref().is_some_and(|g| g.state_attached) {
+            self.attach_library_state(library_id);
         }
 
         // Move the focus index with the D-pad / arrow keys (the grid tiles are
@@ -1339,6 +1394,17 @@ impl MediaApp {
             return;
         };
 
+        // Arm the segment lookup here, before the YouTube resolve forks the two
+        // paths: this is the last point where the source is still the library's
+        // own URI rather than a resolved stream URL with no video id in it.
+        if let Some(watcher) = self.sponsorblock.as_mut() {
+            let video_id = match &source.uri {
+                ClassifiedUri::YouTube(url) => shepherd_media_core::uri::youtube_video_id(url),
+                _ => None,
+            };
+            watcher.note_item_started(video_id);
+        }
+
         // YouTube: resolve the stream URL on a worker before playback (network
         // must not run on the UI thread, and there's no yt-dlp on PATH for
         // mpv's own ytdl hook to use).
@@ -1447,6 +1513,11 @@ impl MediaApp {
         if let Some(p) = self.player.as_mut() {
             let _ = p.stop();
         }
+        if let Some(watcher) = self.sponsorblock.as_mut() {
+            watcher.note_stopped();
+        }
+        // The video rectangle is deliberately left alone: see
+        // `track_video_bounds`. It is replaced when the next file opens.
         self.playing = None;
     }
 
@@ -1526,8 +1597,12 @@ impl MediaApp {
             return;
         }
 
-        // Still playing: feed the player's position into the resume state
-        // (batched — this runs every frame).
+        // Still playing: skip anything the viewer has reached, then feed the
+        // position into the resume state (batched — this runs every frame).
+        // In that order, so a position saved this frame is the one on the far
+        // side of a skip rather than inside it.
+        self.track_video_bounds(ui.max_rect().size(), ui.ctx().pixels_per_point());
+        self.apply_segment_skip();
         self.track_resume_progress();
 
         let title = self
@@ -1536,7 +1611,7 @@ impl MediaApp {
             .map(|x| x.title.clone())
             .unwrap_or_default();
         let leave = match self.player.as_mut() {
-            Some(p) => self.playback.draw(ui, p.as_mut(), &title),
+            Some(p) => self.playback.draw(ui, p.as_mut(), &title, self.video_rect),
             None => {
                 ui.label("No player available on this platform.");
                 ui.button("⬅ Back").clicked()
@@ -1545,6 +1620,63 @@ impl MediaApp {
         if leave {
             self.finish_resume_tracking();
             self.end_playback();
+        }
+    }
+
+    /// Keep the video SurfaceView placed at the rectangle the playing file
+    /// should occupy, and remember it so the bars can be painted around it.
+    ///
+    /// Polled rather than pushed once at play time: the size is not known when
+    /// playback is requested, only once the file is open, and it can change
+    /// again mid-playback (a stream switching representation, a playlist moving
+    /// on). The activity is told only when the rectangle actually changes, so
+    /// the steady state is one property read per frame and no JNI at all.
+    fn track_video_bounds(&mut self, window: egui::Vec2, pixels_per_point: f32) {
+        let size = self.player.as_ref().and_then(|p| p.video_size());
+        let rect = size.and_then(|(w, h)| {
+            crate::surface::fit_video((window.x, window.y), (w as f32, h as f32))
+        });
+        // A size that has *stopped* being known is not a reason to resize. The
+        // surface still holds the last frame of the file that just ended, and
+        // stretching it back across the window to say "nothing is playing" is
+        // the very distortion this exists to avoid. The next file sets its own
+        // bounds when it opens.
+        let Some(rect) = rect else { return };
+        let rect = Some(rect);
+        if rect != self.video_rect {
+            self.video_rect = rect;
+            // The activity lays views out in window pixels; egui works in
+            // points, so this is the one place the two have to agree.
+            crate::surface::set_video_bounds(rect.map(|r| crate::surface::VideoRect {
+                x: r.x * pixels_per_point,
+                y: r.y * pixels_per_point,
+                width: r.width * pixels_per_point,
+                height: r.height * pixels_per_point,
+            }));
+        }
+    }
+
+    /// Seek past a SponsorBlock segment the viewer has reached.
+    ///
+    /// No-op when the library has the setting off, when the lookup has not
+    /// answered yet, or when the player cannot yet report a duration — every one
+    /// of which simply plays the video as it is.
+    fn apply_segment_skip(&mut self) {
+        let Some(watcher) = self.sponsorblock.as_mut() else {
+            return;
+        };
+        let (position, duration) = match self.player.as_ref() {
+            Some(p) => (p.position(), p.duration()),
+            None => return,
+        };
+        let Some(skip) = watcher.poll(position, duration) else {
+            return;
+        };
+        if let Some(p) = self.player.as_mut() {
+            match p.seek_absolute(skip.target) {
+                Ok(()) => self.playback.note_skipped(skip.category),
+                Err(e) => log::warn!("could not skip a SponsorBlock segment: {e}"),
+            }
         }
     }
 

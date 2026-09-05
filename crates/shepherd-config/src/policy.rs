@@ -259,6 +259,33 @@ pub struct MediaServiceConfig {
     pub watched_grace_days: u64,
     /// Maximum total size of the on-disk video cache, in bytes.
     pub cache_max_bytes: u64,
+    /// SponsorBlock segment skipping (issue #159).
+    pub sponsorblock: SponsorBlockConfig,
+}
+
+/// Validated SponsorBlock settings (issue #159).
+#[derive(Debug, Clone)]
+pub struct SponsorBlockConfig {
+    /// Whether to skip segments at all. Off unless a parent turned it on, and
+    /// while it is off nothing contacts the service.
+    pub enabled: bool,
+    /// Category names to skip, already checked against the known list.
+    pub categories: Vec<String>,
+    /// Base URL of the instance to query.
+    pub api: String,
+}
+
+impl Default for SponsorBlockConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            categories: crate::schema::DEFAULT_SPONSORBLOCK_CATEGORIES
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
+            api: "https://sponsor.ajay.app".to_string(),
+        }
+    }
 }
 
 impl Default for MediaServiceConfig {
@@ -269,6 +296,7 @@ impl Default for MediaServiceConfig {
             free_space_floor_bytes: 2 * 1024 * 1024 * 1024,
             watched_grace_days: 30,
             cache_max_bytes: 10 * 1024 * 1024 * 1024,
+            sponsorblock: SponsorBlockConfig::default(),
         }
     }
 }
@@ -331,6 +359,16 @@ impl ServiceConfig {
                 prefetch_while_session_active: m.prefetch_while_session_active,
                 free_space_floor_bytes: m.free_space_floor_bytes,
                 watched_grace_days: m.watched_grace_days,
+                sponsorblock: SponsorBlockConfig {
+                    enabled: m.sponsorblock.enabled,
+                    categories: m
+                        .sponsorblock
+                        .categories
+                        .iter()
+                        .map(|c| c.as_str().to_string())
+                        .collect(),
+                    api: m.sponsorblock.api.clone(),
+                },
                 cache_max_bytes: m.cache_max_bytes,
             })
             .unwrap_or_default();
@@ -910,6 +948,7 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
             reverse,
             resume,
             prefetch,
+            sponsorblock,
         } => EntryKind::Media {
             library,
             mode: match mode {
@@ -934,6 +973,7 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
             reverse,
             resume,
             prefetch,
+            sponsorblock,
         },
         RawEntryKind::Retroarch {
             core,

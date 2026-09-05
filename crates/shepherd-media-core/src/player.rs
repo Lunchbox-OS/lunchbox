@@ -107,6 +107,20 @@ pub trait PlayerHandle: Send {
         None
     }
 
+    /// The size the current video should be *displayed* at, in pixels, once
+    /// anamorphic pixels are accounted for. `None` when nothing is playing, for
+    /// audio, or before the file is open.
+    ///
+    /// Only a backend that leaves scaling to someone else needs this. Under
+    /// Android's `mediacodec_embed` the decoder scales its output to whatever
+    /// size the Surface happens to be, and no pass under mpv's control ever
+    /// draws the frame — so `--keepaspect` cannot apply, and the host has to
+    /// shape the Surface itself. The Linux front-end renders through mpv's own
+    /// GL API, which letterboxes internally, and never calls this.
+    fn video_size(&self) -> Option<(i64, i64)> {
+        None
+    }
+
     fn set_volume(&mut self, _percent: f64) -> Result<(), PlayerError> {
         Ok(())
     }
@@ -367,6 +381,9 @@ mod libmpv_backend {
         // Seconds to start the next `play` at, consumed there. Set by the
         // front-ends' opt-in resume feature.
         start_position: Option<f64>,
+        // Whether the `hwdec` asked for was a readback mode, so the per-file
+        // log line can tell a deliberate copy from a silent fallback to one.
+        copy_wanted: bool,
     }
 
     impl LibmpvPlayer {
@@ -380,25 +397,23 @@ mod libmpv_backend {
             fast_render: bool,
             output: super::VideoOutput,
         ) -> Result<Self, PlayerError> {
-            let mpv = Mpv::with_initializer(|init| {
-                match output {
-                    // `vo=libmpv` disables mpv's own windowing — the host UI
-                    // owns the surface and composites mpv's output via
-                    // RenderContext.
-                    super::VideoOutput::RenderApi => {
-                        init.set_property("vo", "libmpv")?;
-                        // Hardware-accelerated decode where available; fall
-                        // back to software automatically.
-                        init.set_property("hwdec", "auto-safe")?;
-                    }
-                    // Decode straight into the Surface attached later via
-                    // `set_video_surface`. `hwdec=mediacodec` (not
-                    // `-copy`) is the whole point: frames stay on the GPU.
-                    super::VideoOutput::AndroidSurface => {
-                        init.set_property("vo", "mediacodec_embed")?;
-                        init.set_property("hwdec", "mediacodec")?;
-                    }
+            let (vo, hwdec) = match output {
+                // `vo=libmpv` disables mpv's own windowing — the host UI owns
+                // the surface and composites mpv's output via RenderContext.
+                super::VideoOutput::RenderApi => ("libmpv", render_api_hwdec()),
+                // Decode straight into the Surface attached later via
+                // `set_video_surface`. `hwdec=mediacodec` (not `-copy`) is the
+                // whole point: frames stay on the GPU.
+                super::VideoOutput::AndroidSurface => {
+                    ("mediacodec_embed", "mediacodec".to_string())
                 }
+            };
+            // Whether a readback was asked for, so `log_hwdec` can tell the
+            // deliberate copy mode above from mpv quietly falling back to one.
+            let copy_wanted = hwdec.contains("copy");
+            let mpv = Mpv::with_initializer(|init| {
+                init.set_property("vo", vo)?;
+                init.set_property("hwdec", hwdec.as_str())?;
                 if fast_render {
                     // Best-effort: keep default quality if the profile is missing.
                     let _ = init.set_property("profile", "fast");
@@ -432,11 +447,10 @@ mod libmpv_backend {
             mpv.observe_property("idle-active", libmpv2::Format::Flag, 0)
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
 
-            // Observe which decoder mpv actually settled on. `hwdec=auto-safe`
-            // degrades quietly: a missing VA-API driver, a display handle we
-            // failed to hand over, or a codec the GPU has no block for all end
-            // in software decoding (or a `-copy` mode that reads every frame
-            // back into system RAM) with nothing said about it. That gap is
+            // Observe which decoder mpv actually settled on. Every `auto-*`
+            // hwdec degrades quietly: a missing VA-API driver, a display handle
+            // we failed to hand over, or a codec the GPU has no block for all
+            // end in software decoding with nothing said about it. That gap is
             // what made issue #115 hard to see, so report it once per file.
             mpv.observe_property("hwdec-current", libmpv2::Format::String, 0)
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))?;
@@ -447,6 +461,7 @@ mod libmpv_backend {
                 render_ctx: Mutex::new(RenderCtxHolder(None)),
                 external_audio: None,
                 start_position: None,
+                copy_wanted,
             })
         }
 
@@ -464,16 +479,58 @@ mod libmpv_backend {
         }
     }
 
+    /// Which decode path the render-API front-end asks mpv for, honouring a
+    /// `SHEPHERD_MPV_HWDEC` override.
+    ///
+    /// The default is a *copy* mode — `auto-copy-safe` — rather than the
+    /// zero-copy `auto-safe` that issue #115 fought for, because zero-copy
+    /// VA-API renders the wrong picture after a seek on the hardware this
+    /// project runs on.
+    ///
+    /// What that looks like: a second or so after a seek the frame turns green
+    /// and blocky, luma roughly intact and chroma read from the wrong place,
+    /// and it stays that way until some later seek happens to clear it.
+    /// SponsorBlock made it impossible to ignore — the player now seeks on its
+    /// own — but the fault is not in the seek. Measured on an Ivy Bridge iGPU
+    /// (i965 VA driver, Mesa crocus), against a 720p H.264 file from the video
+    /// cache, in the headless dev session:
+    ///
+    /// | decode path | corrupt seeks | CPU (one core) |
+    /// |---|---|---|
+    /// | `vaapi` (zero-copy) | 4 of 12 | 19.1 % |
+    /// | `vaapi-copy` | 0 of 12 | 21.7 % |
+    /// | software | 0 of 12 | 55.2 % |
+    ///
+    /// Identical with `hr-seek-framedrop` on and off, identical under `vo=gpu`
+    /// and `vo=gpu-next`, and identical with a larger surface pool — and bare
+    /// `mpv` reproduces it with no shepherd code involved, so it is a driver
+    /// bug in the DMABUF export, not something this crate can seek its way
+    /// around. The one thing that changes it is whether the decoded surface is
+    /// read back into system RAM, which is exactly what a `-copy` mode does.
+    ///
+    /// The price is the 2.6 points of one core in the table, and it is only
+    /// paid on hardware where the interop is fine. Set
+    /// `SHEPHERD_MPV_HWDEC=auto-safe` to take the zero-copy path back on a GPU
+    /// that renders it correctly; any value mpv's `--hwdec` accepts works,
+    /// including `no` to force software. See `docs/shepherd-media.md`.
+    fn render_api_hwdec() -> String {
+        std::env::var("SHEPHERD_MPV_HWDEC").unwrap_or_else(|_| "auto-copy-safe".to_string())
+    }
+
     /// Report the decode path mpv chose for the current file, at a level that
     /// matches how much performance is on the table.
     ///
     /// mpv writes `"no"` when it is decoding on the CPU, the interop name
     /// (`vaapi`, `mediacodec`, …) when frames stay on the GPU, and a `-copy`
     /// suffix when it decodes on the GPU but reads every frame back into system
-    /// RAM. The middle case is the one worth shouting about: it looks like
-    /// hardware decoding from the outside while costing roughly twice the CPU
-    /// of the zero-copy path.
-    fn log_hwdec(mode: &str) {
+    /// RAM.
+    ///
+    /// A readback costs roughly twice the CPU of the zero-copy path, so it is
+    /// worth a warning when nobody asked for it — but on the render-API
+    /// front-end it *is* what was asked for (see [`render_api_hwdec`]), and
+    /// warning about the choice this crate just made would be noise.
+    /// `copy_wanted` separates the two.
+    fn log_hwdec(mode: &str, copy_wanted: bool) {
         if mode.is_empty() {
             return;
         }
@@ -484,10 +541,18 @@ mod libmpv_backend {
                  and that the source codec is one this GPU can decode."
             );
         } else if let Some(interop) = mode.strip_suffix("-copy") {
-            tracing::warn!(
-                "mpv is decoding video with {interop} but copying every frame back \
-                 to system RAM ({mode}); the zero-copy path is unavailable."
-            );
+            if copy_wanted {
+                tracing::info!(
+                    "mpv is decoding video with {interop}, reading each frame back \
+                     to system RAM ({mode}); set SHEPHERD_MPV_HWDEC=auto-safe for \
+                     the zero-copy path if this GPU renders it correctly."
+                );
+            } else {
+                tracing::warn!(
+                    "mpv is decoding video with {interop} but copying every frame back \
+                     to system RAM ({mode}); the zero-copy path is unavailable."
+                );
+            }
         } else {
             tracing::info!("mpv is decoding video with {mode} (zero-copy)");
         }
@@ -575,10 +640,18 @@ mod libmpv_backend {
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
         }
 
+        /// Seek to `seconds`, exactly.
+        ///
+        /// `exact` is spelled out rather than left to `--hr-seek`, whose
+        /// default mpv documents as "implementation specific and may change
+        /// with new releases". Landing on the preceding keyframe instead of the
+        /// requested position would put a SponsorBlock skip back inside the
+        /// span it just jumped, with the span already marked as skipped — so
+        /// the rest of the sponsor would play with nothing left to stop it.
         fn seek_absolute(&mut self, seconds: f64) -> Result<(), PlayerError> {
             let arg = format!("{seconds}");
             self.mpv
-                .command("seek", &[&arg, "absolute"])
+                .command("seek", &[&arg, "absolute+exact"])
                 .map_err(|e: libmpv2::Error| PlayerError::Backend(e.to_string()))
         }
 
@@ -588,6 +661,15 @@ mod libmpv_backend {
 
         fn duration(&self) -> Option<f64> {
             self.mpv.get_property::<f64>("duration").ok()
+        }
+
+        /// `dwidth`/`dheight` rather than `width`/`height`: they are the
+        /// dimensions after aspect correction, so a 720x576 anamorphic PAL file
+        /// reports the 1024x576 it should be shown at.
+        fn video_size(&self) -> Option<(i64, i64)> {
+            let width = self.mpv.get_property::<i64>("dwidth").ok()?;
+            let height = self.mpv.get_property::<i64>("dheight").ok()?;
+            (width > 0 && height > 0).then_some((width, height))
         }
 
         fn set_volume(&mut self, percent: f64) -> Result<(), PlayerError> {
@@ -706,7 +788,7 @@ mod libmpv_backend {
                             }
                         }
                         ("hwdec-current", PropertyData::Str(mode)) => {
-                            log_hwdec(mode);
+                            log_hwdec(mode, self.copy_wanted);
                             None
                         }
                         _ => None,

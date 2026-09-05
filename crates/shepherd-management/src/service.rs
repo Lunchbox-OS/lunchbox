@@ -14,7 +14,7 @@ use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, LightSensor,
-    SpawnOptions, VolumeController, VolumeError,
+    SpawnOptions, SponsorBlockSpec, VolumeController, VolumeError,
 };
 use shepherd_store::Store;
 use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
@@ -1694,6 +1694,17 @@ fn resolve_spawn(
     let is_media = matches!(kind, Some(EntryKind::Media { .. }));
     let media_watched_grace_days = is_media.then(|| eng.policy().service.media.watched_grace_days);
     let media_cache_max_bytes = is_media.then(|| eng.policy().service.media.cache_max_bytes);
+    // The household's SponsorBlock settings. The entry's own on/off override
+    // rides on the entry kind and is applied by the host when it builds the
+    // argv, so both directions of override work.
+    let media_sponsorblock = is_media.then(|| {
+        let sb = &eng.policy().service.media.sponsorblock;
+        SponsorBlockSpec {
+            enabled: sb.enabled,
+            categories: sb.categories.clone(),
+            api: sb.api.clone(),
+        }
+    });
     let needs_hidpi = entry.is_some_and(|e| e.xwayland_native_resolution);
 
     let log_path = eng.policy().service.capture_child_output.then(|| {
@@ -1718,6 +1729,7 @@ fn resolve_spawn(
         connectivity_check,
         media_watched_grace_days,
         media_cache_max_bytes,
+        media_sponsorblock,
         ..Default::default()
     };
 

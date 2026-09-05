@@ -132,6 +132,10 @@ impl PlayerHandle for CachingPlayer {
         self.inner.duration()
     }
 
+    fn video_size(&self) -> Option<(i64, i64)> {
+        self.inner.video_size()
+    }
+
     fn set_volume(&mut self, percent: f64) -> Result<(), PlayerError> {
         self.inner.set_volume(percent)
     }

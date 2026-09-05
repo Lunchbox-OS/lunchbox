@@ -13,6 +13,12 @@ Linux binary for the `shepherd-media` library-launcher. Wraps
   cached file for a remote source at play time and queues an uncached item for
   download once it is watched to the end. The cache itself lives in
   `shepherd-media-cache`, which shepherdd shares.
+- `SkipWatcher` (`skipping.rs`), which skips SponsorBlock segments in YouTube
+  videos when a parent has enabled it (`--sponsorblock-categories`, filled in by
+  shepherdd from `service.media.sponsorblock`). It owns only the timing — an
+  off-thread lookup, a duration mpv does not know until the file is open, and a
+  per-frame position; the decisions are `shepherd-media-core`'s. With no
+  categories there is no watcher and nothing reaches the network.
 - The `--resume` option (default off): per-library playback positions kept under
   `$XDG_STATE_HOME/shepherd/media/resume/`, so an item re-opens where it stopped
   and browse mode offers to continue the last one watched. The state model is

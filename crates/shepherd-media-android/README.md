@@ -57,6 +57,27 @@ the full design and roadmap.
   in `<filesDir>/resume/<library-id>.toml`; the state model and its policy are
   shared with the Linux binary (`shepherd-media-app`'s `resume` module). Not yet
   exercised on hardware.
+- Per-library **Skip sponsors** (default off, issue #159): jumps over sponsor
+  reads, self-promotion, "like and subscribe", intros and end cards in YouTube
+  videos, with a brief notice saying what was skipped. The categories, the
+  filtering and the skip state machine are `shepherd-media-core`'s and the
+  bucket cache is `shepherd-media-app`'s, so this behaves exactly as the Linux
+  binary does; only the fetch and the cache directory
+  (`<filesDir>/cache/sponsorblock/`) are local. Off means no request is made.
+  Verified on a Pixel 10a, through the settings checkbox: 62s of playback
+  reaches 112s of video with the toggle on and 62s with it off, and the bucket
+  lands in the app's own cache.
+- **Correct aspect ratio.** Under `mediacodec_embed` the decoder scales its
+  output to fill the Surface it is handed, and mpv's `--keepaspect` never gets a
+  look in because no pass under mpv's control draws the frame — so a
+  `MATCH_PARENT` SurfaceView stretched every video to the shape of the display
+  (a 16:9 video measured 26% too wide on a 2424x1080 Pixel). The Rust side works
+  out the rectangle the video should occupy (`surface::fit_video`), places the
+  SurfaceView there over JNI, and paints the letterbox bars itself in
+  `playback.rs` — the bars have to be drawn there because `NativeActivity` hands
+  the window's surface to the native renderer (`getWindow().takeSurface`), so
+  nothing the Java side draws is ever shown, and the window is translucent, so
+  anything unpainted shows the home screen rather than a black bar.
 - Source resolution (`resolve` module): local/`file://` TOML, HTTP(S) TOML, and
   `.m3u`/`.m3u8` (local or HTTP) are parsed into a `Library` on a worker thread,
   and the grid lists the real items. `content://` SAF and YouTube sources report

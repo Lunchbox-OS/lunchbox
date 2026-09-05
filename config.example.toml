@@ -117,6 +117,34 @@ timeout_ms = 1500
 # and orders purely by age.
 # watched_grace_days = 30
 #
+# Skip sponsored spans in YouTube videos, from the SponsorBlock database
+# (optional) — issue #159. Off by default: it is the one media feature that
+# talks to a service outside your home, so nothing is looked up until you say
+# so. Turn it on and a sponsor read, an "like and subscribe", or an end card is
+# jumped over, with a brief notice saying why the video moved.
+#
+# What leaves the device when it is on: a four-character hash prefix, and
+# nothing else. The lookup asks for every video whose id hashes into the same
+# bucket — about a hundred of them — and picks yours out here, so the service
+# cannot tell which one is playing. Nothing is ever submitted or voted on.
+#
+# Segment data is CC BY-NC-SA 4.0, from https://sponsor.ajay.app.
+# [service.media.sponsorblock]
+# enabled = false
+#
+# Which categories to skip. The default covers the spans that are reliably not
+# the video; `preview` (a recap of an earlier episode), `filler` and
+# `music_offtopic` are left out because their submissions are judgement calls
+# that can cut something a child wanted. The full list is: sponsor, selfpromo,
+# interaction, intro, outro, preview, filler, music_offtopic, hook.
+# categories = ["sponsor", "selfpromo", "interaction", "intro", "outro"]
+#
+# Point this at a mirror to keep the lookups inside your own infrastructure.
+# api = "https://sponsor.ajay.app"
+#
+# A single library can opt out (or in) with `sponsorblock` under its
+# `[entries.kind]` — for a channel whose sponsor reads are part of the show.
+
 # `cache_max_bytes` bounds the cache; `free_space_floor_bytes` bounds the volume
 # it sits on. Both are needed: a 10 GiB cache on a 16 GiB device fills the disk
 # long before it fills the cache. shepherdd hands the cap to every media
