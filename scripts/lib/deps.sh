@@ -13,6 +13,11 @@ source "$DEPS_LIB_DIR/common.sh"
 # shellcheck source=admin.sh
 source "$DEPS_LIB_DIR/admin.sh"
 
+# For arch_to_triple: `deps install cross` adds the same Rust target that
+# `shepherd build --arch` will ask for, and the two must agree.
+# shellcheck source=build.sh
+source "$DEPS_LIB_DIR/build.sh"
+
 # Directory containing package lists
 DEPS_DIR="$(get_repo_root)/scripts/deps"
 
@@ -318,6 +323,107 @@ install_cargo_ndk() {
     fi
 }
 
+# Ubuntu's mirror for architectures the primary archive does not carry. Named
+# for the role, not for any architecture: which arches live here differs between
+# Ubuntu's own mirrors and the many that carry everything in one tree, which is
+# why the code below probes rather than assumes.
+DEPS_PORTS_URI="http://ports.ubuntu.com/ubuntu-ports/"
+
+# Does the apt mirror at $1 actually serve architecture $3 for suite $2?
+#
+# Probes the per-architecture binary index. The suite Release file's
+# `Architectures:` field cannot answer this -- it lists every architecture the
+# *suite* defines, so a mirror that carries only some of them still advertises
+# them all -- but binary-<arch>/Release is either there or it is not.
+_deps_mirror_serves() {
+    local uri="${1%/}" suite="$2" arch="$3" component
+    for component in main universe; do
+        curl -sfI --max-time 20 -o /dev/null \
+            "$uri/dists/$suite/$component/binary-$arch/Release" || return 1
+    done
+    return 0
+}
+
+# Make apt able to install packages for a foreign architecture.
+#
+# Two steps, the second of which is conditional: dpkg has to be told the
+# architecture exists, and apt has to have somewhere to fetch it from. When the
+# configured mirror already carries it -- true of most full mirrors, and the
+# reason this probes instead of assuming Ubuntu's archive/ports split -- there is
+# nothing else to do. When it does not, every existing entry must first be
+# pinned to the architectures it *does* serve, or `apt-get update` fails hard on
+# the 404 for the new one, and only then can a ports entry be added.
+_deps_enable_foreign_arch() {
+    local arch="$1"
+    local sources="/etc/apt/sources.list.d/ubuntu.sources"
+
+    if ! dpkg --print-foreign-architectures | grep -qx -- "$arch"; then
+        info "Telling dpkg about the $arch architecture..."
+        maybe_sudo dpkg --add-architecture "$arch"
+    fi
+
+    if [[ ! -f "$sources" ]]; then
+        warn "$sources not found; assuming apt can already fetch $arch packages"
+        return 0
+    fi
+
+    if grep -q "^URIs: $DEPS_PORTS_URI" "$sources"; then
+        info "A ports entry for $arch is already configured"
+        return 0
+    fi
+
+    local uri suite
+    uri="$(awk '/^URIs:/ {print $2; exit}' "$sources")"
+    suite="$(awk '/^Suites:/ {print $2; exit}' "$sources")"
+    [[ -n "$uri" && -n "$suite" ]] \
+        || die "Could not read a URI and suite out of $sources"
+
+    if _deps_mirror_serves "$uri" "$suite" "$arch"; then
+        info "The configured mirror ($uri) already serves $arch"
+        return 0
+    fi
+
+    _deps_mirror_serves "$DEPS_PORTS_URI" "$suite" "$arch" \
+        || die "Neither $uri nor $DEPS_PORTS_URI serves $arch packages for $suite"
+
+    info "Pinning the existing sources to their own architectures..."
+    local native
+    native="$(dpkg --print-architecture)"
+    # Add `Architectures:` to every stanza that has none, so the new
+    # architecture is not requested from a mirror that lacks it. Stanzas that
+    # already declare their architectures are left alone -- this has to be safe
+    # to run twice.
+    maybe_sudo cp -n "$sources" "$sources.pre-cross" || true
+    maybe_sudo awk -v arches="$native" '
+        /^[[:space:]]*$/ { flush(); print; next }
+        /^Architectures:/ { seen = 1 }
+        { buf[n++] = $0 }
+        END { flush() }
+        function flush(   i) {
+            for (i = 0; i < n; i++) {
+                print buf[i]
+                if (buf[i] ~ /^Types:/ && !seen) print "Architectures: " arches
+            }
+            n = 0; seen = 0
+        }
+    ' "$sources" | maybe_sudo tee "$sources.new" >/dev/null
+    maybe_sudo mv "$sources.new" "$sources"
+
+    info "Adding a $DEPS_PORTS_URI entry for $arch..."
+    local components
+    components="$(awk '/^Components:/ {sub(/^Components: /, ""); print; exit}' "$sources")"
+    maybe_sudo tee "/etc/apt/sources.list.d/ubuntu-ports-$arch.sources" >/dev/null <<EOF
+# Added by \`shepherd deps install cross --arch $arch\`: the configured mirror
+# does not carry $arch, so its packages come from Ubuntu's ports mirror.
+Types: deb
+URIs: $DEPS_PORTS_URI
+Suites: $suite $suite-updates $suite-backports $suite-security
+Components: $components
+Architectures: $arch
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+}
+
 # Read a package file, stripping comments and empty lines
 read_package_file() {
     local file="$1"
@@ -330,11 +436,19 @@ read_package_file() {
     grep -v '^\s*#' "$file" | grep -v '^\s*$' | sed 's/#.*//' | tr -s '[:space:]' '\n' | grep -v '^$'
 }
 
-# Get packages for a specific set
+# Get packages for a specific set.
+#
+# $2 is the Debian architecture, required only by the `cross` set, whose file is
+# a template: every `@ARCH@` becomes the architecture being cross-compiled for.
 get_packages() {
     local set_name="$1"
+    local arch="${2:-}"
     
     case "$set_name" in
+        cross)
+            [[ -n "$arch" ]] || die "The 'cross' set needs --arch <debian-arch>"
+            read_package_file "$DEPS_DIR/cross.pkgs" | sed "s/@ARCH@/$arch/g"
+            ;;
         build)
             read_package_file "$DEPS_DIR/build.pkgs"
             ;;
@@ -363,37 +477,75 @@ get_packages() {
             } | sort -u
             ;;
         *)
-            die "Unknown package set: $set_name (valid: build, run, test, android, agent, dev)"
+            die "Unknown package set: $set_name (valid: build, run, test, android, agent, cross, dev)"
             ;;
     esac
 }
 
+# Split "<set> [--arch ARCH]" into DEPS_SET and DEPS_ARCH.
+_deps_parse_args() {
+    DEPS_SET="${1:-}"
+    DEPS_ARCH=""
+    shift || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --arch)
+                [[ -n "${2:-}" ]] || die "--arch needs a Debian architecture"
+                DEPS_ARCH="$2"
+                shift 2
+                ;;
+            *)
+                die "Unknown deps option: $1 (try: shepherd deps help)"
+                ;;
+        esac
+    done
+
+    # The cross set is the only one that is per-architecture, and the only
+    # architecture worth cross-compiling for is one that is not the host's.
+    if [[ "$DEPS_SET" == "cross" ]]; then
+        [[ -n "$DEPS_ARCH" ]] || die "Usage: shepherd deps <cmd> cross --arch <debian-arch>"
+        if [[ "$DEPS_ARCH" == "$(dpkg --print-architecture)" ]]; then
+            die "$DEPS_ARCH is this host's own architecture; build for it natively instead"
+        fi
+    fi
+}
+
 # Print packages for a set (one per line)
 deps_print() {
-    local set_name="${1:-}"
+    local DEPS_SET DEPS_ARCH
+    _deps_parse_args "$@"
     
-    if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps print <build|run|dev>"
+    if [[ -z "$DEPS_SET" ]]; then
+        die "Usage: shepherd deps print <build|run|cross|dev>"
     fi
     
-    get_packages "$set_name"
+    get_packages "$DEPS_SET" "$DEPS_ARCH"
 }
 
 # Install packages for a set
 deps_install() {
-    local set_name="${1:-}"
+    local DEPS_SET DEPS_ARCH
+    _deps_parse_args "$@"
+    local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps install <build|run|dev>"
+        die "Usage: shepherd deps install <build|run|cross|dev>"
     fi
     
     check_ubuntu_version
     
     info "Installing $set_name dependencies..."
+
+    # Multiarch first: none of the `:<arch>` packages below can even be
+    # resolved until dpkg knows the architecture and apt has a mirror for it.
+    if [[ "$set_name" == "cross" ]]; then
+        _deps_enable_foreign_arch "$DEPS_ARCH"
+    fi
     
     # Get the package list
     local packages
-    packages=$(get_packages "$set_name" | tr '\n' ' ')
+    packages=$(get_packages "$set_name" "$DEPS_ARCH" | tr '\n' ' ')
     
     if [[ -z "$packages" ]]; then
         warn "No packages to install for set: $set_name"
@@ -424,6 +576,16 @@ deps_install() {
         install_media_deps
     fi
 
+    # The cross set needs rustc's own std for the target, which apt cannot
+    # provide. `shepherd build --arch` derives the same triple.
+    if [[ "$set_name" == "cross" ]]; then
+        source "$HOME/.cargo/env" 2>/dev/null || true
+        local triple
+        triple="$(arch_to_triple "$DEPS_ARCH")"
+        info "Adding the $triple Rust target..."
+        rustup target add "$triple"
+    fi
+
     # For the android set, fetch the SDK after the JDK + unzip apt
     # packages are present, then cargo-ndk + the Android Rust targets.
     if [[ "$set_name" == "android" ]]; then
@@ -436,14 +598,16 @@ deps_install() {
 
 # Check if all packages for a set are installed
 deps_check() {
-    local set_name="${1:-}"
+    local DEPS_SET DEPS_ARCH
+    _deps_parse_args "$@"
+    local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps check <build|run|dev>"
+        die "Usage: shepherd deps check <build|run|cross|dev>"
     fi
     
     local packages
-    packages=$(get_packages "$set_name")
+    packages=$(get_packages "$set_name" "$DEPS_ARCH")
     
     local missing=()
     while IFS= read -r pkg; do
@@ -464,6 +628,17 @@ deps_check() {
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_ytdlp_installed; then
             warn "yt-dlp is not installed (run: shepherd deps install run)"
+            return 1
+        fi
+    fi
+
+    # For the cross set, also check rustc's std for the target.
+    if [[ "$set_name" == "cross" ]]; then
+        local triple
+        triple="$(arch_to_triple "$DEPS_ARCH")"
+        if command_exists rustup \
+            && ! rustup target list --installed 2>/dev/null | grep -qx -- "$triple"; then
+            warn "The $triple Rust target is not installed (run: shepherd deps install cross --arch $DEPS_ARCH)"
             return 1
         fi
     fi
@@ -520,6 +695,8 @@ Package sets:
     android  JDK + Android SDK + NDK for the companion-android and
              shepherd-media-android apps
     agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
+    cross    Cross-compilation toolchain and the target architecture's half of
+             the build set. Needs --arch <debian-arch>; see 'shepherd build --arch'.
     dev      All dependencies (build + run + test + agent + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
@@ -530,6 +707,7 @@ Examples:
     shepherd deps print build
     shepherd deps install dev
     shepherd deps install android
+    shepherd deps install cross --arch arm64
     shepherd deps check run
 EOF
             ;;
