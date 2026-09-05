@@ -71,6 +71,30 @@ impl EntryKindTag {
     pub fn confirms_on_close_by_default(self) -> bool {
         !matches!(self, EntryKindTag::Ebook)
     }
+
+    /// The input-compat sidecars this activity runs absent an explicit
+    /// `input_compat` (issue #160).
+    ///
+    /// Only `ebook` asks for one. A gamepad is the one controller a reading
+    /// device is likely to have and the reader cannot use: Okular listens for
+    /// arrow keys, `Page Up` / `Page Down` and the scroll wheel, and a pad
+    /// produces none of them on its own. The productivity preset maps the
+    /// D-pad to the arrow keys, so a pad turns pages the moment a book opens,
+    /// with nothing to configure.
+    ///
+    /// It costs an idle bridge process when no pad is plugged in, which is why
+    /// this is a per-kind answer rather than a global one — and the bridge
+    /// handles hotplug, so a pad connected mid-book works.
+    ///
+    /// An entry that lists `input_compat` replaces this wholesale, and an
+    /// empty list turns it off; the default only applies when the field is
+    /// absent.
+    pub fn default_input_compat(self) -> Vec<InputCompatMode> {
+        match self {
+            EntryKindTag::Ebook => vec![InputCompatMode::GamepadProductivity],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// A known Steam "launch interstitial" — one of the blocking modals Steam can
@@ -731,6 +755,12 @@ impl EntryKind {
     /// editor's copy can be generated from it instead of mirrored by hand.
     pub fn confirms_on_close_by_default(&self) -> bool {
         self.tag().confirms_on_close_by_default()
+    }
+
+    /// The input-compat sidecars this activity gets when the entry lists none
+    /// (issue #160). See [`EntryKindTag::default_input_compat`].
+    pub fn default_input_compat(&self) -> Vec<InputCompatMode> {
+        self.tag().default_input_compat()
     }
 
     /// Whether the HUD should offer page-turn buttons for this activity

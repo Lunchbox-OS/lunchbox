@@ -550,6 +550,11 @@ end = "20:00"
 # It emits nothing (so it needs the `input` group but not `/dev/uinput`) and,
 # like the two modes above, is mutually exclusive with them (all three grab or
 # produce the touchscreen). It still stacks with a `gamepad_*` preset.
+#
+# Leave `input_compat` out entirely and the entry's kind decides. Only `ebook`
+# asks for anything: it runs `gamepad_productivity`, whose D-pad is the arrow
+# keys, so a pad turns pages with nothing configured. Writing the field here
+# replaces that wholesale, and `input_compat = []` refuses every sidecar.
 # https://store.steampowered.com/app/22000/World_of_Goo/
 [[entries]]
 id = "steam-world-of-goo"
@@ -1075,6 +1080,10 @@ book = "~/Books/the-hobbit.epub"
 # Closing a book does not ask "are you sure": there is nothing to lose, since
 # the page is written on the way out. That is this kind's default -- set
 # confirm_on_close = true here to get the prompt anyway.
+
+# A book also runs the `gamepad_productivity` sidecar by default, so a game
+# controller's D-pad turns pages -- the reader itself understands keys, the
+# wheel and nothing else. Set input_compat = [] to go without it.
 
 # Reading is the obvious thing to reward, so no limit here -- and see the
 # [entries.tokens] block on a game entry for banking reading time into it.

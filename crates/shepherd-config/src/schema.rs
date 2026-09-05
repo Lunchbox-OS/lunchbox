@@ -192,8 +192,14 @@ pub struct RawEntry {
     /// orthogonal sidecar — touch-to-mouse and gamepad presets can be
     /// stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
     /// or a list (`input_compat = ["touch_to_mouse", "gamepad_productivity"]`).
+    ///
+    /// Absent, the default comes from the entry's kind — see
+    /// [`shepherd_api::EntryKind::default_input_compat`], which gives an
+    /// `ebook` the gamepad preset that turns its D-pad into arrow keys. A
+    /// list given here replaces that wholesale, and `input_compat = []` is
+    /// how an entry asks for no sidecar at all.
     #[serde(default, deserialize_with = "deserialize_input_compat_list")]
-    pub input_compat: Vec<RawInputCompat>,
+    pub input_compat: Option<Vec<RawInputCompat>>,
 
     /// Tunables for input-compat sidecars (analog deadzones, speeds).
     #[serde(default)]
@@ -362,7 +368,11 @@ pub struct RawInputCompatOptions {
 
 /// Accept either a single `RawInputCompat` value or a list of them. Empty
 /// list and missing field both deserialize to `vec![]`.
-fn deserialize_input_compat_list<'de, D>(deserializer: D) -> Result<Vec<RawInputCompat>, D::Error>
+/// `None` and `Some(vec![])` are different answers here: absent means "use the
+/// kind's default", an empty list means "no sidecar, whatever the kind says".
+fn deserialize_input_compat_list<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<RawInputCompat>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -374,9 +384,9 @@ where
     }
 
     match Option::<OneOrMany>::deserialize(deserializer)? {
-        None => Ok(Vec::new()),
-        Some(OneOrMany::One(v)) => Ok(vec![v]),
-        Some(OneOrMany::Many(v)) => Ok(v),
+        None => Ok(None),
+        Some(OneOrMany::One(v)) => Ok(Some(vec![v])),
+        Some(OneOrMany::Many(v)) => Ok(Some(v)),
     }
 }
 
@@ -1199,7 +1209,7 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.entries[0].input_compat,
-            vec![RawInputCompat::TouchToMouse]
+            Some(vec![RawInputCompat::TouchToMouse])
         );
     }
 
@@ -1217,7 +1227,7 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.entries[0].input_compat,
-            vec![RawInputCompat::DisableTouch]
+            Some(vec![RawInputCompat::DisableTouch])
         );
     }
 
@@ -1356,10 +1366,10 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.entries[0].input_compat,
-            vec![
+            Some(vec![
                 RawInputCompat::TouchToMouse,
                 RawInputCompat::GamepadProductivity
-            ]
+            ])
         );
         let opts = config.entries[0].input_compat_options.unwrap();
         assert_eq!(opts.gamepad_deadzone, Some(0.2));
@@ -1367,8 +1377,10 @@ mod tests {
         assert_eq!(opts.gamepad_scroll_speed, None);
     }
 
+    /// Absent and empty are different answers: absent defers to the kind (a
+    /// book gets the gamepad preset), an empty list refuses every sidecar.
     #[test]
-    fn parse_input_compat_absent() {
+    fn parse_input_compat_absent_is_not_the_same_as_empty() {
         let toml_str = r#"
             config_version = 1
 
@@ -1376,9 +1388,16 @@ mod tests {
             id = "g"
             label = "G"
             kind = { type = "process", command = "/bin/g" }
+
+            [[entries]]
+            id = "h"
+            label = "H"
+            kind = { type = "process", command = "/bin/h" }
+            input_compat = []
         "#;
         let config: RawConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.entries[0].input_compat.is_empty());
+        assert_eq!(config.entries[0].input_compat, None);
+        assert_eq!(config.entries[1].input_compat, Some(Vec::new()));
     }
 
     #[test]

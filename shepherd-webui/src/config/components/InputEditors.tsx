@@ -53,10 +53,17 @@ const DEVICE_LABELS: Record<RawInputDevice, string> = {
 export function InputCompatEditor({
   basePath,
   compat,
+  explicit,
+  kindDefault,
   options,
 }: {
   basePath: string;
+  /** What the activity will actually run: the entry's list, else the kind's. */
   compat: RawInputCompat[];
+  /** Whether the entry states `input_compat` itself, rather than inheriting. */
+  explicit: boolean;
+  /** What the kind supplies when the entry says nothing (a book: a gamepad). */
+  kindDefault: RawInputCompat[];
   options: RawInputCompatOptions | null | undefined;
 }) {
   const f = useFields(basePath);
@@ -65,8 +72,15 @@ export function InputCompatEditor({
   const selectedTouch = compat.find((c) => TOUCH_MODES.includes(c));
   const gamepadOn = compat.some((c) => GAMEPAD_MODES.includes(c));
 
+  // Clearing the list has to be written down when the kind would otherwise
+  // supply one — unsetting the field there means "inherit", which is the
+  // opposite of what the empty checkboxes just said. Where the kind supplies
+  // nothing, unset and empty mean the same thing, so prefer unset and keep the
+  // file quiet.
   const setCompat = (next: RawInputCompat[]) =>
-    next.length === 0 ? f.unsetField("input_compat") : f.setField("input_compat", next);
+    next.length === 0 && kindDefault.length === 0
+      ? f.unsetField("input_compat")
+      : f.setField("input_compat", next);
 
   const toggleTouch = (mode: RawInputCompat) => {
     // Only one touch mode at a time; picking a second replaces the first.
@@ -83,7 +97,7 @@ export function InputCompatEditor({
     <Section
       title="Input compatibility"
       description="Sidecars that translate input while this activity runs."
-      present={compat.length > 0}
+      present={compat.length > 0 || explicit}
       onTogglePresent={(on) => (on ? setCompat(["touch_to_mouse"]) : setCompat([]))}
     >
       <Stack spacing={2}>

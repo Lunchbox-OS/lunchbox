@@ -116,9 +116,19 @@ That makes every device navigable:
 | Input | Paged layouts | `layout = "scroll"` |
 | --- | --- | --- |
 | Keyboard | Page Up/Down, arrows, Space | scrolls |
-| Gamepad (`input_compat = "gamepad_productivity"`) | D-pad → arrow keys | scrolls |
+| Gamepad (on by default) | D-pad → arrow keys | scrolls |
 | Mouse / touchpad | wheel turns the page | wheel scrolls |
 | **Touchscreen only** | **the HUD's `‹` `›` buttons** | drag scrolls, or the same buttons |
+
+**The gamepad sidecar is on by default for this kind.** A pad is the one
+controller a reading device is likely to have that Okular cannot use: it listens
+for arrow keys, `Page Up` / `Page Down` and the wheel, and a pad produces none
+of them. So an `ebook` entry that says nothing about `input_compat` runs
+`gamepad_productivity`, whose D-pad is the arrow keys — plug a pad in and it
+turns pages, with nothing configured. It costs an idle bridge process when no
+pad is attached, and the bridge handles hotplug, so one connected mid-book
+works. Listing `input_compat` on the entry replaces that wholesale, and
+`input_compat = []` refuses it.
 
 `layout = "scroll"` remains the alternative for a touch-only device where
 scrolling reads better than paging: one continuous column fitted to the width,

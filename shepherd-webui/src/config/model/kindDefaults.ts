@@ -11,7 +11,7 @@
  * answers the daemon resolves at policy load, and a copy of a rule is a copy
  * that drifts.
  */
-import type { RawEntryKind } from "./config.generated";
+import type { RawEntryKind, RawInputCompat } from "./config.generated";
 import { KIND_DEFAULTS } from "./kind-defaults.generated";
 
 /**
@@ -28,4 +28,9 @@ function defaultsFor(kind: RawEntryKind | undefined) {
  */
 export function confirmsOnCloseByDefault(kind: RawEntryKind | undefined): boolean {
   return defaultsFor(kind).confirm_on_close;
+}
+
+/** The input-compat sidecars this activity runs, absent an explicit list. */
+export function defaultInputCompat(kind: RawEntryKind | undefined): RawInputCompat[] {
+  return defaultsFor(kind).input_compat;
 }

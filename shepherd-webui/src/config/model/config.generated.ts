@@ -333,8 +333,14 @@ export interface RawEntry {
    * orthogonal sidecar — touch-to-mouse and gamepad presets can be
    * stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
    * or a list (`input_compat = ["touch_to_mouse", "gamepad_productivity"]`).
+   *
+   * Absent, the default comes from the entry's kind — see
+   * [`shepherd_api::EntryKind::default_input_compat`], which gives an
+   * `ebook` the gamepad preset that turns its D-pad into arrow keys. A
+   * list given here replaces that wholesale, and `input_compat = []` is
+   * how an entry asks for no sidecar at all.
    */
-  input_compat?: RawInputCompat[];
+  input_compat?: RawInputCompat[] | null;
   /**
    * Tunables for input-compat sidecars (analog deadzones, speeds).
    */

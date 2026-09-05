@@ -612,8 +612,13 @@ impl Entry {
         let internet = convert_entry_internet(raw.internet.as_ref());
         let firewall = raw.firewall.as_ref().map(convert_firewall_config);
         let browser = raw.browser.as_ref().map(convert_browser_config);
-        let input_compat =
-            convert_input_compat_list(&raw.input_compat, &EntryId::new(raw.id.clone()));
+        // Resolved before `kind` is moved into the policy below. An entry that
+        // lists nothing inherits its kind's sidecars; `input_compat = []` is a
+        // list, so it still means "none" and reaches the same conflict pass.
+        let input_compat = match &raw.input_compat {
+            Some(listed) => convert_input_compat_list(listed, &EntryId::new(raw.id.clone())),
+            None => kind.default_input_compat(),
+        };
         let input_compat_options = raw
             .input_compat_options
             .as_ref()
