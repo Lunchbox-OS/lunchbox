@@ -17,10 +17,15 @@ import { insert, servicePath, set, unset } from "../doc/patches";
 import { useFields } from "../doc/useFields";
 import Checkbox from "@mui/material/Checkbox";
 import FormGroup from "@mui/material/FormGroup";
+import MenuItem from "@mui/material/MenuItem";
 import type {
   RawConfig,
   RawSponsorBlockCategory,
 } from "../model/config.generated";
+import {
+  HUD_ORIENTATIONS,
+  VERTICAL_HUD_DESCRIPTION,
+} from "../model/hudOrientation";
 import { DurationField } from "../components/DurationField";
 import {
   BrightnessEditor,
@@ -164,6 +169,13 @@ export function ServicePage({ config }: { config: RawConfig }) {
           }
         >
           <SteamEditor config={config} />
+        </Section>
+
+        <Section
+          title="HUD"
+          description="Which edge of the screen the always-visible bar sits on."
+        >
+          <HudEditor config={config} />
         </Section>
 
         <Section
@@ -514,6 +526,53 @@ function SteamEditor({ config }: { config: RawConfig }) {
         helperText="How long to wait for the game window before giving up."
         sx={{ maxWidth: 260 }}
       />
+    </Stack>
+  );
+}
+
+function HudEditor({ config }: { config: RawConfig }) {
+  const { apply } = useConfigDoc();
+  const f = useFields("service.hud");
+  const v = config.service?.hud;
+  return (
+    <Stack spacing={1} sx={{ maxWidth: 520 }}>
+      <TextField
+        select
+        size="small"
+        label="HUD edge"
+        // Unset has to *read* as "top", not as a blank box: which edge the
+        // device uses when nothing says otherwise is the whole question this
+        // control answers, and a blank field leaves it unanswered. MUI renders
+        // an empty value as nothing unless told otherwise, and the label then
+        // needs pinning up so it does not sit on top of the text.
+        slotProps={{
+          select: { displayEmpty: true },
+          inputLabel: { shrink: true },
+        }}
+        value={v?.orientation ?? ""}
+        onChange={(e) =>
+          // Clearing removes the whole `[service.hud]` table rather than
+          // leaving an empty one behind: the daemon's default is "top" either
+          // way, and a table with nothing in it is noise in a file people
+          // hand-annotate.
+          e.target.value
+            ? f.setField("orientation", e.target.value)
+            : apply(unset(servicePath("hud")))
+        }
+        helperText="Applies to the launcher and to every activity that does not choose its own."
+        fullWidth
+      >
+        <MenuItem value="">Top (the default)</MenuItem>
+        {HUD_ORIENTATIONS.map((o) => (
+          <MenuItem key={o.value} value={o.value}>
+            {o.label}
+          </MenuItem>
+        ))}
+      </TextField>
+      <Typography variant="caption" color="text.secondary">
+        {VERTICAL_HUD_DESCRIPTION} An individual activity can override this on
+        its Behaviour tab, and the HUD moves back here when that activity ends.
+      </Typography>
     </Stack>
   );
 }

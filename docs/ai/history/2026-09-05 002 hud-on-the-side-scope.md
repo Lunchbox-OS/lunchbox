@@ -300,8 +300,36 @@ the full config round trip: a `hud_orientation = "left"` entry flipping the bar
 on launch (`Rebuilding the HUD ... before=Top after=Left`) and flipping it back
 on stop.
 
-## Not built
+## The editor controls
 
-The web editor got the per-entry control; **the global `[service.hud]` setting
-has no editor control yet** and must be typed into `config.toml`. It is
-documented in `config.example.toml` and validated like everything else.
+Both are in: `hud_orientation` on an activity's Behaviour tab, and the
+device-wide `[service.hud] orientation` in a "HUD" section on the Device page.
+The option list and the description of what the vertical HUD *is* live in
+`model/hudOrientation.ts`, so the two menus cannot drift, and the list is typed
+as `RawHudOrientation` — a new edge added to the Rust schema fails the type
+check until it is given a label rather than quietly going missing from both.
+
+Two behaviours the DOM tests in `config/hud-orientation.test.tsx` pin, because
+the obvious implementation gets each wrong:
+
+* Clearing the **device** setting unsets the whole `[service.hud]` table rather
+  than leaving an empty one. The daemon reads "top" either way; the difference
+  only shows in a file people annotate.
+* Clearing the **activity** setting unsets the key rather than writing "top".
+  "Inherit" and "top" are different answers — an activity pinned to top keeps
+  its top bar when the device moves to a side bar, and an inheriting one
+  follows.
+
+Those tests also caught a real bug before it shipped: MUI renders a select
+whose value is `""` as a blank box, so both menus read as empty when unset
+instead of saying "Top (the default)" / "Use the device setting" — which is the
+one thing this control exists to tell you. Fixed with `displayEmpty` and a
+pinned label. (The pre-existing "Category" select on the same page has the same
+blank-when-unset behaviour; left alone, since "no category" reads acceptably as
+an empty field in a way "no edge" does not.)
+
+Verified by those DOM tests rather than a screenshot: the standalone editor
+loads its validator as wasm, so `firefox --screenshot` catches it mid-load and
+a real screenshot would need browser automation this environment has no
+selenium for. The tests assert the rendered text of each closed menu in both
+states, which is what a screenshot would have shown.
