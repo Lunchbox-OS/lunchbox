@@ -919,7 +919,31 @@ impl CoreEngine {
     /// Both entries and groups can be gated, and a session settles against
     /// whichever apply — an entry that is itself gated *and* sits in a gated
     /// group pays both.
-    fn settle_tokens(&self, ended: &Entry, duration: Duration, today: NaiveDate) {
+    ///
+    /// Two dates, and they differ only for a session that ran across midnight
+    /// (issue #170):
+    ///
+    /// - `billed_day` is the day the session belongs to — the day it started.
+    ///   It answers the *ledger* questions: which day's force-enable override
+    ///   granted this session, and whether the balance it drew on still exists.
+    /// - `today` is the day the live balances belong to. A token balance is a
+    ///   single row with one `updated_day` stamp, not a per-day ledger, so the
+    ///   store is only ever told about the current day; writing a past date
+    ///   would rewind that stamp over a balance a caregiver granted after
+    ///   midnight.
+    ///
+    /// A gate that doesn't carry over is therefore skipped outright when the
+    /// two disagree: the balance that session spent from reset at midnight, so
+    /// there is nothing left to bill and nothing today that ought to pay for
+    /// yesterday's play. Carry-over gates have one continuous balance and are
+    /// settled as normal.
+    fn settle_tokens(
+        &self,
+        ended: &Entry,
+        duration: Duration,
+        billed_day: NaiveDate,
+        today: NaiveDate,
+    ) {
         // Which subjects this session banks time for: the entry, and the group
         // it belongs to (issue #5).
         let ended_subjects: Vec<LimitSubject> = std::iter::once(ended.subject())
@@ -930,10 +954,12 @@ impl CoreEngine {
         // group. `evaluate_entry` treats an override at *either* level as a
         // force-enable that lifts both the gate and the clamp, so the spend
         // exemption below has to be scoped the same way: billing a balance for
-        // a session whose cap was lifted can drain it to zero.
+        // a session whose cap was lifted can drain it to zero. The override is
+        // keyed by date, so it is the *billed* day that has to be asked: the
+        // grant that approved a session started at 23:50 expired at midnight.
         let granted = ended_subjects
             .iter()
-            .any(|subject| self.manually_enabled(subject, today));
+            .any(|subject| self.manually_enabled(subject, billed_day));
 
         // Every gate in the policy, on entries and on groups alike.
         let gates = self
@@ -949,6 +975,19 @@ impl CoreEngine {
             );
 
         for (target, tokens) in gates {
+            // The balance this session earned and spent against belonged to
+            // `billed_day`, and a gate that doesn't carry over threw it away at
+            // midnight. There is nothing left to settle, and settling against
+            // today's balance instead is exactly what issue #170 is about.
+            if billed_day != today && !tokens.carry_over {
+                debug!(
+                    subject = %target,
+                    billed_day = %billed_day,
+                    "Session started on an earlier day; its token balance has since reset"
+                );
+                continue;
+            }
+
             // Earn: the session was on one of this gate's source activities,
             // either directly or as a member of a source group.
             if tokens.from.iter().any(|src| ended_subjects.contains(src)) {
@@ -985,18 +1024,23 @@ impl CoreEngine {
     /// its cooldown at all — a workaround for unstable activities, which would
     /// otherwise crash on launch and leave the child locked out of something
     /// they never got to play.
+    ///
+    /// `billed_day` is the day the session's time is charged to — its *start*
+    /// day (issue #170), which is not `now.date_naive()` for a session that ran
+    /// across midnight. Cooldowns are unaffected either way: they are stored as
+    /// `now + delta` timestamps rather than keyed by date.
     fn settle_session_end(
         &self,
         ended_entry_id: &EntryId,
         duration: Duration,
         now: DateTime<Local>,
-        today: NaiveDate,
+        billed_day: NaiveDate,
     ) {
         let Some(entry) = self.policy.get_entry(ended_entry_id) else {
             return;
         };
 
-        self.settle_tokens(entry, duration, today);
+        self.settle_tokens(entry, duration, billed_day, now.date_naive());
 
         let cooldowns = [
             (
@@ -1614,15 +1658,21 @@ impl CoreEngine {
         // written, so the attempt is visible.
         let billable = !matches!(reason, SessionEndReason::LaunchFailed { .. });
 
-        let today = now.date_naive();
+        // Charge the session to the day it *started*, not the day it happened
+        // to end (issue #170). A session from 23:50 to 00:10 is yesterday's
+        // play: billing all twenty minutes to `now` spends a quota the child
+        // has not touched yet, so a session run right up to bedtime eats into
+        // the next morning. Splitting a session across the two days it spans
+        // is explicitly out of scope; the whole session lands on its start day.
+        let billed_day = session.started_at.date_naive();
         if billable {
             let _ = self
                 .store
-                .add_usage(&session.plan.entry_id, today, duration);
+                .add_usage(&session.plan.entry_id, billed_day, duration);
 
             // Settle token balances (issue #8) and cooldowns, on the entry and
             // on its group (issue #5)
-            self.settle_session_end(&session.plan.entry_id, duration, now, today);
+            self.settle_session_end(&session.plan.entry_id, duration, now, billed_day);
         } else {
             info!(
                 session_id = %session.plan.session_id,
@@ -4612,6 +4662,268 @@ mod tests {
             engine
                 .notify_resumed(at(22, 35), MonotonicInstant::now())
                 .is_empty()
+        );
+    }
+
+    // ---- Billing to the day a session started (issue #170) ----------------
+
+    /// The same fixed April 2026 week as [`at`], but with the day spelled out
+    /// so a test can straddle midnight.
+    fn on_day(day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, day, hour, minute, 0)
+            .unwrap()
+    }
+
+    /// Run a complete session that starts and ends at the given wall-clock
+    /// times, advancing the monotonic clock by the gap between them.
+    fn run_session_between(
+        engine: &mut CoreEngine,
+        entry_id: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+    ) {
+        let entry_id = EntryId::new(entry_id);
+        let plan = match engine.request_launch(&entry_id, start) {
+            LaunchDecision::Approved(plan) => plan,
+            LaunchDecision::Denied { reasons } => {
+                panic!("launch of {entry_id} denied: {reasons:?}")
+            }
+        };
+        let started = MonotonicInstant::now();
+        engine.start_session(plan, start, started);
+        let elapsed = (end - start)
+            .to_std()
+            .expect("the session ends after it starts");
+        engine.end_current_session(Some(0), started + elapsed, end);
+    }
+
+    fn make_quota_policy(quota: Duration) -> Policy {
+        let mut policy = make_test_policy();
+        policy.entries[0].limits.max_run = None;
+        policy.entries[0].limits.daily_quota = Some(quota);
+        policy
+    }
+
+    /// The whole of issue #170: a session run up to bedtime is yesterday's
+    /// play, however far past midnight it happened to end.
+    #[test]
+    fn usage_is_billed_to_the_day_the_session_started() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+
+        let start = on_day(27, 23, 50);
+        let end = on_day(28, 0, 10);
+        run_session_between(&mut engine, "test-game", start, end);
+
+        let entry_id = EntryId::new("test-game");
+        assert_eq!(
+            store.get_usage(&entry_id, start.date_naive()).unwrap(),
+            Duration::from_secs(20 * 60),
+            "the whole session belongs to the day it started"
+        );
+        assert_eq!(
+            store.get_usage(&entry_id, end.date_naive()).unwrap(),
+            Duration::ZERO,
+            "and none of it to the day it ended"
+        );
+    }
+
+    /// What the child actually notices: the new day's budget is whole.
+    #[test]
+    fn a_session_across_midnight_leaves_the_new_days_quota_untouched() {
+        let quota = Duration::from_secs(30 * 60);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine =
+            CoreEngine::new(make_quota_policy(quota), store, HostCapabilities::minimal());
+
+        run_session_between(
+            &mut engine,
+            "test-game",
+            on_day(27, 23, 50),
+            on_day(28, 0, 10),
+        );
+
+        let before_midnight = engine.list_entries(on_day(27, 23, 55));
+        assert_eq!(
+            before_midnight[0].max_run_if_started_now,
+            Some(Duration::from_secs(10 * 60)),
+            "the 20 minutes came out of the day the session started on"
+        );
+
+        let after_midnight = engine.list_entries(on_day(28, 0, 15));
+        assert_eq!(
+            after_midnight[0].max_run_if_started_now,
+            Some(quota),
+            "the new day starts with its whole quota"
+        );
+    }
+
+    /// A launch that never produced an activity is still not billed, whichever
+    /// day it is asked about.
+    #[test]
+    fn a_failed_launch_across_midnight_is_billed_to_neither_day() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+
+        let entry_id = EntryId::new("test-game");
+        let start = on_day(27, 23, 50);
+        let LaunchDecision::Approved(plan) = engine.request_launch(&entry_id, start) else {
+            panic!("launch should be approved");
+        };
+        let started = MonotonicInstant::now();
+        engine.start_session(plan, start, started);
+        engine.notify_launch_failed(
+            None,
+            "never started".into(),
+            started + Duration::from_secs(20 * 60),
+            on_day(28, 0, 10),
+        );
+
+        assert_eq!(
+            store
+                .get_usage(&entry_id, on_day(27, 0, 0).date_naive())
+                .unwrap(),
+            Duration::ZERO
+        );
+        assert_eq!(
+            store
+                .get_usage(&entry_id, on_day(28, 0, 0).date_naive())
+                .unwrap(),
+            Duration::ZERO
+        );
+    }
+
+    /// A carry-over gate has one continuous balance, so a session that crossed
+    /// midnight still spends it down.
+    #[test]
+    fn a_carry_over_gate_is_still_spent_across_midnight() {
+        let mut tokens = tokens_from(&["scratch"]);
+        tokens.carry_over = true;
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_token_policy(tokens),
+            store,
+            HostCapabilities::minimal(),
+        );
+
+        run_session(
+            &mut engine,
+            "scratch",
+            Duration::from_secs(30 * 60),
+            on_day(27, 20, 0),
+        );
+        run_session_between(
+            &mut engine,
+            "minecraft",
+            on_day(27, 23, 50),
+            on_day(28, 0, 10),
+        );
+
+        assert_eq!(
+            balance_of(&engine, "minecraft", on_day(28, 0, 15)),
+            Duration::from_secs(10 * 60),
+            "30 minutes banked, 20 spent"
+        );
+    }
+
+    /// A gate that doesn't carry over threw its balance away at midnight, so
+    /// there is nothing left for the session to settle against — and in
+    /// particular it must not reach into what a caregiver granted afterwards.
+    #[test]
+    fn a_grant_after_midnight_survives_a_session_that_started_yesterday() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_token_policy(tokens_from(&["scratch"])),
+            store,
+            HostCapabilities::minimal(),
+        );
+
+        // Yesterday: half an hour earned, and a session started on it at 23:50.
+        run_session(
+            &mut engine,
+            "scratch",
+            Duration::from_secs(30 * 60),
+            on_day(27, 20, 0),
+        );
+        let entry_id = EntryId::new("minecraft");
+        let LaunchDecision::Approved(plan) = engine.request_launch(&entry_id, on_day(27, 23, 50))
+        else {
+            panic!("launch should be approved");
+        };
+        let started = MonotonicInstant::now();
+        engine.start_session(plan, on_day(27, 23, 50), started);
+
+        // A caregiver banks ten minutes after midnight, while it is still running.
+        let subject = LimitSubject::entry("minecraft");
+        engine
+            .adjust_tokens(&subject, 10 * 60, on_day(28, 0, 5))
+            .expect("the gate accepts a grant");
+
+        engine.end_current_session(
+            Some(0),
+            started + Duration::from_secs(20 * 60),
+            on_day(28, 0, 10),
+        );
+
+        assert_eq!(
+            balance_of(&engine, "minecraft", on_day(28, 0, 15)),
+            Duration::from_secs(10 * 60),
+            "the session spent yesterday's balance, not today's grant"
+        );
+    }
+
+    /// The force-enable exemption is keyed by date too: the grant that approved
+    /// a session started at 23:50 expired at midnight, so it has to be looked up
+    /// on the billed day or the child pays for time that was given to them.
+    #[test]
+    fn a_force_enable_from_the_start_day_still_exempts_the_spend() {
+        let mut tokens = tokens_from(&["scratch"]);
+        tokens.carry_over = true;
+
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_token_policy(tokens),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+
+        run_session(
+            &mut engine,
+            "scratch",
+            Duration::from_secs(30 * 60),
+            on_day(27, 20, 0),
+        );
+        store
+            .upsert_daily_override(
+                &LimitSubject::entry("minecraft"),
+                on_day(27, 0, 0).date_naive(),
+                Some(true),
+                None,
+            )
+            .unwrap();
+
+        run_session_between(
+            &mut engine,
+            "minecraft",
+            on_day(27, 23, 50),
+            on_day(28, 0, 10),
+        );
+
+        assert_eq!(
+            balance_of(&engine, "minecraft", on_day(28, 0, 15)),
+            Duration::from_secs(30 * 60),
+            "a session the caregiver granted is not billed to the gate"
         );
     }
 }

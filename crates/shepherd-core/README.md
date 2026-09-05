@@ -210,6 +210,31 @@ A force-enable daily override bypasses the gate and the cap, and a session run
 under that override does not spend the balance: the caregiver granted that time,
 so it isn't billed to the child.
 
+## Which day a session is billed to
+
+A session is charged to the day it **started**, not the day it happened to end
+(issue #170). Playing 23:50 to 00:10 is twenty minutes of yesterday's budget;
+billing it to `now` would spend a quota the child has not touched yet, so an
+activity run right up to bedtime would eat into the next morning. Splitting a
+session across the two days it spans is deliberately out of scope — the whole
+session lands on its start day.
+
+That start day is the ledger key for everything date-keyed in the settlement:
+`Store::add_usage`, and the force-enable override lookup that decides whether a
+session was *granted* and so exempt from spending its token balance. Cooldowns
+are unaffected, being stored as `now + delta` timestamps rather than by date.
+
+Token balances are the exception, because they are not a ledger. Each gate has a
+single row with one `updated_day` stamp, and a gate without `carry_over` resets
+lazily when that stamp goes stale — so once midnight has passed there is no
+"yesterday's balance" left to settle against. Such a gate is therefore skipped
+outright for a session that started on an earlier day: the balance it earned and
+spent from is gone, and charging today's balance instead would be the very thing
+this rule exists to prevent. Carry-over gates hold one continuous balance and
+settle as normal. The store is only ever told about the *current* day, so a past
+date can never rewind the stamp over a balance a caregiver granted after
+midnight.
+
 ## Groups
 
 A group (issue #5) carries the same limits an entry does — window, quota,
