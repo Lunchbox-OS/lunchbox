@@ -1280,8 +1280,14 @@ fn build_hud_content(
     // re-anchor the layer-shell surface when the active output actually changes.
     let anchored_connector = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
     let window_for_monitor = window.clone();
-    // All icons we resize when the HUD scale factor changes.
-    let scaled_icons: [gtk4::Image; 7] = [
+    // All icons we resize when the HUD scale factor changes. Every `Image` the
+    // bar owns has to be listed: an icon's pixel size is a widget property, so
+    // `scale_px_literals` never reaches it and one left out here renders
+    // 1/factor too small next to neighbours that grew (issue #114). The
+    // page-turn pair were missed when they were added in #160 — latent, since a
+    // reading activity is unlikely to be `xwayland_native_resolution`, but
+    // wrong by the same rule.
+    let scaled_icons: [gtk4::Image; 9] = [
         warning_icon.clone(),
         battery_icon.clone(),
         volume_icon.clone(),
@@ -1289,6 +1295,8 @@ fn build_hud_content(
         action_icon.clone(),
         network_icon.clone(),
         display_icon.clone(),
+        page_back_icon.clone(),
+        page_forward_icon.clone(),
     ];
     let time_display_for_scale = time_display.clone();
     // Every `gtk4::Box` in the HUD, with the spacing it uses at factor 1.0.
