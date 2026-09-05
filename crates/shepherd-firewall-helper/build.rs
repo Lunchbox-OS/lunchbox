@@ -31,6 +31,12 @@ fn main() {
     //   the host toolchain; strip them.
     // - CARGO_TARGET_DIR would redirect target/ outside the BPF crate;
     //   strip it so artifacts land where build.rs expects.
+    // - CARGO_BUILD_TARGET would beat the BPF crate's own
+    //   .cargo/config.toml `[build] target = "bpfel-unknown-none"` (env wins
+    //   over config) and try to compile the eBPF program for whatever the
+    //   parent build is targeting. Nothing here sets it -- a cross build
+    //   passes `--target` on the command line for exactly this reason -- but
+    //   an exported one from anywhere else must not reach this child.
     // A build script, not a daemon: this runs on a developer's machine or a
     // CI runner at compile time, where `$PATH` is the toolchain's own and there
     // is no kiosk user to have chosen it (issue #144).
@@ -41,6 +47,7 @@ fn main() {
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("CARGO")
         .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET")
         .env_remove("CARGO_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
