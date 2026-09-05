@@ -481,8 +481,10 @@ export type EbookLayout =
    */
   | "facing"
   /**
-   * Two pages side by side, with the first page alone — so the spreads fall
-   * where a printed book's would.
+   * The same, with the first page alone — so the spreads fall where a
+   * printed book's would, cover on its own and chapter openings on the
+   * right. The default: it costs nothing over `facing` and matches what a
+   * child holding a paper book expects.
    */
   | "facing_first_centered"
   /**

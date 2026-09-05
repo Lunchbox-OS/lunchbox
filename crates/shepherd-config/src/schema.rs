@@ -610,7 +610,8 @@ pub enum RawEntryKind {
         /// remembers a position for this book.
         #[serde(default)]
         open_at: Option<u32>,
-        /// `facing` (default), `facing_first_centered`, or `single`.
+        /// `facing_first_centered` (default), `facing`, `single`, or
+        /// `scroll`.
         #[serde(default)]
         layout: EbookLayout,
         /// Point size of an EPUB's reflowed text. Default 16. Changing it

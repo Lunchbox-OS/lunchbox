@@ -1049,14 +1049,17 @@ type = "ebook"
 # Absolute or ~/-prefixed, like a RetroArch `content`: a bare relative path
 # would resolve against the daemon's working directory, not yours.
 book = "~/Books/the-hobbit.epub"
-# layout = "facing"     # the default: two pages, like an open book. Use
-#                       # "single" on a portrait screen, where one page fills
-#                       # it -- and "scroll" on a TOUCH-ONLY screen, which is
-#                       # the only layout a finger can navigate: paging is
-#                       # bound to keys and the scroll wheel, and the reader
-#                       # has no swipe gesture -- but the HUD grows a pair of
-#                       # page-turn buttons for a reading activity, so a paged
-#                       # layout is usable on a tablet too.
+# layout = "facing_first_centered"
+#                       # the default: two pages like an open book, with the
+#                       # cover on its own so every later spread falls where a
+#                       # printed book's would. "facing" pairs from the first
+#                       # page instead; "single" suits a portrait screen, where
+#                       # one page fills it; and "scroll" is a continuous
+#                       # column -- the only layout a finger can navigate
+#                       # unaided, since paging is bound to keys and the wheel
+#                       # and the reader has no swipe gesture. The HUD grows a
+#                       # pair of page-turn buttons for a reading activity, so
+#                       # a paged layout is usable on a tablet too.
 # font_size = 16        # points, for a reflowed EPUB. This is the reading-size
 #                       # knob: the page is fitted to the screen, so a larger
 #                       # font means fewer words on it and bigger text. It also

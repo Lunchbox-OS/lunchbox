@@ -817,6 +817,13 @@ Putting the default on the kind rather than on the field is the part worth
 keeping: the next kind that has nothing to save (a photo frame, a clock) answers
 the same question in one line, and the config file stays silent about it.
 
+**`FacingFirstCentered` is the default layout.** `Facing` pairs from the very
+first page, which puts the cover next to page 1 and every later spread off by
+one from the printed book. Holding the cover back on its own is what a child
+holding a paper book expects, and it costs nothing: same view mode family, same
+page-turn behaviour. `Facing` remains available for documents with no cover,
+where pairing from the top is what the pagination assumes.
+
 ### Left undone, deliberately
 
 - **The polite close is opt-in for one kind.** Extending it to plain `process`

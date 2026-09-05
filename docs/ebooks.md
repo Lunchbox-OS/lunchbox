@@ -64,7 +64,7 @@ default = "deny"
 | Field | Default | Notes |
 | --- | --- | --- |
 | `book` | required | Absolute or `~/`-prefixed. A relative path would resolve against the daemon's working directory, not yours. |
-| `layout` | `facing` | `facing` (two pages, like an open book), `facing_first_centered` (same, cover alone), `single` (one page), `scroll` (a continuous column — the only one a touch-only screen can navigate; see "Touch"). |
+| `layout` | `facing_first_centered` | `facing_first_centered` (two pages, with the cover on its own), `facing` (two pages, paired from the first), `single` (one page), `scroll` (a continuous column — the only one a touch-only screen can navigate; see "Touch"). |
 | `font_size` | `16` | Points, for a reflowed EPUB. See "Text size" below. |
 | `font_family` | `Noto Serif` | Must be installed on the device. |
 | `open_at` | — | 1-based page, **first launch only**; afterwards the remembered position wins. |
@@ -78,9 +78,13 @@ default = "deny"
 A page is a page: the paged layouts fit the view to the screen and do not
 scroll, so turning the page turns the page.
 
-- **`facing` on a landscape panel.** One portrait page fitted to a 16:9 screen
-  is letterboxed and small; two side by side fill the width and read like an
-  open book.
+- **`facing_first_centered` on a landscape panel** — the default. One portrait
+  page fitted to a 16:9 screen is letterboxed and small; two side by side fill
+  the width and read like an open book. Holding the cover back on its own puts
+  every later spread where a printed book's would be: odd pages on the right,
+  even on the left.
+- **`facing`** pairs from the very first page instead. Use it for a document
+  that has no cover, where pairing from the top is what the pagination assumes.
 - **`single` on a portrait screen**, where one page already fills it.
 - **`scroll` on a touch-only screen** — see below. It is the one layout that
   can be navigated by touch alone.

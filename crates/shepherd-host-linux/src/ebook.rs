@@ -529,7 +529,7 @@ mod tests {
             book,
             viewer: EbookViewer::Okular,
             open_at: None,
-            layout: EbookLayout::Facing,
+            layout: EbookLayout::default(),
             font_size: 16,
             font_family: "Noto Serif",
             command: None,
@@ -599,6 +599,19 @@ mod tests {
         assert!(rendered.contains("ViewMode=Single"));
         assert!(!EbookLayout::Scroll.needs_keys_to_turn_pages());
         assert!(EbookLayout::Facing.needs_keys_to_turn_pages());
+    }
+
+    /// The shipped default puts the cover on its own, the way a paper book
+    /// opens — and it must still be a *paged* layout, since that is what the
+    /// page-turn buttons and the no-page-turn diagnostic assume.
+    #[test]
+    fn the_default_layout_is_facing_with_the_cover_alone() {
+        assert_eq!(EbookLayout::default(), EbookLayout::FacingFirstCentered);
+        assert_eq!(
+            EbookLayout::default().okular_view_mode(),
+            "FacingFirstCentered"
+        );
+        assert!(EbookLayout::default().needs_keys_to_turn_pages());
     }
 
     #[test]

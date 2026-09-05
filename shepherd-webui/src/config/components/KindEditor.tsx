@@ -75,8 +75,8 @@ const MEDIA_SORTS: Record<RawMediaSortBy, string> = {
 };
 
 const EBOOK_LAYOUTS: Record<EbookLayout, string> = {
-  facing: "Two pages, like an open book",
   facing_first_centered: "Two pages, cover on its own",
+  facing: "Two pages, from the first",
   single: "One page at a time",
   scroll: "Scrolling column (for touch-only screens)",
 };
@@ -493,7 +493,7 @@ export function KindEditor({ kind, onChange }: Props) {
             select
             size="small"
             label="Layout"
-            value={kind.layout ?? "facing"}
+            value={kind.layout ?? "facing_first_centered"}
             onChange={(e) => patch({ layout: e.target.value as EbookLayout })}
             helperText="Facing pages suit a landscape screen, single a portrait one. A touch-only screen needs the scrolling column: there is no way to turn a page without a key, D-pad or wheel."
           >

@@ -420,10 +420,12 @@ impl EbookViewer {
 pub enum EbookLayout {
     /// Two pages side by side, like an open book. Fits a landscape panel: a
     /// single portrait page fitted to 16:9 is letterboxed and small.
-    #[default]
     Facing,
-    /// Two pages side by side, with the first page alone — so the spreads fall
-    /// where a printed book's would.
+    /// The same, with the first page alone — so the spreads fall where a
+    /// printed book's would, cover on its own and chapter openings on the
+    /// right. The default: it costs nothing over `facing` and matches what a
+    /// child holding a paper book expects.
+    #[default]
     FacingFirstCentered,
     /// One page at a time. The right choice on a portrait screen.
     Single,
