@@ -46,15 +46,21 @@ PACKAGE_EXAMPLE_DIR="$PACKAGED_DATA_DIR"
 # file's missing `conffiles` before doing that.
 PACKAGE_LAST_CONFFILE_VERSION="0.4.1"
 
-# Build the .deb for the host architecture.
+# Build the .deb, for the host architecture by default.
 package_deb() {
     local out_dir="dist/pkg"
     local do_build="true"
+    local arch=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --out)
                 out_dir="$2"
+                shift 2
+                ;;
+            --arch)
+                [[ -n "${2:-}" ]] || die "--arch needs a Debian architecture"
+                arch="$2"
                 shift 2
                 ;;
             --no-build)
@@ -72,6 +78,18 @@ package_deb() {
     done
 
     verify_repo
+
+    require_command dpkg
+
+    # Default to the host architecture, which is what an unqualified
+    # `package deb` has always meant.
+    [[ -n "$arch" ]] || arch="$(dpkg --print-architecture)"
+    # Sets SHEPHERD_CARGO_TARGET (exported, so it survives the fakeroot
+    # re-exec below), which is what makes get_target_dir -- and therefore every
+    # install step that stages a binary -- look under target/<triple>/ for a
+    # cross build. A host-architecture --arch leaves it empty and nothing
+    # changes.
+    build_set_target arch "$arch"
 
     local repo_root
     repo_root="$(get_repo_root)"
@@ -93,10 +111,10 @@ package_deb() {
         require_command fakeroot
         info "Re-executing staging under fakeroot..."
         exec fakeroot "$repo_root/scripts/shepherd" package deb \
-            --out "$out_dir" --no-build
+            --out "$out_dir" --arch "$arch" --no-build
     fi
 
-    require_command dpkg-deb dpkg
+    require_command dpkg-deb
 
     # Absolute output dir so it survives the DESTDIR-relative install calls.
     case "$out_dir" in
@@ -139,12 +157,10 @@ package_deb() {
 
     _package_stage_admin_cli "$stage" "$repo_root"
 
-    # Package for the host architecture. cargo built native binaries above, so
-    # the Debian arch (amd64, arm64, …) must match; `dpkg --print-architecture`
-    # yields the Debian name for the running host.
-    local arch
-    arch="$(dpkg --print-architecture)"
-
+    # $arch was resolved above -- either from --arch or from
+    # `dpkg --print-architecture` -- and the binaries staged into $stage were
+    # built for it, because build_set_target pointed get_target_dir at the
+    # matching target directory.
     _package_write_control "$stage" "$version" "$repo_root" "$arch"
 
     local deb="$out_dir/${PACKAGE_NAME}_${version}_${arch}.deb"
@@ -639,11 +655,16 @@ package_deb_usage() {
     cat <<EOF
 Usage: shepherd package deb [OPTIONS]
 
-Builds a Debian package for the host architecture by staging the install tree
-(via install.sh with DESTDIR) and wrapping it with dpkg-deb.
+Builds a Debian package by staging the install tree (via install.sh with
+DESTDIR) and wrapping it with dpkg-deb. Packages for the host architecture
+unless --arch says otherwise.
 
 Options:
     --out DIR      Output directory for the .deb (default: dist/pkg)
+    --arch ARCH    Debian architecture to build and package for (arm64, …).
+                   Defaults to the host's. Any other architecture is a cross
+                   build and needs the toolchain from
+                   \`shepherd deps install cross --arch ARCH\`.
     --no-build     Skip the release build; reuse existing target/release
     -h, --help     Show this help
 
@@ -654,6 +675,7 @@ Notes:
 Examples:
     shepherd package deb
     shepherd package deb --out /tmp/out
+    shepherd package deb --arch arm64
 EOF
 }
 

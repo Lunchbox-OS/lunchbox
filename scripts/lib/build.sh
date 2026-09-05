@@ -39,16 +39,83 @@ SHEPHERD_BINARIES=(
     "shepherd-validate-config"
 )
 
+# Rust target triple to build for, or empty for a native build.
+#
+# Set by `build_set_target` from --target/--arch and read by get_target_dir, so
+# that everything which locates a built binary follows a cross build without
+# knowing that one is happening. Exported so a re-exec (package deb's fakeroot
+# re-entry) keeps it.
+export SHEPHERD_CARGO_TARGET="${SHEPHERD_CARGO_TARGET:-}"
+
+# Translate a Debian architecture name into its Rust target triple.
+#
+# Derived with dpkg-architecture rather than a lookup table on purpose: a table
+# would have to spell out the arch literals that scripts/ci/check-arch-neutral.sh
+# forbids in this path, and it is exactly the sort of thing that goes stale.
+# The result is checked against rustc's own target list, so an architecture
+# whose GNU type does not translate (armhf, whose Rust triple names the ISA
+# revision) fails here rather than at link time.
+arch_to_triple() {
+    local arch="$1"
+    local gnu triple
+
+    require_command dpkg-architecture
+    gnu="$(dpkg-architecture -a"$arch" -qDEB_HOST_GNU_TYPE 2>/dev/null)" \
+        || die "Not a Debian architecture: $arch"
+
+    # e.g. aarch64-linux-gnu -> aarch64-unknown-linux-gnu
+    triple="${gnu/-linux-/-unknown-linux-}"
+
+    if ! rustc --print target-list | grep -qx -- "$triple"; then
+        die "No Rust target for Debian architecture '$arch' (derived $triple).
+Pass --target <triple> explicitly if you know the right one."
+    fi
+    echo "$triple"
+}
+
+# Resolve --target/--arch into SHEPHERD_CARGO_TARGET.
+#
+# An --arch that names the host architecture stays a native build: it leaves the
+# triple unset, so the output paths and the cargo fingerprints are the ones every
+# other build on this machine already uses. That makes `--arch $(dpkg
+# --print-architecture)` a no-op rather than a second, redundant target
+# directory, which is what lets a CI matrix pass --arch on every leg.
+# --target always sets the triple, even when it is the host's.
+build_set_target() {
+    local kind="$1" value="$2"
+
+    case "$kind" in
+        target)
+            SHEPHERD_CARGO_TARGET="$value"
+            ;;
+        arch)
+            if [[ "$value" == "$(dpkg --print-architecture)" ]]; then
+                SHEPHERD_CARGO_TARGET=""
+            else
+                SHEPHERD_CARGO_TARGET="$(arch_to_triple "$value")"
+            fi
+            ;;
+        *)
+            die "build_set_target: unknown kind '$kind'"
+            ;;
+    esac
+    export SHEPHERD_CARGO_TARGET
+}
+
 # Get the target directory for binaries
 get_target_dir() {
     local release="${1:-false}"
     local repo_root
     repo_root="$(get_repo_root)"
-    
-    if [[ "$release" == "true" ]]; then
-        echo "$repo_root/target/release"
+
+    local profile="debug"
+    [[ "$release" == "true" ]] && profile="release"
+
+    # cargo puts a --target build under target/<triple>/ instead of target/.
+    if [[ -n "${SHEPHERD_CARGO_TARGET:-}" ]]; then
+        echo "$repo_root/target/$SHEPHERD_CARGO_TARGET/$profile"
     else
-        echo "$repo_root/target/debug"
+        echo "$repo_root/target/$profile"
     fi
 }
 
@@ -238,6 +305,42 @@ EOF
     fi
 }
 
+# Export the cross-compilation environment for SHEPHERD_CARGO_TARGET.
+#
+# Only touches variables that are unset, so a CI image that bakes them in wins
+# and a developer can override any one of them. Everything is derived from the
+# triple, so no architecture is named here.
+#
+# Nothing is exported for a native build: cargo, pkg-config and cc all do the
+# right thing unaided, and pointing PKG_CONFIG_LIBDIR at the host's own
+# directory would only be a way to get it wrong.
+_build_export_cross_env() {
+    local triple="$1"
+    local gnu upper
+
+    # aarch64-unknown-linux-gnu -> aarch64-linux-gnu, the multiarch tuple that
+    # names both the cross gcc and the sysroot's pkgconfig directory.
+    gnu="${triple/-unknown-/-}"
+    upper="${triple//-/_}"
+    upper="${upper^^}"
+
+    # A cross build of the -sys crates needs pkg-config pointed at the target
+    # sysroot. Ubuntu 26.04 ships no pkg-config-<gnu> package (the binary comes
+    # from pkgconf-bin now), so set the search path explicitly rather than
+    # relying on a per-target wrapper being on PATH.
+    export PKG_CONFIG_ALLOW_CROSS="${PKG_CONFIG_ALLOW_CROSS:-1}"
+    export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR:-/usr/lib/$gnu/pkgconfig:/usr/share/pkgconfig}"
+    # A multiarch sysroot is the host root, so the .pc prefixes need no rewrite.
+    export PKG_CONFIG_SYSROOT_DIR="${PKG_CONFIG_SYSROOT_DIR:-/}"
+
+    # cargo's linker override for this target. The `cc` crate finds the same
+    # compiler off the triple on its own, so this is only for the final link.
+    local linker_var="CARGO_TARGET_${upper}_LINKER"
+    if [[ -z "${!linker_var:-}" ]]; then
+        export "$linker_var=$gnu-gcc"
+    fi
+}
+
 # Build the project
 build_cargo() {
     local release="${1:-false}"
@@ -251,17 +354,34 @@ build_cargo() {
 
     cd "$repo_root" || die "Failed to change directory to $repo_root"
 
+    local -a cargo_args=()
     local build_type
     if [[ "$release" == "true" ]]; then
         build_type="release"
-        info "Building shepherd (release mode)..."
-        cargo build --release
+        cargo_args+=(--release)
     else
         build_type="debug"
-        info "Building shepherd (debug mode)..."
-        cargo build
     fi
-    
+
+    local for_target=""
+    if [[ -n "${SHEPHERD_CARGO_TARGET:-}" ]]; then
+        # Pass --target on the command line rather than exporting
+        # CARGO_BUILD_TARGET: shepherd-firewall-helper's build.rs shells out to
+        # a nightly cargo for the sibling BPF crate, and an environment
+        # variable would beat that crate's own [build] target and try to build
+        # the eBPF program for this triple. (build.rs strips it too, belt and
+        # braces -- but the command line never reaches the child at all.)
+        cargo_args+=(--target "$SHEPHERD_CARGO_TARGET")
+        for_target=" for $SHEPHERD_CARGO_TARGET"
+
+        if [[ "$SHEPHERD_CARGO_TARGET" != "$(rustc -vV | awk '/^host: /{print $2}')" ]]; then
+            _build_export_cross_env "$SHEPHERD_CARGO_TARGET"
+        fi
+    fi
+
+    info "Building shepherd ($build_type mode)$for_target..."
+    cargo build "${cargo_args[@]}"
+
     # Verify binaries were created
     if ! binaries_exist "$release"; then
         die "Build completed but some binaries are missing"
@@ -302,6 +422,16 @@ build_main() {
                 release=true
                 shift
                 ;;
+            --target)
+                [[ -n "${2:-}" ]] || die "--target needs a Rust target triple"
+                build_set_target target "$2"
+                shift 2
+                ;;
+            --arch)
+                [[ -n "${2:-}" ]] || die "--arch needs a Debian architecture"
+                build_set_target arch "$2"
+                shift 2
+                ;;
             clean)
                 build_clean
                 return
@@ -323,6 +453,13 @@ Usage: shepherd build [OPTIONS]
 
 Options:
     --release, -r    Build in release mode (optimized)
+    --arch ARCH      Build for a Debian architecture (arm64, …). The host's own
+                     architecture builds natively; any other cross-compiles and
+                     lands in target/<triple>/, which install and package follow.
+                     Needs the cross toolchain: shepherd deps install cross
+                     --arch ARCH
+    --target TRIPLE  Build for a Rust target triple, always explicitly, even
+                     when it is the host's. Lower-level form of --arch.
     clean            Clean build artifacts
     config-editor    Build the standalone config editor into dist-standalone/
     config-wasm      Build only the config editor's wasm validator
@@ -331,6 +468,7 @@ Options:
 Examples:
     shepherd build                  # Debug build
     shepherd build --release        # Release build
+    shepherd build --arch arm64     # Cross-compile (from another architecture)
     shepherd build clean            # Clean artifacts
     shepherd build config-editor    # Static bundle for a web host
 EOF
