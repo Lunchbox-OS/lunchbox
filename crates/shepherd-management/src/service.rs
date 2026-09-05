@@ -21,7 +21,7 @@ use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
@@ -184,6 +184,29 @@ pub trait ManagementService: Send + Sync {
     #[rpc(wrap_result = "entry_count")]
     async fn reload_config(&self) -> ManagementResult<usize>;
 
+    /// Re-fetch what the media libraries are made of, now (issue #165).
+    ///
+    /// Everything on the media path is cached with a TTL and swept on a timer:
+    /// a YouTube playlist listing is good for six hours, a SponsorBlock bucket
+    /// for a day, a failed download waits six hours before anything tries
+    /// again, and the sweep that would notice runs hourly. Add a video to a
+    /// playlist and it can be most of a day before the device has it. This is
+    /// the override — it re-asks for the listings and the segments, forgets the
+    /// download cooldowns, and sweeps immediately.
+    ///
+    /// Device-wide rather than per activity: the video cache and the segment
+    /// buckets are one directory shared by every library, and the thing an
+    /// administrator wants is "pick up what I changed", not "pick up what I
+    /// changed in this one place".
+    ///
+    /// **Returns as soon as the work is accepted, not when it is done.** A
+    /// refresh shells out to `yt-dlp` once per playlist and then downloads
+    /// videos; the companion's RPC deadline is fifteen seconds. What actually
+    /// happened arrives as diagnostics — a refresh that could not reach what it
+    /// went for raises [`DiagnosticCode::MediaRefreshFailed`], and a successful
+    /// one clears it — which both clients already display.
+    async fn refresh_media(&self) -> ManagementResult<()>;
+
     // User
     async fn logout(&self);
 
@@ -260,6 +283,15 @@ pub struct DefaultManagementService {
     /// alike). Set by the daemon's main loop.
     pub broadcast_fn: Arc<dyn Fn(Event) + Send + Sync>,
     pub config_path: PathBuf,
+    /// Nudges shepherdd's media prefetcher to re-fetch libraries and segments
+    /// immediately (issue #165). `None` on any embedding without a prefetcher —
+    /// in which case [`ManagementService::refresh_media`] reports that rather
+    /// than answering "done" to a button that did nothing.
+    ///
+    /// A bare channel rather than a collaborator trait because the work is on
+    /// the far side of it: this crate must not link the media stack, and the
+    /// prefetcher already owns every decision about what a sweep does.
+    pub media_refresh_tx: Option<mpsc::Sender<()>>,
     /// Fires when shepherdd should begin graceful shutdown. The logout
     /// operation flips this to `true`.
     pub shutdown_tx: watch::Sender<bool>,
@@ -1160,6 +1192,31 @@ impl ManagementService for DefaultManagementService {
                 warn!(error = %e, "Config reload failed via management API");
                 Err(ManagementError::Unprocessable(e.to_string()))
             }
+        }
+    }
+
+    async fn refresh_media(&self) -> ManagementResult<()> {
+        let Some(tx) = self.media_refresh_tx.as_ref() else {
+            return Err(ManagementError::Unprocessable(
+                "Media refresh is not available on this device".into(),
+            ));
+        };
+        match tx.try_send(()) {
+            Ok(()) => {
+                info!("media refresh requested via management API");
+                Ok(())
+            }
+            // The channel holds one request, which is all a request with no
+            // arguments can usefully mean: a second press while the first is
+            // still queued asks for the same sweep. Reporting a conflict would
+            // train an administrator to press it again.
+            Err(mpsc::error::TrySendError::Full(())) => {
+                debug!("media refresh already pending");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => Err(ManagementError::Internal(
+                "The media prefetcher is not running".into(),
+            )),
         }
     }
 

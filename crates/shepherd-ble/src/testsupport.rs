@@ -222,6 +222,9 @@ impl ManagementService for MockSvc {
     async fn reload_config(&self) -> ManagementResult<usize> {
         Ok(42)
     }
+    async fn refresh_media(&self) -> ManagementResult<()> {
+        Ok(())
+    }
     async fn logout(&self) {}
     async fn ping(&self) {}
     async fn list_diagnostics(&self) -> shepherd_api::DiagnosticSet {

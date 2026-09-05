@@ -110,6 +110,25 @@ impl SponsorBlockCache {
         self.bucket(video_id).is_some()
     }
 
+    /// Re-fetch this video's bucket whatever its age, for an
+    /// administrator-triggered refresh (issue #165).
+    ///
+    /// `Err` means the segments on disk are still yesterday's, which is what
+    /// the caller raises a diagnostic about. A bucket that could not be
+    /// replaced is kept, so a failed refresh never costs the device skips it
+    /// already had — see [`BucketStore::refresh`].
+    pub fn refresh(&self, video_id: &str) -> Result<(), String> {
+        self.store.refresh(video_id, |prefix| self.fetch(prefix))
+    }
+
+    /// The hash prefix `video_id` falls in. A refresh sweeping a library uses
+    /// it to ask for each bucket once rather than once per video: a bucket
+    /// covers around a hundred videos, and unlike [`Self::warm`] a refresh
+    /// cannot lean on the cache write to make the second ask free.
+    pub fn prefix_for(&self, video_id: &str) -> String {
+        self.store.prefix_for(video_id)
+    }
+
     /// The raw bucket JSON covering `video_id`, from cache or the network.
     pub fn bucket(&self, video_id: &str) -> Option<String> {
         self.store.resolve(video_id, |prefix| self.fetch(prefix))

@@ -84,6 +84,37 @@ impl BucketStore {
         }
     }
 
+    /// Re-fetch the bucket covering `video_id` whatever its age, for an
+    /// administrator-triggered refresh (issue #165).
+    ///
+    /// The TTL is the only thing skipped. On a failed fetch the cached bucket
+    /// is deliberately **left where it is**: every other cache on this path
+    /// falls back to a stale copy when the network is gone, and a refresh that
+    /// deleted what it could not replace would leave the device skipping
+    /// nothing — worse than before the button was pressed. The error is
+    /// returned instead, so the caller can say the refresh did not happen.
+    ///
+    /// `Ok` means the bucket on disk is now the service's current answer.
+    pub fn refresh(
+        &self,
+        video_id: &str,
+        fetch: impl FnOnce(&str) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let prefix = sponsorblock_prefix(video_id);
+        let json = fetch(&prefix)?;
+        if let Some(path) = self.path_for(&prefix) {
+            save(&path, &json);
+        }
+        Ok(())
+    }
+
+    /// The hash prefix `video_id` falls in. Exposed so a caller refreshing a
+    /// whole library can fetch each bucket once rather than once per video —
+    /// around a hundred videos share one.
+    pub fn prefix_for(&self, video_id: &str) -> String {
+        sponsorblock_prefix(video_id)
+    }
+
     /// Where `prefix` is cached, or `None` when there is no cache directory.
     pub fn path_for(&self, prefix: &str) -> Option<PathBuf> {
         self.dir.as_ref().map(|d| d.join(format!("{prefix}.json")))
@@ -211,6 +242,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join(format!("{PREFIX}.json"))).unwrap(),
             "new"
+        );
+    }
+
+    #[test]
+    fn a_refresh_refetches_a_bucket_that_is_still_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        store.resolve(VIDEO, |_| Ok("old".into())).unwrap();
+
+        store
+            .refresh(VIDEO, |prefix| {
+                assert_eq!(prefix, PREFIX, "the video id must never be sent");
+                Ok("new".to_string())
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(format!("{PREFIX}.json"))).unwrap(),
+            "new"
+        );
+    }
+
+    /// The reason a refresh re-fetches rather than deleting-then-fetching: a
+    /// button pressed on a flaky network must not leave the device with fewer
+    /// segments than it had.
+    #[test]
+    fn a_failed_refresh_keeps_the_bucket_it_could_not_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        store.resolve(VIDEO, |_| Ok("old".into())).unwrap();
+
+        assert!(store.refresh(VIDEO, |_| Err("offline".into())).is_err());
+        assert_eq!(
+            store
+                .resolve(VIDEO, |_| panic!("the kept bucket is still fresh"))
+                .unwrap(),
+            "old"
         );
     }
 

@@ -840,6 +840,13 @@ impl Service {
         // auto-brightness poll loop can call the inherent
         // `auto_brightness_tick`, then shared with the transports as
         // `Arc<dyn ManagementService>`.
+        // Media refresh (issue #165): the management API's end of the nudge
+        // that makes the prefetcher re-fetch now instead of at its next tick.
+        // Capacity one — the request carries nothing, so a second press while
+        // the first is still queued is asking for the same sweep, and dropping
+        // it is the correct answer rather than a queue of identical work.
+        let (media_refresh_tx, media_refresh_rx) = tokio::sync::mpsc::channel::<()>(1);
+
         let svc_concrete = {
             let ipc_for_broadcast = ipc_ref.clone();
             let event_tx_for_broadcast = event_tx.clone();
@@ -857,6 +864,7 @@ impl Service {
                     let _ = event_tx_for_broadcast.send(event);
                 }),
                 config_path: config_path.clone(),
+                media_refresh_tx: Some(media_refresh_tx),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
                 display: display_svc.clone(),
@@ -1038,9 +1046,11 @@ impl Service {
             let events = event_tx.subscribe();
             let engine_for_prefetch = engine.clone();
             let publisher = diagnostic_publisher.clone();
-            tokio::spawn(
-                async move { prefetcher.run(engine_for_prefetch, events, publisher).await },
-            );
+            tokio::spawn(async move {
+                prefetcher
+                    .run(engine_for_prefetch, events, media_refresh_rx, publisher)
+                    .await
+            });
         }
 
         {

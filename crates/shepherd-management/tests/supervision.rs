@@ -142,6 +142,7 @@ fn harness() -> Harness {
             let _ = tx_for_fn.send(event);
         }),
         config_path: std::path::PathBuf::from("/nonexistent/config.toml"),
+        media_refresh_tx: None,
         shutdown_tx,
         hidpi,
         display: Arc::new(NoOpDisplayController),

@@ -93,6 +93,17 @@ pub enum DiagnosticCode {
     MediaCacheDiskLow,
     /// A media library could not be read or parsed.
     MediaLibraryUnreadable,
+    /// An administrator asked for a media refresh (issue #165) and it could not
+    /// reach what it was told to re-fetch — the device is offline, the playlist
+    /// would not load, SponsorBlock did not answer.
+    ///
+    /// Distinct from [`Self::MediaLibraryUnreadable`], which is about a library
+    /// that cannot be *parsed* and is just as broken on a scheduled sweep. This
+    /// one only ever appears because somebody pressed a button, and it is what
+    /// stops that button from looking like it worked. The device keeps serving
+    /// whatever it had cached, so this is a refresh that did not happen rather
+    /// than a library that is gone.
+    MediaRefreshFailed,
     /// No sound backend was detected; volume control does nothing.
     NoSoundBackend,
     /// The sound backend is present but its device topology could not be read,

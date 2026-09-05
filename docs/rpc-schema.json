@@ -493,6 +493,13 @@
       }
     },
     {
+      "name": "refresh_media",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "logout",
       "params": [],
       "result": {

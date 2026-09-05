@@ -191,6 +191,57 @@ The implementation, including how a running `shepherd-media` and a prefetching
 shepherdd stay off each other's downloads, is documented in
 [`crates/shepherd-media-cache/README.md`](../crates/shepherd-media-cache/README.md).
 
+### Refreshing now (issue #165)
+
+Every clock above is generous on purpose, and together they add up: a video
+added to a YouTube playlist waits out the 6-hour metadata cache and then the
+hourly sweep before the device has it, a segment submitted to SponsorBlock waits
+a day, and a download that failed waits 6 hours before anything tries again.
+That is right for unattended work and wrong for a parent who has just changed
+something and is standing in front of the device.
+
+**Refresh Media** in the web UI's Admin page, and **Refresh media** in the
+companion app's Maintenance card, is the override. Both call one RPC,
+`refresh_media`, which:
+
+- re-fetches every playlist-backed library from YouTube, ignoring the 6-hour
+  metadata cache — so new items appear in browse, and the daemon knows to
+  download them;
+- forgets every `<key>.failed` marker, so items inside their retry cooldown are
+  attempted again immediately;
+- re-fetches the SponsorBlock bucket for every video it caches, ignoring the
+  24-hour TTL, asking once per bucket rather than once per video;
+- sweeps immediately rather than at the next tick, **including while an activity
+  is running** — the press almost always happens with the child in front of the
+  device, which is exactly the state background prefetch declines to work in.
+
+What it deliberately does not do is re-download videos that are already cached.
+A cached file is named after its source URL and quality selector, so the only
+way its bytes can be wrong is a re-upload at the same URL — and a button that
+silently re-spends 10 GiB of a household's bandwidth is not what "refresh"
+should mean. Nor does it touch what the child has watched: the `.played` and
+`.seen` markers and the resume positions are about history, not freshness.
+
+Two settings still apply, because neither is something a button can overrule:
+`service.media.prefetch = false` means the household has opted out of
+downloading, and an offline device has nothing to fetch. Both are reported
+rather than swallowed — see below.
+
+**It returns before the work is done.** A refresh runs `yt-dlp` once per
+playlist and then downloads videos; the companion's RPC deadline is 15 seconds.
+So the button says "Refreshing media libraries…", and the outcome arrives as a
+diagnostic on the Device health screen: a refresh that could not reach what it
+went for raises `media_refresh_failed`, naming the activity and why, and the
+next refresh that gets through clears it. A scheduled sweep leaves that
+diagnostic alone in both directions — it reads from exactly the caches a refresh
+exists to bypass, so it is no evidence either way.
+
+One limitation worth knowing: a media activity that is **already on screen**
+loaded its library when it launched. Refreshing updates the caches under it, and
+the child sees the new items the next time the activity is opened — or
+immediately, if you also use the HUD's reset button (or `reset_current`) to
+restart it in place.
+
 ## Authoring a library file
 
 A starter library is checked in at the repo root as

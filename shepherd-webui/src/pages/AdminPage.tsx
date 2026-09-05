@@ -11,6 +11,7 @@ import Switch from "@mui/material/Switch";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import Typography from "@mui/material/Typography";
 import LogoutIcon from "@mui/icons-material/Logout";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import VolumeOffIcon from "@mui/icons-material/VolumeOff";
 import VolumeDownIcon from "@mui/icons-material/VolumeDown";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
@@ -23,6 +24,7 @@ import {
   getVolume,
   listAudioOutputs,
   logoutUser,
+  refreshMedia,
   reloadConfig,
   setAudioOutputLimits,
   setAutoBrightness,
@@ -120,6 +122,16 @@ export function AdminPage() {
   const reloadMutation = useMutation({
     mutationFn: reloadConfig,
     onSuccess: (res) => flash(`Config reloaded (${res.entry_count} entries)`),
+    onError: (e) => flash(String(e), false),
+  });
+
+  const refreshMediaMutation = useMutation({
+    mutationFn: refreshMedia,
+    // Deliberately not "done": the daemon has accepted the request, and the
+    // playlist fetches and downloads it kicks off outlive this response by
+    // minutes. A refresh that could not reach what it went for reports itself
+    // on the Device health page.
+    onSuccess: () => flash("Refreshing media libraries…"),
     onError: (e) => flash(String(e), false),
   });
 
@@ -276,6 +288,25 @@ export function AdminPage() {
             startIcon={reloadMutation.isPending ? <Spinner size={16} /> : undefined}
           >
             Reload Config
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Media */}
+      <Card variant="outlined">
+        <CardContent>
+          <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 600 }}>Media</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Fetch playlists, videos and sponsor segments now, instead of waiting for
+            their caches to expire. Use this after adding something to a playlist.
+          </Typography>
+          <Button
+            variant="outlined"
+            onClick={() => refreshMediaMutation.mutate()}
+            disabled={refreshMediaMutation.isPending}
+            startIcon={refreshMediaMutation.isPending ? <Spinner size={16} /> : <RefreshIcon />}
+          >
+            Refresh Media
           </Button>
         </CardContent>
       </Card>

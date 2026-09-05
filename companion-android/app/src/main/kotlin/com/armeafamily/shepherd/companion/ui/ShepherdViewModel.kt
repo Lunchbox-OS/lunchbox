@@ -683,6 +683,19 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         refreshSnapshot()
     }
 
+    /**
+     * Ask the device to re-fetch its media libraries (issue #165).
+     *
+     * The message deliberately says "started", not "done": the device answers
+     * as soon as it accepts the request, and the fetches outlive the reply by
+     * minutes. A refresh that could not reach what it went for raises a
+     * diagnostic, which the health screen shows.
+     */
+    fun refreshMedia() = action { c ->
+        c.refreshMedia()
+        _message.value = "Refreshing media libraries…"
+    }
+
     fun logoutDevice() = action { c ->
         c.logout()
         _message.value = "Logged out the device session."
