@@ -19,7 +19,82 @@ pub enum EntryKindTag {
     Vm,
     Media,
     Retroarch,
+    Ebook,
     Custom,
+}
+
+impl EntryKindTag {
+    /// Every kind, in declaration order.
+    ///
+    /// Exists so the per-kind defaults below can be *enumerated* rather than
+    /// mirrored: the config editor needs the same answers, and
+    /// `shepherd-wire-codegen` walks this list to generate them.
+    pub const ALL: [EntryKindTag; 9] = [
+        EntryKindTag::Process,
+        EntryKindTag::Snap,
+        EntryKindTag::Steam,
+        EntryKindTag::Flatpak,
+        EntryKindTag::Vm,
+        EntryKindTag::Media,
+        EntryKindTag::Retroarch,
+        EntryKindTag::Ebook,
+        EntryKindTag::Custom,
+    ];
+
+    /// The wire and config spelling of this tag, matching its serde rename.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryKindTag::Process => "process",
+            EntryKindTag::Snap => "snap",
+            EntryKindTag::Steam => "steam",
+            EntryKindTag::Flatpak => "flatpak",
+            EntryKindTag::Vm => "vm",
+            EntryKindTag::Media => "media",
+            EntryKindTag::Retroarch => "retroarch",
+            EntryKindTag::Ebook => "ebook",
+            EntryKindTag::Custom => "custom",
+        }
+    }
+
+    /// Whether the HUD's "X" confirms before ending this activity, absent an
+    /// explicit `confirm_on_close` (issue #78).
+    ///
+    /// The prompt exists because the button is easy to hit by accident and
+    /// most activities lose unsaved state when they are closed — a game
+    /// mid-level, a drawing. A reading activity has nothing to lose: the
+    /// position is written on the way out, and reopening returns to the page.
+    /// So the prompt is pure friction there, on the one activity a child is
+    /// most likely to open and close repeatedly.
+    ///
+    /// An entry that sets the field explicitly always wins; this is only what
+    /// happens when it is silent.
+    pub fn confirms_on_close_by_default(self) -> bool {
+        !matches!(self, EntryKindTag::Ebook)
+    }
+
+    /// The input-compat sidecars this activity runs absent an explicit
+    /// `input_compat` (issue #160).
+    ///
+    /// Only `ebook` asks for one. A gamepad is the one controller a reading
+    /// device is likely to have and the reader cannot use: Okular listens for
+    /// arrow keys, `Page Up` / `Page Down` and the scroll wheel, and a pad
+    /// produces none of them on its own. The productivity preset maps the
+    /// D-pad to the arrow keys, so a pad turns pages the moment a book opens,
+    /// with nothing to configure.
+    ///
+    /// It costs an idle bridge process when no pad is plugged in, which is why
+    /// this is a per-kind answer rather than a global one — and the bridge
+    /// handles hotplug, so a pad connected mid-book works.
+    ///
+    /// An entry that lists `input_compat` replaces this wholesale, and an
+    /// empty list turns it off; the default only applies when the field is
+    /// absent.
+    pub fn default_input_compat(self) -> Vec<InputCompatMode> {
+        match self {
+            EntryKindTag::Ebook => vec![InputCompatMode::GamepadProductivity],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// A known Steam "launch interstitial" — one of the blocking modals Steam can
@@ -325,6 +400,50 @@ pub enum EntryKind {
         #[serde(default = "default_true")]
         reset: bool,
     },
+    /// One book, opened in a document reader locked down to reading it
+    /// (issue #160).
+    ///
+    /// The reader keeps the page: shepherd's job is to hand it a private
+    /// configuration that closes every door out of the book, and to close the
+    /// window politely at the end of the session so the position is written.
+    /// See [`shepherd_host_linux::ebook`] for what is generated.
+    Ebook {
+        /// The book. Absolute, or `~/`-prefixed; expanded at launch.
+        book: PathBuf,
+        /// Which reader to drive. Only `okular` is implemented.
+        #[serde(default)]
+        viewer: EbookViewer,
+        /// Page to open on the *first* launch, 1-based. Ignored once the
+        /// reader has a remembered position for this book.
+        #[serde(default)]
+        open_at: Option<u32>,
+        /// How pages are laid out. `facing` (the default) suits a landscape
+        /// panel; `single` a portrait one.
+        #[serde(default)]
+        layout: EbookLayout,
+        /// Point size for the reflowed text of an EPUB. Changing it
+        /// repaginates the book, which moves a remembered position, so pick it
+        /// before the book is first opened.
+        #[serde(default = "default_ebook_font_size")]
+        font_size: u32,
+        /// Font family for the same. Must be installed on the device.
+        #[serde(default = "default_ebook_font_family")]
+        font_family: String,
+        /// The reader binary. Defaults to the viewer's usual name.
+        #[serde(default)]
+        command: Option<String>,
+        /// Extra arguments, appended after the ones shepherd derives.
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Lock the reader down: no file dialog, no printing, no settings, no
+        /// menubar or toolbar. On by default — this is a supervised kiosk, and
+        /// off is only for an admin checking what the reader looks like
+        /// unrestricted.
+        #[serde(default = "default_true")]
+        kiosk: bool,
+    },
     Custom {
         type_name: String,
         payload: serde_json::Value,
@@ -334,6 +453,98 @@ pub enum EntryKind {
 /// Default for [`EntryKind::Retroarch::command`].
 pub(crate) fn default_retroarch_command() -> String {
     "retroarch".to_string()
+}
+
+pub(crate) fn default_ebook_font_size() -> u32 {
+    16
+}
+
+pub(crate) fn default_ebook_font_family() -> String {
+    "Noto Serif".to_string()
+}
+
+/// Which reader an [`EntryKind::Ebook`] activity drives.
+///
+/// Open rather than closed on purpose: the config surface here — a book and a
+/// place in it — is reader-agnostic, even though only one reader is wired up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum EbookViewer {
+    /// Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
+    /// PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
+    /// documented way to disable its own escape hatches.
+    #[default]
+    Okular,
+}
+
+impl EbookViewer {
+    /// The binary this viewer runs as, when the entry does not name one.
+    pub fn default_command(self) -> &'static str {
+        match self {
+            EbookViewer::Okular => "okular",
+        }
+    }
+}
+
+/// How an [`EntryKind::Ebook`] activity lays pages out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum EbookLayout {
+    /// Two pages side by side, like an open book. Fits a landscape panel: a
+    /// single portrait page fitted to 16:9 is letterboxed and small.
+    Facing,
+    /// The same, with the first page alone — so the spreads fall where a
+    /// printed book's would, cover on its own and chapter openings on the
+    /// right. The default: it costs nothing over `facing` and matches what a
+    /// child holding a paper book expects.
+    #[default]
+    FacingFirstCentered,
+    /// One page at a time. The right choice on a portrait screen.
+    Single,
+    /// One continuous column, scrolled rather than paged, fitted to the width.
+    ///
+    /// The only layout a **touch-only** device can navigate: dragging scrolls
+    /// it. The paged layouts turn the page on a key, a gamepad D-pad or a
+    /// scroll wheel, and a touchscreen produces none of those — Okular grabs
+    /// only the pinch gesture, and has no swipe-to-turn anywhere in its
+    /// desktop view.
+    Scroll,
+}
+
+impl EbookLayout {
+    /// The value Okular's `[PageView] ViewMode` takes for this layout.
+    pub fn okular_view_mode(self) -> &'static str {
+        match self {
+            EbookLayout::Facing => "Facing",
+            EbookLayout::FacingFirstCentered => "FacingFirstCentered",
+            // Scrolling a two-page spread is nobody's idea of reading.
+            EbookLayout::Single | EbookLayout::Scroll => "Single",
+        }
+    }
+
+    /// Whether the view scrolls continuously instead of turning pages.
+    pub fn is_continuous(self) -> bool {
+        matches!(self, EbookLayout::Scroll)
+    }
+
+    /// Okular's `[Zoom] ZoomMode`: fit the width of a scrolled column, fit the
+    /// whole page when the page is the unit of navigation.
+    pub fn okular_zoom_mode(self) -> u8 {
+        match self {
+            EbookLayout::Scroll => 1,
+            _ => 2,
+        }
+    }
+
+    /// Whether turning the page needs an input a touchscreen cannot produce.
+    ///
+    /// The basis of the `EbookNoPageTurn` diagnostic: a paged layout on a
+    /// touch-only device leaves a child stranded on page one.
+    pub fn needs_keys_to_turn_pages(self) -> bool {
+        !self.is_continuous()
+    }
 }
 
 /// How a [`EntryKind::Retroarch`] activity treats its save state across
@@ -520,6 +731,7 @@ impl EntryKind {
             EntryKind::Vm { .. } => EntryKindTag::Vm,
             EntryKind::Media { .. } => EntryKindTag::Media,
             EntryKind::Retroarch { .. } => EntryKindTag::Retroarch,
+            EntryKind::Ebook { .. } => EntryKindTag::Ebook,
             EntryKind::Custom { .. } => EntryKindTag::Custom,
         }
     }
@@ -533,6 +745,57 @@ impl EntryKind {
     /// otherwise unreachable.
     pub fn supports_reset(&self) -> bool {
         matches!(self, EntryKind::Retroarch { reset: true, .. })
+    }
+
+    /// Whether the HUD's "X" should confirm before ending this activity, when
+    /// the entry does not say either way (issue #78).
+    ///
+    /// The answer depends only on the kind, so it lives on
+    /// [`EntryKindTag::confirms_on_close_by_default`] — where the config
+    /// editor's copy can be generated from it instead of mirrored by hand.
+    pub fn confirms_on_close_by_default(&self) -> bool {
+        self.tag().confirms_on_close_by_default()
+    }
+
+    /// The input-compat sidecars this activity gets when the entry lists none
+    /// (issue #160). See [`EntryKindTag::default_input_compat`].
+    pub fn default_input_compat(&self) -> Vec<InputCompatMode> {
+        self.tag().default_input_compat()
+    }
+
+    /// Whether the HUD should offer page-turn buttons for this activity
+    /// (issue #160).
+    ///
+    /// Turning a page in a document reader is bound to keys, a gamepad D-pad
+    /// or a scroll wheel — and a touchscreen produces none of those, while the
+    /// reader itself has no swipe gesture. On a touch-only device that leaves
+    /// a child on page one, so the buttons live where every activity's
+    /// controls already live: shepherd's own HUD, which is on the overlay
+    /// layer, always reachable, and cannot be locked out by the reader.
+    pub fn supports_page_turn(&self) -> bool {
+        matches!(self, EntryKind::Ebook { .. })
+    }
+
+    /// Whether a graceful stop should ask the compositor to close this
+    /// activity's window before it signals the process (issue #160).
+    ///
+    /// A `SIGTERM` is a request to *die*; closing the window is a request to
+    /// *finish*. Applications that save on window close and install no signal
+    /// handler — Okular is the measured case, and it is a large class — lose
+    /// everything to the signal-only path, so for them the close request is
+    /// the difference between remembering the page and starting over.
+    ///
+    /// Opt-in per kind rather than universal, because a close request is not
+    /// always a quit:
+    ///
+    /// - **Steam** treats it as "hide to tray", so the close would be ignored
+    ///   and the stop would only get slower.
+    /// - **RetroArch** already has a verified single-`SIGTERM` shutdown that
+    ///   writes its save state (#125). Nothing is broken there to fix.
+    /// - **Snap and flatpak** activities are signalled through their own
+    ///   cgroups, which is a different lever with its own reasons.
+    pub fn wants_polite_close(&self) -> bool {
+        matches!(self, EntryKind::Ebook { .. })
     }
 }
 
@@ -770,6 +1033,10 @@ pub struct SessionInfo {
     /// older payload simply doesn't show the button.
     #[serde(default)]
     pub can_reset: bool,
+    /// Whether the HUD should show page-turn buttons for this session. See
+    /// [`EntryKind::supports_page_turn`].
+    #[serde(default)]
+    pub can_turn_pages: bool,
 }
 
 /// Default for [`SessionInfo::confirm_on_close`] / the `SessionStarted` event:

@@ -30,9 +30,12 @@ use chrono::{DateTime, Local};
 use shepherd_api::EntryKind;
 use shepherd_api::{
     Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSubject,
+    InputDeviceType,
 };
 use shepherd_config::Policy;
-use shepherd_host_linux::{FirewallEnforcementStatus, MissingCore, refresh_firewall_enforcement};
+use shepherd_host_linux::{
+    FirewallEnforcementStatus, MissingCore, MissingSupport, refresh_firewall_enforcement,
+};
 use shepherd_util::EntryId;
 
 /// Identity of a raised condition. Mirrors [`Diagnostic::key`] but owned, so it
@@ -97,6 +100,16 @@ pub struct ProbeFacts {
     /// Separate from the core: the two fail independently and are fixed
     /// differently, and a ROM on removable media comes and goes with it.
     pub retroarch_missing_content: Vec<(EntryId, String)>,
+    /// Ebook entries whose book is not there, with the path checked.
+    pub ebook_missing_books: Vec<(EntryId, String)>,
+    /// Ebook entries whose reader, or whose format backend, is not installed.
+    pub ebook_missing_support: Vec<(EntryId, MissingSupport)>,
+    /// Ebook entries laid out in pages, on a device where nothing can turn
+    /// one: a touchscreen with no keyboard or gamepad, *and* no writable
+    /// `/dev/uinput` for the HUD's page-turn buttons to work through. Empty
+    /// when input detection is unavailable — a device we cannot enumerate is
+    /// not one we should accuse.
+    pub ebook_unturnable_pages: Vec<EntryId>,
 }
 
 /// Compute the probed diagnostics implied by `facts`.
@@ -272,6 +285,85 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
         });
     }
 
+    // A book that is not where the entry says it is. Same shape as RetroArch's
+    // missing content, and the same reasoning: the child taps a tile and gets
+    // an error dialog, which nothing else surfaces.
+    for (entry_id, path) in &facts.ebook_missing_books {
+        out.push(Diagnostic {
+            code: DiagnosticCode::EbookBookMissing,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: format!("The book this activity opens is not there: {path}"),
+            remedy: Some(
+                "Restore the file or point `book` at where it is now. A `~/` path is read                  against the home directory of the user shepherdd runs as."
+                    .to_string(),
+            ),
+            since: now,
+        });
+    }
+
+    // The reader itself, or the backend for this book's format. Worth its own
+    // code because the fix is an install rather than a config edit -- and
+    // because EPUB support shipping separately from Okular is exactly the kind
+    // of thing an administrator finds out from a child, otherwise.
+    for (entry_id, why) in &facts.ebook_missing_support {
+        let (message, remedy) = match why {
+            MissingSupport::Reader { command } => (
+                format!("The reader this activity runs is not installed: {command}"),
+                "Install it with `sudo shepherd-admin apps install okular`, or point                  `command` at the reader you meant."
+                    .to_string(),
+            ),
+            MissingSupport::Backend { format, generator } => (
+                format!(
+                    "Okular is installed but cannot open {format} files: the {generator}                      backend is missing"
+                ),
+                "Install it with `sudo shepherd-admin apps install okular`, which includes                  okular-extra-backends -- EPUB and DjVu support ship separately from Okular                  itself."
+                    .to_string(),
+            ),
+        };
+        out.push(Diagnostic {
+            code: DiagnosticCode::EbookReaderMissing,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message,
+            remedy: Some(remedy),
+            since: now,
+        });
+    }
+
+    // A book that cannot be turned. Paging is a keystroke, a D-pad press or a
+    // scroll wheel; a touchscreen produces none of those, and the reader has
+    // no swipe gesture. The HUD's page-turn buttons exist for exactly that
+    // device -- but they synthesize a key through `/dev/uinput`, so where that
+    // is not writable they are two buttons that do nothing and the book is
+    // stuck on page one. A failure a child reports as "it's broken", and one
+    // no log line or launch error would ever mention.
+    for entry_id in &facts.ebook_unturnable_pages {
+        out.push(Diagnostic {
+            code: DiagnosticCode::EbookNoPageTurn,
+            subject: DiagnosticSubject::Entry {
+                entry_id: entry_id.clone(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: "This device has a touchscreen and no keyboard or gamepad, and \
+                      /dev/uinput is not writable -- so neither a gesture nor the HUD's \
+                      page-turn buttons can turn the page in this activity"
+                .to_string(),
+            remedy: Some(
+                "Give the session user write access to /dev/uinput (the same access the \
+                 input-compat bridges need), which is what the HUD's page buttons \
+                 synthesize their keypress through. Failing that, set layout = \"scroll\" \
+                 on the entry to drag-scroll instead of paging, or attach a keyboard."
+                    .to_string(),
+            ),
+            since: now,
+        });
+    }
+
     // Input devices. Same "only if it matters" rule as yt-dlp: with no
     // input-gated entry, an unreadable /dev/input changes nothing.
     if facts.input_devices_readable == Some(false) && facts.any_entry_requires_input {
@@ -335,22 +427,59 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         .iter()
         .map(|e| (e.id.clone(), e.kind.clone()))
         .collect();
-    let (retroarch_missing_cores, retroarch_missing_content) =
-        tokio::task::spawn_blocking(move || {
-            let mut cores = Vec::new();
-            let mut content = Vec::new();
-            for (id, kind) in kinds {
-                if let Some(why) = shepherd_host_linux::missing_core(&kind) {
-                    cores.push((id.clone(), why));
-                }
-                if let Some(path) = shepherd_host_linux::missing_content(&kind) {
-                    content.push((id, path));
+    let (
+        retroarch_missing_cores,
+        retroarch_missing_content,
+        ebook_missing_books,
+        ebook_missing_support,
+    ) = tokio::task::spawn_blocking(move || {
+        let mut cores = Vec::new();
+        let mut content = Vec::new();
+        let mut books = Vec::new();
+        let mut support = Vec::new();
+        for (id, kind) in kinds {
+            if let Some(why) = shepherd_host_linux::missing_core(&kind) {
+                cores.push((id.clone(), why));
+            }
+            if let Some(path) = shepherd_host_linux::missing_content(&kind) {
+                content.push((id.clone(), path));
+            }
+            if let Some(path) = shepherd_host_linux::missing_book(&kind) {
+                books.push((id.clone(), path));
+            }
+            if let Some(why) = shepherd_host_linux::missing_support(&kind) {
+                support.push((id, why));
+            }
+        }
+        (cores, content, books, support)
+    })
+    .await
+    .unwrap_or_default();
+
+    // Only worth scanning when something could care, and only conclusive when
+    // the devices could be read at all.
+    let paged_ebooks = paged_ebook_entry_ids(policy);
+    let ebook_unturnable_pages = if paged_ebooks.is_empty() {
+        Vec::new()
+    } else {
+        match tokio::task::spawn_blocking(crate::input_devices::connected_inputs).await {
+            Ok(Some(connected)) => {
+                let touch_only = connected.contains(&InputDeviceType::Touch)
+                    && !connected.contains(&InputDeviceType::Keyboard)
+                    && !connected.contains(&InputDeviceType::Gamepad);
+                // The HUD's buttons rescue a touch-only device, but only if
+                // they can synthesize a key at all.
+                if touch_only && !shepherd_bridge::uinput_is_writable() {
+                    paged_ebooks
+                } else {
+                    Vec::new()
                 }
             }
-            (cores, content)
-        })
-        .await
-        .unwrap_or_default();
+            // Detection unavailable, or the scan panicked: fail open rather
+            // than warn about a device we cannot see.
+            _ => Vec::new(),
+        }
+    };
 
     let youtube_entries = crate::media::youtube_entry_ids(policy);
     let ytdlp_available = if youtube_entries.is_empty() {
@@ -375,7 +504,23 @@ pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> Pro
         browser_policy_ignored_entries: browser_policy_ignored_entry_ids(policy),
         retroarch_missing_cores,
         retroarch_missing_content,
+        ebook_missing_books,
+        ebook_missing_support,
+        ebook_unturnable_pages,
     }
+}
+
+/// Ebook entries whose layout turns pages rather than scrolling.
+fn paged_ebook_entry_ids(policy: &Policy) -> Vec<EntryId> {
+    policy
+        .entries
+        .iter()
+        .filter(|e| match &e.kind {
+            shepherd_api::EntryKind::Ebook { layout, .. } => layout.needs_keys_to_turn_pages(),
+            _ => false,
+        })
+        .map(|e| e.id.clone())
+        .collect()
 }
 
 /// Entries whose `[entries.browser]` will be ignored because their kind cannot
@@ -549,6 +694,42 @@ impl shepherd_api::DiagnosticSink for DiagnosticPublisher {
 
 #[cfg(test)]
 mod tests {
+    /// A paged book on a touch-only device is unreadable past page one, and
+    /// that is the sort of thing an administrator finds out from a child.
+    #[test]
+    fn a_paged_book_with_nothing_to_turn_it_is_flagged() {
+        let facts = ProbeFacts {
+            ebook_unturnable_pages: vec![EntryId::new("the-hobbit")],
+            ..Default::default()
+        };
+        let out = evaluate(&facts, shepherd_util::now());
+        let flagged: Vec<_> = out
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::EbookNoPageTurn)
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].severity, DiagnosticSeverity::Warning);
+        // The remedy has to name the way out, not just the problem.
+        assert!(
+            flagged[0]
+                .remedy
+                .as_ref()
+                .is_some_and(|r| r.contains("uinput") && r.contains("scroll")),
+            "remedy should point at layout = \"scroll\""
+        );
+    }
+
+    /// …and a scrolling one is not, because dragging works.
+    #[test]
+    fn a_scrolling_book_is_not_flagged() {
+        let out = evaluate(&ProbeFacts::default(), shepherd_util::now());
+        assert!(
+            !out.iter()
+                .any(|d| d.code == DiagnosticCode::EbookNoPageTurn),
+            "nothing to flag when no entry pages"
+        );
+    }
+
     use super::*;
 
     fn at(secs: i64) -> DateTime<Local> {

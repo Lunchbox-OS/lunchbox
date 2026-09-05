@@ -10,6 +10,51 @@
 // list), the projection always carries the canonical form shown here.
 
 /**
+ * How an [`EntryKind::Ebook`] activity lays pages out.
+ */
+export type EbookLayout =
+  /**
+   * Two pages side by side, like an open book. Fits a landscape panel: a
+   * single portrait page fitted to 16:9 is letterboxed and small.
+   */
+  | "facing"
+  /**
+   * The same, with the first page alone — so the spreads fall where a
+   * printed book's would, cover on its own and chapter openings on the
+   * right. The default: it costs nothing over `facing` and matches what a
+   * child holding a paper book expects.
+   */
+  | "facing_first_centered"
+  /**
+   * One page at a time. The right choice on a portrait screen.
+   */
+  | "single"
+  /**
+   * One continuous column, scrolled rather than paged, fitted to the width.
+   *
+   * The only layout a **touch-only** device can navigate: dragging scrolls
+   * it. The paged layouts turn the page on a key, a gamepad D-pad or a
+   * scroll wheel, and a touchscreen produces none of those — Okular grabs
+   * only the pinch gesture, and has no swipe-to-turn anywhere in its
+   * desktop view.
+   */
+  | "scroll";
+
+/**
+ * Which reader an [`EntryKind::Ebook`] activity drives.
+ *
+ * Open rather than closed on purpose: the config surface here — a book and a
+ * place in it — is reader-agnostic, even though only one reader is wired up.
+ */
+export type EbookViewer =
+  /**
+   * Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
+   * PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
+   * documented way to disable its own escape hatches.
+   */
+  | "okular";
+
+/**
  * Automatic screen-brightness configuration (ambient-light driven).
  */
 export interface RawAutoBrightnessConfig {
@@ -250,10 +295,14 @@ export interface RawEntry {
    * activities lose unsaved state when force-closed, the HUD shows a
    * confirmation prompt first (issue #78). Only affects the "X" button —
    * closing via the API, time expiration, or the process exiting is
-   * unaffected. Enabled by default; set `false` for activities that are
-   * safe to close instantly.
+   * unaffected.
+   *
+   * Absent, the default comes from the entry's kind: on for everything that
+   * can lose work, off for `ebook`, which cannot — see
+   * [`shepherd_api::EntryKind::confirms_on_close_by_default`]. Set it
+   * explicitly to override that either way.
    */
-  confirm_on_close?: boolean;
+  confirm_on_close?: boolean | null;
   /**
    * Explicitly disabled
    */
@@ -284,8 +333,14 @@ export interface RawEntry {
    * orthogonal sidecar — touch-to-mouse and gamepad presets can be
    * stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
    * or a list (`input_compat = ["touch_to_mouse", "gamepad_productivity"]`).
+   *
+   * Absent, the default comes from the entry's kind — see
+   * [`shepherd_api::EntryKind::default_input_compat`], which gives an
+   * `ebook` the gamepad preset that turns its D-pad into arrow keys. A
+   * list given here replaces that wholesale, and `input_compat = []` is
+   * how an entry asks for no sidecar at all.
    */
-  input_compat?: RawInputCompat[];
+  input_compat?: RawInputCompat[] | null;
   /**
    * Tunables for input-compat sidecars (analog deadzones, speeds).
    */
@@ -553,6 +608,57 @@ export type RawEntryKind =
        * `"off"` boots the content fresh every time.
        */
       save_state?: RetroarchSaveState;
+    }
+  /**
+   * A single book, opened in a reader locked down to reading it. See
+   * [`shepherd_api::EntryKind::Ebook`] for what shepherd sets up around the
+   * launch.
+   */
+  | {
+      type: "ebook";
+      /**
+       * Extra arguments, appended after the ones shepherd derives.
+       */
+      args?: string[];
+      /**
+       * The book to open. Must be absolute or start with `~/`.
+       */
+      book: string;
+      /**
+       * The reader binary; defaults to the viewer's own name.
+       */
+      command?: string | null;
+      /**
+       * Additional environment variables
+       */
+      env?: Record<string, string>;
+      /**
+       * Font family for the same. Default "Noto Serif".
+       */
+      font_family?: string;
+      /**
+       * Point size of an EPUB's reflowed text. Default 16. Changing it
+       * repaginates, which moves a remembered position.
+       */
+      font_size?: number;
+      /**
+       * Lock the reader's own escape hatches. On by default.
+       */
+      kiosk?: boolean;
+      /**
+       * `facing_first_centered` (default), `facing`, `single`, or
+       * `scroll`.
+       */
+      layout?: EbookLayout;
+      /**
+       * Page to open on the first launch, 1-based. Ignored once the reader
+       * remembers a position for this book.
+       */
+      open_at?: number | null;
+      /**
+       * Which reader to drive. `okular` (default) is the only one wired up.
+       */
+      viewer?: EbookViewer;
     }
   | {
       type: "custom";

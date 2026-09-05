@@ -54,6 +54,10 @@ pub enum EventPayload {
         /// show the button.
         #[serde(default)]
         can_reset: bool,
+        /// Whether the HUD should offer page-turn buttons for this session
+        /// (issue #160). Defaults to `false` when absent, like `can_reset`.
+        #[serde(default)]
+        can_turn_pages: bool,
     },
 
     /// Warning issued for current session
@@ -170,6 +174,7 @@ mod tests {
             deadline: Some(shepherd_util::now()),
             confirm_on_close: true,
             can_reset: false,
+            can_turn_pages: false,
         });
 
         let json = serde_json::to_string(&event).unwrap();
@@ -192,6 +197,7 @@ mod tests {
             deadline: None,
             confirm_on_close: false,
             can_reset: false,
+            can_turn_pages: false,
         });
 
         let json = serde_json::to_string(&event).unwrap();

@@ -46,6 +46,15 @@ const STEAM_READY_FALLBACK: Duration = Duration::from_secs(120);
 /// rather than leaving the launcher held indefinitely (issue #136).
 const KILL_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 
+/// How long a graceful stop waits for an activity to act on a close request
+/// before falling through to `SIGTERM` (issue #160).
+///
+/// Measured against Okular, the case this exists for: 0.33 s for a PDF, ~2 s
+/// for an EPUB, on a debug build with no GPU. Three seconds leaves room without
+/// eating much of the 5 s graceful window an app that ignores the request still
+/// needs.
+const POLITE_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long to wait for a snap/flatpak runtime to create the scope its app runs
 /// in, and for the firewall to be attached to it, before giving up and ending
 /// the activity (#151). The scope is created when the runtime starts the app,
@@ -260,10 +269,15 @@ struct SessionInfo {
     /// *system* manager, so `systemctl stop` on it (via the helper) reaches
     /// processes our own signals may not.
     firewall_scope: Option<String>,
-    /// A RetroArch session, which gets a longer graceful-stop window: its
-    /// shutdown has to unload the core, flush the in-game save, and write a
-    /// save state before the process goes away.
-    retroarch: bool,
+    /// Floor on this session's graceful-stop window, when its kind needs one
+    /// longer than the generic 5 s. RetroArch has to unload the core, flush
+    /// the in-game save and write a save state; a reader has to run its close
+    /// handler and write the page it was on. The cost of cutting either short
+    /// is the child's progress.
+    graceful_floor: Option<Duration>,
+    /// Ask the compositor to close this activity's windows before signalling
+    /// it. See [`EntryKind::wants_polite_close`].
+    polite_close: bool,
 }
 
 /// How a session's graceful SIGTERM is delivered.
@@ -1390,6 +1404,77 @@ impl LinuxHost {
         pid_is_live(pid) || pgid_is_live(pgid)
     }
 
+    /// Ask the compositor to close this session's windows, and wait a short
+    /// while for the activity to finish on its own (issue #160).
+    ///
+    /// Returns whether it did. A `false` means the caller should carry on to
+    /// the signal ladder — either there was no window to close, the compositor
+    /// could not be reached, or the application ignored the request.
+    ///
+    /// The wait only happens when a window was actually found, so an activity
+    /// with no surface (a headless helper, a test fixture) costs nothing.
+    async fn close_windows_politely(
+        &self,
+        pid: u32,
+        pgid: u32,
+        session_info: &Option<SessionInfo>,
+        is_steam: bool,
+    ) -> bool {
+        let windows = match crate::sway::list_windows().await {
+            Ok(windows) => windows,
+            Err(e) => {
+                debug!(error = %e, "Could not list windows for a polite close; signalling instead");
+                return false;
+            }
+        };
+
+        // The activity's own windows: its pid, or anything in its process
+        // group — the same rule window attribution uses, and the reason a
+        // launcher script that execs does not cost us the real window.
+        let mine: Vec<u64> = windows
+            .iter()
+            .filter(|w| {
+                w.pid
+                    .is_some_and(|wpid| wpid == pid || pid_in_group(wpid, pgid))
+            })
+            .map(|w| w.id)
+            .collect();
+
+        if mine.is_empty() {
+            return false;
+        }
+
+        for id in &mine {
+            if let Err(e) = crate::sway::act_on_window(*id, WindowAction::Close).await {
+                debug!(window = id, error = %e, "Close request failed");
+            }
+        }
+        info!(
+            pid,
+            windows = mine.len(),
+            "Asked the compositor to close the activity's windows"
+        );
+
+        let start = Instant::now();
+        while start.elapsed() < POLITE_CLOSE_TIMEOUT {
+            if !Self::activity_is_running(pid, pgid, session_info, is_steam) {
+                info!(
+                    pid,
+                    took_ms = start.elapsed().as_millis(),
+                    "Activity closed itself"
+                );
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        debug!(
+            pid,
+            "Activity outlived the close request; falling through to SIGTERM"
+        );
+        false
+    }
+
     /// Wait for a kill to actually take, escalating once to the activity's
     /// systemd scope if it has one.
     ///
@@ -1704,9 +1789,16 @@ impl HostAdapter for LinuxHost {
         entry_kind: &EntryKind,
         options: SpawnOptions,
     ) -> HostResult<HostSessionHandle> {
-        // RetroArch sessions need a longer grace period on stop than the
-        // generic default; `stop` reads this back off the session info.
-        let is_retroarch = matches!(entry_kind, EntryKind::Retroarch { .. });
+        // Some kinds need a longer grace period on stop than the generic
+        // default; `stop` reads this back off the session info.
+        let graceful_floor = match entry_kind {
+            EntryKind::Retroarch { .. } => Some(crate::retroarch::STOP_TIMEOUT),
+            EntryKind::Ebook { .. } => Some(crate::ebook::STOP_TIMEOUT),
+            _ => None,
+        };
+        // Likewise for the polite close: whether a stop asks the compositor
+        // first is a property of the kind, decided once here.
+        let polite_close = entry_kind.wants_polite_close();
 
         // Extract argv, env, cwd, snap_name, flatpak_app_id, and steam_app_id based on entry kind
         let (argv, env, cwd, snap_name, flatpak_app_id, steam_app_id) = match entry_kind {
@@ -1836,6 +1928,50 @@ impl HostAdapter for LinuxHost {
                     "Prepared RetroArch launch"
                 );
                 (launch.argv, env.clone(), None, None, None, None)
+            }
+            EntryKind::Ebook {
+                book,
+                viewer,
+                open_at,
+                layout,
+                font_size,
+                font_family,
+                command,
+                args,
+                env,
+                kiosk,
+            } => {
+                let spec = crate::ebook::Spec {
+                    book,
+                    viewer: *viewer,
+                    open_at: *open_at,
+                    layout: *layout,
+                    font_size: *font_size,
+                    font_family,
+                    command: command.as_deref(),
+                    args,
+                    kiosk: *kiosk,
+                };
+                let launch =
+                    crate::ebook::prepare(&spec, options.entry_id.as_deref(), expand_tilde)
+                        .map_err(|e| {
+                            HostError::SpawnFailed(format!(
+                                "Failed to prepare reader config: {}",
+                                e
+                            ))
+                        })?;
+                info!(
+                    argv = ?launch.argv,
+                    state_dir = %launch.paths.root.display(),
+                    "Prepared reader launch"
+                );
+                // The generated environment points the reader at the entry's
+                // own config and state; an explicit `[entries.kind.env]` is
+                // layered on top, so an admin can still override one of them
+                // deliberately.
+                let mut merged: HashMap<String, String> = launch.env.into_iter().collect();
+                merged.extend(env.clone());
+                (launch.argv, merged, None, None, None, None)
             }
             EntryKind::Custom {
                 type_name: _,
@@ -2110,7 +2246,8 @@ impl HostAdapter for LinuxHost {
             flatpak_app_id: flatpak_app_id.clone(),
             steam_app_id,
             firewall_scope: firewall_scope.clone(),
-            retroarch: is_retroarch,
+            graceful_floor,
+            polite_close,
         };
         self.session_info
             .lock()
@@ -2205,27 +2342,42 @@ impl HostAdapter for LinuxHost {
 
         match mode {
             StopMode::Graceful { timeout } => {
-                // Raise the floor for RetroArch: its shutdown unloads the
-                // core, flushes the in-game save, and writes a save state, and
-                // the cost of cutting that short is the child's save file. The
-                // callers all pass the generic 5s, which is a fine default for
-                // an app whose shutdown is just "exit".
-                let timeout = if session_info.as_ref().is_some_and(|i| i.retroarch) {
-                    timeout.max(crate::retroarch::STOP_TIMEOUT)
+                // Raise the floor for kinds whose shutdown does real work —
+                // RetroArch writing a save state, a reader writing the page it
+                // was on. The callers all pass the generic 5s, which is a fine
+                // default for an app whose shutdown is just "exit".
+                let timeout = match session_info.as_ref().and_then(|i| i.graceful_floor) {
+                    Some(floor) => timeout.max(floor),
+                    None => timeout,
+                };
+
+                let is_steam_session = session_info
+                    .as_ref()
+                    .is_some_and(|i| i.steam_app_id.is_some());
+
+                // Ask before telling. For an application that saves its state
+                // in `closeEvent` and installs no signal handler, this is the
+                // whole difference between finishing and being killed — see
+                // `EntryKind::wants_polite_close`. Costs nothing when the
+                // activity has no window, and falls through to the signal
+                // ladder unchanged when it ignores the request.
+                let closed_politely = if session_info.as_ref().is_some_and(|i| i.polite_close) {
+                    self.close_windows_politely(pid, pgid, &session_info, is_steam_session)
+                        .await
                 } else {
-                    timeout
+                    false
                 };
 
                 let plan = session_info.as_ref().map(GracefulSignal::for_session);
 
-                match plan {
+                match plan.as_ref().filter(|_| !closed_politely) {
                     // Sandboxed runtimes put the real app in a cgroup of their
                     // own, so signalling our direct child would miss it.
-                    Some(GracefulSignal::SnapCgroup(ref snap)) => {
+                    Some(GracefulSignal::SnapCgroup(snap)) => {
                         kill_snap_cgroup(snap, nix::sys::signal::Signal::SIGTERM);
                         info!(snap = %snap, "Sent SIGTERM via snap cgroup");
                     }
-                    Some(GracefulSignal::SteamProcesses(app_id)) => {
+                    Some(&GracefulSignal::SteamProcesses(app_id)) => {
                         let _ =
                             kill_steam_game_processes(app_id, nix::sys::signal::Signal::SIGTERM);
                         if let Ok(mut map) = self.steam_sessions.lock() {
@@ -2236,13 +2388,13 @@ impl HostAdapter for LinuxHost {
                             "Sent SIGTERM to Steam game processes"
                         );
                     }
-                    Some(GracefulSignal::FlatpakCgroup(ref app_id)) => {
+                    Some(GracefulSignal::FlatpakCgroup(app_id)) => {
                         kill_flatpak_cgroup(app_id, nix::sys::signal::Signal::SIGTERM);
                         info!(flatpak = %app_id, "Sent SIGTERM via flatpak cgroup");
                     }
                     // A plain process gets its one SIGTERM from `p.terminate()`
                     // below, which signals the whole process group.
-                    Some(GracefulSignal::ProcessGroup) | None => {}
+                    Some(&GracefulSignal::ProcessGroup) | None => {}
                 }
 
                 // Exactly one SIGTERM reaches the group. Both paths below are
@@ -2256,7 +2408,7 @@ impl HostAdapter for LinuxHost {
                 // the first is still pending the kernel folds them into one and
                 // the shutdown runs. That race is the whole bug.
                 let is_steam = matches!(plan, Some(GracefulSignal::SteamProcesses(_)));
-                if !is_steam {
+                if !is_steam && !closed_politely {
                     let signalled_via_process = {
                         let procs = self.processes.lock().unwrap();
                         match procs.get(&pid) {
@@ -2889,7 +3041,8 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
-            retroarch: false,
+            graceful_floor: None,
+            polite_close: false,
         }
     }
 
@@ -3025,7 +3178,8 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
-            retroarch: false,
+            graceful_floor: None,
+            polite_close: false,
         });
         host.session_info
             .lock()
@@ -3359,8 +3513,79 @@ mod tests {
             flatpak_app_id: None,
             steam_app_id: None,
             firewall_scope: None,
-            retroarch: false,
+            graceful_floor: None,
+            polite_close: false,
         }
+    }
+
+    /// Which kinds get asked before they get told (issue #160).
+    ///
+    /// The list is a judgement, not a detail: Steam reads a close request as
+    /// "hide to tray" and would only stop more slowly, and RetroArch's
+    /// single-SIGTERM shutdown is verified to save (#125), so neither opts in.
+    /// A reader must, because it saves the page in its close handler and
+    /// handles no signal at all.
+    #[test]
+    fn only_kinds_that_save_on_window_close_are_asked_first() {
+        let ebook = EntryKind::Ebook {
+            book: "/books/x.epub".into(),
+            viewer: Default::default(),
+            open_at: None,
+            layout: Default::default(),
+            font_size: 16,
+            font_family: "Noto Serif".into(),
+            command: None,
+            args: vec![],
+            env: HashMap::new(),
+            kiosk: true,
+        };
+        assert!(ebook.wants_polite_close());
+
+        assert!(
+            !EntryKind::Steam {
+                app_id: 1,
+                args: vec![],
+                env: HashMap::new(),
+            }
+            .wants_polite_close()
+        );
+        assert!(
+            !EntryKind::Retroarch {
+                core: Some("mgba".into()),
+                core_path: None,
+                content: "/roms/x.gba".into(),
+                save_state: shepherd_api::RetroarchSaveState::Auto,
+                command: "retroarch".into(),
+                args: vec![],
+                env: HashMap::new(),
+                kiosk: true,
+                reset: true,
+            }
+            .wants_polite_close()
+        );
+        assert!(
+            !EntryKind::Process {
+                command: "foot".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            }
+            .wants_polite_close()
+        );
+    }
+
+    /// The stop path raises its floor for the kinds whose shutdown does real
+    /// work, and leaves everything else on the generic default.
+    #[test]
+    fn graceful_floor_is_per_kind() {
+        let ebook_floor = crate::ebook::STOP_TIMEOUT;
+        let retro_floor = crate::retroarch::STOP_TIMEOUT;
+        // A reader needs less than an emulator but more than "exit".
+        assert!(ebook_floor > Duration::from_secs(5));
+        assert!(retro_floor > ebook_floor);
+        // And the polite-close budget has to fit inside the reader's floor,
+        // or the fallback SIGTERM would never get its turn.
+        assert!(POLITE_CLOSE_TIMEOUT < ebook_floor);
     }
 
     /// A plain process is signalled *only* through its process group.

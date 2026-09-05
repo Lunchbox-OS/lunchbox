@@ -144,6 +144,7 @@ kind = { type = "media", library = "~/.config/shepherd/movies.toml", mode = "pla
 # reset ("reboot the console") button unless `reset = false` — with save-state
 # resume on, it is the only way back to a game's own title screen.
 kind = { type = "retroarch", core = "mgba", content = "~/Games/roms/game.gba" }
+kind = { type = "ebook", book = "~/Books/the-hobbit.epub" }
 
 # Custom type
 kind = { type = "custom", type_name = "my-launcher", payload = { ... } }

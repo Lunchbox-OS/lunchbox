@@ -8,6 +8,7 @@
 
 pub mod config_schema;
 pub mod editor_schema;
+pub mod kind_defaults;
 pub mod kotlin_types;
 pub mod rust_types;
 pub mod ts_types;

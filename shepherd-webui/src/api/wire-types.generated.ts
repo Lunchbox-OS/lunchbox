@@ -350,7 +350,24 @@ export type DiagnosticCode =
    * A RetroArch entry's content — its ROM or disc image — is not there, so
    * the activity will not launch.
    */
-  | "retroarch_content_missing";
+  | "retroarch_content_missing"
+  /**
+   * An ebook entry's book is not there, so the activity opens on an error
+   * instead of a page.
+   */
+  | "ebook_book_missing"
+  /**
+   * An ebook entry's reader, or the backend for that book's format, is not
+   * installed. On Ubuntu the EPUB backend ships separately from Okular, so
+   * this is the likely first-run failure.
+   */
+  | "ebook_reader_missing"
+  /**
+   * An ebook entry lays the book out in pages on a device that has no way
+   * to turn one: a touchscreen and nothing else. Reading would stop at the
+   * end of the first page.
+   */
+  | "ebook_no_page_turn";
 
 /**
  * The current set, as clients see it.
@@ -453,6 +470,51 @@ export interface Duration {
   nanos: number;
   secs: number;
 }
+
+/**
+ * How an [`EntryKind::Ebook`] activity lays pages out.
+ */
+export type EbookLayout =
+  /**
+   * Two pages side by side, like an open book. Fits a landscape panel: a
+   * single portrait page fitted to 16:9 is letterboxed and small.
+   */
+  | "facing"
+  /**
+   * The same, with the first page alone — so the spreads fall where a
+   * printed book's would, cover on its own and chapter openings on the
+   * right. The default: it costs nothing over `facing` and matches what a
+   * child holding a paper book expects.
+   */
+  | "facing_first_centered"
+  /**
+   * One page at a time. The right choice on a portrait screen.
+   */
+  | "single"
+  /**
+   * One continuous column, scrolled rather than paged, fitted to the width.
+   *
+   * The only layout a **touch-only** device can navigate: dragging scrolls
+   * it. The paged layouts turn the page on a key, a gamepad D-pad or a
+   * scroll wheel, and a touchscreen produces none of those — Okular grabs
+   * only the pinch gesture, and has no swipe-to-turn anywhere in its
+   * desktop view.
+   */
+  | "scroll";
+
+/**
+ * Which reader an [`EntryKind::Ebook`] activity drives.
+ *
+ * Open rather than closed on purpose: the config surface here — a book and a
+ * place in it — is reader-agnostic, even though only one reader is wired up.
+ */
+export type EbookViewer =
+  /**
+   * Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
+   * PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
+   * documented way to disable its own escape hatches.
+   */
+  | "okular";
 
 /**
  * Unique identifier for an entry in the policy whitelist
@@ -645,6 +707,62 @@ export type EntryKind =
        */
       save_state?: RetroarchSaveState;
     }
+  /**
+   * One book, opened in a document reader locked down to reading it
+   * (issue #160).
+   *
+   * The reader keeps the page: shepherd's job is to hand it a private
+   * configuration that closes every door out of the book, and to close the
+   * window politely at the end of the session so the position is written.
+   * See [`shepherd_host_linux::ebook`] for what is generated.
+   */
+  | {
+      type: "ebook";
+      /**
+       * Extra arguments, appended after the ones shepherd derives.
+       */
+      args?: string[];
+      /**
+       * The book. Absolute, or `~/`-prefixed; expanded at launch.
+       */
+      book: string;
+      /**
+       * The reader binary. Defaults to the viewer's usual name.
+       */
+      command?: string | null;
+      env?: Record<string, string>;
+      /**
+       * Font family for the same. Must be installed on the device.
+       */
+      font_family?: string;
+      /**
+       * Point size for the reflowed text of an EPUB. Changing it
+       * repaginates the book, which moves a remembered position, so pick it
+       * before the book is first opened.
+       */
+      font_size?: number;
+      /**
+       * Lock the reader down: no file dialog, no printing, no settings, no
+       * menubar or toolbar. On by default — this is a supervised kiosk, and
+       * off is only for an admin checking what the reader looks like
+       * unrestricted.
+       */
+      kiosk?: boolean;
+      /**
+       * How pages are laid out. `facing` (the default) suits a landscape
+       * panel; `single` a portrait one.
+       */
+      layout?: EbookLayout;
+      /**
+       * Page to open on the *first* launch, 1-based. Ignored once the
+       * reader has a remembered position for this book.
+       */
+      open_at?: number | null;
+      /**
+       * Which reader to drive. Only `okular` is implemented.
+       */
+      viewer?: EbookViewer;
+    }
   | {
       type: "custom";
       payload: unknown;
@@ -662,6 +780,7 @@ export type EntryKindTag =
   | "vm"
   | "media"
   | "retroarch"
+  | "ebook"
   | "custom";
 
 /**
@@ -721,6 +840,11 @@ export type EventPayload =
        * show the button.
        */
       can_reset?: boolean;
+      /**
+       * Whether the HUD should offer page-turn buttons for this session
+       * (issue #160). Defaults to `false` when absent, like `can_reset`.
+       */
+      can_turn_pages?: boolean;
       /**
        * Whether the HUD should confirm before its "X" button ends this
        * session (issue #78). Defaults to `true` when absent.
@@ -1390,6 +1514,11 @@ export interface SessionInfo {
    * older payload simply doesn't show the button.
    */
   can_reset?: boolean;
+  /**
+   * Whether the HUD should show page-turn buttons for this session. See
+   * [`EntryKind::supports_page_turn`].
+   */
+  can_turn_pages?: boolean;
   /**
    * Whether the HUD should confirm before its "X" button ends this
    * session (issue #78). Defaults to `true` when absent so older payloads

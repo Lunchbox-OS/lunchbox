@@ -1,7 +1,7 @@
 //! Raw configuration schema (as parsed from TOML)
 
 use serde::{Deserialize, Serialize};
-use shepherd_api::RetroarchSaveState;
+use shepherd_api::{EbookLayout, EbookViewer, RetroarchSaveState};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -192,8 +192,14 @@ pub struct RawEntry {
     /// orthogonal sidecar — touch-to-mouse and gamepad presets can be
     /// stacked. Accepts a single string (`input_compat = "touch_to_mouse"`)
     /// or a list (`input_compat = ["touch_to_mouse", "gamepad_productivity"]`).
+    ///
+    /// Absent, the default comes from the entry's kind — see
+    /// [`shepherd_api::EntryKind::default_input_compat`], which gives an
+    /// `ebook` the gamepad preset that turns its D-pad into arrow keys. A
+    /// list given here replaces that wholesale, and `input_compat = []` is
+    /// how an entry asks for no sidecar at all.
     #[serde(default, deserialize_with = "deserialize_input_compat_list")]
-    pub input_compat: Vec<RawInputCompat>,
+    pub input_compat: Option<Vec<RawInputCompat>>,
 
     /// Tunables for input-compat sidecars (analog deadzones, speeds).
     #[serde(default)]
@@ -223,10 +229,14 @@ pub struct RawEntry {
     /// activities lose unsaved state when force-closed, the HUD shows a
     /// confirmation prompt first (issue #78). Only affects the "X" button —
     /// closing via the API, time expiration, or the process exiting is
-    /// unaffected. Enabled by default; set `false` for activities that are
-    /// safe to close instantly.
-    #[serde(default = "default_true")]
-    pub confirm_on_close: bool,
+    /// unaffected.
+    ///
+    /// Absent, the default comes from the entry's kind: on for everything that
+    /// can lose work, off for `ebook`, which cannot — see
+    /// [`shepherd_api::EntryKind::confirms_on_close_by_default`]. Set it
+    /// explicitly to override that either way.
+    #[serde(default)]
+    pub confirm_on_close: Option<bool>,
 }
 
 /// Per-entry firewall configuration
@@ -358,7 +368,11 @@ pub struct RawInputCompatOptions {
 
 /// Accept either a single `RawInputCompat` value or a list of them. Empty
 /// list and missing field both deserialize to `vec![]`.
-fn deserialize_input_compat_list<'de, D>(deserializer: D) -> Result<Vec<RawInputCompat>, D::Error>
+/// `None` and `Some(vec![])` are different answers here: absent means "use the
+/// kind's default", an empty list means "no sidecar, whatever the kind says".
+fn deserialize_input_compat_list<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<RawInputCompat>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -370,9 +384,9 @@ where
     }
 
     match Option::<OneOrMany>::deserialize(deserializer)? {
-        None => Ok(Vec::new()),
-        Some(OneOrMany::One(v)) => Ok(vec![v]),
-        Some(OneOrMany::Many(v)) => Ok(v),
+        None => Ok(None),
+        Some(OneOrMany::One(v)) => Ok(Some(vec![v])),
+        Some(OneOrMany::Many(v)) => Ok(Some(v)),
     }
 }
 
@@ -593,6 +607,43 @@ pub enum RawEntryKind {
         #[serde(default = "default_true")]
         reset: bool,
     },
+    /// A single book, opened in a reader locked down to reading it. See
+    /// [`shepherd_api::EntryKind::Ebook`] for what shepherd sets up around the
+    /// launch.
+    Ebook {
+        /// The book to open. Must be absolute or start with `~/`.
+        book: PathBuf,
+        /// Which reader to drive. `okular` (default) is the only one wired up.
+        #[serde(default)]
+        viewer: EbookViewer,
+        /// Page to open on the first launch, 1-based. Ignored once the reader
+        /// remembers a position for this book.
+        #[serde(default)]
+        open_at: Option<u32>,
+        /// `facing_first_centered` (default), `facing`, `single`, or
+        /// `scroll`.
+        #[serde(default)]
+        layout: EbookLayout,
+        /// Point size of an EPUB's reflowed text. Default 16. Changing it
+        /// repaginates, which moves a remembered position.
+        #[serde(default = "default_ebook_font_size")]
+        font_size: u32,
+        /// Font family for the same. Default "Noto Serif".
+        #[serde(default = "default_ebook_font_family")]
+        font_family: String,
+        /// The reader binary; defaults to the viewer's own name.
+        #[serde(default)]
+        command: Option<String>,
+        /// Extra arguments, appended after the ones shepherd derives.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Additional environment variables
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Lock the reader's own escape hatches. On by default.
+        #[serde(default = "default_true")]
+        kiosk: bool,
+    },
     Custom {
         type_name: String,
         #[serde(default)]
@@ -602,6 +653,14 @@ pub enum RawEntryKind {
 
 fn default_retroarch_command() -> String {
     "retroarch".to_string()
+}
+
+fn default_ebook_font_size() -> u32 {
+    16
+}
+
+fn default_ebook_font_family() -> String {
+    "Noto Serif".to_string()
 }
 
 /// Availability configuration
@@ -1150,7 +1209,7 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.entries[0].input_compat,
-            vec![RawInputCompat::TouchToMouse]
+            Some(vec![RawInputCompat::TouchToMouse])
         );
     }
 
@@ -1168,12 +1227,12 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.entries[0].input_compat,
-            vec![RawInputCompat::DisableTouch]
+            Some(vec![RawInputCompat::DisableTouch])
         );
     }
 
     #[test]
-    fn confirm_on_close_defaults_true_and_parses_false() {
+    fn confirm_on_close_is_unset_by_default_and_parses_false() {
         // Absent -> enabled by default (issue #78).
         let default_toml = r#"
             config_version = 1
@@ -1184,7 +1243,7 @@ mod tests {
             kind = { type = "process", command = "/bin/g" }
         "#;
         let config: RawConfig = toml::from_str(default_toml).unwrap();
-        assert!(config.entries[0].confirm_on_close);
+        assert_eq!(config.entries[0].confirm_on_close, None);
 
         // Explicit opt-out.
         let opt_out_toml = r#"
@@ -1197,7 +1256,7 @@ mod tests {
             confirm_on_close = false
         "#;
         let config: RawConfig = toml::from_str(opt_out_toml).unwrap();
-        assert!(!config.entries[0].confirm_on_close);
+        assert_eq!(config.entries[0].confirm_on_close, Some(false));
     }
 
     #[test]
@@ -1307,10 +1366,10 @@ mod tests {
         let config: RawConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.entries[0].input_compat,
-            vec![
+            Some(vec![
                 RawInputCompat::TouchToMouse,
                 RawInputCompat::GamepadProductivity
-            ]
+            ])
         );
         let opts = config.entries[0].input_compat_options.unwrap();
         assert_eq!(opts.gamepad_deadzone, Some(0.2));
@@ -1318,8 +1377,10 @@ mod tests {
         assert_eq!(opts.gamepad_scroll_speed, None);
     }
 
+    /// Absent and empty are different answers: absent defers to the kind (a
+    /// book gets the gamepad preset), an empty list refuses every sidecar.
     #[test]
-    fn parse_input_compat_absent() {
+    fn parse_input_compat_absent_is_not_the_same_as_empty() {
         let toml_str = r#"
             config_version = 1
 
@@ -1327,9 +1388,16 @@ mod tests {
             id = "g"
             label = "G"
             kind = { type = "process", command = "/bin/g" }
+
+            [[entries]]
+            id = "h"
+            label = "H"
+            kind = { type = "process", command = "/bin/h" }
+            input_compat = []
         "#;
         let config: RawConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.entries[0].input_compat.is_empty());
+        assert_eq!(config.entries[0].input_compat, None);
+        assert_eq!(config.entries[1].input_compat, Some(Vec::new()));
     }
 
     #[test]

@@ -86,6 +86,153 @@ watched_grace_days = 90
         assert_eq!(policy.service.media.watched_grace_days, 90);
     }
 
+    /// The HUD's "are you sure" exists to protect unsaved work. A book has
+    /// none — the page is written on the way out — so a reading activity
+    /// closes on one tap, while everything else keeps the prompt.
+    #[test]
+    fn a_reading_activity_closes_without_confirming() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+
+[[entries]]
+id = "book"
+label = "A Book"
+kind = { type = "ebook", book = "~/Books/a.epub" }
+
+[[entries]]
+id = "game"
+label = "A Game"
+kind = { type = "process", command = "/usr/bin/true" }
+"#,
+        )
+        .unwrap();
+
+        let by_id = |id: &str| {
+            policy
+                .entries
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("entry exists")
+                .confirm_on_close
+        };
+        assert!(!by_id("book"), "a book has nothing to lose by closing");
+        assert!(by_id("game"), "everything else keeps the prompt");
+    }
+
+    /// …and an entry that states its preference is obeyed either way, which is
+    /// the whole reason the field became optional rather than kind-derived.
+    #[test]
+    fn an_explicit_confirm_on_close_overrides_the_kind_default() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+
+[[entries]]
+id = "book"
+label = "A Book"
+confirm_on_close = true
+kind = { type = "ebook", book = "~/Books/a.epub" }
+
+[[entries]]
+id = "game"
+label = "A Game"
+confirm_on_close = false
+kind = { type = "process", command = "/usr/bin/true" }
+"#,
+        )
+        .unwrap();
+
+        let by_id = |id: &str| {
+            policy
+                .entries
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("entry exists")
+                .confirm_on_close
+        };
+        assert!(by_id("book"));
+        assert!(!by_id("game"));
+    }
+
+    /// A book gets the gamepad preset without asking, because a pad is the one
+    /// controller a reading device is likely to have that the reader cannot
+    /// use on its own (issue #160).
+    #[test]
+    fn a_reading_activity_gets_the_gamepad_sidecar() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+
+[[entries]]
+id = "book"
+label = "A Book"
+kind = { type = "ebook", book = "~/Books/a.epub" }
+
+[[entries]]
+id = "game"
+label = "A Game"
+kind = { type = "process", command = "/usr/bin/true" }
+"#,
+        )
+        .unwrap();
+
+        let by_id = |id: &str| {
+            policy
+                .entries
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("entry exists")
+                .input_compat
+                .clone()
+        };
+        assert_eq!(
+            by_id("book"),
+            vec![InputCompatMode::GamepadProductivity],
+            "a D-pad should turn pages the moment a book opens"
+        );
+        assert!(
+            by_id("game").is_empty(),
+            "no other kind gains a sidecar it did not ask for"
+        );
+    }
+
+    /// A listed `input_compat` replaces the kind's answer rather than adding to
+    /// it, and an empty list is a list — the way an entry says "no sidecar".
+    #[test]
+    fn an_explicit_input_compat_overrides_the_kind_default() {
+        let policy = parse_config(
+            r#"
+config_version = 1
+
+[[entries]]
+id = "touch-book"
+label = "A Book"
+input_compat = "touch_to_mouse"
+kind = { type = "ebook", book = "~/Books/a.epub" }
+
+[[entries]]
+id = "bare-book"
+label = "Another Book"
+input_compat = []
+kind = { type = "ebook", book = "~/Books/b.epub" }
+"#,
+        )
+        .unwrap();
+
+        let by_id = |id: &str| {
+            policy
+                .entries
+                .iter()
+                .find(|e| e.id.as_str() == id)
+                .expect("entry exists")
+                .input_compat
+                .clone()
+        };
+        assert_eq!(by_id("touch-book"), vec![InputCompatMode::TouchToMouse]);
+        assert!(by_id("bare-book").is_empty());
+    }
+
     #[test]
     fn media_cache_size_and_grace_have_defaults() {
         let policy = parse_config("config_version = 1\n").unwrap();
@@ -97,6 +244,7 @@ watched_grace_days = 90
     }
 
     use super::*;
+    use shepherd_api::InputCompatMode;
     use std::time::Duration;
 
     #[test]

@@ -30,6 +30,8 @@ pub enum SessionState {
         confirm_on_close: bool,
         /// Whether this activity offers the reset button (issue #125).
         can_reset: bool,
+        /// Whether this activity offers the page-turn buttons (issue #160).
+        can_turn_pages: bool,
     },
 
     /// Warning shown - time running low
@@ -48,6 +50,8 @@ pub enum SessionState {
         confirm_on_close: bool,
         /// Whether this activity offers the reset button (issue #125).
         can_reset: bool,
+        /// Whether this activity offers the page-turn buttons (issue #160).
+        can_turn_pages: bool,
     },
 
     /// Session is ending
@@ -110,6 +114,17 @@ impl SessionState {
             SessionState::Active { can_reset, .. } | SessionState::Warning { can_reset, .. } => {
                 *can_reset
             }
+            SessionState::NoSession | SessionState::Ending { .. } => false,
+        }
+    }
+
+    /// Whether the current activity is one the HUD turns pages for, i.e.
+    /// whether to show the page-turn buttons (issue #160). `false` with no
+    /// session, so they hide with the rest of the session UI.
+    pub fn can_turn_pages(&self) -> bool {
+        match self {
+            SessionState::Active { can_turn_pages, .. }
+            | SessionState::Warning { can_turn_pages, .. } => *can_turn_pages,
             SessionState::NoSession | SessionState::Ending { .. } => false,
         }
     }
@@ -349,6 +364,7 @@ impl SharedState {
                 deadline,
                 confirm_on_close,
                 can_reset,
+                can_turn_pages,
             } => {
                 let now = shepherd_util::now();
                 // For unlimited sessions (deadline=None), time_remaining is None
@@ -368,6 +384,7 @@ impl SharedState {
                     time_remaining_secs: time_remaining,
                     confirm_on_close: *confirm_on_close,
                     can_reset: *can_reset,
+                    can_turn_pages: *can_turn_pages,
                 });
             }
 
@@ -392,6 +409,7 @@ impl SharedState {
                         entry_name,
                         confirm_on_close,
                         can_reset,
+                        can_turn_pages,
                         ..
                     } = state
                     {
@@ -406,6 +424,7 @@ impl SharedState {
                                 severity: *severity,
                                 confirm_on_close: *confirm_on_close,
                                 can_reset: *can_reset,
+                                can_turn_pages: *can_turn_pages,
                             };
                         }
                     }
@@ -416,6 +435,7 @@ impl SharedState {
                         entry_name,
                         confirm_on_close,
                         can_reset,
+                        can_turn_pages,
                         ..
                     } = state
                         && sid == session_id
@@ -430,6 +450,7 @@ impl SharedState {
                             severity: *severity,
                             confirm_on_close: *confirm_on_close,
                             can_reset: *can_reset,
+                            can_turn_pages: *can_turn_pages,
                         };
                     }
                 });
@@ -479,6 +500,7 @@ impl SharedState {
                         time_remaining_secs: time_remaining,
                         confirm_on_close: session.confirm_on_close,
                         can_reset: session.can_reset,
+                        can_turn_pages: session.can_turn_pages,
                     });
                 } else {
                     self.set_session_state(SessionState::NoSession);
@@ -556,7 +578,37 @@ mod tests {
             time_remaining_secs: None,
             confirm_on_close,
             can_reset: false,
+            can_turn_pages: false,
         }
+    }
+
+    /// The page buttons follow the activity, not the HUD: they belong to a
+    /// reading session and must be gone the moment there isn't one, or a
+    /// stray press would send a page key to the launcher.
+    #[test]
+    fn page_buttons_belong_to_the_session() {
+        assert!(!active(true).can_turn_pages());
+        assert!(!SessionState::NoSession.can_turn_pages());
+        assert!(
+            !SessionState::Ending {
+                session_id: SessionId::new(),
+                reason: "done".into(),
+            }
+            .can_turn_pages()
+        );
+
+        let reading = SessionState::Active {
+            session_id: SessionId::new(),
+            entry_id: EntryId::new("book"),
+            entry_name: "A Book".into(),
+            started_at: std::time::Instant::now(),
+            time_limit_secs: None,
+            time_remaining_secs: None,
+            confirm_on_close: true,
+            can_reset: false,
+            can_turn_pages: true,
+        };
+        assert!(reading.can_turn_pages());
     }
 
     #[test]

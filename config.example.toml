@@ -550,6 +550,11 @@ end = "20:00"
 # It emits nothing (so it needs the `input` group but not `/dev/uinput`) and,
 # like the two modes above, is mutually exclusive with them (all three grab or
 # produce the touchscreen). It still stacks with a `gamepad_*` preset.
+#
+# Leave `input_compat` out entirely and the entry's kind decides. Only `ebook`
+# asks for anything: it runs `gamepad_productivity`, whose D-pad is the arrow
+# keys, so a pad turns pages with nothing configured. Writing the field here
+# replaces that wholesale, and `input_compat = []` refuses every sidecar.
 # https://store.steampowered.com/app/22000/World_of_Goo/
 [[entries]]
 id = "steam-world-of-goo"
@@ -638,6 +643,10 @@ always = true
 # this is `true` by default: the HUD shows a "really end?" prompt and only stops
 # the activity once confirmed. Set it to `false` for activities that are safe to
 # close instantly (e.g. a simple menu or a stateless viewer).
+#
+# Left unset, the default comes from the entry's kind. Only `ebook` differs: a
+# book has nothing to lose, since the page is written on the way out, so it
+# closes on one tap. Setting the field explicitly always wins.
 #
 # This only affects the HUD "X" button. Closing via the API, a time/quota
 # expiration, or the activity's own process exiting is never gated by it.
@@ -1018,6 +1027,73 @@ content = "~/Games/retroarch/pokemon-firered.gba"
 max_run_seconds = 2700     # 45 minutes -- long enough to reach a save point
 daily_quota_seconds = 5400
 cooldown_seconds = 1800
+
+## === Reading (ebook) ===
+# Install the reader with:
+#   sudo shepherd-admin apps install okular
+#
+# One activity per book, opening where the child stopped. shepherd generates
+# the reader's whole configuration per entry -- the restrictions that keep the
+# activity inside the book, the page-at-a-time view, the reading font -- and
+# re-renders it before every launch, so nothing below needs a config file of
+# its own. See docs/ebooks.md.
+#
+# No books are included. Supply your own, DRM-free. A book from a store belongs
+# in that store's app -- a browser activity for Kindle Cloud Reader or Google
+# Play Books -- because the DRM is the point of the store, and shepherd is not
+# in the business of removing it.
+[[entries]]
+id = "the-hobbit"
+label = "The Hobbit"
+# The cover makes a far better tile than a generic book icon; without one,
+# shepherd falls back to the format's mime icon.
+# icon = "~/Books/covers/the-hobbit.png"
+
+[entries.kind]
+type = "ebook"
+# Absolute or ~/-prefixed, like a RetroArch `content`: a bare relative path
+# would resolve against the daemon's working directory, not yours.
+book = "~/Books/the-hobbit.epub"
+# layout = "facing_first_centered"
+#                       # the default: two pages like an open book, with the
+#                       # cover on its own so every later spread falls where a
+#                       # printed book's would. "facing" pairs from the first
+#                       # page instead; "single" suits a portrait screen, where
+#                       # one page fills it; and "scroll" is a continuous
+#                       # column -- the only layout a finger can navigate
+#                       # unaided, since paging is bound to keys and the wheel
+#                       # and the reader has no swipe gesture. The HUD grows a
+#                       # pair of page-turn buttons for a reading activity, so
+#                       # a paged layout is usable on a tablet too.
+# font_size = 16        # points, for a reflowed EPUB. This is the reading-size
+#                       # knob: the page is fitted to the screen, so a larger
+#                       # font means fewer words on it and bigger text. It also
+#                       # repaginates the book, which moves a saved place --
+#                       # so choose it before the first read, not after.
+# font_family = "Noto Serif"
+# open_at = 1           # first launch only; after that the reader reopens
+#                       # wherever the child stopped.
+# kiosk = true          # the default; false unlocks the reader's own menus,
+#                       # file dialog and settings -- for an admin looking at
+#                       # what the reader does unrestricted, not for a child.
+
+# Closing a book does not ask "are you sure": there is nothing to lose, since
+# the page is written on the way out. That is this kind's default -- set
+# confirm_on_close = true here to get the prompt anyway.
+
+# A book also runs the `gamepad_productivity` sidecar by default, so a game
+# controller's D-pad turns pages -- the reader itself understands keys, the
+# wheel and nothing else. Set input_compat = [] to go without it.
+
+# Reading is the obvious thing to reward, so no limit here -- and see the
+# [entries.tokens] block on a game entry for banking reading time into it.
+[entries.availability]
+always = true
+
+# A book needs no network. Belt to the reader's own restrictions: this is what
+# stops a link inside a book reaching anything.
+[entries.firewall]
+default = "deny"
 
 # Terminal for debugging only.
 # `foot` is used here (not `ptyxis`, `gnome-terminal`, etc.) because

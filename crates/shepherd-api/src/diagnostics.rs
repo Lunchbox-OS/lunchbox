@@ -112,6 +112,17 @@ pub enum DiagnosticCode {
     /// A RetroArch entry's content — its ROM or disc image — is not there, so
     /// the activity will not launch.
     RetroarchContentMissing,
+    /// An ebook entry's book is not there, so the activity opens on an error
+    /// instead of a page.
+    EbookBookMissing,
+    /// An ebook entry's reader, or the backend for that book's format, is not
+    /// installed. On Ubuntu the EPUB backend ships separately from Okular, so
+    /// this is the likely first-run failure.
+    EbookReaderMissing,
+    /// An ebook entry lays the book out in pages on a device that has no way
+    /// to turn one: a touchscreen and nothing else. Reading would stop at the
+    /// end of the first page.
+    EbookNoPageTurn,
 }
 
 /// What a diagnostic is about.

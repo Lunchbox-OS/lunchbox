@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 shepherd-util = { workspace = true }
 shepherd-api = { workspace = true }
+shepherd-bridge = { workspace = true }
 shepherd-host-api = { workspace = true }
 shepherd-config = { workspace = true }
 shepherd-store = { workspace = true }

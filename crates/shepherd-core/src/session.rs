@@ -23,6 +23,10 @@ pub struct SessionPlan {
     /// [`shepherd_api::EntryKind::supports_reset`]. Derived from the entry's
     /// kind at launch so the HUD knows whether to offer the button.
     pub can_reset: bool,
+    /// Whether the HUD should offer page-turn buttons — see
+    /// [`shepherd_api::EntryKind::supports_page_turn`]. Derived the same way,
+    /// and for the same reason.
+    pub can_turn_pages: bool,
 }
 
 impl SessionPlan {
@@ -230,6 +234,7 @@ impl ActiveSession {
             warnings_issued: self.warnings_issued.clone(),
             confirm_on_close: self.plan.confirm_on_close,
             can_reset: self.plan.can_reset,
+            can_turn_pages: self.plan.can_turn_pages,
         }
     }
 }
@@ -283,6 +288,7 @@ mod tests {
             ],
             confirm_on_close: true,
             can_reset: false,
+            can_turn_pages: false,
         }
     }
 
@@ -333,6 +339,7 @@ mod tests {
             }],
             confirm_on_close: true,
             can_reset: false,
+            can_turn_pages: false,
         };
 
         let times = plan.warning_times();

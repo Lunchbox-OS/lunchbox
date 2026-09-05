@@ -582,6 +582,12 @@ impl Entry {
         _global_brightness: &BrightnessPolicy,
     ) -> Self {
         let kind = convert_entry_kind(raw.kind);
+        // Resolved before `kind` is moved into the policy below: an entry that
+        // says nothing about confirming inherits its kind's answer, and a
+        // reader has nothing unsaved to protect.
+        let confirm_on_close = raw
+            .confirm_on_close
+            .unwrap_or_else(|| kind.confirms_on_close_by_default());
         let availability = raw
             .availability
             .map(convert_availability)
@@ -606,8 +612,13 @@ impl Entry {
         let internet = convert_entry_internet(raw.internet.as_ref());
         let firewall = raw.firewall.as_ref().map(convert_firewall_config);
         let browser = raw.browser.as_ref().map(convert_browser_config);
-        let input_compat =
-            convert_input_compat_list(&raw.input_compat, &EntryId::new(raw.id.clone()));
+        // Resolved before `kind` is moved into the policy below. An entry that
+        // lists nothing inherits its kind's sidecars; `input_compat = []` is a
+        // list, so it still means "none" and reaches the same conflict pass.
+        let input_compat = match &raw.input_compat {
+            Some(listed) => convert_input_compat_list(listed, &EntryId::new(raw.id.clone())),
+            None => kind.default_input_compat(),
+        };
         let input_compat_options = raw
             .input_compat_options
             .as_ref()
@@ -636,7 +647,7 @@ impl Entry {
             input_compat_options,
             requires_input,
             xwayland_native_resolution: raw.xwayland_native_resolution,
-            confirm_on_close: raw.confirm_on_close,
+            confirm_on_close,
         }
     }
 }
@@ -995,6 +1006,29 @@ fn convert_entry_kind(raw: RawEntryKind) -> EntryKind {
             env,
             kiosk,
             reset,
+        },
+        RawEntryKind::Ebook {
+            book,
+            viewer,
+            open_at,
+            layout,
+            font_size,
+            font_family,
+            command,
+            args,
+            env,
+            kiosk,
+        } => EntryKind::Ebook {
+            book,
+            viewer,
+            open_at,
+            layout,
+            font_size,
+            font_family,
+            command,
+            args,
+            env,
+            kiosk,
         },
         RawEntryKind::Custom { type_name, payload } => EntryKind::Custom {
             type_name,

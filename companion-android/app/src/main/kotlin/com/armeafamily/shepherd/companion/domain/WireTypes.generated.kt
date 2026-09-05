@@ -379,6 +379,23 @@ enum class DiagnosticCode {
      * the activity will not launch.
      */
     @SerialName("retroarch_content_missing") RETROARCH_CONTENT_MISSING,
+    /**
+     * An ebook entry's book is not there, so the activity opens on an error
+     * instead of a page.
+     */
+    @SerialName("ebook_book_missing") EBOOK_BOOK_MISSING,
+    /**
+     * An ebook entry's reader, or the backend for that book's format, is not
+     * installed. On Ubuntu the EPUB backend ships separately from Okular, so
+     * this is the likely first-run failure.
+     */
+    @SerialName("ebook_reader_missing") EBOOK_READER_MISSING,
+    /**
+     * An ebook entry lays the book out in pages on a device that has no way
+     * to turn one: a touchscreen and nothing else. Reading would stop at the
+     * end of the first page.
+     */
+    @SerialName("ebook_no_page_turn") EBOOK_NO_PAGE_TURN,
 }
 
 /**
@@ -507,6 +524,55 @@ data class DurationSecs(
     val nanos: Long,
     val secs: Long,
 )
+
+/**
+ * How an [`EntryKind::Ebook`] activity lays pages out.
+ */
+@Serializable
+enum class EbookLayout {
+    /**
+     * Two pages side by side, like an open book. Fits a landscape panel: a
+     * single portrait page fitted to 16:9 is letterboxed and small.
+     */
+    @SerialName("facing") FACING,
+    /**
+     * The same, with the first page alone — so the spreads fall where a
+     * printed book's would, cover on its own and chapter openings on the
+     * right. The default: it costs nothing over `facing` and matches what a
+     * child holding a paper book expects.
+     */
+    @SerialName("facing_first_centered") FACING_FIRST_CENTERED,
+    /**
+     * One page at a time. The right choice on a portrait screen.
+     */
+    @SerialName("single") SINGLE,
+    /**
+     * One continuous column, scrolled rather than paged, fitted to the width.
+     *
+     * The only layout a **touch-only** device can navigate: dragging scrolls
+     * it. The paged layouts turn the page on a key, a gamepad D-pad or a
+     * scroll wheel, and a touchscreen produces none of those — Okular grabs
+     * only the pinch gesture, and has no swipe-to-turn anywhere in its
+     * desktop view.
+     */
+    @SerialName("scroll") SCROLL,
+}
+
+/**
+ * Which reader an [`EntryKind::Ebook`] activity drives.
+ *
+ * Open rather than closed on purpose: the config surface here — a book and a
+ * place in it — is reader-agnostic, even though only one reader is wired up.
+ */
+@Serializable
+enum class EbookViewer {
+    /**
+     * Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
+     * PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
+     * documented way to disable its own escape hatches.
+     */
+    @SerialName("okular") OKULAR,
+}
 
 /**
  * Unique identifier for an entry in the policy whitelist
@@ -715,6 +781,64 @@ sealed interface EntryKind {
         val saveState: RetroarchSaveState? = null,
     ) : EntryKind
 
+    /**
+     * One book, opened in a document reader locked down to reading it
+     * (issue #160).
+     *
+     * The reader keeps the page: shepherd's job is to hand it a private
+     * configuration that closes every door out of the book, and to close the
+     * window politely at the end of the session so the position is written.
+     * See [`shepherd_host_linux::ebook`] for what is generated.
+     */
+    @Serializable
+    @SerialName("ebook")
+    data class Ebook(
+        /**
+         * Extra arguments, appended after the ones shepherd derives.
+         */
+        val args: List<String> = emptyList(),
+        /**
+         * The book. Absolute, or `~/`-prefixed; expanded at launch.
+         */
+        val book: String,
+        /**
+         * The reader binary. Defaults to the viewer's usual name.
+         */
+        val command: String? = null,
+        val env: Map<String, String> = emptyMap(),
+        /**
+         * Font family for the same. Must be installed on the device.
+         */
+        val fontFamily: String? = null,
+        /**
+         * Point size for the reflowed text of an EPUB. Changing it
+         * repaginates the book, which moves a remembered position, so pick it
+         * before the book is first opened.
+         */
+        val fontSize: Long = 16L,
+        /**
+         * Lock the reader down: no file dialog, no printing, no settings, no
+         * menubar or toolbar. On by default — this is a supervised kiosk, and
+         * off is only for an admin checking what the reader looks like
+         * unrestricted.
+         */
+        val kiosk: Boolean = true,
+        /**
+         * How pages are laid out. `facing` (the default) suits a landscape
+         * panel; `single` a portrait one.
+         */
+        val layout: EbookLayout? = null,
+        /**
+         * Page to open on the *first* launch, 1-based. Ignored once the
+         * reader has a remembered position for this book.
+         */
+        val openAt: Long? = null,
+        /**
+         * Which reader to drive. Only `okular` is implemented.
+         */
+        val viewer: EbookViewer? = null,
+    ) : EntryKind
+
     @Serializable
     @SerialName("custom")
     data class Custom(
@@ -746,6 +870,7 @@ enum class EntryKindTag {
     @SerialName("vm") VM,
     @SerialName("media") MEDIA,
     @SerialName("retroarch") RETROARCH,
+    @SerialName("ebook") EBOOK,
     @SerialName("custom") CUSTOM,
 }
 
@@ -1371,6 +1496,11 @@ data class SessionInfo(
      * older payload simply doesn't show the button.
      */
     val canReset: Boolean = false,
+    /**
+     * Whether the HUD should show page-turn buttons for this session. See
+     * [`EntryKind::supports_page_turn`].
+     */
+    val canTurnPages: Boolean = false,
     /**
      * Whether the HUD should confirm before its "X" button ends this
      * session (issue #78). Defaults to `true` when absent so older payloads

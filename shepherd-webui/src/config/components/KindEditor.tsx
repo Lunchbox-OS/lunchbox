@@ -1,7 +1,7 @@
 /**
  * What an activity actually launches.
  *
- * `RawEntryKind` is an internally-tagged union with eight variants, so
+ * `RawEntryKind` is an internally-tagged union with nine variants, so
  * switching the type rewrites the whole `kind` table. That is one `set` on
  * `kind` rather than a field-by-field migration: the shapes have almost nothing
  * in common, and carrying over `args`/`env` where they exist is enough.
@@ -13,6 +13,7 @@ import Switch from "@mui/material/Switch";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import type {
+  EbookLayout,
   RawEntryKind,
   RawMediaMode,
   RawMediaQuality,
@@ -32,6 +33,7 @@ const KIND_LABELS: Record<KindTag, string> = {
   vm: "Virtual machine",
   media: "Media library",
   retroarch: "Emulated game",
+  ebook: "Book",
   custom: "Custom",
 };
 
@@ -43,6 +45,7 @@ const KIND_HINTS: Record<KindTag, string> = {
   vm: "Handed to a VM driver.",
   media: "Opens a shepherd-media library.",
   retroarch: "Boots one ROM or disc image through RetroArch.",
+  ebook: "Opens one book in a reader locked to reading it.",
   custom: "Passed through to a host adapter that understands the type name.",
 };
 
@@ -69,6 +72,13 @@ const MEDIA_SORTS: Record<RawMediaSortBy, string> = {
   kind: "Kind",
   category: "Category",
   duration: "Duration",
+};
+
+const EBOOK_LAYOUTS: Record<EbookLayout, string> = {
+  facing_first_centered: "Two pages, cover on its own",
+  facing: "Two pages, from the first",
+  single: "One page at a time",
+  scroll: "Scrolling column (for touch-only screens)",
 };
 
 const SAVE_STATES: Record<RetroarchSaveState, string> = {
@@ -138,6 +148,9 @@ export function KindEditor({ kind, onChange }: Props) {
           args: args ?? [],
           env: env ?? {},
         } as RawEntryKind);
+        break;
+      case "ebook":
+        onChange({ ...base, book: "", args: args ?? [], env: env ?? {} } as RawEntryKind);
         break;
       case "custom":
         onChange({ ...base, type_name: "" } as RawEntryKind);
@@ -461,6 +474,75 @@ export function KindEditor({ kind, onChange }: Props) {
             value={kind.command ?? ""}
             onChange={(e) => patch({ command: e.target.value })}
             placeholder="retroarch"
+          />
+        </>
+      )}
+
+      {kind.type === "ebook" && (
+        <>
+          <TextField
+            size="small"
+            label="Book"
+            required
+            value={kind.book}
+            onChange={(e) => patch({ book: e.target.value })}
+            placeholder="~/Books/the-hobbit.epub"
+            helperText="EPUB, PDF, CBZ or DjVu. Absolute, or starting with ~/."
+          />
+          <TextField
+            select
+            size="small"
+            label="Layout"
+            value={kind.layout ?? "facing_first_centered"}
+            onChange={(e) => patch({ layout: e.target.value as EbookLayout })}
+            helperText="Facing pages suit a landscape screen, single a portrait one. A touch-only screen needs the scrolling column: there is no way to turn a page without a key, D-pad or wheel."
+          >
+            {(Object.keys(EBOOK_LAYOUTS) as EbookLayout[]).map((v) => (
+              <MenuItem key={v} value={v}>
+                {EBOOK_LAYOUTS[v]}
+              </MenuItem>
+            ))}
+          </TextField>
+          <TextField
+            size="small"
+            type="number"
+            label="Text size"
+            value={kind.font_size ?? 16}
+            onChange={(e) => patch({ font_size: Number(e.target.value) })}
+            helperText="Points, for a reflowed EPUB. Changing it repaginates the book, which moves a saved place -- set it before the first read."
+          />
+          <TextField
+            size="small"
+            label="Font"
+            value={kind.font_family ?? ""}
+            onChange={(e) => patch({ font_family: e.target.value })}
+            placeholder="Noto Serif"
+          />
+          <TextField
+            size="small"
+            type="number"
+            label="Open at page (optional)"
+            value={kind.open_at ?? ""}
+            onChange={(e) =>
+              patch({ open_at: e.target.value === "" ? null : Number(e.target.value) })
+            }
+            helperText="First launch only; after that the reader reopens where it was left."
+          />
+          <FormControlLabel
+            control={
+              <Switch
+                checked={kind.kiosk ?? true}
+                onChange={(e) => patch({ kiosk: e.target.checked })}
+              />
+            }
+            label="Lock the reader to this book"
+          />
+          <TextField
+            size="small"
+            label="Reader binary (optional)"
+            value={kind.command ?? ""}
+            onChange={(e) => patch({ command: e.target.value })}
+            placeholder="okular"
           />
         </>
       )}

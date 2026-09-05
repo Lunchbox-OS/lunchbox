@@ -62,6 +62,10 @@ activity kind so that closing one saves the game's state and re-opening resumes
 it — plus a HUD button to reset the console back to its title screen, which a
 resumed save state otherwise makes unreachable.
 
+[Books](./docs/ebooks.md) get one too: an activity per book, opening on the page
+the child stopped at, in a reader locked down to reading it — no file dialog, no
+settings, no menubar or toolbar, just the page.
+
 !["Putt Putt Joins the Circus" hosted within shepherd-launcher UI](./docs/readme/apps-puttputt.png)
 
 > [Putt Putt Joins the Circus](https://humongous.fandom.com/wiki/Putt-Putt_Joins_the_Circus)

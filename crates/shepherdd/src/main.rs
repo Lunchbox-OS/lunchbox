@@ -1507,6 +1507,7 @@ impl Service {
                 deadline,
                 confirm_on_close,
                 can_reset,
+                can_turn_pages,
             } => {
                 Self::broadcast(
                     ipc,
@@ -1518,6 +1519,7 @@ impl Service {
                         deadline: *deadline,
                         confirm_on_close: *confirm_on_close,
                         can_reset: *can_reset,
+                        can_turn_pages: *can_turn_pages,
                     }),
                 );
             }

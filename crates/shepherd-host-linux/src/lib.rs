@@ -14,6 +14,7 @@ mod audio;
 mod audio_route;
 mod brightness;
 mod browser;
+mod ebook;
 pub mod helpers;
 mod light;
 mod process;
@@ -29,6 +30,7 @@ pub use audio::{AudioOutput, AudioOutputKind, AudioTopology, SinkNode};
 pub use audio_route::{AudioRouter, NoOpAudioRouter, PipeWireAudioRouter};
 pub use brightness::*;
 pub use browser::is_supported_browser_flatpak;
+pub use ebook::{MissingSupport, missing_book, missing_support};
 pub use helpers::{
     resolve as resolve_helper, resolve_arg as resolve_helper_arg, resolve_daemon_sibling,
 };

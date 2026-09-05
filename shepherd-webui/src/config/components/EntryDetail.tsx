@@ -18,6 +18,7 @@ import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { useFields } from "../doc/useFields";
 import { entryPath, insert, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry, RawEntryKind } from "../model/config.generated";
+import { confirmsOnCloseByDefault, defaultInputCompat } from "../model/kindDefaults";
 import { BrowserEditor, FirewallEditor, InternetEditor } from "./NetworkEditors";
 import { BrightnessEditor, VolumeEditor } from "./RestrictionEditors";
 import { InputCompatEditor, RequiresInputEditor } from "./InputEditors";
@@ -147,7 +148,9 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
               <BrowserEditor path={`${base}.browser`} value={entry.browser} />
               <InputCompatEditor
                 basePath={base}
-                compat={entry.input_compat ?? []}
+                compat={entry.input_compat ?? defaultInputCompat(entry.kind)}
+                explicit={entry.input_compat !== undefined && entry.input_compat !== null}
+                kindDefault={defaultInputCompat(entry.kind)}
                 options={entry.input_compat_options}
               />
               <RequiresInputEditor basePath={base} devices={entry.requires_input ?? []} />
@@ -159,7 +162,7 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
                   <FormControlLabel
                     control={
                       <Switch
-                        checked={entry.confirm_on_close ?? true}
+                        checked={entry.confirm_on_close ?? confirmsOnCloseByDefault(entry.kind)}
                         onChange={(e) => f.setField("confirm_on_close", e.target.checked)}
                       />
                     }
@@ -167,7 +170,7 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
                   />
                   <Typography variant="caption" color="text.secondary" sx={{ ml: 6, mt: -1 }}>
                     Worth turning off only for activities that lose nothing when closed
-                    instantly.
+                    instantly — which is why a book starts off.
                   </Typography>
                   <FormControlLabel
                     sx={{ mt: 1 }}
@@ -206,6 +209,9 @@ function hasAdvanced(entry: RawEntry): boolean {
       entry.volume ||
       entry.brightness ||
       (entry.input_compat?.length ?? 0) > 0 ||
+      // An explicit empty list is a *choice* — a book refusing the gamepad
+      // sidecar its kind would otherwise run — so it counts as set.
+      (entry.input_compat?.length === 0 && defaultInputCompat(entry.kind).length > 0) ||
       (entry.requires_input?.length ?? 0) > 0 ||
       entry.xwayland_native_resolution ||
       entry.confirm_on_close === false,

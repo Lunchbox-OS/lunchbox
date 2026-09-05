@@ -266,6 +266,51 @@ cheaper check (`report_unowned_windows`), which only knows about pids it
 spawned. Closing an `unowned` window stays a human's call:
 shepherd will not kill a surface it does not recognize, because a system
 dialog on a kiosk a child depends on is worse than the visibility gap.
+## Ebook
+
+`EntryKind::Ebook` entries are launched through `ebook.rs`, which generates the
+reader's entire configuration into a per-entry `XDG_CONFIG_HOME` /
+`XDG_DATA_HOME` / `XDG_CACHE_HOME` and re-renders it before every launch —
+Okular rewrites its own config on exit, so a one-time seed would decay. The
+admin's own KDE configuration is never touched.
+
+Two mechanisms, because Okular has no single kiosk switch: KDE's Kiosk *action
+restrictions* in `kdeglobals` (immutable via `[$i]`, enforced by
+`KActionCollection` so the menu item, toolbar button and shortcut all die
+together), and the view settings in `okularrc`/`okularpartrc` (no menubar,
+sidebar or scrollbars; a page at a time, fitted to the screen).
+
+The toolbar takes a third mechanism, and not the documented one: the XMLGUI
+`hidden` attribute that is supposed to control it does nothing here (measured on
+a device, not assumed), so the generated `okularrc` asks Okular to start in its
+own full-screen mode — which hides menubar and toolbar together — and sets
+`shouldShow{MenuBar,ToolBar}ComingFromFullScreen=false` so that leaving the mode
+restores neither. The compositor refuses the fullscreen state to keep the HUD
+visible, which is exactly what makes Okular leave the mode, and the window keeps
+its ordinary geometry throughout. The `fullscreen` action must therefore stay
+unrestricted, since the chrome hiding hangs off it. Reading positions live in
+`<data>/okular/docdata/` and are never written by shepherd. See
+`docs/ebooks.md`.
+
+## Closing a window before signalling it
+
+`SIGTERM` is a request to die; `xdg_toplevel.close` is a request to finish. A
+large class of desktop applications saves its state in the window's close
+handler and installs no signal handler at all — Okular is the measured case: it
+writes the page it was on only on a clean close, so a signal-only stop loses the
+child's place every session.
+
+So a graceful stop for a kind that asks for it (`EntryKind::wants_polite_close`)
+first asks the compositor to close every window attributed to the session
+(`[con_id=N] kill` over the sway IPC the daemon already holds), waits up to
+`POLITE_CLOSE_TIMEOUT`, and only then falls through to the unchanged
+`SIGTERM` → `SIGKILL` ladder. Measured at 0.33 s (PDF) to ~2 s (EPUB).
+
+It is opt-in per kind rather than universal because a close request is not
+always a quit: Steam reads it as "hide to tray", and RetroArch already has a
+verified single-`SIGTERM` shutdown that writes its save state. An activity with
+no window costs nothing — the wait only happens if a window was found.
+
 ## RetroArch
 
 `EntryKind::Retroarch` entries are launched through `retroarch.rs`, which
