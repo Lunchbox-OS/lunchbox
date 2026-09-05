@@ -210,6 +210,44 @@ serves both, so `deps install cross` reported "already serves amd64; no ports
 entry needed" and rewrote nothing), and anything about *running* the result —
 these are amd64 binaries on an arm64 machine.
 
+### The cross set is not co-installable with the native one — a correction
+
+The scoping doc's probe concluded that the target architecture's `-dev`
+packages "are all co-installable with the amd64 host set and none is missing
+from ports — the apt step exited 0." **The exit code was the wrong thing to
+read.** `apt-get install -y` resolves a conflict by *removing* the offending
+packages and still exits 0.
+
+Doing it here removed eight natively-installed packages:
+
+```
+libmpv-dev libarchive-dev libcdio-dev libcdio-cdda-dev
+libcdio-paranoia-dev libext2fs-dev libgirepository1.0-dev libtool-bin
+```
+
+`libmpv-dev` is `Multi-Arch: same`, but it depends on `libcdio-dev`,
+`libext2fs-dev`, `libgirepository1.0-dev` and `libtool-bin`, which are
+`Multi-Arch: no` — so the whole chain is exclusive, and a host can have one
+architecture's or the other's, not both. `apt-get install --no-remove` confirms
+it from the other side: restoring the native set requires removing the target
+one.
+
+The consequence was quiet and remote, exactly as feared. The next
+`cargo test --workspace` failed to link `shepherd-media-android` with
+`cannot find -lmpv` — a message that says nothing about cross-compiling, on a
+machine whose native build had been green an hour earlier.
+
+`deps install cross` now simulates the install first and refuses when anything
+native would go, naming the packages and offering the two real options
+(cross-compile in a container, or `--allow-remove` and restore with
+`deps install build`). `.ci/Dockerfile.cross` passes `--allow-remove`, which is
+safe there specifically: that image only ever cross-compiles, so it has no
+native build to protect.
+
+This does not weaken the cross-link result above — that build linked all nine
+binaries against a complete target sysroot. It changes where cross builds
+should *happen*: a container, not a workstation you also build natively on.
+
 ### One alarming-looking thing that is fine
 
 Installing a foreign architecture's libraries runs their `postinst` scripts,

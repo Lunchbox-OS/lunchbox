@@ -169,6 +169,10 @@ Notes:
   configured mirror does not serve it, adds an entry for Ubuntu's ports mirror.
   Many mirrors carry every architecture in one tree, so this is decided by
   probing rather than assumed.
+- It **refuses** if installing the target's `-dev` set would uninstall the
+  host's: those chains are not always co-installable, and apt would remove the
+  native half silently. Cross-compile in a container instead, or pass
+  `--allow-remove` and restore with `deps install build`.
 - Cross-compiling buys no test coverage: nothing in `cargo test`, the e2e suite
   or the firewall BPF suites runs on the target architecture. Those need a
   native host.

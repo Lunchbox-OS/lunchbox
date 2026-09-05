@@ -29,13 +29,22 @@ ARG TARGET_ARCH=arm64
 # the image stays in lockstep with `shepherd deps install cross` on a host and
 # the multiarch/mirror setup is exercised here rather than reimplemented.
 #
+# --allow-remove is required, and is safe *here specifically*. The two
+# architectures' -dev chains are not co-installable: several packages
+# libmpv-dev depends on (libcdio-dev, libext2fs-dev, libgirepository1.0-dev,
+# libtool-bin) are `Multi-Arch: no`, so apt drops the host's half to make room
+# for the target's. `deps install cross` refuses to do that by default,
+# because on a developer's machine it silently breaks the native build. This
+# image never builds natively -- it exists to cross-compile -- so it has no
+# native build to protect, and the base image it layers on is untouched.
+#
 # Re-copy scripts (and VERSION, which `scripts/shepherd` reads at startup for
 # any subcommand) so this layer reflects the current checkout rather than
 # whatever the base image baked.
 COPY VERSION /opt/shepherd-deps/VERSION
 COPY scripts /opt/shepherd-deps/scripts
 WORKDIR /opt/shepherd-deps
-RUN ./scripts/shepherd deps install cross --arch "${TARGET_ARCH}" && \
+RUN ./scripts/shepherd deps install cross --arch "${TARGET_ARCH}" --allow-remove && \
     rm -rf /var/lib/apt/lists/*
 
 # `deps install cross` adds the Rust target as root, so re-open the toolchain

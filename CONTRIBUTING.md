@@ -557,11 +557,25 @@ architecture and, only if the configured mirror does not already serve it, adds
 an entry for Ubuntu's ports mirror — on 26.04 the main archive carries arm64
 too, so that is decided by probing rather than assumed.
 
-Installing a foreign architecture's libraries prints a handful of
+**It will probably refuse, and that is the useful part.** The two
+architectures' `-dev` chains are not co-installable here: `libmpv-dev` depends
+on `libcdio-dev`, `libext2fs-dev`, `libgirepository1.0-dev` and `libtool-bin`,
+several of which are `Multi-Arch: no`, so apt makes room by removing the host's
+half — and `apt-get install -y` does that silently and exits 0. The native
+build then fails at link time with `cannot find -lmpv`, a long way from
+anything that mentions cross-compiling. `deps install cross` simulates the
+install first and stops rather than let that happen.
+
+So on a machine you also build natively on, **cross-compile in a container**
+(that is what CI does — see `.ci/Dockerfile.cross`). If you would rather take
+the trade on the host, pass `--allow-remove`, and restore the native set
+afterwards with `shepherd deps install build`.
+
+Installing a foreign architecture's libraries also prints a handful of
 `Exec format error` lines from their `postinst` scripts (glib schemas,
-gdk-pixbuf loaders). That is expected on a multiarch host with no emulator, and
-harmless: those helpers matter to *running* that architecture's software, not
-to compiling against its headers. `apt` exits 0 and the sysroot is complete.
+gdk-pixbuf loaders). Those are expected on a multiarch host with no emulator,
+and harmless: the helpers matter to *running* that architecture's software, not
+to compiling against its headers.
 
 An `--arch` naming the **host's own** architecture builds natively, into the
 usual `target/{debug,release}`, so it is a no-op rather than a second target

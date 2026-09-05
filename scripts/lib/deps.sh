@@ -486,6 +486,52 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
 }
 
+# Refuse to install a cross set that would uninstall the native one.
+#
+# The two architectures' -dev chains are not always co-installable, and apt
+# resolves that by *removing* the native half -- then exits 0. Installing
+# libmpv-dev:<arch> on this workspace's dependency set drags out the host's own
+# libmpv-dev, libgirepository1.0-dev, libarchive-dev, libcdio-dev,
+# libext2fs-dev and libtool-bin, because several of those are `Multi-Arch: no`
+# and libmpv-dev depends on them. The native build then fails at link time with
+# `cannot find -lmpv`, a long way from anything that mentions cross-compiling.
+#
+# So simulate first and stop, rather than leave someone with a broken
+# workstation and no idea why. A CI image that only ever cross-compiles has no
+# native build to protect and passes --allow-remove.
+_deps_refuse_destructive_install() {
+    local -a packages=("$@")
+    local sim removed
+
+    info "Checking whether this would remove any natively-installed packages..."
+    # `|| true`: a simulation that fails has nothing to say about removals, and
+    # the real install below will report the failure properly.
+    sim="$(maybe_sudo apt-get install -s -y "${packages[@]}" 2>/dev/null || true)"
+
+    # apt lists removals under a header, one indented continuation block.
+    removed="$(awk '
+        /^The following packages will be REMOVED:/ { inblock = 1; next }
+        inblock && /^[[:space:]]/ { print; next }
+        inblock { inblock = 0 }
+    ' <<<"$sim" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+
+    [[ -n "$removed" ]] || return 0
+
+    warn "This would REMOVE these natively-installed packages:"
+    warn "  $removed"
+    die "Refusing: that would break the native build on this host (a missing
+native libmpv-dev shows up as \`cannot find -lmpv\` when linking, which says
+nothing about cross-compiling).
+
+The two architectures' -dev chains are not co-installable here, so this host
+can have one or the other, not both. Options:
+
+  * Cross-compile in a container instead, and keep this host native. That is
+    what CI does; see .ci/Dockerfile.cross.
+  * Accept the trade and pass --allow-remove. Restore the native set afterwards
+    with: shepherd deps install build"
+}
+
 # Read a package file, stripping comments and empty lines
 read_package_file() {
     local file="$1"
@@ -548,6 +594,7 @@ get_packages() {
 _deps_parse_args() {
     DEPS_SET="${1:-}"
     DEPS_ARCH=""
+    DEPS_ALLOW_REMOVE=false
     shift || true
 
     while [[ $# -gt 0 ]]; do
@@ -556,6 +603,10 @@ _deps_parse_args() {
                 [[ -n "${2:-}" ]] || die "--arch needs a Debian architecture"
                 DEPS_ARCH="$2"
                 shift 2
+                ;;
+            --allow-remove)
+                DEPS_ALLOW_REMOVE=true
+                shift
                 ;;
             *)
                 die "Unknown deps option: $1 (try: shepherd deps help)"
@@ -575,7 +626,7 @@ _deps_parse_args() {
 
 # Print packages for a set (one per line)
 deps_print() {
-    local DEPS_SET DEPS_ARCH
+    local DEPS_SET DEPS_ARCH DEPS_ALLOW_REMOVE
     _deps_parse_args "$@"
     
     if [[ -z "$DEPS_SET" ]]; then
@@ -587,7 +638,7 @@ deps_print() {
 
 # Install packages for a set
 deps_install() {
-    local DEPS_SET DEPS_ARCH
+    local DEPS_SET DEPS_ARCH DEPS_ALLOW_REMOVE
     _deps_parse_args "$@"
     local set_name="$DEPS_SET"
     
@@ -615,6 +666,13 @@ deps_install() {
     fi
     
     info "Packages: $packages"
+
+    # The cross set is the one that can collide with what is already installed
+    # for the host; every other set only adds to it.
+    if [[ "$set_name" == "cross" ]] && [[ "$DEPS_ALLOW_REMOVE" != "true" ]]; then
+        # shellcheck disable=SC2086  # word splitting is the point
+        _deps_refuse_destructive_install $packages
+    fi
     
     # Install using apt
     maybe_sudo apt-get update
@@ -666,7 +724,7 @@ deps_install() {
 
 # Check if all packages for a set are installed
 deps_check() {
-    local DEPS_SET DEPS_ARCH
+    local DEPS_SET DEPS_ARCH DEPS_ALLOW_REMOVE
     _deps_parse_args "$@"
     local set_name="$DEPS_SET"
     
@@ -777,6 +835,9 @@ Package sets:
     agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
     cross    Cross-compilation toolchain and the target architecture's half of
              the build set. Needs --arch <debian-arch>; see 'shepherd build --arch'.
+             Refuses to run if it would uninstall the native build set (the two
+             are not always co-installable); --allow-remove overrides, and is
+             what the CI cross image passes.
     dev      All dependencies (build + run + test + agent + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
