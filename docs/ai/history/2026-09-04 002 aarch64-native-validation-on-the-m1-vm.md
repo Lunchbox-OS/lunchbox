@@ -33,6 +33,7 @@ the binaries were linked *and* run here.
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | `shepherd dev headless` + `dev shot` | launcher grid + HUD paint correctly |
 | `shepherd package deb --arch arm64` | `shepherd-launcher_0.4.1_arm64.deb`, valid |
+| `deps install cross` + `build --arch` + `package deb --arch` (→ amd64) | **cross link proven**, valid `..._amd64.deb` |
 | `firewall_cgroup` (writable + read-only cgroupfs), as root | passed, real packets filtered |
 | `firewall_real` (polkit + helper + systemd-run), as `tester` | passed |
 | `firewall_real_flatpak` / `_snap` | skipped — no flatpak, no probe snap |
@@ -170,6 +171,60 @@ is reversible:
 - a `tester` user, in that group, plus an ACL granting it traversal of
   `/home/shepherd-dev`
 
+## The cross link, proven (in the mirror direction)
+
+The one step nothing had ever executed. The original probe died on ENOSPC
+before linking; native aarch64 builds link, but never *cross*. Once Canonical's
+archive came back it became testable here, because `us.archive.ubuntu.com`
+serves both architectures — so this host can cross-compile **towards amd64**,
+the mirror image of what CI does.
+
+```sh
+./scripts/shepherd deps install cross --arch amd64
+./scripts/shepherd build --arch amd64
+./scripts/shepherd package deb --arch amd64 --out dist/pkg
+```
+
+All three succeeded, first attempt, no source changes. Results:
+
+- **Every binary linked and is `ELF 64-bit … x86-64`** — all eight session
+  binaries plus `shepherd-firewall-helper`, interpreter
+  `/lib64/ld-linux-x86-64.so.2`, and `NEEDED` entries resolved against the
+  amd64 sysroot (`libgtk-4.so.1`, `libudev.so.1`, …). The workspace cross-links,
+  and the last open question from the scoping doc is closed.
+- **The eBPF object stayed `ELF … eBPF`,** and
+  `crates/shepherd-firewall-bpf/target/` contains only `bpfel-unknown-none`
+  with no host-triple directory beside it. That is the `--target`-on-the-
+  command-line decision holding up in a real cross build rather than in the
+  synthetic test that first demonstrated it.
+- **`package deb --arch amd64` produced a valid package**: `Architecture:
+  amd64`, `control.tar.xz` + `data.tar.xz`, and x86-64 binaries staged inside
+  it — i.e. the label and the contents agree, which is what the new CI
+  assertions check.
+- **The native path is undisturbed.** A plain `shepherd build` afterwards still
+  produces `ARM aarch64` binaries in `target/debug`, and `deps check dev` still
+  passes. The cross build lives entirely in `target/x86_64-unknown-linux-gnu/`.
+
+What this does **not** prove: the ports-mirror fallback (this host's mirror
+serves both, so `deps install cross` reported "already serves amd64; no ports
+entry needed" and rewrote nothing), and anything about *running* the result —
+these are amd64 binaries on an arm64 machine.
+
+### One alarming-looking thing that is fine
+
+Installing a foreign architecture's libraries runs their `postinst` scripts,
+and several try to execute a helper of that architecture:
+
+```
+/var/lib/dpkg/info/libglib2.0-0t64:amd64.postinst: 41:
+  /usr/lib/x86_64-linux-gnu/glib-2.0/glib-compile-schemas: Exec format error
+```
+
+Five of those appeared (glib schemas, gio modules, gdk-pixbuf loaders). They
+are expected on any multiarch host without an emulator, do not fail the
+install, and matter only to *running* that architecture's software — which is
+not what a sysroot is for. `apt` exited 0 and the sysroot is complete.
+
 ## Two setup gaps this VM exposed
 
 - **`deps install dev` does not install clippy or rustfmt.** `install_rust`
@@ -247,16 +302,15 @@ this VM, since the cross build happens on the amd64 runner:
 - `ci.yml`: a `build-arm64` job, and `package` matrixed over both arches.
 - `release.yml`: the `deb` job matrixed over both arches.
 
-One thing to watch on the first run:
+Both of the risks this section originally listed have since been retired: the
+cross link is proven (above), and the mirror question is settled (the
+container's `archive.ubuntu.com` serves arm64, so `deps install cross` will add
+no source and rewrite nothing).
 
-- **The final link is still unproven.** The original probe died on ENOSPC
-  before linking; native aarch64 links fine, but nothing has yet linked
-  *cross*. That is what `build-arm64`'s "Assert the binaries are actually
-  arm64" step is there to catch, along with a silent fallback to the host.
-
-The `deps install cross` step in the cross image should be uneventful: the
-container's `archive.ubuntu.com` serves arm64 (see the correction above), so
-the probe finds it already available and no source is added or rewritten.
+What is left is genuinely CI-shaped and cannot be rehearsed here: whether the
+`image-cross` build succeeds on the runner, whether the DinD/registry plumbing
+copied from `image-android` works for a third image, and how much the extra
+image job costs the critical path.
 
 Also still open:
 

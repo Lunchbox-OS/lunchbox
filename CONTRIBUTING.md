@@ -554,8 +554,14 @@ package:
 half of `deps/build.pkgs` (Ubuntu's multiarch makes it co-installable with the
 host's own), and rustc's std for the derived triple. It tells dpkg about the
 architecture and, only if the configured mirror does not already serve it, adds
-an entry for Ubuntu's ports mirror — many mirrors carry every architecture in
-one tree, so that is decided by probing rather than assumed.
+an entry for Ubuntu's ports mirror — on 26.04 the main archive carries arm64
+too, so that is decided by probing rather than assumed.
+
+Installing a foreign architecture's libraries prints a handful of
+`Exec format error` lines from their `postinst` scripts (glib schemas,
+gdk-pixbuf loaders). That is expected on a multiarch host with no emulator, and
+harmless: those helpers matter to *running* that architecture's software, not
+to compiling against its headers. `apt` exits 0 and the sysroot is complete.
 
 An `--arch` naming the **host's own** architecture builds natively, into the
 usual `target/{debug,release}`, so it is a no-op rather than a second target
