@@ -159,11 +159,28 @@ install_sway_config() {
     # or `launch`. It is in `sway.conf` because a dev stack runs entirely inside
     # one shell's cgroup, where the check cannot mean anything.
     #
+    # The two `swaymsg exit` fallbacks are rewritten rather than stripped (issue
+    # #144's open defect 2, tracked as #172) -- the one that runs when shepherdd
+    # exits, and the one behind the `Mod4+Shift+Escape` escape hatch, which fires
+    # only when there is no shepherdd to signal. `swaymsg exit` cannot work on a
+    # device:
+    # shepherdd unlinks sway's IPC socket once it has connected, so a daemon
+    # that dies after that leaves sway up with nothing supervising the session.
+    # `loginctl terminate-session` needs no compositor socket, and terminating
+    # one's own session needs no polkit authorisation. `sway.conf` keeps
+    # `swaymsg exit` because a development sway is nested inside the developer's
+    # own login session and inherits its `XDG_SESSION_ID`.
+    #
+    # This does not make a *deliberate* kill safe: the `sh -c` wrapper runs at
+    # the kiosk uid, so an activity can kill it first and leave nothing to run
+    # the fallback. See the note above the exec line in `sway.conf`.
     # `sway.conf` carries both flags because it is the development config, where
     # the unlink would take the socket away from `swaymsg` and the headless
     # harness. An installed kiosk wants the defaults, so they come back out
     # here — and the checks below are the ones that matter: a rename upstream
     # that silently left one in would ship an unhardened device.
+    # shellcheck disable=SC2016  # $XDG_SESSION_ID must reach the config
+    # literally, for the session's own shell to expand when the fallback runs.
     sed \
         -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
         -e "s|./target/debug/shepherd-hud|$bindir/shepherd-hud|g" \
@@ -174,6 +191,8 @@ install_sway_config() {
         -e "s| --no-restrict-ipc-peers||g" \
         -e "s| --trust-environment||g" \
         -e "s| --no-state-custodian||g" \
+        -e '/^exec .*shepherdd -c /s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
+        -e '/^bindsym .*pkill -TERM shepherdd/s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
         "$src_config" > "$dst_config"
 
     # Scoped to the exec line: the comment above it names the flag too, and a
@@ -191,6 +210,20 @@ install_sway_config() {
     fi
     if [[ "$dst_exec_line" == *--no-state-custodian* ]]; then
         die "Failed to strip --no-state-custodian from $dst_config; the installed device would keep policy and state in the kiosk user's home, where every activity can rewrite them (issue #157)"
+    fi
+    if [[ "$dst_exec_line" == *"swaymsg exit"* ]]; then
+        die "Failed to rewrite the 'swaymsg exit' fallback in $dst_config; shepherdd unlinks sway's IPC socket, so a daemon that died would leave the session running with nothing supervising it (issue #144)"
+    fi
+    if [[ "$dst_exec_line" != *"terminate-session"* ]]; then
+        die "No session-teardown fallback on the exec line in $dst_config; a daemon that died would leave the session running with nothing supervising it (issue #144)"
+    fi
+    local dst_exit_binding
+    dst_exit_binding="$(grep -E "^bindsym .*pkill -TERM shepherdd" "$dst_config" || true)"
+    if [[ -z "$dst_exit_binding" ]]; then
+        die "No 'pkill -TERM shepherdd' exit binding in $dst_config (sway.conf's exit keybinding may have changed)"
+    fi
+    if [[ "$dst_exit_binding" == *"swaymsg exit"* ]]; then
+        die "Failed to rewrite the 'swaymsg exit' fallback on the exit binding in $dst_config; shepherdd unlinks sway's IPC socket, so the escape hatch would do nothing when there is no shepherdd to signal (issue #144)"
     fi
     if [[ "$dst_exec_line" == *--trust-environment* ]]; then
         die "Failed to strip --trust-environment from $dst_config; the installed device would take helper binaries, and the browser-policy root, from an environment the kiosk user can write (issue #144)"
