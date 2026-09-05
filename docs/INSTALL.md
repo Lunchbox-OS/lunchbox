@@ -106,8 +106,9 @@ on the CPU. `shepherd-media` asks YouTube for H.264 first for exactly that
 reason.
 
 To install an activity backend (Steam via Canonical's snap, Chrome via Flathub,
-RetroArch from the distro's own packages — matching what shepherd's
-`type = "steam"`, `kind = "flatpak"` and `type = "retroarch"` adapters drive):
+RetroArch and Okular from the distro's own packages — matching what shepherd's
+`type = "steam"`, `kind = "flatpak"`, `type = "retroarch"` and `type = "ebook"`
+adapters drive):
 
 ```sh
 sudo shepherd-admin apps install steam    # or: chrome
@@ -138,6 +139,24 @@ opt-in; `sudo add-apt-repository --remove ppa:libretro/testing` reverts it.
 **No games are installed** — supply your own, and only ones you have the right
 to. See [emulators.md](./emulators.md) for configuring an activity, where saves
 live, and how the reset button works.
+
+`apps install okular` sets up reading activities (`type = "ebook"`):
+
+```sh
+sudo shepherd-admin apps install okular
+```
+
+It installs three packages, and the second is the one people miss: `okular`
+itself, `okular-extra-backends` — EPUB and DjVu support ship separately from
+Okular on Ubuntu, so without it a reading activity opens PDFs and refuses
+novels — and `fonts-noto-core` for the default reading font. shepherd generates
+the reader's whole configuration per entry and re-renders it on every launch,
+so there is nothing to set up by hand.
+
+**No books are installed.** Supply your own, DRM-free; a book from a store
+belongs in that store's app (a browser or Android activity). See
+[ebooks.md](./ebooks.md) for configuring an activity, where reading positions
+live, and what the restrictions do and do not cover.
 
 `apps install steam` also connects the snap's `mount-observe` interface and
 permits unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`
@@ -637,6 +656,14 @@ uinput is what lets the sidecars work on any Wayland compositor (GNOME/Mutter,
 KWin, …), not just wlroots ones like Sway. (`disable_touch` is the exception —
 it only grabs input and emits nothing, so it needs the `input` group but not
 `/dev/uinput`.)
+
+**The HUD needs the same `/dev/uinput` access**, whether or not any activity
+configures a sidecar: its page-turn buttons for `type = "ebook"` activities
+synthesize a keypress through it. `shepherd install all` and the `.deb` both
+provide it already, so a normal install needs nothing extra — but on an install
+where the udev rule or the group was skipped deliberately, those buttons do
+nothing, and a paged reading activity on a touch-only device raises the
+`ebook_no_page_turn` diagnostic saying so.
 
 `shepherd install all` adds the group and installs the udev rule
 automatically. To set them up on an existing install, run:
