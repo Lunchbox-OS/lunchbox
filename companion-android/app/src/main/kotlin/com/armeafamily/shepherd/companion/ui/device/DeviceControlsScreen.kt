@@ -73,6 +73,14 @@ fun DeviceControlsScreen(
                 Column(androidx.compose.ui.Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Maintenance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Button(onClick = vm::reloadConfig, modifier = Modifier.fillMaxWidth()) { Text("Reload config") }
+                    // Next to "reload config" because it is the same gesture
+                    // for the other half of what a parent changes: the config
+                    // file is one source of what the child sees, the playlist
+                    // behind a media activity is the other, and only the first
+                    // had a button (issue #165).
+                    OutlinedButton(onClick = vm::refreshMedia, modifier = Modifier.fillMaxWidth()) {
+                        Text("Refresh media")
+                    }
                     OutlinedButton(onClick = vm::logoutDevice, modifier = Modifier.fillMaxWidth()) {
                         Text("Log out device session")
                     }

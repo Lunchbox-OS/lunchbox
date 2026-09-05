@@ -31,6 +31,25 @@ taken with `default-features = false`, so even the mpv-backed `PlayerHandle` is
 absent. The player-side wrapper that substitutes cached files at play time stays
 behind in `shepherd-media` as `caching_player.rs`.
 
+## Skipping the TTLs on request (issue #165)
+
+Every cache here answers "is this fresh enough" with a clock, which is right for
+the hourly sweep and wrong for an administrator who has just changed something.
+`refetch_playlist` and `SponsorBlockCache::refresh` are the same fetches with
+the freshness check removed, and `clear_all_failures` forgets every download
+cooldown in the directory at once.
+
+All three **re-fetch rather than delete-then-fetch**, which is the whole design
+constraint. Every cache on this path falls back to a stale copy when the network
+is gone — that is what keeps a device skipping sponsors and listing its library
+offline — so a refresh that unlinked what it could not replace would leave a
+device on a flaky connection worse off than before the button was pressed. A
+failed forced fetch therefore leaves the cached copy exactly where it was and
+returns the error, and shepherdd turns that into a diagnostic.
+
+The cooldown markers are the exception, because there the marker *is* the
+staleness: an item is held back precisely by the record of its last failure.
+
 ## `yt-dlp` runs in a cgroup of its own (issue #144)
 
 `shepherdd` accepts a client on its management socket only from its own cgroup,

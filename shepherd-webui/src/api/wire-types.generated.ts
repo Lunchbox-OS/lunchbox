@@ -321,6 +321,19 @@ export type DiagnosticCode =
    */
   | "media_library_unreadable"
   /**
+   * An administrator asked for a media refresh (issue #165) and it could not
+   * reach what it was told to re-fetch — the device is offline, the playlist
+   * would not load, SponsorBlock did not answer.
+   *
+   * Distinct from [`Self::MediaLibraryUnreadable`], which is about a library
+   * that cannot be *parsed* and is just as broken on a scheduled sweep. This
+   * one only ever appears because somebody pressed a button, and it is what
+   * stops that button from looking like it worked. The device keeps serving
+   * whatever it had cached, so this is a refresh that did not happen rather
+   * than a library that is gone.
+   */
+  | "media_refresh_failed"
+  /**
    * No sound backend was detected; volume control does nothing.
    */
   | "no_sound_backend"

@@ -77,6 +77,35 @@ pub fn clear_failed(cache_dir: &Path, key: &str) {
     let _ = std::fs::remove_file(cache_dir.join(format!("{key}.{FAILED_EXT}")));
 }
 
+/// Forget every recorded failure in this directory, so nothing is inside its
+/// cooldown any more. Returns how many markers were removed.
+///
+/// For the administrator-triggered refresh (issue #165). The six-hour cooldown
+/// exists so a library of dead links does not turn into an hourly burst of
+/// doomed yt-dlp runs — a rule about *unattended* retries. Somebody who has
+/// just fixed the thing that was broken and pressed a button is not unattended,
+/// and waiting out a timer they cannot see is the whole complaint.
+///
+/// Keyed by content, and the directory is shared by every library on the
+/// device, so this is deliberately all-or-nothing: there is no per-library
+/// subset to clear, and clearing one library's markers means walking the same
+/// directory anyway.
+pub fn clear_all_failures(cache_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return 0;
+    };
+    let mut cleared = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(&format!(".{FAILED_EXT}"))
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
 /// Whether `key` failed too recently to be worth trying again.
 ///
 /// Applies to speculative downloads only. A download the user earned by
@@ -747,6 +776,30 @@ mod tests {
             "clip",
             Duration::from_secs(3600)
         ));
+    }
+
+    #[test]
+    fn clearing_all_failures_unblocks_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_failed(dir.path(), "clip");
+        mark_failed(dir.path(), "other");
+        std::fs::write(dir.path().join("clip.mp4"), b"video").unwrap();
+
+        assert_eq!(clear_all_failures(dir.path()), 2);
+        assert!(!retry_blocked(
+            dir.path(),
+            "clip",
+            Duration::from_secs(3600)
+        ));
+        assert!(!retry_blocked(
+            dir.path(),
+            "other",
+            Duration::from_secs(3600)
+        ));
+        assert!(
+            dir.path().join("clip.mp4").exists(),
+            "clearing cooldowns must not touch cached content"
+        );
     }
 
     #[test]

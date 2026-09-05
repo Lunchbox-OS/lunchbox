@@ -45,7 +45,7 @@ pub mod subprocess;
 pub use download::{DEFAULT_DOWNLOAD_INTERVAL, DownloadKind, RETRY_COOLDOWN};
 pub use key::{content_key, interest_key, source_url};
 pub use paths::media_cache_dir;
-pub use playlist::{fetch_playlist, ytdlp_available};
+pub use playlist::{fetch_playlist, refetch_playlist, ytdlp_available};
 pub use sponsorblock::{DEFAULT_API as SPONSORBLOCK_API, SponsorBlockCache};
 pub use subprocess::{
     ProgramResolverFn, ScopePrefixFn, set_program_resolver_fn, set_scope_prefix_fn,
@@ -53,7 +53,7 @@ pub use subprocess::{
 // The shared eviction scoring; re-exported so callers of this crate need not
 // reach into `shepherd-media-app` for it.
 pub use shepherd_media_app::lru::{DEFAULT_WATCHED_GRACE, Score, ScoreWeights as CacheWeights};
-pub use store::{CacheState, cache_total};
+pub use store::{CacheState, cache_total, clear_all_failures};
 
 use download::{DownloadRequest, download_worker};
 

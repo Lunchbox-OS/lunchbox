@@ -144,6 +144,19 @@ class ManagementClient(private val connection: ShepherdConnection) {
 
     suspend fun reloadConfig(): ReloadResult = decode(call("reload_config", RpcParams.reloadConfig()))
 
+    /**
+     * Re-fetch playlists, videos and sponsor segments now instead of waiting
+     * out their caches (issue #165).
+     *
+     * Returns once the device has accepted the request. The work behind it —
+     * a `yt-dlp` run per playlist, then downloads — takes far longer than the
+     * RPC deadline, so what came of it arrives as a diagnostic on the device
+     * health screen rather than in this reply.
+     */
+    suspend fun refreshMedia() {
+        call("refresh_media", RpcParams.refreshMedia())
+    }
+
     suspend fun logout() {
         call("logout", RpcParams.logout())
     }

@@ -75,6 +75,7 @@ export type RpcMethod =
   | "set_display_mode"
   | "ping"
   | "reload_config"
+  | "refresh_media"
   | "logout"
   | "list_diagnostics"
   | "list_windows"
@@ -199,6 +200,7 @@ export interface RpcParamsMap {
   };
   "ping": Record<string, never>;
   "reload_config": Record<string, never>;
+  "refresh_media": Record<string, never>;
   "logout": Record<string, never>;
   "list_diagnostics": Record<string, never>;
   "list_windows": Record<string, never>;
@@ -257,6 +259,7 @@ export interface RpcResultMap {
   "set_display_mode": DisplayState;
   "ping": null;
   "reload_config": { entry_count: number };
+  "refresh_media": null;
   "logout": null;
   "list_diagnostics": DiagnosticSet;
   "list_windows": WindowInfo[];

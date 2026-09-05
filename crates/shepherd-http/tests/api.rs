@@ -249,6 +249,7 @@ fn make_app_with_admin_and_policy(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
         display: Arc::new(shepherd_host_api::NoOpDisplayController),

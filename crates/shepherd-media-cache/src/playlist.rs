@@ -217,6 +217,24 @@ pub fn fetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
     }
 }
 
+/// Fetch a YouTube playlist, ignoring the cache entirely, for an
+/// administrator-triggered refresh (issue #165).
+///
+/// The point of the button is that a video added to the playlist five minutes
+/// ago shows up now instead of in six hours, so the TTL is exactly what has to
+/// be skipped. A successful fetch is written back, which is what makes the
+/// refresh reach the player process too — both read this one directory.
+///
+/// On failure the cached copy is **left alone** rather than removed. A refresh
+/// pressed on a flaky connection must not cost the device the library listing
+/// it already had; the caller reports the error instead, and the next ordinary
+/// [`fetch_playlist`] still has its offline fallback.
+pub fn refetch_playlist(url: &str) -> Result<PlaylistInfo, String> {
+    let info = fetch_playlist_live(url)?;
+    save_to_cache(url, &info);
+    Ok(info)
+}
+
 /// Run `yt-dlp` to fetch fresh playlist metadata, with no cache interaction.
 fn fetch_playlist_live(url: &str) -> Result<PlaylistInfo, String> {
     ensure_ytdlp_available()?;

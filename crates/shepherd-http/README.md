@@ -55,6 +55,7 @@ codegen consumes). At time of writing:
 - Volume: `get_volume`, `set_volume`, `set_mute`, `volume_up`, `volume_down`, `toggle_mute`
 - Brightness: `get_brightness`, `set_brightness`, `brightness_up`, `brightness_down`
 - Config: `reload_config`
+- Media: `refresh_media`
 - User: `logout`
 - Debug: `list_windows`, `act_on_window`
 

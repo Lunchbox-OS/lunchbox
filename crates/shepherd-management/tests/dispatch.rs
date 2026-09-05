@@ -365,6 +365,7 @@ fn make_svc_full(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
         display: Arc::new(NoOpDisplayController),
@@ -1014,6 +1015,59 @@ async fn reload_config_invalid_file_is_unprocessable() {
     std::fs::write(cfg.path(), "not = valid = toml").unwrap();
     let svc = make_svc(test_policy(), cfg.path().to_path_buf());
     let err = rpc(&svc, "reload_config", json!({})).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::Unprocessable(_))
+        ),
+        "{err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Media refresh (issue #165)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_media_hands_the_prefetcher_a_request() {
+    let cfg = temp_config();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    svc.media_refresh_tx = Some(tx);
+
+    let body = ok(&svc, "refresh_media", json!({})).await;
+    assert!(body.is_null(), "no wrap_result, so a bare null: {body}");
+    assert_eq!(rx.try_recv(), Ok(()));
+}
+
+/// A second press while the first is still queued asks for the same sweep, so
+/// it succeeds rather than reporting a conflict — an error there would only
+/// teach an administrator to press it again.
+#[tokio::test]
+async fn a_second_refresh_while_one_is_pending_still_succeeds() {
+    let cfg = temp_config();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    svc.media_refresh_tx = Some(tx);
+
+    ok(&svc, "refresh_media", json!({})).await;
+    ok(&svc, "refresh_media", json!({})).await;
+    assert_eq!(rx.try_recv(), Ok(()));
+    assert!(
+        rx.try_recv().is_err(),
+        "the duplicate is dropped, not queued"
+    );
+}
+
+/// Answering "done" to a button that reached nothing is the failure mode this
+/// guards: an embedding with no prefetcher has to say so.
+#[tokio::test]
+async fn refresh_media_without_a_prefetcher_is_unprocessable() {
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    assert!(svc.media_refresh_tx.is_none());
+
+    let err = rpc(&svc, "refresh_media", json!({})).await.unwrap_err();
     assert!(
         matches!(
             err,

@@ -52,6 +52,7 @@ object RpcMethods {
     const val SET_DISPLAY_MODE: String = "set_display_mode"
     const val PING: String = "ping"
     const val RELOAD_CONFIG: String = "reload_config"
+    const val REFRESH_MEDIA: String = "refresh_media"
     const val LOGOUT: String = "logout"
     const val LIST_DIAGNOSTICS: String = "list_diagnostics"
     const val LIST_WINDOWS: String = "list_windows"

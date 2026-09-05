@@ -192,6 +192,12 @@ export const setAutoBrightness = (enabled: boolean) =>
 // Config — `reload_config` returns `{entry_count: number}` (wrap_result).
 export const reloadConfig = () => call("reload_config", {});
 
+// Media — re-fetch playlists, sponsor segments and pending downloads now
+// instead of waiting out their caches (issue #165). Returns as soon as the
+// daemon accepts the request, not when the refresh finishes; what came of it
+// shows up on the Device health page as a diagnostic.
+export const refreshMedia = () => call("refresh_media", {});
+
 // User
 export const logoutUser = () => call("logout", {});
 

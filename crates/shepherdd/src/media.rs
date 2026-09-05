@@ -49,14 +49,16 @@ use shepherd_config::{MediaServiceConfig, Policy};
 use shepherd_core::CoreEngine;
 use shepherd_media_app::Quality;
 use shepherd_media_cache::{
-    QueueOutcome, SponsorBlockCache, VideoCache, fetch_playlist, ytdlp_available,
+    QueueOutcome, SponsorBlockCache, VideoCache, fetch_playlist, refetch_playlist, ytdlp_available,
 };
 use shepherd_media_core::{
     ClassifiedUri, Library, PlatformInfo, build_library_from_entries, is_youtube_playlist_url,
     load_library, resolve_source,
 };
 use shepherd_util::EntryId;
-use tokio::sync::{Mutex, broadcast};
+use std::collections::HashSet;
+
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
@@ -69,6 +71,24 @@ const RESUME_DELAY: Duration = Duration::from_secs(30);
 /// its metadata cache expires every 6 hours; nothing else here changes on its
 /// own.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Why a sweep is happening, which is the only thing that differs between the
+/// two (issue #165).
+///
+/// A scheduled sweep is unattended work on a timer, so it trusts every cache it
+/// meets: the playlist listing is good for six hours and a SponsorBlock bucket
+/// for a day, and re-asking sooner would spend a household's bandwidth on
+/// answers that have almost certainly not changed. A manual sweep exists
+/// *because* somebody believes one of those answers is out of date, so it skips
+/// the TTLs and re-asks. Everything after the fetch — what to queue, what a
+/// download may evict, the disk floor — is identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepMode {
+    /// The hourly timer, a session ending, the internet coming back.
+    Scheduled,
+    /// An administrator pressed refresh.
+    Manual,
+}
 
 /// One library to keep cached, resolved from a `media` entry.
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +156,7 @@ impl MediaPrefetcher {
         mut self,
         engine: Arc<Mutex<CoreEngine>>,
         mut events: broadcast::Receiver<Event>,
+        mut refresh_rx: mpsc::Receiver<()>,
         diagnostics: crate::diagnostics::DiagnosticPublisher,
     ) {
         let mut session_active = false;
@@ -155,8 +176,20 @@ impl MediaPrefetcher {
                 _ = ticker.tick() => {
                     self.reread_policy(&engine).await;
                     if self.may_sweep(session_active, online) {
-                        self.sweep(&diagnostics).await;
+                        self.sweep(&diagnostics, SweepMode::Scheduled).await;
                     }
+                }
+                // An administrator pressed refresh (issue #165). Deliberately
+                // *not* gated on `session_active`: the press almost always
+                // happens with the child in front of the device asking where
+                // the new video is, which is precisely the state the
+                // background rule declines to work in. The ticker is reset
+                // afterwards so the hourly sweep does not follow a minute
+                // later and redo the same walk.
+                Some(()) = refresh_rx.recv() => {
+                    self.reread_policy(&engine).await;
+                    self.refresh(&diagnostics, online).await;
+                    ticker.reset();
                 }
                 received = events.recv() => match received {
                     Ok(event) => {
@@ -185,7 +218,7 @@ impl MediaPrefetcher {
                         if resume {
                             self.reread_policy(&engine).await;
                             if self.may_sweep(session_active, online) {
-                                self.sweep(&diagnostics).await;
+                                self.sweep(&diagnostics, SweepMode::Scheduled).await;
                                 ticker.reset();
                             }
                         }
@@ -240,8 +273,73 @@ impl MediaPrefetcher {
         !session_active || self.settings.prefetch_while_session_active
     }
 
+    /// Service an administrator's refresh request (issue #165).
+    ///
+    /// The two gates a scheduled sweep applies that this one keeps are the two
+    /// a button cannot argue with: prefetch switched off is a household
+    /// decision, and an offline device has nothing to re-fetch. Both are
+    /// reported as diagnostics rather than swallowed — the request came from a
+    /// person watching for something to happen, and "nothing happened, here is
+    /// why" is the only honest answer a fire-and-forget RPC can give them.
+    async fn refresh(&self, diagnostics: &crate::diagnostics::DiagnosticPublisher, online: bool) {
+        if !online {
+            diagnostics.raise(Diagnostic {
+                code: DiagnosticCode::MediaRefreshFailed,
+                subject: DiagnosticSubject::Service,
+                severity: DiagnosticSeverity::Warning,
+                message: "A media refresh was requested, but this device has no internet \
+                          connection, so nothing could be fetched."
+                    .to_string(),
+                remedy: Some(
+                    "Reconnect this device to the internet and refresh again.".to_string(),
+                ),
+                since: shepherd_util::now(),
+            });
+            return;
+        }
+
+        if !self.settings.prefetch {
+            diagnostics.raise(Diagnostic {
+                code: DiagnosticCode::MediaRefreshFailed,
+                subject: DiagnosticSubject::Service,
+                severity: DiagnosticSeverity::Warning,
+                message: "A media refresh was requested, but background media downloads are \
+                          turned off on this device."
+                    .to_string(),
+                remedy: Some(
+                    "Set `service.media.prefetch = true` in the configuration, reload it, and \
+                     refresh again."
+                        .to_string(),
+                ),
+                since: shepherd_util::now(),
+            });
+            return;
+        }
+
+        diagnostics.clear(
+            DiagnosticCode::MediaRefreshFailed,
+            &DiagnosticSubject::Service,
+        );
+
+        // Before the walk, not per library: the failure markers are keyed by
+        // content in one directory shared by every library on the device, so
+        // there is no per-library subset to clear — and clearing inside the
+        // loop would wipe a failure the previous library's downloads had just
+        // recorded.
+        let cleared = tokio::task::spawn_blocking(clear_download_cooldowns)
+            .await
+            .unwrap_or(0);
+        info!(
+            libraries = self.targets.len(),
+            cooldowns_cleared = cleared,
+            "media refresh requested"
+        );
+
+        self.sweep(diagnostics, SweepMode::Manual).await;
+    }
+
     /// One pass over every configured library.
-    async fn sweep(&self, diagnostics: &crate::diagnostics::DiagnosticPublisher) {
+    async fn sweep(&self, diagnostics: &crate::diagnostics::DiagnosticPublisher, mode: SweepMode) {
         for target in &self.targets {
             if !self.have_disk_headroom() {
                 return;
@@ -271,6 +369,7 @@ impl MediaPrefetcher {
                     watched_grace,
                     cache_max_bytes,
                     sponsorblock_api.as_deref(),
+                    mode,
                 )
             })
             .await;
@@ -281,8 +380,12 @@ impl MediaPrefetcher {
             // silently stopped working — and the old line said "queued 92
             // items" in both cases, because it counted items *offered* rather
             // than downloads actually started.
+            let subject = DiagnosticSubject::Entry {
+                entry_id: EntryId::new(target.entry_id.clone()),
+            };
             match queued {
-                Ok(Ok(tally)) => {
+                Ok(Ok(report)) => {
+                    let tally = report.tally;
                     info!(
                         entry = %target.entry_id,
                         total = tally.total,
@@ -295,29 +398,69 @@ impl MediaPrefetcher {
                     // The same site that notices the failure notices the
                     // recovery, so a library that starts parsing again clears
                     // itself without anything else having to remember.
-                    diagnostics.clear(
-                        DiagnosticCode::MediaLibraryUnreadable,
-                        &DiagnosticSubject::Entry {
-                            entry_id: EntryId::new(target.entry_id.clone()),
-                        },
-                    );
+                    diagnostics.clear(DiagnosticCode::MediaLibraryUnreadable, &subject);
+                    self.report_refresh(diagnostics, target, &subject, mode, report.stale);
                 }
-                Ok(Err(reason)) => diagnostics.raise(Diagnostic {
-                    code: DiagnosticCode::MediaLibraryUnreadable,
-                    subject: DiagnosticSubject::Entry {
-                        entry_id: EntryId::new(target.entry_id.clone()),
-                    },
+                Ok(Err(reason)) => {
+                    diagnostics.raise(Diagnostic {
+                        code: DiagnosticCode::MediaLibraryUnreadable,
+                        subject: subject.clone(),
+                        severity: DiagnosticSeverity::Warning,
+                        message: format!(
+                            "This activity's media library could not be read: {reason}"
+                        ),
+                        remedy: Some(
+                            "Check the `library` path or URL on this activity, and that the \
+                             file parses."
+                                .to_string(),
+                        ),
+                        since: shepherd_util::now(),
+                    });
+                    // One problem, one diagnostic: an unreadable library is
+                    // already named above, and saying it twice under two codes
+                    // would just make the list longer.
+                    self.report_refresh(diagnostics, target, &subject, mode, None);
+                }
+                Err(e) => warn!(entry = %target.entry_id, error = %e, "media prefetch task failed"),
+            }
+        }
+    }
+
+    /// Raise or clear this entry's [`DiagnosticCode::MediaRefreshFailed`] after
+    /// a manual sweep. A scheduled sweep touches it in neither direction: it
+    /// reads from the caches a refresh exists to bypass, so it can neither
+    /// confirm nor deny that the source is reachable.
+    fn report_refresh(
+        &self,
+        diagnostics: &crate::diagnostics::DiagnosticPublisher,
+        target: &PrefetchTarget,
+        subject: &DiagnosticSubject,
+        mode: SweepMode,
+        stale: Option<String>,
+    ) {
+        if mode != SweepMode::Manual {
+            return;
+        }
+        match stale {
+            Some(reason) => {
+                warn!(entry = %target.entry_id, reason = %reason, "media refresh could not reach the source");
+                diagnostics.raise(Diagnostic {
+                    code: DiagnosticCode::MediaRefreshFailed,
+                    subject: subject.clone(),
                     severity: DiagnosticSeverity::Warning,
-                    message: format!("This activity's media library could not be read: {reason}"),
+                    message: format!(
+                        "The last media refresh could not re-fetch this activity, so it is \
+                         still showing what was cached: {reason}"
+                    ),
                     remedy: Some(
-                        "Check the `library` path or URL on this activity, and that the \
-                         file parses."
+                        "Check this device's internet connection and the activity's \
+                         `library` URL, then refresh again."
                             .to_string(),
                     ),
                     since: shepherd_util::now(),
-                }),
-                Err(e) => warn!(entry = %target.entry_id, error = %e, "media prefetch task failed"),
+                });
             }
+            None => diagnostics.clear(DiagnosticCode::MediaRefreshFailed, subject),
         }
     }
 
@@ -436,8 +579,38 @@ struct SweepTally {
     warmed: usize,
 }
 
+/// One library's sweep, plus whether an administrator's refresh actually
+/// reached what it went to re-fetch (issue #165).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SweepReport {
+    tally: SweepTally,
+    /// `Some(reason)` when a manual refresh fell back to cached data — the
+    /// playlist would not load, the segment service did not answer. Always
+    /// `None` on a scheduled sweep, which is reading from those caches by
+    /// design rather than settling for them.
+    stale: Option<String>,
+}
+
+/// What loading a library produced.
+struct LoadedLibrary {
+    library: Library,
+    /// Why the listing below is the cached one rather than a fresh fetch. See
+    /// [`SweepReport::stale`].
+    stale: Option<String>,
+}
+
+/// Forget every download cooldown in the shared video cache directory, so a
+/// following sweep retries items a failure is currently holding back. Returns
+/// how many were cleared, or 0 when there is no cache directory to clear.
+fn clear_download_cooldowns() -> usize {
+    shepherd_media_cache::media_cache_dir("videos")
+        .map(|dir| shepherd_media_cache::clear_all_failures(&dir))
+        .unwrap_or(0)
+}
+
 /// Load `library_source` and queue every remote item in it. Returns what the
-/// sweep amounted to, or `None` if the library could not be read.
+/// sweep amounted to, or the reason the library could not be read.
+#[allow(clippy::too_many_arguments)]
 fn queue_library(
     entry_id: &str,
     library_source: &str,
@@ -446,8 +619,9 @@ fn queue_library(
     watched_grace: Duration,
     cache_max_bytes: u64,
     sponsorblock_api: Option<&str>,
-) -> Result<SweepTally, String> {
-    let library = match load_prefetch_library(library_source) {
+    mode: SweepMode,
+) -> Result<SweepReport, String> {
+    let LoadedLibrary { library, mut stale } = match load_prefetch_library(library_source, mode) {
         Ok(l) => l,
         Err(e) => {
             warn!(entry = %entry_id, error = %e, "could not read media library for prefetch");
@@ -460,11 +634,17 @@ fn queue_library(
     // No cache is not a library problem, so it reports an empty sweep rather
     // than an error: conflating the two is what the `Option` did before.
     let Some(cache) = VideoCache::new(ytdl_format, watched_grace, cache_max_bytes) else {
-        return Ok(SweepTally::default());
+        return Ok(SweepReport::default());
     };
 
     let platform_info = PlatformInfo::current();
     let segments = sponsorblock_api.map(SponsorBlockCache::new);
+    // A manual refresh re-asks for buckets the TTL would have served from
+    // disk, so — unlike `warm`, which is free the second time a bucket is
+    // wanted — it has to remember which prefixes it has already paid for.
+    // One bucket covers around a hundred videos.
+    let mut refreshed_prefixes: HashSet<String> = HashSet::new();
+    let mut segment_failure: Option<String> = None;
     let mut tally = SweepTally::default();
     // The ordinal is the item's place in the library as browse would show it,
     // which is how eviction orders one sweep's guesses against each other — a
@@ -495,29 +675,84 @@ fn queue_library(
                 && matches!(outcome, QueueOutcome::Queued | QueueOutcome::AlreadyCached)
                 && let ClassifiedUri::YouTube(url) = &source.uri
                 && let Some(video_id) = shepherd_media_core::uri::youtube_video_id(url)
-                && segments.warm(&video_id)
             {
-                tally.warmed += 1;
+                let warmed = match mode {
+                    SweepMode::Scheduled => segments.warm(&video_id),
+                    // A refresh is here because somebody thinks the segments
+                    // are out of date, so the day-long TTL is exactly what it
+                    // skips. A bucket that will not re-fetch is not an error
+                    // the child ever sees — the cached one is still on disk
+                    // and still skips — so it is recorded and reported once
+                    // for the library rather than aborting the sweep.
+                    SweepMode::Manual => {
+                        if refreshed_prefixes.insert(segments.prefix_for(&video_id)) {
+                            match segments.refresh(&video_id) {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    segment_failure.get_or_insert(e);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                };
+                if warmed {
+                    tally.warmed += 1;
+                }
             }
         }
     }
-    Ok(tally)
+
+    // The library listing is what a parent is looking at, so a failure there
+    // is the one worth naming; segments only ever downgrade to yesterday's.
+    if stale.is_none()
+        && let Some(e) = segment_failure
+    {
+        stale = Some(format!(
+            "the sponsor-segment service could not be reached ({e})"
+        ));
+    }
+
+    Ok(SweepReport { tally, stale })
 }
 
 /// Load a library from either a file path or a YouTube playlist URL. Mirrors
 /// what `shepherd-media` does at launch, minus the CLI ordering — prefetch
 /// order follows the library's own, which is what browse shows by default.
-fn load_prefetch_library(source: &str) -> Result<Library, String> {
+///
+/// A manual refresh bypasses the six-hour playlist cache; a file-backed library
+/// has nothing to bypass, since it is re-read from disk either way. When the
+/// forced fetch fails it falls back to the cached listing rather than failing
+/// the sweep: the parent's activity is still there and still playable, and the
+/// difference between "could not refresh" and "could not read" is exactly what
+/// the returned reason carries up.
+fn load_prefetch_library(source: &str, mode: SweepMode) -> Result<LoadedLibrary, String> {
     if is_youtube_playlist_url(source) {
-        let info = fetch_playlist(source)?;
-        Ok(build_library_from_entries(
-            source,
-            info.title,
-            info.playlist_id.as_deref(),
-            &info.entries,
-        ))
+        let (info, stale) = match mode {
+            SweepMode::Scheduled => (fetch_playlist(source)?, None),
+            SweepMode::Manual => match refetch_playlist(source) {
+                Ok(info) => (info, None),
+                Err(e) => (fetch_playlist(source)?, Some(e)),
+            },
+        };
+        Ok(LoadedLibrary {
+            library: build_library_from_entries(
+                source,
+                info.title,
+                info.playlist_id.as_deref(),
+                &info.entries,
+            ),
+            stale,
+        })
     } else {
-        load_library(Path::new(source)).map_err(|e| e.to_string())
+        load_library(Path::new(source))
+            .map(|library| LoadedLibrary {
+                library,
+                stale: None,
+            })
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -764,6 +999,151 @@ mod tests {
             })
             .have_disk_headroom()
         );
+    }
+
+    // --- media refresh (issue #165) ---------------------------------------
+
+    /// A publisher writing into a registry the test can read back.
+    fn publisher() -> (
+        crate::diagnostics::DiagnosticPublisher,
+        Arc<crate::diagnostics::DiagnosticRegistry>,
+    ) {
+        let registry = Arc::new(crate::diagnostics::DiagnosticRegistry::new());
+        let (changed, _rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            crate::diagnostics::DiagnosticPublisher::new(registry.clone(), changed),
+            registry,
+        )
+    }
+
+    fn codes(registry: &crate::diagnostics::DiagnosticRegistry) -> Vec<DiagnosticCode> {
+        registry.current().items.iter().map(|d| d.code).collect()
+    }
+
+    /// The button has to answer for itself. Both gates a refresh keeps end in a
+    /// diagnostic rather than a silent return, because the RPC has already told
+    /// the caller "accepted" and this is the only channel left to say otherwise.
+    #[tokio::test]
+    async fn a_refresh_with_no_internet_says_so() {
+        let (diagnostics, registry) = publisher();
+        prefetcher_with(MediaServiceConfig::default())
+            .refresh(&diagnostics, false)
+            .await;
+        assert_eq!(codes(&registry), vec![DiagnosticCode::MediaRefreshFailed]);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_prefetch_switched_off_says_so() {
+        let (diagnostics, registry) = publisher();
+        prefetcher_with(MediaServiceConfig {
+            prefetch: false,
+            ..Default::default()
+        })
+        .refresh(&diagnostics, true)
+        .await;
+        assert_eq!(codes(&registry), vec![DiagnosticCode::MediaRefreshFailed]);
+    }
+
+    /// A refresh that got through clears the last one's complaint, so the
+    /// health screen is about now rather than about the last time it failed.
+    #[tokio::test]
+    async fn a_refresh_that_gets_through_clears_the_previous_failure() {
+        let (diagnostics, registry) = publisher();
+        let prefetcher = prefetcher_with(MediaServiceConfig::default());
+
+        prefetcher.refresh(&diagnostics, false).await;
+        assert_eq!(codes(&registry), vec![DiagnosticCode::MediaRefreshFailed]);
+
+        // No targets, so the sweep after the gates is a no-op walk.
+        prefetcher.refresh(&diagnostics, true).await;
+        assert!(codes(&registry).is_empty());
+    }
+
+    fn target() -> PrefetchTarget {
+        PrefetchTarget {
+            entry_id: "movies".into(),
+            library: "/etc/shepherd/movies.toml".into(),
+            quality: MediaQuality::Best,
+            only_item: None,
+            sponsorblock: false,
+        }
+    }
+
+    #[test]
+    fn a_manual_sweep_that_fell_back_to_cached_data_raises_and_a_clean_one_clears() {
+        let (diagnostics, registry) = publisher();
+        let prefetcher = prefetcher_with(MediaServiceConfig::default());
+        let target = target();
+        let subject = DiagnosticSubject::Entry {
+            entry_id: EntryId::new(target.entry_id.clone()),
+        };
+
+        prefetcher.report_refresh(
+            &diagnostics,
+            &target,
+            &subject,
+            SweepMode::Manual,
+            Some("yt-dlp could not reach the playlist".into()),
+        );
+        assert_eq!(codes(&registry), vec![DiagnosticCode::MediaRefreshFailed]);
+
+        prefetcher.report_refresh(&diagnostics, &target, &subject, SweepMode::Manual, None);
+        assert!(codes(&registry).is_empty());
+    }
+
+    /// A scheduled sweep reads from exactly the caches a refresh exists to
+    /// bypass, so a clean one is no evidence the source is reachable and must
+    /// not clear a standing complaint about it.
+    #[test]
+    fn a_scheduled_sweep_leaves_the_refresh_diagnostic_alone() {
+        let (diagnostics, registry) = publisher();
+        let prefetcher = prefetcher_with(MediaServiceConfig::default());
+        let target = target();
+        let subject = DiagnosticSubject::Entry {
+            entry_id: EntryId::new(target.entry_id.clone()),
+        };
+
+        prefetcher.report_refresh(
+            &diagnostics,
+            &target,
+            &subject,
+            SweepMode::Manual,
+            Some("offline".into()),
+        );
+        prefetcher.report_refresh(&diagnostics, &target, &subject, SweepMode::Scheduled, None);
+        assert_eq!(codes(&registry), vec![DiagnosticCode::MediaRefreshFailed]);
+    }
+
+    /// A file-backed library is re-read from disk on every sweep, so a refresh
+    /// has no cache to bypass and nothing to report as stale.
+    #[test]
+    fn a_file_library_reads_the_same_in_both_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movies.toml");
+        std::fs::write(
+            &path,
+            r#"schema_version = 1
+library_id = "movies"
+title = "Movies"
+
+[[items]]
+id = "intro"
+title = "Intro"
+kind = "video"
+
+[[items.sources]]
+platforms = ["linux"]
+uri = "file:///media/intro.mp4"
+"#,
+        )
+        .unwrap();
+        let source = path.to_str().unwrap();
+
+        for mode in [SweepMode::Scheduled, SweepMode::Manual] {
+            let loaded = load_prefetch_library(source, mode).expect("the library parses");
+            assert_eq!(loaded.library.items.len(), 1);
+            assert!(loaded.stale.is_none(), "nothing was served from a cache");
+        }
     }
 
     /// A policy with one browse-mode `media` entry per id, built by parsing

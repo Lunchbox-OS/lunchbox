@@ -206,6 +206,9 @@ object RpcParams {
     /** Params for `reload_config`, which takes none. */
     fun reloadConfig(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `refresh_media`, which takes none. */
+    fun refreshMedia(): JsonObject = JsonObject(emptyMap())
+
     /** Params for `logout`, which takes none. */
     fun logout(): JsonObject = JsonObject(emptyMap())
 
