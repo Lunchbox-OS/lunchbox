@@ -61,6 +61,45 @@ STATED_SERVICE_UNIT="shepherd-stated@.service"
 # living under it.
 STATED_STATE_ROOT="/var/lib/shepherdd/state"
 
+# The file names shepherd's protected files have, and what happens to each when
+# a device gains or loses the custodian.
+#
+# These mirror `ProtectedFile` in `shepherd-util`, which is the Rust half of the
+# same list, plus `shepherdd.db`, which the custodian owns without it being a
+# `ProtectedFile` (it is reached through `Store`, not `ProtectedFiles`).
+# `crates/shepherd-util/tests/installer_covers_protected_files.rs` fails if a
+# name is added there and not accounted for here -- the two lists cannot be one
+# list, so they are held together by something that breaks loudly instead of by
+# a comment asking nicely.
+#
+# Moved from `~/.local/share/shepherdd/` into the custodian's directory, and
+# back again by `uninstall state --restore-to-home`.
+SHEPHERD_MIGRATED_FILES=(shepherdd.db admin.toml unbond-queue.toml)
+# The policy, moved from `~/.config/shepherd/` -- a different directory, so it
+# is handled apart from the list above rather than being in it.
+SHEPHERD_POLICY_FILE="config.toml"
+# Deliberately *not* moved: a one-shot instruction rather than state, so moving
+# a stale one would factory-reset a device during an upgrade. Declared rather
+# than merely omitted, so the drift test can tell "decided against" apart from
+# "forgotten" -- which is the whole distinction it exists to check.
+# shellcheck disable=SC2034  # read by installer_covers_protected_files.rs
+SHEPHERD_UNMIGRATED_FILES=(.factory-reset-ble)
+# Named individually where a caller needs one by name. shellcheck reads each
+# file alone, so it cannot see `bluetooth.sh` using these two.
+# shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
+SHEPHERD_ADMIN_RECORD_FILE="admin.toml"
+# shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
+SHEPHERD_RESET_SENTINEL_FILE=".factory-reset-ble"
+
+# The socket unit instance that serves `$1`.
+#
+# A function rather than a format string repeated at each call site: the
+# template names above are the *unit files*, and this is the instance, which is
+# what `systemctl enable` and `systemctl stop` actually take.
+stated_socket_unit_for() {
+    echo "shepherd-stated@$1.socket"
+}
+
 # udev rules. Installed to a fixed system location regardless of --prefix
 # (udev only reads /etc/udev/rules.d and /usr/lib/udev/rules.d). Currently
 # just the /dev/uinput access rule the input-compat sidecars need.
@@ -732,8 +771,10 @@ install_state() {
             _migrate_state_for_user "$user"
 
             info "Enabling the state custodian's socket for $user"
-            systemctl enable --now "shepherd-stated@$user.socket" 2>/dev/null \
-                || warn "Could not enable shepherd-stated@$user.socket; enable it manually"
+            local socket_unit
+            socket_unit="$(stated_socket_unit_for "$user")"
+            systemctl enable --now "$socket_unit" 2>/dev/null \
+                || warn "Could not enable $socket_unit; enable it manually"
         fi
     fi
 
@@ -846,7 +887,7 @@ _migrate_state_for_user() {
     # instruction, not state, and moving a stale one would factory-reset a
     # device during an upgrade.
     local src dst name
-    for name in shepherdd.db admin.toml; do
+    for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
         src="$home/.local/share/shepherdd/$name"
         dst="$state_dir/$name"
         [[ -f "$src" ]] || continue
@@ -870,8 +911,8 @@ _migrate_state_for_user() {
     done
 
     # The policy, moved like the rest, with a signpost left behind.
-    src="$home/.config/shepherd/config.toml"
-    dst="$state_dir/config.toml"
+    src="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
+    dst="$state_dir/$SHEPHERD_POLICY_FILE"
     if [[ -f "$src" ]] && ! _is_policy_placeholder "$src"; then
         if [[ -e "$dst" ]]; then
             warn "  $dst already exists; not replacing it from $src"
@@ -1218,7 +1259,7 @@ _restore_state_to_home() {
     done
 
     local src dst name side
-    for name in shepherdd.db admin.toml; do
+    for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
         src="$state_dir/$name"
         dst="$data_dir/$name"
         [[ -f "$src" ]] || continue
@@ -1245,8 +1286,8 @@ _restore_state_to_home() {
     # is not worth preserving: it exists to say the policy went somewhere else,
     # and it is about to be wrong. A real policy at that path is a different
     # matter and is left alone like everything else.
-    src="$state_dir/config.toml"
-    dst="$home/.config/shepherd/config.toml"
+    src="$state_dir/$SHEPHERD_POLICY_FILE"
+    dst="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
     if [[ -f "$src" ]]; then
         if [[ -e "$dst" ]] && ! _is_policy_placeholder "$dst"; then
             warn "  $dst is a real policy; leaving $src where it is"

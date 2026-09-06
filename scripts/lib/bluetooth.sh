@@ -9,6 +9,13 @@
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+# For STATED_STATE_ROOT and the protected file names (issue #157). Sourced
+# rather than restated: this file used to carry its own copy of the custodian's
+# directory with a comment saying it "must match install.sh's", which is the
+# arrangement that has to be checked by hand and therefore is not.
+# shellcheck source=install.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
+
 # Where shepherdd's admin record and factory-reset sentinel live.
 #
 # Two possible homes since issue #157, and this has to check both. On a device
@@ -19,21 +26,17 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # find no admin record (so leave the BlueZ bond in place) and write a sentinel
 # where nothing reads it (so the reset would never happen).
 #
-# `<data_dir>/admin.toml`, where data_dir defaults to ~/.local/share/shepherdd
+# `<data_dir>/<name>`, where data_dir defaults to ~/.local/share/shepherdd
 # (`APP_DIR = "shepherdd"` in shepherd-util).
-SHEPHERD_DEFAULT_ADMIN_REL=".local/share/shepherdd/admin.toml"
-SHEPHERD_DEFAULT_SENTINEL_REL=".local/share/shepherdd/.factory-reset-ble"
-
-# The custodian's directory, which must match install.sh's STATED_STATE_ROOT.
-SHEPHERD_STATE_ROOT="/var/lib/shepherdd/state"
+SHEPHERD_DEFAULT_DATA_REL=".local/share/shepherdd"
 
 # Echo the admin record for $1, preferring the custodian's copy.
 _default_admin_record() {
     local user="$1" home="$2"
-    if [[ -f "$SHEPHERD_STATE_ROOT/$user/admin.toml" ]]; then
-        echo "$SHEPHERD_STATE_ROOT/$user/admin.toml"
+    if [[ -f "$STATED_STATE_ROOT/$user/$SHEPHERD_ADMIN_RECORD_FILE" ]]; then
+        echo "$STATED_STATE_ROOT/$user/$SHEPHERD_ADMIN_RECORD_FILE"
     else
-        echo "$home/$SHEPHERD_DEFAULT_ADMIN_REL"
+        echo "$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE"
     fi
 }
 
@@ -41,10 +44,10 @@ _default_admin_record() {
 # when it exists, because that is the only one shepherdd will read there.
 _default_sentinel() {
     local user="$1" home="$2"
-    if [[ -d "$SHEPHERD_STATE_ROOT/$user" ]]; then
-        echo "$SHEPHERD_STATE_ROOT/$user/.factory-reset-ble"
+    if [[ -d "$STATED_STATE_ROOT/$user" ]]; then
+        echo "$STATED_STATE_ROOT/$user/$SHEPHERD_RESET_SENTINEL_FILE"
     else
-        echo "$home/$SHEPHERD_DEFAULT_SENTINEL_REL"
+        echo "$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE"
     fi
 }
 
@@ -230,7 +233,7 @@ Options for 'clear':
     --user USER             Target user (required).
     --admin-record PATH     Override admin.toml location
                             (default: the custodian's copy in
-                            $SHEPHERD_STATE_ROOT/USER/, else
+                            $STATED_STATE_ROOT/USER/, else
                             ~USER/$SHEPHERD_DEFAULT_ADMIN_REL).
     --sentinel PATH         Override reset-sentinel location
                             (default: the custodian's directory when there is

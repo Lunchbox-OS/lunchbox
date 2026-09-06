@@ -1207,8 +1207,10 @@ setup_user() {
     # as a diagnostic, but not what an operator following the docs expects.
     if command_exists systemctl && [[ -f "$STATED_UNIT_DIR/$STATED_SOCKET_UNIT" ]]; then
         info "Enabling the state custodian for $user..."
-        systemctl enable --now "shepherd-stated@$user.socket" 2>/dev/null \
-            || warn "Could not enable shepherd-stated@$user.socket; shepherd's state will stay in $user's home"
+        local socket_unit
+        socket_unit="$(stated_socket_unit_for "$user")"
+        systemctl enable --now "$socket_unit" 2>/dev/null \
+            || warn "Could not enable $socket_unit; shepherd's state will stay in $user's home"
     fi
 
     success "Set up $user"
