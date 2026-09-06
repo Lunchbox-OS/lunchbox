@@ -68,6 +68,25 @@ pub fn socket_path(user: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/run/shepherdd/state").join(format!("{user}.sock"))
 }
 
+/// Where the custodian keeps `user`'s protected files.
+///
+/// The directory itself is `0700` and owned by [`STATE_USER`], so nothing at
+/// the kiosk uid can read what is inside it. Its *parents* are root-owned and
+/// world-executable, which is what makes this useful to a client that cannot
+/// read it: `shepherdd` can `stat` this path and learn **whether this device is
+/// one the custodian holds state for**, without being able to see the state.
+///
+/// That distinction is the whole point. A failed connection cannot otherwise be
+/// told apart from a device that never had a custodian, and the two want
+/// opposite responses — one is a fresh install, the other is protection that
+/// has broken and must not be quietly downgraded.
+///
+/// An activity cannot forge the answer in either direction: the parent is
+/// root-owned, so it can neither create this directory nor remove it.
+pub fn state_dir(user: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/lib/shepherdd/state").join(user)
+}
+
 /// One call. Exactly one variant per `Store` method, plus the handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]

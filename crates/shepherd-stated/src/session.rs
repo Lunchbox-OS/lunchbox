@@ -108,71 +108,114 @@ pub struct TrustedSession {
 /// socket down (see [`resolve_waiting`]).
 const SESSION_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// [`resolve`], but wait for the session rather than failing when it is not
-/// there yet.
+/// What [`resolve_waiting`] settled on.
+pub enum Trust {
+    /// The kiosk's graphical session.
+    Session(TrustedSession),
+    /// Nothing may be trusted, and why.
+    ///
+    /// Deliberately **not** an error. The daemon exits cleanly on this, which
+    /// with `Restart=on-failure` spends no restart budget and leaves the socket
+    /// armed for the next connection.
+    Nothing(String),
+}
+
+/// [`resolve`], but wait for the session rather than failing when there is not
+/// exactly one yet.
 ///
-/// `Ok(None)` means no session appeared in time. That is deliberately **not**
-/// an error: on a device at the greeter, or when something probes the socket
-/// before anyone has logged in, there is genuinely nothing to trust and the
-/// honest response is to serve nobody and stop — leaving the socket armed for
-/// the next connection.
+/// [`Trust::Nothing`] covers both ways there can be no answer, because a device
+/// gets out of both by itself and neither is this daemon's to fix:
+///
+/// * **None.** At the greeter, or something probed the socket before anyone
+///   logged in. There is genuinely nothing to trust.
+/// * **More than one.** [`resolve`] refuses to guess, and it should. In the
+///   ordinary case the extra one is transient — a `switch user`, or a login
+///   overlapping a logout that has not finished — so it is worth waiting out.
 ///
 /// Failing instead is what a device measured: five quick failures tripped
 /// systemd's start limit, which failed the *socket* unit, after which every
 /// connection for the rest of the boot was refused and shepherdd ran on an
-/// unprotected local store — a permanent downgrade from a transient race.
-pub async fn resolve_waiting(conn: &zbus::Connection, uid: u32) -> Result<Option<TrustedSession>> {
+/// unprotected local store — a permanent downgrade from a transient race. That
+/// is exactly the trade a second session must not be able to force, so it ends
+/// the same way the empty case does.
+pub async fn resolve_waiting(conn: &zbus::Connection, uid: u32) -> Result<Trust> {
     let manager = LogindManagerProxy::new(conn)
         .await
         .context("connecting to logind")?;
-    // Subscribe *before* the first look, or a session appearing between the two
-    // is missed and the wait runs to its timeout for no reason.
+    // Subscribe *before* the first look, or a change between the two is missed
+    // and the wait runs to its timeout for no reason.
+    //
+    // Departures as well as arrivals: the ambiguous case is waiting for a
+    // session to *go*, which no arrival will ever signal.
     let mut arrivals = manager
         .receive_session_new()
         .await
         .context("subscribing to logind session arrivals")?;
+    let mut departures = manager
+        .receive_session_removed()
+        .await
+        .context("subscribing to logind session departures")?;
 
-    match resolve(conn, uid).await {
-        Ok(session) => return Ok(Some(session)),
-        Err(e) if !is_missing_session(&e) => return Err(e),
-        Err(_) => {}
-    }
+    let mut why = match resolve(conn, uid).await {
+        Ok(session) => return Ok(Trust::Session(session)),
+        Err(e) if !is_unresolved(&e) => return Err(e),
+        Err(e) => e.to_string(),
+    };
 
     tracing::info!(
         uid,
         timeout_secs = SESSION_WAIT.as_secs(),
-        "No graphical session yet; waiting for one to appear"
+        reason = %why,
+        "Nothing to trust yet; waiting for the sessions to settle"
     );
     let deadline = tokio::time::Instant::now() + SESSION_WAIT;
     loop {
         use futures_util::StreamExt as _;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Ok(None);
+            return Ok(Trust::Nothing(why));
         }
-        match tokio::time::timeout(remaining, arrivals.next()).await {
-            // A session appeared. It may not be *the* one — a user manager
-            // registers too — so re-resolve rather than trusting the signal.
-            Ok(Some(_)) => match resolve(conn, uid).await {
-                Ok(session) => return Ok(Some(session)),
-                Err(e) if !is_missing_session(&e) => return Err(e),
-                Err(_) => continue,
+        let changed = tokio::time::timeout(remaining, async {
+            tokio::select! {
+                arrived = arrivals.next() => arrived.is_some(),
+                departed = departures.next() => departed.is_some(),
+            }
+        })
+        .await;
+        match changed {
+            // The set of sessions moved. It may not have moved the way that
+            // helps — a user manager registers too — so re-resolve rather than
+            // trusting the signal.
+            Ok(true) => match resolve(conn, uid).await {
+                Ok(session) => return Ok(Trust::Session(session)),
+                Err(e) if !is_unresolved(&e) => return Err(e),
+                Err(e) => {
+                    why = e.to_string();
+                    continue;
+                }
             },
             // logind stopped talking to us, or the wait ran out.
-            Ok(None) => return Ok(None),
-            Err(_) => return Ok(None),
+            Ok(false) | Err(_) => return Ok(Trust::Nothing(why)),
         }
     }
 }
 
-/// Whether an error from [`resolve`] is "not yet" rather than "not ever".
+/// Whether an error from [`resolve`] is "nothing to trust *yet*" rather than a
+/// genuine failure.
+///
+/// Both of [`resolve`]'s refusals qualify — no graphical session, and more than
+/// one — because both can clear on their own and neither means the daemon is
+/// broken. Anything else (logind unreachable, a cgroup directory that cannot be
+/// read) is a real error and stays one.
 ///
 /// A string check because the distinction is between two `bail!`s in one
 /// function; splitting the error into a type would be more ceremony than the
-/// one call site needs, and the message is asserted in a test so it cannot
+/// one call site needs, and both messages are asserted in tests so they cannot
 /// drift silently.
-fn is_missing_session(e: &anyhow::Error) -> bool {
-    e.to_string().contains("has no graphical session")
+fn is_unresolved(e: &anyhow::Error) -> bool {
+    let message = e.to_string();
+    // "graphical sessions", plural, is only ever the more-than-one refusal.
+    message.contains("has no graphical session") || message.contains("graphical sessions")
 }
 
 /// Find the graphical session of `uid` and resolve its cgroup id.
@@ -334,29 +377,36 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_session_is_told_apart_from_a_real_failure() {
-        // `resolve_waiting` waits on one of `resolve`'s two `bail!`s and gives
-        // up on the other, and it tells them apart by their message. Getting
+    fn nothing_to_trust_yet_is_told_apart_from_a_real_failure() {
+        // `resolve_waiting` waits on both of `resolve`'s `bail!`s and gives up
+        // on anything else, and it tells them apart by their message. Getting
         // this wrong is not a compile error and not a test failure anywhere
-        // else — it is a device that either fails at boot instead of waiting,
-        // or waits twenty seconds for a condition that will never clear.
+        // else — it is a device that fails at boot instead of waiting, and a
+        // failure here is what took a socket unit down for a whole boot and
+        // left shepherdd on an unprotected store.
         let missing = anyhow::anyhow!(
             "uid 1001 has no graphical session (looking for one with class=user, \
              type=wayland and a seat); nothing can be trusted until it logs in"
         );
-        assert!(is_missing_session(&missing));
+        assert!(is_unresolved(&missing));
 
+        // Two sessions is transient in the ordinary case (a `switch user`, or a
+        // login overlapping a logout), so it waits rather than failing. If it
+        // does not clear, the daemon stops cleanly with the socket armed — the
+        // one thing it must not do is spend restart budget, because running out
+        // is what makes a second session a downgrade that outlasts it.
         let ambiguous = anyhow::anyhow!(
             "uid 1001 has 2 graphical sessions (7, 9); refusing to guess which \
                              one is shepherd's"
         );
-        assert!(
-            !is_missing_session(&ambiguous),
-            "two sessions is not something waiting fixes"
-        );
+        assert!(is_unresolved(&ambiguous));
 
         let broken = anyhow::anyhow!("connecting to logind");
-        assert!(!is_missing_session(&broken));
+        assert!(!is_unresolved(&broken));
+
+        // The two refusals are told apart by a plural, so a singular message
+        // must not match the ambiguous arm by accident.
+        assert!(!missing.to_string().contains("graphical sessions"));
     }
 
     #[test]

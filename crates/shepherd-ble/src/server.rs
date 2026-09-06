@@ -245,6 +245,16 @@ pub struct BleServerConfig {
     /// activity can read and present to the management API. `None` keeps the
     /// three path fields above, which is what a dev stack and the tests use.
     pub files: Option<Arc<dyn shepherd_util::ProtectedFiles>>,
+    /// This device's admin record belongs to the state custodian, which could
+    /// not be reached this boot (issue #157).
+    ///
+    /// `AdminStore::load` returns `None` both when nobody has claimed a device
+    /// and when the daemon is looking in the wrong place because it fell back,
+    /// and after migration the fallback location is *empty* — so a custodian
+    /// that failed to start would present a claimed device as unclaimed and let
+    /// the next phone to pair take it. Set, claiming is refused until the
+    /// custodian answers again.
+    pub claims_unreachable: bool,
 }
 
 impl std::fmt::Debug for BleServerConfig {
@@ -341,7 +351,15 @@ impl BleServer {
             store.clear()?;
         }
 
-        let claim = Arc::new(ClaimMachine::load(store)?);
+        let mut claim = ClaimMachine::load(store)?;
+        if config.claims_unreachable {
+            warn!(
+                "The state custodian holds this device's admin record and could not be \
+                 reached; refusing to claim until it answers (issue #157)"
+            );
+            claim = claim.with_claims_unreachable();
+        }
+        let claim = Arc::new(claim);
         Ok(Self {
             config,
             svc,
@@ -1772,6 +1790,14 @@ async fn handle_claim_rpc(
         Err(crate::claim::ClaimError::AlreadyClaimed) => {
             RpcResponse::err(id, ErrorCode::AlreadyClaimed, "device already claimed")
         }
+        // `Conflict` rather than a code of its own: the device is in a state
+        // where claiming cannot proceed, which is what `Conflict` already
+        // means, and an existing variant keeps a companion that predates this
+        // build from meeting a value it cannot decode. The message is what
+        // tells an admin the difference.
+        Err(e @ crate::claim::ClaimError::StateUnreachable) => {
+            RpcResponse::err(id, ErrorCode::Conflict, e.to_string())
+        }
         Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
     }
 }
@@ -2189,6 +2215,7 @@ mod tests {
             reset_sentinel_path: dir.path().join("reset"),
             adapter: None,
             files: None,
+            claims_unreachable: false,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2229,6 +2256,7 @@ mod tests {
             reset_sentinel_path: dir.path().join("reset"),
             adapter: None,
             files: None,
+            claims_unreachable: false,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2399,6 +2427,7 @@ mod tests {
             reset_sentinel_path: sentinel_path,
             adapter: None,
             files: None,
+            claims_unreachable: false,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);

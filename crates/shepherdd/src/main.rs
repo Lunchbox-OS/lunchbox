@@ -260,8 +260,20 @@ enum StateProtection {
     /// Deliberately local (`--no-state-custodian`).
     OptedOut,
     /// Wanted, but the custodian could not be reached; the store is a file in
-    /// the home directory of the uid activities run as. Carries the reason.
-    Degraded(String),
+    /// the home directory of the uid activities run as.
+    Degraded {
+        /// Why the custodian could not be used.
+        reason: String,
+        /// Whether this device has a custodian state directory, i.e. whether
+        /// protection *broke* rather than never having been installed.
+        ///
+        /// `/var/lib/shepherdd/state/<user>/` is unreadable here but its
+        /// parents are not, so this is a `stat` shepherdd is allowed to make
+        /// and an activity cannot forge in either direction. It is what tells a
+        /// fresh install apart from a device whose protection failed this boot
+        /// — the second must not go on to present itself as unclaimed.
+        custodian_expected: bool,
+    },
 }
 
 /// What [`StateSource::into_parts`] settles into: the store, the policy source
@@ -302,7 +314,13 @@ enum StateSource {
     /// be reached. `reason` is `None` for the first and the failure for the
     /// second — which is the difference between "the operator asked" and "the
     /// protection was wanted and could not be had".
-    Local { reason: Option<String> },
+    Local {
+        reason: Option<String>,
+        /// Whether this device has custodian state on disk, i.e. whether the
+        /// protection *broke* rather than never having been installed. Always
+        /// `false` when the operator opted out.
+        custodian_expected: bool,
+    },
 }
 
 impl StateSource {
@@ -364,12 +382,16 @@ impl StateSource {
                     // Database protected, policy not. Degraded rather than
                     // Custodian, because a policy an activity can rewrite is
                     // exactly what this issue is about.
-                    StateProtection::Degraded(
-                        "the custodian holds no policy file, so the policy is still read from \
-                         this user's home where every activity can rewrite it; run `shepherd \
-                         install state --user <user>` to migrate it"
+                    StateProtection::Degraded {
+                        reason: "the custodian holds no policy file, so the policy is still \
+                                 read from this user's home where every activity can rewrite \
+                                 it; run `shepherd install state --user <user>` to migrate it"
                             .to_string(),
-                    )
+                        // The custodian answered; the database is protected. It
+                        // is the policy that is not, and the admin record it
+                        // also holds is reachable, so claiming is fine.
+                        custodian_expected: false,
+                    }
                 };
                 // `None` when the custodian holds no policy: the policy is
                 // then a local file, and the reload has to read it from where
@@ -377,10 +399,16 @@ impl StateSource {
                 let policy_files = holds_policy.then_some(files);
                 Ok((store, policy_files, protection))
             }
-            StateSource::Local { reason } => {
+            StateSource::Local {
+                reason,
+                custodian_expected,
+            } => {
                 let store = Service::open_local_store(data_dir)?;
                 let protection = match reason {
-                    Some(reason) => StateProtection::Degraded(reason),
+                    Some(reason) => StateProtection::Degraded {
+                        reason,
+                        custodian_expected,
+                    },
                     None => StateProtection::OptedOut,
                 };
                 Ok((store, None, protection))
@@ -409,7 +437,10 @@ impl Service {
                 "Policy and state are in this user's home; every activity runs as this uid \
                  and can read and rewrite them (issue #157)"
             );
-            return Ok(StateSource::Local { reason: None });
+            return Ok(StateSource::Local {
+                reason: None,
+                custodian_expected: false,
+            });
         }
 
         // Whose state to ask for is *this process's* user, not a name from the
@@ -424,6 +455,8 @@ impl Service {
                 warn!(%reason, "Falling back to local policy and state");
                 return Ok(StateSource::Local {
                     reason: Some(reason),
+                    // No name to look a state directory up by.
+                    custodian_expected: false,
                 });
             }
         };
@@ -437,9 +470,15 @@ impl Service {
             Ok(store) => store,
             Err(e) => {
                 let reason = format!("{e}");
-                warn!(error = %reason, "Falling back to local policy and state");
+                let custodian_expected = Self::custodian_holds_state_for(&user);
+                warn!(
+                    error = %reason,
+                    custodian_expected,
+                    "Falling back to local policy and state"
+                );
                 return Ok(StateSource::Local {
                     reason: Some(reason),
+                    custodian_expected,
                 });
             }
         };
@@ -447,9 +486,15 @@ impl Service {
             Ok(files) => files,
             Err(e) => {
                 let reason = format!("{e}");
-                warn!(error = %reason, "Falling back to local policy and state");
+                let custodian_expected = Self::custodian_holds_state_for(&user);
+                warn!(
+                    error = %reason,
+                    custodian_expected,
+                    "Falling back to local policy and state"
+                );
                 return Ok(StateSource::Local {
                     reason: Some(reason),
+                    custodian_expected,
                 });
             }
         };
@@ -462,6 +507,24 @@ impl Service {
             files: Arc::new(files),
             store: Arc::new(store),
         })
+    }
+
+    /// Whether the custodian holds state for `user`, asked of the filesystem
+    /// rather than of the connection that just failed (issue #157).
+    ///
+    /// `/var/lib/shepherdd/state/<user>/` is `0700` and owned by
+    /// `shepherd-state`, so nothing here can read it — but its parents are
+    /// root-owned and world-executable, so this `stat` is allowed, and an
+    /// activity can neither create the directory nor remove it.
+    ///
+    /// It answers the one question a failed connection cannot: whether this is
+    /// a device that never had a custodian, or one whose protection broke this
+    /// boot. Both fall back, but only the second must stop presenting itself as
+    /// unclaimed — after migration the fallback location is empty, so an absent
+    /// `admin.toml` there means "looking in the wrong place", not "nobody has
+    /// claimed this device".
+    fn custodian_holds_state_for(user: &str) -> bool {
+        shepherd_state_proto::state_dir(user).is_dir()
     }
 
     /// Connect to the custodian, retrying a transient failure.
@@ -639,7 +702,7 @@ impl Service {
         state: &StateProtection,
         diagnostics: &dyn DiagnosticSink,
     ) {
-        if let StateProtection::Degraded(reason) = state {
+        if let StateProtection::Degraded { reason, .. } = state {
             diagnostics.raise(Self::state_not_protected_diagnostic(reason));
         }
     }
@@ -1396,6 +1459,18 @@ impl Service {
                     // too — otherwise the credential sits at the uid every
                     // activity runs as (issue #157).
                     files: policy_files.clone(),
+                    // A device whose custodian holds the admin record but could
+                    // not be reached must not offer itself to the next phone
+                    // that asks: the fallback location is empty after
+                    // migration, so "no record" there is indistinguishable from
+                    // "cannot see the record" (issue #157).
+                    claims_unreachable: matches!(
+                        state_protection,
+                        StateProtection::Degraded {
+                            custodian_expected: true,
+                            ..
+                        }
+                    ),
                     adapter: ble_cfg.adapter,
                 };
                 // `shepherd-pairing-display` is spawned per pairing
@@ -2598,7 +2673,20 @@ mod harden_diagnostic_tests {
         for (state, expected) in [
             (StateProtection::Custodian, 0),
             (StateProtection::OptedOut, 0),
-            (StateProtection::Degraded("socket missing".into()), 1),
+            (
+                StateProtection::Degraded {
+                    reason: "socket missing".into(),
+                    custodian_expected: false,
+                },
+                1,
+            ),
+            (
+                StateProtection::Degraded {
+                    reason: "socket missing".into(),
+                    custodian_expected: true,
+                },
+                1,
+            ),
         ] {
             let sink = RecordingSink::default();
             Service::degraded_state_protection_is_reported(&state, &sink);
@@ -2608,5 +2696,27 @@ mod harden_diagnostic_tests {
                 "{state:?} reported the wrong number of diagnostics"
             );
         }
+    }
+
+    /// The signal that tells a broken custodian apart from one that was never
+    /// installed, and the reason it can be trusted: the directory is one only
+    /// root can create, in a tree an activity cannot write.
+    ///
+    /// Both answers matter. A `true` on a fresh install would refuse claims on
+    /// a device nobody has ever paired — unpairable out of the box. A `false`
+    /// on a device whose protection broke is the bug this exists to prevent.
+    #[test]
+    fn a_custodian_state_directory_is_what_says_protection_was_expected() {
+        // No custodian was ever installed for a name nothing owns.
+        assert!(!Service::custodian_holds_state_for(
+            "definitely-not-a-user-on-this-box"
+        ));
+
+        // And the path it asks about is the one the custodian actually uses,
+        // which is the half that would rot silently if either side moved.
+        assert_eq!(
+            shepherd_state_proto::state_dir("kiosk"),
+            std::path::Path::new("/var/lib/shepherdd/state/kiosk")
+        );
     }
 }

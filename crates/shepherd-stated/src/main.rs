@@ -117,16 +117,21 @@ async fn main() -> Result<()> {
         .await
         .context("connecting to the system bus to ask logind about sessions")?;
 
-    let Some(trusted) = session::resolve_waiting(&conn, uid).await? else {
-        // Nobody is logged in. Exit *cleanly*: with `Restart=on-failure` that
+    let trusted = match session::resolve_waiting(&conn, uid).await? {
+        session::Trust::Session(trusted) => trusted,
+        // Nobody is logged in, or more than one session is and there is no
+        // right one to pick. Exit *cleanly*: with `Restart=on-failure` that
         // consumes no restart budget, so the socket stays armed and the next
         // connection tries again. Failing here is what a device measured
         // taking the socket unit down for a whole boot.
-        info!(
-            "No graphical session for {}; serving nobody and stopping",
-            args.user
-        );
-        return Ok(());
+        session::Trust::Nothing(reason) => {
+            info!(
+                user = %args.user,
+                %reason,
+                "Nothing to trust; serving nobody and stopping"
+            );
+            return Ok(());
+        }
     };
     info!(
         session = %trusted.id,
@@ -183,7 +188,10 @@ async fn main() -> Result<()> {
 /// the protected files live came from a variable — and this whole issue is
 /// about state that can be pointed somewhere else.
 fn default_state_dir(user: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from("/var/lib/shepherdd/state").join(user)
+    // The same constant shepherdd stats to tell "the custodian is broken" apart
+    // from "this device never had one", so the two cannot drift into disagreeing
+    // about where the state lives.
+    shepherd_state_proto::state_dir(user)
 }
 
 /// Resolve a user name to a uid without shelling out.
