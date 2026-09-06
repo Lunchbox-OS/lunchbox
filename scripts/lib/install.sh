@@ -686,6 +686,48 @@ install_firewall() {
     success "Firewall helper installed"
 }
 
+# Give one user a custodian: the directory, their migrated state, and the socket.
+#
+# Split out of `install_state` because a packaged device cannot reach that.
+# The `.deb` ships `shepherd-admin`, which has no `install` verb -- so on a
+# packaged system this is the only route to the per-user half, and
+# `shepherd-admin setup-user` is what calls it. Without that, `setup-user`
+# enabled the socket and nothing else: the custodian came up with an empty
+# directory while the device's real history sat in the home directory, and the
+# diagnostic that noticed named `shepherd install state`, a command that does
+# not exist there.
+#
+# Args:
+#   $1 -- the kiosk user
+setup_state_for_user() {
+    local user="$1"
+
+    require_root
+    id "$user" >/dev/null 2>&1 || die "No such user: $user"
+    getent passwd "$STATED_USER" >/dev/null \
+        || die "The system user $STATED_USER does not exist; install the state custodian first"
+
+    # Create the state directory here rather than leaving it to the unit's
+    # `StateDirectory=`. That would also do it -- but only when the *service*
+    # first starts, and socket activation means that is the moment shepherdd
+    # first connects. Migration has to have already happened by then, or the
+    # daemon creates an empty database and the device's history is stranded in
+    # the home directory it came from.
+    #
+    # `StateDirectory=` is idempotent, so it accepts what is already here and
+    # keeps enforcing the mode.
+    info "Creating $STATED_STATE_ROOT/$user"
+    install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_STATE_ROOT/$user"
+
+    _migrate_state_for_user "$user"
+
+    info "Enabling the state custodian's socket for $user"
+    local socket_unit
+    socket_unit="$(stated_socket_unit_for "$user")"
+    systemctl enable --now "$socket_unit" 2>/dev/null \
+        || warn "Could not enable $socket_unit; enable it manually"
+}
+
 # Install the state custodian: the binary, its systemd units, and the system
 # user that owns shepherd's policy and state (issue #157).
 #
@@ -753,29 +795,7 @@ install_state() {
         systemctl daemon-reload 2>/dev/null \
             || warn "Could not reload systemd; the state custodian applies at next boot"
 
-        if [[ -n "$user" ]]; then
-            id "$user" >/dev/null 2>&1 || die "No such user: $user"
-
-            # Create the state directory here rather than leaving it to the
-            # unit's `StateDirectory=`. That would also do it -- but only when
-            # the *service* first starts, and socket activation means that is
-            # the moment shepherdd first connects. Migration has to have already
-            # happened by then, or the daemon creates an empty database and the
-            # device's history is stranded in the home directory it came from.
-            #
-            # `StateDirectory=` is idempotent, so it accepts what is already
-            # here and keeps enforcing the mode.
-            info "Creating $STATED_STATE_ROOT/$user"
-            install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_STATE_ROOT/$user"
-
-            _migrate_state_for_user "$user"
-
-            info "Enabling the state custodian's socket for $user"
-            local socket_unit
-            socket_unit="$(stated_socket_unit_for "$user")"
-            systemctl enable --now "$socket_unit" 2>/dev/null \
-                || warn "Could not enable $socket_unit; enable it manually"
-        fi
+        [[ -n "$user" ]] && setup_state_for_user "$user"
     fi
 
     success "State custodian installed"

@@ -581,8 +581,11 @@ journalctl -u shepherd-stated@kiosk.service     # what it trusted, what it refus
 ```
 
 Installed by `shepherd install all --user kiosk`, or on a packaged system by
-`shepherd-admin setup-user kiosk` — the per-user socket cannot be enabled at
-package time, because the kiosk user is not known then.
+`shepherd-admin setup-user kiosk`. Both do the same per-user work — create the
+protected directory, move the device's existing state into it, and enable the
+socket — because none of it can happen at package time, when the kiosk user is
+not known yet. `shepherd-admin` is the packaged CLI and has no `install` verb,
+so `setup-user` is the whole of it there.
 
 Consequences worth knowing before you debug a device:
 

@@ -453,7 +453,7 @@ if [ "$1" = "configure" ]; then
     cat <<'EOM'
 shepherd-launcher installed. Finish setting up a kiosk user (replace USER):
 
-  shepherd-admin setup-user USER     # deploy config + add group memberships
+  shepherd-admin setup-user USER     # config, groups, and the state custodian
   shepherd-admin yt-dlp install      # only for YouTube media libraries
 
 Then have USER log out and back in and pick the "Shepherd Kiosk" session.

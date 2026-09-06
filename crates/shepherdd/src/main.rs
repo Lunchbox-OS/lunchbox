@@ -385,7 +385,8 @@ impl StateSource {
                     StateProtection::Degraded {
                         reason: "the custodian holds no policy file, so the policy is still \
                                  read from this user's home where every activity can rewrite \
-                                 it; run `shepherd install state --user <user>` to migrate it"
+                                 it; migrate it with `shepherd install state --user <user>`, \
+                                 or `shepherd-admin setup-user <user>` on a packaged system"
                             .to_string(),
                         // The custodian answered; the database is protected. It
                         // is the policy that is not, and the admin record it

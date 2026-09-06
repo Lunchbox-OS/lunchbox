@@ -1200,17 +1200,21 @@ setup_user() {
     # package's postinst (or install_firewall) created.
     add_user_to_groups "$user" "${SHEPHERD_REQUIRED_GROUPS[@]}" "$FIREWALL_GROUP"
 
-    # The state custodian is per-user, so the package cannot enable it: the
-    # kiosk user is not known at package time. Without this the daemon never
-    # starts and shepherdd falls back to keeping its state in the user's home,
-    # where every activity can reach it (issue #157) -- degraded, and reported
-    # as a diagnostic, but not what an operator following the docs expects.
+    # The state custodian is per-user, so the package cannot set it up: the
+    # kiosk user is not known at package time. This does the whole per-user half
+    # -- the protected directory, the device's migrated state, and the socket --
+    # because on a packaged system there is nowhere else to get it. The `.deb`
+    # ships `shepherd-admin`, which has no `install` verb, so `shepherd install
+    # state --user <user>` is a from-source command only.
+    #
+    # Enabling the socket alone was the earlier shape, and it was worse than it
+    # looked: the custodian came up owning an empty directory while the device's
+    # usage history, quota balances and BLE admin record stayed in the home
+    # directory, unread. An upgrade looked like a factory reset, and the
+    # diagnostic that noticed named a command a packaged device does not have.
     if command_exists systemctl && [[ -f "$STATED_UNIT_DIR/$STATED_SOCKET_UNIT" ]]; then
-        info "Enabling the state custodian for $user..."
-        local socket_unit
-        socket_unit="$(stated_socket_unit_for "$user")"
-        systemctl enable --now "$socket_unit" 2>/dev/null \
-            || warn "Could not enable $socket_unit; shepherd's state will stay in $user's home"
+        info "Setting up the state custodian for $user..."
+        setup_state_for_user "$user"
     fi
 
     success "Set up $user"
