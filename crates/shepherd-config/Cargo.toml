@@ -6,8 +6,8 @@ license.workspace = true
 description = "Configuration parsing and validation for shepherdd"
 
 [[bin]]
-name = "validate-config"
-path = "src/bin/validate-config.rs"
+name = "shepherd-validate-config"
+path = "src/bin/shepherd-validate-config.rs"
 
 [dependencies]
 shepherd-util = { workspace = true }

@@ -972,7 +972,7 @@ _migrate_state_for_user() {
 _resolve_validator() {
     local release="${1:-true}"
     local installed
-    if installed="$(command -v validate-config 2>/dev/null)" && [[ -x "$installed" ]]; then
+    if installed="$(command -v shepherd-validate-config 2>/dev/null)" && [[ -x "$installed" ]]; then
         echo "$installed"
         return 0
     fi
@@ -1046,7 +1046,7 @@ install_policy() {
     # exists and the file is right here; there is no reason to find out later.
     local validator
     validator="$(_resolve_validator "$release")" \
-        || die "validate-config not found; run 'shepherd build' first (from a source tree), \
+        || die "shepherd-validate-config not found; run 'shepherd build' first (from a source tree), \
 or reinstall the package, which ships it"
     info "Validating $src..."
     "$validator" "$src" \

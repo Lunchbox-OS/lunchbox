@@ -14,15 +14,15 @@ fn main() -> ExitCode {
         Some(path) => PathBuf::from(path),
         None => {
             let default_path = default_config_path();
-            eprintln!("Usage: validate-config [config-file]");
+            eprintln!("Usage: shepherd-validate-config [config-file]");
             eprintln!();
             eprintln!("Validates a shepherdd configuration file.");
             eprintln!();
             eprintln!("If no path is provided, uses: {}", default_path.display());
             eprintln!();
             eprintln!("Example:");
-            eprintln!("  validate-config {}", default_path.display());
-            eprintln!("  validate-config config.example.toml");
+            eprintln!("  shepherd-validate-config {}", default_path.display());
+            eprintln!("  shepherd-validate-config config.example.toml");
             return ExitCode::from(2);
         }
     };

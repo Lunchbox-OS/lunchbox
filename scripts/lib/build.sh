@@ -25,7 +25,7 @@ SHEPHERD_BINARIES=(
     # only route to a policy is an unchecked one, and an unparseable policy is
     # fatal at shepherdd's *startup* -- a session that ends at the next boot,
     # on a device whose kiosk user has no shell to fix it from.
-    "validate-config"
+    "shepherd-validate-config"
 )
 
 # Get the target directory for binaries
