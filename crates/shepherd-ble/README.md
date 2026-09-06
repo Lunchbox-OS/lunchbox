@@ -41,3 +41,46 @@ unified HTTP+BLE bearer-token identity, filesystem reset sentinel.
 
 The agent + server modules require a running BlueZ daemon and a real
 adapter; everything else is unit-testable in isolation.
+
+## The claim is per-user; the bond is not
+
+Worth knowing before reasoning about a device with more than one kiosk user,
+because the two halves of "paired" live at different scopes.
+
+Since issue #157 the admin record is held by the state custodian, which is
+templated per user — `shepherd-stated@<user>`, its own
+`/var/lib/shepherdd/state/<user>/`, its own `admin.toml`. So the *claim*, and
+the HTTP bearer token minted with it, belong to one kiosk user.
+
+The **BlueZ bond does not**. It lives under `/var/lib/bluetooth/<adapter>/`, is
+owned by root, and there is one adapter. `Adapter::remove_device` forgets a bond
+for the machine.
+
+Three consequences follow, none of them designed — they fall out of the two
+scopes rather than being chosen:
+
+- **A phone claimed for one user arrives at the next already bonded.** The
+  second user's record is absent, so their device reads `Unclaimed`, and the
+  phone — bonded at the link layer — can claim it too. One phone administering
+  two children is plausibly what an operator wants, but nothing here decides it.
+- **A factory reset for one user unpairs the phone from all of them.** The
+  sentinel is per-user and clears that user's record, but the queued
+  `remove_device` takes the system bond with it. The other user's record still
+  says claimed, with no bond behind it — the mirror of the lockout
+  `PendingUnbondStore` exists to prevent, across a boundary the rest of the
+  design keeps.
+- **`authorize` gates on the claim, and any bonded peer passes it.** See the
+  comment on `ClaimMachine::authorize`: an address that does not match the
+  record is logged and allowed under the v1 single-admin policy. With one bond
+  table and several records, "any bonded peer" is a wider set than it reads as.
+
+Untested, and stated here from the code rather than from a device: nothing in
+the tree sets up a second kiosk user. Two simultaneous graphical sessions are a
+further open question — the custodian refuses two sessions for *one* uid, so two
+uids with one each satisfies it, and two `shepherdd`s would then contend for one
+adapter's GATT registration.
+
+This is not issue #149, which is multiple *phones* per device. They meet at the
+same fix, though: identify a peer by its resolved identity or IRK rather than by
+whichever address BlueZ surfaced, which is what `authorize`'s comment already
+says multi-admin will need.
