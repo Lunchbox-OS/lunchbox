@@ -1062,18 +1062,17 @@ install_all() {
     success "Installation complete!"
     info ""
     info "Next steps:"
-    # Step 1 named the home config alone until issue #157, which is now the one
-    # file that changes nothing on its own: the state custodian holds the copy
-    # shepherdd reads. An operator following the old wording would edit, see no
-    # effect, and have only the policy_diverged diagnostic to explain it.
-    info "  1. Set the policy. The state custodian holds the copy shepherdd"
-    info "     reads, so editing ~$user/.config/shepherd/config.toml alone"
-    info "     changes nothing -- push it when you are done:"
-    info "       sudo shepherd install policy --user $user"
-    info "     Or install one from anywhere, without touching $user's home:"
+    # Step 1 named ~/.config/shepherd/config.toml until issue #157 moved the
+    # policy to the custodian and left a signpost there. An operator following
+    # the old wording would edit a file that decides nothing.
+    info "  1. Set the policy. It lives with the state custodian now --"
+    info "     $STATED_STATE_ROOT/$user/config.toml -- and"
+    info "     ~$user/.config/shepherd/config.toml is a signpost saying so."
+    info "     Edit it in place:"
+    info "       sudoedit $STATED_STATE_ROOT/$user/config.toml"
+    info "     or install one from anywhere, validated before it is applied:"
     info "       sudo shepherd install policy --user $user --source PATH"
-    info "     Either way it is validated first, and the device reports"
-    info "     policy_diverged while the two copies disagree."
+    info "     Either way shepherdd reloads within a second."
     info "  2. Have $user log out and back in (so the new shepherd-firewall"
     info "     group membership takes effect for per-entry firewall rules)"
     info "  3. Select 'Shepherd Kiosk' session at login"
