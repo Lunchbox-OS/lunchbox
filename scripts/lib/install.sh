@@ -13,6 +13,11 @@ source "$INSTALL_LIB_DIR/common.sh"
 # shellcheck source=build.sh
 source "$INSTALL_LIB_DIR/build.sh"
 
+# Source config utilities: `install policy` validates before it installs, and
+# `get_validate_binary` is where the validator's path is decided.
+# shellcheck source=config.sh
+source "$INSTALL_LIB_DIR/config.sh"
+
 # Distro package name. Lives here rather than in package.sh because the
 # uninstall path needs it to point at `apt purge`, and package.sh sources
 # this file (not the other way round).
@@ -813,28 +818,71 @@ _migrate_state_for_user() {
     fi
 }
 
-# Push a user's edited policy to the custodian, and say so.
+# Push a policy to the custodian, and say so.
 #
 # `install config` deploys the *example* config; this is the other direction --
-# take what is at `~/.config/shepherd/config.toml` now and make it the one the
-# daemon reads. That is the remedy shepherdd's divergence warning names, so it
-# has to exist as a command an operator can actually run.
+# take a policy and make it the one the daemon reads. That is the remedy
+# shepherdd's divergence warning names, so it has to exist as a command an
+# operator can actually run.
+#
+# With `--source` the policy comes straight from a path the administrator
+# names, and the kiosk user's home is never touched. That is the case hardening
+# creates: `harden apply` gives the kiosk user `nologin` and denies it SSH, so
+# an administrator cannot `su` in to edit the config the way every doc used to
+# assume. Editing it as root through `~kiosk/` still works and remains the
+# default when no `--source` is given, but routing an edit through the home
+# directory of the uid this issue exists to distrust should not be the only way
+# to reconfigure a device.
+#
+# Args:
+#   $1 -- the kiosk user whose custodian receives the policy (required)
+#   $2 -- policy to push (default: that user's ~/.config/shepherd/config.toml)
+#   $3 -- "true" for the release validator (default), "false" for debug
 install_policy() {
     local user="${1:-}"
+    local source_config="${2:-}"
+    local release="${3:-true}"
     require_root
-    [[ -n "$user" ]] || die "Usage: shepherd install policy --user USER"
+    [[ -n "$user" ]] || die "Usage: shepherd install policy --user USER [--source PATH]"
     validate_user "$user"
 
-    local home
+    local home src
     home="$(getent passwd "$user" | cut -d: -f6)"
-    [[ -f "$home/.config/shepherd/config.toml" ]] \
-        || die "No policy at $home/.config/shepherd/config.toml to push"
+    if [[ -n "$source_config" ]]; then
+        src="$source_config"
+        [[ -f "$src" ]] || die "No policy at $src to push"
+    else
+        src="$home/.config/shepherd/config.toml"
+        [[ -f "$src" ]] \
+            || die "No policy at $src to push (name one with --source PATH)"
+    fi
+
     [[ -d "$STATED_STATE_ROOT/$user" ]] \
         || die "No state custodian for $user; run 'shepherd install state --user $user' first"
 
+    # Validate before installing, not after. shepherdd tolerates a bad policy on
+    # *reload* -- it keeps the running one and logs -- but at startup
+    # `load_policy` is fatal, and since #172 a shepherdd that exits takes the
+    # session down with `loginctl terminate-session`. So a policy with a typo
+    # costs nothing until the next boot, and then costs the whole session, on a
+    # device whose kiosk user has no shell to fix it from. The validator already
+    # exists and the file is right here; there is no reason to find out later.
+    local validator
+    validator="$(get_validate_binary "$release")"
+    if [[ ! -x "$validator" ]]; then
+        # Deliberately not built here, unlike `shepherd config validate`: this
+        # runs as root, and a cargo build as root leaves a root-owned target/
+        # behind that the developer's next plain build cannot write. Same
+        # reasoning (and message shape) as install_state's missing binary.
+        die "validate-config not found at $validator; run 'shepherd build' first"
+    fi
+    info "Validating $src..."
+    "$validator" "$src" \
+        || die "$src did not validate; nothing was pushed (the device keeps its current policy)"
+
     install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
-        "$home/.config/shepherd/config.toml" "$STATED_STATE_ROOT/$user/config.toml"
-    success "Pushed $user's policy to the state custodian"
+        "$src" "$STATED_STATE_ROOT/$user/config.toml"
+    success "Pushed $src to $user's state custodian"
     info "shepherdd reloads it within a second; no restart needed."
 }
 
@@ -1306,7 +1354,7 @@ install_main() {
             install_state "$user" "$release"
             ;;
         policy)
-            install_policy "$user"
+            install_policy "$user" "$source_config" "$release"
             ;;
         config)
             install_config "$user" "$source_config" "$force"
@@ -1335,8 +1383,10 @@ Commands:
     firewall          Install the privileged firewall helper + polkit rule
     state             Install the state custodian: its binary, systemd units
                       and system user (issue #157)
-    policy            Push the user's edited ~/.config/shepherd/config.toml to
-                      the custodian, making it the one shepherdd reads
+    policy            Push a policy to the custodian, making it the one
+                      shepherdd reads. Takes the user's edited
+                      ~/.config/shepherd/config.toml, or any file named with
+                      --source. Validated before it is installed.
     config            Deploy user configuration
     sway-config       Install sway configuration
     desktop-entry     Install display manager desktop entry
@@ -1351,7 +1401,9 @@ Options:
                       (required for config / groups / all; optional for
                       firewall)
     --prefix PREFIX   Installation prefix (default: $DEFAULT_PREFIX)
-    --source CONFIG   Source config file (default: config.example.toml)
+    --source CONFIG   Source config file. For 'config', what to deploy
+                      (default: config.example.toml); for 'policy', the policy
+                      to push (default: the user's own config.toml)
     --force, -f       Overwrite existing configuration files
     --release         Use release binaries (default)
     --debug           Use debug binaries (for 'firewall' during development)
@@ -1370,6 +1422,8 @@ Examples:
     shepherd install bins --prefix /usr/local
     shepherd install firewall --user kiosk
     shepherd install config --user kiosk --force
+    shepherd install policy --user kiosk
+    shepherd install policy --user kiosk --source ./new-config.toml
     shepherd install groups --user kiosk
     shepherd install udev
     shepherd install all --user kiosk --prefix /usr

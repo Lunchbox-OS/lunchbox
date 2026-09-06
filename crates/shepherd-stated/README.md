@@ -178,6 +178,15 @@ an operator can edit it and see nothing happen, so three things close that trap:
 and the device reports `policy_diverged` while the two disagree — which is
 exactly what a forgotten push looks like.
 
+`shepherd install policy --source PATH` skips the home copy entirely and writes
+what an administrator names. On a hardened device that is the only route that
+does not need root to edit a file inside the home directory of the uid this
+daemon exists to distrust — `harden apply` leaves the kiosk user with `nologin`
+and no SSH, so there is nothing to `su` into. Either form validates first: a
+policy this daemon serves and shepherdd cannot parse is fatal at *startup*
+(tolerated only on reload), which on a device is a session that ends rather than
+a message someone reads.
+
 That is a swept diagnostic rather than a log line, so it clears itself when the
 edit is pushed. It has to be: the sweep also runs on config reload, and a reload
 is what pushing an edit causes.

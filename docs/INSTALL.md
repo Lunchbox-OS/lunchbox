@@ -591,6 +591,27 @@ Consequences worth knowing before you debug a device:
   which reloads within a second. While the two disagree the device reports the
   `policy_diverged` diagnostic — visible in the web UI and the companion app —
   and it clears when the edit is pushed.
+- **An administrator can reconfigure a device without touching the kiosk's home
+  at all**, which is what a hardened device needs: `harden apply` gives the
+  kiosk user `nologin` and denies it SSH, so there is no `su` into it to edit a
+  config in `vim`.
+
+  ```sh
+  sudo shepherd install policy --user kiosk --source ./new-config.toml
+  ```
+
+  That writes straight to the custodian. Editing as root through `~kiosk/` and
+  pushing with no `--source` still works and stays the default; this is the
+  route that does not route a policy through the home directory of the uid the
+  custodian exists to distrust.
+
+  **Both forms validate before they install.** A policy shepherdd cannot parse
+  is survivable on reload — it keeps the running one and logs — but fatal at
+  startup, and since #172 a shepherdd that exits takes the session down with
+  it. So a typo would cost nothing until the next boot and then cost the whole
+  session, on a device whose kiosk user has no shell to fix it from. A file
+  that does not validate is reported and not installed, and the device keeps
+  the policy it has.
 - **The state is not in the user's home.** `/var/lib/shepherdd/state/<user>/` is,
   and only `root` and `shepherd-state` can read it.
 - **The socket is created by systemd, not by the daemon**, which is what stops an
