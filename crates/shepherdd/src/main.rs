@@ -1692,7 +1692,6 @@ impl Service {
                 _ = diagnostic_timer.tick() => {
                     Self::sweep_diagnostics(
                         &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
-                        policy_files.as_ref(), &config_path,
                     ).await;
                 }
 
@@ -1750,7 +1749,6 @@ impl Service {
                     // keeps a diagnostic about an activity that is gone.
                     Self::sweep_diagnostics(
                         &engine, &diagnostics, &ipc_ref, &event_tx, sound_backend_available,
-                        policy_files.as_ref(), &config_path,
                     ).await;
                 }
 
@@ -1919,21 +1917,9 @@ impl Service {
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         sound_backend_available: bool,
-        policy_files: Option<&Arc<dyn ProtectedFiles>>,
-        config_path: &Path,
     ) {
         let policy = { engine.lock().await.policy().clone() };
-        // Read the custodian's copy here rather than caching it: the whole
-        // point is to notice an edit made since the last sweep, and a cached
-        // one would report the divergence that existed at startup forever.
-        let custodial =
-            policy_files.and_then(|files| files.read(ProtectedFile::Config).ok().flatten());
-        let source = custodial.as_ref().map(|text| diagnostics::PolicySource {
-            local: config_path,
-            custodial: text,
-        });
-        let facts =
-            diagnostics::gather_facts(&policy, sound_backend_available, source.as_ref()).await;
+        let facts = diagnostics::gather_facts(&policy, sound_backend_available).await;
         let fresh = diagnostics::evaluate(&facts, shepherd_util::now());
 
         // Feed the firewall answer to the availability gate before publishing.

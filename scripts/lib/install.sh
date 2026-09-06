@@ -316,24 +316,34 @@ install_config() {
     # only the seed, and left the custodian's copy -- the one shepherdd reads --
     # untouched. The operator saw "Overwrote user configuration" and the device
     # kept running the old policy.
-    if maybe_sudo test -f "$dst_config"; then
+    #
+    # Where it lands depends on whether this device has a custodian. With one,
+    # the example goes straight to it and the home path gets the signpost --
+    # seeding the home copy and then syncing it would recreate exactly the two
+    # files this issue stopped having. Without one (a dev box, a DESTDIR stage,
+    # a device that opted out) the home path is the live policy and this is
+    # unchanged.
+    local custodian_dir="$STATED_STATE_ROOT/$user"
+    if [[ -d "$custodian_dir" && -z "${DESTDIR:-}" ]]; then
+        if [[ -e "$custodian_dir/config.toml" ]]; then
+            warn "Policy already exists at $custodian_dir/config.toml, leaving it alone"
+            info "  To change the policy this device runs:"
+            info "    shepherd install policy --user $user --source PATH"
+        else
+            install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
+                "$source_config" "$custodian_dir/config.toml"
+            success "Installed $user's policy to the state custodian"
+        fi
+        _write_policy_placeholder "$user"
+    elif maybe_sudo test -f "$dst_config"; then
         warn "Config file already exists at $dst_config, leaving it alone"
         info "  To change the policy this device runs:"
         info "    shepherd install policy --user $user [--source PATH]"
     else
-        # Copy config file
         maybe_sudo cp "$source_config" "$dst_config"
         maybe_sudo chown "$user:$user" "$dst_config"
         maybe_sudo chmod 0644 "$dst_config"
         success "Installed user configuration for $user"
-
-        # Keep the custodian's copy in step (issue #157). It is the one the
-        # daemon reads; the home copy is the seed and the fallback. Writing only
-        # one would mean an operator following the documented workflow edits a
-        # file that no longer decides anything -- which is the trap
-        # `warn_if_the_policy_diverged` exists to catch, and this is what stops
-        # it happening in the first place.
-        _sync_policy_to_custodian "$user"
     fi
 
     # The example config references `~/.config/shepherd/movies.toml` for the
@@ -730,6 +740,75 @@ install_state() {
     success "State custodian installed"
 }
 
+# The line that marks a policy file as shepherd's signpost rather than a policy.
+#
+# Matched, not just written: `install policy` must never push one of these to
+# the custodian, and the migration must not "move" one it wrote itself on an
+# earlier run.
+POLICY_PLACEHOLDER_MARK="# shepherd: this device's policy lives with the state custodian"
+
+# Whether $1 is the placeholder rather than a real policy.
+_is_policy_placeholder() {
+    [[ -f "$1" ]] && grep -qF "$POLICY_PLACEHOLDER_MARK" "$1"
+}
+
+# Leave a signpost where the policy used to be.
+#
+# The policy now lives at a uid activities do not have, and the path every doc
+# and every habit points at is empty. A missing file would be read as "not
+# configured yet"; this says where it went and what to do instead.
+#
+# It is a *valid, empty* policy on purpose. `shepherdd` falls back to this file
+# when the custodian cannot be reached, so it has to parse -- and what it should
+# grant in that state is nothing, because the alternative is a device running a
+# policy nobody can see from where the custodian keeps it. Zero entries plus the
+# `state_not_protected` diagnostic is a device that visibly is not working,
+# which is the honest outcome; a stale policy that still launches games is a
+# device that looks fine and is not.
+_write_policy_placeholder() {
+    local user="$1"
+    local home dst
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -n "$home" ]] || return 0
+    dst="$home/.config/shepherd/config.toml"
+
+    # Never over a real policy: on a device without a custodian that file is
+    # the live one, and this function is called from paths that also run there.
+    if [[ -e "$dst" ]] && ! _is_policy_placeholder "$dst"; then
+        return 0
+    fi
+
+    install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
+    cat > "$dst" <<EOF
+$POLICY_PLACEHOLDER_MARK
+#
+# It was moved to a uid no activity has, so that the software this device
+# supervises cannot rewrite the rules it is supervised by (issue #157):
+#
+#     $STATED_STATE_ROOT/$user/config.toml
+#
+# To change what this device allows, edit that file as root --
+#
+#     sudoedit $STATED_STATE_ROOT/$user/config.toml
+#
+# -- or install one from anywhere, validated before it is applied:
+#
+#     sudo shepherd install policy --user $user --source ./new-config.toml
+#
+# Either way shepherdd reloads within a second; no restart is needed.
+#
+# Editing *this* file changes nothing while the custodian is reachable. It
+# parses, and grants nothing, because shepherdd reads it if the custodian ever
+# cannot be reached -- a device with no activities and a loud diagnostic, rather
+# than one quietly running a policy you cannot see.
+
+config_version = 1
+EOF
+    chown "$user:$user" "$dst"
+    chmod 0644 "$dst"
+    info "  Left a signpost at $dst"
+}
+
 # Move an existing device's state into the custodian's directory.
 #
 # Without this an upgrade looks like a factory reset: shepherdd would ask the
@@ -745,6 +824,13 @@ install_state() {
 # Idempotent and non-destructive. A file already in the protected directory is
 # never overwritten -- if both exist, the protected one is the live one and the
 # home copy is stale, so it is left alone and reported rather than merged.
+#
+# The policy moves with everything else, and a placeholder takes its place at
+# the familiar path saying where it went. Leaving a real copy there was the
+# earlier design and it was worse: two files that look equally authoritative,
+# only one of which decides anything, and a diagnostic whose whole job was to
+# notice they had drifted apart. One file that decides, and one signpost, needs
+# no diagnostic.
 _migrate_state_for_user() {
     local user="$1"
     local home state_dir moved=0 skipped=0
@@ -759,14 +845,6 @@ _migrate_state_for_user() {
     # `.factory-reset-ble` is deliberately not migrated: it is a one-shot
     # instruction, not state, and moving a stale one would factory-reset a
     # device during an upgrade.
-    #
-    # The policy is *copied*, not moved, unlike the rest. An operator edits
-    # `~/.config/shepherd/config.toml` -- every doc says so, `shepherd install
-    # config` writes it there, and the config editor saves it there. Taking it
-    # away would break that workflow with nothing to replace it yet; leaving a
-    # copy means the protected one is what the daemon reads while the familiar
-    # path still exists. The stale-copy warning is what stops the two silently
-    # diverging.
     local src dst name
     for name in shepherdd.db admin.toml; do
         src="$home/.local/share/shepherdd/$name"
@@ -791,18 +869,25 @@ _migrate_state_for_user() {
         moved=$((moved + 1))
     done
 
-    # The policy, copied rather than moved -- see above.
+    # The policy, moved like the rest, with a signpost left behind.
     src="$home/.config/shepherd/config.toml"
     dst="$state_dir/config.toml"
-    if [[ -f "$src" ]]; then
+    if [[ -f "$src" ]] && ! _is_policy_placeholder "$src"; then
         if [[ -e "$dst" ]]; then
             warn "  $dst already exists; not replacing it from $src"
             skipped=$((skipped + 1))
         else
-            info "  Copying the policy into the custodian's directory"
+            info "  Moving the policy into the custodian's directory"
             install -m 0600 -o "$STATED_USER" -g "$STATED_USER" "$src" "$dst"
+            rm -f "$src"
             moved=$((moved + 1))
         fi
+    fi
+    # Whether or not there was one to move: a device that reaches here keeps
+    # its policy with the custodian, and the familiar path should say so rather
+    # than be missing. Also covers a re-run, where the move already happened.
+    if [[ -d "$state_dir" ]]; then
+        _write_policy_placeholder "$user"
     fi
 
     if [[ "$moved" -gt 0 ]]; then
@@ -852,6 +937,16 @@ install_policy() {
             || die "No policy at $src to push (name one with --source PATH)"
     fi
 
+    # The signpost is not a policy. Pushing one would replace a device's real
+    # policy with an empty one -- every activity gone -- which is a bad enough
+    # outcome to be worth a check rather than a comment.
+    if _is_policy_placeholder "$src"; then
+        die "$src is the signpost shepherd leaves when the policy moves to the custodian, not a policy.
+  The live one is at $STATED_STATE_ROOT/$user/config.toml -- edit it with
+    sudoedit $STATED_STATE_ROOT/$user/config.toml
+  or install a different one with --source PATH."
+    fi
+
     [[ -d "$STATED_STATE_ROOT/$user" ]] \
         || die "No state custodian for $user; run 'shepherd install state --user $user' first"
 
@@ -881,24 +976,6 @@ install_policy() {
     info "shepherdd reloads it within a second; no restart needed."
 }
 
-# Copy a user's policy into the custodian's directory, if there is one.
-#
-# Silent no-op when the custodian is not installed for this user: `install
-# config` is also how a device without it is set up, and warning there would be
-# noise on every fresh install.
-_sync_policy_to_custodian() {
-    local user="$1"
-    local home dst
-    home="$(getent passwd "$user" | cut -d: -f6)"
-    [[ -n "$home" ]] || return 0
-    dst="$STATED_STATE_ROOT/$user/config.toml"
-    [[ -d "$STATED_STATE_ROOT/$user" ]] || return 0
-    [[ -f "$home/.config/shepherd/config.toml" ]] || return 0
-
-    info "Updating the custodian's copy of the policy..."
-    install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
-        "$home/.config/shepherd/config.toml" "$dst"
-}
 
 # Install the system-wide components: everything that is host-global and
 # DESTDIR-safe. This is the single source of truth for "what a system install
@@ -1164,25 +1241,22 @@ _restore_state_to_home() {
         moved=$((moved + 1))
     done
 
-    # The policy was copied in rather than moved, so the home copy still exists
-    # and is usually the same file. Where it is not, the custodian's is the one
-    # the device was actually running, and quietly overwriting an operator's
-    # file with it would be the wrong kind of helpful -- so it lands beside it,
-    # named, for a person to compare.
+    # The policy moves back over the signpost, which is the one file here that
+    # is not worth preserving: it exists to say the policy went somewhere else,
+    # and it is about to be wrong. A real policy at that path is a different
+    # matter and is left alone like everything else.
     src="$state_dir/config.toml"
     dst="$home/.config/shepherd/config.toml"
     if [[ -f "$src" ]]; then
-        if [[ ! -e "$dst" ]]; then
-            info "  Copying the policy back to $dst"
+        if [[ -e "$dst" ]] && ! _is_policy_placeholder "$dst"; then
+            warn "  $dst is a real policy; leaving $src where it is"
+            skipped=$((skipped + 1))
+        else
+            info "  Moving the policy back to $dst"
             install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
             install -m 0644 -o "$user" -g "$user" "$src" "$dst"
+            rm -f "$src"
             moved=$((moved + 1))
-        elif ! cmp -s "$src" "$dst"; then
-            install -m 0644 -o "$user" -g "$user" "$src" "$dst.from-custodian"
-            warn "  $dst differs from the policy this device was running"
-            info "    The one it ran is now at $dst.from-custodian; compare them"
-            info "    and keep the one you want -- shepherdd will read $dst."
-            skipped=$((skipped + 1))
         fi
     fi
 

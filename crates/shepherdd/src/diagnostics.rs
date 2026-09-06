@@ -22,7 +22,6 @@
 //! easy to get subtly wrong and invisible when they are.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
@@ -111,47 +110,6 @@ pub struct ProbeFacts {
     /// when input detection is unavailable — a device we cannot enumerate is
     /// not one we should accuse.
     pub ebook_unturnable_pages: Vec<EntryId>,
-    /// The path of a home-directory policy that differs from the one the
-    /// custodian is serving, when there is one (issue #157).
-    ///
-    /// `None` on a device without a custodian, and on one whose two copies
-    /// agree. Recomputed every sweep like the rest, so pushing the edit clears
-    /// the condition without a daemon restart — which matters more here than
-    /// for most: the sweep also runs on config reload, and a reload is exactly
-    /// what pushing an edit causes.
-    ///
-    /// Deliberately **not** watched with inotify, though watching it would make
-    /// the condition appear the moment someone edits rather than at the next
-    /// sweep. That file is writable by every activity, so a watch on it would
-    /// let one drive diagnostic sweeps at will — and a sweep probes the
-    /// firewall, scans `/dev/input` and runs `yt-dlp`. That is the
-    /// amplification `2026-08-29 004`'s finding 3 is about, bought for a
-    /// faster answer to an operator's own mistake.
-    pub policy_diverged: Option<PathBuf>,
-}
-
-/// Where a device keeps its policy, when the custodian keeps one (issue #157).
-///
-/// Passed to [`gather_facts`] rather than read there, so the comparison stays a
-/// pure function of two strings and the sweep does not have to know how to talk
-/// to a socket.
-pub struct PolicySource<'a> {
-    /// The path an operator edits: the seed and the fallback.
-    pub local: &'a std::path::Path,
-    /// What the custodian is serving, which is what takes effect.
-    pub custodial: &'a str,
-}
-
-impl PolicySource<'_> {
-    /// The local path when it differs from what is in force.
-    ///
-    /// An unreadable local copy is *not* divergence: a device whose policy
-    /// lives only with the custodian is a fine state to be in, and reporting it
-    /// would tell an operator to fix something that is not broken.
-    fn diverged(&self) -> Option<PathBuf> {
-        let home = std::fs::read_to_string(self.local).ok()?;
-        (home != self.custodial).then(|| self.local.to_path_buf())
-    }
 }
 
 /// Compute the probed diagnostics implied by `facts`.
@@ -160,29 +118,6 @@ impl PolicySource<'_> {
 /// caller controls time and the rules stay testable.
 pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-
-    // The policy an operator edited is not the one in force. Nothing is
-    // unprotected — the device is running a policy somebody installed — so this
-    // is a `Warning`: what is wrong is that an edit is not taking effect, and
-    // silence would let someone believe a limit had changed when it had not.
-    if let Some(path) = &facts.policy_diverged {
-        out.push(Diagnostic {
-            code: DiagnosticCode::PolicyDiverged,
-            subject: DiagnosticSubject::Service,
-            severity: DiagnosticSeverity::Warning,
-            message: format!(
-                "The policy at {} is not the one this device is running; the state \
-                 custodian's copy is what takes effect",
-                path.display()
-            ),
-            remedy: Some(
-                "Apply it with `sudo shepherd install policy --user <user>`, or discard it \
-                 — that file is the seed and the fallback, not the live policy."
-                    .to_string(),
-            ),
-            since: now,
-        });
-    }
 
     // Firewall. The host-wide cause and the per-activity consequence are
     // separate diagnostics on purpose: the first tells an admin what to fix,
@@ -454,11 +389,7 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
 /// The impure half, deliberately separated so every rule above stays testable
 /// without a filesystem or a subprocess. Runs off the reactor: the firewall
 /// probe execs `pkcheck` and the input scan walks `/dev/input`.
-pub async fn gather_facts(
-    policy: &Policy,
-    sound_backend_available: bool,
-    policy_source: Option<&PolicySource<'_>>,
-) -> ProbeFacts {
+pub async fn gather_facts(policy: &Policy, sound_backend_available: bool) -> ProbeFacts {
     // Re-probe rather than read the cache. This is the call that makes an
     // installed helper take effect without a daemon restart.
     let firewall = tokio::task::spawn_blocking(refresh_firewall_enforcement)
@@ -562,7 +493,6 @@ pub async fn gather_facts(
     };
 
     ProbeFacts {
-        policy_diverged: policy_source.and_then(PolicySource::diverged),
         firewall,
         firewalled_entries: firewalled_entry_ids(policy),
         youtube_entries,
@@ -826,88 +756,6 @@ mod tests {
     #[test]
     fn a_healthy_device_reports_nothing() {
         assert!(evaluate(&healthy(), at(0)).is_empty());
-    }
-
-    #[test]
-    fn a_policy_edited_at_the_wrong_path_is_reported_and_clears_when_pushed() {
-        // The home copy is kept on purpose -- it is the seed and the fallback,
-        // and without it a custodian that failed to start would take the
-        // session down. The cost is that an operator can edit it and see
-        // nothing happen, which is what this reports.
-        //
-        // Clearing matters as much as raising: the old form of this was a
-        // startup-only log line, so pushing the edit left the complaint behind
-        // until the next boot. Recomputed every sweep, and the sweep also runs
-        // on config reload -- which is exactly what pushing an edit causes.
-        let diverged = ProbeFacts {
-            sound_backend_available: true,
-            policy_diverged: Some(PathBuf::from("/home/kiosk/.config/shepherd/config.toml")),
-            ..ProbeFacts::default()
-        };
-        let raised = evaluate(&diverged, at(0));
-        assert_eq!(raised.len(), 1);
-        assert_eq!(raised[0].code, DiagnosticCode::PolicyDiverged);
-        // Not `Critical`: nothing is unprotected, and the device is enforcing a
-        // policy somebody installed. Grading it with the security conditions
-        // would train an administrator to ignore all of them.
-        assert_eq!(raised[0].severity, DiagnosticSeverity::Warning);
-        assert!(
-            raised[0]
-                .message
-                .contains("/home/kiosk/.config/shepherd/config.toml"),
-            "the path is the whole actionable content: {}",
-            raised[0].message
-        );
-        assert!(
-            raised[0]
-                .remedy
-                .as_deref()
-                .is_some_and(|r| r.contains("shepherd install policy")),
-            "the remedy has to name a command that exists"
-        );
-
-        assert!(
-            evaluate(
-                &ProbeFacts {
-                    sound_backend_available: true,
-                    ..ProbeFacts::default()
-                },
-                at(0)
-            )
-            .is_empty(),
-            "pushing the edit clears it without a restart"
-        );
-    }
-
-    /// A device with no custodian, and one whose copies agree, both report
-    /// nothing -- and so does one whose local copy is unreadable, because a
-    /// policy that lives only with the custodian is a fine state to be in.
-    #[test]
-    fn only_a_real_difference_is_divergence() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let local = dir.path().join("config.toml");
-        std::fs::write(&local, "config_version = 1\n").expect("write");
-
-        let agreeing = PolicySource {
-            local: &local,
-            custodial: "config_version = 1\n",
-        };
-        assert!(agreeing.diverged().is_none());
-
-        let differing = PolicySource {
-            local: &local,
-            custodial: "config_version = 1\n# and something else\n",
-        };
-        assert_eq!(differing.diverged(), Some(local.clone()));
-
-        let missing = PolicySource {
-            local: &dir.path().join("not-there.toml"),
-            custodial: "config_version = 1\n",
-        };
-        assert!(
-            missing.diverged().is_none(),
-            "no local copy is not a divergence to report"
-        );
     }
 
     #[test]

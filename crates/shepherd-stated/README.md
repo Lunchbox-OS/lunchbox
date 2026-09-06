@@ -172,32 +172,34 @@ With the custodian stopped, the session still comes up and the device reports
 `state_not_protected` (`Critical`) carrying the underlying reason — the trade
 #144 already makes twice, and never silent.
 
-### The policy has two copies, on purpose
+### There is one policy, and a signpost
 
-`config.toml` is **copied** into the protected directory, not moved. The home
-copy stays because it is two things: the seed migration reads, and the fallback
-`shepherdd` reads when the custodian is unreachable. Without it, a custodian
-that failed to start would take the whole session down — the trade #144
-declines to make twice already.
+`config.toml` is **moved** into the protected directory, and a signpost takes
+its place at `~/.config/shepherd/config.toml` naming where it went and how to
+change it. One file decides what a child may do, and it is the one at a uid no
+activity has.
 
-The custodian's copy is what takes effect. The cost of keeping the other is that
-an operator can edit it and see nothing happen, so three things close that trap:
-`shepherd install policy` pushes an edit, `shepherd install config` writes both,
-and the device reports `policy_diverged` while the two disagree — which is
-exactly what a forgotten push looks like.
+The earlier design kept a real copy at the home path — the seed migration read,
+and the fallback `shepherdd` reads when the custodian is unreachable — with a
+`policy_diverged` diagnostic to notice when the two drifted apart. It worked,
+and it was worse: two files that look equally authoritative, only one of which
+decides anything, and a whole diagnostic whose job was to report the confusion
+the arrangement created. Removing the second copy removed the need for it.
 
-`shepherd install policy --source PATH` skips the home copy entirely and writes
-what an administrator names. On a hardened device that is the only route that
-does not need root to edit a file inside the home directory of the uid this
-daemon exists to distrust — `harden apply` leaves the kiosk user with `nologin`
-and no SSH, so there is nothing to `su` into. Either form validates first: a
-policy this daemon serves and shepherdd cannot parse is fatal at *startup*
-(tolerated only on reload), which on a device is a session that ends rather than
-a message someone reads.
+The signpost still has to parse, because the fallback still reads that path. It
+is a valid policy with **zero entries**, which is the right thing to grant when
+the custodian cannot be reached: a device with no activities and a `Critical`
+`state_not_protected` is visibly not working, and that is honest. A stale policy
+that still launches games would be a device that looks fine and is not.
 
-That is a swept diagnostic rather than a log line, so it clears itself when the
-edit is pushed. It has to be: the sweep also runs on config reload, and a reload
-is what pushing an edit causes.
+Two ways to set a policy, both landing on the same file and reloading within a
+second — `sudoedit /var/lib/shepherdd/state/<user>/config.toml`, or
+`shepherd install policy --user <user> --source PATH`. The second is what a
+hardened device needs: `harden apply` leaves the kiosk user with `nologin` and
+no SSH, so there is nothing to `su` into. Both validate first — a policy this
+daemon serves and shepherdd cannot parse is fatal at *startup* (tolerated only
+on reload), which on a device is a session that ends rather than a message
+someone reads.
 
 ### What is still open
 
