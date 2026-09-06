@@ -152,6 +152,14 @@ verified on an installed kiosk after a clean boot: `shepherdd` connects to the
 custodian, the exploit that opened this issue is refused at every step, and the
 device's existing state is migrated rather than abandoned.
 
+That migration is reversible: `shepherd uninstall state --restore-to-home` moves
+the database and the admin record back to `~/.local/share/shepherdd/` before
+removing the units. Without it a downgrade to a build that predates this daemon
+would find an empty home, start from zero usage, and — with no `admin.toml` —
+report itself unclaimed, which is a factory reset by another name. The forward
+migration moves rather than copies, so the way back has to be a command rather
+than an assumption.
+
 ```
 shepherdd:      State served by the custodian; it is not reachable by activities
 activity:       ls /var/lib/shepherdd/state/kiosk/   -> Permission denied

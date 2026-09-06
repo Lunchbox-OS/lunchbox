@@ -1102,13 +1102,114 @@ uninstall_desktop_entry() {
 }
 
 # Remove the bluetoothd drop-in. Mirrors install_bluetooth_dropin.
+# Move a device's state back out of the custodian's directory (issue #157).
+#
+# The way out, and the reason `uninstall state` is not a one-way door.
+# `_migrate_state_for_user` *moved* the database and the admin record in, so a
+# device that goes back to keeping state in the kiosk user's home -- a rollback
+# to a build older than this one, or a deliberate `--no-state-custodian` --
+# finds that home empty and starts from zero: no usage history, no quota
+# balances, and an absent `admin.toml`, which `ClaimMachine::load` reads as
+# `Unclaimed`. A downgrade would look like a factory reset, and the next phone
+# to pair would claim the device. This is what stops that.
+#
+# Non-destructive in the same direction as the forward migration: a file
+# already in the home directory is never overwritten. On this path that copy is
+# the one shepherdd would read next, so it is the one that wins.
+#
+# Args:
+#   $1 -- the user whose state is being restored
+_restore_state_to_home() {
+    local user="$1"
+    local home state_dir data_dir moved=0 skipped=0
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    if [[ -z "$home" || ! -d "$home" ]]; then
+        warn "  $user has no home directory; leaving their state in $STATED_STATE_ROOT/$user"
+        return 0
+    fi
+    state_dir="$STATED_STATE_ROOT/$user"
+    [[ -d "$state_dir" ]] || return 0
+    data_dir="$home/.local/share/shepherdd"
+
+    info "Restoring $user's state to $data_dir..."
+    # Each component explicitly: `install -d` applies its mode and ownership to
+    # the *last* path element only, so a missing `~/.local/share` would be
+    # created root-owned and the user could then not write inside it.
+    local dir
+    for dir in "$home/.local" "$home/.local/share" "$data_dir"; do
+        [[ -d "$dir" ]] || install -d -m 0755 -o "$user" -g "$user" "$dir"
+    done
+
+    local src dst name side
+    for name in shepherdd.db admin.toml; do
+        src="$state_dir/$name"
+        dst="$data_dir/$name"
+        [[ -f "$src" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; leaving $src where it is"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Moving $name back to $data_dir"
+        install -m 0600 -o "$user" -g "$user" "$src" "$dst"
+        # SQLite side files travel with the database, exactly as they do on the
+        # way in: a journal left behind does not match the database it belongs
+        # to, and the next open is what finds out.
+        for side in "-wal" "-shm" "-journal"; do
+            [[ -f "$src$side" ]] || continue
+            install -m 0600 -o "$user" -g "$user" "$src$side" "$dst$side"
+            rm -f "$src$side"
+        done
+        rm -f "$src"
+        moved=$((moved + 1))
+    done
+
+    # The policy was copied in rather than moved, so the home copy still exists
+    # and is usually the same file. Where it is not, the custodian's is the one
+    # the device was actually running, and quietly overwriting an operator's
+    # file with it would be the wrong kind of helpful -- so it lands beside it,
+    # named, for a person to compare.
+    src="$state_dir/config.toml"
+    dst="$home/.config/shepherd/config.toml"
+    if [[ -f "$src" ]]; then
+        if [[ ! -e "$dst" ]]; then
+            info "  Copying the policy back to $dst"
+            install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
+            install -m 0644 -o "$user" -g "$user" "$src" "$dst"
+            moved=$((moved + 1))
+        elif ! cmp -s "$src" "$dst"; then
+            install -m 0644 -o "$user" -g "$user" "$src" "$dst.from-custodian"
+            warn "  $dst differs from the policy this device was running"
+            info "    The one it ran is now at $dst.from-custodian; compare them"
+            info "    and keep the one you want -- shepherdd will read $dst."
+            skipped=$((skipped + 1))
+        fi
+    fi
+
+    if [[ "$moved" -gt 0 ]]; then
+        success "  Restored $moved file(s) to $data_dir"
+    fi
+    if [[ "$skipped" -gt 0 ]]; then
+        info "  $skipped file(s) needed a decision and were left for you (above)"
+    fi
+}
+
+# Remove the state custodian.
+#
+# Args:
+#   $1 -- "true" to move every user's state back to their home directory first
+#         (default "false": the state is left where it is)
 uninstall_state() {
+    local restore="${1:-false}"
     local destdir="${DESTDIR:-}"
 
     require_root
 
     # Stop and disable every instance first, or systemd keeps a socket bound to
-    # a unit file that no longer exists.
+    # a unit file that no longer exists. This is also what has to happen before
+    # any restore: the custodian holds the database open for its whole life, and
+    # moving a file out from under a live writer is how a database gets a
+    # journal that no longer matches it.
     if [[ -z "$destdir" ]]; then
         local unit
         while IFS= read -r unit; do
@@ -1117,6 +1218,18 @@ uninstall_state() {
             systemctl disable --now "$unit" 2>/dev/null || true
         done < <(systemctl list-units --all --no-legend 'shepherd-stated@*' 2>/dev/null \
             | awk '{print $1}' | grep -E '^shepherd-stated@' || true)
+    fi
+
+    # Every user the custodian holds state for, not one named on the command
+    # line: an uninstall is already device-wide, and a device with two kiosk
+    # users would otherwise have half its state moved and half left behind.
+    if [[ "$restore" == "true" && -z "$destdir" && -d "$STATED_STATE_ROOT" ]]; then
+        local state_user_dir
+        for state_user_dir in "$STATED_STATE_ROOT"/*/; do
+            [[ -d "$state_user_dir" ]] || continue
+            state_user_dir="${state_user_dir%/}"
+            _restore_state_to_home "$(basename "$state_user_dir")"
+        done
     fi
 
     info "Removing the state custodian..."
@@ -1134,8 +1247,16 @@ uninstall_state() {
     # reinstall picks them straight back up. Removing the uid would orphan them
     # to a number rather than a name, which is worse than leaving both.
     if [[ -d "$destdir$STATED_STATE_ROOT" ]]; then
-        info "Left shepherd's state in $destdir$STATED_STATE_ROOT (owned by $STATED_USER)"
-        info "  Remove it by hand if you mean to discard usage history and the BLE admin record."
+        if [[ "$restore" == "true" ]]; then
+            info "Left $destdir$STATED_STATE_ROOT in place (owned by $STATED_USER)"
+            info "  Anything still in it is named above; the rest went back to the"
+            info "  users' home directories. Remove it by hand once you are happy."
+        else
+            info "Left shepherd's state in $destdir$STATED_STATE_ROOT (owned by $STATED_USER)"
+            info "  Remove it by hand if you mean to discard usage history and the BLE admin record."
+            info "  To put it back where shepherdd looks without the custodian, re-run with"
+            info "  --restore-to-home (a build older than issue #157 will not find it here)."
+        fi
     fi
 
     success "Removed the state custodian"
@@ -1195,10 +1316,11 @@ uninstall_udev() {
 # group memberships are left untouched (see the note atop the uninstall block).
 uninstall_system() {
     local prefix="${1:-$DEFAULT_PREFIX}"
+    local restore="${2:-false}"
 
     uninstall_bins "$prefix"
     uninstall_firewall
-    uninstall_state
+    uninstall_state "$restore"
     uninstall_sway_config
     uninstall_desktop_entry "$prefix"
     uninstall_udev
@@ -1208,12 +1330,13 @@ uninstall_system() {
 # Remove everything shepherd installed system-wide.
 uninstall_all() {
     local prefix="${1:-$DEFAULT_PREFIX}"
+    local restore="${2:-false}"
 
     require_root
 
     info "Uninstalling shepherd-launcher (prefix: $prefix)..."
 
-    uninstall_system "$prefix"
+    uninstall_system "$prefix" "$restore"
 
     success "Uninstall complete!"
 
@@ -1237,12 +1360,17 @@ uninstall_main() {
     shift || true
 
     local prefix="$DEFAULT_PREFIX"
+    local restore="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --prefix)
                 prefix="$2"
                 shift 2
+                ;;
+            --restore-to-home)
+                restore="true"
+                shift
                 ;;
             *)
                 die "Unknown option: $1"
@@ -1258,7 +1386,7 @@ uninstall_main() {
             uninstall_firewall
             ;;
         state)
-            uninstall_state
+            uninstall_state "$restore"
             ;;
         sway-config)
             uninstall_sway_config
@@ -1270,7 +1398,7 @@ uninstall_main() {
             uninstall_udev
             ;;
         all)
-            uninstall_all "$prefix"
+            uninstall_all "$prefix" "$restore"
             ;;
         ""|help|-h|--help)
             cat <<EOF
@@ -1292,6 +1420,12 @@ Commands:
 Options:
     --prefix PREFIX   Installation prefix the files were installed under
                       (default: $DEFAULT_PREFIX)
+    --restore-to-home For 'state' and 'all': move each user's database and BLE
+                      admin record back to ~/.local/share/shepherdd first, where
+                      a build without the state custodian looks for them. The
+                      migration that put them under the custodian moved them, so
+                      without this a downgrade starts from an empty database and
+                      an unclaimed device.
 
 Environment:
     DESTDIR           Removal root, mirroring 'install' (default: empty).
@@ -1301,6 +1435,7 @@ Examples:
     shepherd uninstall bins
     shepherd uninstall bins --prefix /usr
     shepherd uninstall all
+    shepherd uninstall state --restore-to-home
 EOF
             ;;
         *)

@@ -631,6 +631,62 @@ Consequences worth knowing before you debug a device:
   stops PAM reading a `~/.pam_environment` the kiosk user writes. See
   [Kiosk hardening](#kiosk-hardening).
 
+#### Operating a device after the state moved
+
+Three habits that worked before the custodian need adjusting. None of them
+fails loudly, which is why they are written down here.
+
+**Downgrading.** Migration *moved* the database and the BLE admin record out of
+the kiosk user's home. A build older than this one looks for them there, finds
+nothing, creates an empty database, and — with no `admin.toml` — reports itself
+as **unclaimed**, so the next phone to pair claims the device. A downgrade would
+look exactly like a factory reset. Move the state back first:
+
+```sh
+sudo shepherd uninstall state --restore-to-home
+```
+
+That stops the custodian, returns each user's `shepherdd.db` (with its SQLite
+side files) and `admin.toml` to `~/.local/share/shepherdd/`, and then removes the
+binary and units. It never overwrites a file already in the home directory — on
+that path the home copy is the one the older build will read, so it wins and the
+custodian's is left behind and named. The policy is the one exception: it was
+*copied* in rather than moved, so if the two now differ the one the device was
+actually running is written beside yours as `config.toml.from-custodian` for you
+to compare, rather than replacing an edit you may have meant.
+
+**Backups.** A device's state is now in **two** places, and a backup of `/home`
+alone no longer covers it:
+
+| What | Where | Owner |
+| --- | --- | --- |
+| usage history, quotas, audit log, policy, BLE admin record | `/var/lib/shepherdd/state/<user>/` | `shepherd-state` |
+| RetroArch save states, ebook progress, media cache | `~<user>/.local/share/shepherdd/` | the kiosk user |
+
+Back up both, and preserve ownership (`tar --numeric-owner`, `rsync -a`). If you
+restore onto a *different* machine, check the uid: `shepherd-state` is created
+with whatever system id was free, so it can differ between devices, and a
+restore by number can land the state on the wrong name. `sudo chown -R
+shepherd-state:shepherd-state /var/lib/shepherdd/state` after restoring fixes it.
+
+**Reading or editing the database by hand.** It is no longer in the kiosk user's
+home, and `sudo sqlite3` is the wrong way to reach it:
+
+```sh
+# Wrong: root creates root-owned -wal/-shm in a directory shepherd-state owns,
+# and the custodian can then no longer write its own database.
+sudo sqlite3 /var/lib/shepherdd/state/kiosk/shepherdd.db
+
+# Right: become the uid that owns it.
+sudo -u shepherd-state sqlite3 /var/lib/shepherdd/state/kiosk/shepherdd.db
+```
+
+Stop the custodian first if you are writing (`sudo systemctl stop
+shepherd-stated@kiosk.service`); it holds the database open for as long as it
+runs, and it starts again on the daemon's next connection. If you have already
+left root-owned side files behind, `sudo chown shepherd-state:shepherd-state
+/var/lib/shepherdd/state/kiosk/shepherdd.db*` puts it right.
+
 ### External monitor / docking (issue #87)
 
 If you use external-monitor mirroring, the Sway session must be started with
@@ -674,10 +730,19 @@ sudo ./scripts/shepherd uninstall bins --prefix /usr/local
 
 # Remove everything installed system-wide
 sudo ./scripts/shepherd uninstall all
+
+# ...and put the state back where a build without the custodian looks for it
+sudo ./scripts/shepherd uninstall all --restore-to-home
 ```
 
 (If you installed the `.deb`, use `sudo apt-get remove shepherd-launcher`
 instead.)
+
+The state custodian's own files are left in place by default, and so is the
+`shepherd-state` user that owns them, so a reinstall picks a device's history
+straight back up. `--restore-to-home` is for the other case — going back to a
+build that predates the custodian, which will not find the state there. See
+[Operating a device after the state moved](#operating-a-device-after-the-state-moved).
 
 Files that belong to an installed package are left alone, and `uninstall`
 says so. Four of the files a from-source install places are shipped by the
