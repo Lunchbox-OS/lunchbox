@@ -320,7 +320,7 @@ To hand a device to a different phone, or to recover when no phone can
 administer it, factory-reset the management state on the device itself:
 
 ```sh
-sudo touch /var/lib/shepherdd/state/<kiosk-user>/.factory-reset-ble
+sudo touch /var/lib/shepherdd/admin/.factory-reset-ble
 sudo reboot
 ```
 
@@ -332,9 +332,14 @@ process, so this happens once rather than on every boot.
 That directory belongs to the state custodian, so `sudo` is doing real work
 here rather than being habit: the kiosk user cannot write it, which is the
 point — a factory reset an activity could trigger would be a way for a game to
-unpair the phone that supervises it (issue #157). On a device installed before
-the custodian existed, the sentinel is `~<kiosk-user>/.local/share/shepherdd/.factory-reset-ble`
-instead.
+unpair the phone that supervises it (issue #157).
+
+It has no kiosk user in the path because a factory reset is the *device's*, like
+the Bluetooth bond it forgets: there is one adapter and one bond table, so one
+admin record, shared by every kiosk user on the machine. On a device installed
+before the custodian existed, the sentinel is
+`~<kiosk-user>/.local/share/shepherdd/.factory-reset-ble` instead — per user, as
+the whole arrangement was then.
 
 That clears the admin record and the Bluetooth bond and returns the device to
 unclaimed, so the next phone to pair claims it. The old phone's stored
@@ -676,7 +681,8 @@ alone no longer covers it:
 
 | What | Where | Owner |
 | --- | --- | --- |
-| usage history, quotas, audit log, policy, BLE admin record | `/var/lib/shepherdd/state/<user>/` | `shepherd-state` |
+| usage history, quotas, audit log, policy | `/var/lib/shepherdd/state/<user>/` | `shepherd-state` |
+| BLE admin record, unbond queue, reset sentinel — the *device's*, not a user's | `/var/lib/shepherdd/admin/` | `shepherd-state` |
 | RetroArch save states, ebook progress, media cache | `~<user>/.local/share/shepherdd/` | the kiosk user |
 
 Back up both, and preserve ownership (`tar --numeric-owner`, `rsync -a`). If you

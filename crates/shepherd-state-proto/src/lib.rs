@@ -68,6 +68,21 @@ pub fn socket_path(user: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/run/shepherdd/state").join(format!("{user}.sock"))
 }
 
+/// Where the custodian keeps the *device's* protected files — the ones shared
+/// by every kiosk user on it.
+///
+/// The admin record, the unbond queue and the reset sentinel live here rather
+/// than under a user, because what they describe is the machine's: there is one
+/// Bluetooth adapter and one BlueZ bond table, and forgetting a bond forgets it
+/// for everyone. A claim kept per-user while the bond was system-wide gave a
+/// two-child device behaviour nobody chose.
+///
+/// Same uid and same `0700` as the per-user directories, so it is no more
+/// reachable from an activity than they are.
+pub fn admin_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/lib/shepherdd/admin")
+}
+
 /// Where the custodian keeps `user`'s protected files.
 ///
 /// The directory itself is `0700` and owned by [`STATE_USER`], so nothing at

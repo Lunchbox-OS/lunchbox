@@ -158,7 +158,14 @@ async fn main() -> Result<()> {
     // The same `LocalProtectedFiles` shepherdd uses for its data directory when
     // the custodian is opted out — one implementation, so "protected" and "not
     // protected" cannot drift into two behaviours.
-    let files: Arc<dyn ProtectedFiles> = Arc::new(LocalProtectedFiles::new(state_dir.clone()));
+    // Two roots: this user's files under their state directory, the device's
+    // under the shared one. `StateDirectory=` in the unit creates both, owned
+    // by this uid at 0700.
+    let admin_dir = shepherd_state_proto::admin_dir();
+    std::fs::create_dir_all(&admin_dir)
+        .with_context(|| format!("creating the admin directory {}", admin_dir.display()))?;
+    let files: Arc<dyn ProtectedFiles> =
+        Arc::new(LocalProtectedFiles::scoped(state_dir.clone(), admin_dir));
     let config_changes = watch::config_changes(&state_dir)?;
     watch::warn_if_no_policy(&state_dir);
 

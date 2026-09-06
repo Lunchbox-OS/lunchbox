@@ -22,6 +22,15 @@ the policy, and launched it under supervision with no deadline. The config is
 watched for changes, so the policy edit took effect in about three seconds with
 no restart and no RPC.
 
+Two of those are the *device's* rather than a user's. The admin record and the
+reset sentinel — and the unbond queue that shadows the record — live in a shared
+`/var/lib/shepherdd/admin/`, while the policy and the database live under
+`state/<user>/`. There is one Bluetooth adapter and one BlueZ bond table, so
+there is one admin record; a claim scoped more narrowly than the bond it names
+cannot be kept honest. `ProtectedFile::scope` is where the rule is written, and
+every instance of this daemon runs as the same uid, so they all reach the shared
+directory.
+
 File permissions cannot separate them, because `shepherdd` runs at the uid it
 would be defending against. Neither can per-process confinement: Landlock needs
 `no_new_privs`, which breaks `snap-confine` and `pkexec`, and both it and

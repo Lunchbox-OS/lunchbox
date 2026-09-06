@@ -32,11 +32,19 @@ ExecStart=/usr/libexec/shepherd-stated --user %i
 User=shepherd-state
 Group=shepherd-state
 
-# /var/lib/shepherdd/state/<user>, created by the service manager and owned by
-# this daemon's uid. 0700 is what makes the state unreachable for everyone
-# else, including the kiosk user every activity runs as — which is the whole
-# mechanism this issue turns on.
-StateDirectory=shepherdd/state/%i
+# Two directories, both created by the service manager and owned by this
+# daemon's uid. 0700 is what makes the state unreachable for everyone else,
+# including the kiosk user every activity runs as — which is the whole mechanism
+# this issue turns on.
+#
+#   shepherdd/state/<user>  this child's policy and database
+#   shepherdd/admin         the device's admin record, unbond queue and reset
+#                           sentinel, shared by every kiosk user
+#
+# The second is shared because what it holds is: there is one Bluetooth adapter
+# and one BlueZ bond table, and forgetting a bond forgets it for the machine.
+# Every instance of this unit runs as the same uid, so they can all reach it.
+StateDirectory=shepherdd/state/%i shepherdd/admin
 StateDirectoryMode=0700
 
 # A logout takes the trusted session's cgroup away with it, so the daemon exits

@@ -31,21 +31,27 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 SHEPHERD_DEFAULT_DATA_REL=".local/share/shepherdd"
 
 # Echo the admin record for $1, preferring the custodian's copy.
+#
+# The custodian's is the *device's*, not this user's: there is one bond table,
+# so one record. `--user` still selects whose home to fall back to on a device
+# without a custodian, where every user had their own.
 _default_admin_record() {
     local user="$1" home="$2"
-    if [[ -f "$STATED_STATE_ROOT/$user/$SHEPHERD_ADMIN_RECORD_FILE" ]]; then
-        echo "$STATED_STATE_ROOT/$user/$SHEPHERD_ADMIN_RECORD_FILE"
+    if [[ -f "$STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE" ]]; then
+        echo "$STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE"
     else
         echo "$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE"
     fi
 }
 
-# Echo where to plant the sentinel for $1. Prefers the custodian's directory
-# when it exists, because that is the only one shepherdd will read there.
+# Echo where to plant the sentinel for $1. Prefers the custodian's shared
+# directory when it exists, because that is the only one shepherdd will read
+# there -- and because a factory reset is the device's, like the bond it
+# forgets. On a device without a custodian it stays per-user, as it was.
 _default_sentinel() {
     local user="$1" home="$2"
-    if [[ -d "$STATED_STATE_ROOT/$user" ]]; then
-        echo "$STATED_STATE_ROOT/$user/$SHEPHERD_RESET_SENTINEL_FILE"
+    if [[ -d "$STATED_ADMIN_DIR" ]]; then
+        echo "$STATED_ADMIN_DIR/$SHEPHERD_RESET_SENTINEL_FILE"
     else
         echo "$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE"
     fi
@@ -233,7 +239,7 @@ Options for 'clear':
     --user USER             Target user (required).
     --admin-record PATH     Override admin.toml location
                             (default: the custodian's copy in
-                            $STATED_STATE_ROOT/USER/, else
+                            $STATED_ADMIN_DIR/, else
                             ~USER/$SHEPHERD_DEFAULT_ADMIN_REL).
     --sentinel PATH         Override reset-sentinel location
                             (default: the custodian's directory when there is

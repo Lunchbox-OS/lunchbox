@@ -152,6 +152,58 @@ pub fn default_config_path() -> PathBuf {
 }
 
 #[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    /// Which scope each file has is the whole of this design, and it is one
+    /// line of `match` away from being wrong in a way nothing else notices: a
+    /// device file scoped per-user goes back to being a claim that disagrees
+    /// with the bond it names.
+    #[test]
+    fn the_device_owns_the_admin_record_and_the_user_owns_the_policy() {
+        assert_eq!(ProtectedFile::Config.scope(), FileScope::PerUser);
+        for file in [
+            ProtectedFile::AdminRecord,
+            ProtectedFile::ResetSentinel,
+            ProtectedFile::UnbondQueue,
+        ] {
+            assert_eq!(
+                file.scope(),
+                FileScope::System,
+                "{file:?} describes the machine's one Bluetooth adapter, not a child"
+            );
+        }
+    }
+
+    /// A scoped store puts each file under the root its scope names; an
+    /// unscoped one puts everything in the single directory it was given,
+    /// which is what a device without the custodian has.
+    #[test]
+    fn the_roots_follow_the_scope() {
+        let scoped = LocalProtectedFiles::scoped("/user".into(), "/device".into());
+        assert_eq!(
+            scoped.path(ProtectedFile::Config),
+            std::path::Path::new("/user/config.toml")
+        );
+        assert_eq!(
+            scoped.path(ProtectedFile::AdminRecord),
+            std::path::Path::new("/device/admin.toml")
+        );
+
+        let flat = LocalProtectedFiles::new("/home".into());
+        assert_eq!(
+            flat.path(ProtectedFile::Config),
+            std::path::Path::new("/home/config.toml")
+        );
+        assert_eq!(
+            flat.path(ProtectedFile::AdminRecord),
+            std::path::Path::new("/home/admin.toml"),
+            "with one root there is nowhere else for a device file to go"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -215,6 +267,40 @@ pub enum ProtectedFile {
     UnbondQueue,
 }
 
+/// Who a protected file belongs to.
+///
+/// Not a detail of where bytes are put: it is the difference between a fact
+/// about a *child* and a fact about the *device*, and getting it wrong is
+/// visible to a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileScope {
+    /// One per kiosk user. What this child may do, and what they have used.
+    PerUser,
+    /// One for the machine, shared by every kiosk user on it.
+    System,
+}
+
+impl ProtectedFile {
+    /// Whose file this is.
+    ///
+    /// The admin record, the unbond queue and the reset sentinel are the
+    /// device's, not a user's, because the thing they describe is: a BlueZ bond
+    /// lives in `/var/lib/bluetooth` at one adapter, owned by root, and
+    /// `Adapter::remove_device` forgets it for the whole machine. Keeping the
+    /// *claim* per-user while the *bond* was system-wide made a device with two
+    /// kiosk users behave in ways nobody chose — a phone claimed for one
+    /// arriving at the next already bonded, and a factory reset for one
+    /// unpairing the phone from the others.
+    ///
+    /// The policy is genuinely a per-child fact and stays one.
+    pub fn scope(self) -> FileScope {
+        match self {
+            Self::Config => FileScope::PerUser,
+            Self::AdminRecord | Self::ResetSentinel | Self::UnbondQueue => FileScope::System,
+        }
+    }
+}
+
 impl ProtectedFile {
     /// The file's name inside the protected directory.
     ///
@@ -261,15 +347,43 @@ pub trait ProtectedFiles: Send + Sync {
 /// into two different behaviours.
 pub struct LocalProtectedFiles {
     dir: PathBuf,
+    /// Where the machine's files live, when they live apart from this user's.
+    system_dir: Option<PathBuf>,
 }
 
 impl LocalProtectedFiles {
+    /// Everything in one directory.
+    ///
+    /// What a device *without* the custodian gets: there is no protected root
+    /// to share, so the distinction between a user's files and the machine's
+    /// has nowhere to live and the home directory holds both. Also what the
+    /// tests use.
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            system_dir: None,
+        }
+    }
+
+    /// A directory per scope: this user's files in `dir`, the machine's in
+    /// `system_dir`.
+    ///
+    /// What the custodian serves. One implementation either way, so
+    /// "protected" and "not protected" cannot drift into two behaviours — only
+    /// the roots differ.
+    pub fn scoped(dir: PathBuf, system_dir: PathBuf) -> Self {
+        Self {
+            dir,
+            system_dir: Some(system_dir),
+        }
     }
 
     fn path(&self, file: ProtectedFile) -> PathBuf {
-        self.dir.join(file.file_name())
+        let root = match (file.scope(), &self.system_dir) {
+            (FileScope::System, Some(system)) => system,
+            _ => &self.dir,
+        };
+        root.join(file.file_name())
     }
 }
 

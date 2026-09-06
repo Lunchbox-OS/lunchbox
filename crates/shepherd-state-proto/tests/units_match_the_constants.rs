@@ -19,7 +19,7 @@
 //! `--no-state-custodian`. A duplication that must exist gets something that
 //! breaks loudly when it drifts.
 
-use shepherd_state_proto::{STATE_USER, socket_path, state_dir};
+use shepherd_state_proto::{STATE_USER, admin_dir, socket_path, state_dir};
 
 fn unit(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -63,9 +63,24 @@ fn the_service_unit_owns_the_directory_the_client_stats() {
     let service = unit("shepherd-stated@.service");
 
     // `StateDirectory=` is relative to /var/lib, which is the one part the unit
-    // does not spell out.
-    let state_directory = directive(&service, "StateDirectory");
-    let absolute = std::path::Path::new("/var/lib").join(&state_directory);
+    // does not spell out, and it now names two directories: this user's and the
+    // device's. Both have to be created, or the daemon writes into a path the
+    // service manager never made.
+    let directories: Vec<std::path::PathBuf> = directive(&service, "StateDirectory")
+        .split_whitespace()
+        .map(|d| std::path::Path::new("/var/lib").join(d))
+        .collect();
+    assert!(
+        directories.contains(&admin_dir()),
+        "shepherd-stated@.service does not create {}, where the admin record, the unbond \
+         queue and the reset sentinel live — the daemon would write into a directory \
+         nothing made. It creates: {directories:?}",
+        admin_dir().display()
+    );
+    let absolute = directories
+        .first()
+        .expect("StateDirectory= names at least one directory")
+        .clone();
     assert_eq!(
         absolute,
         state_dir("%i"),

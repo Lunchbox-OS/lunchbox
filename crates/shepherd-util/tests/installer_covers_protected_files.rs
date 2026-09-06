@@ -12,7 +12,7 @@
 //! unbond was stranded — leaving the old phone's bond in place, which is the
 //! one thing a factory reset exists to prevent.
 
-use shepherd_util::ProtectedFile;
+use shepherd_util::{FileScope, ProtectedFile};
 
 /// Every variant, so adding one to the enum without adding it here is a
 /// compile error rather than a silently narrower test.
@@ -56,6 +56,7 @@ fn every_protected_file_is_accounted_for_by_the_installer() {
     // that "decided against" reads differently from "forgotten" — which is the
     // distinction this test exists to make.
     let mut accounted: Vec<String> = shell_names(&script, "SHEPHERD_MIGRATED_FILES");
+    accounted.extend(shell_names(&script, "SHEPHERD_SYSTEM_FILES"));
     accounted.extend(shell_names(&script, "SHEPHERD_POLICY_FILE"));
     accounted.extend(shell_names(&script, "SHEPHERD_UNMIGRATED_FILES"));
 
@@ -64,9 +65,9 @@ fn every_protected_file_is_accounted_for_by_the_installer() {
         assert!(
             accounted.iter().any(|n| n == name),
             "{name} is a ProtectedFile the installer says nothing about.\n\
-             Add it to SHEPHERD_MIGRATED_FILES in scripts/lib/install.sh so a device \
-             carries it across, or to SHEPHERD_UNMIGRATED_FILES if it should be left \
-             behind on purpose.\n\
+             Add it to SHEPHERD_MIGRATED_FILES (a user's) or SHEPHERD_SYSTEM_FILES \
+             (the device's) in scripts/lib/install.sh so it is carried across, or to \
+             SHEPHERD_UNMIGRATED_FILES if it should be left behind on purpose.\n\
              The installer currently accounts for: {accounted:?}"
         );
     }
@@ -89,6 +90,7 @@ fn the_installer_does_not_carry_files_that_no_longer_exist() {
 
     for name in shell_names(&script, "SHEPHERD_MIGRATED_FILES")
         .into_iter()
+        .chain(shell_names(&script, "SHEPHERD_SYSTEM_FILES"))
         .chain(shell_names(&script, "SHEPHERD_UNMIGRATED_FILES"))
     {
         assert!(
@@ -96,5 +98,41 @@ fn the_installer_does_not_carry_files_that_no_longer_exist() {
             "install.sh migrates {name}, which is not a file shepherd keeps any more \
              (known: {known:?})"
         );
+    }
+}
+
+#[test]
+fn the_installer_puts_each_file_in_the_scope_rust_says_it_has() {
+    // The lists are not just "everything is somewhere": which list a file is in
+    // decides which *directory* the installer moves it to, and that has to
+    // agree with `ProtectedFile::scope`, which decides which directory the
+    // custodian serves it from. A file the installer treats as a user's and the
+    // daemon reads as the device's is one the daemon never finds.
+    let script = installer();
+    let per_user = shell_names(&script, "SHEPHERD_MIGRATED_FILES");
+    let system = shell_names(&script, "SHEPHERD_SYSTEM_FILES");
+    let policy = shell_names(&script, "SHEPHERD_POLICY_FILE");
+
+    for file in ALL {
+        let name = file.file_name().to_string();
+        // The sentinel is deliberately never carried across, so it appears in
+        // neither list; its scope still matters to the daemon, which is checked
+        // by the unit test on `scope()` itself rather than here.
+        if file == &ProtectedFile::ResetSentinel {
+            continue;
+        }
+        match file.scope() {
+            FileScope::System => assert!(
+                system.contains(&name),
+                "{name} is a device file to Rust but the installer moves it to a user's \
+                 directory (SHEPHERD_SYSTEM_FILES has {system:?})"
+            ),
+            FileScope::PerUser => assert!(
+                per_user.contains(&name) || policy.contains(&name),
+                "{name} is a user's file to Rust but the installer does not move it to \
+                 their directory (SHEPHERD_MIGRATED_FILES has {per_user:?}, \
+                 SHEPHERD_POLICY_FILE has {policy:?})"
+            ),
+        }
     }
 }

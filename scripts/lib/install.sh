@@ -72,16 +72,27 @@ STATED_STATE_ROOT="/var/lib/shepherdd/state"
 # list, so they are held together by something that breaks loudly instead of by
 # a comment asking nicely.
 #
-# Moved from `~/.local/share/shepherdd/` into the custodian's directory, and
-# back again by `uninstall state --restore-to-home`.
-SHEPHERD_MIGRATED_FILES=(shepherdd.db admin.toml unbond-queue.toml)
+# Moved from `~/.local/share/shepherdd/` into this user's custodian directory,
+# and back again by `uninstall state --restore-to-home`.
+SHEPHERD_MIGRATED_FILES=(shepherdd.db)
+# The device's files rather than a user's, so they move to the *shared*
+# directory instead. There is one Bluetooth adapter and one BlueZ bond table,
+# and forgetting a bond forgets it for the machine -- so an admin record kept
+# per-user while the bond was system-wide gave a two-child device behaviour
+# nobody chose. `ProtectedFile::scope` is the Rust half of this split.
+SHEPHERD_SYSTEM_FILES=(admin.toml unbond-queue.toml)
+# Where they go. Shared by every kiosk user, at the same uid and mode as the
+# per-user directories, so it is no more reachable from an activity.
+STATED_ADMIN_DIR="/var/lib/shepherdd/admin"
 # The policy, moved from `~/.config/shepherd/` -- a different directory, so it
 # is handled apart from the list above rather than being in it.
 SHEPHERD_POLICY_FILE="config.toml"
 # Deliberately *not* moved: a one-shot instruction rather than state, so moving
 # a stale one would factory-reset a device during an upgrade. Declared rather
 # than merely omitted, so the drift test can tell "decided against" apart from
-# "forgotten" -- which is the whole distinction it exists to check.
+# "forgotten" -- which is the whole distinction it exists to check. (It is a
+# device file like the two above, and shepherdd reads it from the shared
+# directory; it is simply never carried across.)
 # shellcheck disable=SC2034  # read by installer_covers_protected_files.rs
 SHEPHERD_UNMIGRATED_FILES=(.factory-reset-ble)
 # Named individually where a caller needs one by name. shellcheck reads each
@@ -930,6 +941,30 @@ _migrate_state_for_user() {
         moved=$((moved + 1))
     done
 
+    # The device's files, into the shared directory rather than this user's.
+    #
+    # First user wins on a machine where two of them were separately claimed
+    # before the custodian existed: there is one bond table, so there can only
+    # be one admin record, and picking the later one would silently discard a
+    # pairing that still works. The one left behind is reported, not deleted.
+    install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_ADMIN_DIR"
+    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+        src="$home/.local/share/shepherdd/$name"
+        dst="$STATED_ADMIN_DIR/$name"
+        [[ -f "$src" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; leaving $user's $name in place"
+            info "    This device already has an admin record. A second one cannot apply:"
+            info "    the BlueZ bond it names is the machine's, not $user's."
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Moving $name into the device's shared directory"
+        install -m 0600 -o "$STATED_USER" -g "$STATED_USER" "$src" "$dst"
+        rm -f "$src"
+        moved=$((moved + 1))
+    done
+
     # The policy, moved like the rest, with a signpost left behind.
     src="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
     dst="$state_dir/$SHEPHERD_POLICY_FILE"
@@ -1341,12 +1376,48 @@ _restore_state_to_home() {
         fi
     fi
 
+    # The device's files are *copied* to each user, not moved, because before
+    # the custodian every user had their own -- that is the arrangement being
+    # restored. `_drop_shared_admin_files` removes the shared originals once
+    # every user has taken a copy.
+    local shared
+    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+        shared="$STATED_ADMIN_DIR/$name"
+        dst="$data_dir/$name"
+        [[ -f "$shared" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; not replacing it from $shared"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Copying the device's $name to $data_dir"
+        install -m 0600 -o "$user" -g "$user" "$shared" "$dst"
+        moved=$((moved + 1))
+    done
+
     if [[ "$moved" -gt 0 ]]; then
         success "  Restored $moved file(s) to $data_dir"
     fi
     if [[ "$skipped" -gt 0 ]]; then
         info "  $skipped file(s) needed a decision and were left for you (above)"
     fi
+}
+
+# Remove the device's shared files, once every user has a copy.
+#
+# Separate from `_restore_state_to_home` because it must happen exactly once,
+# after the last user -- copying to two users and deleting after the first would
+# leave the second without an admin record.
+_drop_shared_admin_files() {
+    [[ -d "$STATED_ADMIN_DIR" ]] || return 0
+    local name
+    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+        rm -f "$STATED_ADMIN_DIR/$name"
+    done
+    # The sentinel is an instruction, not state; a stale one left here would
+    # factory-reset the device the next time a custodian is installed.
+    rm -f "$STATED_ADMIN_DIR/${SHEPHERD_UNMIGRATED_FILES[0]}"
+    rmdir "$STATED_ADMIN_DIR" 2>/dev/null || true
 }
 
 # Stop and disable every running instance of the custodian.
@@ -1378,6 +1449,8 @@ _restore_state_for_every_user() {
         state_user_dir="${state_user_dir%/}"
         _restore_state_to_home "$(basename "$state_user_dir")"
     done
+    # Only now that every user has their copy.
+    _drop_shared_admin_files
 }
 
 # Stop the custodian and return every user's state to their home, leaving the
