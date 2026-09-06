@@ -19,6 +19,13 @@ SHEPHERD_BINARIES=(
     "shepherd-touch-bridge"
     "shepherd-tablet-bridge"
     "shepherd-gamepad-bridge"
+    # Not a daemon or a sidecar: the policy validator, shipped because
+    # `install policy` validates before it installs and a packaged device has
+    # no source tree to build it from (issue #157). Without it on a device the
+    # only route to a policy is an unchecked one, and an unparseable policy is
+    # fatal at shepherdd's *startup* -- a session that ends at the next boot,
+    # on a device whose kiosk user has no shell to fix it from.
+    "validate-config"
 )
 
 # Get the target directory for binaries

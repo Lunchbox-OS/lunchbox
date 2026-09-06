@@ -959,6 +959,32 @@ _migrate_state_for_user() {
     fi
 }
 
+# Where to find the policy validator, installed or built.
+#
+# A device has it on `PATH` -- it ships in the package -- and a source tree has
+# it under `target/`. Checked in that order, because on a device the installed
+# one is the one that matches the daemon, and a stale `target/` from an old
+# checkout would be the wrong answer to validate against.
+#
+# Deliberately never *builds* it, unlike `shepherd config validate`: this runs
+# as root, and a cargo build as root leaves a root-owned `target/` behind that
+# the developer's next plain build cannot write.
+_resolve_validator() {
+    local release="${1:-true}"
+    local installed
+    if installed="$(command -v validate-config 2>/dev/null)" && [[ -x "$installed" ]]; then
+        echo "$installed"
+        return 0
+    fi
+    local built
+    built="$(get_validate_binary "$release")"
+    if [[ -x "$built" ]]; then
+        echo "$built"
+        return 0
+    fi
+    return 1
+}
+
 # Push a policy to the custodian, and say so.
 #
 # `install config` deploys the *example* config; this is the other direction --
@@ -1019,14 +1045,9 @@ install_policy() {
     # device whose kiosk user has no shell to fix it from. The validator already
     # exists and the file is right here; there is no reason to find out later.
     local validator
-    validator="$(get_validate_binary "$release")"
-    if [[ ! -x "$validator" ]]; then
-        # Deliberately not built here, unlike `shepherd config validate`: this
-        # runs as root, and a cargo build as root leaves a root-owned target/
-        # behind that the developer's next plain build cannot write. Same
-        # reasoning (and message shape) as install_state's missing binary.
-        die "validate-config not found at $validator; run 'shepherd build' first"
-    fi
+    validator="$(_resolve_validator "$release")" \
+        || die "validate-config not found; run 'shepherd build' first (from a source tree), \
+or reinstall the package, which ships it"
     info "Validating $src..."
     "$validator" "$src" \
         || die "$src did not validate; nothing was pushed (the device keeps its current policy)"
@@ -1328,6 +1349,57 @@ _restore_state_to_home() {
     fi
 }
 
+# Stop and disable every running instance of the custodian.
+#
+# Before removing its unit files, or systemd keeps a socket bound to a unit that
+# no longer exists. Before any restore too: the custodian holds the database
+# open for its whole life, and moving a file from under a live writer is how a
+# database gets a journal that no longer matches it.
+_stop_stated_instances() {
+    local unit
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        info "Stopping $unit"
+        systemctl disable --now "$unit" 2>/dev/null || true
+    done < <(systemctl list-units --all --no-legend 'shepherd-stated@*' 2>/dev/null \
+        | awk '{print $1}' | grep -E '^shepherd-stated@' || true)
+}
+
+# Put every user's state back in their home directory.
+#
+# Every user the custodian holds state for, not one named on the command line:
+# this runs when a device is leaving the custodian behind, and a device with two
+# kiosk users would otherwise have half its state moved and half left.
+_restore_state_for_every_user() {
+    [[ -d "$STATED_STATE_ROOT" ]] || return 0
+    local state_user_dir
+    for state_user_dir in "$STATED_STATE_ROOT"/*/; do
+        [[ -d "$state_user_dir" ]] || continue
+        state_user_dir="${state_user_dir%/}"
+        _restore_state_to_home "$(basename "$state_user_dir")"
+    done
+}
+
+# Stop the custodian and return every user's state to their home, leaving the
+# binary and units alone.
+#
+# The half of `uninstall state --restore-to-home` a packaged device needs. There
+# the units and the binary belong to dpkg -- deleting them behind its back is
+# what `uninstall` already refuses to do to conffiles -- and `apt` is what
+# removes them. What `apt` cannot do is move a device's state back out of the
+# custodian first, and a downgrade that skips that starts from an empty database
+# and an unclaimed device.
+restore_state_to_home() {
+    require_root
+
+    _stop_stated_instances
+    _restore_state_for_every_user
+
+    success "Shepherd's state is back in the users' home directories"
+    info "  The custodian's binary and units are untouched; they belong to the"
+    info "  package manager. Downgrade or remove the package to finish."
+}
+
 # Remove the state custodian.
 #
 # Args:
@@ -1345,25 +1417,8 @@ uninstall_state() {
     # moving a file out from under a live writer is how a database gets a
     # journal that no longer matches it.
     if [[ -z "$destdir" ]]; then
-        local unit
-        while IFS= read -r unit; do
-            [[ -n "$unit" ]] || continue
-            info "Stopping $unit"
-            systemctl disable --now "$unit" 2>/dev/null || true
-        done < <(systemctl list-units --all --no-legend 'shepherd-stated@*' 2>/dev/null \
-            | awk '{print $1}' | grep -E '^shepherd-stated@' || true)
-    fi
-
-    # Every user the custodian holds state for, not one named on the command
-    # line: an uninstall is already device-wide, and a device with two kiosk
-    # users would otherwise have half its state moved and half left behind.
-    if [[ "$restore" == "true" && -z "$destdir" && -d "$STATED_STATE_ROOT" ]]; then
-        local state_user_dir
-        for state_user_dir in "$STATED_STATE_ROOT"/*/; do
-            [[ -d "$state_user_dir" ]] || continue
-            state_user_dir="${state_user_dir%/}"
-            _restore_state_to_home "$(basename "$state_user_dir")"
-        done
+        _stop_stated_instances
+        [[ "$restore" == "true" ]] && _restore_state_for_every_user
     fi
 
     info "Removing the state custodian..."

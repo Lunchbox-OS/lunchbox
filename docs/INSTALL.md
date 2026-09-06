@@ -584,8 +584,9 @@ Installed by `shepherd install all --user kiosk`, or on a packaged system by
 `shepherd-admin setup-user kiosk`. Both do the same per-user work — create the
 protected directory, move the device's existing state into it, and enable the
 socket — because none of it can happen at package time, when the kiosk user is
-not known yet. `shepherd-admin` is the packaged CLI and has no `install` verb,
-so `setup-user` is the whole of it there.
+not known yet. `shepherd-admin` is the packaged CLI and has no `install` verb, so `setup-user`
+is the whole of it there — with `shepherd-admin policy`, `migrate-state` and
+`restore-state` covering the three per-device operations afterwards.
 
 Consequences worth knowing before you debug a device:
 
@@ -605,7 +606,12 @@ Consequences worth knowing before you debug a device:
   ```sh
   sudoedit /var/lib/shepherdd/state/kiosk/config.toml
   sudo shepherd install policy --user kiosk --source ./new-config.toml
+  sudo shepherd-admin policy kiosk --source ./new-config.toml   # packaged
   ```
+
+  The last two validate the file before installing it; `sudoedit` does not, and
+  a policy shepherdd cannot parse is fatal at its next startup rather than on
+  reload.
 - **An administrator can reconfigure a device without touching the kiosk's home
   at all**, which is what a hardened device needs: `harden apply` gives the
   kiosk user `nologin` and denies it SSH, so there is no `su` into it to edit a
@@ -656,7 +662,8 @@ as **unclaimed**, so the next phone to pair claims the device. A downgrade would
 look exactly like a factory reset. Move the state back first:
 
 ```sh
-sudo shepherd uninstall state --restore-to-home
+sudo shepherd uninstall state --restore-to-home   # from source
+sudo shepherd-admin restore-state                 # packaged; apt removes the rest
 ```
 
 That stops the custodian, returns each user's `shepherdd.db` (with its SQLite

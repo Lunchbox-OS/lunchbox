@@ -457,6 +457,14 @@ shepherd-launcher installed. Finish setting up a kiosk user (replace USER):
   shepherd-admin yt-dlp install      # only for YouTube media libraries
 
 Then have USER log out and back in and pick the "Shepherd Kiosk" session.
+Change the policy later (it lives with the state custodian, not in the home):
+
+  shepherd-admin policy USER --source ./config.toml
+
+Before downgrading to a release without the custodian, move the state back:
+
+  shepherd-admin restore-state
+
 Other admin tasks: shepherd-admin apps install steam|chrome, harden, bluetooth.
 EOM
 fi

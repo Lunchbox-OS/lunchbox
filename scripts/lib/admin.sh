@@ -10,13 +10,20 @@
 #   * scripts/shepherd-admin      — a slim entrypoint shipped in the .deb as
 #                                   /usr/bin/shepherd-admin
 #
-# setup_user needs install_config / install_user_groups / add_user_to_groups
-# from install.sh and FIREWALL_GROUP; the entrypoints source install.sh, so
-# those are available at call time. (deps.sh sources this file only for
-# install_media_deps and its yt-dlp/VA-API halves, and never calls setup_user.)
-
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+# The per-user and per-device operations here are install.sh's, shared rather
+# than reimplemented: setup_user needs install_config / install_user_groups /
+# add_user_to_groups / setup_state_for_user, and the custodian commands need
+# install_policy and restore_state_to_home.
+#
+# Sourced rather than assumed. Both entrypoints happen to source install.sh
+# first, so this held by luck of ordering -- and it broke the moment anything
+# sourced this file on its own. No cycle: install.sh takes common, build and
+# config, and none of those take this.
+# shellcheck source=install.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 
 # ---------------------------------------------------------------------------
 # yt-dlp
@@ -1175,6 +1182,98 @@ apps_main() {
 # membership that `install all` adds via install_firewall. Depends on install.sh
 # being sourced by the entrypoint (install_config, install_user_groups,
 # add_user_to_groups, FIREWALL_GROUP, SHEPHERD_REQUIRED_GROUPS).
+# `shepherd-admin policy USER --source PATH` -- install a policy, validated.
+#
+# The packaged face of `shepherd install policy`. On a device the policy lives
+# with the state custodian and `sudoedit` is the other way in; this is the one
+# that checks the file first, which matters because an unparseable policy is
+# fatal at shepherdd's *startup* rather than on reload.
+#
+# `--source` is required here, unlike the from-source command, which defaults to
+# the user's home copy. After migration that path holds a signpost rather than a
+# policy, so defaulting to it would only ever produce the refusal.
+admin_policy() {
+    local user="" source_config=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --source) source_config="$2"; shift 2 ;;
+            -h|--help|help)
+                cat <<'EOF'
+Usage: shepherd-admin policy USER --source PATH
+
+Install PATH as USER's policy, validating it first. The state custodian holds
+the policy shepherdd reads; shepherdd reloads within a second.
+
+The other way to change it on a device is to edit the custodian's copy directly:
+
+  sudoedit /var/lib/shepherdd/state/USER/config.toml
+
+That takes effect the same way, but nothing checks it first.
+EOF
+                return 0
+                ;;
+            --*) die "Unknown option: $1" ;;
+            *)
+                if [[ -z "$user" ]]; then user="$1"; shift; else die "Unexpected argument: $1"; fi
+                ;;
+        esac
+    done
+    [[ -n "$user" ]] || die "Usage: shepherd-admin policy USER --source PATH"
+    [[ -n "$source_config" ]] || die "shepherd-admin policy needs --source PATH"
+
+    install_policy "$user" "$source_config" "true"
+}
+
+# `shepherd-admin migrate-state USER` -- move USER's state under the custodian.
+#
+# `setup-user` does this as part of setting a user up. This is the same step on
+# its own, for a device that gained the custodian after its state was already
+# in the home directory -- an upgrade, or a `setup-user` from before the
+# packaged path did the migration. Idempotent: anything already migrated is
+# reported and left.
+admin_migrate_state() {
+    local user="${1:-}"
+    case "$user" in
+        -h|--help|help|"")
+            echo "Usage: shepherd-admin migrate-state USER"
+            echo
+            echo "Move USER's database, BLE admin record and policy under the state"
+            echo "custodian, and enable its socket. Safe to re-run."
+            return 0
+            ;;
+    esac
+    require_root
+    validate_user "$user"
+    setup_state_for_user "$user"
+}
+
+# `shepherd-admin restore-state` -- move state back out of the custodian.
+#
+# Run before downgrading to a release without the custodian. The migration
+# *moves* the database and the admin record, so an older shepherdd would find an
+# empty home directory, open a fresh database and -- with no `admin.toml` --
+# report itself unclaimed, letting the next phone to pair claim the device.
+#
+# Unlike `shepherd uninstall state --restore-to-home`, this leaves the binary
+# and units alone: on a packaged device they belong to dpkg, and `apt` is what
+# removes them.
+admin_restore_state() {
+    case "${1:-}" in
+        -h|--help|help)
+            echo "Usage: shepherd-admin restore-state"
+            echo
+            echo "Stop the state custodian and move every user's state back to their"
+            echo "home directory. Run this BEFORE downgrading to a release that has no"
+            echo "custodian, which would otherwise start from an empty database and an"
+            echo "unclaimed device. The package's own files are left for apt to remove."
+            return 0
+            ;;
+        "") ;;
+        *) die "Unexpected argument: $1" ;;
+    esac
+    restore_state_to_home
+}
+
 setup_user() {
     local user=""
     while [[ $# -gt 0 ]]; do

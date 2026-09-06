@@ -60,8 +60,21 @@ shepherd-admin - post-install admin tasks for shepherd-launcher
 Usage: shepherd-admin <command> [options]
 
 Commands:
-    setup-user USER   Deploy the example config and add USER to the groups
-                      shepherd needs (input/video/bluetooth/shepherd-firewall)
+    setup-user USER   Deploy the example config, set up the state custodian for
+                      USER (its directory, their existing state, its socket) and
+                      add USER to the groups shepherd needs
+                      (input/video/bluetooth/shepherd-firewall)
+    policy USER       Install a policy from a file, validated first. The one
+      --source PATH   shepherdd reads lives with the state custodian, so this is
+                      how a packaged device changes what it allows
+    migrate-state USER
+                      Move USER's existing state under the state custodian. Part
+                      of setup-user; run it alone on a device that gained the
+                      custodian after its state was already there
+    restore-state     Stop the custodian and move every user's state back to
+                      their home directory. Run this BEFORE downgrading to a
+                      release without the custodian, or the older build starts
+                      from an empty database and an unclaimed device
     media-deps <cmd>  Install everything shepherd-media needs: va-api + yt-dlp
     va-api <cmd>      Install/detect VA-API drivers for hardware video decoding
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
@@ -80,6 +93,8 @@ Run 'shepherd-admin <command> help' for detailed command information.
 
 Examples:
     sudo shepherd-admin setup-user kiosk
+    sudo shepherd-admin policy kiosk --source ./new-config.toml
+    sudo shepherd-admin restore-state            # before downgrading
     sudo shepherd-admin media-deps install
     shepherd-admin va-api detect
     sudo shepherd-admin yt-dlp install
@@ -98,6 +113,19 @@ main() {
     case "$cmd" in
         setup-user)
             setup_user "$@"
+            ;;
+        # The three per-device operations issue #157 added. Their implementation
+        # is shared with `scripts/shepherd`, which is not shipped -- so without
+        # these a packaged device could enable the custodian and then neither
+        # set a policy through it, populate it, nor get back out.
+        policy)
+            admin_policy "$@"
+            ;;
+        migrate-state)
+            admin_migrate_state "$@"
+            ;;
+        restore-state)
+            admin_restore_state "$@"
             ;;
         media-deps|media)
             media_deps_main "$@"
