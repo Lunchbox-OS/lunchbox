@@ -36,7 +36,8 @@ use shepherd_management::{
 use shepherd_state_proto::{RemoteFiles, RemoteStore};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{
-    MonotonicInstant, ProtectedFile, ProtectedFiles, RateLimiter, default_config_path,
+    LocalProtectedFiles, MonotonicInstant, ProtectedFile, ProtectedFiles, RateLimiter,
+    default_config_path,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -229,6 +230,9 @@ struct Service {
     /// both how it is watched (shepherdd cannot inotify a directory it cannot
     /// open) and where a reload reads from.
     policy_files: Option<Arc<dyn ProtectedFiles>>,
+    /// Where the BLE admin record, unbond queue and reset sentinel live.
+    /// Always present, unlike `policy_files` — see [`StateParts`].
+    protected_files: Arc<dyn ProtectedFiles>,
 }
 
 /// What arming the management socket's peer allow-list actually achieved.
@@ -280,7 +284,15 @@ enum StateProtection {
 /// when it is the custodian's, and how protected that combination is.
 type StateParts = (
     Arc<dyn Store>,
+    // The policy handle: `Some` only when the custodian actually holds a
+    // policy, because that decides where a *reload* reads from.
     Option<Arc<dyn ProtectedFiles>>,
+    // Where the BLE admin record, unbond queue and reset sentinel live --
+    // always something, custodian or local. Separate from the policy handle on
+    // purpose: a custodian that holds the admin record but no policy still
+    // serves the record, and gating one on the other would send the token back
+    // to the home directory over an unrelated migration gap.
+    Arc<dyn ProtectedFiles>,
     StateProtection,
 );
 
@@ -397,8 +409,8 @@ impl StateSource {
                 // `None` when the custodian holds no policy: the policy is
                 // then a local file, and the reload has to read it from where
                 // it was actually read at boot.
-                let policy_files = holds_policy.then_some(files);
-                Ok((store, policy_files, protection))
+                let policy_files = holds_policy.then_some(Arc::clone(&files));
+                Ok((store, policy_files, files, protection))
             }
             StateSource::Local {
                 reason,
@@ -412,7 +424,13 @@ impl StateSource {
                     },
                     None => StateProtection::OptedOut,
                 };
-                Ok((store, None, protection))
+                // The same `LocalProtectedFiles` the custodian uses on its own
+                // side, rooted at this user's data directory: one
+                // implementation, so "protected" and "not protected" cannot
+                // drift into two behaviours.
+                let files: Arc<dyn ProtectedFiles> =
+                    Arc::new(LocalProtectedFiles::new(data_dir.to_path_buf()));
+                Ok((store, None, files, protection))
             }
         }
     }
@@ -738,7 +756,8 @@ impl Service {
             .with_context(|| format!("Failed to create data directory {:?}", data_dir))?;
 
         // Initialize store
-        let (store, policy_files, state_protection) = state.into_parts(&data_dir)?;
+        let (store, policy_files, protected_files, state_protection) =
+            state.into_parts(&data_dir)?;
         if state_protection == StateProtection::Custodian {
             Self::warn_about_a_superseded_local_store(&data_dir);
         }
@@ -849,6 +868,7 @@ impl Service {
             ipc_peer_hardening,
             state_protection,
             policy_files,
+            protected_files,
         })
     }
 
@@ -1171,6 +1191,7 @@ impl Service {
         let ipc_peer_hardening = self.ipc_peer_hardening.clone();
         let state_protection = self.state_protection.clone();
         let policy_files = self.policy_files.clone();
+        let protected_files = Arc::clone(&self.protected_files);
 
         let config_path = self.config_path.clone();
 
@@ -1453,13 +1474,15 @@ impl Service {
                 let bsc = BleServerConfig {
                     device_name: ble_cfg.device_name,
                     firmware_version: env!("CARGO_PKG_VERSION").to_string(),
-                    admin_record_path: ble_cfg.admin_record_path,
-                    reset_sentinel_path: ble_cfg.reset_sentinel_path,
                     // The admin record carries the minted HTTP token, so when
                     // the custodian is holding shepherd's state it holds this
                     // too — otherwise the credential sits at the uid every
                     // activity runs as (issue #157).
-                    files: policy_files.clone(),
+                    //
+                    // Not `policy_files`: that is `None` when the custodian
+                    // holds no *policy*, and the admin record is a different
+                    // file the custodian may well be serving.
+                    files: Arc::clone(&protected_files),
                     // A device whose custodian holds the admin record but could
                     // not be reached must not offer itself to the next phone
                     // that asks: the fallback location is empty after

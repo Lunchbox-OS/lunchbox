@@ -23,7 +23,7 @@ use shepherd_util::{
 };
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -441,7 +441,7 @@ impl ServiceConfig {
             .ble_management
             .as_ref()
             .filter(|c| c.enabled)
-            .map(|c| BleManagementConfig::from_raw(c, &data_dir));
+            .map(BleManagementConfig::from_raw);
         let display = DisplayConfig::from_raw(raw.display.as_ref());
         let media = raw
             .media
@@ -563,27 +563,17 @@ impl ManagementApiConfig {
 #[derive(Debug, Clone)]
 pub struct BleManagementConfig {
     pub device_name: String,
-    pub admin_record_path: PathBuf,
-    pub reset_sentinel_path: PathBuf,
     /// Controller address or `hciN` name; `None` means "first listed".
     pub adapter: Option<String>,
 }
 
 impl BleManagementConfig {
-    fn from_raw(raw: &RawBleManagementConfig, data_dir: &Path) -> Self {
+    fn from_raw(raw: &RawBleManagementConfig) -> Self {
         Self {
             device_name: raw
                 .device_name
                 .clone()
                 .unwrap_or_else(|| "shepherd".to_string()),
-            admin_record_path: raw
-                .admin_record_path
-                .clone()
-                .unwrap_or_else(|| data_dir.join("admin.toml")),
-            reset_sentinel_path: raw
-                .reset_sentinel_path
-                .clone()
-                .unwrap_or_else(|| data_dir.join(".factory-reset-ble")),
             adapter: raw
                 .adapter
                 .as_ref()

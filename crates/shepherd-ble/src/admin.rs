@@ -8,7 +8,6 @@ use chrono::{DateTime, Local};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use shepherd_util::{ProtectedFile, ProtectedFiles};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
@@ -72,50 +71,36 @@ impl From<toml::ser::Error> for AdminStoreError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AdminStore {
-    backend: Backend,
+    files: Arc<dyn ProtectedFiles>,
+}
+
+impl std::fmt::Debug for AdminStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdminStore")
+    }
 }
 
 impl AdminStore {
-    /// Keep the record in a file this process can open.
+    /// Keep the record wherever `files` keeps it.
     ///
-    /// The pre-#157 arrangement, and still what a development stack and the
-    /// tests use. On a device the record is at a uid every activity shares, so
-    /// [`Self::custodial`] is what a device gets.
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            backend: Backend::File(path),
-        }
-    }
-
-    /// Keep the record wherever `files` keeps it — on a device, the state
-    /// custodian, at a uid no activity has (issue #157).
+    /// One constructor, because there is one place: on a device the state
+    /// custodian, at a uid no activity has (issue #157); in a dev stack and the
+    /// tests, `LocalProtectedFiles` over a directory. Both are the same trait,
+    /// so this store has nothing to decide.
     ///
-    /// The record holds the bonded admin's identity *and* the minted HTTP
-    /// token, so a file-backed one at the shared uid is a credential an
-    /// activity can read and then present to the management API as any remote
-    /// caller would.
-    pub fn custodial(files: Arc<dyn ProtectedFiles>) -> Self {
-        Self {
-            backend: Backend::Custodian {
-                files,
-                file: ProtectedFile::AdminRecord,
-            },
-        }
-    }
-
-    /// Where the record lives, for logs. `None` when it is not a path this
-    /// process could open even if it wanted to.
-    pub fn path(&self) -> Option<&Path> {
-        match &self.backend {
-            Backend::File(path) => Some(path),
-            Backend::Custodian { .. } => None,
-        }
+    /// It used to take a `PathBuf` as well, from a configurable
+    /// `admin_record_path`. That knob is gone: the record holds the bonded
+    /// admin's identity *and* the minted HTTP token, so a path pointing
+    /// anywhere but the custodian's directory is a credential an activity can
+    /// read and present to the management API as any remote caller would.
+    pub fn new(files: Arc<dyn ProtectedFiles>) -> Self {
+        Self { files }
     }
 
     pub fn load(&self) -> Result<Option<AdminRecord>, AdminStoreError> {
-        let Some(text) = self.backend.read()? else {
+        let Some(text) = self.files.read(ProtectedFile::AdminRecord)? else {
             return Ok(None);
         };
         let wrapped: AdminFile = toml::from_str(&text)?;
@@ -126,82 +111,16 @@ impl AdminStore {
         let wrapped = AdminFile {
             admin: record.clone(),
         };
-        self.backend.write(&toml::to_string_pretty(&wrapped)?)
+        self.files.write(
+            ProtectedFile::AdminRecord,
+            &toml::to_string_pretty(&wrapped)?,
+        )?;
+        Ok(())
     }
 
     pub fn clear(&self) -> Result<(), AdminStoreError> {
-        self.backend.delete()
-    }
-}
-
-/// Where an [`AdminStore`] actually keeps its bytes.
-///
-/// `Clone` because `AdminStore` is, and the custodian arm shares one connection
-/// rather than opening a second: the record is written on a claim and a factory
-/// reset, which is not a rate worth a connection each.
-#[derive(Clone)]
-enum Backend {
-    File(PathBuf),
-    Custodian {
-        files: Arc<dyn ProtectedFiles>,
-        file: ProtectedFile,
-    },
-}
-
-impl std::fmt::Debug for Backend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Backend::File(path) => write!(f, "File({})", path.display()),
-            Backend::Custodian { file, .. } => write!(f, "Custodian({file:?})"),
-        }
-    }
-}
-
-impl Backend {
-    fn read(&self) -> Result<Option<String>, AdminStoreError> {
-        match self {
-            Backend::File(path) => match std::fs::read(path) {
-                Ok(bytes) => String::from_utf8(bytes)
-                    .map(Some)
-                    .map_err(|e| AdminStoreError::Toml(format!("non-UTF-8 admin record: {e}"))),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e.into()),
-            },
-            Backend::Custodian { files, file } => Ok(files.read(*file)?),
-        }
-    }
-
-    fn write(&self, text: &str) -> Result<(), AdminStoreError> {
-        match self {
-            Backend::File(path) => {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                // Through a temp file and a rename, so a partial write cannot
-                // leave a corrupt admin record behind.
-                let tmp = path.with_extension("toml.tmp");
-                std::fs::write(&tmp, text)?;
-                std::fs::rename(&tmp, path)?;
-                Ok(())
-            }
-            // `LocalProtectedFiles` does the same temp-and-rename on the
-            // custodian's side, so the guarantee holds either way.
-            Backend::Custodian { files, file } => Ok(files.write(*file, text)?),
-        }
-    }
-
-    fn delete(&self) -> Result<(), AdminStoreError> {
-        match self {
-            Backend::File(path) => match std::fs::remove_file(path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e.into()),
-            },
-            Backend::Custodian { files, file } => {
-                files.delete(*file)?;
-                Ok(())
-            }
-        }
+        self.files.delete(ProtectedFile::AdminRecord)?;
+        Ok(())
     }
 }
 
@@ -234,37 +153,30 @@ struct PendingUnbondFile {
 /// is written *before* the removal is attempted and deleted only once it
 /// succeeds, so a failure at any point just means the next startup tries
 /// again.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PendingUnbondStore {
-    backend: Backend,
+    files: Arc<dyn ProtectedFiles>,
+}
+
+impl std::fmt::Debug for PendingUnbondStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingUnbondStore")
+    }
 }
 
 impl PendingUnbondStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            backend: Backend::File(path),
-        }
-    }
-
     /// Keep the queue with the rest of shepherd's protected files (issue #157).
-    pub fn custodial(files: Arc<dyn ProtectedFiles>) -> Self {
-        Self {
-            backend: Backend::Custodian {
-                files,
-                file: ProtectedFile::UnbondQueue,
-            },
-        }
-    }
-
-    pub fn path(&self) -> Option<&Path> {
-        match &self.backend {
-            Backend::File(path) => Some(path),
-            Backend::Custodian { .. } => None,
-        }
+    ///
+    /// It used to derive its own path beside the admin record, under a
+    /// different name (`ble-pending-unbond.toml`) from the one the custodian
+    /// serves — so the two halves of the same queue disagreed about what the
+    /// file was called. One name now, from `ProtectedFile::UnbondQueue`.
+    pub fn new(files: Arc<dyn ProtectedFiles>) -> Self {
+        Self { files }
     }
 
     pub fn list(&self) -> Result<Vec<String>, AdminStoreError> {
-        let Some(text) = self.backend.read()? else {
+        let Some(text) = self.files.read(ProtectedFile::UnbondQueue)? else {
             return Ok(Vec::new());
         };
         let parsed: PendingUnbondFile = toml::from_str(&text)?;
@@ -292,55 +204,35 @@ impl PendingUnbondStore {
             return Ok(());
         }
         if addresses.is_empty() {
-            return self.backend.delete();
+            self.files.delete(ProtectedFile::UnbondQueue)?;
+            return Ok(());
         }
         self.write(&addresses)
     }
 
     fn write(&self, addresses: &[String]) -> Result<(), AdminStoreError> {
-        // The backend does the temp-then-rename either way: a torn write here
-        // would strand a bond with no record of it.
-        self.backend
-            .write(&toml::to_string_pretty(&PendingUnbondFile {
+        // `ProtectedFiles` does a temp-then-rename on both sides: a torn write
+        // here would strand a bond with no record of it.
+        self.files.write(
+            ProtectedFile::UnbondQueue,
+            &toml::to_string_pretty(&PendingUnbondFile {
                 addresses: addresses.to_vec(),
-            })?)
+            })?,
+        )?;
+        Ok(())
     }
 }
 
-/// Check for the factory-reset sentinel at daemon startup. If the file
-/// exists, delete it and return `true` — the caller is then responsible
-/// for clearing the admin record and removing the BlueZ bond before the
-/// GATT server starts accepting connections.
-pub fn check_reset_sentinel(sentinel_path: &Path) -> bool {
-    if !sentinel_path.exists() {
-        return false;
-    }
-    match std::fs::remove_file(sentinel_path) {
-        Ok(()) => true,
-        Err(e) => {
-            // Be conservative: if we can't remove the sentinel we'd loop
-            // factory-resetting on every restart, which is worse than
-            // failing closed. Log loudly and treat as not-present.
-            warn!(
-                path = %sentinel_path.display(),
-                error = %e,
-                "Factory-reset sentinel present but could not be removed; skipping reset",
-            );
-            false
-        }
-    }
-}
-
-/// The same check against the state custodian (issue #157).
+/// Check for the factory-reset sentinel at daemon startup. If it is there,
+/// consume it and return `true` — the caller is then responsible for clearing
+/// the admin record and removing the BlueZ bond before the GATT server starts
+/// accepting connections.
 ///
-/// One `take` rather than a read and a delete, and that is the whole reason the
-/// trait has a `take`: the sentinel is an *instruction*, not state. Read it,
-/// crash before deleting it, and the next boot factory-resets a device that has
-/// already been reset — losing a pairing nobody asked to lose.
-///
-/// Fails closed on error, exactly as the path version does, and for the same
-/// reason: a sentinel that cannot be consumed would reset on every restart.
-pub fn check_reset_sentinel_custodial(files: &dyn ProtectedFiles) -> bool {
+/// One form, over `ProtectedFiles`. The path-based twin went with the
+/// `reset_sentinel_path` knob that fed it: a sentinel an activity could write
+/// is a way for a game to unpair the phone supervising it, which is why the
+/// file belongs where the custodian keeps it and nowhere else (issue #157).
+pub fn check_reset_sentinel(files: &dyn ProtectedFiles) -> bool {
     match files.take(ProtectedFile::ResetSentinel) {
         Ok(Some(_)) => true,
         Ok(None) => false,
@@ -384,10 +276,18 @@ mod tests {
         )
     }
 
+    /// What a dev stack passes: the files rooted at a directory, which is the
+    /// same implementation the custodian uses on its own side of the socket.
+    fn files_in(dir: &TempDir) -> Arc<dyn ProtectedFiles> {
+        Arc::new(shepherd_util::LocalProtectedFiles::new(
+            dir.path().to_path_buf(),
+        ))
+    }
+
     #[test]
     fn save_then_load_round_trips() {
         let dir = TempDir::new().unwrap();
-        let store = AdminStore::new(dir.path().join("admin.toml"));
+        let store = AdminStore::new(files_in(&dir));
         assert!(store.load().unwrap().is_none());
 
         let r = sample_record();
@@ -400,21 +300,21 @@ mod tests {
 
     #[test]
     fn save_creates_missing_parent() {
+        // `LocalProtectedFiles` is rooted at a directory that need not exist
+        // yet -- a fresh device's data directory does not.
         let dir = TempDir::new().unwrap();
-        let store = AdminStore::new(dir.path().join("nested/sub/admin.toml"));
+        let root = dir.path().join("nested/sub");
+        let store = AdminStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
+            root.clone(),
+        )));
         store.save(&sample_record()).unwrap();
-        assert!(
-            store
-                .path()
-                .expect("a file-backed store has a path")
-                .exists()
-        );
+        assert!(root.join("admin.toml").exists());
     }
 
     #[test]
     fn clear_removes_file_and_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        let store = AdminStore::new(dir.path().join("admin.toml"));
+        let store = AdminStore::new(files_in(&dir));
         store.save(&sample_record()).unwrap();
         store.clear().unwrap();
         assert!(store.load().unwrap().is_none());
@@ -425,7 +325,7 @@ mod tests {
     #[test]
     fn pending_unbond_survives_until_removal_succeeds() {
         let dir = TempDir::new().unwrap();
-        let store = PendingUnbondStore::new(dir.path().join("pending-unbond.toml"));
+        let store = PendingUnbondStore::new(files_in(&dir));
         assert!(store.list().unwrap().is_empty());
 
         store.add("AA:BB:CC:DD:EE:FF").unwrap();
@@ -433,14 +333,9 @@ mod tests {
         store.add("11:22:33:44:55:66").unwrap();
         assert_eq!(store.list().unwrap().len(), 2);
 
-        // A fresh handle on the same path sees the list — this is the
+        // A fresh handle on the same directory sees the list — this is the
         // whole point: the retry has to survive a daemon restart.
-        let reopened = PendingUnbondStore::new(
-            store
-                .path()
-                .expect("a file-backed store has a path")
-                .to_path_buf(),
-        );
+        let reopened = PendingUnbondStore::new(files_in(&dir));
         assert_eq!(reopened.list().unwrap().len(), 2);
 
         reopened.remove("AA:BB:CC:DD:EE:FF").unwrap();
@@ -450,7 +345,7 @@ mod tests {
         // an empty list behind.
         reopened.remove("11:22:33:44:55:66").unwrap();
         assert!(store.list().unwrap().is_empty());
-        assert!(!store.path().expect("file-backed").exists());
+        assert!(!dir.path().join("unbond-queue.toml").exists());
         // Removing something absent is a no-op, not an error.
         reopened.remove("11:22:33:44:55:66").unwrap();
     }
@@ -458,9 +353,12 @@ mod tests {
     #[test]
     fn pending_unbond_creates_missing_parent() {
         let dir = TempDir::new().unwrap();
-        let store = PendingUnbondStore::new(dir.path().join("nested/sub/pending.toml"));
+        let root = dir.path().join("nested/sub");
+        let store = PendingUnbondStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
+            root.clone(),
+        )));
         store.add("AA:BB:CC:DD:EE:FF").unwrap();
-        assert!(store.path().expect("file-backed").exists());
+        assert!(root.join("unbond-queue.toml").exists());
     }
 
     #[test]
@@ -474,11 +372,12 @@ mod tests {
     #[test]
     fn reset_sentinel_consumed_on_check() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join(".factory-reset");
+        let files = files_in(&dir);
+        let path = dir.path().join(ProtectedFile::ResetSentinel.file_name());
         std::fs::write(&path, "").unwrap();
-        assert!(check_reset_sentinel(&path));
+        assert!(check_reset_sentinel(files.as_ref()));
         assert!(!path.exists());
         // Second call returns false (no file to act on).
-        assert!(!check_reset_sentinel(&path));
+        assert!(!check_reset_sentinel(files.as_ref()));
     }
 }

@@ -341,9 +341,6 @@ unclaimed, so the next phone to pair claims it. The old phone's stored
 credentials stop working; remove the stale pairing on that phone from Android's
 Bluetooth settings.
 
-Adjust the path if you set `admin_record_path`/`reset_sentinel_path` — the
-sentinel lives in the configured `data_dir`.
-
 If the device never appears in the pairing list at all, it is not advertising —
 see "BLE management doesn't advertise" under Troubleshooting below.
 

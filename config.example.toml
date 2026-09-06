@@ -228,14 +228,6 @@ enabled = true
                                         # isn't present is a startup error
                                         # listing the ones that are, rather than
                                         # a silent fallback.
-# admin_record_path = "/var/lib/shepherdd/admin.toml"
-                                        # Where the admin record is persisted.
-                                        # Default: <data_dir>/admin.toml.
-# reset_sentinel_path = "/var/lib/shepherdd/.factory-reset-ble"
-                                        # If this file exists at startup, the
-                                        # admin record is wiped and the file
-                                        # removed. Default:
-                                        # <data_dir>/.factory-reset-ble.
 
 # HUD placement (issue #171). "top" (the default) and "bottom" give the
 # horizontal bar; "left" gives the vertical one -- the same HUD rotated a
