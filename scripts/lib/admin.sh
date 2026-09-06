@@ -1177,10 +1177,8 @@ apps_main() {
 # add_user_to_groups, FIREWALL_GROUP, SHEPHERD_REQUIRED_GROUPS).
 setup_user() {
     local user=""
-    local force="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --force|-f) force="true"; shift ;;
             --*) die "Unknown option: $1" ;;
             *)
                 if [[ -z "$user" ]]; then user="$1"; shift; else die "Unexpected argument: $1"; fi
@@ -1189,14 +1187,14 @@ setup_user() {
     done
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd-admin setup-user USER [--force]"
+        die "Usage: shepherd-admin setup-user USER"
     fi
 
     require_root
     validate_user "$user"
 
     # Config + media library (reads the examples via get_data_dir).
-    install_config "$user" "" "$force"
+    install_config "$user" ""
 
     # input/video/bluetooth plus the shepherd-firewall system group that the
     # package's postinst (or install_firewall) created.

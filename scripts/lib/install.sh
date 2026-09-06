@@ -271,10 +271,9 @@ EOF
 install_config() {
     local user="${1:-}"
     local source_config="${2:-}"
-    local force="${3:-false}"
-    
+
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install config --user USER [--source CONFIG] [--force]"
+        die "Usage: shepherd install config --user USER [--source CONFIG]"
     fi
     
     validate_user "$user"
@@ -307,17 +306,20 @@ install_config() {
     maybe_sudo chown "$user:$user" "$user_config_dir"
     maybe_sudo chmod 0755 "$user_config_dir"
     
-    # Check if config already exists
+    # Deploy the example only where there is nothing yet. There is deliberately
+    # no way to make this overwrite: `install config` seeds a device, and
+    # replacing a policy is `install policy`'s job, which writes the copy that
+    # actually decides what a child may do and validates before it does.
+    #
+    # An overwrite here used to exist as `--force`, and under the custodian it
+    # was the worst of both (issue #157): it replaced the home copy, which is
+    # only the seed, and left the custodian's copy -- the one shepherdd reads --
+    # untouched. The operator saw "Overwrote user configuration" and the device
+    # kept running the old policy.
     if maybe_sudo test -f "$dst_config"; then
-        if [[ "$force" == "true" ]]; then
-            warn "Overwriting existing config at $dst_config"
-            maybe_sudo cp "$source_config" "$dst_config"
-            maybe_sudo chown "$user:$user" "$dst_config"
-            maybe_sudo chmod 0644 "$dst_config"
-            success "Overwrote user configuration for $user"
-        else
-            warn "Config file already exists at $dst_config, skipping (use --force to overwrite)"
-        fi
+        warn "Config file already exists at $dst_config, leaving it alone"
+        info "  To change the policy this device runs:"
+        info "    shepherd install policy --user $user [--source PATH]"
     else
         # Copy config file
         maybe_sudo cp "$source_config" "$dst_config"
@@ -325,12 +327,13 @@ install_config() {
         maybe_sudo chmod 0644 "$dst_config"
         success "Installed user configuration for $user"
 
-    # Keep the custodian's copy in step (issue #157). It is the one the daemon
-    # reads; the home copy is the seed and the fallback. Writing only one would
-    # mean an operator following the documented workflow edits a file that no
-    # longer decides anything -- which is the trap `warn_if_the_policy_diverged`
-    # exists to catch, and this is what stops it happening in the first place.
-    _sync_policy_to_custodian "$user"
+        # Keep the custodian's copy in step (issue #157). It is the one the
+        # daemon reads; the home copy is the seed and the fallback. Writing only
+        # one would mean an operator following the documented workflow edits a
+        # file that no longer decides anything -- which is the trap
+        # `warn_if_the_policy_diverged` exists to catch, and this is what stops
+        # it happening in the first place.
+        _sync_policy_to_custodian "$user"
     fi
 
     # The example config references `~/.config/shepherd/movies.toml` for the
@@ -341,15 +344,7 @@ install_config() {
     local dst_library="$user_config_dir/movies.toml"
     if [[ -f "$source_library" ]]; then
         if maybe_sudo test -f "$dst_library"; then
-            if [[ "$force" == "true" ]]; then
-                warn "Overwriting existing media library at $dst_library"
-                maybe_sudo cp "$source_library" "$dst_library"
-                maybe_sudo chown "$user:$user" "$dst_library"
-                maybe_sudo chmod 0644 "$dst_library"
-                success "Overwrote media library for $user"
-            else
-                info "Media library already exists at $dst_library, skipping"
-            fi
+            info "Media library already exists at $dst_library, skipping"
         else
             maybe_sudo cp "$source_library" "$dst_library"
             maybe_sudo chown "$user:$user" "$dst_library"
@@ -932,10 +927,9 @@ install_system() {
 install_all() {
     local user="${1:-}"
     local prefix="${2:-$DEFAULT_PREFIX}"
-    local force="${3:-false}"
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install all --user USER [--prefix PREFIX] [--force]"
+        die "Usage: shepherd install all --user USER [--prefix PREFIX]"
     fi
 
     require_root
@@ -944,17 +938,33 @@ install_all() {
     info "Installing shepherd-launcher (prefix: $prefix)..."
 
     install_system "$prefix" "$user"
-    install_config "$user" "" "$force"
+    install_config "$user" ""
     install_user_groups "$user"
 
     success "Installation complete!"
     info ""
     info "Next steps:"
-    info "  1. Edit user config at ~$user/.config/shepherd/config.toml"
+    # Step 1 named the home config alone until issue #157, which is now the one
+    # file that changes nothing on its own: the state custodian holds the copy
+    # shepherdd reads. An operator following the old wording would edit, see no
+    # effect, and have only the policy_diverged diagnostic to explain it.
+    info "  1. Set the policy. The state custodian holds the copy shepherdd"
+    info "     reads, so editing ~$user/.config/shepherd/config.toml alone"
+    info "     changes nothing -- push it when you are done:"
+    info "       sudo shepherd install policy --user $user"
+    info "     Or install one from anywhere, without touching $user's home:"
+    info "       sudo shepherd install policy --user $user --source PATH"
+    info "     Either way it is validated first, and the device reports"
+    info "     policy_diverged while the two copies disagree."
     info "  2. Have $user log out and back in (so the new shepherd-firewall"
     info "     group membership takes effect for per-entry firewall rules)"
     info "  3. Select 'Shepherd Kiosk' session at login"
-    info "  4. Optionally run 'shepherd harden apply --user $user' for kiosk mode"
+    # Not "optionally" any more (issue #157): two of shepherd's own protections
+    # rest on hardening, so a device a child uses is not finished without it.
+    info "  4. Run 'shepherd harden apply --user $user'. On a device a child"
+    info "     uses this is not optional: it is what stops a second login for"
+    info "     $user, which the state custodian refuses to choose between, and"
+    info "     what stops PAM reading an environment $user wrote."
 }
 
 # --- Uninstall -------------------------------------------------------------
@@ -1307,7 +1317,6 @@ install_main() {
     local user=""
     local prefix="$DEFAULT_PREFIX"
     local source_config=""
-    local force="false"
     local release="true"
 
     # Parse remaining arguments
@@ -1324,10 +1333,6 @@ install_main() {
             --source)
                 source_config="$2"
                 shift 2
-                ;;
-            --force|-f)
-                force="true"
-                shift
                 ;;
             --debug)
                 release="false"
@@ -1357,7 +1362,7 @@ install_main() {
             install_policy "$user" "$source_config" "$release"
             ;;
         config)
-            install_config "$user" "$source_config" "$force"
+            install_config "$user" "$source_config"
             ;;
         sway-config)
             install_sway_config "$prefix"
@@ -1372,7 +1377,7 @@ install_main() {
             install_udev
             ;;
         all)
-            install_all "$user" "$prefix" "$force"
+            install_all "$user" "$prefix"
             ;;
         ""|help|-h|--help)
             cat <<EOF
@@ -1404,7 +1409,6 @@ Options:
     --source CONFIG   Source config file. For 'config', what to deploy
                       (default: config.example.toml); for 'policy', the policy
                       to push (default: the user's own config.toml)
-    --force, -f       Overwrite existing configuration files
     --release         Use release binaries (default)
     --debug           Use debug binaries (for 'firewall' during development)
 
@@ -1421,7 +1425,7 @@ Notes:
 Examples:
     shepherd install bins --prefix /usr/local
     shepherd install firewall --user kiosk
-    shepherd install config --user kiosk --force
+    shepherd install config --user kiosk
     shepherd install policy --user kiosk
     shepherd install policy --user kiosk --source ./new-config.toml
     shepherd install groups --user kiosk
