@@ -347,6 +347,14 @@ unclaimed, so the next phone to pair claims it. The old phone's stored
 credentials stop working; remove the stale pairing on that phone from Android's
 Bluetooth settings.
 
+It deliberately leaves **web management access alone**: the web password is one
+a parent chose, not the phone's, and a household whose phone broke would
+otherwise be locked out of the device entirely. So after a factory reset the web
+UI still signs in with the same password, browsers already signed in stay signed
+in, and the login page simply stops offering "Approve on my phone" until a phone
+is paired again. To clear the web side too, revoke the sessions from the web UI,
+or start over with `shepherd web-auth reset`.
+
 If the device never appears in the pairing list at all, it is not advertising —
 see "BLE management doesn't advertise" under Troubleshooting below.
 

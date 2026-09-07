@@ -320,6 +320,18 @@ Example (bedtime restriction):
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
   `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
+- **"shepherdd did not connect to the compositor within 30s" can be a lie.**
+  A GTK `Cannot get portal org.freedesktop.host.portal.Registry version: Timeout
+  was reached` eats ~26s of the 30s budget, and the alias socket then appears at
+  around T+50s with a perfectly healthy stack behind it. The damage is that the
+  start path bailed **without writing `session.env`**, so `dev stop` says "No
+  live headless session to stop" and every `dev` subcommand has nothing to
+  reattach to while sway, shepherdd, the launcher and the HUD all keep running.
+  Confirm with `ls /run/user/1000/ | grep sway` (the alias is there) and
+  `ls -l dev-runtime/shepherd.sock` (live), then kill the pids from
+  `ps -eo pid,cmd | grep -E "sway.*headless|shepherdd"`, `rm
+  dev-runtime/headless/session.env`, and boot again — the second boot is
+  usually well inside the budget.
 - **"shepherdd did not connect to the compositor" is a different failure from
   "Sway did not create its IPC socket"**, and the harness now tells them apart:
   the first waits on the alias (which only exists once shepherdd has connected),
@@ -330,8 +342,11 @@ Example (bedtime restriction):
 ## Seeing the web UI (not just the native surfaces)
 
 The management SPA is embedded into `shepherdd` and served on
-`http://127.0.0.1:8080`, and the session has **Firefox**, so the web UI can be
-rendered and driven here — it does not need a JS component-test harness.
+**`https://127.0.0.1:8080`** — `https`, since issue #156: `config.example.toml`
+binds `0.0.0.0`, and a non-loopback bind now comes up on a generated
+self-signed certificate rather than in the clear. The session has **Firefox**,
+so the web UI can be rendered and driven here; it does not need a JS
+component-test harness.
 
 `dev click` **cannot** drive it: the headless seat has no pointer device, so
 Firefox never binds `wl_pointer` and synthetic `swaymsg ... cursor press` events
@@ -344,18 +359,62 @@ Firefox and needs no extra packages:
 PROF=$HOME/ff-test; mkdir -p $PROF
 printf 'user_pref("marionette.port", 2828);\nuser_pref("browser.aboutwelcome.enabled", false);\n' > $PROF/user.js
 set -a; . dev-runtime/headless/session.env; set +a
-MOZ_ENABLE_WAYLAND=1 setsid firefox --profile $PROF --marionette --new-window http://127.0.0.1:8080/ &
+MOZ_ENABLE_WAYLAND=1 setsid firefox --profile $PROF --marionette --new-window about:blank &
 ```
 
 Then speak the wire protocol (length-prefixed JSON on TCP 2828): connect, read
 the handshake, `WebDriver:NewSession`, then `WebDriver:ExecuteScript` /
 `WebDriver:FindElement` / `WebDriver:ElementSendKeys`. Only **one** session at a
-time, so do a whole scenario in one script. `ExecuteScript` is enough to seed
-`localStorage` (`apiToken` — the API is authenticated; the dev token is
-`http_token` in `dev-runtime/data/admin.toml`), click MUI controls, and read
-`innerText` back for assertions. `dev shot` still gets you the pixels.
+time, so do a whole scenario in one script. `ExecuteScript` is enough to click
+MUI controls and read `innerText` back for assertions; `dev shot` still gets you
+the pixels.
+
+**Pass `acceptInsecureCerts` at `WebDriver:NewSession`**, or every navigation
+fails with `insecure certificate` against the dev stack's self-signed cert.
+Marionette wants it in both places:
+
+```python
+m.cmd("WebDriver:NewSession", {
+    "acceptInsecureCerts": True,
+    "capabilities": {"alwaysMatch": {"acceptInsecureCerts": True}},
+})
+```
+
+Launch on `about:blank` and navigate *after* the session exists, for the same
+reason: a URL on the command line is loaded before any capability applies.
+
+**Signing in (issue #156).** The API no longer has an open mode, and the
+`localStorage` `apiToken` route is gone for browsers — a person logs in and
+gets an `HttpOnly` cookie. On a fresh dev stack:
+
+```sh
+CODE=$(grep enrolment_code dev-runtime/data/web-auth.toml | cut -d'"' -f2)
+curl -sk -c cookies.txt -X POST https://127.0.0.1:8080/api/v1/auth/setup \
+  -H 'Content-Type: application/json' \
+  -d "{\"code\": \"$CODE\", \"password\": \"a real password\"}"
+```
+
+or drive the setup form in the browser, which is the same thing and also shows
+you the screen. To get back to a *fresh* device — the setup screen, a new code
+on the TV — `rm dev-runtime/data/web-auth.toml` and restart the session.
+
+For a scripted client that wants no browser at all, set
+`auth_token` under `[service.management_api]` and send
+`Authorization: Bearer`: it authenticates a request, and deliberately cannot
+open a session.
 
 Gotchas here:
+
+- **A curl cookie jar is keyed by host, so a session can look revoked when it
+  is not.** Move the daemon from a loopback bind to a LAN bind and every
+  `-b cookies.txt` request comes back 401, because curl silently stops sending
+  a cookie saved under `127.0.0.1`. Send it explicitly —
+  `-H "Cookie: shepherd_session=$(awk '/shepherd_session/{print $7}' cookies.txt | tail -1)"`
+  — before concluding anything about session lifetime or revocation.
+
+- **`pkill -f firefox` kills your own shell.** The Bash tool's wrapper carries
+  the command text, so `-f` matches it. Use `pkill -x firefox`, or match the
+  profile path.
 
 - **`npm run build` alone does not reach the running daemon.** `rust_embed`
   embeds `shepherd-webui/dist/` at compile time but does not make cargo consider

@@ -179,6 +179,7 @@ fn harness() -> Harness {
         diagnostics: None,
         network: None,
         web_listener: WebListenerHandle::default(),
+        web_auth: None,
     };
 
     Harness {

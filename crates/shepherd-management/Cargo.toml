@@ -23,6 +23,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"
+argon2 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+woothee = { workspace = true }
 
 # Used only by the `rpc-codegen` binary — kept out of the library
 # surface via `[[bin]]` in the parent workspace's build graph.

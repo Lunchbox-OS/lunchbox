@@ -209,7 +209,9 @@ only thing that checks them, so run it alongside the build; CI runs it as its
 own job.
 
 During development, run the rsbuild dev server (which proxies API calls to
-`localhost:8080`) instead of embedding:
+`https://localhost:8080` — the daemon serves TLS on any non-loopback bind since
+issue #156, and the proxy is configured to accept its self-signed certificate)
+instead of embedding:
 
 ```sh
 shepherd dev webui                    # hot-reloading, usually on port 3000
@@ -225,6 +227,14 @@ without those two steps.
 The Rust binary is still needed for the API; the dev server is only for the
 frontend. If the web UI has not been built, shepherdd still works normally — the
 daemon just returns 404 for all non-API routes.
+
+The management API requires a login (issue #156). A dev stack that has never
+been signed into prints its setup code at startup and shows it on the device's
+screen; it is also in `dev-runtime/data/web-auth.toml`. Enter it in the browser
+to choose a password, or `rm` that file and restart to get back to a fresh
+device. Scripts that want no browser can set `auth_token` under
+`[service.management_api]` and send `Authorization: Bearer` — that token
+authenticates a request and deliberately cannot open a session.
 
 Unit tests, typechecking and the import boundary check:
 

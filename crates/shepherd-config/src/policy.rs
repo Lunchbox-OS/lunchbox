@@ -66,6 +66,18 @@ pub const DEFAULT_MANAGEMENT_API_BIND: &str = "127.0.0.1";
 /// interface that is not up yet. `bind_retry_seconds = 0` retries forever.
 pub const DEFAULT_MANAGEMENT_API_BIND_RETRY: Duration = Duration::from_secs(300);
 
+/// Default idle timeout for a web management session (issue #156).
+pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(2 * 24 * 3600);
+
+/// Default absolute lifetime for a web management session, however active.
+pub const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 3600);
+
+/// Default consecutive failed logins from one address before a lockout.
+pub const DEFAULT_LOCKOUT_AFTER: u32 = 8;
+
+/// Default length of a first lockout; each subsequent one doubles, to 16x.
+pub const DEFAULT_LOCKOUT: Duration = Duration::from_secs(300);
+
 /// Default seconds banked per second spent on a token gate's source activity.
 pub const DEFAULT_TOKEN_EARN_RATIO: f64 = 1.0;
 
@@ -535,7 +547,54 @@ pub struct ManagementApiConfig {
     /// How long to keep retrying the initial bind when the address is unavailable.
     /// `None` means retry indefinitely.
     pub bind_retry: Option<Duration>,
+    /// Machine credential for `Authorization: Bearer`. Since issue #156 it
+    /// authenticates a request but cannot open a browser session.
     pub auth_token: Option<String>,
+    /// Transport security, with `"auto"` already resolved against `bind`.
+    pub tls: TlsMode,
+    /// Login and session behaviour.
+    pub auth: WebAuthLimits,
+}
+
+/// How the management API's listener is secured (issue #156).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TlsMode {
+    /// Plaintext. Reachable only on a loopback bind — validation refuses it
+    /// anywhere else, so a device cannot be left serving admin in the clear on
+    /// a network by leaving a knob at its default.
+    Off,
+    /// A certificate this device generated for itself, persisted so the
+    /// fingerprint a parent accepted stays the same across restarts.
+    SelfSigned,
+    /// A certificate somebody else issued: `tailscale cert`, Let's Encrypt via
+    /// DNS-01, a home CA. The only mode that gets a padlock with no ceremony.
+    Files { cert: PathBuf, key: PathBuf },
+}
+
+impl TlsMode {
+    pub fn is_tls(&self) -> bool {
+        !matches!(self, TlsMode::Off)
+    }
+}
+
+/// Validated login and session behaviour.
+#[derive(Debug, Clone)]
+pub struct WebAuthLimits {
+    pub session_idle: Duration,
+    pub session_max_age: Duration,
+    pub lockout_after: u32,
+    pub lockout: Duration,
+}
+
+impl Default for WebAuthLimits {
+    fn default() -> Self {
+        Self {
+            session_idle: DEFAULT_SESSION_IDLE,
+            session_max_age: DEFAULT_SESSION_MAX_AGE,
+            lockout_after: DEFAULT_LOCKOUT_AFTER,
+            lockout: DEFAULT_LOCKOUT,
+        }
+    }
 }
 
 impl ManagementApiConfig {
@@ -550,12 +609,74 @@ impl ManagementApiConfig {
             Some(s) => Some(Duration::from_secs(s)),
             None => Some(DEFAULT_MANAGEMENT_API_BIND_RETRY),
         };
+        let tls = resolve_tls(raw.tls.as_ref(), &bind);
+        let auth = raw
+            .auth
+            .as_ref()
+            .map(|a| WebAuthLimits {
+                session_idle: a
+                    .session_idle_days
+                    .map(|d| Duration::from_secs(d * 24 * 3600))
+                    .unwrap_or(DEFAULT_SESSION_IDLE),
+                session_max_age: a
+                    .session_max_days
+                    .map(|d| Duration::from_secs(d * 24 * 3600))
+                    .unwrap_or(DEFAULT_SESSION_MAX_AGE),
+                lockout_after: a.lockout_after.unwrap_or(DEFAULT_LOCKOUT_AFTER),
+                lockout: a
+                    .lockout_seconds
+                    .map(Duration::from_secs)
+                    .unwrap_or(DEFAULT_LOCKOUT),
+            })
+            .unwrap_or_default();
         Self {
             port: raw.port.unwrap_or(DEFAULT_MANAGEMENT_API_PORT),
             bind,
             bind_retry,
             auth_token: raw.auth_token.clone(),
+            tls,
+            auth,
         }
+    }
+}
+
+/// Resolve `[service.management_api.tls]` against the bind address.
+///
+/// `"auto"` — the default, and what a config that says nothing gets — is the
+/// whole point of this function: a loopback listener stays plaintext, so the
+/// dev loop and the e2e harness are untouched, and a listener anyone else can
+/// reach comes up on a self-signed certificate rather than in the clear.
+/// A mode string that is not one of the four is rejected in `validate_config`;
+/// here it falls back to `"auto"` rather than panicking, because `from_raw`
+/// runs on configs that have already been validated and must not have a second
+/// opinion about them.
+fn resolve_tls(raw: Option<&crate::schema::RawTlsConfig>, bind: &IpAddr) -> TlsMode {
+    let Some(raw) = raw else {
+        return auto_tls(bind);
+    };
+    match raw.mode.as_deref().unwrap_or("auto") {
+        "off" => TlsMode::Off,
+        "self_signed" => TlsMode::SelfSigned,
+        "files" => match (raw.cert.as_ref(), raw.key.as_ref()) {
+            (Some(cert), Some(key)) => TlsMode::Files {
+                cert: PathBuf::from(cert),
+                key: PathBuf::from(key),
+            },
+            // Missing paths are a validation error; a config that reached here
+            // without them still has to come up as something, and the
+            // self-signed fallback is the one that does not serve admin in the
+            // clear.
+            _ => TlsMode::SelfSigned,
+        },
+        _ => auto_tls(bind),
+    }
+}
+
+fn auto_tls(bind: &IpAddr) -> TlsMode {
+    if bind.is_loopback() {
+        TlsMode::Off
+    } else {
+        TlsMode::SelfSigned
     }
 }
 

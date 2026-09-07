@@ -103,8 +103,11 @@ SHEPHERD_MIGRATED_FILES=(shepherdd.db)
 # directory instead. There is one Bluetooth adapter and one BlueZ bond table,
 # and forgetting a bond forgets it for the machine -- so an admin record kept
 # per-user while the bond was system-wide gave a two-child device behaviour
-# nobody chose. `ProtectedFile::scope` is the Rust half of this split.
-SHEPHERD_SYSTEM_FILES=(admin.toml unbond-queue.toml)
+# nobody chose. The same argument covers the other two: there is one management
+# API on one port, so a per-user web password would be two passwords for one
+# door, and one certificate for the host that serves it.
+# `ProtectedFile::scope` is the Rust half of this split.
+SHEPHERD_SYSTEM_FILES=(admin.toml unbond-queue.toml web-auth.toml tls.pem)
 # Where they go. Shared by every kiosk user, at the same uid and mode as the
 # per-user directories, so it is no more reachable from an activity.
 STATED_ADMIN_DIR="/var/lib/shepherdd/admin"
@@ -115,16 +118,18 @@ SHEPHERD_POLICY_FILE="config.toml"
 # a stale one would factory-reset a device during an upgrade. Declared rather
 # than merely omitted, so the drift test can tell "decided against" apart from
 # "forgotten" -- which is the whole distinction it exists to check. (It is a
-# device file like the two above, and shepherdd reads it from the shared
+# device file like the ones above, and shepherdd reads it from the shared
 # directory; it is simply never carried across.)
 # shellcheck disable=SC2034  # read by installer_covers_protected_files.rs
 SHEPHERD_UNMIGRATED_FILES=(.factory-reset-ble)
 # Named individually where a caller needs one by name. shellcheck reads each
-# file alone, so it cannot see `bluetooth.sh` using these two.
+# file alone, so it cannot see the libraries below using these.
 # shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
 SHEPHERD_ADMIN_RECORD_FILE="admin.toml"
 # shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
 SHEPHERD_RESET_SENTINEL_FILE=".factory-reset-ble"
+# shellcheck disable=SC2034  # used by webauth.sh, which sources this file
+SHEPHERD_WEB_AUTH_FILE="web-auth.toml"
 
 # The socket unit instance that serves `$1`.
 #

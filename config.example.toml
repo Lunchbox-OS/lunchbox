@@ -201,7 +201,36 @@ bind = "0.0.0.0"             # Bind address ("127.0.0.1" for localhost-only)
 # bind_retry_seconds = 300   # Retry initial bind for this long if the address is not yet
                              # assigned (e.g. ZeroTier interface still coming up at login).
                              # 0 = retry forever. Default: 300.
-# auth_token = "changeme"    # Optional Bearer token; omit to allow unauthenticated access
+# auth_token = "changeme"    # Machine credential for `Authorization: Bearer` -- scripts,
+                             # `curl`, the e2e harness. It authenticates a request but
+                             # cannot sign a person in; a parent uses a password or the
+                             # paired companion (issue #156). Omit unless something
+                             # automated needs it.
+
+# Transport security (issue #156). Omitting this whole table means `mode = "auto"`,
+# which is the right answer almost always: plaintext on a loopback bind, a generated
+# self-signed certificate on any other. Plaintext on a non-loopback bind is refused
+# outright -- everything an administrator does over this socket is a credential to the
+# child on the same network.
+[service.management_api.tls]
+mode = "self_signed"         # "auto" | "off" | "self_signed" | "files"
+                             #
+                             # "self_signed" generates a certificate for this device and
+                             # keeps it, so the fingerprint a browser was told to accept
+                             # stays the same across restarts. It is logged at startup.
+                             #
+                             # "files" is the mode with a real padlock and no warnings:
+                             # point it at `tailscale cert` output, a Let's Encrypt
+                             # certificate from a DNS-01 client, or a home CA.
+# cert = "/var/lib/shepherdd/tls/fullchain.pem"   # required for mode = "files"
+# key  = "/var/lib/shepherdd/tls/privkey.pem"
+
+# How long a signed-in browser stays signed in, and what guessing costs.
+# [service.management_api.auth]
+# session_idle_days = 2      # A session unused this long is dead.
+# session_max_days = 14      # And one this old is dead however actively it is used.
+# lockout_after = 8          # Failed logins from one address before it is locked out.
+# lockout_seconds = 300      # First lockout; each subsequent one doubles, to 16x.
 
 # Bluetooth LE management transport (optional)
 # Primary admin path: works without network configuration, IP autodiscovery,

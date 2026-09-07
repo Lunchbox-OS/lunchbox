@@ -246,6 +246,14 @@ pub struct WebListenerView {
     pub addr: Option<String>,
     /// The port on its own, for building a URL against some other address.
     pub port: Option<u16>,
+    /// Whether the listener terminates TLS (issue #156).
+    ///
+    /// Decides the scheme in [`NetworkStatusView::management_urls`], which is
+    /// not cosmetic: a device serving HTTPS answers a plaintext request with a
+    /// connection reset, so an `http://` URL for it sends a parent to debug
+    /// their browser instead of opening their device.
+    #[serde(default)]
+    pub tls: bool,
     /// Why it is not serving. Only set with [`WebListenerState::Failed`].
     pub error: Option<String>,
 }
@@ -256,8 +264,14 @@ impl WebListenerView {
             state: WebListenerState::Disabled,
             addr: None,
             port: None,
+            tls: false,
             error: None,
         }
+    }
+
+    /// The scheme a URL against this listener needs.
+    pub fn scheme(&self) -> &'static str {
+        if self.tls { "https" } else { "http" }
     }
 }
 
@@ -378,8 +392,9 @@ fn management_urls(listener: &WebListenerView, interfaces: &[NetworkInterfaceVie
         return Vec::new();
     };
 
+    let scheme = listener.scheme();
     if !ip.is_unspecified() {
-        return vec![format!("http://{}:{}", url_host(&ip), port)];
+        return vec![format!("{scheme}://{}:{}", url_host(&ip), port)];
     }
 
     // One URL per interface, not one per address. A wireless interface on a
@@ -392,7 +407,7 @@ fn management_urls(listener: &WebListenerView, interfaces: &[NetworkInterfaceVie
         .iter()
         .filter(|i| i.reachable)
         .filter_map(|i| i.preferred_address())
-        .map(|a| format!("http://{}:{}", a.in_url(), port))
+        .map(|a| format!("{scheme}://{}:{}", a.in_url(), port))
         .collect()
 }
 
@@ -459,7 +474,17 @@ mod tests {
             state: WebListenerState::Listening,
             addr: Some(addr.to_string()),
             port: Some(port),
+            tls: false,
             error: None,
+        }
+    }
+
+    /// The same listener, serving TLS — which is what a device bound to
+    /// anything but loopback does since issue #156.
+    fn listening_tls(ip: &str, port: u16) -> WebListenerView {
+        WebListenerView {
+            tls: true,
+            ..listening(ip, port)
         }
     }
 
@@ -536,6 +561,49 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_listener_advertises_https() {
+        // The scheme is not cosmetic: since issue #156 a device bound to
+        // anything but loopback serves TLS, and an `http://` URL for it gets a
+        // connection reset rather than a redirect.
+        let status = NetworkStatusView::new(
+            Connectivity::Full,
+            NetworkSource::NetworkManager,
+            vec![
+                iface(
+                    "wlan0",
+                    NetworkInterfaceKind::Wifi,
+                    vec![v4("192.168.0.139")],
+                ),
+                iface(
+                    "eth0",
+                    NetworkInterfaceKind::Ethernet,
+                    vec![v6("2001:db8::5")],
+                ),
+            ],
+            listening_tls("0.0.0.0", 8080),
+        );
+        assert_eq!(
+            status.management_urls,
+            vec!["https://192.168.0.139:8080", "https://[2001:db8::5]:8080"]
+        );
+    }
+
+    #[test]
+    fn a_concrete_tls_bind_advertises_https_too() {
+        let status = NetworkStatusView::new(
+            Connectivity::Full,
+            NetworkSource::NetworkManager,
+            vec![iface(
+                "wlan0",
+                NetworkInterfaceKind::Wifi,
+                vec![v4("192.168.0.139")],
+            )],
+            listening_tls("192.168.0.139", 8080),
+        );
+        assert_eq!(status.management_urls, vec!["https://192.168.0.139:8080"]);
+    }
+
+    #[test]
     fn a_listener_that_is_not_serving_offers_no_url() {
         // An address that will refuse the connection is worse than none: it
         // sends somebody debugging their phone instead of their device.
@@ -556,6 +624,7 @@ mod tests {
                     state,
                     addr: Some("0.0.0.0:8080".into()),
                     port: Some(8080),
+                    tls: false,
                     error: None,
                 },
             );

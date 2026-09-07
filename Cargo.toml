@@ -173,6 +173,34 @@ gtk4-layer-shell = "0.4"
 # HTTP API
 axum = { version = "0.8", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+# TLS termination for the management API (issue #156). `rustls` is already in
+# the tree behind `ureq`, on the `ring` provider; both of these follow it there
+# rather than dragging in `aws-lc-rs`, which wants cmake and a C toolchain on a
+# device that has neither.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls-pemfile = "2"
+
+# Password hashing for the web UI login (issue #156). Argon2id with the
+# crate's default params; the PHC string carries them, so raising them later
+# re-hashes on next login rather than invalidating the stored password.
+argon2 = "0.5"
+# CSPRNG behind session ids, enrolment codes and approval codes.
+rand = "0.8"
+# Constant-time comparison of session tokens and codes.
+subtle = "2.6"
+sha2 = "0.10"
+# User-Agent parsing, for the label beside each session in the "signed-in
+# browsers" list (issue #156). A hand-rolled token table kept mislabelling
+# ordinary devices -- every browser on iOS is WebKit and announces itself as
+# `CriOS`/`FxiOS`/`EdgiOS`, ChromeOS says `CrOS` and never `Linux` -- and the
+# set of such rules is exactly the kind that goes stale unnoticed. Self
+# contained: the dataset is compiled in, so there is no regex file to vendor
+# or refresh, unlike `ua-parser`, and no `serde_yaml` (deprecated) as
+# `uaparser` would bring. Output is a label a person reads, never an input to
+# a decision.
+woothee = "0.13"
 
 # WebSocket client (Steam CEF DevTools / Chrome DevTools Protocol).
 # Default features give a non-TLS ws:// client; we only talk to loopback.

@@ -92,6 +92,12 @@ where
     }
 }
 
+/// The machine token the harness configures when a test does not name one.
+///
+/// Not a secret: it is written into a config file in a temp directory that
+/// lives as long as one test, on a loopback listener.
+pub const DEFAULT_E2E_AUTH_TOKEN: &str = "e2e-machine-token";
+
 /// Builder for a [`TestHarness`].
 pub struct HarnessBuilder {
     config_toml: Option<String>,
@@ -128,9 +134,13 @@ impl HarnessBuilder {
         self
     }
 
-    /// Set an auth token for the management API. If `Some(_)`, the default
-    /// config will configure the API with this token, and the [`HttpClient`]
-    /// will send it on every request.
+    /// Override the machine token the management API is configured with.
+    ///
+    /// The harness always sets one (see [`DEFAULT_E2E_AUTH_TOKEN`]) because
+    /// since issue #156 an API with no credential is *closed*, not open — a
+    /// device that nobody has set a password on answers the setup endpoints
+    /// and refuses everything else, which is the whole point. Tests that want
+    /// to prove a *wrong* token is refused set a known one here.
     pub fn auth_token(mut self, token: impl Into<String>) -> Self {
         self.auth_token = Some(token.into());
         self
@@ -290,7 +300,16 @@ impl TestHarness {
 
         let http_port = alloc_tcp_port()?;
 
-        let auth_token = builder.auth_token.clone();
+        // Always a token. A harness without one would be testing a device
+        // that refuses every RPC, since issue #156 removed the open-mode
+        // fallback; the machine credential is exactly what a scripted client
+        // with no browser is meant to use.
+        let auth_token = Some(
+            builder
+                .auth_token
+                .clone()
+                .unwrap_or_else(|| DEFAULT_E2E_AUTH_TOKEN.to_string()),
+        );
         let auth_line = match &auth_token {
             Some(t) => format!("auth_token = \"{}\"", t),
             None => String::new(),

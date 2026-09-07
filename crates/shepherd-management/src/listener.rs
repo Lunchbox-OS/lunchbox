@@ -36,11 +36,16 @@ impl WebListenerHandle {
 
     /// Configured for `addr` and not serving yet. The state a listener starts
     /// in, and stays in for as long as `bind_retry_seconds` allows.
-    pub fn configured(addr: SocketAddr) -> Self {
+    ///
+    /// `tls` decides the scheme in the URLs a UI offers, so it is taken here
+    /// rather than left to each consumer: the answer lives in the config, and
+    /// getting it wrong hands somebody a URL their browser cannot open.
+    pub fn configured(addr: SocketAddr, tls: bool) -> Self {
         Self::from_view(WebListenerView {
             state: WebListenerState::Binding,
             addr: Some(addr.to_string()),
             port: Some(addr.port()),
+            tls,
             error: None,
         })
     }
@@ -51,12 +56,17 @@ impl WebListenerHandle {
         }
     }
 
-    /// The listener is serving on `addr`.
-    pub fn set_listening(&self, addr: SocketAddr) {
+    /// The listener is serving on `addr`, with or without TLS.
+    ///
+    /// Both come from the listener rather than from the config: `port = 0`
+    /// binds somewhere else entirely, and `tls.mode = "auto"` resolves to
+    /// plaintext or self-signed depending on where the bind landed.
+    pub fn set_listening(&self, addr: SocketAddr, tls: bool) {
         self.set(WebListenerView {
             state: WebListenerState::Listening,
             addr: Some(addr.to_string()),
             port: Some(addr.port()),
+            tls,
             error: None,
         });
     }
@@ -108,28 +118,32 @@ mod tests {
 
     #[test]
     fn a_configured_listener_starts_out_binding() {
-        let handle = WebListenerHandle::configured(addr());
+        let handle = WebListenerHandle::configured(addr(), true);
         let view = handle.get();
         assert_eq!(view.state, WebListenerState::Binding);
         assert_eq!(view.addr.as_deref(), Some("0.0.0.0:8080"));
         assert_eq!(view.port, Some(8080));
+        assert!(view.tls, "the scheme is known before the bind succeeds");
     }
 
     #[test]
     fn a_clone_sees_what_the_original_wrote() {
         // The point of the type: the HTTP server holds one end and the
         // management service the other.
-        let handle = WebListenerHandle::configured(addr());
+        let handle = WebListenerHandle::configured(addr(), false);
         let reader = handle.clone();
-        handle.set_listening(addr());
+        handle.set_listening(addr(), true);
         assert_eq!(reader.get().state, WebListenerState::Listening);
+        // `tls.mode = "auto"` is only resolved once the bind lands, so the
+        // listener gets the last word on the scheme, not the config.
+        assert!(reader.get().tls);
     }
 
     #[test]
     fn a_failure_keeps_the_address_it_failed_on() {
         // "Failed" without saying what it was trying to bind is not a report
         // anybody can act on.
-        let handle = WebListenerHandle::configured(addr());
+        let handle = WebListenerHandle::configured(addr(), true);
         handle.set_failed("Address not available");
         let view = handle.get();
         assert_eq!(view.state, WebListenerState::Failed);

@@ -59,6 +59,37 @@ const DIAGNOSTIC_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 /// (issue #144). A minute: this is a deliberate act, not a hot path.
 const SOCKET_WATCH_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How often the web credential store expires what has gone stale (issue #156).
+///
+/// Session expiry is enforced on every request anyway; this only decides how
+/// long a dead session lingers in the list a parent is looking at.
+const WEB_AUTH_SWEEP: Duration = Duration::from_secs(30);
+
+/// How often the on-screen setup card re-checks what it should be saying.
+///
+/// Faster than the sweep because the card goes up during startup, before the
+/// HTTP listener has bound — and until it has, `management_urls` is empty and
+/// the card can only offer a port. Five seconds is how long a parent spends
+/// looking at the weaker message on a cold boot, and a NetworkManager read is
+/// only made while a setup code exists at all.
+const SETUP_CARD_POLL: Duration = Duration::from_secs(5);
+
+/// What the setup card is currently showing (issue #156).
+///
+/// Compared rather than blindly re-spawned: the poll is fast, and restarting
+/// the overlay subprocess on every tick would flash the card in the face of
+/// the person reading the code off it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupCardContent {
+    code: String,
+    /// Every URL the device is reachable at, from the live network status —
+    /// so a wildcard bind names its wifi and VPN addresses rather than
+    /// nothing (issue #182).
+    urls: Vec<String>,
+    /// The port on its own, for the window before the listener has bound.
+    port: Option<u16>,
+}
+
 mod diagnostics;
 mod display;
 mod display_watch;
@@ -1510,8 +1541,35 @@ impl Service {
         // configured listener starts out `Binding`: the address it wants may
         // not exist yet, which is what `bind_retry_seconds` is for.
         let web_listener = match &management_api_config {
-            Some(cfg) => WebListenerHandle::configured(SocketAddr::new(cfg.bind, cfg.port)),
+            Some(cfg) => {
+                WebListenerHandle::configured(SocketAddr::new(cfg.bind, cfg.port), cfg.tls.is_tls())
+            }
             None => WebListenerHandle::disabled(),
+        };
+
+        // The web UI's credential store (issue #156). Built whenever the HTTP
+        // API is, and *only* then: it is the thing that makes an unclaimed
+        // device closed rather than open, so a management API without one
+        // would be the fail-open state this replaced. A store that cannot be
+        // loaded takes the API down with it rather than falling back to no
+        // authentication.
+        let web_auth: Option<Arc<shepherd_management::WebAuth>> = match &management_api_config {
+            Some(cfg) => {
+                let policy = shepherd_management::WebAuthPolicy {
+                    session_idle: cfg.auth.session_idle,
+                    session_max_age: cfg.auth.session_max_age,
+                    lockout_after: cfg.auth.lockout_after,
+                    lockout: cfg.auth.lockout,
+                };
+                match shepherd_management::WebAuth::load(Arc::clone(&protected_files), policy) {
+                    Ok(auth) => Some(Arc::new(auth)),
+                    Err(e) => {
+                        error!(error = %e, "Could not open the web management credential store");
+                        return Err(anyhow::anyhow!("web management credential store: {e}"));
+                    }
+                }
+            }
+            None => None,
         };
 
         // Automatic brightness. Offered only when the host actually exposes a
@@ -1587,6 +1645,7 @@ impl Service {
                 ),
                 network: Some(Arc::new(LinuxNetworkInfo::new()) as Arc<dyn NetworkInfoProvider>),
                 web_listener: web_listener.clone(),
+                web_auth: web_auth.clone(),
             })
         };
         let svc: Arc<dyn ManagementService> = svc_concrete.clone();
@@ -1701,12 +1760,28 @@ impl Service {
             None => (None, None),
         };
 
-        let http_handle = match management_api_config {
-            Some(api_cfg) => {
+        // The store learns about the companion here rather than at
+        // construction: the claim machine does not exist until the BLE server
+        // is built, and the browser's login page needs to know whether the
+        // "approve on my phone" button leads anywhere.
+        if let Some(web) = &web_auth {
+            web.set_companion(admin_authority.clone());
+        }
+
+        // Zipped, not two `if let`s: the store is built above from exactly this
+        // `Option`, so pairing them here is what makes "an API always has a
+        // credential store" a thing the compiler carries rather than a thing
+        // two nearby blocks happen to agree on.
+        let http_handle = match management_api_config.zip(web_auth.clone()) {
+            Some((api_cfg, web)) => {
+                announce_web_auth_state(&web, &api_cfg);
                 let http_state = HttpAppState { svc: svc.clone() };
                 let http_server = HttpServer::new(http_state, api_cfg)
                     .with_admin_authority(admin_authority)
-                    .with_listener_status(web_listener.clone());
+                    .with_listener_status(web_listener.clone())
+                    .with_web_auth(web)
+                    .with_protected_files(Arc::clone(&protected_files))
+                    .with_hostnames(local_hostnames());
                 let http_shutdown_rx = shutdown_rx.clone();
                 let listener_status = web_listener.clone();
                 let publisher = diagnostic_publisher.clone();
@@ -1724,6 +1799,80 @@ impl Service {
             }
             None => None,
         };
+
+        // The web credential store's housekeeping (issue #156), and the
+        // on-screen setup code that goes with it.
+        //
+        // One task for both because they are the same question asked on the
+        // same clock: is this device set up, and are its sessions still alive.
+        // The card is shown while there is a code to show and torn down the
+        // moment a password exists — the parent who just finished setting one
+        // should not have to look at their setup code any more.
+        if let Some(web) = web_auth.clone() {
+            let mut sweep_shutdown = shutdown_rx.clone();
+            let svc_for_setup = svc.clone();
+            tokio::spawn(async move {
+                let mut card: Option<pairing_display::SetupCodeDisplay> = None;
+                // What the card on screen is currently saying, so a tick that
+                // changes nothing does not restart the subprocess and flash the
+                // card at whoever is reading it.
+                let mut showing: Option<SetupCardContent> = None;
+                let mut ticker = tokio::time::interval(SETUP_CARD_POLL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut since_sweep = Duration::ZERO;
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            // The sweep is expiry housekeeping and wants the
+                            // slower clock; the card wants the faster one,
+                            // because at boot it goes up before the listener
+                            // has bound and should stop saying "port 8080 on
+                            // this device" as soon as it can say an address.
+                            since_sweep += SETUP_CARD_POLL;
+                            if since_sweep >= WEB_AUTH_SWEEP {
+                                since_sweep = Duration::ZERO;
+                                web.sweep();
+                            }
+                            let wanted = match web.enrolment_code() {
+                                // Only asked for while a code exists: this is a
+                                // NetworkManager round trip, and a device that
+                                // finished setup months ago has no use for one.
+                                Some(code) => {
+                                    let status = svc_for_setup.network_status().await;
+                                    Some(SetupCardContent {
+                                        code,
+                                        urls: status.management_urls,
+                                        port: status.management_api.port,
+                                    })
+                                }
+                                None => None,
+                            };
+                            if wanted != showing {
+                                // Torn down before the replacement goes up:
+                                // two overlays anchored to the same corner
+                                // would stack rather than replace.
+                                drop(card.take());
+                                card = wanted.as_ref().map(|c| {
+                                    pairing_display::SetupCodeDisplay::show(
+                                        &c.code, &c.urls, c.port,
+                                    )
+                                });
+                                showing = wanted;
+                            }
+                        }
+                        _ = sweep_shutdown.changed() => {
+                            if *sweep_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Explicit: the card is a child process, and shutdown is the
+                // one path where leaving it to the end of scope would be easy
+                // to lose in a later refactor.
+                drop(card);
+            });
+        }
 
         // System event watcher (logind + NetworkManager). Always running so the
         // suspend cover (issue #73) works regardless of internet gating: it
@@ -2674,6 +2823,55 @@ async fn dispatch_ipc(
                 shepherd_management::ManagementError::Internal(m) => (ErrorCode::Internal, m),
             };
             Response::error(request_id, ErrorInfo::new(code, msg))
+        }
+    }
+}
+
+/// DNS names to put in a generated TLS certificate.
+///
+/// The machine's hostname, plus its `.local` form, plus `localhost`. Not an
+/// exhaustive answer — a device reached through a name only the router knows
+/// will still mismatch — but it covers the two ways a parent actually types a
+/// device's address, and the `files` TLS mode is the answer for anything else.
+fn local_hostnames() -> Vec<String> {
+    let mut names = vec!["localhost".to_string()];
+    if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+        let hostname = hostname.trim().to_string();
+        if !hostname.is_empty() {
+            names.push(format!("{hostname}.local"));
+            names.push(hostname);
+        }
+    }
+    names.dedup();
+    names
+}
+
+/// Say, once at startup, what state web management authentication is in.
+///
+/// An unconfigured device puts its setup code in the journal, because the
+/// on-screen card needs a compositor and this needs to work on a device whose
+/// display has not come up — or over SSH, where the person reading the journal
+/// is the one who will set the password.
+fn announce_web_auth_state(
+    web: &shepherd_management::WebAuth,
+    cfg: &shepherd_config::ManagementApiConfig,
+) {
+    let scheme = if cfg.tls.is_tls() { "https" } else { "http" };
+    let host = if cfg.bind.is_unspecified() {
+        "<this device>".to_string()
+    } else {
+        cfg.bind.to_string()
+    };
+    match web.enrolment_code() {
+        Some(code) => {
+            warn!(
+                "Management web UI has no password yet. Open {scheme}://{host}:{} and enter \
+                 setup code {code} to choose one.",
+                cfg.port
+            );
+        }
+        None => {
+            info!("Management web UI is password-protected");
         }
     }
 }

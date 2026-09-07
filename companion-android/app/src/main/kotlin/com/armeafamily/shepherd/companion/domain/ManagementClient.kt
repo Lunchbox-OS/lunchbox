@@ -140,6 +140,49 @@ class ManagementClient(private val connection: ShepherdConnection) {
     suspend fun setAutoBrightness(enabled: Boolean): BrightnessInfo =
         decode(call("set_auto_brightness", RpcParams.setAutoBrightness(enabled)))
 
+    // --- web management authentication (issue #156) --------------------
+
+    /**
+     * Whether the device's web UI has a password yet.
+     *
+     * The companion is the reset path: a parent who has forgotten the password
+     * taps [setWebPassword] here rather than finding an SSH client, which is
+     * what the issue's "for now, the reset flow can just be over SSH" was
+     * settling for.
+     */
+    suspend fun webAuthStatus(): WebAuthStatus =
+        decode(call("web_auth_status", RpcParams.webAuthStatus()))
+
+    /** Set or replace the web UI's password. Existing sessions survive. */
+    suspend fun setWebPassword(password: String) {
+        call("set_web_password", RpcParams.setWebPassword(password))
+    }
+
+    suspend fun listWebSessions(): List<WebSessionInfo> =
+        decode(call("list_web_sessions", RpcParams.listWebSessions()))
+
+    suspend fun revokeWebSession(id: String) {
+        call("revoke_web_session", RpcParams.revokeWebSession(id))
+    }
+
+    /**
+     * Browsers waiting to be let in, each with the six digits it is showing.
+     *
+     * The parent compares those digits against the screen in front of them
+     * before approving — the same ritual as pairing, and for the same reason:
+     * a request that is not theirs shows a different number.
+     */
+    suspend fun listLoginRequests(): List<LoginRequestInfo> =
+        decode(call("list_login_requests", RpcParams.listLoginRequests()))
+
+    suspend fun approveLoginRequest(id: String) {
+        call("approve_login_request", RpcParams.approveLoginRequest(id))
+    }
+
+    suspend fun denyLoginRequest(id: String) {
+        call("deny_login_request", RpcParams.denyLoginRequest(id))
+    }
+
     // --- misc ----------------------------------------------------------
 
     suspend fun reloadConfig(): ReloadResult = decode(call("reload_config", RpcParams.reloadConfig()))

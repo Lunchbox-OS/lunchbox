@@ -9,6 +9,7 @@
 import axios from "axios";
 import type { RpcMethod, RpcParams, RpcResult } from "./rpc-methods.generated";
 import type { ReasonCode } from "./types";
+import { UNAUTHENTICATED_EVENT } from "../auth/AuthGate";
 
 export class ApiError extends Error {
   constructor(
@@ -24,11 +25,24 @@ function getBase(): string {
   return localStorage.getItem("apiBase") ?? "";
 }
 
+/**
+ * The *machine* token, since issue #156.
+ *
+ * A browser signed in normally has no token here at all: it authenticates with
+ * an `HttpOnly` session cookie it cannot read. This survives for the one case a
+ * cookie cannot serve — an `apiBase` pointing at a different origin, where the
+ * browser will not send this origin's cookie — and for `npm run dev` against a
+ * device. See `ConnectionSettings`.
+ */
 function getToken(): string | null {
   return localStorage.getItem("apiToken");
 }
 
-const axiosInstance = axios.create();
+const axiosInstance = axios.create({
+  // Attach the session cookie. Redundant same-origin, load-bearing when
+  // `apiBase` points elsewhere.
+  withCredentials: true,
+});
 
 axiosInstance.interceptors.request.use((config) => {
   config.baseURL = `${getBase()}/api/v1`;
@@ -41,6 +55,12 @@ axiosInstance.interceptors.response.use(
   (res) => res,
   (err) => {
     if (axios.isAxiosError(err) && err.response) {
+      // A session can expire, or be revoked from another device, while this
+      // tab is open. Tell the gate rather than letting every query on the page
+      // fail with its own unexplained error.
+      if (err.response.status === 401) {
+        window.dispatchEvent(new Event(UNAUTHENTICATED_EVENT));
+      }
       const body = err.response.data as
         | { error?: string; message?: string }
         | undefined;
@@ -254,6 +274,10 @@ export function openEventStream(signal: AbortSignal): Promise<Response> {
   const token = getToken();
   return fetch(`${getBase()}/api/v1/events`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
+    // Same reason as the axios instance: the session cookie is the credential
+    // for a browser that signed in normally, and `fetch` does not send cookies
+    // cross-origin without being told to.
+    credentials: "include",
     signal,
     cache: "no-store", // long-lived stream; never serve it from cache
   });

@@ -114,3 +114,63 @@ impl Drop for SwayPairingDisplay {
         self.hide();
     }
 }
+
+/// The web management setup code on the television (issue #156).
+///
+/// The same binary as the pairing overlay, in its corner-card mode, and a
+/// separate handle rather than a second `PairingDisplay`: this one is up for
+/// minutes and must not be torn down by a pairing attempt that happens while
+/// it is showing, nor tear that pairing overlay down when it goes.
+pub struct SetupCodeDisplay {
+    child: Option<Child>,
+}
+
+impl SetupCodeDisplay {
+    /// Show the card. Returns a handle that hides it when dropped.
+    ///
+    /// A failure to spawn is logged and nothing else: the code is also in the
+    /// journal, and a device with no compositor up yet — or no overlay binary
+    /// installed — must still finish starting.
+    pub fn show(code: &str, urls: &[String], port: Option<u16>) -> Self {
+        #[allow(clippy::disallowed_methods)]
+        let mut cmd = Command::new(shepherd_host_linux::resolve_daemon_sibling(BINARY));
+        cmd.args(["--setup-code", code]);
+        // One `--url` per way in. A wildcard bind is reachable at one address
+        // per network the device is on (issue #182), and which of them the
+        // parent's laptop can use is not something this end can know.
+        for url in urls {
+            cmd.args(["--url", url]);
+        }
+        if let Some(port) = port {
+            cmd.args(["--port", &port.to_string()]);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        match cmd.spawn() {
+            Ok(child) => {
+                info!(
+                    pid = child.id(),
+                    "Showing the management setup code on screen"
+                );
+                Self { child: Some(child) }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Could not show the setup code on screen; it is in the log instead",
+                );
+                Self { child: None }
+            }
+        }
+    }
+}
+
+impl Drop for SetupCodeDisplay {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}

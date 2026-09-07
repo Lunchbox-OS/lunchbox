@@ -36,3 +36,50 @@ outcome. The daemon retries a bind whose address does not exist yet
 still coming up at login), a `port = 0` binds to something else entirely, and
 a bind that never succeeds previously reached only a log line — on a device
 whose web interface is exactly how somebody would have read it.
+
+## Web management authentication
+
+`webauth.rs` holds the credential store behind the management web UI (issue
+#156): the Argon2id password hash, the live browser sessions, and the pending
+"approve this browser on your phone" requests. It lives here rather than in
+`shepherd-http` because the companion reaches two of those three over BLE —
+approving a waiting browser, and setting the password without SSH are both
+ordinary trait methods, so `#[management_rpc]` carries them to every transport
+and to the Kotlin and TypeScript codegen.
+
+What is *not* here is the login itself. Signing in is a pre-auth HTTP exchange
+(`POST /api/v1/auth/login` and friends, in `shepherd-http`); a transport that
+has already authenticated its peer, as BLE has by the time a GATT write lands,
+has no use for one, and exposing it there would be a second door into the same
+room.
+
+The store is synchronous behind a `std::sync::RwLock`, for the same reason
+`AdminAuthority` is: the HTTP auth middleware runs per request and must not
+await. It persists through `ProtectedFiles` to `web-auth.toml` under the state
+custodian, at a uid no activity has — a password hash and a table of live
+sessions are exactly the kind of thing the child must not be able to read.
+Session tokens are stored hashed even there.
+
+### Why there is a User-Agent parser in here
+
+Each session carries a label — "Chrome on Android" — so a parent can tell which
+row is the laptop they want to sign out. That label comes from `woothee`, and
+the dependency is deliberate: this started as a dozen-line token table and the
+table was quietly wrong about ordinary devices. Every browser on iOS is WebKit
+underneath and announces itself as `CriOS`/`FxiOS`/`EdgiOS` with no `Chrome/`
+token at all, so every iPhone read as Safari; ChromeOS says `CrOS` and never
+says `Linux`, so those rows had no platform; Android says `Linux; Android 15`
+and means the second half. That set of rules only grows, and none of it is
+guessable — it belongs in a dataset somebody else maintains.
+
+`woothee` over the alternatives because it is self-contained: the dataset
+compiles in, so there is no `regexes.yaml` to vendor and refresh as
+`ua-parser` requires, and no deprecated `serde_yaml` as `uaparser` brings. It
+added exactly one entry to `Cargo.lock` — the `regex` family was already in
+the tree.
+
+The label is for a person to read and is never an input to a decision: a
+User-Agent is whatever the client typed. Two things stay knowingly wrong and
+are pinned by tests that say so — a desktop-mode iPad is byte-identical to a
+Mac, and Windows 11 sends `Windows NT 10.0` just as Windows 10 does, which is
+why the version is dropped rather than repeated as a coin flip.

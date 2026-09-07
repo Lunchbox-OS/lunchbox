@@ -507,6 +507,79 @@
       }
     },
     {
+      "name": "web_auth_status",
+      "params": [],
+      "result": {
+        "type": "WebAuthStatus"
+      }
+    },
+    {
+      "name": "set_web_password",
+      "params": [
+        {
+          "name": "password",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "list_web_sessions",
+      "params": [],
+      "result": {
+        "type": "Vec<WebSessionInfo>"
+      }
+    },
+    {
+      "name": "revoke_web_session",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "list_login_requests",
+      "params": [],
+      "result": {
+        "type": "Vec<LoginRequestInfo>"
+      }
+    },
+    {
+      "name": "approve_login_request",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "deny_login_request",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "logout",
       "params": [],
       "result": {

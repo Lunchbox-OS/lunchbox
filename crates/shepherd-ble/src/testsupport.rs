@@ -229,6 +229,35 @@ impl ManagementService for MockSvc {
     async fn refresh_media(&self) -> ManagementResult<()> {
         Ok(())
     }
+    // Web management authentication (issue #156). The BLE transport reaches
+    // these, so the mock has to answer them; every one says "no store", which
+    // is what a device with the HTTP API switched off would say.
+    async fn web_auth_status(&self) -> ManagementResult<shepherd_management::WebAuthStatus> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+    async fn set_web_password(&self, _password: String) -> ManagementResult<()> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+    async fn list_web_sessions(
+        &self,
+    ) -> ManagementResult<Vec<shepherd_management::WebSessionInfo>> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+    async fn revoke_web_session(&self, _id: String) -> ManagementResult<()> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+    async fn list_login_requests(
+        &self,
+    ) -> ManagementResult<Vec<shepherd_management::LoginRequestInfo>> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+    async fn approve_login_request(&self, _id: String) -> ManagementResult<()> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+    async fn deny_login_request(&self, _id: String) -> ManagementResult<()> {
+        Err(ManagementError::Conflict("no web auth in tests".into()))
+    }
+
     async fn logout(&self) {}
     async fn ping(&self) {}
     async fn list_diagnostics(&self) -> shepherd_api::DiagnosticSet {

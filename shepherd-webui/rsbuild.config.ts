@@ -39,8 +39,19 @@ export default defineConfig({
     : {
         proxy: {
           "/api": {
-            target: "http://localhost:8080",
-            changeOrigin: true,
+            // `https`, since issue #156: a daemon bound anywhere but loopback
+            // comes up on TLS, and `config.example.toml` binds `0.0.0.0`.
+            target: "https://localhost:8080",
+            // The dev stack's certificate is self-signed by construction, so
+            // the proxy has to accept it. It is a loopback hop on the
+            // developer's own machine.
+            secure: false,
+            // *Not* `changeOrigin`. Rewriting `Host` to the upstream while the
+            // browser still sends `Origin: http://localhost:3000` makes every
+            // cookie-authenticated write look cross-origin to the daemon's CSRF
+            // check, which answers 403. Leaving `Host` alone keeps the two
+            // agreeing.
+            changeOrigin: false,
           },
         },
       },

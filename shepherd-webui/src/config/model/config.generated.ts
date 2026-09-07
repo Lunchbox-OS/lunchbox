@@ -885,7 +885,18 @@ export interface RawLimits {
  */
 export interface RawManagementApiConfig {
   /**
-   * Optional Bearer token for authentication. If absent, all LAN clients are trusted.
+   * Login and session behaviour. Absent means the defaults below.
+   */
+  auth?: RawWebAuthConfig | null;
+  /**
+   * Machine credential for `Authorization: Bearer`, for scripts, the e2e
+   * harness and `curl`.
+   *
+   * Since issue #156 this is deliberately *not* a way for a person to log
+   * in: it authenticates a request but cannot open a browser session, so it
+   * grants nothing that outlives the call. A parent signs in with a
+   * password or an approval on the paired companion instead. Absent, and
+   * with no password set, the API answers nothing but the setup endpoints.
    */
   auth_token?: string | null;
   /**
@@ -906,6 +917,10 @@ export interface RawManagementApiConfig {
    * TCP port to listen on (default: 7890)
    */
   port?: number | null;
+  /**
+   * Transport security (issue #156). Absent means `mode = "auto"`.
+   */
+  tls?: RawTlsConfig | null;
 }
 
 /**
@@ -1191,6 +1206,42 @@ export interface RawTimeWindow {
 }
 
 /**
+ * TLS for the management API (issue #156).
+ *
+ * A bearer token or a password crossing a LAN in cleartext is a credential
+ * the child on that LAN can have for the asking, so the plaintext listener is
+ * no longer a thing a device can be left in by accident: `mode = "off"` with a
+ * bind other than loopback is a configuration error, not a warning.
+ */
+export interface RawTlsConfig {
+  /**
+   * PEM certificate chain, for `mode = "files"`.
+   */
+  cert?: string | null;
+  /**
+   * PEM private key, for `mode = "files"`. PKCS#8, SEC1 or PKCS#1.
+   */
+  key?: string | null;
+  /**
+   * One of:
+   *
+   * - `"auto"` (default) — plaintext on a loopback bind, a generated
+   *   self-signed certificate on any other. The listener is never
+   *   accidentally in the clear on a network, and a device with no domain,
+   *   no CA and no Tailscale still comes up serving HTTPS.
+   * - `"off"` — plaintext. Loopback binds only.
+   * - `"self_signed"` — generate and persist a certificate for this
+   *   device's names and addresses. Browsers show an interstitial the first
+   *   time; the fingerprint is logged and readable from the companion, so
+   *   the click-through can be checked rather than guessed at.
+   * - `"files"` — use `cert` and `key`. This is the one that gets a real
+   *   padlock: `tailscale cert`, a Let's Encrypt certificate from a DNS-01
+   *   client, or a home CA all land here.
+   */
+  mode?: string | null;
+}
+
+/**
  * Token gate (issue #8)
  *
  * Configured on the *target* entry: time spent on the entries listed in
@@ -1260,6 +1311,31 @@ export interface RawWarningThreshold {
    * Severity: "info", "warn", "critical"
    */
   severity?: string;
+}
+
+/**
+ * Login and session behaviour for the web UI (issue #156).
+ */
+export interface RawWebAuthConfig {
+  /**
+   * Consecutive failed logins from one address before that address is
+   * locked out. Default: 8.
+   */
+  lockout_after?: number | null;
+  /**
+   * How long the first lockout lasts, in seconds; each subsequent lockout
+   * for the same address doubles it, to a ceiling of 16x. Default: 300.
+   */
+  lockout_seconds?: number | null;
+  /**
+   * A session unused for this long is dead. Default: 2.
+   */
+  session_idle_days?: number | null;
+  /**
+   * A session older than this is dead however actively it is used.
+   * Default: 14.
+   */
+  session_max_days?: number | null;
 }
 
 /**

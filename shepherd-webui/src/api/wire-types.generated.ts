@@ -1370,6 +1370,35 @@ export type LaunchOutcome =
 export type LimitSubject = string;
 
 /**
+ * A login waiting on a tap in the companion app.
+ */
+export interface LoginRequestInfo {
+  /**
+   * The six digits the browser is displaying. The parent compares.
+   */
+  code: string;
+  expires_at: IsoTimestamp;
+  /**
+   * The request's public handle — what `approve_login_request` takes.
+   *
+   * Not the same string the browser polls with. The browser's id is a
+   * secret capability; this is a short opaque handle derived from it, so
+   * that listing pending requests over BLE does not hand out the ability to
+   * collect the resulting session.
+   */
+  id: string;
+  /**
+   * Who is asking, as best the device can tell: "Chrome on Android".
+   */
+  label: string;
+  /**
+   * The address the request came from.
+   */
+  peer: string;
+  requested_at: IsoTimestamp;
+}
+
+/**
  * How a [`EntryKind::Media`] activity opens.
  */
 export type MediaMode =
@@ -1991,6 +2020,24 @@ export interface WarningThreshold {
 }
 
 /**
+ * What a client may know about the device's authentication state *before* it
+ * has authenticated. Deliberately thin — it says which door to knock on and
+ * nothing else.
+ */
+export interface WebAuthStatus {
+  /**
+   * Whether a paired companion exists to approve a login. False means the
+   * password is the only way in, so the UI should not offer the other.
+   */
+  companion_available: boolean;
+  /**
+   * False on a device where nobody has set a password yet: the browser
+   * should show the setup screen and ask for the code on the TV.
+   */
+  configured: boolean;
+}
+
+/**
  * Whether the web management interface is up, and where.
  *
  * The reason this is not simply the configured `bind`/`port`: the daemon
@@ -2035,6 +2082,44 @@ export interface WebListenerView {
    */
   port?: number | null;
   state: WebListenerState;
+  /**
+   * Whether the listener terminates TLS (issue #156).
+   *
+   * Decides the scheme in [`NetworkStatusView::management_urls`], which is
+   * not cosmetic: a device serving HTTPS answers a plaintext request with a
+   * connection reset, so an `http://` URL for it sends a parent to debug
+   * their browser instead of opening their device.
+   */
+  tls?: boolean;
+}
+
+/**
+ * One live browser session, as an administrator sees it.
+ *
+ * Carries no credential: `id` is a public handle used to revoke the session,
+ * not the token that authenticates it. The token itself is stored hashed and
+ * is never readable back out of this module.
+ */
+export interface WebSessionInfo {
+  created_at: IsoTimestamp;
+  /**
+   * True for the session making the request, so the UI can label it and
+   * warn before revoking it.
+   */
+  current: boolean;
+  expires_at: IsoTimestamp;
+  id: string;
+  /**
+   * Human label derived from the User-Agent at login — "Chrome on Android",
+   * not a hex string, because the person revoking sessions is choosing
+   * between their own devices.
+   */
+  label: string;
+  last_seen: IsoTimestamp;
+  /**
+   * The address the session logged in from, for the same reason.
+   */
+  peer: string;
 }
 
 /**

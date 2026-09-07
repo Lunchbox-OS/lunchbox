@@ -8,14 +8,15 @@ Exposes a local/LAN JSON-RPC endpoint that lets a parent or administrator manage
 Shepherd from a phone or browser on the same network, without needing direct
 access to the launcher UI.
 
-The surface is deliberately two endpoints:
+The surface is two endpoints plus the login flow:
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/v1/rpc` | JSON-RPC dispatch into every `ManagementService` method. |
 | `GET`  | `/api/v1/events` | Server-Sent Events stream of every `shepherd_api::Event`. |
+| — | `/api/v1/auth/*` | Signing in. See [Auth](#auth). |
 
-An optional Bearer token can be configured for authentication (see below).
+Authentication is a session, not a shared secret (issue #156). See below.
 
 ## RPC wire format
 
@@ -99,17 +100,91 @@ returns show up as an object with a named field instead of a bare primitive
 
 ## Auth
 
-`AuthSources` combines two token sources:
+Since issue #156 a *credential* buys a *session*, and it is the session that
+travels. Three things are accepted, and they are not equals:
 
-- A static token from `[service.management_api].auth_token` in the config file.
-- A dynamic token from a plugged-in `AdminAuthority` (in production this is the
-  BLE claim machine: the token is minted when a companion phone pairs and
-  becomes the admin).
+| Credential | Who presents it | Can it sign a person in? |
+|---|---|---|
+| `shepherd_session` cookie | A browser | It *is* the signed-in state |
+| Session token as `Authorization: Bearer` | A cross-origin browser, a script holding a session | Yes — same session |
+| Machine token as `Authorization: Bearer` | `curl`, the e2e harness, the companion | **No.** Authenticates the request, opens nothing |
 
-The middleware runs on both `/rpc` and `/events`. If neither source is
-configured — no static token *and* no BLE admin has claimed yet — the surface
-runs in open mode. As soon as either exists, `Authorization: Bearer <token>`
-is required.
+The machine tokens are the config's `[service.management_api].auth_token` and
+the token the BLE claim minted (through `AdminAuthority`). They survive, demoted:
+they authenticate a call and cannot become a browser session, which is the
+resolution of the question the June 2026 BLE design left open.
+
+**Open mode is gone.** A device used to serve the whole management surface to
+anyone who could reach the port when no token was configured and no admin had
+claimed. `shepherdd` now always builds a `WebAuth` store alongside the API, and
+an *unconfigured* store is closed: the setup endpoints answer, nothing else
+does. `AuthSources::is_open` survives only for a router built with no store at
+all, which is the tests and nothing on a device.
+
+### The login endpoints
+
+Five of these are reachable without a credential — they are how a browser
+authenticates in the first place — and four are not:
+
+| Method | Path | Pre-auth? | Purpose |
+|---|---|---|---|
+| `GET`  | `/api/v1/auth/status` | yes | `{configured, companion_available}`: which form the login page should show |
+| `POST` | `/api/v1/auth/setup` | yes | First-run: `{code, password}`, where `code` is the six digits on the device's screen |
+| `POST` | `/api/v1/auth/login` | yes | `{password}` |
+| `POST` | `/api/v1/auth/request` | yes | Ask the paired companion to approve; returns `{poll_token, code, expires_at}` |
+| `POST` | `/api/v1/auth/poll` | yes | `{poll_token}` → `{state: pending\|approved\|denied\|expired}`; an approval sets the cookie |
+| `GET`  | `/api/v1/auth/session` | no | Whoami |
+| `POST` | `/api/v1/auth/signout` | no | End this session |
+| `GET`  | `/api/v1/auth/sessions` | no | Every live session, the caller's marked `current` |
+| `DELETE` | `/api/v1/auth/sessions/{id}` | no | Revoke one |
+
+The approval half — listing pending requests and approving them — is on the
+`ManagementService` trait instead (`list_login_requests`,
+`approve_login_request`, `deny_login_request`, `set_web_password`,
+`list_web_sessions`, `revoke_web_session`, `web_auth_status`), so the companion
+reaches it over BLE. The *login* is deliberately not on the trait: by the time
+a GATT write lands the peer is bonded, so a login endpoint there would be a
+second door into the same room.
+
+The six digits are for a human to compare across two screens, exactly as BLE
+pairing's Numeric Comparison does. They are not a secret. The `poll_token` is:
+only the browser that asked knows it, so only that browser collects the session
+the approval mints, and an attacker racing the parent shows a different number.
+
+### Cookie attributes
+
+`HttpOnly; SameSite=Strict; Path=/`, plus `Secure` whenever the listener is
+TLS — and only then, because a `Secure` cookie on a plaintext origin is
+dropped by the browser and would lock it out. `SameSite=Strict` is most of the
+CSRF answer; an `Origin`-vs-`Host` check on cookie-authenticated writes is the
+rest. Bearer callers are exempt from that check: nothing attaches a bearer
+header automatically.
+
+### Rate limiting
+
+Failed logins are counted per peer address inside `WebAuth`. After
+`lockout_after` failures that address waits `lockout_seconds`, doubling per
+subsequent lockout to a 16x ceiling and resetting on a success. A lockout
+answers `429` with `Retry-After`; a wrong password and a wrong setup code are
+the same `403`, because the difference only matters to somebody guessing.
+
+## TLS
+
+`[service.management_api.tls].mode` is one of:
+
+- `auto` (the default, and what an absent table means) — plaintext on a
+  loopback bind, a generated self-signed certificate on any other.
+- `off` — plaintext. **A non-loopback bind with this is a config-validation
+  error**, not a warning: everything an administrator does over that socket is
+  a credential to the child on the same network.
+- `self_signed` — generate and persist a certificate for this device's names
+  and addresses. The SHA-256 fingerprint is logged at startup so the browser
+  warning can be checked rather than merely clicked through.
+- `files` — `cert` and `key` PEM paths. The mode with a real padlock:
+  `tailscale cert`, Let's Encrypt via a DNS-01 client, or a home CA.
+
+Termination is `axum-server` over `rustls` on the `ring` provider — the one
+already in the tree behind `ureq`, so this drags in no `aws-lc-rs` and no cmake.
 
 ## SSE
 
@@ -118,8 +193,9 @@ is required.
 `BrightnessChanged`, `PolicyReloaded`, and so on. The stream stays open until
 the client disconnects.
 
-The `EventSource` browser API can't set custom headers, so the SSE handler
-also accepts the token as a `?token=` query parameter.
+The web UI opens this with `fetch` and `credentials: "include"` rather than
+`EventSource`, so the session cookie carries it and no credential goes in a
+URL. A bearer client sets the header as it would on any other call.
 
 ## Integration
 
@@ -131,13 +207,41 @@ The HTTP server is started by shepherdd when `[service.management_api].enabled
 enabled = true
 port = 8080
 bind = "0.0.0.0"          # or 127.0.0.1 for local-only
-auth_token = "..."         # optional Bearer token
+auth_token = "..."         # optional machine token (not a login)
 bind_retry_seconds = 300   # keep retrying if the addr isn't up yet
+
+[service.management_api.tls]
+mode = "self_signed"       # auto | off | self_signed | files
+
+[service.management_api.auth]
+session_idle_days = 2
+session_max_days = 14
+lockout_after = 8
+lockout_seconds = 300
 ```
+
+### Recovering from a forgotten password
+
+In order of how much it costs:
+
+1. **From the paired companion** — Device controls → Web access → Change
+   password. No old password needed; the BLE link already proved who is asking.
+2. **Over SSH** — delete the credential store and restart the daemon. A fresh
+   setup code appears on the device's screen and in the journal:
+   ```sh
+   sudo rm /var/lib/shepherdd/admin/web-auth.toml
+   sudo systemctl restart shepherdd    # or restart the dev stack
+   ```
+   Every session goes with it, which is the right answer for the case where a
+   password was lost rather than merely forgotten.
 
 ## Testing
 
-Integration tests in `tests/api.rs` cover auth, RPC method dispatch,
-per-method result shapes, and error mapping. The e2e crate
+Integration tests in `tests/api.rs` cover auth — which routes are reachable
+without a credential, the cookie's attributes, the `Origin` check, lockout, and
+the whole companion-approval handshake — plus RPC method dispatch, per-method
+result shapes, and error mapping. The credential store's own arithmetic
+(hashing, expiry, throttle backoff) is tested in
+`shepherd-management/src/webauth.rs`. The e2e crate
 (`crates/shepherd-e2e`) drives the same endpoint end-to-end against a real
 shepherdd process.
