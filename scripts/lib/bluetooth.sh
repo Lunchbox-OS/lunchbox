@@ -226,7 +226,7 @@ bluetooth_clear() {
             warn "Admin record $admin_record exists but has no identity_address; nothing to unpair in BlueZ"
         fi
     else
-        info "No admin record at $admin_record (user is already unclaimed); skipping BlueZ unpair step"
+        info "No admin record at $admin_record (already unclaimed); skipping BlueZ unpair step"
     fi
 
     if [[ "${#addresses[@]}" -gt 0 ]]; then
@@ -267,9 +267,10 @@ bluetooth_main() {
 Usage: shepherd bluetooth <command> [options]
 
 Commands:
-    clear     Force-disconnect + unpair the bonded BLE peer for a user
-              and delete their admin record so the next session starts
-              unclaimed.
+    clear     Force-disconnect + unpair the bonded BLE peer and delete
+              shepherd's admin record, so the next session starts unclaimed.
+              With the state custodian that record is the device's, so this
+              unclaims it for every kiosk user on the machine.
 
 Options for 'clear':
     --user USER             Target user (required).

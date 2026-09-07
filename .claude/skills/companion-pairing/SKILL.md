@@ -149,7 +149,9 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   bond intact; this is the path that needs link encryption to come up
   before the first read succeeds.
 - **Re-pair after factory reset** — `touch dev-runtime/data/.factory-reset-ble`
-  and restart the session. The device returns to unclaimed and drops its
+  and restart the session. (That path is the dev stack's, which runs with
+  `--no-state-custodian`. On an installed device the sentinel is the *device's*
+  and lives at `/var/lib/shepherdd/admin/.factory-reset-ble` — issue #157.) The device returns to unclaimed and drops its
   bond; the app should show "Bond lost — re-pair needed", and `Re-pair`
   leads back to the scan list (not straight into pairing).
 
