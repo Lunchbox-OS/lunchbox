@@ -13,6 +13,14 @@ export type IsoTimestamp = string;
 /** A calendar date, `YYYY-MM-DD`. */
 export type IsoDate = string;
 
+/**
+ * Which family an address belongs to. Kept explicit rather than sniffed from
+ * the string, so a UI grouping v4 above v6 does not have to count colons.
+ */
+export type AddressFamily =
+  | "v4"
+  | "v6";
+
 export interface AdminRecord {
   /**
    * `"public"` or `"random"` — matches `bluer`'s `AddressType` enum
@@ -176,6 +184,38 @@ export interface BrightnessRestrictions {
 export type ClaimStateTag =
   | "unclaimed"
   | "claimed";
+
+/**
+ * How much of the internet the host believes it can reach.
+ *
+ * Mirrors NetworkManager's connectivity states, which are the only ones any
+ * backend here can distinguish. A host with no NetworkManager reports
+ * [`Connectivity::Unknown`] — which is honest, and different from
+ * [`Connectivity::None`].
+ */
+export type Connectivity =
+  /**
+   * Nobody could say. Not a claim that the device is offline.
+   */
+  | "unknown"
+  /**
+   * No route to anywhere.
+   */
+  | "none"
+  /**
+   * A captive portal is intercepting traffic. Worth its own state: the
+   * device looks connected and nothing works, which is the single most
+   * confusing failure to debug remotely.
+   */
+  | "portal"
+  /**
+   * A route exists but the connectivity probe did not complete.
+   */
+  | "limited"
+  /**
+   * The host reached the internet.
+   */
+  | "full";
 
 /**
  * A parent-set daily override for a single entry
@@ -422,7 +462,24 @@ export type DiagnosticCode =
    * to turn one: a touchscreen and nothing else. Reading would stop at the
    * end of the first page.
    */
-  | "ebook_no_page_turn";
+  | "ebook_no_page_turn"
+  /**
+   * The web management interface is configured and is not serving, so the
+   * address a parent would browse to refuses the connection (issue #182).
+   *
+   * Until this existed the failure reached exactly one log line on a device
+   * nobody can log into, which is the wrong place for it: the whole reason
+   * to open the web interface is that something else has already gone
+   * wrong. The companion app still works — it is on BLE, not the network —
+   * so this is a path lost rather than a device lost, and it is a
+   * `Warning`.
+   *
+   * Not raised while the daemon is still retrying a bind whose address has
+   * not appeared yet: that is `bind_retry_seconds` doing its job, and a
+   * ZeroTier interface coming up at login would otherwise raise an alarm
+   * every boot and clear it seconds later.
+   */
+  | "management_api_unavailable";
 
 /**
  * The current set, as clients see it.
@@ -1383,6 +1440,137 @@ export type MediaSortBy =
   | "duration";
 
 /**
+ * One address on one interface.
+ *
+ * Address and prefix are separate fields rather than one CIDR string because
+ * the address alone is what gets copied into an SSH command, and a UI should
+ * not have to split on `/` to offer that.
+ */
+export interface NetworkAddressView {
+  /**
+   * The address on its own, e.g. `192.168.0.139`.
+   */
+  address: string;
+  family: AddressFamily;
+  /**
+   * Prefix length in bits, e.g. `24`.
+   */
+  prefix: number;
+}
+
+/**
+ * What kind of interface this is. Advisory: it drives presentation and which
+ * addresses are offered as ways in, never policy.
+ */
+export type NetworkInterfaceKind =
+  /**
+   * A wireless interface. The one with a network name a person recognises.
+   */
+  | "wifi"
+  /**
+   * A wired interface.
+   */
+  | "ethernet"
+  /**
+   * A tunnel — WireGuard, ZeroTier, OpenVPN. Reachable, and on a device
+   * administered remotely often the *only* thing reachable, which is why
+   * `service.management_api.bind_retry_seconds` exists at all.
+   */
+  | "vpn"
+  /**
+   * A container or VM bridge (`lxcbr0`, `docker0`). Has an address; that
+   * address is not a way in from the parent's phone.
+   */
+  | "bridge"
+  /**
+   * The host talking to itself. Never a way in.
+   */
+  | "loopback"
+  /**
+   * Something we could not name. Reported as a possible way in: being wrong
+   * about a veth costs a line in a list, while being wrong about a real
+   * interface costs the address somebody needed.
+   */
+  | "other";
+
+/**
+ * One network interface as an administrator sees it.
+ */
+export interface NetworkInterfaceView {
+  addresses: NetworkAddressView[];
+  /**
+   * Nameservers configured for this interface.
+   */
+  dns: string[];
+  gateway?: string | null;
+  kind: NetworkInterfaceKind;
+  /**
+   * Kernel name, e.g. `wlp3s0`.
+   */
+  name: string;
+  /**
+   * Whether an address here is a plausible way to reach this device from
+   * another machine on the same network.
+   *
+   * Derived, not reported by the host — see
+   * [`NetworkStatusView::new`]. A UI leads with these and folds the rest
+   * away: on a device running containers most interfaces are noise, and the
+   * one a parent needs is the one they will not find by scrolling.
+   */
+  reachable?: boolean;
+  /**
+   * Whether the interface is up and configured.
+   */
+  up: boolean;
+  /**
+   * Present only on a wireless interface.
+   */
+  wifi?: WifiView | null;
+}
+
+/**
+ * Where the status came from, so a UI can say why a field is missing rather
+ * than rendering an empty box.
+ */
+export type NetworkSource =
+  /**
+   * NetworkManager over D-Bus: everything below is available.
+   */
+  | "network_manager"
+  /**
+   * The kernel's interface list. Addresses are real; SSID, gateway, DNS and
+   * connectivity are not knowable this way and come back empty.
+   */
+  | "interfaces"
+  /**
+   * Neither worked.
+   */
+  | "unavailable";
+
+/**
+ * The whole read-out.
+ */
+export interface NetworkStatusView {
+  connectivity: Connectivity;
+  interfaces: NetworkInterfaceView[];
+  management_api: WebListenerView;
+  /**
+   * URLs that should open the web management interface, most useful first.
+   *
+   * Derived here rather than in each UI so the phone and the browser agree,
+   * and because the derivation is not obvious: a listener bound to
+   * `0.0.0.0` has no address of its own, so the answer is one URL per
+   * reachable address on the box — which is the whole point of the ticket.
+   */
+  management_urls?: string[];
+  source: NetworkSource;
+  /**
+   * Whether [`MAX_NETWORK_INTERFACES`] hid anything. UIs must say so.
+   */
+  truncated?: boolean;
+}
+
+/**
  * Structured reason codes for why an entry is unavailable
  */
 export type ReasonCode =
@@ -1800,6 +1988,77 @@ export interface WarningThreshold {
    */
   seconds_before: number;
   severity: WarningSeverity;
+}
+
+/**
+ * Whether the web management interface is up, and where.
+ *
+ * The reason this is not simply the configured `bind`/`port`: the daemon
+ * retries a bind that is not yet available (a ZeroTier interface still coming
+ * up at login), and a bind that never succeeds only ever reached a log line.
+ * From every UI, a device whose management API never came up looked exactly
+ * like one that did.
+ */
+export type WebListenerState =
+  /**
+   * `service.management_api` is absent or disabled. Nothing is wrong.
+   */
+  | "disabled"
+  /**
+   * Configured, and still waiting for its address to exist.
+   */
+  | "binding"
+  /**
+   * Serving.
+   */
+  | "listening"
+  /**
+   * Configured and not serving. Somebody should know.
+   */
+  | "failed";
+
+/**
+ * Where the web management interface is listening, if at all.
+ */
+export interface WebListenerView {
+  /**
+   * The socket address as configured, e.g. `0.0.0.0:8080`. `None` only when
+   * [`WebListenerState::Disabled`].
+   */
+  addr?: string | null;
+  /**
+   * Why it is not serving. Only set with [`WebListenerState::Failed`].
+   */
+  error?: string | null;
+  /**
+   * The port on its own, for building a URL against some other address.
+   */
+  port?: number | null;
+  state: WebListenerState;
+}
+
+/**
+ * The wireless network an interface is associated with.
+ */
+export interface WifiView {
+  /**
+   * Channel centre frequency in MHz. A UI can turn 5220 into "5 GHz", which
+   * is the part a person debugging a weak signal actually wants.
+   */
+  frequency_mhz?: number | null;
+  /**
+   * Signal quality, 0–100, as the driver reports it.
+   */
+  signal_percent?: number | null;
+  /**
+   * The network's name.
+   *
+   * `None` when the interface is not associated — and also when the SSID is
+   * not valid UTF-8, which is legal: 802.11 carries an SSID as up to 32
+   * arbitrary octets, not a string. A name we cannot render is reported as
+   * no name rather than as mojibake.
+   */
+  ssid?: string | null;
 }
 
 /**

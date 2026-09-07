@@ -172,6 +172,21 @@ pub enum DiagnosticCode {
     /// to turn one: a touchscreen and nothing else. Reading would stop at the
     /// end of the first page.
     EbookNoPageTurn,
+    /// The web management interface is configured and is not serving, so the
+    /// address a parent would browse to refuses the connection (issue #182).
+    ///
+    /// Until this existed the failure reached exactly one log line on a device
+    /// nobody can log into, which is the wrong place for it: the whole reason
+    /// to open the web interface is that something else has already gone
+    /// wrong. The companion app still works — it is on BLE, not the network —
+    /// so this is a path lost rather than a device lost, and it is a
+    /// `Warning`.
+    ///
+    /// Not raised while the daemon is still retrying a bind whose address has
+    /// not appeared yet: that is `bind_retry_seconds` doing its job, and a
+    /// ZeroTier interface coming up at login would otherwise raise an alarm
+    /// every boot and clear it seconds later.
+    ManagementApiUnavailable,
 }
 
 /// What a diagnostic is about.

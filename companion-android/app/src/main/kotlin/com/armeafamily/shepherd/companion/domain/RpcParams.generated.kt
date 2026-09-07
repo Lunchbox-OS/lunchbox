@@ -218,6 +218,9 @@ object RpcParams {
     /** Params for `list_diagnostics`, which takes none. */
     fun listDiagnostics(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `network_status`, which takes none. */
+    fun networkStatus(): JsonObject = JsonObject(emptyMap())
+
     /** Params for `list_windows`, which takes none. */
     fun listWindows(): JsonObject = JsonObject(emptyMap())
 

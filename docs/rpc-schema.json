@@ -521,6 +521,13 @@
       }
     },
     {
+      "name": "network_status",
+      "params": [],
+      "result": {
+        "type": "NetworkStatusView"
+      }
+    },
+    {
       "name": "list_windows",
       "params": [],
       "result": {

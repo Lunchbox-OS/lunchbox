@@ -20,6 +20,7 @@ import type {
   IsoTimestamp,
   LaunchOutcome,
   LimitSubject,
+  NetworkStatusView,
   ServiceStateSnapshot,
   SessionInfo,
   StopMode,
@@ -80,6 +81,7 @@ export type RpcMethod =
   | "refresh_media"
   | "logout"
   | "list_diagnostics"
+  | "network_status"
   | "list_windows"
   | "act_on_window";
 
@@ -206,6 +208,7 @@ export interface RpcParamsMap {
   "refresh_media": Record<string, never>;
   "logout": Record<string, never>;
   "list_diagnostics": Record<string, never>;
+  "network_status": Record<string, never>;
   "list_windows": Record<string, never>;
   "act_on_window": {
     id: number;
@@ -266,6 +269,7 @@ export interface RpcResultMap {
   "refresh_media": null;
   "logout": null;
   "list_diagnostics": DiagnosticSet;
+  "network_status": NetworkStatusView;
   "list_windows": WindowInfo[];
   "act_on_window": null;
 }

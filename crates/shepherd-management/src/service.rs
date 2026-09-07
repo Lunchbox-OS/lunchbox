@@ -7,14 +7,15 @@ use shepherd_api::{
     AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, Diagnostic,
     DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject,
     DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
-    HudOrientation, ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus,
-    UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    HudOrientation, NetworkStatusView, ServiceStateSnapshot, SessionEndReason, SessionInfo,
+    StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
-    LightSensor, SpawnOptions, SponsorBlockSpec, VolumeController, VolumeError,
+    LightSensor, NetworkInfoProvider, NetworkSnapshot, SpawnOptions, SponsorBlockSpec,
+    VolumeController, VolumeError,
 };
 use shepherd_store::Store;
 use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
@@ -26,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 use crate::error::{ManagementError, ManagementResult};
+use crate::listener::WebListenerHandle;
 use crate::types::LaunchOutcome;
 
 /// Store key under which the runtime auto-brightness on/off state persists.
@@ -226,6 +228,19 @@ pub trait ManagementService: Send + Sync {
     /// be reachable from a browser at all.
     async fn list_diagnostics(&self) -> DiagnosticSet;
 
+    /// Where this device is on the network, and where its web management
+    /// interface is listening (issue #182).
+    ///
+    /// Read-only, and the answer to a question the companion app cannot ask
+    /// any other way: it reached the device over BLE and has no idea what its
+    /// address is. Without this, using the web interface or SSH means
+    /// `arp`-ing the LAN for a device that does not announce itself.
+    ///
+    /// Deliberately does not repeat the connectivity checks. Those already
+    /// ride `service_state`'s `internet_status`, and a UI showing both reads
+    /// them from there.
+    async fn network_status(&self) -> NetworkStatusView;
+
     // Debug windows
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>>;
     async fn act_on_window(&self, id: u64, action: WindowAction) -> ManagementResult<()>;
@@ -316,6 +331,14 @@ pub struct DefaultManagementService {
     /// any embedding that does not surface diagnostics; raising must never be
     /// load-bearing for the operation that noticed the problem.
     pub diagnostics: Option<Arc<dyn DiagnosticSink>>,
+    /// How to read this device's own networking (issue #182). `None` on an
+    /// embedding with no way to look, which reports itself as
+    /// `NetworkSource::Unavailable` rather than as a device with no network.
+    pub network: Option<Arc<dyn NetworkInfoProvider>>,
+    /// What the web management interface is really doing, as opposed to what
+    /// the config asked for. Written by whoever owns the listener; `Disabled`
+    /// by default, which is the truth for an embedding that never starts one.
+    pub web_listener: WebListenerHandle,
 }
 
 #[async_trait]
@@ -1253,6 +1276,20 @@ impl ManagementService for DefaultManagementService {
     // --------------------------------------------------------------- windows
     async fn list_diagnostics(&self) -> DiagnosticSet {
         self.engine.lock().await.diagnostics()
+    }
+
+    async fn network_status(&self) -> NetworkStatusView {
+        let listener = self.web_listener.get();
+        let snapshot = match &self.network {
+            Some(provider) => provider.snapshot().await,
+            None => NetworkSnapshot::unavailable(),
+        };
+        NetworkStatusView::new(
+            snapshot.connectivity,
+            snapshot.source,
+            snapshot.interfaces,
+            listener,
+        )
     }
 
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {

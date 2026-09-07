@@ -56,6 +56,7 @@ object RpcMethods {
     const val REFRESH_MEDIA: String = "refresh_media"
     const val LOGOUT: String = "logout"
     const val LIST_DIAGNOSTICS: String = "list_diagnostics"
+    const val NETWORK_STATUS: String = "network_status"
     const val LIST_WINDOWS: String = "list_windows"
     const val ACT_ON_WINDOW: String = "act_on_window"
 

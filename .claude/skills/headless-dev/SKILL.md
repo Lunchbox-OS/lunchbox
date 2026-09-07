@@ -129,6 +129,20 @@ Example (bedtime restriction):
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/shepherd-ipc/src/client.rs`.
+  - **A page in the web UI** (`shepherd-webui`): `dev click` does not activate
+    a link or a nav item in a browser either, and the SPA has no URL routing to
+    deep-link with — so to render one page, temporarily change the initial
+    `useState<Page>` in `src/App.tsx`, `npm run build`, and re-boot (the daemon
+    embeds `dist/` at compile time, so this needs a full `dev headless`, not
+    `--no-build`). Run the browser inside the session by sourcing
+    `dev-runtime/headless/session.env` and launching `firefox --kiosk
+    http://127.0.0.1:8080/` with `MOZ_ENABLE_WAYLAND=1`. Firefox on Ubuntu is a
+    **snap**: a `--profile` outside `$HOME/snap/firefox/common` fails with
+    "Your Firefox profile cannot be loaded", and the half-started instance then
+    holds a lock that makes every later launch claim Firefox is "already
+    running, but is not responding" — use the default profile. `Page_Down` does
+    nothing without content focus; `wtype -M ctrl -k minus -m ctrl` (zoom out)
+    is the reliable way to get more of a long page into one screenshot.
   - **The vertical HUD** (issue #171): export `SHEPHERD_HUD_ANCHOR=left` before
     `dev headless`. That **pins** the bar, so it also stops the HUD following
     shepherdd — which is what you want to look at the layout, and not what you
@@ -253,6 +267,22 @@ Example (bedtime restriction):
   user owns — including the `sleep`s in your own driver script, which then dies
   mid-scenario (exit 144). Point the fixture at a small wrapper script
   (`exec tail -f /dev/null`) so the name is unique to the fixture.
+- **`dev headless` right after `dev stop` can hang shepherdd at startup — retry
+  it.** Twice in four boots (2026-09-07) the daemon stopped dead after
+
+  ```
+  INFO shepherd_host_linux::process: Activities will be launched into a cgroup of their own
+  ```
+
+  — the last line of `process::init()` — and never reached the volume-controller
+  line, the compositor, or anything else, so the harness reported "shepherdd did
+  not connect to the compositor within 30s" against a perfectly healthy sway.
+  The GTK clients time out on the portal 25 s later, which makes the log look
+  like a compositor problem it is not. It is not caused by the config: the same
+  config booted first try on the retry. Kill every survivor the
+  `ps -eo pid,cmd | grep …` listing below names, `rm
+  dev-runtime/headless/session.env`, and boot again — do not spend time
+  debugging the daemon over a first failed boot.
 - **A stale `dev-runtime/headless/session.env` breaks the next boot.** The start
   path sources it, so a leftover `SWAYSOCK` from a dead session is inherited by
   the new sway, which uses *that* socket path while the script waits on the one

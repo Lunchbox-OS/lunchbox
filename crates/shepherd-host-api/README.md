@@ -162,6 +162,34 @@ pub trait VolumeController: Send + Sync {
 }
 ```
 
+### Network Info
+
+`NetworkInfoProvider` reads the host's own networking for the management UIs
+(issue #182) — interfaces, addresses, and the wireless network one is
+associated with:
+
+```rust
+#[async_trait]
+pub trait NetworkInfoProvider: Send + Sync {
+    async fn snapshot(&self) -> NetworkSnapshot;
+}
+```
+
+Read-only, and deliberately infallible. Every caller is a status page whose
+only response to an error would be to render "unavailable", which
+`NetworkSnapshot::unavailable()` already says — and an implementation is far
+better placed to log *why* than a caller holding an opaque error. Partial
+answers are normal: a host with no NetworkManager still reports interfaces and
+addresses, just no SSID.
+
+The `NetworkSnapshot` it returns is raw parts. Every judgement about what they
+mean — which interface is a way in, what URL reaches the web UI, what order to
+show them in — is made once in `shepherd_api::NetworkStatusView::new`, so a
+second host implementation cannot quietly disagree with the first.
+
+`NullNetworkInfo` (knows nothing) and `StaticNetworkInfo` (returns whatever it
+was built with) are provided for tests.
+
 ## Mock Implementation
 
 For testing, the crate provides `MockHost`:

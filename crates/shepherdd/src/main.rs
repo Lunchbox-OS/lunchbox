@@ -21,17 +21,18 @@ use shepherd_config::load_config;
 use shepherd_core::{CoreEngine, CoreEvent};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
-    HudLayoutController, LightSensor, NoOpDisplayController, StopMode as HostStopMode,
-    VolumeController,
+    HudLayoutController, LightSensor, NetworkInfoProvider, NoOpDisplayController,
+    StopMode as HostStopMode, VolumeController,
 };
 use shepherd_host_linux::{
-    LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxVolumeController,
-    PipeWireAudioRouter, SwayIpcBackend,
+    LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxNetworkInfo,
+    LinuxVolumeController, PipeWireAudioRouter, SwayIpcBackend,
 };
 use shepherd_http::{AppState as HttpAppState, HttpServer};
 use shepherd_ipc::{IpcServer, ServerMessage};
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementService,
+    WebListenerHandle,
 };
 use shepherd_state_proto::{RemoteFiles, RemoteStore, Supervision};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
@@ -39,6 +40,7 @@ use shepherd_util::{
     LocalProtectedFiles, MonotonicInstant, ProtectedFile, ProtectedFiles, RateLimiter,
     default_config_path,
 };
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -719,6 +721,33 @@ impl Service {
             .with_context(|| format!("Failed to open database {:?}", db_path))?;
         info!(db_path = %db_path.display(), "Store initialized (local)");
         Ok(Arc::new(store))
+    }
+
+    /// The web management interface is configured and not serving (issue
+    /// #182).
+    ///
+    /// A `Warning` rather than a `Critical`: the companion app reaches this
+    /// device over BLE and is unaffected, so this is one path lost rather than
+    /// a device lost. It is still the path somebody would reach for when
+    /// something else has gone wrong, which is why it is said out loud at all.
+    fn management_api_unavailable_diagnostic(error: &anyhow::Error) -> Diagnostic {
+        Diagnostic {
+            code: DiagnosticCode::ManagementApiUnavailable,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "The web management interface is configured but is not serving, so the \
+                 address a browser would open refuses the connection — {error}"
+            ),
+            remedy: Some(
+                "Check `service.management_api.bind` names an address this device actually \
+                 has, and that nothing else holds the port. Raise \
+                 `service.management_api.bind_retry_seconds` if the address belongs to an \
+                 interface that comes up late, such as a VPN."
+                    .to_string(),
+            ),
+            since: shepherd_util::now(),
+        }
     }
 
     /// The administrator-facing form of "this device's state is reachable by
@@ -1476,6 +1505,15 @@ impl Service {
             )
         };
 
+        // The web listener's real state (issue #182), created before the
+        // service that reads it and before the server that writes it. A
+        // configured listener starts out `Binding`: the address it wants may
+        // not exist yet, which is what `bind_retry_seconds` is for.
+        let web_listener = match &management_api_config {
+            Some(cfg) => WebListenerHandle::configured(SocketAddr::new(cfg.bind, cfg.port)),
+            None => WebListenerHandle::disabled(),
+        };
+
         // Automatic brightness. Offered only when the host actually exposes a
         // light sensor. The runtime on/off state persists in the store; fall
         // back to the config default the first time (or if the store read
@@ -1547,6 +1585,8 @@ impl Service {
                 diagnostics: Some(
                     Arc::new(diagnostic_publisher.clone()) as Arc<dyn shepherd_api::DiagnosticSink>
                 ),
+                network: Some(Arc::new(LinuxNetworkInfo::new()) as Arc<dyn NetworkInfoProvider>),
+                web_listener: web_listener.clone(),
             })
         };
         let svc: Arc<dyn ManagementService> = svc_concrete.clone();
@@ -1664,12 +1704,21 @@ impl Service {
         let http_handle = match management_api_config {
             Some(api_cfg) => {
                 let http_state = HttpAppState { svc: svc.clone() };
-                let http_server =
-                    HttpServer::new(http_state, api_cfg).with_admin_authority(admin_authority);
+                let http_server = HttpServer::new(http_state, api_cfg)
+                    .with_admin_authority(admin_authority)
+                    .with_listener_status(web_listener.clone());
                 let http_shutdown_rx = shutdown_rx.clone();
+                let listener_status = web_listener.clone();
+                let publisher = diagnostic_publisher.clone();
                 Some(tokio::spawn(async move {
                     if let Err(e) = http_server.run(http_shutdown_rx).await {
                         error!(error = %e, "HTTP management API error");
+                        // Until #182 this was the whole report: one line in a
+                        // log on a device whose web interface is precisely how
+                        // somebody would have read it. Say it where a parent
+                        // can see it, on the phone if nowhere else.
+                        listener_status.set_failed(&e);
+                        publisher.raise(Self::management_api_unavailable_diagnostic(&e));
                     }
                 }))
             }
