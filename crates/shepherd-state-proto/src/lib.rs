@@ -36,6 +36,10 @@ use shepherd_api::AudioOutput;
 use shepherd_store::{AuditEvent, StateSnapshot, StoreError};
 use shepherd_util::{EntryId, LimitSubject, ProtectedFile};
 
+use methods::{wire_ty, with_store_methods};
+
+mod methods;
+
 pub mod client;
 pub mod files;
 pub mod server;
@@ -48,7 +52,13 @@ pub use files::{ConfigWatch, RemoteFiles};
 /// Bump when a variant's meaning changes, not when one is added: an older
 /// client simply never sends a new variant, and an older server answers
 /// `UnknownRequest` if it somehow does.
-pub const PROTO_VERSION: u32 = 1;
+///
+/// 2: generating the store half from `methods` made the no-argument variants
+/// struct variants with no fields rather than unit variants, so `LoadSnapshot`
+/// and `ListAudioOutputs` encode as `{"LoadSnapshot":{}}` instead of
+/// `"LoadSnapshot"`. Both ends ship together, so this only ever shows up as a
+/// half-finished upgrade — which is exactly what the handshake is for.
+pub const PROTO_VERSION: u32 = 2;
 
 /// The system user that owns the state and answers this socket.
 ///
@@ -102,156 +112,59 @@ pub fn state_dir(user: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/var/lib/shepherdd/state").join(user)
 }
 
-/// One call. Exactly one variant per `Store` method, plus the handshake.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op")]
-pub enum StateRequest {
-    Hello {
-        proto: u32,
-    },
+/// One call. Exactly one variant per `Store` method, plus the file operations
+/// and the handshake.
+///
+/// The store half is generated from the table in [`methods`] rather than
+/// written out here: three copies of the same list -- variant, client method,
+/// server arm -- is a shape where the compiler cannot see a mismatch, and the
+/// one that mattered was an arm calling the wrong store method.
+macro_rules! define_state_request {
+    ($( $variant:ident => $method:ident ( $( $arg:ident : $mode:ident $($aty:ty)? ),* $(,)? ) -> $ret:ty; )*) => {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        pub enum StateRequest {
+            /// Version handshake. Always first, and a mismatch is refused
+            /// rather than negotiated -- see [`PROTO_VERSION`].
+            Hello {
+                proto: u32,
+            },
 
-    // Audit log
-    AppendAudit {
-        event: Box<AuditEvent>,
-    },
-    GetRecentAudits {
-        limit: usize,
-    },
+            $(
+                $variant {
+                    $( $arg: wire_ty!($mode $($aty)?), )*
+                },
+            )*
 
-    // Usage accounting
-    GetUsage {
-        entry_id: EntryId,
-        day: NaiveDate,
-    },
-    AddUsage {
-        entry_id: EntryId,
-        day: NaiveDate,
-        duration: Duration,
-    },
-    GetUsageRange {
-        entry_id: EntryId,
-        from: NaiveDate,
-        to: NaiveDate,
-    },
-    GetAllUsageForDate {
-        date: NaiveDate,
-    },
+            /// The one `Store` method outside the table: it returns a bare
+            /// `bool`, so a broken connection has to read as unhealthy rather
+            /// than as an error.
+            IsHealthy,
 
-    // Token balances
-    GetTokenState {
-        subject: LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-    },
-    AdjustTokenBalance {
-        subject: LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-        delta_secs: i64,
-    },
-    SetTokenRatchet {
-        subject: LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-    },
+            // The protected files. Not `Store` methods -- they go through
+            // `ProtectedFiles`, whose four operations are few enough to write
+            // out.
+            ReadFile {
+                file: ProtectedFile,
+            },
+            WriteFile {
+                file: ProtectedFile,
+                contents: String,
+            },
+            DeleteFile {
+                file: ProtectedFile,
+            },
+            TakeFile {
+                file: ProtectedFile,
+            },
 
-    // Cooldowns
-    GetCooldownUntil {
-        subject: LimitSubject,
-    },
-    SetCooldownUntil {
-        subject: LimitSubject,
-        until: DateTime<Local>,
-    },
-    ClearCooldown {
-        subject: LimitSubject,
-    },
-
-    // Crash-recovery snapshot
-    LoadSnapshot,
-    SaveSnapshot {
-        snapshot: Box<StateSnapshot>,
-    },
-
-    // Health
-    IsHealthy,
-
-    // Daily overrides
-    GetDailyOverride {
-        subject: LimitSubject,
-        date: NaiveDate,
-    },
-    UpsertDailyOverride {
-        subject: LimitSubject,
-        date: NaiveDate,
-        availability: Option<bool>,
-        quota_delta_seconds: Option<i64>,
-    },
-    ClearDailyOverride {
-        subject: LimitSubject,
-        date: NaiveDate,
-    },
-    ListDailyOverrides {
-        date: NaiveDate,
-    },
-
-    // Audio outputs
-    RecordAudioOutputSeen {
-        output: Box<AudioOutput>,
-    },
-    SetAudioOutputLimits {
-        output_key: String,
-        max_volume: Option<u8>,
-        min_volume: Option<u8>,
-    },
-    GetAudioOutput {
-        output_key: String,
-    },
-    ListAudioOutputs,
-    ForgetAudioOutput {
-        output_key: String,
-    },
-
-    // Settings
-    GetSetting {
-        key: String,
-    },
-    SetSetting {
-        key: String,
-        value: String,
-    },
-
-    // The protected files: policy, and the BLE admin identity that goes with
-    // it. Addressed by a closed set rather than a name — see [`ProtectedFile`].
-    ReadFile {
-        file: ProtectedFile,
-    },
-    WriteFile {
-        file: ProtectedFile,
-        contents: String,
-    },
-    DeleteFile {
-        file: ProtectedFile,
-    },
-    /// Read and remove in one step, for the factory-reset sentinel.
-    TakeFile {
-        file: ProtectedFile,
-    },
-
-    /// Turn this connection into a notification stream for policy changes.
-    ///
-    /// After this the connection carries no more requests and no replies: the
-    /// custodian writes a [`ConfigChanged`] line whenever the policy file it
-    /// owns is written. shepherdd used to watch the file itself with inotify;
-    /// it cannot watch a directory it cannot open, so the watch moved to the
-    /// side that can.
-    ///
-    /// A separate connection rather than multiplexing onto the request one,
-    /// because a client that had to demultiplex replies from events could no
-    /// longer treat "the next line" as its answer — which is what keeps the
-    /// request path as simple as it is.
-    WatchConfig,
+            /// Turn this connection into a notification stream for policy
+            /// changes. Answered by the connection loop, not by `handle`.
+            WatchConfig,
+        }
+    };
 }
+
+with_store_methods!(define_state_request);
 
 impl StateRequest {
     /// Whether re-sending this request after a failure could change the state
@@ -270,12 +183,12 @@ impl StateRequest {
                 | Self::GetAllUsageForDate { .. }
                 | Self::GetTokenState { .. }
                 | Self::GetCooldownUntil { .. }
-                | Self::LoadSnapshot
+                | Self::LoadSnapshot { .. }
                 | Self::IsHealthy
                 | Self::GetDailyOverride { .. }
                 | Self::ListDailyOverrides { .. }
                 | Self::GetAudioOutput { .. }
-                | Self::ListAudioOutputs
+                | Self::ListAudioOutputs { .. }
                 | Self::GetSetting { .. }
                 | Self::ReadFile { .. }
                 | Self::WatchConfig

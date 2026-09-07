@@ -9,6 +9,7 @@
 //! of the same kind rather than as a dropped connection: callers already handle
 //! `StoreError`, because SQLite could always fail.
 
+use crate::methods::{wire_recv, with_store_methods};
 use shepherd_store::{Store, StoreError};
 use shepherd_util::ProtectedFiles;
 
@@ -19,7 +20,39 @@ use crate::{HelloReply, PROTO_VERSION, StateRequest, WireResult};
 /// Serialisation of the *reply* cannot fail for these types, but the result is
 /// still checked rather than unwrapped: a panic here would take the daemon down
 /// and, with socket activation, take it down again on the next connection.
+/// Every `Store` method, from the table in [`crate::methods`].
+///
+/// Generated from the same entry as the client method that builds the variant,
+/// so an arm cannot call a different store method than the one its variant
+/// names -- which is a mismatch that typechecks, and used to be caught only by
+/// a test.
+///
+/// Returns `Err(request)` for anything not in the table, handing it back to
+/// [`handle`] rather than duplicating the rest of the match here.
+macro_rules! define_store_dispatch {
+    ($( $variant:ident => $method:ident ( $( $arg:ident : $mode:ident $($aty:ty)? ),* $(,)? ) -> $ret:ty; )*) => {
+        fn dispatch_store(store: &dyn Store, request: StateRequest) -> Result<String, StateRequest> {
+            match request {
+                $(
+                    StateRequest::$variant { $( $arg, )* } => Ok(encode(
+                        WireResult::from_store(store.$method( $( wire_recv!($mode $arg) ),* ))
+                    )),
+                )*
+                other => Err(other),
+            }
+        }
+    };
+}
+
+with_store_methods!(define_store_dispatch);
+
 pub fn handle(store: &dyn Store, files: &dyn ProtectedFiles, request: StateRequest) -> String {
+    // The generated half first; `handle` keeps only what is not a `Store` call.
+    let request = match dispatch_store(store, request) {
+        Ok(encoded) => return encoded,
+        Err(request) => request,
+    };
+
     match request {
         StateRequest::Hello { proto } => {
             if proto != PROTO_VERSION {
@@ -40,119 +73,11 @@ pub fn handle(store: &dyn Store, files: &dyn ProtectedFiles, request: StateReque
             })
         }
 
-        StateRequest::AppendAudit { event } => {
-            encode(WireResult::from_store(store.append_audit(*event)))
-        }
-        StateRequest::GetRecentAudits { limit } => {
-            encode(WireResult::from_store(store.get_recent_audits(limit)))
-        }
-
-        StateRequest::GetUsage { entry_id, day } => {
-            encode(WireResult::from_store(store.get_usage(&entry_id, day)))
-        }
-        StateRequest::AddUsage {
-            entry_id,
-            day,
-            duration,
-        } => encode(WireResult::from_store(
-            store.add_usage(&entry_id, day, duration),
-        )),
-        StateRequest::GetUsageRange { entry_id, from, to } => encode(WireResult::from_store(
-            store.get_usage_range(&entry_id, from, to),
-        )),
-        StateRequest::GetAllUsageForDate { date } => {
-            encode(WireResult::from_store(store.get_all_usage_for_date(date)))
-        }
-
-        StateRequest::GetTokenState {
-            subject,
-            day,
-            carry_over,
-        } => encode(WireResult::from_store(
-            store.get_token_state(&subject, day, carry_over),
-        )),
-        StateRequest::AdjustTokenBalance {
-            subject,
-            day,
-            carry_over,
-            delta_secs,
-        } => encode(WireResult::from_store(
-            store.adjust_token_balance(&subject, day, carry_over, delta_secs),
-        )),
-        StateRequest::SetTokenRatchet {
-            subject,
-            day,
-            carry_over,
-        } => encode(WireResult::from_store(
-            store.set_token_ratchet(&subject, day, carry_over),
-        )),
-
-        StateRequest::GetCooldownUntil { subject } => {
-            encode(WireResult::from_store(store.get_cooldown_until(&subject)))
-        }
-        StateRequest::SetCooldownUntil { subject, until } => encode(WireResult::from_store(
-            store.set_cooldown_until(&subject, until),
-        )),
-        StateRequest::ClearCooldown { subject } => {
-            encode(WireResult::from_store(store.clear_cooldown(&subject)))
-        }
-
-        StateRequest::LoadSnapshot => encode(WireResult::from_store(store.load_snapshot())),
-        StateRequest::SaveSnapshot { snapshot } => {
-            encode(WireResult::from_store(store.save_snapshot(&snapshot)))
-        }
-
+        // The one `Store` method outside the table: a bare `bool`, so it has
+        // no `StoreResult` to wrap.
         StateRequest::IsHealthy => encode(WireResult::Ok {
             value: store.is_healthy(),
         }),
-
-        StateRequest::GetDailyOverride { subject, date } => encode(WireResult::from_store(
-            store.get_daily_override(&subject, date),
-        )),
-        StateRequest::UpsertDailyOverride {
-            subject,
-            date,
-            availability,
-            quota_delta_seconds,
-        } => encode(WireResult::from_store(store.upsert_daily_override(
-            &subject,
-            date,
-            availability,
-            quota_delta_seconds,
-        ))),
-        StateRequest::ClearDailyOverride { subject, date } => encode(WireResult::from_store(
-            store.clear_daily_override(&subject, date),
-        )),
-        StateRequest::ListDailyOverrides { date } => {
-            encode(WireResult::from_store(store.list_daily_overrides(date)))
-        }
-
-        StateRequest::RecordAudioOutputSeen { output } => encode(WireResult::from_store(
-            store.record_audio_output_seen(&output),
-        )),
-        StateRequest::SetAudioOutputLimits {
-            output_key,
-            max_volume,
-            min_volume,
-        } => encode(WireResult::from_store(store.set_audio_output_limits(
-            &output_key,
-            max_volume,
-            min_volume,
-        ))),
-        StateRequest::GetAudioOutput { output_key } => {
-            encode(WireResult::from_store(store.get_audio_output(&output_key)))
-        }
-        StateRequest::ListAudioOutputs => {
-            encode(WireResult::from_store(store.list_audio_outputs()))
-        }
-        StateRequest::ForgetAudioOutput { output_key } => encode(WireResult::from_store(
-            store.forget_audio_output(&output_key),
-        )),
-
-        StateRequest::GetSetting { key } => encode(WireResult::from_store(store.get_setting(&key))),
-        StateRequest::SetSetting { key, value } => {
-            encode(WireResult::from_store(store.set_setting(&key, &value)))
-        }
 
         StateRequest::ReadFile { file } => encode(WireResult::from_store(
             files.read(file).map_err(as_store_error),
@@ -176,6 +101,23 @@ pub fn handle(store: &dyn Store, files: &dyn ProtectedFiles, request: StateReque
             encode(WireResult::<()>::Err {
                 kind: crate::WireErrorKind::Serialization,
                 message: "WatchConfig must be intercepted by the connection loop".into(),
+            })
+        }
+
+        // Unreachable: `dispatch_store` hands back only what is not a `Store`
+        // call, so every remaining variant is named above. Answered rather than
+        // `unreachable!`, for the reason `WatchConfig` gives — under socket
+        // activation a panic takes the daemon down, and down again on the next
+        // connection.
+        handled => {
+            tracing::error!(
+                request = ?handled,
+                "A request reached the tail of `handle` after the generated dispatch declined \
+                 it; this is a coding mistake, not something a peer can cause"
+            );
+            encode(WireResult::<()>::Err {
+                kind: crate::WireErrorKind::Serialization,
+                message: "request not handled".into(),
             })
         }
     }

@@ -41,6 +41,7 @@ use shepherd_store::{AuditEvent, StateSnapshot, Store, StoreError, StoreResult, 
 use shepherd_util::{EntryId, LimitSubject};
 use tracing::debug;
 
+use crate::methods::{trait_ty, wire_send, with_store_methods};
 use crate::{HelloReply, PROTO_VERSION, STATE_USER, StateRequest, WireResult};
 
 /// How long any single call may take before it is a failure.
@@ -359,211 +360,30 @@ impl RemoteStore {
     }
 }
 
-impl Store for RemoteStore {
-    fn append_audit(&self, event: AuditEvent) -> StoreResult<()> {
-        self.call(&StateRequest::AppendAudit {
-            event: Box::new(event),
-        })
-    }
+/// Every `Store` method, from the table in [`crate::methods`].
+///
+/// One line of generated body each: build the variant, hand it to
+/// [`RemoteStore::call`]. `is_healthy` is the exception and is written out
+/// below, because it is the only method that cannot report *why* it failed.
+macro_rules! define_remote_store {
+    ($( $variant:ident => $method:ident ( $( $arg:ident : $mode:ident $($aty:ty)? ),* $(,)? ) -> $ret:ty; )*) => {
+        impl Store for RemoteStore {
+            $(
+                fn $method(&self $(, $arg: trait_ty!($mode $($aty)?) )*) -> StoreResult<$ret> {
+                    self.call(&StateRequest::$variant {
+                        $( $arg: wire_send!($mode $arg), )*
+                    })
+                }
+            )*
 
-    fn get_recent_audits(&self, limit: usize) -> StoreResult<Vec<AuditEvent>> {
-        self.call(&StateRequest::GetRecentAudits { limit })
-    }
-
-    fn get_usage(&self, entry_id: &EntryId, day: NaiveDate) -> StoreResult<Duration> {
-        self.call(&StateRequest::GetUsage {
-            entry_id: entry_id.clone(),
-            day,
-        })
-    }
-
-    fn add_usage(&self, entry_id: &EntryId, day: NaiveDate, duration: Duration) -> StoreResult<()> {
-        self.call(&StateRequest::AddUsage {
-            entry_id: entry_id.clone(),
-            day,
-            duration,
-        })
-    }
-
-    fn get_token_state(
-        &self,
-        subject: &LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-    ) -> StoreResult<TokenState> {
-        self.call(&StateRequest::GetTokenState {
-            subject: subject.clone(),
-            day,
-            carry_over,
-        })
-    }
-
-    fn adjust_token_balance(
-        &self,
-        subject: &LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-        delta_secs: i64,
-    ) -> StoreResult<TokenState> {
-        self.call(&StateRequest::AdjustTokenBalance {
-            subject: subject.clone(),
-            day,
-            carry_over,
-            delta_secs,
-        })
-    }
-
-    fn set_token_ratchet(
-        &self,
-        subject: &LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-    ) -> StoreResult<()> {
-        self.call(&StateRequest::SetTokenRatchet {
-            subject: subject.clone(),
-            day,
-            carry_over,
-        })
-    }
-
-    fn get_cooldown_until(&self, subject: &LimitSubject) -> StoreResult<Option<DateTime<Local>>> {
-        self.call(&StateRequest::GetCooldownUntil {
-            subject: subject.clone(),
-        })
-    }
-
-    fn set_cooldown_until(
-        &self,
-        subject: &LimitSubject,
-        until: DateTime<Local>,
-    ) -> StoreResult<()> {
-        self.call(&StateRequest::SetCooldownUntil {
-            subject: subject.clone(),
-            until,
-        })
-    }
-
-    fn clear_cooldown(&self, subject: &LimitSubject) -> StoreResult<()> {
-        self.call(&StateRequest::ClearCooldown {
-            subject: subject.clone(),
-        })
-    }
-
-    fn load_snapshot(&self) -> StoreResult<Option<StateSnapshot>> {
-        self.call(&StateRequest::LoadSnapshot)
-    }
-
-    fn save_snapshot(&self, snapshot: &StateSnapshot) -> StoreResult<()> {
-        self.call(&StateRequest::SaveSnapshot {
-            snapshot: Box::new(snapshot.clone()),
-        })
-    }
-
-    fn is_healthy(&self) -> bool {
-        // The only method that cannot report *why*, so a broken connection has
-        // to read as unhealthy rather than panicking or pretending.
-        self.call::<bool>(&StateRequest::IsHealthy).unwrap_or(false)
-    }
-
-    fn get_daily_override(
-        &self,
-        subject: &LimitSubject,
-        date: NaiveDate,
-    ) -> StoreResult<Option<DailyOverride>> {
-        self.call(&StateRequest::GetDailyOverride {
-            subject: subject.clone(),
-            date,
-        })
-    }
-
-    fn upsert_daily_override(
-        &self,
-        subject: &LimitSubject,
-        date: NaiveDate,
-        availability: Option<bool>,
-        quota_delta_seconds: Option<i64>,
-    ) -> StoreResult<DailyOverride> {
-        self.call(&StateRequest::UpsertDailyOverride {
-            subject: subject.clone(),
-            date,
-            availability,
-            quota_delta_seconds,
-        })
-    }
-
-    fn clear_daily_override(&self, subject: &LimitSubject, date: NaiveDate) -> StoreResult<bool> {
-        self.call(&StateRequest::ClearDailyOverride {
-            subject: subject.clone(),
-            date,
-        })
-    }
-
-    fn list_daily_overrides(&self, date: NaiveDate) -> StoreResult<Vec<DailyOverride>> {
-        self.call(&StateRequest::ListDailyOverrides { date })
-    }
-
-    fn record_audio_output_seen(&self, output: &AudioOutput) -> StoreResult<()> {
-        self.call(&StateRequest::RecordAudioOutputSeen {
-            output: Box::new(output.clone()),
-        })
-    }
-
-    fn set_audio_output_limits(
-        &self,
-        output_key: &str,
-        max_volume: Option<u8>,
-        min_volume: Option<u8>,
-    ) -> StoreResult<bool> {
-        self.call(&StateRequest::SetAudioOutputLimits {
-            output_key: output_key.to_string(),
-            max_volume,
-            min_volume,
-        })
-    }
-
-    fn get_audio_output(&self, output_key: &str) -> StoreResult<Option<AudioOutputRecord>> {
-        self.call(&StateRequest::GetAudioOutput {
-            output_key: output_key.to_string(),
-        })
-    }
-
-    fn list_audio_outputs(&self) -> StoreResult<Vec<AudioOutputRecord>> {
-        self.call(&StateRequest::ListAudioOutputs)
-    }
-
-    fn forget_audio_output(&self, output_key: &str) -> StoreResult<bool> {
-        self.call(&StateRequest::ForgetAudioOutput {
-            output_key: output_key.to_string(),
-        })
-    }
-
-    fn get_setting(&self, key: &str) -> StoreResult<Option<String>> {
-        self.call(&StateRequest::GetSetting {
-            key: key.to_string(),
-        })
-    }
-
-    fn set_setting(&self, key: &str, value: &str) -> StoreResult<()> {
-        self.call(&StateRequest::SetSetting {
-            key: key.to_string(),
-            value: value.to_string(),
-        })
-    }
-
-    fn get_usage_range(
-        &self,
-        entry_id: &EntryId,
-        from: NaiveDate,
-        to: NaiveDate,
-    ) -> StoreResult<Vec<(NaiveDate, Duration)>> {
-        self.call(&StateRequest::GetUsageRange {
-            entry_id: entry_id.clone(),
-            from,
-            to,
-        })
-    }
-
-    fn get_all_usage_for_date(&self, date: NaiveDate) -> StoreResult<Vec<(EntryId, Duration)>> {
-        self.call(&StateRequest::GetAllUsageForDate { date })
-    }
+            /// The one method not in the table. It returns a bare `bool`, so
+            /// it cannot report *why* it failed, and a broken connection has
+            /// to read as unhealthy rather than panicking or pretending.
+            fn is_healthy(&self) -> bool {
+                self.call::<bool>(&StateRequest::IsHealthy).unwrap_or(false)
+            }
+        }
+    };
 }
+
+with_store_methods!(define_remote_store);
