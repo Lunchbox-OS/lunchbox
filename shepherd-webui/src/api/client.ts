@@ -213,6 +213,23 @@ export const logoutUser = () => call("logout", {});
  */
 export const listDiagnostics = () => call("list_diagnostics", {});
 
+/**
+ * Where this device is on the network, and where the web interface it is
+ * serving this page from is listening (issue #182).
+ */
+export const getNetworkStatus = () => call("network_status", {});
+
+/**
+ * The whole service snapshot.
+ *
+ * Every other page queries the one thing it needs, which is why this is the
+ * only caller: the connectivity checks live on the snapshot and nowhere else,
+ * and the network page renders them beside the interfaces they are checked
+ * over. Duplicating them onto `network_status` would give the UI two sources
+ * for one fact.
+ */
+export const getServiceState = () => call("service_state", {});
+
 export const listWindows = () => call("list_windows", {});
 export const closeWindow = (id: number) =>
   call("act_on_window", { id, action: "close" });

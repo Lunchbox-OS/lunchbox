@@ -19,12 +19,14 @@ import BarChartIcon from "@mui/icons-material/BarChart";
 import SettingsIcon from "@mui/icons-material/Settings";
 import BugReportIcon from "@mui/icons-material/BugReport";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
+import WifiIcon from "@mui/icons-material/Wifi";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EntriesPage } from "./pages/EntriesPage";
 import { UsagePage } from "./pages/UsagePage";
 import { AdminPage } from "./pages/AdminPage";
 import { WindowsPage } from "./pages/WindowsPage";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage";
+import { NetworkPage } from "./pages/NetworkPage";
 
 // The config editor (src/config/) is deliberately NOT routed from here.
 //
@@ -44,13 +46,21 @@ import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 // also keeps its chunks and its ~800 kB wasm validator out of dist/, and so out
 // of the daemon binary that rust-embed builds from it.
 
-type Page = "dashboard" | "entries" | "usage" | "admin" | "health" | "windows";
+type Page =
+  | "dashboard"
+  | "entries"
+  | "usage"
+  | "admin"
+  | "network"
+  | "health"
+  | "windows";
 
 const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [
   { id: "dashboard", label: "Now", Icon: PlayArrowIcon },
   { id: "entries", label: "Activities", Icon: AppsIcon },
   { id: "usage", label: "Usage", Icon: BarChartIcon },
   { id: "admin", label: "Admin", Icon: SettingsIcon },
+  { id: "network", label: "Network", Icon: WifiIcon },
   { id: "health", label: "Health", Icon: HealthAndSafetyIcon },
   { id: "windows", label: "Windows", Icon: BugReportIcon },
 ];
@@ -70,6 +80,7 @@ export function App() {
       {page === "entries" && <EntriesPage />}
       {page === "usage" && <UsagePage />}
       {page === "admin" && <AdminPage />}
+      {page === "network" && <NetworkPage />}
       {page === "health" && <DiagnosticsPage />}
       {page === "windows" && <WindowsPage />}
     </>
