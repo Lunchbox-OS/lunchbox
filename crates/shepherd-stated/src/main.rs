@@ -182,7 +182,10 @@ async fn main() -> Result<()> {
             tokio::spawn(guard::run(
                 guard_rx,
                 guard::Guard::new(guard::BEAT_DEADLINE, guard::CLOSE_SETTLE),
-                trusted.id.clone(),
+                guard::Target {
+                    session: trusted.id.clone(),
+                    uid,
+                },
                 Arc::new(terminator),
             ));
             (authority.armed(), authority.caveat())

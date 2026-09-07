@@ -133,8 +133,17 @@ shepherdd ──Supervise──▶ custodian     "will anything happen if I die?
               …
           ╳ killed       EOF        ─▶ settle 5s  ─▶ TerminateSession
           ╳ SIGSTOPped   no beats   ─▶ deadline 60s ─▶ TerminateSession
-                                       still there after 10s ─▶ KillSession
+                                       still there after 10s ─▶ KillUser
 ```
+
+The escalation is `KillUser`, not `KillSession`, and the difference matters:
+the session scope holds sway, the launcher and the HUD, while the activities are
+in `shepherd-<id>.scope` under the user manager's `app.slice` (or a snap's or
+flatpak's own scope). Killing the session scope in the one case this escalation
+exists for would take the compositor and leave the game running. `KillUser`
+covers both and needs no second polkit grant. It does **not** cover a firewalled
+Process entry, which the `pkexec` helper puts in a *system* manager scope,
+outside this uid's units entirely.
 
 **The beat comes from the engine tick**, the same 100 ms loop that decides
 whether a child's time is up — not from a timer of its own, which would attest

@@ -142,9 +142,19 @@ to. It needs no compositor socket and no subprocess, so the custodian's "not a
 spawner" property survives intact (`clippy.toml` denies bare `Command::new`
 workspace-wide; this is a D-Bus call on the connection the daemon already holds).
 
-Escalation, because a terminate can be ignored: call it, watch for
-`SessionRemoved` for ~10 s, and if the session is still there call
-`KillSession(id, "all", SIGKILL)` once. Log each step with the session id and
+Escalation, because a terminate can be ignored: call it, wait ~10 s, and if this
+process is still alive to notice — it exits when the session goes — call
+`KillUser(uid, SIGKILL)` once.
+
+**`KillUser`, not the `KillSession` this first said.** The session scope holds
+sway, the launcher, the HUD and swayidle; the activities are elsewhere, and
+`2026-08-29 003` measured where: `shepherd-<id>.scope` under the user manager's
+`app.slice` for most of them, a snap's or flatpak's own scope for those. So
+`KillSession` in the one case the escalation exists for would kill the
+compositor and leave the child's game running. `KillUser` reaches both, under
+the polkit action the terminate already needs — no second grant, no wider rule.
+It does not reach a firewalled Process entry, which the `pkexec` helper puts in
+a *system* manager scope; see "Firewalled activities" below. Log each step with the session id and
 the reason it fired. Then let the process exit the way it already does when the
 session goes away.
 
@@ -202,6 +212,103 @@ can raise a `Critical` diagnostic beside `StateNotProtected`
 at that moment and has a diagnostics channel; the moment the watchdog is needed,
 it does not.
 
+## Firewalled activities
+
+The one kind of activity neither step reaches, scoped out here because it is the
+next piece of work rather than a gap to leave unwritten.
+
+### Why it is out of reach
+
+A firewalled Process entry does not run where the others run.
+`IPAddressDeny=`/`IPAddressAllow=` are backed by `cgroup_skb` BPF programs, and
+attaching those needs `CAP_NET_ADMIN`, so the launch goes
+`pkexec → shepherd-firewall-helper → systemd-run --scope` in the **system**
+manager. The helper builds this argv (`shepherd-firewall-helper/src/main.rs`):
+
+```
+systemd-run --scope --collect --quiet --unit=shepherd-<session-id>.scope \
+            --uid=<kiosk> --gid=<kiosk> --property=IPAddressDeny=any … -- <command>
+```
+
+The process runs as the kiosk uid, but the *unit* belongs to the system manager
+and sits outside `user-<uid>.slice`. So:
+
+| | reaches it? |
+| --- | --- |
+| `TerminateSession` — stops `session-<n>.scope` | no |
+| logind's user GC — stops `user@<uid>.service` and `user-<uid>.slice` | no |
+| `KillUser` — kills the user's slice | no |
+| `stop_firewall_scope` — `pkexec … stop-scope`, shepherdd's own teardown | **yes, and it is the only thing that does** |
+
+Which is the problem: that last row runs from inside `shepherdd`, and this whole
+issue is about `shepherdd` not being there to run anything. A killed daemon
+leaves a firewalled activity in a system scope that nothing stops. In practice
+it loses the compositor when the session ends and most GUI clients exit on that
+— but "most" is not "all", and a non-graphical one simply keeps running, with
+its firewall rules and no supervisor.
+
+Worth being precise about the blast radius: this is **pre-existing**, not
+something the watchdog introduces. An unclean shepherdd death always left these
+behind; before #172 it left the whole session behind with them.
+
+### The fix belongs at creation, not at kill time
+
+The tempting shape is to give the custodian the authority to stop those units —
+and it is the wrong one. `org.freedesktop.systemd1.manage-units` is a far wider
+grant than `login1.manage` (stop *any* unit on the machine, not just end a
+session), and it would put the scope-naming convention inside a daemon that has
+no business knowing what an activity is. Custody, not judgment, and this would
+be judgment.
+
+The unit's lifetime should instead be tied to the session's when it is created,
+so that the existing `TerminateSession` finishes the job and nothing new has any
+authority at all. Two ways, in increasing order of strength:
+
+**A. Put the scope in the user's slice.** `--slice=user-<uid>.slice` on the
+helper's `systemd-run`. The helper already has `--uid`, so this is derived, not
+passed — nothing new crosses the trust boundary. Then logind's user GC stops it
+with the rest of the user's units, and `KillUser` reaches it too, because it is
+in the slice `KillUser` kills.
+
+**B. Bind it to the session scope.** `--property=BindsTo=session-<n>.scope` plus
+`--property=After=session-<n>.scope`. Stronger: the scope goes when *that
+session* goes, rather than when the user's last session goes, so it is also
+correct on a device with two kiosk users. The session name has to come from
+somewhere, and it must not be an argument — the helper is reachable by anything
+in the `shepherd-firewall` group, which is the kiosk user, so an argument is
+attacker-chosen. It should be derived from the caller: `sd_pid_get_session()` on
+the `pkexec` caller's pid, or the same logind filter the custodian already uses
+for the uid it was given. (A caller that *lies* can only weaken its own
+activity's lifetime — `BindsTo` is one-way — but deriving it costs little and
+removes the question.)
+
+A is one flag and cannot really go wrong. B is the one that is actually correct
+per-session. They compose; A alone is most of the value.
+
+### What the work is
+
+| | |
+| --- | --- |
+| `shepherd-firewall-helper/src/main.rs` | the `--slice=` flag, and for B the session derivation |
+| `shepherd-host-linux/src/process.rs` | nothing for A; for B, only if the session has to be plumbed rather than derived |
+| `crates/shepherd-e2e/tests/firewall_real.rs` | assert the scope's `Slice=` / `BindsTo=` is what was asked for |
+| device | launch a firewalled activity, `loginctl terminate-session`, and confirm the scope is **gone** rather than parentless |
+
+Small in code and almost entirely verification, and the verification needs a
+device: `systemd-run --scope` in the system manager is the one path a
+development stack does not take (`--no-restrict-ipc-peers` aside, the firewall
+e2e tests stub `pkexec`).
+
+Two things it depends on that are read rather than measured, and they are the
+same two the watchdog itself depends on — so one device session answers both:
+that stopping a slice stops the units in it, and that logind's user GC is prompt
+with no lingering configured.
+
+**Not done here** because it is a different mechanism in a different binary with
+a different privilege story, and because the watchdog is worth having without
+it: a killed shepherdd today leaves the whole session running, and after this it
+leaves at most one firewalled process that has lost its screen.
+
 ## What this does not close
 
 * **A device without the custodian.** `--no-state-custodian`, or a packaged
@@ -213,6 +320,9 @@ it does not.
   shepherdd. The launcher, HUD and swayidle live there; an activity does not,
   and getting code into that scope is the same break that would already let it
   read the policy. No new trust, but it is now load-bearing for a second thing.
+* **Firewalled activities**, which live in a system-manager scope and are
+  reached by neither step. Scoped out above; the fix is one flag in the firewall
+  helper rather than anything here.
 * **A shepherdd that ticks but supervises nothing.** The heartbeat rides the
   engine tick, which is a real attestation, but not a proof that the host
   adapter still launches or stops anything. #135's supervision escapes are their
@@ -250,6 +360,22 @@ it does not.
    session** (`switch user`, or a login overlapping a logout) → nothing is
    terminated, and the journal says the session did not resolve. Record the
    measurements here, as #157 did.
+
+   Two of those turn on systemd behaviour that has been *read* rather than
+   measured, and both change what (a) and (b) actually kill:
+
+   * **`TerminateSession` kills the session scope even though this host reports
+     `KillUserProcesses=false`.** `method_terminate_session` passes `force`, so
+     it should stop the scope rather than abandon it — but the property is right
+     there on the manager saying the opposite-sounding thing, and it decides
+     whether sway dies or is merely orphaned. Check with an activity running:
+     the compositor should go, not linger.
+   * **logind stops `user@<uid>.service` when the last session goes**, which is
+     what actually reaches the activities in `app.slice` — the terminate does
+     not touch them. No lingering is enabled anywhere in this tree, so the
+     garbage collection should be prompt; confirm the scopes are gone and not
+     merely parentless, and confirm what `KillUser` adds when the terminate is
+     ignored.
 
 ## Two smaller things worth doing with it
 

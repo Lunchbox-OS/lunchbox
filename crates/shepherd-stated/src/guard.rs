@@ -360,13 +360,46 @@ impl Drop for Connected {
     }
 }
 
+/// What the watchdog ends, named once.
+///
+/// Two identifiers because the two steps reach different things: a session id
+/// ends the *session*, and a uid ends everything the user is running. See
+/// [`Terminator::kill_user`] for why the second is not a stronger version of the
+/// first.
+#[derive(Debug, Clone)]
+pub struct Target {
+    /// The session `resolve` settled on, carried from there rather than looked
+    /// up again — the filter that produced it is the security-relevant part.
+    pub session: String,
+    /// The kiosk uid, for the escalation.
+    pub uid: u32,
+}
+
 /// Ending a session, as an interface, so the state machine's decisions can be
-/// tested without logind and the D-Bus call has one implementation.
+/// tested without logind and the D-Bus calls have one implementation.
 pub trait Terminator: Send + Sync + 'static {
     /// Ask logind to end the session.
     fn terminate<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
-    /// Kill what is left of it, when asking did not work.
-    fn kill<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
+
+    /// Kill everything the kiosk user is running, when asking did not work.
+    ///
+    /// **Not `KillSession`**, which would be the obvious pair to `terminate`
+    /// and is the wrong call. A session scope holds sway, the launcher, the HUD
+    /// and swayidle; the activities shepherd launches are somewhere else
+    /// entirely — `shepherd-<id>.scope` under the user manager's `app.slice`,
+    /// or a snap's or flatpak's own scope (measured on a device,
+    /// `docs/ai/history/2026-08-29 003`). Killing the session scope in the one
+    /// case this escalation exists for would take the compositor and leave the
+    /// game running.
+    ///
+    /// `KillUser` covers both, and costs nothing to reach: it is the same
+    /// polkit action (`org.freedesktop.login1.manage`) the terminate already
+    /// needs, so there is no second grant and no wider rule.
+    ///
+    /// What it still does not cover is a firewalled Process entry, which the
+    /// `pkexec` helper puts in a **system** manager scope, outside this uid's
+    /// units. Nothing here reaches that.
+    fn kill_user(&self, uid: u32) -> BoxFuture<'_, anyhow::Result<()>>;
 }
 
 /// Drive the guard: events in, terminations out.
@@ -377,7 +410,7 @@ pub trait Terminator: Send + Sync + 'static {
 pub async fn run(
     mut rx: mpsc::UnboundedReceiver<Event>,
     mut guard: Guard,
-    session_id: String,
+    target: Target,
     terminator: Arc<dyn Terminator>,
 ) {
     loop {
@@ -400,26 +433,31 @@ pub async fn run(
             ),
             Action::Fire(reason) => {
                 error!(
-                    session = %session_id,
+                    session = %target.session,
                     %reason,
                     "Nothing is supervising this session; ending it"
                 );
-                if let Err(e) = terminator.terminate(&session_id).await {
-                    error!(session = %session_id, error = %e, "Could not terminate the session");
+                if let Err(e) = terminator.terminate(&target.session).await {
+                    error!(
+                        session = %target.session,
+                        error = %e,
+                        "Could not terminate the session"
+                    );
                 }
                 // If logind honoured it, the session goes away, `watch_for_loss`
                 // returns and this process exits — taking this task with it
                 // before the sleep finishes. Reaching the other side of it means
-                // the session is still there.
+                // the session is still there, and so is everything in it.
                 tokio::time::sleep(KILL_AFTER).await;
                 warn!(
-                    session = %session_id,
-                    "The session is still here; killing what is in it"
+                    session = %target.session,
+                    uid = target.uid,
+                    "The session is still here; killing everything this user is running"
                 );
-                if let Err(e) = terminator.kill(&session_id).await {
-                    error!(session = %session_id, error = %e, "Could not kill the session either");
+                if let Err(e) = terminator.kill_user(target.uid).await {
+                    error!(uid = target.uid, error = %e, "Could not kill the user's processes");
                 }
-                info!(session = %session_id, "The watchdog has done what it can");
+                info!(session = %target.session, "The watchdog has done what it can");
                 return;
             }
         }

@@ -70,9 +70,12 @@ trait LogindManager {
     /// grants and what [`crate::polkit`] checks for at startup.
     fn terminate_session(&self, session_id: &str) -> zbus::Result<()>;
 
-    /// Kill what is left of a session, for when asking did not work.
-    /// `who` is `"all"`, `"leader"` or `"session"`.
-    fn kill_session(&self, session_id: &str, who: &str, signal_number: i32) -> zbus::Result<()>;
+    /// Kill everything a uid is running, for when asking did not work.
+    ///
+    /// `KillUser` rather than `KillSession` deliberately: the session scope
+    /// holds the compositor and shepherd's own UI, while the activities live in
+    /// the user manager's `app.slice`. See [`crate::guard::Terminator::kill_user`].
+    fn kill_user(&self, uid: u32, signal_number: i32) -> zbus::Result<()>;
 
     /// `true` as the machine goes to sleep, `false` once it is back.
     ///
@@ -413,16 +416,16 @@ impl crate::guard::Terminator for LogindTerminator {
         })
     }
 
-    fn kill<'a>(&'a self, session_id: &'a str) -> futures_util::future::BoxFuture<'a, Result<()>> {
+    fn kill_user(&self, uid: u32) -> futures_util::future::BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.manager
-                // SIGKILL, and everything in the session: this only runs after
-                // a terminate has already been ignored for ten seconds, and
-                // something that ignored logind is not going to be moved by a
-                // politer signal.
-                .kill_session(session_id, "all", nix::sys::signal::Signal::SIGKILL as i32)
+                // SIGKILL, and everything the uid is running: this only runs
+                // after a terminate has already been ignored for ten seconds,
+                // and something that ignored logind is not going to be moved by
+                // a politer signal.
+                .kill_user(uid, nix::sys::signal::Signal::SIGKILL as i32)
                 .await
-                .with_context(|| format!("asking logind to kill session {session_id}"))
+                .with_context(|| format!("asking logind to kill everything uid {uid} is running"))
         })
     }
 }
