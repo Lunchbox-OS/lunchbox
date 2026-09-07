@@ -396,9 +396,11 @@ pub trait Terminator: Send + Sync + 'static {
     /// polkit action (`org.freedesktop.login1.manage`) the terminate already
     /// needs, so there is no second grant and no wider rule.
     ///
-    /// What it still does not cover is a firewalled Process entry, which the
-    /// `pkexec` helper puts in a **system** manager scope, outside this uid's
-    /// units. Nothing here reaches that.
+    /// A firewalled Process entry is a system-manager scope rather than one of
+    /// this uid's units, and used to be out of reach of this too. It is not any
+    /// more: the helper now creates it with `--slice=user-<uid>.slice`, so it
+    /// is inside the slice this kills (issue #172,
+    /// `shepherd-firewall-helper::lifetime_args`).
     fn kill_user(&self, uid: u32) -> BoxFuture<'_, anyhow::Result<()>>;
 }
 

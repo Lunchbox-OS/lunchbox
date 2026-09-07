@@ -141,9 +141,11 @@ the session scope holds sway, the launcher and the HUD, while the activities are
 in `shepherd-<id>.scope` under the user manager's `app.slice` (or a snap's or
 flatpak's own scope). Killing the session scope in the one case this escalation
 exists for would take the compositor and leave the game running. `KillUser`
-covers both and needs no second polkit grant. It does **not** cover a firewalled
-Process entry, which the `pkexec` helper puts in a *system* manager scope,
-outside this uid's units entirely.
+covers both and needs no second polkit grant. A firewalled Process entry is a
+*system* manager scope — `IPAddressDeny=` needs `CAP_NET_ADMIN` — and used to be
+outside all of this; the firewall helper now creates it inside
+`user-<uid>.slice` and bound to the session, so both the terminate and this
+reach it.
 
 **The beat comes from the engine tick**, the same 100 ms loop that decides
 whether a child's time is up — not from a timer of its own, which would attest

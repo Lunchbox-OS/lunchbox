@@ -251,7 +251,7 @@ Worth being precise about the blast radius: this is **pre-existing**, not
 something the watchdog introduces. An unclean shepherdd death always left these
 behind; before #172 it left the whole session behind with them.
 
-### The fix belongs at creation, not at kill time
+### The fix belongs at creation, not at kill time — and that is what was built
 
 The tempting shape is to give the custodian the authority to stop those units —
 and it is the wrong one. `org.freedesktop.systemd1.manage-units` is a far wider
@@ -282,32 +282,60 @@ for the uid it was given. (A caller that *lies* can only weaken its own
 activity's lifetime — `BindsTo` is one-way — but deriving it costs little and
 removes the question.)
 
-A is one flag and cannot really go wrong. B is the one that is actually correct
-per-session. They compose; A alone is most of the value.
+Both landed, in `shepherd-firewall-helper::lifetime_args`. The session for B is
+**derived, never passed**: the polkit rule admits the `shepherd-firewall` group,
+which is the kiosk user, so an argument would be attacker-chosen. It comes from
+the helper's own cgroup — the caller's, inherited through `pkexec`, read before
+`systemd-run` moves anything — so a caller can only name the session it is
+actually in, and a value that is not `session-<alnum>.scope` is treated as "no
+session" rather than guessed at. A caller that could lie would in any case only
+shorten its own activity's life; `BindsTo` is one-way.
 
-### What the work is
+Measured on this host rather than read, because the whole thing rests on a
+system-manager unit being placeable in a user's slice:
 
-| | |
-| --- | --- |
-| `shepherd-firewall-helper/src/main.rs` | the `--slice=` flag, and for B the session derivation |
-| `shepherd-host-linux/src/process.rs` | nothing for A; for B, only if the session has to be plumbed rather than derived |
-| `crates/shepherd-e2e/tests/firewall_real.rs` | assert the scope's `Slice=` / `BindsTo=` is what was asked for |
-| device | launch a firewalled activity, `loginctl terminate-session`, and confirm the scope is **gone** rather than parentless |
+```
+$ sudo systemd-run --scope --unit=probe.scope --uid=1000 --gid=1000 \
+      --slice=user-1000.slice --property=BindsTo=session-2.scope \
+      --property=After=session-2.scope -- sleep 30
+$ systemctl show probe.scope -p Slice -p BindsTo -p After -p ControlGroup
+BindsTo=session-2.scope
+After=user-1000.slice session-2.scope
+Slice=user-1000.slice
+ControlGroup=/user.slice/user-1000.slice/probe.scope     ← inside the user's slice
+```
 
-Small in code and almost entirely verification, and the verification needs a
-device: `systemd-run --scope` in the system manager is the one path a
-development stack does not take (`--no-restrict-ipc-peers` aside, the firewall
-e2e tests stub `pkexec`).
+And the dependency that makes the slice do any work is implicit, so nothing has
+to declare it:
 
-Two things it depends on that are read rather than measured, and they are the
-same two the watchdog itself depends on — so one device session answers both:
-that stopping a slice stops the units in it, and that logind's user GC is prompt
-with no lingering configured.
+```
+$ systemctl show user@1000.service -p Requires -p Slice
+Requires=user-1000.slice sysinit.target
+Slice=user-1000.slice
+```
 
-**Not done here** because it is a different mechanism in a different binary with
-a different privilege story, and because the watchdog is worth having without
-it: a killed shepherdd today leaves the whole session running, and after this it
-leaves at most one firewalled process that has lost its screen.
+A unit `Requires=` its slice, and a stopped slice stops what requires it.
+
+`shepherd-host-linux` needed nothing: the session is derived inside the helper,
+so no new argument crosses the `pkexec` boundary and `firewall_helper_argv_prefix`
+is unchanged. `stop_firewall_scope` stays as it is — the clean path should still
+stop a scope immediately rather than wait for the session to end.
+
+Four unit tests in the helper: both properties present with a session, the slice
+alone without one (naming a unit that does not exist would fail the scope's
+start, which is an activity that will not launch for the sake of defence in
+depth), the session parsed out of a real v2 cgroup line, and every shape that is
+not a session scope — an `app.slice` scope, a system service, `session-.scope`,
+one with a shell metacharacter in the id — reading as "no session".
+
+### What is left on a device
+
+The teardown itself, which is the half a unit test cannot reach: launch a
+firewalled activity, end the session, and confirm the scope is **gone** rather
+than parentless. It shares the two systemd behaviours the watchdog itself rests
+on — that logind's user GC is prompt with no lingering, and that stopping a slice
+stops what is in it — so one device session answers all of it. The `Requires=`
+half of that is measured above; the promptness is not.
 
 ## What this does not close
 
@@ -320,9 +348,10 @@ leaves at most one firewalled process that has lost its screen.
   shepherdd. The launcher, HUD and swayidle live there; an activity does not,
   and getting code into that scope is the same break that would already let it
   read the policy. No new trust, but it is now load-bearing for a second thing.
-* **Firewalled activities**, which live in a system-manager scope and are
-  reached by neither step. Scoped out above; the fix is one flag in the firewall
-  helper rather than anything here.
+* **A firewalled activity on a device that has not been verified.** The scope is
+  now created inside `user-<uid>.slice` and bound to the session (above), which
+  is what makes the terminate and the escalation reach it — but only the
+  properties are measured, not the teardown.
 * **A shepherdd that ticks but supervises nothing.** The heartbeat rides the
   engine tick, which is a real attestation, but not a proof that the host
   adapter still launches or stops anything. #135's supervision escapes are their

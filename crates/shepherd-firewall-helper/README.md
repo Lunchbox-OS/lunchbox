@@ -53,6 +53,40 @@ shepherd-firewall-helper stop-scope --scope-name <name>
 `systemd-run`'s pid; shepherdd's `Command::spawn().wait()` returns when
 the activity exits and the transient scope is collected.
 
+## The scope dies with the session (issue #172)
+
+The scope this creates is a **system** manager unit — it has to be, because the
+`cgroup_skb` programs behind `IPAddressDeny=` need `CAP_NET_ADMIN` and a
+per-user manager cannot attach them. That put it outside `user-<uid>.slice`,
+where nothing that ends a kiosk session reached it: not logind's
+`TerminateSession`, not its teardown of `user@<uid>.service`, not `KillUser`.
+The only thing that ever stopped one was shepherdd calling back through
+`stop-scope` — and issue #172 is about shepherdd being killed, which is exactly
+when nothing calls anything.
+
+So `apply-process` adds two properties (`lifetime_args`):
+
+| | |
+| --- | --- |
+| `--slice=user-<uid>.slice` | puts the scope in the kiosk user's slice. A unit implicitly `Requires=` its slice, so logind stopping that slice at the user's last logout stops this too — and it is the slice `KillUser` kills, so the session watchdog's escalation reaches it |
+| `--property=BindsTo=`/`After=` the caller's session scope | ends it when *that session* ends, which is the sharper statement: a device with two kiosk users has one slice each but a session per login, and an activity belongs to a session |
+
+**The session is derived, never passed.** The polkit rule admits the
+`shepherd-firewall` group, which is the kiosk user, so an argument would be
+attacker-chosen. It is read from this process's own cgroup — the caller's,
+inherited through `pkexec`, before `systemd-run` moves anything — and validated
+to logind's shape (`session-`, alphanumeric, `.scope`) because it ends up in an
+argv. A caller not in a session scope (a development stack, a hand-run helper)
+gets the slice and no binding, rather than a guess: naming a unit that does not
+exist would fail the scope's start, and that is an activity that will not launch
+for the sake of defence in depth.
+
+Declaring the lifetime here is what keeps the authority where it belongs.
+The alternative was to let the state custodian stop these units when it ends a
+session, which would have meant `org.freedesktop.systemd1.manage-units` — the
+right to stop *any* unit on the machine — for a daemon whose whole discipline is
+custody rather than judgment.
+
 ## Install
 
 The helper is installed by `scripts/integration-tests/setup-firewall-dev.sh`
