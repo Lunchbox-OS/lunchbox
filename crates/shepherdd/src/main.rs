@@ -1706,7 +1706,9 @@ impl Service {
                 let http_state = HttpAppState { svc: svc.clone() };
                 let http_server = HttpServer::new(http_state, api_cfg)
                     .with_admin_authority(admin_authority)
-                    .with_listener_status(web_listener.clone());
+                    .with_listener_status(web_listener.clone())
+                    .with_protected_files(Arc::clone(&protected_files))
+                    .with_hostnames(local_hostnames());
                 let http_shutdown_rx = shutdown_rx.clone();
                 let listener_status = web_listener.clone();
                 let publisher = diagnostic_publisher.clone();
@@ -2676,6 +2678,25 @@ async fn dispatch_ipc(
             Response::error(request_id, ErrorInfo::new(code, msg))
         }
     }
+}
+
+/// DNS names to put in a generated TLS certificate.
+///
+/// The machine's hostname, plus its `.local` form, plus `localhost`. Not an
+/// exhaustive answer — a device reached through a name only the router knows
+/// will still mismatch — but it covers the two ways a parent actually types a
+/// device's address, and the `files` TLS mode is the answer for anything else.
+fn local_hostnames() -> Vec<String> {
+    let mut names = vec!["localhost".to_string()];
+    if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+        let hostname = hostname.trim().to_string();
+        if !hostname.is_empty() {
+            names.push(format!("{hostname}.local"));
+            names.push(hostname);
+        }
+    }
+    names.dedup();
+    names
 }
 
 #[tokio::main]

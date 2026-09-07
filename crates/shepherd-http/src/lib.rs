@@ -19,6 +19,7 @@
 pub mod auth;
 pub mod handlers;
 pub mod state;
+pub mod tls;
 pub mod web_assets;
 
 pub use auth::AuthSources;
@@ -27,6 +28,7 @@ pub use state::AppState;
 use anyhow::Context;
 use shepherd_config::ManagementApiConfig;
 use shepherd_management::{AdminAuthority, WebListenerHandle};
+use shepherd_util::ProtectedFiles;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,6 +44,11 @@ pub struct HttpServer {
     config: ManagementApiConfig,
     admin: Option<Arc<dyn AdminAuthority>>,
     listener_status: WebListenerHandle,
+    files: Option<Arc<dyn ProtectedFiles>>,
+    /// Names to put in a generated certificate's SAN list, so a parent who
+    /// reaches the device by hostname does not get a second warning about the
+    /// name on top of the one about the issuer.
+    hostnames: Vec<String>,
 }
 
 impl HttpServer {
@@ -51,7 +58,22 @@ impl HttpServer {
             config,
             admin: None,
             listener_status: WebListenerHandle::default(),
+            files: None,
+            hostnames: Vec::new(),
         }
+    }
+
+    /// Where a generated TLS certificate is kept. Required for
+    /// `tls.mode = "self_signed"`; ignored by every other mode.
+    pub fn with_protected_files(mut self, files: Arc<dyn ProtectedFiles>) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    /// Extra DNS names for a generated certificate.
+    pub fn with_hostnames(mut self, hostnames: Vec<String>) -> Self {
+        self.hostnames = hostnames;
+        self
     }
 
     /// Plug in a BLE-claim-derived [`AdminAuthority`] so the bearer
@@ -76,6 +98,7 @@ impl HttpServer {
 
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let addr = SocketAddr::new(self.config.bind, self.config.port);
+        let tls = self.build_tls(&addr)?;
         let sources = AuthSources {
             static_token: self.config.auth_token.clone(),
             admin: self.admin.clone(),
@@ -85,15 +108,84 @@ impl HttpServer {
         // The bound address, not the configured one: with `port = 0` they are
         // different, and this is the one somebody can connect to.
         let bound = listener.local_addr().unwrap_or(addr);
+        let scheme = if tls.is_some() { "https" } else { "http" };
         self.listener_status.set_listening(bound);
-        info!(addr = %bound, "Management HTTP API listening");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.wait_for(|v| *v).await;
-            })
-            .await?;
+        info!(addr = %bound, scheme, "Management API listening");
+
+        // `ConnectInfo` rather than a bare service: the login throttle counts
+        // failures per peer, and a peer it cannot see is one bucket for the
+        // whole network — which would let a guesser lock the parent out.
+        let service = app.into_make_service_with_connect_info::<SocketAddr>();
+
+        match tls {
+            None => {
+                axum::serve(listener, service)
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.wait_for(|v| *v).await;
+                    })
+                    .await?;
+            }
+            Some(config) => {
+                let std_listener = listener.into_std()?;
+                let handle = axum_server::Handle::new();
+                let shutdown_handle = handle.clone();
+                tokio::spawn(async move {
+                    let _ = shutdown_rx.wait_for(|v| *v).await;
+                    // The same grace the plaintext path gets: in-flight
+                    // requests finish, a hung one does not hold up shutdown.
+                    shutdown_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+                });
+                axum_server::from_tcp_rustls(
+                    std_listener,
+                    axum_server::tls_rustls::RustlsConfig::from_config(config),
+                )
+                .handle(handle)
+                .serve(service)
+                .await?;
+            }
+        }
         Ok(())
     }
+
+    /// Resolve the configured mode into a rustls config, or `None` for
+    /// plaintext.
+    ///
+    /// Installing the `ring` provider here rather than in `main`: this is the
+    /// only place in the workspace that terminates TLS, and a provider
+    /// installed lazily at the point of use cannot be forgotten by a second
+    /// binary that links this crate. `install_default` returning `Err` means
+    /// somebody already installed one, which is fine.
+    fn build_tls(&self, addr: &SocketAddr) -> anyhow::Result<Option<Arc<rustls::ServerConfig>>> {
+        if !self.config.tls.is_tls() {
+            return Ok(None);
+        }
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let files = self.files.clone().context(
+            "TLS is configured but the server was built without a place to keep a certificate",
+        )?;
+        let addresses = local_addresses(addr);
+        tls::server_config(&self.config.tls, &files, &self.hostnames, &addresses)
+    }
+}
+
+/// Addresses to name in a generated certificate.
+///
+/// The bind address itself when it is a concrete one; loopback always, because
+/// `dev shot` and anything else on the device reaches it that way. A wildcard
+/// bind contributes nothing — a certificate cannot name "every address this
+/// machine will ever have" — so a device on a DHCP lease that moves will show
+/// a name mismatch until the certificate is regenerated. That is a known
+/// sharp edge of the self-signed mode and the reason `files` mode exists.
+fn local_addresses(addr: &SocketAddr) -> Vec<std::net::IpAddr> {
+    let mut out = vec![
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    let bind = addr.ip();
+    if !bind.is_unspecified() && !bind.is_loopback() {
+        out.push(bind);
+    }
+    out
 }
 
 /// Bind a TcpListener, retrying on EADDRNOTAVAIL until either the listener

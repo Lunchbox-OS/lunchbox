@@ -26,6 +26,11 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 tokio-stream = { workspace = true }
 rust-embed = { version = "8", features = ["include-exclude"] }
+axum-server = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+rustls-pemfile = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"

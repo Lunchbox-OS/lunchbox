@@ -173,6 +173,15 @@ gtk4-layer-shell = "0.4"
 # HTTP API
 axum = { version = "0.8", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+# TLS termination for the management API (issue #156). `rustls` is already in
+# the tree behind `ureq`, on the `ring` provider; both of these follow it there
+# rather than dragging in `aws-lc-rs`, which wants cmake and a C toolchain on a
+# device that has neither.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls-pemfile = "2"
+
 # Password hashing for the web UI login (issue #156). Argon2id with the
 # crate's default params; the PHC string carries them, so raising them later
 # re-hashes on next login rather than invalidating the stored password.
