@@ -27,6 +27,8 @@ source "$LIB_DIR/install.sh"
 source "$LIB_DIR/harden.sh"
 # shellcheck source=lib/config.sh
 source "$LIB_DIR/config.sh"
+# shellcheck source=lib/webauth.sh
+source "$LIB_DIR/webauth.sh"
 # shellcheck source=lib/bluetooth.sh
 source "$LIB_DIR/bluetooth.sh"
 # shellcheck source=lib/version.sh
@@ -53,6 +55,7 @@ Commands:
     uninstall   Remove installed shepherd binaries and system files
     harden      User hardening for kiosk mode
     bluetooth   Bluetooth admin operations (clear bonds, etc.)
+    web-auth    Web management sign-in (reset a forgotten password)
     version     Show or bump the project version
     package     Build distributable packages (.deb, F-Droid repo)
     apps        Install activity backends (steam via snap, chrome via Flathub,
@@ -196,6 +199,9 @@ EOF
             ;;
         bluetooth)
             bluetooth_main "$@"
+            ;;
+        web-auth)
+            webauth_main "$@"
             ;;
         version)
             version_main "$@"
