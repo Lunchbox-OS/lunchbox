@@ -4,37 +4,9 @@
 //! brightness on connect, then drives changes through the daemon so policy
 //! restrictions are enforced in one place.
 
-use shepherd_api::BrightnessInfo;
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use tokio::runtime::Runtime;
-
-/// Get current brightness status from shepherdd
-pub fn get_brightness_status() -> Option<BrightnessInfo> {
-    let socket_path = default_socket_path();
-    let rt = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::error!("Failed to create runtime: {}", e);
-            return None;
-        }
-    };
-    rt.block_on(async {
-        match IpcClient::connect(&socket_path).await {
-            Ok(mut client) => match client.get_brightness().await {
-                Ok(info) => Some(info),
-                Err(e) => {
-                    tracing::error!("Failed to get brightness: {}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::debug!("Failed to connect to shepherdd for brightness: {}", e);
-                None
-            }
-        }
-    })
-}
 
 /// Set brightness to a specific percentage via shepherdd
 pub fn set_brightness(percent: u8) -> anyhow::Result<()> {

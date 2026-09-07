@@ -12,7 +12,6 @@ mod imp {
 
     #[derive(Default)]
     pub struct TimeDisplay {
-        pub icon: RefCell<Option<gtk4::Image>>,
         pub label: RefCell<Option<gtk4::Label>>,
         pub total_secs: RefCell<Option<u64>>,
         pub remaining_secs: RefCell<Option<u64>>,
@@ -37,13 +36,10 @@ mod imp {
             obj.set_orientation(gtk4::Orientation::Horizontal);
             obj.set_spacing(4);
 
-            // Time icon
-            let icon = gtk4::Image::from_icon_name("preferences-system-time-symbolic");
-            icon.set_pixel_size(20);
-            obj.append(&icon);
-            *self.icon.borrow_mut() = Some(icon);
-
-            // Time label
+            // Time label. There is deliberately no icon beside it: a countdown
+            // is self-describing, and the clock glyph that used to sit here
+            // was the one element of the bar that said nothing the numbers did
+            // not already say (issue #178).
             let label = gtk4::Label::new(Some("--:--"));
             label.add_css_class("time-display");
             obj.append(&label);
@@ -67,25 +63,26 @@ impl TimeDisplay {
         glib::Object::builder().build()
     }
 
-    /// Resize the clock icon. Called with the HUD scale factor applied, like
-    /// every other HUD icon, so it keeps its physical size when shepherdd drops
-    /// the compositor scale for an XWayland activity (issue #114).
-    pub fn set_icon_pixel_size(&self, px: i32) {
-        if let Some(icon) = self.imp().icon.borrow().as_ref() {
-            icon.set_pixel_size(px);
-        }
-    }
-
-    /// Lay the icon out above the readout rather than beside it, and switch
-    /// to the three-character duration format. Both are what the vertical HUD
-    /// needs, and neither makes sense without the other, so they are one call.
+    /// Lay the readout out for the vertical HUD: the three-character duration
+    /// format, and centred across the bar.
+    ///
+    /// Both are the same problem — the readout has 48px to fit *across* rather
+    /// than an open bar to sit along — so they are one call.
+    ///
+    /// The centring has to be asked for. A vertical box allocates every child
+    /// the full width of the bar, and this widget's own label is packed at the
+    /// start of it, so the default `Fill` left the countdown hard against the
+    /// left edge while the clock face and the activity title above it were
+    /// centred. `Fill` is restored for the horizontal bar, where the widget is
+    /// allocated its natural width and the alignment makes no difference
+    /// either way.
     pub fn set_compact(&self, compact: bool) {
         let imp = self.imp();
         imp.compact.set(compact);
-        self.set_orientation(if compact {
-            gtk4::Orientation::Vertical
+        self.set_halign(if compact {
+            gtk4::Align::Center
         } else {
-            gtk4::Orientation::Horizontal
+            gtk4::Align::Fill
         });
         self.update_display();
     }

@@ -149,8 +149,18 @@ Example (bedtime restriction):
     (env propagates from the invocation into the sway-spawned HUD), then
     `: > <path>` pops the "End session" prompt, `: > <path>.reset` pops the
     reset prompt (only for activities that offer it — `type = "retroarch"`),
-    and `: > <path>.down` dismisses whichever is up. Every file is consumed, so
-    open/close cycles are just two `touch`es.
+    `: > <path>.volume` / `: > <path>.brightness` open the two pop-out slider
+    controls (issue #178), and `: > <path>.down` dismisses whichever is up.
+    Every file is consumed, so open/close cycles are just two `touch`es.
+  - **The reading layout** (page-turn buttons, and the bar's worst case for
+    room) has its own permanent debug-build hook: export
+    `SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS=1` before `dev headless`. Okular is
+    not installed here, so there is no real `type = "ebook"` session to start,
+    and both #171 and #178 previously had to add a throwaway override to look
+    at this layout. The hook only forces the buttons *visible*; pressing one
+    still checks the real session state, so it cannot send page keys into an
+    unrelated activity. Pair it with `--size 1280x600` to see the overflow
+    behaviour issue #178 is about.
   - **Any other HUD-only UI action**: add a temporary one-shot debug hook gated
     behind an env var that calls `widget.emit_clicked()`, boot with the env var
     set, screenshot, then remove the hook. `dev key` (keyboard) *does* reach the
@@ -192,6 +202,18 @@ Example (bedtime restriction):
   (with the volume slider in its *disabled* styling, which measures differently
   from the live one). Before keeping a shot, poll for something only the target
   state paints, e.g. the warning banner's background colour.
+- **The headless output is not at scale 1, so `--size` is not logical pixels.**
+  It comes up at **scale 1.5**, so `--size 1280x600` gives a *853x400 logical*
+  screen — a far harsher test than it looks, and the wrong number to quote when
+  an issue is written in logical pixels (issue #178 is: "displays less than 720
+  logical pixels tall"). Check with `swaymsg -t get_outputs` — the output's
+  `rect` is logical, its `current_mode` is physical — and pin both together
+  before measuring anything size-dependent:
+
+  ```sh
+  swaymsg output HEADLESS-1 mode 1280x720 scale 1   # 1280x720 logical
+  ```
+
 - **Output-scale changes settle asynchronously.** Useful when testing the
   `xwayland_native_resolution` HiDPI hack, which needs a non-1x scale
   (`swaymsg output HEADLESS-1 scale 1.5`, via `headless_run` in

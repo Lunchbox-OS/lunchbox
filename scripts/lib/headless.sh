@@ -442,6 +442,18 @@ headless_start() {
     # flags, and `env -i` in the `--user` path would drop anything not listed
     # here.
     [[ -n "${SHEPHERD_HUD_ANCHOR:-}" ]] && sway_env+=("SHEPHERD_HUD_ANCHOR=$SHEPHERD_HUD_ANCHOR")
+    # The HUD's debug-build hooks, forwarded for the same reason: they are the
+    # only way to drive HUD-only UI here (the synthetic pointer does not fire
+    # GTK `clicked`), and the reading layout has no reader to start.
+    # (`set -e` is on, so the test cannot be the loop body's last command.)
+    local hud_debug
+    for hud_debug in \
+        SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER \
+        SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS; do
+        if [[ -n "${!hud_debug:-}" ]]; then
+            sway_env+=("$hud_debug=${!hud_debug}")
+        fi
+    done
 
     local pid swaysock wd
     if [[ "$user_mode" -eq 1 ]]; then

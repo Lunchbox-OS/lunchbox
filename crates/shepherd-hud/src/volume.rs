@@ -3,37 +3,9 @@
 //! Provides volume status and control via shepherdd. The service
 //! handles actual volume control and enforces restrictions.
 
-use shepherd_api::VolumeInfo;
 use shepherd_ipc::IpcClient;
 use shepherd_util::default_socket_path;
 use tokio::runtime::Runtime;
-
-/// Get current volume status from shepherdd
-pub fn get_volume_status() -> Option<VolumeInfo> {
-    let socket_path = default_socket_path();
-    let rt = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::error!("Failed to create runtime: {}", e);
-            return None;
-        }
-    };
-    rt.block_on(async {
-        match IpcClient::connect(&socket_path).await {
-            Ok(mut client) => match client.get_volume().await {
-                Ok(info) => Some(info),
-                Err(e) => {
-                    tracing::error!("Failed to get volume: {}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::debug!("Failed to connect to shepherdd for volume: {}", e);
-                None
-            }
-        }
-    })
-}
 
 /// Toggle mute state via shepherdd
 pub fn toggle_mute() -> anyhow::Result<()> {
