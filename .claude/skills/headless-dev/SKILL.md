@@ -267,6 +267,22 @@ Example (bedtime restriction):
   user owns — including the `sleep`s in your own driver script, which then dies
   mid-scenario (exit 144). Point the fixture at a small wrapper script
   (`exec tail -f /dev/null`) so the name is unique to the fixture.
+- **`dev headless` right after `dev stop` can hang shepherdd at startup — retry
+  it.** Twice in four boots (2026-09-07) the daemon stopped dead after
+
+  ```
+  INFO shepherd_host_linux::process: Activities will be launched into a cgroup of their own
+  ```
+
+  — the last line of `process::init()` — and never reached the volume-controller
+  line, the compositor, or anything else, so the harness reported "shepherdd did
+  not connect to the compositor within 30s" against a perfectly healthy sway.
+  The GTK clients time out on the portal 25 s later, which makes the log look
+  like a compositor problem it is not. It is not caused by the config: the same
+  config booted first try on the retry. Kill every survivor the
+  `ps -eo pid,cmd | grep …` listing below names, `rm
+  dev-runtime/headless/session.env`, and boot again — do not spend time
+  debugging the daemon over a first failed boot.
 - **A stale `dev-runtime/headless/session.env` breaks the next boot.** The start
   path sources it, so a leftover `SWAYSOCK` from a dead session is inherited by
   the new sway, which uses *that* socket path while the script waits on the one

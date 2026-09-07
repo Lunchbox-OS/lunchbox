@@ -192,6 +192,33 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   adb shell cmd notification list
   adb shell "cmd notification snooze --for 1800000 '<key>'"   # quote it: | is a shell pipe
   ```
+- **Never snooze a `com.android.settings` notification during pairing.** The
+  OS pairing prompt *is* one, and it reuses a single key
+  (`0|com.android.settings|17301632|null|1000` on this phone), so snoozing
+  that key suppresses every later consent prompt for the whole snooze window.
+  A stale pairing notification left over from an aborted attempt is exactly
+  the "noise" the rule above tempts you to snooze, and doing so cost three
+  failed pairings here: the app showed **"Pairing failed — Cannot connect
+  peripheral that has been cancelled"** (Kable, after the phone's 30 s
+  `SMP_RSP_TIMEOUT`) while logcat said the framework had done everything
+  right —
+
+  ```
+  BluetoothBondStateMachine: sendPairingRequestIntent: ACTION_PAIRING_REQUEST … variant=3
+  BluetoothPairingService: Show pairing notification for  (shepherd-26.04)
+  ```
+
+  …and `cmd notification list` showed no such notification. That combination —
+  the service says it posted, the list does not have it — means snoozed, not
+  wedged; no amount of restarting `bluetooth` or the app will help. Undo it:
+
+  ```sh
+  adb shell "cmd notification unsnooze '0|com.android.settings|17301632|null|1000'"
+  ```
+
+  Snooze the *charging* notification by all means; check the key's package
+  first, and prefer clearing a stale pairing notification (swipe / relaunch)
+  over snoozing it.
 - **Confirm promptly.** The prompt times out in 30s. Don't interleave
   screenshots and image reads between the taps; let `run` do it.
 - **Only trust a *fresh* prompt.** A leftover notification from an
