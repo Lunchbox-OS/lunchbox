@@ -237,6 +237,35 @@ impl Transport {
             .map_err(|e| std::io::Error::other(format!("clearing the read timeout: {e}")))?;
         Ok(WatchStream { conn })
     }
+
+    /// Turn this transport into the supervision channel (issue #172).
+    ///
+    /// Consumes it for the same reason [`Self::into_watch_stream`] does: after
+    /// `Supervise` the connection carries exactly one reply and then only
+    /// heartbeats, so a `call` on it would wait out its timeout.
+    ///
+    /// The reply is read here rather than left to the caller because it is the
+    /// answer to "will anything happen if I die", and a caller that forgot to
+    /// read it would be a caller silently trusting a watchdog that may not be
+    /// armed.
+    pub fn into_supervision_stream(
+        self,
+    ) -> std::io::Result<(crate::SuperviseReply, SupervisionStream)> {
+        let line = serde_json::to_string(&StateRequest::Supervise)
+            .map_err(|e| std::io::Error::other(format!("encoding the supervise request: {e}")))?;
+        let mut conn = self
+            .conn
+            .into_inner()
+            .expect("state transport lock")
+            .ok_or_else(|| std::io::Error::other("not connected"))?;
+        conn.send(&line)?;
+        let reply = conn.receive()?;
+        let reply: crate::SuperviseReply = serde_json::from_str(&reply)
+            .map_err(|e| std::io::Error::other(format!("decoding the supervision reply: {e}")))?;
+        // The read timeout stays as it is: nothing else ever arrives on this
+        // connection, and the client never reads it again.
+        Ok((reply, SupervisionStream { conn }))
+    }
 }
 
 /// A connection that only carries change notifications.
@@ -248,6 +277,30 @@ impl WatchStream {
     /// Block until the policy changes, or the watch ends.
     pub fn next_change(&mut self) -> std::io::Result<()> {
         self.conn.receive().map(|_| ())
+    }
+}
+
+/// A connection that only carries heartbeats (issue #172).
+///
+/// The mirror of [`WatchStream`]: that one only reads, this one only writes.
+/// Its value is not what it carries but that it *exists* — the custodian ends
+/// the session when this connection stops being fed, and a killed process
+/// cannot hold its file descriptors open.
+pub struct SupervisionStream {
+    conn: Connection,
+}
+
+impl SupervisionStream {
+    /// Tell the custodian shepherd is still supervising.
+    ///
+    /// Keeps the write timeout the connection was opened with: a beat that
+    /// blocks forever would leave the custodian waiting on a deadline that
+    /// never expires *and* this thread stuck, which is the one combination
+    /// where nobody notices anything is wrong.
+    pub fn beat(&mut self) -> std::io::Result<()> {
+        let line = serde_json::to_string(&StateRequest::Heartbeat)
+            .map_err(|e| std::io::Error::other(format!("encoding a heartbeat: {e}")))?;
+        self.conn.send(&line)
     }
 }
 

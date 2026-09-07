@@ -317,6 +317,27 @@ export type DiagnosticCode =
    */
   | "state_not_protected"
   /**
+   * Nothing outside the session would notice this daemon being killed, so an
+   * activity can leave the session running with nothing supervising it
+   * (issue #172).
+   *
+   * Every activity runs as shepherdd's own uid, and signal permission is a
+   * uid comparison — so `kill`, or `SIGSTOP`, is available to anything the
+   * device is supervising. The answer is the state custodian, which is
+   * outside the session at a uid nothing in it can signal: it watches a
+   * connection shepherdd holds and ends the session when the feeding stops.
+   *
+   * This is raised when that watchdog exists but cannot act — the polkit
+   * rule that lets the custodian end a session is missing, or the connection
+   * could not be opened at all. Deliberately *not* raised on a device with
+   * no custodian: that device already says so through
+   * [`Self::StateNotProtected`], and one fact should not set off two alarms.
+   *
+   * `Critical`, because a watchdog that cannot fire is worse than no
+   * watchdog: it is the shape that looks like protection.
+   */
+  | "session_not_guarded"
+  /**
    * Something at this uid tried to drive the daemon from outside the
    * session and was refused (issue #144). Worth an administrator's
    * attention: an activity probing the management socket is not something

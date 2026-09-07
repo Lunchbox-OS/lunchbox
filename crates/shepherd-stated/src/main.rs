@@ -38,6 +38,8 @@
 //! while sway `exec`s it". This daemon can, so the name-takeover class does not
 //! exist here.
 
+mod guard;
+mod polkit;
 mod session;
 mod watch;
 
@@ -142,6 +144,75 @@ async fn main() -> Result<()> {
 
     let policy = PeerPolicy::for_cgroup(trusted.cgroup_id);
 
+    // The session watchdog (issue #172). Armed by shepherdd opening a
+    // supervision connection, and fired by it stopping — which is the one thing
+    // an activity can do to its supervisor that #161's fallback cannot catch,
+    // because that fallback runs at the uid doing the killing.
+    //
+    // Asked *before* anything is served, so the answer is ready for the first
+    // supervision connection: shepherdd is the only process that can report
+    // "this device has a watchdog that cannot fire", and only while it is alive
+    // to do it.
+    let (guard_tx, guard_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Two things have to be true for the watchdog to work, and they fail
+    // independently: there has to be a way to *ask* logind, and polkit has to
+    // allow the asking. Both are settled here, before a byte is served, so the
+    // first supervision connection gets the real answer rather than an
+    // optimistic one.
+    let (armed, caveat) = match session::LogindTerminator::new(&conn).await {
+        Ok(terminator) => {
+            let authority = polkit::may_end_sessions(&conn).await;
+            match &authority {
+                polkit::Authority::Granted => info!(
+                    session = %trusted.id,
+                    "The session watchdog can end this session if nothing is supervising it"
+                ),
+                polkit::Authority::Denied => error!(
+                    action = "org.freedesktop.login1.manage",
+                    "polkit refuses this daemon the right to end a session, so the watchdog \
+                     cannot fire. Install \
+                     /etc/polkit-1/rules.d/50-shepherd-session-guard.rules (issue #172)"
+                ),
+                polkit::Authority::Unknown(why) => warn!(
+                    %why,
+                    "Could not ask polkit whether the watchdog may end a session; it will try \
+                     anyway"
+                ),
+            }
+            tokio::spawn(guard::run(
+                guard_rx,
+                guard::Guard::new(guard::BEAT_DEADLINE, guard::CLOSE_SETTLE),
+                trusted.id.clone(),
+                Arc::new(terminator),
+            ));
+            (authority.armed(), authority.caveat())
+        }
+        Err(e) => {
+            error!(error = %e, "No way to end the session; the watchdog is inert");
+            // Nothing is driving the guard, so let the events go nowhere rather
+            // than pile up in a channel with no reader for the life of the
+            // session.
+            drop(guard_rx);
+            (
+                false,
+                Some(format!(
+                    "this daemon could not reach logind to end a session ({e}), so nothing \
+                     will end it if shepherdd stops supervising it"
+                )),
+            )
+        }
+    };
+    let guard_handle = guard::Handle::new(guard_tx.clone(), armed, caveat, guard::BEAT_DEADLINE);
+    // A sleeping machine is not a wedged one. Failing to subscribe is not fatal
+    // — it costs the watchdog the ability to tell those apart, and that is
+    // worth a loud line rather than a refusal to start.
+    match session::forward_sleep_signals(&conn, guard_tx).await {
+        Ok(forwarder) => {
+            tokio::spawn(forwarder);
+        }
+        Err(e) => error!(error = %e, "Not watching for suspend; a sleep may look like a wedge"),
+    }
+
     let state_dir = args
         .state_dir
         .clone()
@@ -183,7 +254,7 @@ async fn main() -> Result<()> {
     let watch = session::watch_for_loss(&conn, trusted.clone()).await?;
 
     tokio::select! {
-        r = serve(listener, policy, store, files, config_changes) => r,
+        r = serve(listener, policy, store, files, config_changes, guard_handle) => r,
         r = watch => r,
     }
 }
@@ -300,6 +371,7 @@ async fn serve(
     store: Arc<dyn Store>,
     files: Arc<dyn ProtectedFiles>,
     config_changes: tokio::sync::broadcast::Sender<()>,
+    guard: guard::Handle,
 ) -> Result<()> {
     loop {
         let (stream, _) = match listener.accept().await {
@@ -320,13 +392,14 @@ async fn serve(
                 let store = Arc::clone(&store);
                 let files = Arc::clone(&files);
                 let changes = config_changes.subscribe();
+                let guard = guard.clone();
                 // One task per connection. In practice there are two — a
                 // request connection and a config watch — but a task keeps a
                 // slow or wedged peer from stalling the accept loop, which is
                 // what would turn a hung client into a device that cannot
                 // reconnect.
                 tokio::spawn(async move {
-                    if let Err(e) = session_loop(stream, store, files, changes).await {
+                    if let Err(e) = session_loop(stream, store, files, changes, guard).await {
                         debug!(error = %e, "A state connection ended");
                     }
                 });
@@ -352,6 +425,7 @@ async fn session_loop(
     store: Arc<dyn Store>,
     files: Arc<dyn ProtectedFiles>,
     mut changes: tokio::sync::broadcast::Receiver<()>,
+    guard: guard::Handle,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -360,6 +434,47 @@ async fn session_loop(
         if line.trim().is_empty() {
             continue;
         }
+        // `Supervise` changes what the connection is, like `WatchConfig`
+        // below — but in the other direction: after it, this side only reads,
+        // and what it is reading for is the moment the reading stops
+        // (issue #172).
+        if matches!(
+            serde_json::from_str::<StateRequest>(&line),
+            Ok(StateRequest::Supervise)
+        ) {
+            let reply = serde_json::to_string(&guard.reply())?;
+            write_half.write_all(reply.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
+            write_half.flush().await?;
+            // Armed from here until this value is dropped, which every way out
+            // of this function goes through -- EOF, a decode error, the task
+            // unwinding. The one that would have been forgotten is the one that
+            // matters most.
+            let connection = guard.connection();
+            debug!("A peer is supervising the session");
+            while let Some(line) = lines.next_line().await? {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<StateRequest>(&line) {
+                    Ok(StateRequest::Heartbeat) => connection.beat(),
+                    // Nothing else belongs on this connection. Ending it is
+                    // safe in the direction that matters: the guard hears the
+                    // close and starts its settle, so a confused client costs
+                    // the session rather than costing the supervision.
+                    other => {
+                        warn!(
+                            request = ?other.ok(),
+                            "Something other than a heartbeat arrived on a supervision \
+                             connection; ending it"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         // `WatchConfig` changes what the connection is, so it is intercepted
         // here rather than dispatched: after it, this side only writes.
         if matches!(

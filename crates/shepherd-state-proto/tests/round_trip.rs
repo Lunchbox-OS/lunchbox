@@ -563,3 +563,93 @@ fn the_protected_files_round_trip_and_take_is_atomic() {
         "deleting what is not there is false, not an error"
     );
 }
+
+/// The supervision channel, both halves, over a real socket (issue #172).
+///
+/// The custodian's connection loop lives in a binary crate and cannot be called
+/// from here, so what this pins is the *wire*: that `Supervise` is answered
+/// once and then never again, that heartbeats arrive as heartbeats, and — the
+/// part the whole watchdog rests on — that a dropped client is an EOF the
+/// server can see. A `beat()` that started answering, or a `Supervise` the
+/// server had to reply to twice, would deadlock a device rather than fail a
+/// test, so it is worth holding both ends together here.
+#[test]
+fn the_supervision_channel_is_one_reply_and_then_only_beats() {
+    use shepherd_state_proto::{StateRequest, SuperviseReply, Transport};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("state.sock");
+    let listener = UnixListener::bind(&socket).expect("bind");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut writer = stream.try_clone().expect("clone");
+        let mut lines = BufReader::new(stream).lines();
+
+        // The handshake `Transport::connect_at` makes before anything else.
+        let hello = lines.next().expect("a line").expect("read");
+        assert!(matches!(
+            serde_json::from_str::<StateRequest>(&hello),
+            Ok(StateRequest::Hello { .. })
+        ));
+        writeln!(
+            writer,
+            "{}",
+            serde_json::to_string(&shepherd_state_proto::WireResult::Ok {
+                value: shepherd_state_proto::HelloReply {
+                    proto: shepherd_state_proto::PROTO_VERSION,
+                },
+            })
+            .expect("encode")
+        )
+        .expect("write");
+
+        let request = lines.next().expect("a line").expect("read");
+        assert!(matches!(
+            serde_json::from_str::<StateRequest>(&request),
+            Ok(StateRequest::Supervise)
+        ));
+        writeln!(
+            writer,
+            "{}",
+            serde_json::to_string(&SuperviseReply {
+                armed: true,
+                reason: None,
+                deadline: Duration::from_secs(30),
+            })
+            .expect("encode")
+        )
+        .expect("write");
+
+        // Everything after the reply is one-way.
+        let mut beats = 0;
+        for line in lines {
+            match serde_json::from_str::<StateRequest>(&line.expect("read")) {
+                Ok(StateRequest::Heartbeat) => beats += 1,
+                other => panic!("only heartbeats belong here, got {other:?}"),
+            }
+        }
+        // Falling out of the loop is the EOF the watchdog fires on.
+        tx.send(beats).expect("report");
+    });
+
+    let transport = Transport::connect_at(socket, nix::unistd::getuid().as_raw()).expect("connect");
+    let (reply, mut supervision) = transport.into_supervision_stream().expect("supervise");
+    assert!(reply.armed, "the custodian said it can end the session");
+    assert_eq!(reply.deadline, Duration::from_secs(30));
+
+    for _ in 0..3 {
+        supervision.beat().expect("beat");
+    }
+    // Dropping the client is what a killed shepherdd does to its descriptors,
+    // and it is the whole mechanism: the server sees the stream end.
+    drop(supervision);
+
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the server saw the connection end"),
+        3
+    );
+    server.join().expect("server");
+}
