@@ -154,6 +154,24 @@ Both flyouts were opened and screenshotted in both layouts. On the horizontal
 bar the title stopped ellipsizing entirely — the ~200px the sliders gave back
 is more than the name needed.
 
+## Two follow-up nits
+
+Both raised on review of the screenshots, both fixed in a third commit.
+
+- **The page-turn arrows were rotating with the bar** (`⌃`/`⌄` in a column,
+  `‹`/`›` across). They point at the *pages*, not at the buttons, and the
+  direction a reader thinks in does not rotate when the bar does — so they are
+  `‹`/`›` in both layouts now. The original reasoning (a sideways arrow means
+  nothing stacked in a column) traded away the more important consistency: a
+  child who learns `›` on one device should not have to learn it again.
+- **The countdown was not centred on the vertical bar.** A vertical box gives
+  every child the bar's full width and `TimeDisplay` packs its label at the
+  start, so the default `Fill` left it hard against the left edge while the
+  clock face and the rotated title beside it were centred. The title already
+  asked for `halign(Center)` explicitly; the countdown now does too. Worth
+  knowing generally: on the vertical bar, centring is something each `left_box`
+  child has to ask for.
+
 ## Harness notes for the next person
 
 - **The headless output comes up at scale 1.5**, so `--size 1280x600` is a

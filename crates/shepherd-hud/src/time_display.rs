@@ -63,11 +63,27 @@ impl TimeDisplay {
         glib::Object::builder().build()
     }
 
-    /// Switch to the three-character duration format the vertical HUD needs,
-    /// where the readout has 48px to fit across rather than along.
+    /// Lay the readout out for the vertical HUD: the three-character duration
+    /// format, and centred across the bar.
+    ///
+    /// Both are the same problem — the readout has 48px to fit *across* rather
+    /// than an open bar to sit along — so they are one call.
+    ///
+    /// The centring has to be asked for. A vertical box allocates every child
+    /// the full width of the bar, and this widget's own label is packed at the
+    /// start of it, so the default `Fill` left the countdown hard against the
+    /// left edge while the clock face and the activity title above it were
+    /// centred. `Fill` is restored for the horizontal bar, where the widget is
+    /// allocated its natural width and the alignment makes no difference
+    /// either way.
     pub fn set_compact(&self, compact: bool) {
         let imp = self.imp();
         imp.compact.set(compact);
+        self.set_halign(if compact {
+            gtk4::Align::Center
+        } else {
+            gtk4::Align::Fill
+        });
         self.update_display();
     }
 

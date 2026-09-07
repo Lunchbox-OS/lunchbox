@@ -649,20 +649,20 @@ fn build_hud_content(
     // They live in a box of their own so the pair stays together and in
     // reading order when the bar is reversed for the vertical layout: the box
     // lands at the bottom as a unit, with "back" still ahead of "forward".
-    // Sideways `‹`/`›` arrows would be meaningless stacked vertically, so the
-    // vertical bar names the keys they actually synthesize — Page Up above
-    // Page Down.
+    //
+    // The arrows point the way the *pages* go, not the way the buttons are
+    // stacked: `‹` back and `›` forward in both layouts. The vertical bar used
+    // to swap them for `⌃`/`⌄`, on the reasoning that a sideways arrow means
+    // nothing in a column — but the direction a reader thinks in is the page's,
+    // and it does not rotate when the bar does. A child who learns `›` on one
+    // device should not have to learn it again on another.
     let page_box = gtk4::Box::builder()
         .orientation(orientation.group())
         .spacing(0)
         .visible(false)
         .build();
 
-    let page_back_icon = gtk4::Image::from_icon_name(if vertical {
-        "go-up-symbolic"
-    } else {
-        "go-previous-symbolic"
-    });
+    let page_back_icon = gtk4::Image::from_icon_name("go-previous-symbolic");
     page_back_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let page_back_button = gtk4::Button::builder()
         .child(&page_back_icon)
@@ -673,11 +673,7 @@ fn build_hud_content(
     page_back_button.add_css_class("page-button");
     page_box.append(&page_back_button);
 
-    let page_forward_icon = gtk4::Image::from_icon_name(if vertical {
-        "go-down-symbolic"
-    } else {
-        "go-next-symbolic"
-    });
+    let page_forward_icon = gtk4::Image::from_icon_name("go-next-symbolic");
     page_forward_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let page_forward_button = gtk4::Button::builder()
         .child(&page_forward_icon)

@@ -16,9 +16,11 @@ Always-visible HUD overlay for Shepherd.
 - **Reset** - Restart an activity in place, for kinds that offer it (`type = "retroarch"`)
 - **Page turning** - `‹` / `›` for reading activities (`type = "ebook"`), which synthesize `Page Up` / `Page Down` through `/dev/uinput`. They exist because a touchscreen cannot turn a page any other way: readers bind paging to keys, a D-pad or a wheel, and have no swipe gesture. The HUD is where they belong — it is on the overlay layer, above the activity, and it is shepherd's own surface rather than something a reader's own restrictions could take away. See `src/page_turn.rs` and `docs/ebooks.md`.
 
-  On the vertical bar these become Page Up / Page Down arrows stacked at the
-  bottom, since sideways `‹`/`›` would be meaningless in a column — and they
-  name the keys they actually synthesize.
+  On the vertical bar the pair stacks at the bottom, but the arrows keep
+  pointing `‹` back and `›` forward. They point the way the *pages* go, not the
+  way the buttons are stacked: the direction a reader thinks in does not rotate
+  when the bar does, and a child who learns `›` on one device should not have
+  to learn it again on another.
 
   A reading session used to be the one case where the bar ran out of room, and the sliders and percentages were shortened and hidden to pay for these two buttons. Since the sliders moved into flyouts (issue #178) the bar has the room and nothing has to yield. The activity name still ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
 - **Power controls** - Suspend, shutdown, restart

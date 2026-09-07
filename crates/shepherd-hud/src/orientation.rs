@@ -19,6 +19,10 @@
 //! analog face because a digital one is wider than the bar; and the warning
 //! banner, whose operator-authored sentence cannot fit in a 48px strip and so
 //! moves into a popover.
+//!
+//! What does *not* rotate is anything pointing at something outside the bar.
+//! The page-turn arrows point the way the pages go, so they stay `‹` back and
+//! `›` forward in both layouts even though the buttons stack in a column.
 
 use gtk4::glib::object::IsA;
 use shepherd_api::HudOrientation;
