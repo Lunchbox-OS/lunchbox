@@ -265,6 +265,14 @@ pub enum ProtectedFile {
     ResetSentinel,
     /// The queue of BlueZ bonds still to be removed after a factory reset.
     UnbondQueue,
+    /// `web-auth.toml` — the management web UI's password hash, its
+    /// first-run enrolment code, and the live browser sessions (issue #156).
+    WebAuth,
+    /// `tls.pem` — the self-signed certificate and key the management API
+    /// generated for itself, kept so the fingerprint a parent accepted
+    /// survives a restart. Here rather than in the data directory because the
+    /// half of it that is a private key must not be readable from an activity.
+    TlsCert,
 }
 
 /// Who a protected file belongs to.
@@ -296,7 +304,11 @@ impl ProtectedFile {
     pub fn scope(self) -> FileScope {
         match self {
             Self::Config => FileScope::PerUser,
-            Self::AdminRecord | Self::ResetSentinel | Self::UnbondQueue => FileScope::System,
+            Self::AdminRecord
+            | Self::ResetSentinel
+            | Self::UnbondQueue
+            | Self::WebAuth
+            | Self::TlsCert => FileScope::System,
         }
     }
 }
@@ -312,6 +324,8 @@ impl ProtectedFile {
             Self::AdminRecord => "admin.toml",
             Self::ResetSentinel => ".factory-reset-ble",
             Self::UnbondQueue => "unbond-queue.toml",
+            Self::WebAuth => "web-auth.toml",
+            Self::TlsCert => "tls.pem",
         }
     }
 }

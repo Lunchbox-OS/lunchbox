@@ -21,6 +21,8 @@ const ALL: &[ProtectedFile] = &[
     ProtectedFile::AdminRecord,
     ProtectedFile::ResetSentinel,
     ProtectedFile::UnbondQueue,
+    ProtectedFile::WebAuth,
+    ProtectedFile::TlsCert,
 ];
 
 fn installer() -> String {
