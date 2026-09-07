@@ -104,7 +104,7 @@ pub async fn status(State(state): State<AppState>, req: Request) -> Response {
 pub async fn setup(req: Request) -> Response {
     let (parts, body) = match split::<SetupBody>(req).await {
         Ok(pair) => pair,
-        Err(response) => return response,
+        Err(e) => return e.into_response(),
     };
     let (Some(web), sources) = (web(&parts), sources(&parts)) else {
         return not_configured();
@@ -125,7 +125,7 @@ pub async fn setup(req: Request) -> Response {
 pub async fn login(req: Request) -> Response {
     let (parts, body) = match split::<LoginBody>(req).await {
         Ok(pair) => pair,
-        Err(response) => return response,
+        Err(e) => return e.into_response(),
     };
     let (Some(web), sources) = (web(&parts), sources(&parts)) else {
         return not_configured();
@@ -163,7 +163,7 @@ pub async fn request_login(req: Request) -> Response {
 pub async fn poll_login(req: Request) -> Response {
     let (parts, body) = match split::<PollBody>(req).await {
         Ok(pair) => pair,
-        Err(response) => return response,
+        Err(e) => return e.into_response(),
     };
     let (Some(web), sources) = (web(&parts), sources(&parts)) else {
         return not_configured();
@@ -276,18 +276,38 @@ use serde_json::Value;
 /// the body carries the credential, the headers carry the User-Agent that
 /// becomes the session's label and the peer that the throttle counts — so they
 /// take the whole request and split it here.
-async fn split<T: DeserializeOwned>(req: Request) -> Result<(Parts, T), Response> {
+async fn split<T: DeserializeOwned>(req: Request) -> Result<(Parts, T), BadBody> {
     let (parts, body) = req.into_parts();
     // A login body is a password and maybe six digits. The cap is three orders
     // of magnitude above that and exists so an unauthenticated endpoint cannot
     // be asked to buffer something large.
     let bytes = match axum::body::to_bytes(body, 16 * 1024).await {
         Ok(bytes) => bytes,
-        Err(_) => return Err(bad_request("Request body too large")),
+        Err(_) => return Err(BadBody::TooLarge),
     };
     match serde_json::from_slice::<T>(&bytes) {
         Ok(value) => Ok((parts, value)),
-        Err(e) => Err(bad_request(format!("Malformed request body: {e}"))),
+        Err(e) => Err(BadBody::Malformed(e)),
+    }
+}
+
+/// Why a body could not be read.
+///
+/// A description rather than the 400 itself: a `Response` is 128 bytes, and an
+/// `Err` variant that large is what `clippy::result_large_err` exists to catch
+/// — every caller of `split` pays for it on the success path too. The caller
+/// turns this into the same response it used to receive.
+enum BadBody {
+    TooLarge,
+    Malformed(serde_json::Error),
+}
+
+impl IntoResponse for BadBody {
+    fn into_response(self) -> Response {
+        match self {
+            BadBody::TooLarge => bad_request("Request body too large"),
+            BadBody::Malformed(e) => bad_request(format!("Malformed request body: {e}")),
+        }
     }
 }
 
