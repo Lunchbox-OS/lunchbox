@@ -194,3 +194,130 @@ that declared conffiles — and this change ships in 0.5.0. It is the
 released version that still had them. Upgrading from anything newer finds
 nothing to do, so it does not need touching again unless a conffile is
 reintroduced.
+
+## The rebase onto the session watchdog (#172), and what it changed
+
+**Prompt:** `#179 is checked out. Rebase atop the current origin/main, then
+reverify. You may uninstall the source build and install packages at whatever
+versions you need to test the upgrade paths. You have a phone in this
+environment -- ensure that the BLE pair and management workflows still work
+correctly after the changes.`
+
+`main` moved on while this was open: #172's session watchdog landed, and it
+shipped **a third rule into the admin directory this change is emptying** —
+`50-shepherd-session-guard.rules`, installed by `install_state` to
+`POLKIT_RULES_DIR` and declared a conffile alongside the other four. The rebase
+conflicted on exactly that line of the `conffiles` heredoc, which is the right
+place to have conflicted.
+
+Moving it came for free — `POLKIT_RULES_DIR` is the vendor directory now, so
+the rule lands under `/usr/share` with no further work. Retiring the copies
+already on devices did not:
+
+- it joins the paths the maintainer scripts hand `rm_conffile`,
+- and the paths `remove_superseded_copy` clears on a from-source install,
+- and `uninstall_state` clears both its locations, like the other two steps do.
+
+No *release* declared this one a conffile — only builds of `main` after 0.4.1
+was cut — and those carry 0.4.1's version number, so `PACKAGE_LAST_CONFFILE_VERSION`
+covers it unchanged. Where it was never registered the helper is a no-op. That
+reasoning is written above `_package_retired_conffiles`, because "why is an
+unreleased path in this list" is the question a reader will have.
+
+Leaving it out would have been the quiet failure this whole change is about: a
+stale `/etc` copy outranking the rule that replaced it, and an uninstall leaving
+a uid holding the right to end any session on the machine.
+
+### Reverified on the box, not in a fake root
+
+Unlike the first pass, this ran against the dev box's real dpkg. The from-source
+install was removed, packages were installed and upgraded for real, and the box
+was put back on a from-source install afterwards.
+
+Baseline: a `.deb` built from `origin/main` (0.4.1), declaring all **five**
+conffiles, with the drop-in rewritten to a *different* machine's `bluetoothd`
+(what 0.4.1's postinst writes on a device whose path differs from the build
+host's — the condition the defect needs), the sway config hand-edited, and the
+udev rule hand-edited.
+
+1. **0.4.1 → 0.5.0, unattended, no force options.** No prompt and no `==>`.
+   Three `Removing obsolete conffile` lines — both polkit rules **and** the
+   session watchdog's; the hand-edited udev rule preserved as `.dpkg-bak`, which
+   is the other `rm_conffile` branch. The sway config replaced, operator edit and
+   all; `shepherd.conf.d/` untouched; the drop-in re-rendered with *this* host's
+   `bluetoothd`, recovering from the planted device path.
+2. **The subsystems read the moved files.** `/dev/uinput` is `root:input 0660`
+   and `udevadm test` names `/usr/lib/udev/rules.d/71-shepherd-uinput.rules`;
+   `pkcheck` answers `yes` for `org.shepherd.firewall.apply-process` as a
+   `shepherd-firewall` member and `yes` for `org.freedesktop.login1.manage` as
+   `shepherd-state`, both from `/usr/share/polkit-1/rules.d` — and
+   `auth_admin_keep` for a uid neither rule names, so the check discriminates.
+   `systemctl show bluetooth.service -p ExecStart` resolves through the drop-in.
+3. **`apt install --reinstall`, no `--force-confmiss`,** after deleting all five
+   behind dpkg's back: all five come back, and `dpkg-query -L` names exactly the
+   missing ones first.
+4. **0.5.0 → 0.5.1 with the drop-in template edited** — the change 0.4.x could
+   not deliver. It lands, `ExecStart` is still right for the machine, no
+   `.dpkg-dist`.
+5. **`apt remove`** takes the postinst-written drop-in *and* its directory (dpkg
+   would not have; it never unpacked it) and leaves `/var/lib/shepherdd/{state,admin}`
+   and the `shepherd-state` uid. **`apt purge`** clears the rest, `.dpkg-bak`
+   included.
+6. **From-source symmetry**, on the real box: a legacy copy planted at
+   `/etc/polkit-1/rules.d/50-shepherd-session-guard.rules` is removed by
+   `install state` (`Removing the superseded …`), and `uninstall all` clears both
+   its locations.
+
+`cargo test --workspace --all-targets` (68 test binaries), `cargo clippy
+--workspace --all-targets -- -D warnings`, `cargo fmt --all`, `shellcheck` and
+`shepherd version check` are clean on the rebased tree.
+
+### A correction to claim 5 above
+
+The earlier pass said the drop-in's obsolete conffile record "survives upgrade,
+reinstall and remove, and clears on purge". Measured on the box, that is right
+for every ordinary path — it survived 0.4.1 → 0.5.0 → 0.5.1 and `apt remove`,
+and `dpkg-query -S` still answered for the path — **but it also clears if the
+file is gone from disk when dpkg unpacks over it.** Deleting the drop-in by hand
+and then reinstalling dropped the record, after which `dpkg-query -S` no longer
+answers for that path.
+
+That matters beyond bookkeeping: `path_owned_by_dpkg` asks `dpkg-query -S`, so on
+a box where the record has been dropped this way a source `uninstall all` will
+take the drop-in, where on an ordinary upgraded box it leaves it. Both are
+defensible; neither is a bug. It is just not the invariant the earlier wording
+implied.
+
+### BLE pairing and management, on the phone
+
+Driven through the `companion-pairing` skill against the headless dev session,
+on the Realtek radio (`8C:68:8B:41:02:DC`) pinned with `[service.ble_management]
+adapter` — the Qualcomm one is the individually-broken controller that skill
+warns about.
+
+- **First pairing from unclaimed** (after `.factory-reset-ble`): Numeric
+  Comparison digits matched on both sides (`473465`), the bond came up `LE:Y`
+  with `EncryptionStatus{keySize=16`, the `claim` RPC was recorded and
+  `admin.toml` written.
+- **Management reads**: `service_state`, `list_groups`, `list_diagnostics`,
+  `get_volume`, `get_brightness`, `list_audio_outputs` all `ok=true`; the app
+  rendered all 17 activities with their block reasons and token balances, and
+  all seven diagnostics with severities and remedies.
+- **A management write**: muting from the phone raised `set_mute` on the daemon
+  and `VolumeChanged { muted: true }` reached the launcher and HUD — phone → BLE
+  → shepherdd → UI, round trip. Unmuting put it back.
+- **Reconnect** (app force-stopped and relaunched) and **reconnect after a
+  daemon restart** (bond intact, no re-pair) both came back, the second after the
+  app's usual backoff ladder, with `BLE outbox backlog drained … bytes=10684
+  reads=22` on the daemon side — the bounded drain working as designed.
+
+None of this is code this change touches: `git diff origin/main HEAD` reaches
+nothing under `crates/` or `companion-android/` but version numbers.
+
+**One pre-existing rough edge seen in passing, and not from this change.** On the
+very first connection after `claim`, the app logged `dispatch: failed to parse
+response frame (7456B)` for the `service_state` reply and dropped it, so the
+activity list sat empty until the next connect. It does not reproduce on a clean
+connect — every later `service_state`, including larger ones, parsed fine — so it
+looks like a frame straddling the claim-time backlog rather than a schema
+problem. Worth a look in `ShepherdConnection`'s reassembly, separately from #177.
