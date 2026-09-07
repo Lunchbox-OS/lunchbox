@@ -168,6 +168,16 @@ class ManagementClient(private val connection: ShepherdConnection) {
     suspend fun listDiagnostics(): DiagnosticSet =
         decode(call("list_diagnostics", RpcParams.listDiagnostics()))
 
+    /**
+     * Where the device is on the network, and where its web interface is
+     * listening (issue #182).
+     *
+     * The one question this app cannot answer any other way: it reached the
+     * device over BLE and has no idea what its address is.
+     */
+    suspend fun networkStatus(): NetworkStatusView =
+        decode(call("network_status", RpcParams.networkStatus()))
+
     suspend fun listWindows(): List<WindowInfo> =
         decode(call("list_windows", RpcParams.listWindows()))
 

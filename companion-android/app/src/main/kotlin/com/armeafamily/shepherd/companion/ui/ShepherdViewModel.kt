@@ -21,6 +21,8 @@ import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.EventPayload
 import com.armeafamily.shepherd.companion.domain.GroupView
 import com.armeafamily.shepherd.companion.domain.ManagementClient
+import com.armeafamily.shepherd.companion.domain.NetworkInterfaceView
+import com.armeafamily.shepherd.companion.domain.NetworkStatusView
 import com.armeafamily.shepherd.companion.domain.ServiceStateSnapshot
 import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.domain.ShepherdRecord
@@ -130,6 +132,28 @@ data class DiagnosticsUiState(
         set.items.filter { (it.subject as? DiagnosticSubject.Entry)?.entryId == entryId }
 }
 
+/**
+ * Where the device is on the network (issue #182).
+ *
+ * Kept out of [DeviceUiState] for the same reason the window list is: nothing
+ * needs it unless somebody has the network screen open, and the addresses on a
+ * device are not worth an RPC on every connect.
+ */
+data class NetworkUiState(
+    val status: NetworkStatusView? = null,
+    val loading: Boolean = false,
+    /** Last refresh failure, shown alongside whatever status we still hold. */
+    val error: String? = null,
+) {
+    /** Interfaces another machine could reach this device at, most useful first. */
+    val reachable: List<NetworkInterfaceView>
+        get() = status?.interfaces.orEmpty().filter { it.reachable }
+
+    /** Everything else — loopback, container bridges, interfaces with no address. */
+    val other: List<NetworkInterfaceView>
+        get() = status?.interfaces.orEmpty().filter { !it.reachable }
+}
+
 data class WindowsUiState(
     val windows: List<WindowInfo> = emptyList(),
     val loading: Boolean = false,
@@ -198,6 +222,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private val _diagnostics = MutableStateFlow(DiagnosticsUiState())
     val diagnostics: StateFlow<DiagnosticsUiState> = _diagnostics
 
+    private val _network = MutableStateFlow(NetworkUiState())
+    val network: StateFlow<NetworkUiState> = _network
+
     /** Default name to claim under — the phone's model. */
     val defaultPhoneName: String = Build.MODEL ?: "Android phone"
 
@@ -208,6 +235,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private var pairingJob: Job? = null
     private var windowsJob: Job? = null
     private var diagnosticsJob: Job? = null
+    private var networkJob: Job? = null
     private var bound = false
 
     init {
@@ -276,6 +304,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // hit whatever container happens to hold it there.
         if (!sameDevice) _windows.value = WindowsUiState()
         if (!sameDevice) _diagnostics.value = DiagnosticsUiState()
+        // Another box's addresses are actively misleading: they would send
+        // somebody to SSH into the device they just switched away from.
+        if (!sameDevice) _network.value = NetworkUiState()
         conn.start()
         eventsJob = viewModelScope.launch {
             conn.events.collect { event -> applyEvent(event.payload) }
@@ -744,6 +775,35 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 val why = if (e is RpcException) ReasonText.describe(e) else e.message
                 _diagnostics.update {
                     it.copy(loading = false, error = why ?: "Couldn't read device health.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Re-read where the device is on the network (issue #182).
+     *
+     * Polled while the screen is open rather than pushed: an address changes
+     * when a cable is plugged in or a VPN comes up, and neither is worth an
+     * event on a link this app shares with everything else it does.
+     */
+    fun refreshNetwork() {
+        if (networkJob?.isActive == true) return
+        val c = client ?: run {
+            _network.update { it.copy(loading = false, error = "Not connected.") }
+            return
+        }
+        _network.update { it.copy(loading = true) }
+        networkJob = viewModelScope.launch {
+            try {
+                val status = c.networkStatus()
+                _network.update { it.copy(status = status, loading = false, error = null) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _network.update {
+                    it.copy(loading = false, error = why ?: "Couldn't read the network status.")
                 }
             }
         }

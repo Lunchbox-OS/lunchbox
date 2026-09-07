@@ -42,6 +42,7 @@ fun DeviceControlsScreen(
     onBack: () -> Unit,
     onOpenWindows: () -> Unit,
     onOpenHealth: () -> Unit,
+    onOpenNetwork: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
 
@@ -96,6 +97,13 @@ fun DeviceControlsScreen(
                     // seeing this when it isn't (issue #143).
                     OutlinedButton(onClick = onOpenHealth, modifier = Modifier.fillMaxWidth()) {
                         Text("Device health…")
+                    }
+                    // The one screen here that is useful precisely when the
+                    // network path is broken: this app is on Bluetooth, so it
+                    // can still say where the device is and whether its web
+                    // interface came up at all (issue #182).
+                    OutlinedButton(onClick = onOpenNetwork, modifier = Modifier.fillMaxWidth()) {
+                        Text("Network…")
                     }
                 }
             }
