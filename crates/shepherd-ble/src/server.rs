@@ -854,14 +854,45 @@ fn spawn_device_watcher(
         // watchdog of each pair to no-op on a stale generation) and put
         // two identical lines in the journal for every event, which is
         // its own cost when the journal is the debugging tool.
+        //
+        // The event payload is *not* the state, and this is the whole
+        // reason the loop reads the property back. `bluer::Device::events`
+        // keeps only the changed properties, throwing away the interface
+        // that emitted them (`device.rs`: `Event::PropertiesChanged {
+        // changed, .. }`), and then matches on the property *name*. On
+        // BlueZ >= 5.82 with `Experimental` — which shepherd requires for
+        // `PreferredBearer`, so every device has it — one device object
+        // carries `org.bluez.Device1`, `org.bluez.Bearer.LE1` *and*
+        // `org.bluez.Bearer.BREDR1`, and all three have a `Connected`
+        // property. So a dual-mode phone bringing its classic profiles up
+        // and down (A2DP, AVRCP, HFP — captured on the wire) arrives here
+        // as `Connected(true)` then `Connected(false)` for a bearer that
+        // has nothing to do with the LE link carrying our GATT service,
+        // which never went anywhere.
+        //
+        // `is_connected()` asks for `Device1`'s own property, so it
+        // answers for the device rather than for whichever bearer last
+        // twitched. Reading it back costs one round trip per event and
+        // turns "something about connectivity changed" into the fact.
         let mut connected: Option<bool> = None;
         while let Some(DeviceEvent::PropertyChanged(prop)) = events.next().await {
-            if let DeviceProperty::Connected(now) = prop
-                && connected.replace(now) == Some(now)
-            {
+            if !matches!(prop, DeviceProperty::Connected(_)) {
                 continue;
             }
-            match prop {
+            let now = match device.is_connected().await {
+                Ok(now) => now,
+                // The object is going away — the stream is about to end
+                // anyway, and guessing from the payload is what this is
+                // here to avoid.
+                Err(e) => {
+                    debug!(peer = %addr, error = %e, "could not read Connected; ignoring the event");
+                    continue;
+                }
+            };
+            if connected.replace(now) == Some(now) {
+                continue;
+            }
+            match DeviceProperty::Connected(now) {
                 // A companion drains both outboxes before it will send
                 // its first RPC, so the depth logged here *is* the
                 // connect latency it's about to pay. Without this line a

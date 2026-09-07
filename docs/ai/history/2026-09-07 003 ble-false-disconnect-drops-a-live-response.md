@@ -14,59 +14,77 @@ not the app's fault.
 
 ## What is actually happening
 
-`Device.Connected` is not a trustworthy account of whether the GATT link still
-carries ATT traffic. It arrives over a second behind the reads and writes it
-purports to describe, and **`pin_peer_to_bredr` provokes a spurious
-`Connected(false)` of its own**: pinning a freshly-paired peer tears down the
-kernel's LE auto-connect, BlueZ reports the device disconnected, and never
-reports it back — while the companion carries on reading and writing over the
-same link for the rest of the session.
+BlueZ is not being spurious. It is being precise, and the daemon was reading it
+imprecisely.
 
-The disconnect arm called `reset_session()`, which cleared both outboxes
-unconditionally. So the ~7.4 KB `service_state` the companion had just asked for
-and was halfway through draining was destroyed underneath it.
+BlueZ 5.85 started with `Experimental` — which shepherd *requires*, because the
+dial-out fix needs `PreferredBearer` — puts three interfaces on one device
+object: `org.bluez.Device1`, `org.bluez.Bearer.LE1` and
+`org.bluez.Bearer.BREDR1`. **All three have a `Connected` property.**
 
-Caught byte-for-byte with `RUST_LOG='info,shepherd_ble=debug'`:
+`bluer::Device::events()` throws the interface away. It matches
+`Event::PropertiesChanged { changed, .. }` — the `interface` field is carried
+all the way to that point and then discarded — and maps the payload by property
+*name*. So a `Connected` change on `Bearer.BREDR1` is delivered to the daemon as
+`DeviceProperty::Connected`, indistinguishable from the device's own.
+
+A dual-mode phone brings its classic profiles up and down on its own schedule
+after LE bonding. Captured on the system bus during a pairing:
 
 ```
-16:52:34.944  claim (id=1) received, response queued
-16:52:35.136  read 255                    <- claim response, delivered whole
-16:52:35.480  service_state (id=2) received; response queued  ~7.4 KB
-16:52:35.672  read 512  ┐
-16:52:35.918  read 512  │
-16:52:35.929  Connected(true): clear_if_aligned DECLINED, kept_for_drain=true
-16:52:35.930  Pinned peer to the BR/EDR bearer
-16:52:36.257  read 512  │   2048 B drained
-16:52:36.454  read 512  ┘
-16:52:36.532  Connected(false): reset_session() -> clear()   <- takes the other ~5.4 KB
-              ... 14 s of empty reads ...
-16:52:50.544  list_groups (id=3)          <- the app's 15 s REQUEST_TIMEOUT_MS expired
+17:25:27.685  InterfacesAdded dev_53_73_F6_74_4E_DA
+              Device1  Address="B8:F4:A4:E5:20:F1"  Bonded=true  PreferredBearer="last-used"
+17:25:31.609  org.bluez.Bearer.BREDR1   Connected=true      <- the phone's classic profiles
+17:25:31.611  org.bluez.Device1         PreferredBearer="bredr"   <- our pin
+17:25:31.861  InterfacesAdded: org.bluez.Network1, org.bluez.MediaControl1
+              Device1  Modalias + UUIDs = A2DP 110a/110c/110e, AVRCP 110e,
+                                          PBAP 1112, HFP 111f …   <- BR/EDR SDP
+17:25:32.194  Device1  ServicesResolved=false
+17:25:32.194  org.bluez.Bearer.BREDR1   Connected=false
+17:25:32.194  org.bluez.Bearer.BREDR1.Disconnected  "org.bluez.Reason.Unknown"
 ```
 
-Note what is *absent*: any later `Connected(false)`, and any `RPC id=1; clearing
-outboxes for new session`. The link never dropped and the RPC session never
-restarted — ids 3, 4, 5… were all answered on the same connection. Only the
-bytes were lost.
+`org.bluez.Device1.Connected` **never changed**. Across the whole capture, every
+genuine LE disconnect emitted `Bearer.LE1.Connected=false` *and*
+`Device1.Connected=false` together; this event emitted only the BR/EDR pair. The
+LE ACL carrying the GATT service was up the entire time, which is exactly why
+the companion's RPCs kept working either side of it.
 
-The companion cannot detect this. A truncated read is indistinguishable from an
-idle one, so it polls an empty characteristic until its RPC timeout. After a
-first pairing the response in question is the opening `service_state`, so the
-first screen a new user sees is empty.
+So the daemon saw a *classic-audio* bearer flap and treated it as its GATT peer
+connecting and then vanishing — and on the vanishing it wiped both outboxes,
+taking the ~7.4 KB `service_state` the companion was mid-drain of.
 
-**Two symptoms, one cause**, depending on how much had been drained when the
-clear landed:
+### It is the dial-out bug's sibling
 
-- *Enough buffered to complete a frame* — the reassembler pads the honest
-  7456-byte length out of the following frame's bytes and hands up a spliced
-  message with a valid-looking JSON head. That is the `failed to parse response
-  frame` line.
-- *Not enough* — the frame never completes, nothing is logged at all, and the
-  app stalls silently for 15 s. That was both later reproductions.
+`pin_peer_to_bredr` is the fix for the reverse dial-out failure: probing an
+`auto_connect` profile on a bonded phone made bluetoothd call
+`device_set_auto_connect(TRUE)` → `MGMT_OP_ADD_DEVICE action=0x02`, after which
+*the kernel* dialled the phone, the box took the central role, and — since only
+a central may start encryption — every read of an `encrypt_authenticated`
+characteristic came back `Insufficient Authentication` forever.
 
-## The fix
+Both bugs are the same confusion: **one bond, two bearers, and code that says
+"the device" when it means "the LE link".** The dial-out bug was the kernel
+using the wrong bearer; this one is the daemon listening to the wrong bearer.
+They are even coupled through `-E`: the experimental flag the dial-out fix needs
+for `PreferredBearer` is the same flag that surfaces the per-bearer interfaces
+this bug rides in on. A stock bluetoothd has neither.
 
-The outboxes now go through `Outbox::clear_if_aligned`, which declines while a
-peer holds a partial frame. That is not a new rule — it is the rule
+The pin is *not* the cause, though it sits suspiciously close in the log. The
+BR/EDR bearer connected 2 ms **before** the `PreferredBearer` write, and the flap
+reproduces at the same 500-600 ms width with the pin left in place.
+
+## The fix, in two layers
+
+**Read the property back instead of trusting the event.** `is_connected()` asks
+for `Device1`'s own `Connected`, so it answers for the device rather than for
+whichever bearer last twitched. One D-Bus round trip per event turns "something
+about connectivity changed" into the fact. That is the root cause, and it also
+stops the daemon arming watchdogs and pinning bearers off classic-profile churn.
+
+**And do not discard bytes a peer is mid-read anyway.** The outboxes now go
+through `Outbox::clear_if_aligned`, which declines while a peer holds a partial
+frame. That is not a new rule — it is the rule
 `Outbox::push_inner` and the `Connected(true)` handler already follow, and for
 the same stated reason: bytes a peer is in the middle of reading are not ours to
 throw away. The disconnect path was the one place still ignoring it.
@@ -84,12 +102,12 @@ single ATT write in practice, so there is next to nothing in flight to protect.
 The `Connected(false)` log line now says "reported disconnected", because that
 is all the property actually tells us.
 
-### Why not fix it at the source
+### Why keep the second layer
 
-Suppressing the `Connected(false)` that follows our own bearer pin would need a
-timing window, and would still leave every other way BlueZ can lie about the
-link. Refusing to discard in-flight bytes is correct no matter why the property
-is wrong.
+The read-back is the fix; the alignment guard is the seatbelt. `Device1.Connected`
+can still go false for real while the companion is mid-frame — a genuine drop
+during a large response — and the guard is what keeps that from being silently
+destructive rather than merely a disconnect. Its cost is one `if`.
 
 ## How it was verified
 
@@ -110,17 +128,19 @@ is wrong.
 - `cargo test --workspace --all-targets` (68 binaries), `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo fmt --all` clean.
 
-### What is not yet proven on hardware
+### Caught in the act, both times
 
-In the post-fix runs BlueZ did not emit the spurious `Connected(false)`
-mid-delivery — it stopped doing so after both Bluetooth stacks were reset
-during the debugging, and it is not something this side can provoke on demand.
-So the hardware runs show the change causes no regression and that
-`service_state` now lands whole, but they do **not** demonstrate the guard
-firing in situ; the unit tests are what pin that. Worth watching for the
-`peer reported gone mid-delivery; keeping what it is still reading` line on a
-device — that log exists precisely so the next person sees it happen rather
-than inferring it.
+The trigger was reproduced with the fix in place, so this is no longer inferred:
+
+- **Alignment guard, on hardware.** BR/EDR bearer up at 17:25:31.609, pin, down
+  at 17:25:32.194 — and the daemon logged `peer reported gone mid-delivery;
+  keeping what it is still reading outbox="response"`. The companion went from
+  `service_state` to its next RPC in **4.1 s** (the natural drain) instead of the
+  15 s RPC timeout, and the device screen populated immediately.
+- **Read-back, on hardware.** Same flap, same width (17:32:08.576 true →
+  17:32:09.099 false, 523 ms), `Device1.Connected` unchanged — and the disconnect
+  arm did not run at all. The connect arm ran once, correctly, because the device
+  really was connected.
 
 ## A note for the next person
 
