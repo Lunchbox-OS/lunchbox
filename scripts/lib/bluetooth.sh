@@ -2,9 +2,14 @@
 # Bluetooth admin operations for shepherd-launcher.
 #
 # Currently one subcommand: `clear`, which force-disconnects and unpairs
-# every BLE peer recorded in a user's shepherdd admin record, then
-# deletes the admin record + factory-reset sentinel so the user's next
-# kiosk session comes up in an unclaimed state.
+# every BLE peer recorded in shepherd's admin record, then deletes the record
+# and any factory-reset sentinel so the next kiosk session comes up unclaimed.
+#
+# Since issue #157 that record is the *device's*, not a user's: there is one
+# Bluetooth adapter and one BlueZ bond table, so there is one admin record,
+# shared by every kiosk user on the machine. `--user` still names whose session
+# to check and whose home to fall back to, but on a device with the custodian
+# what this clears belongs to all of them.
 
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -74,6 +79,21 @@ user_has_active_session() {
         # systemd system, but be defensive).
         who 2>/dev/null | awk -v u="$user" '$1 == u { found=1 } END { exit !found }'
     fi
+}
+
+# Every kiosk user the custodian holds state for.
+#
+# The admin record is the device's, so any of them could have a shepherdd
+# holding it open -- not just the one named on the command line. Empty on a
+# device without a custodian, where the record really is per-user and the named
+# one is the only session that matters.
+_users_with_custodian_state() {
+    [[ -d "$STATED_STATE_ROOT" ]] || return 0
+    local dir
+    for dir in "$STATED_STATE_ROOT"/*/; do
+        [[ -d "$dir" ]] || continue
+        basename "${dir%/}"
+    done
 }
 
 # Read the `identity_address` field out of an admin TOML file.
@@ -164,8 +184,19 @@ bluetooth_clear() {
     require_root
     validate_user "$user"
 
-    if user_has_active_session "$user" && [[ "$force" != "true" ]]; then
-        die "User '$user' currently has an active login session; pass --force to override (this will race with their running shepherdd)"
+    # The record this deletes is the device's, so the race is with *any* kiosk
+    # user's shepherdd, not only the named one. Checking just `--user` would let
+    # a second child's live session have the record pulled out from under it --
+    # the thing this guard exists to prevent, one user over.
+    local busy=()
+    local candidate
+    for candidate in "$user" $(_users_with_custodian_state); do
+        user_has_active_session "$candidate" || continue
+        [[ " ${busy[*]-} " == *" $candidate "* ]] && continue
+        busy+=("$candidate")
+    done
+    if [[ "${#busy[@]}" -gt 0 && "$force" != "true" ]]; then
+        die "Active login session for: ${busy[*]}. shepherd's admin record is the device's, so clearing it races with any running shepherdd; log them out, or pass --force"
     fi
 
     local home
@@ -214,7 +245,12 @@ bluetooth_clear() {
         success "Removed leftover reset sentinel $sentinel"
     fi
 
-    success "Bluetooth state cleared for user '$user'"
+    if [[ "$admin_record" == "$STATED_ADMIN_DIR/"* ]]; then
+        success "Bluetooth state cleared for this device"
+        info "  The admin record is shared, so every kiosk user is now unclaimed."
+    else
+        success "Bluetooth state cleared for user '$user'"
+    fi
 }
 
 # Subcommand dispatcher.
@@ -237,13 +273,14 @@ Commands:
 
 Options for 'clear':
     --user USER             Target user (required).
-    --admin-record PATH     Override admin.toml location
-                            (default: the custodian's copy in
-                            $STATED_ADMIN_DIR/, else
-                            ~USER/$SHEPHERD_DEFAULT_ADMIN_REL).
-    --sentinel PATH         Override reset-sentinel location
-                            (default: the custodian's directory when there is
-                            one, else ~USER/$SHEPHERD_DEFAULT_SENTINEL_REL).
+    --admin-record PATH     Override admin.toml location (default:
+                            $STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE on a
+                            device with the state custodian, else
+                            ~USER/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE).
+    --sentinel PATH         Override reset-sentinel location (default:
+                            $STATED_ADMIN_DIR/$SHEPHERD_RESET_SENTINEL_FILE on a
+                            device with the state custodian, else
+                            ~USER/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE).
     --force                 Proceed even if the user is currently logged in.
 
 Examples:

@@ -83,7 +83,7 @@ Commands:
                       onto an attached phone or TV stick over adb
     power-key <cmd>   Map the power button to suspend instead of shutdown
     harden <cmd>      Apply/revert/status kiosk hardening for a user
-    bluetooth clear   Force-unpair a user's BLE admin and reset to unclaimed
+    bluetooth clear   Force-unpair the device's BLE admin and reset to unclaimed
 
 Options:
     -h, --help        Show this help

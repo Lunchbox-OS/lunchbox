@@ -173,7 +173,8 @@ sudo shepherd-admin power-key suspend
 ```
 
 `shepherd-admin` also exposes `harden` (kiosk lockdown) and `bluetooth clear`
-(reset a user to unclaimed); run `shepherd-admin --help` for the full list.
+(unpair the device's admin phone and return it to unclaimed); run
+`shepherd-admin --help` for the full list.
 
 Then have `kiosk` log out and back in (so the new group memberships take
 effect) and pick the "Shepherd Kiosk" session at login. Then run
