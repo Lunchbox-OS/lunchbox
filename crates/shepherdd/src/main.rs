@@ -1741,6 +1741,7 @@ impl Service {
                 let http_server = HttpServer::new(http_state, api_cfg)
                     .with_admin_authority(admin_authority)
                     .with_listener_status(web_listener.clone())
+                    .with_web_auth(web_auth.clone())
                     .with_protected_files(Arc::clone(&protected_files))
                     .with_hostnames(local_hostnames());
                 let http_shutdown_rx = shutdown_rx.clone();

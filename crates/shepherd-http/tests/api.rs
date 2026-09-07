@@ -227,6 +227,20 @@ fn make_app_with_admin_and_policy(
     config_path: PathBuf,
     admin: Option<Arc<dyn shepherd_management::AdminAuthority>>,
 ) -> axum::Router {
+    make_app_full(policy, auth_token, config_path, admin, None, false)
+}
+
+/// The full constructor. `web` is the credential store (issue #156): `None`
+/// gives a router with no login endpoints, which is the shape every test
+/// written before that issue expects.
+fn make_app_full(
+    policy: Policy,
+    auth_token: Option<&str>,
+    config_path: PathBuf,
+    admin: Option<Arc<dyn shepherd_management::AdminAuthority>>,
+    web: Option<Arc<shepherd_management::WebAuth>>,
+    secure_cookies: bool,
+) -> axum::Router {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
     let volume = Arc::new(MockVolume::new());
@@ -264,14 +278,18 @@ fn make_app_with_admin_and_policy(
         // fixture is a host that cannot look.
         network: None,
         web_listener: WebListenerHandle::default(),
-        web_auth: None,
+        web_auth: web.clone(),
     });
-    let state = AppState { svc };
+    let state = AppState {
+        svc: svc.clone() as Arc<dyn shepherd_management::ManagementService>,
+    };
     handlers::router(
         state,
         shepherd_http::AuthSources {
             static_token: auth_token.map(str::to_owned),
             admin,
+            web,
+            secure_cookies,
         },
     )
 }
@@ -518,4 +536,661 @@ async fn management_unprocessable_returns_422() {
     let (status, body) = rpc(&app, "reload_config", json!({})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"], "unprocessable");
+}
+
+// ---------------------------------------------------------------------------
+// Web management authentication (issue #156)
+//
+// The store's own behaviour — hashing, expiry, lockout arithmetic — is tested
+// in `shepherd-management/src/webauth.rs`. What is left here is what only the
+// HTTP layer can get wrong: which routes are reachable without a credential,
+// whether the cookie carries the right attributes, and whether a cookie-authed
+// cross-origin write is refused.
+// ---------------------------------------------------------------------------
+
+fn web_store(dir: &tempfile::TempDir) -> Arc<shepherd_management::WebAuth> {
+    Arc::new(
+        shepherd_management::WebAuth::load(
+            Arc::new(shepherd_util::LocalProtectedFiles::new(
+                dir.path().to_path_buf(),
+            )),
+            shepherd_management::WebAuthPolicy::default(),
+        )
+        .expect("store loads"),
+    )
+}
+
+/// A router with a credential store, as a device has.
+fn make_web_app(
+    web: Arc<shepherd_management::WebAuth>,
+    config_path: PathBuf,
+    auth_token: Option<&str>,
+) -> axum::Router {
+    make_app_full(
+        test_policy(),
+        auth_token,
+        config_path,
+        None,
+        Some(web),
+        false,
+    )
+}
+
+fn post(uri: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Send a request and hand back the status, the body, and any `Set-Cookie`.
+async fn send_full(app: &axum::Router, req: Request<Body>) -> (StatusCode, Value, Option<String>) {
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, json, cookie)
+}
+
+/// Complete first-run setup and return the session cookie to present.
+async fn enrol(app: &axum::Router, web: &shepherd_management::WebAuth) -> String {
+    let code = web.enrolment_code().expect("a fresh store has a code");
+    let (status, _, cookie) = send_full(
+        app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = cookie.expect("setup sets a session cookie");
+    cookie.split(';').next().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn an_unconfigured_device_answers_status_and_refuses_everything_else() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+
+    // The login page has to be able to render, so `status` is reachable.
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .uri("/api/v1/auth/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["configured"], json!(false));
+
+    // But nothing else is. This is the replacement for open mode: an
+    // unconfigured device used to serve the whole management surface to
+    // anyone who could reach the port.
+    let (status, _) = rpc(&app, "health", json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn setup_then_the_cookie_authenticates() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/rpc")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, &cookie)
+            .body(Body::from(
+                serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_session_cookie_is_httponly_and_samesite_strict() {
+    // The two attributes that do the work: `HttpOnly` is why moving off
+    // `localStorage` was worth doing, and `SameSite=Strict` is most of the
+    // CSRF answer.
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let code = web.enrolment_code().unwrap();
+    let (_, _, cookie) = send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+    let cookie = cookie.expect("a cookie");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(cookie.contains("Path=/"), "{cookie}");
+    // Not `Secure` here: this router is plaintext, and a `Secure` cookie on a
+    // plaintext origin is simply dropped, which would lock the browser out.
+    assert!(!cookie.contains("Secure"), "{cookie}");
+}
+
+#[tokio::test]
+async fn a_tls_listener_marks_the_cookie_secure() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_app_full(
+        test_policy(),
+        None,
+        cfg.path().to_path_buf(),
+        None,
+        Some(web.clone()),
+        true,
+    );
+    let code = web.enrolment_code().unwrap();
+    let (_, _, cookie) = send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+    assert!(cookie.expect("a cookie").contains("Secure"));
+}
+
+#[tokio::test]
+async fn a_wrong_setup_code_is_403_and_sets_no_cookie() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web, cfg.path().to_path_buf(), None);
+    let (status, body, cookie) = send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": "000000", "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "forbidden");
+    assert!(cookie.is_none());
+}
+
+#[tokio::test]
+async fn a_short_password_is_422_with_the_reason() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let code = web.enrolment_code().unwrap();
+    let app = make_web_app(web, cfg.path().to_path_buf(), None);
+    let (status, body, _) = send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "short" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["message"].as_str().unwrap().contains("8"),
+        "the message should say how long: {body}"
+    );
+}
+
+#[tokio::test]
+async fn signing_out_clears_the_cookie_and_the_session() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+
+    let (status, _, set_cookie) = send_full(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/signout")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(set_cookie.expect("a clearing cookie").contains("Max-Age=0"));
+
+    // And the session is actually gone, not merely forgotten by the browser.
+    let (status, _) = send(&app, get_with_cookie("/api/v1/auth/session", &cookie)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_machine_token_authenticates_but_is_not_a_session() {
+    // The demotion decision, in one test: the static token still works on a
+    // request and still cannot be a person logged in.
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web, cfg.path().to_path_buf(), Some("machine-token"));
+
+    let (status, _) = rpc_auth(&app, "health", json!({}), "machine-token").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .uri("/api/v1/auth/session")
+            .header(header::AUTHORIZATION, "Bearer machine-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["machine"], json!(true));
+    assert_eq!(body["session"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_session_token_also_works_as_a_bearer() {
+    // What the web UI's cross-origin "API Server URL" mode needs: a cookie set
+    // by one origin is not sent to another, so the same session has to be
+    // presentable as a bearer.
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+    let token = cookie.split('=').nth(1).unwrap().to_string();
+
+    let (status, _) = rpc_auth(&app, "health", json!({}), &token).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_cookie_authed_cross_origin_write_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/rpc")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, &cookie)
+            .header(header::HOST, "shepherd.local:7890")
+            .header(header::ORIGIN, "https://evil.example")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "forbidden");
+}
+
+#[tokio::test]
+async fn a_same_origin_write_with_an_origin_header_is_allowed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/rpc")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, &cookie)
+            .header(header::HOST, "shepherd.local:7890")
+            .header(header::ORIGIN, "https://shepherd.local:7890")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_bearer_client_is_not_subject_to_the_origin_check() {
+    // Nothing attaches a bearer header automatically, so a cross-site page
+    // cannot forge one — and a script that legitimately sets `Origin` should
+    // not be locked out.
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web, cfg.path().to_path_buf(), Some("machine-token"));
+
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/rpc")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, "Bearer machine-token")
+            .header(header::HOST, "shepherd.local:7890")
+            .header(header::ORIGIN, "https://elsewhere.example")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_sessions_list_marks_the_caller_and_revoking_another_leaves_it_alone() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+
+    // A second session, as if from another device.
+    let (_, _, other_cookie) = send_full(
+        &app,
+        post(
+            "/api/v1/auth/login",
+            json!({ "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+    let other_cookie = other_cookie.unwrap().split(';').next().unwrap().to_string();
+
+    let (status, body) = send(&app, get_with_cookie("/api/v1/auth/sessions", &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let sessions = body.as_array().expect("an array");
+    assert_eq!(sessions.len(), 2);
+    let current: Vec<&Value> = sessions
+        .iter()
+        .filter(|s| s["current"] == json!(true))
+        .collect();
+    assert_eq!(current.len(), 1);
+
+    // Revoke the *other* one and stay signed in.
+    let other_id = sessions
+        .iter()
+        .find(|s| s["current"] == json!(false))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/auth/sessions/{other_id}"))
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = send(&app, get_with_cookie("/api/v1/auth/session", &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, get_with_cookie("/api/v1/auth/session", &other_cookie)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revoking_your_own_session_clears_your_cookie_too() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let cookie = enrol(&app, &web).await;
+    let (_, body) = send(&app, get_with_cookie("/api/v1/auth/sessions", &cookie)).await;
+    let id = body[0]["id"].as_str().unwrap().to_string();
+
+    let (status, _, set_cookie) = send_full(
+        &app,
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/auth/sessions/{id}"))
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        set_cookie.expect("a clearing cookie").contains("Max-Age=0"),
+        "revoking your own session should not leave the browser holding a dead cookie"
+    );
+}
+
+#[tokio::test]
+async fn a_companion_approval_signs_the_browser_in() {
+    // The whole handshake over HTTP: the browser asks, the administrator
+    // approves through the RPC the companion uses, the browser's next poll
+    // comes back with a session cookie.
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), Some("machine-token"));
+    let code = web.enrolment_code().unwrap();
+    send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+
+    let (status, body, _) = send_full(&app, post("/api/v1/auth/request", json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let poll_token = body["poll_token"].as_str().unwrap().to_string();
+    let shown_code = body["code"].as_str().unwrap().to_string();
+
+    let (status, pending) = rpc_auth(&app, "list_login_requests", json!({}), "machine-token").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pending[0]["code"], json!(shown_code));
+
+    let (status, answer, cookie) = send_full(
+        &app,
+        post("/api/v1/auth/poll", json!({ "poll_token": poll_token })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["state"], json!("pending"));
+    assert!(cookie.is_none());
+
+    let id = pending[0]["id"].as_str().unwrap().to_string();
+    let (status, _) = rpc_auth(
+        &app,
+        "approve_login_request",
+        json!({ "id": id }),
+        "machine-token",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, answer, cookie) = send_full(
+        &app,
+        post("/api/v1/auth/poll", json!({ "poll_token": poll_token })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["state"], json!("approved"));
+    let cookie = cookie.expect("an approved poll sets the session cookie");
+    let cookie = cookie.split(';').next().unwrap().to_string();
+
+    let (status, _) = send(&app, get_with_cookie("/api/v1/auth/session", &cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_denied_request_tells_the_browser_and_hands_out_nothing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), Some("machine-token"));
+    let code = web.enrolment_code().unwrap();
+    send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+
+    let (_, body, _) = send_full(&app, post("/api/v1/auth/request", json!({}))).await;
+    let poll_token = body["poll_token"].as_str().unwrap().to_string();
+    let (_, pending) = rpc_auth(&app, "list_login_requests", json!({}), "machine-token").await;
+    let id = pending[0]["id"].as_str().unwrap().to_string();
+    let (status, _) = rpc_auth(
+        &app,
+        "deny_login_request",
+        json!({ "id": id }),
+        "machine-token",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, answer, cookie) = send_full(
+        &app,
+        post("/api/v1/auth/poll", json!({ "poll_token": poll_token })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["state"], json!("denied"));
+    assert!(cookie.is_none());
+}
+
+#[tokio::test]
+async fn lockout_answers_429_with_retry_after() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = Arc::new(
+        shepherd_management::WebAuth::load(
+            Arc::new(shepherd_util::LocalProtectedFiles::new(
+                dir.path().to_path_buf(),
+            )),
+            shepherd_management::WebAuthPolicy {
+                lockout_after: 2,
+                lockout: Duration::from_secs(60),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let app = make_web_app(web.clone(), cfg.path().to_path_buf(), None);
+    let code = web.enrolment_code().unwrap();
+    send_full(
+        &app,
+        post(
+            "/api/v1/auth/setup",
+            json!({ "code": code, "password": "correct horse battery" }),
+        ),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let (status, _, _) = send_full(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                json!({ "password": "wrong password!" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let response = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/auth/login",
+            json!({ "password": "correct horse battery" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .expect("a lockout says how long to wait")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!((1..=60).contains(&retry_after), "got {retry_after}");
+}
+
+#[tokio::test]
+async fn a_malformed_login_body_is_400_not_500() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web, cfg.path().to_path_buf(), None);
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{not json"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "bad_request");
+}
+
+#[tokio::test]
+async fn a_stale_cookie_falls_through_to_unauthorized_rather_than_erroring() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = temp_config();
+    let web = web_store(&dir);
+    let app = make_web_app(web, cfg.path().to_path_buf(), None);
+    let (status, _) = send(
+        &app,
+        get_with_cookie("/api/v1/auth/session", "shepherd_session=long-gone"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

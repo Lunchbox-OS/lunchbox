@@ -22,12 +22,12 @@ pub mod state;
 pub mod tls;
 pub mod web_assets;
 
-pub use auth::AuthSources;
+pub use auth::{AuthSources, Identity};
 pub use state::AppState;
 
 use anyhow::Context;
 use shepherd_config::ManagementApiConfig;
-use shepherd_management::{AdminAuthority, WebListenerHandle};
+use shepherd_management::{AdminAuthority, WebAuth, WebListenerHandle};
 use shepherd_util::ProtectedFiles;
 use std::io;
 use std::net::SocketAddr;
@@ -44,6 +44,7 @@ pub struct HttpServer {
     config: ManagementApiConfig,
     admin: Option<Arc<dyn AdminAuthority>>,
     listener_status: WebListenerHandle,
+    web: Option<Arc<WebAuth>>,
     files: Option<Arc<dyn ProtectedFiles>>,
     /// Names to put in a generated certificate's SAN list, so a parent who
     /// reaches the device by hostname does not get a second warning about the
@@ -58,9 +59,18 @@ impl HttpServer {
             config,
             admin: None,
             listener_status: WebListenerHandle::default(),
+            web: None,
             files: None,
             hostnames: Vec::new(),
         }
+    }
+
+    /// Plug in the web credential store (issue #156). Without one the router
+    /// has no sessions and no login endpoints — which is what the tests want
+    /// and what a device must never be.
+    pub fn with_web_auth(mut self, web: Option<Arc<WebAuth>>) -> Self {
+        self.web = web;
+        self
     }
 
     /// Where a generated TLS certificate is kept. Required for
@@ -102,6 +112,8 @@ impl HttpServer {
         let sources = AuthSources {
             static_token: self.config.auth_token.clone(),
             admin: self.admin.clone(),
+            web: self.web.clone(),
+            secure_cookies: tls.is_some(),
         };
         let app = handlers::router(self.state, sources);
         let listener = bind_with_retry(addr, self.config.bind_retry).await?;

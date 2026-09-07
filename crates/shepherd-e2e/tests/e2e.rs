@@ -213,3 +213,122 @@ async fn auth_token_is_required_when_configured() -> Result<()> {
     h.shutdown().await?;
     Ok(())
 }
+
+/// The whole login flow against a real daemon: read the setup code the device
+/// generated, exchange it for a password and a session, then use that session
+/// as a browser would — cookie, not bearer.
+///
+/// The unit and integration tests cover the arithmetic and the routing; what
+/// only this can show is that the code a running shepherdd actually wrote to
+/// its protected file is the one its HTTP server will accept.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn the_setup_code_on_disk_logs_a_browser_in() -> Result<()> {
+    let h = TestHarness::builder().start().await?;
+
+    let stored = std::fs::read_to_string(h.data_dir().join("web-auth.toml"))
+        .context("the daemon should have written a web auth store at startup")?;
+    let code = stored
+        .lines()
+        .find_map(|l| l.strip_prefix("enrolment_code = "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .context("a device with no password should have a setup code")?;
+    assert_eq!(code.len(), 6, "setup code was {code:?}");
+
+    // A client with no credential at all: what a browser is before it logs in.
+    let anon = shepherd_e2e::HttpClient::new(h.http_port(), None);
+    let status = anon.get("/api/v1/auth/status").await?;
+    assert_eq!(status.status, 200);
+    assert_eq!(status.json()?["configured"], json!(false));
+
+    // Everything else is refused until the password exists.
+    assert_eq!(anon.rpc("health", json!({})).await?.status, 401);
+
+    let setup = anon
+        .post_json(
+            "/api/v1/auth/setup",
+            &json!({ "code": code, "password": "a real password" }),
+        )
+        .await?;
+    assert_eq!(setup.status, 200, "setup body: {}", setup.body);
+    let cookie = setup
+        .set_cookie_pair()
+        .context("setup should hand back a session cookie")?;
+
+    // And now the browser is signed in, over the cookie alone.
+    let browser = anon.with_cookie(&cookie);
+    let health = browser.rpc("health", json!({})).await?;
+    assert_eq!(health.status, 200, "health body: {}", health.body);
+
+    let session = browser.get("/api/v1/auth/session").await?;
+    assert_eq!(session.status, 200);
+    assert_eq!(session.json()?["machine"], json!(false));
+
+    // The status endpoint now says the device is set up, which is what stops
+    // the SPA offering the setup form to the next person who opens it.
+    assert_eq!(
+        anon.get("/api/v1/auth/status").await?.json()?["configured"],
+        json!(true)
+    );
+
+    // Signing out ends it for real.
+    assert_eq!(
+        browser
+            .post_json("/api/v1/auth/signout", &json!({}))
+            .await?
+            .status,
+        204
+    );
+    assert_eq!(browser.rpc("health", json!({})).await?.status, 401);
+
+    h.shutdown().await?;
+    Ok(())
+}
+
+/// A password login, and the throttle behind it, against a real daemon.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_password_login_works_and_a_wrong_one_does_not() -> Result<()> {
+    let h = TestHarness::builder().start().await?;
+    let stored = std::fs::read_to_string(h.data_dir().join("web-auth.toml"))?;
+    let code = stored
+        .lines()
+        .find_map(|l| l.strip_prefix("enrolment_code = "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .context("a setup code")?;
+
+    let anon = shepherd_e2e::HttpClient::new(h.http_port(), None);
+    anon.post_json(
+        "/api/v1/auth/setup",
+        &json!({ "code": code, "password": "a real password" }),
+    )
+    .await?;
+
+    let wrong = anon
+        .post_json(
+            "/api/v1/auth/login",
+            &json!({ "password": "not it at all" }),
+        )
+        .await?;
+    assert_eq!(wrong.status, 403, "body: {}", wrong.body);
+    assert!(wrong.set_cookie_pair().is_none());
+
+    let right = anon
+        .post_json(
+            "/api/v1/auth/login",
+            &json!({ "password": "a real password" }),
+        )
+        .await?;
+    assert_eq!(right.status, 200, "body: {}", right.body);
+    let cookie = right.set_cookie_pair().context("a session cookie")?;
+    assert_eq!(
+        anon.with_cookie(cookie)
+            .rpc("health", json!({}))
+            .await?
+            .status,
+        200
+    );
+
+    h.shutdown().await?;
+    Ok(())
+}

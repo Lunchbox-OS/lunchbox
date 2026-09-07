@@ -17,11 +17,30 @@ use tokio::net::TcpStream;
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,
+    /// Response headers, in the order the server sent them. Kept since issue
+    /// #156 because the login flow's whole result is a `Set-Cookie`.
+    pub headers: Vec<(String, String)>,
 }
 
 impl HttpResponse {
     pub fn json(&self) -> Result<Value> {
         serde_json::from_str(&self.body).map_err(|e| anyhow!("invalid JSON body: {e}"))
+    }
+
+    /// First value of a header, case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The `name=value` pair from `Set-Cookie`, ready to send straight back as
+    /// a `Cookie` header.
+    pub fn set_cookie_pair(&self) -> Option<String> {
+        self.header("set-cookie")
+            .and_then(|c| c.split(';').next())
+            .map(str::to_owned)
     }
 }
 
@@ -30,11 +49,28 @@ impl HttpResponse {
 pub struct HttpClient {
     port: u16,
     auth_token: Option<String>,
+    /// A `name=value` session cookie to send, for tests that drive the login
+    /// flow the way a browser does.
+    cookie: Option<String>,
 }
 
 impl HttpClient {
     pub fn new(port: u16, auth_token: Option<String>) -> Self {
-        Self { port, auth_token }
+        Self {
+            port,
+            auth_token,
+            cookie: None,
+        }
+    }
+
+    /// A copy of this client that presents `cookie` instead of a bearer token
+    /// — a browser rather than a script.
+    pub fn with_cookie(&self, cookie: impl Into<String>) -> Self {
+        Self {
+            port: self.port,
+            auth_token: None,
+            cookie: Some(cookie.into()),
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -125,6 +161,9 @@ impl HttpClient {
         if let Some(t) = &self.auth_token {
             req.push_str(&format!("Authorization: Bearer {t}\r\n"));
         }
+        if let Some(c) = &self.cookie {
+            req.push_str(&format!("Cookie: {c}\r\n"));
+        }
         if let Some(b) = &serialized {
             req.push_str("Content-Type: application/json\r\n");
             req.push_str(&format!("Content-Length: {}\r\n", b.len()));
@@ -169,7 +208,11 @@ impl HttpClient {
         }
 
         let body = String::from_utf8_lossy(&body_bytes).into_owned();
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            body,
+            headers,
+        })
     }
 }
 
