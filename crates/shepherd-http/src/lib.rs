@@ -120,8 +120,12 @@ impl HttpServer {
         // The bound address, not the configured one: with `port = 0` they are
         // different, and this is the one somebody can connect to.
         let bound = listener.local_addr().unwrap_or(addr);
-        let scheme = if tls.is_some() { "https" } else { "http" };
-        self.listener_status.set_listening(bound);
+        // Published, not just logged: the scheme decides whether the URLs the
+        // network page and the setup card hand out say `http` or `https`, and
+        // a TLS listener answers a plaintext request with a reset (issue #182).
+        let tls_on = tls.is_some();
+        self.listener_status.set_listening(bound, tls_on);
+        let scheme = if tls_on { "https" } else { "http" };
         info!(addr = %bound, scheme, "Management API listening");
 
         // `ConnectInfo` rather than a bare service: the login throttle counts

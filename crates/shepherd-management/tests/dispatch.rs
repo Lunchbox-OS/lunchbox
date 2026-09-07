@@ -1951,8 +1951,8 @@ fn make_svc_with_network(
 }
 
 fn listening_on_everything() -> WebListenerHandle {
-    let handle = WebListenerHandle::configured("0.0.0.0:8080".parse().unwrap());
-    handle.set_listening("0.0.0.0:8080".parse().unwrap());
+    let handle = WebListenerHandle::configured("0.0.0.0:8080".parse().unwrap(), false);
+    handle.set_listening("0.0.0.0:8080".parse().unwrap(), false);
     handle
 }
 
@@ -1993,7 +1993,7 @@ async fn network_status_leads_with_the_address_somebody_can_reach() {
 #[tokio::test]
 async fn a_web_interface_that_never_bound_says_so_instead_of_offering_a_url() {
     let cfg = temp_config();
-    let failed = WebListenerHandle::configured("10.147.17.8:8080".parse().unwrap());
+    let failed = WebListenerHandle::configured("10.147.17.8:8080".parse().unwrap(), false);
     failed.set_failed("Cannot assign requested address");
     let svc = make_svc_with_network(a_device_on_wifi(), failed, cfg.path().to_path_buf());
 

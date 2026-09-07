@@ -2082,6 +2082,15 @@ export interface WebListenerView {
    */
   port?: number | null;
   state: WebListenerState;
+  /**
+   * Whether the listener terminates TLS (issue #156).
+   *
+   * Decides the scheme in [`NetworkStatusView::management_urls`], which is
+   * not cosmetic: a device serving HTTPS answers a plaintext request with a
+   * connection reset, so an `http://` URL for it sends a parent to debug
+   * their browser instead of opening their device.
+   */
+  tls?: boolean;
 }
 
 /**
