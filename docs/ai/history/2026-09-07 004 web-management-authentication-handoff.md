@@ -229,6 +229,17 @@ Two departures, both deliberate:
   setup instead: the code is in `dev-runtime/data/web-auth.toml`, and
   `rm`-ing that file plus a restart gets you back to a fresh device.
 - **`target/debug/incremental` reached 26 GB and filled the disk** mid-run,
-  which surfaced as linker "Bus error" and one spurious test failure
-  (`retroarch_spawn_materializes_config_and_argv`). It passed on rerun and in
-  isolation. If you see that test fail once, check `df` before chasing it.
+  which surfaced as linker "Bus error". Check `df` when a build dies oddly.
+
+  > **Correction (2026-09-07, session 006).** The one test failure recorded here
+  > as collateral of that — `retroarch_spawn_materializes_config_and_argv` — is
+  > **not** a disk-space symptom. It is a genuine race on a process-global
+  > environment variable, and it reproduces on a box with plenty of free space.
+  > `adapter.rs`'s test sets `RETROARCH_ROOT_ENV` and `retroarch.rs`'s tests
+  > `remove_var` the same variable, on parallel threads of the same test binary;
+  > when a removal lands between the set and the read, the code falls back to the
+  > real `~/.local/share/shepherdd` and the argv assertion fails with a home-directory
+  > path on the left and the tempdir on the right. That left/right pair is the
+  > tell. It passes in isolation and on rerun, so it still reads as a flake.
+  > `sway_ipc.rs`'s `ENV_LOCK` is the pattern that fixes it; the two modules would
+  > need to share one lock. Not yet done.

@@ -76,12 +76,16 @@ pub struct WebAuthPolicy {
 }
 
 impl Default for WebAuthPolicy {
+    /// The same numbers `[service.management_api.auth]` falls back to, taken
+    /// from there rather than repeated: this default exists for a caller that
+    /// has no config (tests, an embedding), and two copies of the answer is a
+    /// pair that drifts the next time somebody shortens a session.
     fn default() -> Self {
         Self {
-            session_idle: Duration::from_secs(14 * 24 * 3600),
-            session_max_age: Duration::from_secs(90 * 24 * 3600),
-            lockout_after: 8,
-            lockout: Duration::from_secs(300),
+            session_idle: shepherd_config::DEFAULT_SESSION_IDLE,
+            session_max_age: shepherd_config::DEFAULT_SESSION_MAX_AGE,
+            lockout_after: shepherd_config::DEFAULT_LOCKOUT_AFTER,
+            lockout: shepherd_config::DEFAULT_LOCKOUT,
         }
     }
 }

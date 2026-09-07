@@ -1328,12 +1328,12 @@ export interface RawWebAuthConfig {
    */
   lockout_seconds?: number | null;
   /**
-   * A session unused for this long is dead. Default: 14.
+   * A session unused for this long is dead. Default: 2.
    */
   session_idle_days?: number | null;
   /**
    * A session older than this is dead however actively it is used.
-   * Default: 90.
+   * Default: 14.
    */
   session_max_days?: number | null;
 }

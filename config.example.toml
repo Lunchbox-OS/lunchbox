@@ -227,8 +227,8 @@ mode = "self_signed"         # "auto" | "off" | "self_signed" | "files"
 
 # How long a signed-in browser stays signed in, and what guessing costs.
 # [service.management_api.auth]
-# session_idle_days = 14     # A session unused this long is dead.
-# session_max_days = 90      # And one this old is dead however actively it is used.
+# session_idle_days = 2      # A session unused this long is dead.
+# session_max_days = 14      # And one this old is dead however actively it is used.
 # lockout_after = 8          # Failed logins from one address before it is locked out.
 # lockout_seconds = 300      # First lockout; each subsequent one doubles, to 16x.
 

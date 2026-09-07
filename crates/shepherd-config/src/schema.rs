@@ -1151,11 +1151,11 @@ pub struct RawTlsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawWebAuthConfig {
-    /// A session unused for this long is dead. Default: 14.
+    /// A session unused for this long is dead. Default: 2.
     pub session_idle_days: Option<u64>,
 
     /// A session older than this is dead however actively it is used.
-    /// Default: 90.
+    /// Default: 14.
     pub session_max_days: Option<u64>,
 
     /// Consecutive failed logins from one address before that address is

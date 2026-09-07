@@ -786,8 +786,8 @@ function SessionEditor({ config }: { config: RawConfig }) {
         Sign-in sessions
       </Typography>
       <Stack direction="row" spacing={2}>
-        {numberField("session_idle_days", "Idle timeout (days)", "14")}
-        {numberField("session_max_days", "Maximum age (days)", "90")}
+        {numberField("session_idle_days", "Idle timeout (days)", "2")}
+        {numberField("session_max_days", "Maximum age (days)", "14")}
       </Stack>
       <Stack direction="row" spacing={2}>
         {numberField("lockout_after", "Lock out after", "8", "failed attempts")}

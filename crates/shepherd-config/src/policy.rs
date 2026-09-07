@@ -67,10 +67,10 @@ pub const DEFAULT_MANAGEMENT_API_BIND: &str = "127.0.0.1";
 pub const DEFAULT_MANAGEMENT_API_BIND_RETRY: Duration = Duration::from_secs(300);
 
 /// Default idle timeout for a web management session (issue #156).
-pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(14 * 24 * 3600);
+pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(2 * 24 * 3600);
 
 /// Default absolute lifetime for a web management session, however active.
-pub const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(90 * 24 * 3600);
+pub const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 3600);
 
 /// Default consecutive failed logins from one address before a lockout.
 pub const DEFAULT_LOCKOUT_AFTER: u32 = 8;

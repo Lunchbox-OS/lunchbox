@@ -214,8 +214,8 @@ bind_retry_seconds = 300   # keep retrying if the addr isn't up yet
 mode = "self_signed"       # auto | off | self_signed | files
 
 [service.management_api.auth]
-session_idle_days = 14
-session_max_days = 90
+session_idle_days = 2
+session_max_days = 14
 lockout_after = 8
 lockout_seconds = 300
 ```

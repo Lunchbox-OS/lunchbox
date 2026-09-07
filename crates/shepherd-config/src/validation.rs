@@ -1,6 +1,7 @@
 //! Configuration validation
 
 use crate::internet::InternetCheckTarget;
+use crate::policy::{DEFAULT_SESSION_IDLE, DEFAULT_SESSION_MAX_AGE};
 use crate::schema::{
     RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawGroup,
     RawManagementApiConfig, RawMediaMode, RawTimeWindow, RawTokens,
@@ -302,12 +303,25 @@ fn validate_management_api(api: &RawManagementApiConfig) -> Vec<ValidationError>
                     .into(),
             ));
         }
-        if let (Some(idle), Some(max)) = (auth.session_idle_days, auth.session_max_days)
-            && idle > max
-        {
+        // Compared as *resolved* values, not only when both are written down:
+        // setting one knob and leaving the other at its default is the ordinary
+        // way to get an idle timeout that can never fire, and it used to pass.
+        let idle = auth
+            .session_idle_days
+            .unwrap_or(DEFAULT_SESSION_IDLE.as_secs() / 86_400);
+        let max = auth
+            .session_max_days
+            .unwrap_or(DEFAULT_SESSION_MAX_AGE.as_secs() / 86_400);
+        if idle > 0 && max > 0 && idle > max {
+            let source = |written: Option<u64>| match written {
+                Some(_) => "",
+                None => " (the default)",
+            };
             errors.push(ValidationError::GlobalError(format!(
-                "service.management_api.auth.session_idle_days ({idle}) exceeds \
-                 session_max_days ({max}), so the idle timeout can never fire"
+                "service.management_api.auth.session_idle_days ({idle}{}) exceeds \
+                 session_max_days ({max}{}), so the idle timeout can never fire",
+                source(auth.session_idle_days),
+                source(auth.session_max_days),
             )));
         }
     }
@@ -2207,6 +2221,28 @@ mod tests {
             errors.iter().any(|e| e.contains("can never fire")),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn shortening_only_the_absolute_lifetime_is_refused_against_the_default() {
+        // The ordinary way to get an idle timeout that can never fire: set one
+        // knob, leave the other alone. Only checked when both were written
+        // down until the defaults came down to 2 and 14 days, which put the
+        // two close enough together for this to be reachable by accident.
+        let errors = api_errors("[service.management_api.auth]\nsession_max_days = 1");
+        assert!(
+            errors.iter().any(|e| e.contains("can never fire")),
+            "{errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("(the default)")),
+            "the message has to say which value it did not read from the file: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn the_defaults_do_not_refuse_themselves() {
+        assert!(api_errors("[service.management_api.auth]\nlockout_after = 8").is_empty());
     }
 
     #[test]
