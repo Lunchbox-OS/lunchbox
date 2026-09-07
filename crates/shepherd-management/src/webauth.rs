@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shepherd_util::{ProtectedFile, ProtectedFiles};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -917,40 +917,76 @@ fn chrono_duration(d: Duration) -> ChronoDuration {
     ChronoDuration::from_std(d).unwrap_or_else(|_| ChronoDuration::days(365))
 }
 
+/// Woothee's sentinel for "the dataset has no answer". It comes back in every
+/// field, so it has to be filtered out of each one rather than checked once.
+const WOOTHEE_UNKNOWN: &str = "UNKNOWN";
+
+/// The parser, built once.
+///
+/// `Parser::new` compiles a set of regexes, which is not something to do per
+/// request on a login path a guesser can hammer.
+static UA_PARSER: LazyLock<woothee::parser::Parser> = LazyLock::new(woothee::parser::Parser::new);
+
 /// Turn a User-Agent into something a person can pick their own device out of.
 ///
-/// Deliberately crude. This is a label in a list next to a revoke button, not
-/// telemetry, and the failure mode of guessing wrong is a row that reads
-/// "Unknown browser" instead of "Safari".
+/// This is a label in a list next to a revoke button, not telemetry: the
+/// failure mode of guessing wrong is a row that reads "Unknown browser"
+/// instead of "Safari", and nothing here is ever an input to a decision. A
+/// User-Agent is whatever the client typed.
+///
+/// The parsing is `woothee`'s rather than ours. The rules that matter are not
+/// guessable from the outside — every browser on iOS is WebKit underneath and
+/// announces itself as `CriOS`/`FxiOS`/`EdgiOS` with no `Chrome/` token at
+/// all; ChromeOS says `CrOS` and never says `Linux`; an Android UA says
+/// `Linux; Android 15` and means the second half — and a hand-rolled table got
+/// each of those wrong until somebody sat down with real strings. That set
+/// only grows, so it belongs in a dataset somebody else maintains.
+///
+/// What is still knowingly wrong, and cannot be fixed here:
+///
+/// - **A desktop-mode iPad reads as a Mac.** Since iPadOS 13 the default UA is
+///   byte-identical to macOS Safari's; the `iPad` token appears only when
+///   somebody has asked for the mobile site.
+/// - **Windows 11 reads as Windows.** It sends `Windows NT 10.0`, exactly as
+///   Windows 10 does, so woothee reports both as "Windows 10" — which is why
+///   [`normalise_platform`] drops the version rather than repeating a number
+///   that is wrong half the time.
 pub fn label_from_user_agent(ua: Option<&str>) -> String {
     let Some(ua) = ua.filter(|s| !s.is_empty()) else {
         return "Unknown browser".to_string();
     };
-    let browser = [
-        ("Edg/", "Edge"),
-        ("OPR/", "Opera"),
-        ("Firefox/", "Firefox"),
-        ("Chrome/", "Chrome"),
-        ("Safari/", "Safari"),
-    ]
-    .iter()
-    .find(|(needle, _)| ua.contains(needle))
-    .map(|(_, name)| *name)
-    .unwrap_or("Browser");
-    let platform = [
-        ("Android", "Android"),
-        ("iPhone", "iPhone"),
-        ("iPad", "iPad"),
-        ("Macintosh", "macOS"),
-        ("Windows", "Windows"),
-        ("Linux", "Linux"),
-    ]
-    .iter()
-    .find(|(needle, _)| ua.contains(needle))
-    .map(|(_, name)| *name);
-    match platform {
-        Some(p) => format!("{browser} on {p}"),
+    let Some(parsed) = UA_PARSER.parse(ua) else {
+        return "Unknown browser".to_string();
+    };
+    // Named separately because they fail separately: a UA can name a browser
+    // the dataset knows on an OS it does not, and half a label still lets
+    // somebody find their row.
+    let browser = match parsed.name {
+        WOOTHEE_UNKNOWN | "" => "Browser",
+        name => name,
+    };
+    match normalise_platform(parsed.os) {
+        Some(platform) => format!("{browser} on {platform}"),
         None => browser.to_string(),
+    }
+}
+
+/// Woothee's OS name in the vocabulary this list uses.
+///
+/// Two are renamed and the rest pass through, so an OS released after this was
+/// written still shows up under whatever name the dataset gives it rather than
+/// vanishing from the label.
+fn normalise_platform(os: &str) -> Option<&str> {
+    match os {
+        WOOTHEE_UNKNOWN | "" => None,
+        // Every Windows since 10 sends `Windows NT 10.0`, so the version
+        // woothee derives is right for Windows 10 and wrong for Windows 11.
+        // A parent picking a laptop out of a list is not helped by a number
+        // that is a coin flip.
+        os if os.starts_with("Windows") => Some("Windows"),
+        // Apple's own spelling, and the one on the machine's own About box.
+        "Mac OSX" => Some("macOS"),
+        os => Some(os),
     }
 }
 
@@ -1322,20 +1358,234 @@ mod tests {
         assert!(listed.iter().find(|s| s.current).unwrap().id == one.info.id);
     }
 
+    /// Real User-Agent strings, as sent by shipping browsers.
+    ///
+    /// Copied verbatim rather than trimmed to the interesting token, because
+    /// the whole difficulty of this function is what *else* is in the string:
+    /// every Chromium browser claims `Chrome/`, every WebKit one claims
+    /// `Safari/`, and an Android UA claims `Linux`. A table of tidied-up
+    /// fragments would pass while the real thing failed.
+    const REAL_USER_AGENTS: &[(&str, &str)] = &[
+        // --- desktop -------------------------------------------------------
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Safari/537.36",
+            "Chrome on Windows",
+        ),
+        (
+            // Edge is Chrome plus one token at the very end. Read the string
+            // left to right and it is Chrome; the specific token has to win.
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+            "Edge on Windows",
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+            "Firefox on Windows",
+        ),
+        (
+            // Safari's own UA still ends in a `Safari/` token, and carries no
+            // `Chrome/` -- the one common case the naive ordering gets right.
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like \
+             Gecko) Version/18.1 Safari/605.1.15",
+            "Safari on macOS",
+        ),
+        (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like \
+             Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Chrome on macOS",
+        ),
+        (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+            "Firefox on macOS",
+        ),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Safari/537.36",
+            "Chrome on Linux",
+        ),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+            "Firefox on Linux",
+        ),
+        (
+            // ChromeOS says `X11` and `CrOS` and never says `Linux`, so the
+            // platform table has to know the token or the row loses its
+            // platform entirely.
+            "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Safari/537.36",
+            "Chrome on ChromeOS",
+        ),
+        // --- iOS -----------------------------------------------------------
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, \
+             like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+            "Safari on iPhone",
+        ),
+        (
+            // WebKit is mandatory on iOS, so Chrome there is `CriOS` and has
+            // no `Chrome/` token at all. Without the row it reads as Safari.
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, \
+             like Gecko) CriOS/131.0.6778.73 Mobile/15E148 Safari/604.1",
+            "Chrome on iPhone",
+        ),
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, \
+             like Gecko) FxiOS/133.0 Mobile/15E148 Safari/605.1.15",
+            "Firefox on iPhone",
+        ),
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, \
+             like Gecko) EdgiOS/131.0.2903.85 Mobile/15E148 Safari/605.1.15",
+            "Edge on iPhone",
+        ),
+        (
+            // An iPad only says so when the user has asked for the mobile
+            // site; see the note on `label_from_user_agent` for the default.
+            "Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like \
+             Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+            "Safari on iPad",
+        ),
+        // --- Android -------------------------------------------------------
+        (
+            // `Linux; Android 15` -- the platform table has to prefer the
+            // second token, or every phone in the list reads as Linux.
+            "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Mobile Safari/537.36",
+            "Chrome on Android",
+        ),
+        (
+            // Firefox for Android dropped `Linux` from its UA entirely.
+            "Mozilla/5.0 (Android 15; Mobile; rv:133.0) Gecko/20100101 Firefox/133.0",
+            "Firefox on Android",
+        ),
+        (
+            "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Mobile Safari/537.36 EdgA/131.0.2903.87",
+            "Edge on Android",
+        ),
+        (
+            // Woothee's own spelling of the token rather than the product
+            // name ("Samsung Internet"). Renaming it here would be the first
+            // entry in exactly the hand-maintained browser table this stopped
+            // keeping, and it is legible as it stands.
+            "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) \
+             SamsungBrowser/27.0 Chrome/125.0.0.0 Mobile Safari/537.36",
+            "SamsungBrowser on Android",
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/131.0.0.0 Safari/537.36 OPR/116.0.0.0",
+            "Opera on Windows",
+        ),
+    ];
+
     #[test]
-    fn user_agent_labels_are_recognisable() {
-        assert_eq!(
-            label_from_user_agent(Some(
-                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-            )),
-            "Chrome on Android"
-        );
-        assert_eq!(
-            label_from_user_agent(Some("Mozilla/5.0 (X11; Linux x86_64) Firefox/121.0")),
-            "Firefox on Linux"
-        );
+    fn real_user_agents_get_the_browser_and_platform_a_person_would_say() {
+        for (ua, expected) in REAL_USER_AGENTS {
+            assert_eq!(&label_from_user_agent(Some(ua)), expected, "\n  UA: {ua}");
+        }
+    }
+
+    #[test]
+    fn every_real_user_agent_produces_a_label_worth_showing() {
+        // The specific strings above will age; this will not. A row that says
+        // "Browser" or has no platform is one a parent cannot pick their own
+        // device out of, which is the entire job.
+        for (ua, _) in REAL_USER_AGENTS {
+            let label = label_from_user_agent(Some(ua));
+            assert!(!label.starts_with("Browser"), "no browser named: {ua}");
+            assert!(label.contains(" on "), "no platform named: {ua}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_user_agent_is_vague_rather_than_wrong() {
+        // Being vague is the designed failure. A confident wrong answer next
+        // to a revoke button is worse than an honest shrug.
         assert_eq!(label_from_user_agent(None), "Unknown browser");
         assert_eq!(label_from_user_agent(Some("")), "Unknown browser");
+        assert_eq!(
+            label_from_user_agent(Some("!!! not a user agent !!!")),
+            "Unknown browser"
+        );
+    }
+
+    #[test]
+    fn a_script_is_named_as_one_rather_than_as_a_browser() {
+        // Worth more than the "Browser" the old table produced: a row in the
+        // signed-in list that says this was a program tells a parent
+        // something, where "Browser" implies a person at a keyboard.
+        for ua in ["curl/8.9.1", "Wget/1.24.5 (linux-gnu)"] {
+            assert_eq!(label_from_user_agent(Some(ua)), "HTTP Library", "{ua}");
+        }
+    }
+
+    #[test]
+    fn a_browser_the_dataset_does_not_know_still_names_its_platform() {
+        // GNOME Web: woothee has no entry for Epiphany, but it reads the
+        // platform, and half a label still lets somebody find their row.
+        assert_eq!(
+            label_from_user_agent(Some(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) \
+                 Epiphany/605.1.15"
+            )),
+            "Browser on Linux"
+        );
+    }
+
+    #[test]
+    fn chromium_derivatives_land_somewhere_useful() {
+        // Brave and Electron do not identify themselves in a way the dataset
+        // distinguishes, and reporting the engine they are is a better answer
+        // than refusing to name them.
+        for (ua, expected) in [
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like \
+                 Gecko) Chrome/131.0.0.0 Safari/537.36 Brave/131",
+                "Chrome on Windows",
+            ),
+            (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 MyApp/1.2.3 Chrome/128.0.6613.36 Electron/32.0.1 Safari/537.36",
+                "Chrome on Linux",
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like \
+                 Gecko) Chrome/131.0.0.0 Safari/537.36 Vivaldi/7.0",
+                "Vivaldi on Windows",
+            ),
+        ] {
+            assert_eq!(label_from_user_agent(Some(ua)), expected, "{ua}");
+        }
+    }
+
+    #[test]
+    fn windows_is_named_without_a_version_it_cannot_know() {
+        // Windows 11 sends `Windows NT 10.0`, exactly as Windows 10 does, so
+        // woothee reports "Windows 10" for both. Dropping the version is the
+        // honest label; this pins that we do.
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like \
+                  Gecko) Chrome/131.0.0.0 Safari/537.36";
+        let label = label_from_user_agent(Some(ua));
+        assert_eq!(label, "Chrome on Windows");
+        assert!(
+            !label.contains("10"),
+            "no version a UA cannot support: {label}"
+        );
+    }
+
+    #[test]
+    fn a_desktop_mode_ipad_is_knowingly_reported_as_a_mac() {
+        // Not a bug to fix here: since iPadOS 13 the default UA is
+        // byte-identical to a Mac's, so there is nothing in the string to
+        // tell them apart. Pinned so the day it changes, this test says so.
+        let ipad_desktop_mode = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+             AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15";
+        assert_eq!(
+            label_from_user_agent(Some(ipad_desktop_mode)),
+            "Safari on macOS"
+        );
     }
 
     #[test]
