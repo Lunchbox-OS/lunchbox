@@ -20,6 +20,7 @@ import type {
   IsoTimestamp,
   LaunchOutcome,
   LimitSubject,
+  LoginRequestInfo,
   NetworkStatusView,
   ServiceStateSnapshot,
   SessionInfo,
@@ -27,6 +28,8 @@ import type {
   TokenStatus,
   UsageStat,
   VolumeInfo,
+  WebAuthStatus,
+  WebSessionInfo,
   WindowAction,
   WindowInfo,
 } from "./wire-types.generated";
@@ -79,6 +82,13 @@ export type RpcMethod =
   | "ping"
   | "reload_config"
   | "refresh_media"
+  | "web_auth_status"
+  | "set_web_password"
+  | "list_web_sessions"
+  | "revoke_web_session"
+  | "list_login_requests"
+  | "approve_login_request"
+  | "deny_login_request"
   | "logout"
   | "list_diagnostics"
   | "network_status"
@@ -206,6 +216,21 @@ export interface RpcParamsMap {
   "ping": Record<string, never>;
   "reload_config": Record<string, never>;
   "refresh_media": Record<string, never>;
+  "web_auth_status": Record<string, never>;
+  "set_web_password": {
+    password: string;
+  };
+  "list_web_sessions": Record<string, never>;
+  "revoke_web_session": {
+    id: string;
+  };
+  "list_login_requests": Record<string, never>;
+  "approve_login_request": {
+    id: string;
+  };
+  "deny_login_request": {
+    id: string;
+  };
   "logout": Record<string, never>;
   "list_diagnostics": Record<string, never>;
   "network_status": Record<string, never>;
@@ -267,6 +292,13 @@ export interface RpcResultMap {
   "ping": null;
   "reload_config": { entry_count: number };
   "refresh_media": null;
+  "web_auth_status": WebAuthStatus;
+  "set_web_password": null;
+  "list_web_sessions": WebSessionInfo[];
+  "revoke_web_session": null;
+  "list_login_requests": LoginRequestInfo[];
+  "approve_login_request": null;
+  "deny_login_request": null;
   "logout": null;
   "list_diagnostics": DiagnosticSet;
   "network_status": NetworkStatusView;

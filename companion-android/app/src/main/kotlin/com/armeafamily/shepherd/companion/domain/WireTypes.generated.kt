@@ -1524,6 +1524,36 @@ enum class InterstitialKind(val wire: String) {
 typealias LimitSubject = String
 
 /**
+ * A login waiting on a tap in the companion app.
+ */
+@Serializable
+data class LoginRequestInfo(
+    /**
+     * The six digits the browser is displaying. The parent compares.
+     */
+    val code: String,
+    val expiresAt: IsoTimestamp,
+    /**
+     * The request's public handle — what `approve_login_request` takes.
+     *
+     * Not the same string the browser polls with. The browser's id is a
+     * secret capability; this is a short opaque handle derived from it, so
+     * that listing pending requests over BLE does not hand out the ability to
+     * collect the resulting session.
+     */
+    val id: String,
+    /**
+     * Who is asking, as best the device can tell: "Chrome on Android".
+     */
+    val label: String,
+    /**
+     * The address the request came from.
+     */
+    val peer: String,
+    val requestedAt: IsoTimestamp,
+)
+
+/**
  * How a [`EntryKind::Media`] activity opens.
  */
 @Serializable(with = MediaMode.Serializer::class)
@@ -2407,6 +2437,25 @@ data class WarningThreshold(
 )
 
 /**
+ * What a client may know about the device's authentication state *before* it
+ * has authenticated. Deliberately thin — it says which door to knock on and
+ * nothing else.
+ */
+@Serializable
+data class WebAuthStatus(
+    /**
+     * Whether a paired companion exists to approve a login. False means the
+     * password is the only way in, so the UI should not offer the other.
+     */
+    val companionAvailable: Boolean,
+    /**
+     * False on a device where nobody has set a password yet: the browser
+     * should show the setup screen and ask for the code on the TV.
+     */
+    val configured: Boolean,
+)
+
+/**
  * Whether the web management interface is up, and where.
  *
  * The reason this is not simply the configured `bind`/`port`: the daemon
@@ -2472,6 +2521,36 @@ data class WebListenerView(
      */
     val port: Long? = null,
     val state: WebListenerState,
+)
+
+/**
+ * One live browser session, as an administrator sees it.
+ *
+ * Carries no credential: `id` is a public handle used to revoke the session,
+ * not the token that authenticates it. The token itself is stored hashed and
+ * is never readable back out of this module.
+ */
+@Serializable
+data class WebSessionInfo(
+    val createdAt: IsoTimestamp,
+    /**
+     * True for the session making the request, so the UI can label it and
+     * warn before revoking it.
+     */
+    val current: Boolean,
+    val expiresAt: IsoTimestamp,
+    val id: String,
+    /**
+     * Human label derived from the User-Agent at login — "Chrome on Android",
+     * not a hex string, because the person revoking sessions is choosing
+     * between their own devices.
+     */
+    val label: String,
+    val lastSeen: IsoTimestamp,
+    /**
+     * The address the session logged in from, for the same reason.
+     */
+    val peer: String,
 )
 
 /**

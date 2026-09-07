@@ -264,6 +264,7 @@ fn make_app_with_admin_and_policy(
         // fixture is a host that cannot look.
         network: None,
         web_listener: WebListenerHandle::default(),
+        web_auth: None,
     });
     let state = AppState { svc };
     handlers::router(

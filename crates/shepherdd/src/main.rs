@@ -1514,6 +1514,31 @@ impl Service {
             None => WebListenerHandle::disabled(),
         };
 
+        // The web UI's credential store (issue #156). Built whenever the HTTP
+        // API is, and *only* then: it is the thing that makes an unclaimed
+        // device closed rather than open, so a management API without one
+        // would be the fail-open state this replaced. A store that cannot be
+        // loaded takes the API down with it rather than falling back to no
+        // authentication.
+        let web_auth: Option<Arc<shepherd_management::WebAuth>> = match &management_api_config {
+            Some(cfg) => {
+                let policy = shepherd_management::WebAuthPolicy {
+                    session_idle: cfg.auth.session_idle,
+                    session_max_age: cfg.auth.session_max_age,
+                    lockout_after: cfg.auth.lockout_after,
+                    lockout: cfg.auth.lockout,
+                };
+                match shepherd_management::WebAuth::load(Arc::clone(&protected_files), policy) {
+                    Ok(auth) => Some(Arc::new(auth)),
+                    Err(e) => {
+                        error!(error = %e, "Could not open the web management credential store");
+                        return Err(anyhow::anyhow!("web management credential store: {e}"));
+                    }
+                }
+            }
+            None => None,
+        };
+
         // Automatic brightness. Offered only when the host actually exposes a
         // light sensor. The runtime on/off state persists in the store; fall
         // back to the config default the first time (or if the store read
@@ -1587,6 +1612,7 @@ impl Service {
                 ),
                 network: Some(Arc::new(LinuxNetworkInfo::new()) as Arc<dyn NetworkInfoProvider>),
                 web_listener: web_listener.clone(),
+                web_auth: web_auth.clone(),
             })
         };
         let svc: Arc<dyn ManagementService> = svc_concrete.clone();
@@ -1700,6 +1726,14 @@ impl Service {
             }
             None => (None, None),
         };
+
+        // The store learns about the companion here rather than at
+        // construction: the claim machine does not exist until the BLE server
+        // is built, and the browser's login page needs to know whether the
+        // "approve on my phone" button leads anywhere.
+        if let Some(web) = &web_auth {
+            web.set_companion(admin_authority.clone());
+        }
 
         let http_handle = match management_api_config {
             Some(api_cfg) => {

@@ -74,6 +74,12 @@ struct WireTypes {
     event: shepherd_api::Event,
     event_payload: shepherd_api::EventPayload,
     launch_outcome: shepherd_management::LaunchOutcome,
+    // Web management authentication (issue #156). All three are reachable only
+    // as RPC results, never nested in another payload, so they have to be
+    // rooted here or the companion never gets the types.
+    web_auth_status: shepherd_management::WebAuthStatus,
+    web_session_info: shepherd_management::WebSessionInfo,
+    login_request_info: shepherd_management::LoginRequestInfo,
     // Reachable only because this crate sits above shepherd-ble; a generator
     // inside shepherd-management would hit a dependency cycle.
     device_info: shepherd_ble::protocol::DeviceInfo,

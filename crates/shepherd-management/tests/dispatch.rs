@@ -383,6 +383,7 @@ fn make_svc_full(
         // shape a device can be in and must not panic.
         network: None,
         web_listener: WebListenerHandle::default(),
+        web_auth: None,
     }
 }
 

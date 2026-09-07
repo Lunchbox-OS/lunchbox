@@ -212,6 +212,35 @@ object RpcParams {
     /** Params for `refresh_media`, which takes none. */
     fun refreshMedia(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `web_auth_status`, which takes none. */
+    fun webAuthStatus(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `set_web_password`. */
+    fun setWebPassword(password: String): JsonObject = buildJsonObject {
+        put("password", JsonPrimitive(password))
+    }
+
+    /** Params for `list_web_sessions`, which takes none. */
+    fun listWebSessions(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `revoke_web_session`. */
+    fun revokeWebSession(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
+    /** Params for `list_login_requests`, which takes none. */
+    fun listLoginRequests(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `approve_login_request`. */
+    fun approveLoginRequest(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
+    /** Params for `deny_login_request`. */
+    fun denyLoginRequest(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
     /** Params for `logout`, which takes none. */
     fun logout(): JsonObject = JsonObject(emptyMap())
 

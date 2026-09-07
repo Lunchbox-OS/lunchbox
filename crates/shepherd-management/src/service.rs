@@ -29,6 +29,7 @@ use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessStat
 use crate::error::{ManagementError, ManagementResult};
 use crate::listener::WebListenerHandle;
 use crate::types::LaunchOutcome;
+use crate::webauth::{LoginRequestInfo, WebAuth, WebAuthError, WebAuthStatus, WebSessionInfo};
 
 /// Store key under which the runtime auto-brightness on/off state persists.
 pub const AUTO_BRIGHTNESS_SETTING_KEY: &str = "auto_brightness_enabled";
@@ -217,6 +218,48 @@ pub trait ManagementService: Send + Sync {
     /// one clears it — which both clients already display.
     async fn refresh_media(&self) -> ManagementResult<()>;
 
+    // Web management authentication (issue #156)
+    //
+    // The login itself is not here. Signing in is a *pre-auth* HTTP exchange —
+    // `POST /api/v1/auth/login` and friends — and a transport that has already
+    // authenticated its peer, as BLE has by the time a write lands, has no use
+    // for it. What is here is the half an authenticated administrator performs:
+    // approving a browser's request from the phone, setting the password
+    // without SSH, and ending a session on a device they no longer hold.
+
+    /// Whether the web UI has a password yet, and whether a paired companion
+    /// exists to approve a login. Answers the companion's "is this device set
+    /// up?" and the browser's "which door do I offer?".
+    async fn web_auth_status(&self) -> ManagementResult<WebAuthStatus>;
+
+    /// Set or replace the web UI's password.
+    ///
+    /// No old password required: the caller has already proved they are the
+    /// administrator by reaching this trait at all — over a bonded BLE link, or
+    /// with a live session. This is the reset flow that means a parent who
+    /// forgot the password does not have to find an SSH client.
+    async fn set_web_password(&self, password: String) -> ManagementResult<()>;
+
+    /// Every live browser session, so an administrator can see what is signed
+    /// in and end anything they do not recognise.
+    async fn list_web_sessions(&self) -> ManagementResult<Vec<WebSessionInfo>>;
+
+    /// End one session by its public id.
+    async fn revoke_web_session(&self, id: String) -> ManagementResult<()>;
+
+    /// Browsers waiting on an approval, each with the six digits it is
+    /// displaying. The parent compares those digits against the screen in
+    /// front of them — the same Numeric Comparison ritual as BLE pairing, for
+    /// the same reason: a racing attacker's request shows a different number.
+    async fn list_login_requests(&self) -> ManagementResult<Vec<LoginRequestInfo>>;
+
+    /// Approve a waiting browser, minting the session it collects on its next
+    /// poll.
+    async fn approve_login_request(&self, id: String) -> ManagementResult<()>;
+
+    /// Refuse a waiting browser, so it stops waiting and says so.
+    async fn deny_login_request(&self, id: String) -> ManagementResult<()>;
+
     // User
     async fn logout(&self);
 
@@ -339,6 +382,12 @@ pub struct DefaultManagementService {
     /// the config asked for. Written by whoever owns the listener; `Disabled`
     /// by default, which is the truth for an embedding that never starts one.
     pub web_listener: WebListenerHandle,
+    /// The web UI's credential store (issue #156). `None` wherever the
+    /// management API is switched off — in which case the seven web-auth
+    /// methods answer "not configured" rather than pretending to work, because
+    /// a companion that silently set a password on a device with no HTTP
+    /// server would be lying to the person holding the phone.
+    pub web_auth: Option<Arc<WebAuth>>,
 }
 
 #[async_trait]
@@ -1266,6 +1315,47 @@ impl ManagementService for DefaultManagementService {
         }
     }
 
+    // -------------------------------------------------------------- web auth
+    async fn web_auth_status(&self) -> ManagementResult<WebAuthStatus> {
+        Ok(self.require_web_auth()?.status())
+    }
+
+    async fn set_web_password(&self, password: String) -> ManagementResult<()> {
+        self.require_web_auth()?
+            .set_password(&password)
+            .map_err(web_auth_error)
+    }
+
+    async fn list_web_sessions(&self) -> ManagementResult<Vec<WebSessionInfo>> {
+        // No session is `current` from here: this trait is reached over BLE
+        // and over a browser's own connection alike, and only the HTTP layer
+        // knows which session is asking. The web UI marks its own row through
+        // `GET /api/v1/auth/sessions` instead.
+        Ok(self.require_web_auth()?.list_sessions(None))
+    }
+
+    async fn revoke_web_session(&self, id: String) -> ManagementResult<()> {
+        self.require_web_auth()?
+            .revoke_session(&id)
+            .map_err(web_auth_error)
+    }
+
+    async fn list_login_requests(&self) -> ManagementResult<Vec<LoginRequestInfo>> {
+        Ok(self.require_web_auth()?.list_login_requests())
+    }
+
+    async fn approve_login_request(&self, id: String) -> ManagementResult<()> {
+        self.require_web_auth()?
+            .approve_login_request(&id)
+            .map_err(web_auth_error)
+    }
+
+    async fn deny_login_request(&self, id: String) -> ManagementResult<()> {
+        self.require_web_auth()?
+            .deny_login_request(&id)
+            .map_err(web_auth_error)
+    }
+
     // ------------------------------------------------------------------ user
     async fn logout(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -1312,7 +1402,34 @@ impl ManagementService for DefaultManagementService {
     }
 }
 
+/// Map a credential-store failure onto the transport-agnostic error.
+///
+/// The distinctions that survive are the ones a caller can act on: a lockout
+/// and a wrong password are both "no", but only one of them is worth waiting
+/// out, so they do not collapse into the same status.
+fn web_auth_error(e: WebAuthError) -> ManagementError {
+    match e {
+        WebAuthError::NotConfigured => ManagementError::Conflict(e.to_string()),
+        WebAuthError::AlreadyConfigured => ManagementError::Conflict(e.to_string()),
+        WebAuthError::BadPassword | WebAuthError::BadEnrolmentCode => {
+            ManagementError::Forbidden(e.to_string())
+        }
+        WebAuthError::LockedOut(_) => ManagementError::Forbidden(e.to_string()),
+        WebAuthError::NoSuchRequest | WebAuthError::NoSuchSession => {
+            ManagementError::NotFound(e.to_string())
+        }
+        WebAuthError::PasswordTooShort(_) => ManagementError::Unprocessable(e.to_string()),
+        WebAuthError::Store(_) => ManagementError::Internal(e.to_string()),
+    }
+}
+
 impl DefaultManagementService {
+    fn require_web_auth(&self) -> ManagementResult<&Arc<WebAuth>> {
+        self.web_auth.as_ref().ok_or_else(|| {
+            ManagementError::Conflict("the management API is not enabled on this device".into())
+        })
+    }
+
     /// Close out a reset started by `CoreEngine::begin_restart`, handing the
     /// engine the replacement process's handle — or `None` when there isn't
     /// one, which ends the session.

@@ -36,3 +36,26 @@ outcome. The daemon retries a bind whose address does not exist yet
 still coming up at login), a `port = 0` binds to something else entirely, and
 a bind that never succeeds previously reached only a log line — on a device
 whose web interface is exactly how somebody would have read it.
+
+## Web management authentication
+
+`webauth.rs` holds the credential store behind the management web UI (issue
+#156): the Argon2id password hash, the live browser sessions, and the pending
+"approve this browser on your phone" requests. It lives here rather than in
+`shepherd-http` because the companion reaches two of those three over BLE —
+approving a waiting browser, and setting the password without SSH are both
+ordinary trait methods, so `#[management_rpc]` carries them to every transport
+and to the Kotlin and TypeScript codegen.
+
+What is *not* here is the login itself. Signing in is a pre-auth HTTP exchange
+(`POST /api/v1/auth/login` and friends, in `shepherd-http`); a transport that
+has already authenticated its peer, as BLE has by the time a GATT write lands,
+has no use for one, and exposing it there would be a second door into the same
+room.
+
+The store is synchronous behind a `std::sync::RwLock`, for the same reason
+`AdminAuthority` is: the HTTP auth middleware runs per request and must not
+await. It persists through `ProtectedFiles` to `web-auth.toml` under the state
+custodian, at a uid no activity has — a password hash and a table of live
+sessions are exactly the kind of thing the child must not be able to read.
+Session tokens are stored hashed even there.
