@@ -320,6 +320,18 @@ Example (bedtime restriction):
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
   `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
+- **"shepherdd did not connect to the compositor within 30s" can be a lie.**
+  A GTK `Cannot get portal org.freedesktop.host.portal.Registry version: Timeout
+  was reached` eats ~26s of the 30s budget, and the alias socket then appears at
+  around T+50s with a perfectly healthy stack behind it. The damage is that the
+  start path bailed **without writing `session.env`**, so `dev stop` says "No
+  live headless session to stop" and every `dev` subcommand has nothing to
+  reattach to while sway, shepherdd, the launcher and the HUD all keep running.
+  Confirm with `ls /run/user/1000/ | grep sway` (the alias is there) and
+  `ls -l dev-runtime/shepherd.sock` (live), then kill the pids from
+  `ps -eo pid,cmd | grep -E "sway.*headless|shepherdd"`, `rm
+  dev-runtime/headless/session.env`, and boot again — the second boot is
+  usually well inside the budget.
 - **"shepherdd did not connect to the compositor" is a different failure from
   "Sway did not create its IPC socket"**, and the harness now tells them apart:
   the first waits on the alias (which only exists once shepherdd has connected),
@@ -392,6 +404,13 @@ For a scripted client that wants no browser at all, set
 open a session.
 
 Gotchas here:
+
+- **A curl cookie jar is keyed by host, so a session can look revoked when it
+  is not.** Move the daemon from a loopback bind to a LAN bind and every
+  `-b cookies.txt` request comes back 401, because curl silently stops sending
+  a cookie saved under `127.0.0.1`. Send it explicitly —
+  `-H "Cookie: shepherd_session=$(awk '/shepherd_session/{print $7}' cookies.txt | tail -1)"`
+  — before concluding anything about session lifetime or revocation.
 
 - **`pkill -f firefox` kills your own shell.** The Bash tool's wrapper carries
   the command text, so `-f` matches it. Use `pkill -x firefox`, or match the
