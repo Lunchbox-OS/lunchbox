@@ -3,7 +3,7 @@
 use crate::internet::InternetCheckTarget;
 use crate::schema::{
     RawBrowserConfig, RawConfig, RawDays, RawEntry, RawEntryKind, RawFirewallConfig, RawGroup,
-    RawMediaMode, RawTimeWindow, RawTokens,
+    RawManagementApiConfig, RawMediaMode, RawTimeWindow, RawTokens,
 };
 use shepherd_util::GROUP_SUBJECT_PREFIX;
 use std::collections::HashSet;
@@ -146,6 +146,13 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
+    // Validate the management API's transport security (issue #156).
+    if let Some(api) = &config.service.management_api
+        && api.enabled
+    {
+        errors.extend(validate_management_api(api));
+    }
+
     // Validate Steam interstitial auto-dismiss slugs.
     if let Some(steam) = &config.service.steam
         && let Some(list) = &steam.auto_dismiss_interstitials
@@ -205,6 +212,109 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
 }
 
 /// Validate a group definition (issue #5).
+/// The management API's own rules.
+///
+/// The load-bearing one is the last: a listener anyone but this machine can
+/// reach may not be in the clear. Everything an administrator does over that
+/// socket — a password, a session cookie, a token — is a credential to the
+/// child on the same Wi-Fi otherwise. It is an error rather than a warning
+/// because a warning is a thing a device ships with.
+fn validate_management_api(api: &RawManagementApiConfig) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+
+    let bind = api
+        .bind
+        .as_deref()
+        .unwrap_or(crate::policy::DEFAULT_MANAGEMENT_API_BIND);
+    let parsed = match IpAddr::from_str(bind) {
+        Ok(ip) => Some(ip),
+        Err(_) => {
+            errors.push(ValidationError::GlobalError(format!(
+                "Invalid service.management_api.bind '{bind}': not an IP address"
+            )));
+            None
+        }
+    };
+
+    let mode = api
+        .tls
+        .as_ref()
+        .and_then(|t| t.mode.as_deref())
+        .unwrap_or("auto");
+    if !matches!(mode, "auto" | "off" | "self_signed" | "files") {
+        errors.push(ValidationError::GlobalError(format!(
+            "Unknown service.management_api.tls.mode '{mode}' \
+             (known: auto, off, self_signed, files)"
+        )));
+    }
+
+    if mode == "files" {
+        let tls = api.tls.as_ref().expect("mode came from tls");
+        for (field, value) in [("cert", &tls.cert), ("key", &tls.key)] {
+            match value {
+                None => errors.push(ValidationError::GlobalError(format!(
+                    "service.management_api.tls.mode = \"files\" needs tls.{field}"
+                ))),
+                Some(path) if !Path::new(path).exists() => {
+                    errors.push(ValidationError::GlobalError(format!(
+                        "service.management_api.tls.{field} '{path}' does not exist"
+                    )))
+                }
+                Some(_) => {}
+            }
+        }
+    } else if let Some(tls) = &api.tls
+        && (tls.cert.is_some() || tls.key.is_some())
+    {
+        errors.push(ValidationError::GlobalError(format!(
+            "service.management_api.tls has cert/key but mode = \"{mode}\"; \
+             set mode = \"files\" to use them"
+        )));
+    }
+
+    if mode == "off"
+        && let Some(ip) = parsed
+        && !ip.is_loopback()
+    {
+        errors.push(ValidationError::GlobalError(format!(
+            "service.management_api binds {bind} with tls.mode = \"off\", which serves \
+             administration in the clear to everyone on that network — including the \
+             child this device manages. Use mode = \"self_signed\" (or \"files\" with a \
+             certificate), or bind 127.0.0.1. Leaving tls unset picks the right one."
+        )));
+    }
+
+    if let Some(auth) = &api.auth {
+        if auth.session_idle_days == Some(0) {
+            errors.push(ValidationError::GlobalError(
+                "service.management_api.auth.session_idle_days must be > 0".into(),
+            ));
+        }
+        if auth.session_max_days == Some(0) {
+            errors.push(ValidationError::GlobalError(
+                "service.management_api.auth.session_max_days must be > 0".into(),
+            ));
+        }
+        if auth.lockout_after == Some(0) {
+            errors.push(ValidationError::GlobalError(
+                "service.management_api.auth.lockout_after must be > 0; a device that locks \
+                 out on zero failures cannot be logged into at all"
+                    .into(),
+            ));
+        }
+        if let (Some(idle), Some(max)) = (auth.session_idle_days, auth.session_max_days)
+            && idle > max
+        {
+            errors.push(ValidationError::GlobalError(format!(
+                "service.management_api.auth.session_idle_days ({idle}) exceeds \
+                 session_max_days ({max}), so the idle timeout can never fire"
+            )));
+        }
+    }
+
+    errors
+}
+
 fn validate_group(group: &RawGroup, config: &RawConfig) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     let err = |message: String| ValidationError::GroupError {
@@ -1985,5 +2095,127 @@ mod tests {
         "#;
         let cfg: RawConfig = toml::from_str(toml).expect("parses");
         assert!(!cfg.entries[0].internet.as_ref().unwrap().forward_check);
+    }
+
+    // ---- management API transport security (issue #156) ------------------
+
+    fn api_errors(body: &str) -> Vec<String> {
+        let toml =
+            format!("config_version = 1\n[service.management_api]\nenabled = true\n{body}\n");
+        let cfg: RawConfig = toml::from_str(&toml).expect("parses");
+        validate_config(&cfg)
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn plaintext_on_a_public_bind_is_refused() {
+        let errors = api_errors("bind = \"0.0.0.0\"\n[service.management_api.tls]\nmode = \"off\"");
+        assert!(
+            errors.iter().any(|e| e.contains("in the clear")),
+            "expected the plaintext refusal, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn plaintext_on_loopback_is_fine() {
+        // The dev loop and the e2e harness both live here, and neither is
+        // reachable from the network the child is on.
+        assert!(
+            api_errors("bind = \"127.0.0.1\"\n[service.management_api.tls]\nmode = \"off\"")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_public_bind_that_says_nothing_about_tls_is_fine_and_resolves_to_self_signed() {
+        // The whole point of `auto`: saying nothing must not be the insecure
+        // answer, and must not be an error either.
+        assert!(api_errors("bind = \"0.0.0.0\"").is_empty());
+        let cfg: RawConfig = toml::from_str(
+            "config_version = 1\n[service.management_api]\nenabled = true\nbind = \"0.0.0.0\"\n",
+        )
+        .unwrap();
+        let policy = crate::policy::Policy::from_raw(cfg);
+        assert_eq!(
+            policy.service.management_api.unwrap().tls,
+            crate::policy::TlsMode::SelfSigned
+        );
+    }
+
+    #[test]
+    fn a_loopback_bind_that_says_nothing_stays_plaintext() {
+        let cfg: RawConfig =
+            toml::from_str("config_version = 1\n[service.management_api]\nenabled = true\n")
+                .unwrap();
+        let policy = crate::policy::Policy::from_raw(cfg);
+        assert_eq!(
+            policy.service.management_api.unwrap().tls,
+            crate::policy::TlsMode::Off
+        );
+    }
+
+    #[test]
+    fn files_mode_needs_both_paths() {
+        let errors = api_errors("[service.management_api.tls]\nmode = \"files\"");
+        assert!(errors.iter().any(|e| e.contains("tls.cert")), "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("tls.key")), "{errors:?}");
+    }
+
+    #[test]
+    fn a_cert_path_that_is_not_there_is_an_error_rather_than_a_listener_that_never_comes_up() {
+        let errors = api_errors(
+            "[service.management_api.tls]\nmode = \"files\"\ncert = \"/nope/cert.pem\"\nkey = \"/nope/key.pem\"",
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| e.contains("does not exist")));
+    }
+
+    #[test]
+    fn cert_paths_under_a_mode_that_ignores_them_are_called_out() {
+        let errors = api_errors(
+            "[service.management_api.tls]\nmode = \"self_signed\"\ncert = \"/tmp/c.pem\"",
+        );
+        assert!(errors.iter().any(|e| e.contains("set mode")), "{errors:?}");
+    }
+
+    #[test]
+    fn an_unknown_tls_mode_names_the_known_ones() {
+        let errors = api_errors("[service.management_api.tls]\nmode = \"letsencrypt\"");
+        assert!(
+            errors.iter().any(|e| e.contains("self_signed")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_lockout_threshold_of_zero_is_refused() {
+        let errors = api_errors("[service.management_api.auth]\nlockout_after = 0");
+        assert!(
+            errors.iter().any(|e| e.contains("lockout_after")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_idle_timeout_past_the_absolute_one_is_refused() {
+        let errors = api_errors(
+            "[service.management_api.auth]\nsession_idle_days = 120\nsession_max_days = 90",
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("can never fire")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_management_api_is_not_validated() {
+        // Nothing is listening, so a plaintext public bind is not a device
+        // serving admin in the clear — it is a stanza waiting to be switched on.
+        let toml = "config_version = 1\n[service.management_api]\nenabled = false\n\
+                    bind = \"0.0.0.0\"\n[service.management_api.tls]\nmode = \"off\"\n";
+        let cfg: RawConfig = toml::from_str(toml).expect("parses");
+        assert!(validate_config(&cfg).is_empty());
     }
 }

@@ -668,17 +668,15 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
       </Stack>
       <TextField
         size="small"
-        label="Bearer token"
+        label="Machine token"
         value={v?.auth_token ?? ""}
         onChange={(e) => f.setField("auth_token", e.target.value)}
-        helperText="Leave empty to trust every client that can reach the port."
+        helperText="For scripts and the e2e harness. It authenticates a request
+          but cannot sign anybody in — a person uses a password or the paired
+          companion. Leave empty unless something automated needs it."
       />
-      {v?.enabled && !v?.auth_token && v?.bind && v.bind !== "127.0.0.1" && (
-        <Alert severity="warning">
-          This binds beyond loopback with no token, so anything on the network
-          can control the device.
-        </Alert>
-      )}
+      <TlsEditor config={config} />
+      <SessionEditor config={config} />
       <TextField
         size="small"
         type="number"
@@ -694,6 +692,107 @@ function ManagementApiEditor({ config }: { config: RawConfig }) {
         helperText="How long to keep retrying when the interface is not up yet. 0 retries forever."
         sx={{ maxWidth: 260 }}
       />
+    </Stack>
+  );
+}
+
+/**
+ * Transport security for the management API (issue #156).
+ *
+ * The mode a config that says nothing gets is `auto`, and it is the right one
+ * almost always: plaintext on loopback, a generated self-signed certificate
+ * anywhere else. The reason to touch this is `files` — a certificate from
+ * `tailscale cert`, Let's Encrypt or a home CA, which is the only way to get a
+ * browser padlock with no warning.
+ */
+function TlsEditor({ config }: { config: RawConfig }) {
+  const f = useFields("service.management_api.tls");
+  const v = config.service?.management_api?.tls;
+  const mode = v?.mode ?? "auto";
+  const bind = config.service?.management_api?.bind;
+  return (
+    <Stack spacing={2}>
+      <TextField
+        size="small"
+        select
+        label="TLS"
+        value={mode}
+        onChange={(e) =>
+          f.setField("mode", e.target.value === "auto" ? undefined : e.target.value)
+        }
+        helperText="Auto: plaintext on loopback, a self-signed certificate on any
+          other address."
+        sx={{ maxWidth: 320 }}
+      >
+        <MenuItem value="auto">Automatic</MenuItem>
+        <MenuItem value="off">Off (plaintext)</MenuItem>
+        <MenuItem value="self_signed">Self-signed certificate</MenuItem>
+        <MenuItem value="files">Certificate files</MenuItem>
+      </TextField>
+      {mode === "files" && (
+        <>
+          <TextField
+            size="small"
+            label="Certificate (PEM)"
+            value={v?.cert ?? ""}
+            onChange={(e) => f.setField("cert", e.target.value)}
+            placeholder="/var/lib/shepherdd/tls/fullchain.pem"
+          />
+          <TextField
+            size="small"
+            label="Private key (PEM)"
+            value={v?.key ?? ""}
+            onChange={(e) => f.setField("key", e.target.value)}
+            placeholder="/var/lib/shepherdd/tls/privkey.pem"
+          />
+        </>
+      )}
+      {mode === "off" && bind && bind !== "127.0.0.1" && bind !== "::1" && (
+        <Alert severity="error">
+          Plaintext on {bind} serves administration in the clear to everyone on
+          that network, including the child this device manages. The daemon
+          refuses to start with this combination.
+        </Alert>
+      )}
+    </Stack>
+  );
+}
+
+/** How long a signed-in browser stays signed in, and what a guesser costs. */
+function SessionEditor({ config }: { config: RawConfig }) {
+  const f = useFields("service.management_api.auth");
+  const v = config.service?.management_api?.auth;
+  const numberField = (
+    name: "session_idle_days" | "session_max_days" | "lockout_after" | "lockout_seconds",
+    label: string,
+    placeholder: string,
+    helperText?: string,
+  ) => (
+    <TextField
+      size="small"
+      type="number"
+      label={label}
+      value={v?.[name] ?? ""}
+      placeholder={placeholder}
+      helperText={helperText}
+      onChange={(e) =>
+        f.setField(name, e.target.value === "" ? undefined : Number(e.target.value))
+      }
+    />
+  );
+  return (
+    <Stack spacing={2}>
+      <Typography variant="body2" color="text.secondary">
+        Sign-in sessions
+      </Typography>
+      <Stack direction="row" spacing={2}>
+        {numberField("session_idle_days", "Idle timeout (days)", "14")}
+        {numberField("session_max_days", "Maximum age (days)", "90")}
+      </Stack>
+      <Stack direction="row" spacing={2}>
+        {numberField("lockout_after", "Lock out after", "8", "failed attempts")}
+        {numberField("lockout_seconds", "Lockout (s)", "300", "doubles each time")}
+      </Stack>
     </Stack>
   );
 }
