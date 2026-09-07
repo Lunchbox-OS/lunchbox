@@ -173,6 +173,15 @@ gtk4-layer-shell = "0.4"
 # HTTP API
 axum = { version = "0.8", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+# Password hashing for the web UI login (issue #156). Argon2id with the
+# crate's default params; the PHC string carries them, so raising them later
+# re-hashes on next login rather than invalidating the stored password.
+argon2 = "0.5"
+# CSPRNG behind session ids, enrolment codes and approval codes.
+rand = "0.8"
+# Constant-time comparison of session tokens and codes.
+subtle = "2.6"
+sha2 = "0.10"
 
 # WebSocket client (Steam CEF DevTools / Chrome DevTools Protocol).
 # Default features give a non-TLS ws:// client; we only talk to loopback.
