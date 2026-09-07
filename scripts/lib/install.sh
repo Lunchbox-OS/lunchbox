@@ -1507,14 +1507,30 @@ uninstall_state() {
     # record are the things an uninstall is least entitled to destroy, and a
     # reinstall picks them straight back up. Removing the uid would orphan them
     # to a number rather than a name, which is worse than leaving both.
-    if [[ -d "$destdir$STATED_STATE_ROOT" ]]; then
+    #
+    # Both directories, named separately: the per-user one holds the policy and
+    # the database, the shared one the admin record and the unbond queue. A
+    # message naming only the first would tell an operator they still had a BLE
+    # admin record and then point them at the directory it is not in.
+    local left=()
+    [[ -d "$destdir$STATED_STATE_ROOT" ]] && left+=("$destdir$STATED_STATE_ROOT")
+    [[ -d "$destdir$STATED_ADMIN_DIR" ]] && left+=("$destdir$STATED_ADMIN_DIR")
+    if [[ "${#left[@]}" -gt 0 ]]; then
         if [[ "$restore" == "true" ]]; then
-            info "Left $destdir$STATED_STATE_ROOT in place (owned by $STATED_USER)"
-            info "  Anything still in it is named above; the rest went back to the"
-            info "  users' home directories. Remove it by hand once you are happy."
+            info "Left in place, owned by $STATED_USER: ${left[*]}"
+            info "  Anything still in them is named above; the rest went back to the"
+            info "  users' home directories. Remove them by hand once you are happy."
         else
-            info "Left shepherd's state in $destdir$STATED_STATE_ROOT (owned by $STATED_USER)"
-            info "  Remove it by hand if you mean to discard usage history and the BLE admin record."
+            info "Left shepherd's state, owned by $STATED_USER:"
+            local dir
+            for dir in "${left[@]}"; do
+                case "$dir" in
+                    *"$STATED_ADMIN_DIR") info "    $dir  (BLE admin record, unbond queue)" ;;
+                    *) info "    $dir  (policy and usage database, per user)" ;;
+                esac
+            done
+            info "  Remove them by hand if you mean to discard a child's usage history"
+            info "  and this device's pairing."
             info "  To put it back where shepherdd looks without the custodian, re-run with"
             info "  --restore-to-home (a build older than issue #157 will not find it here)."
         fi
