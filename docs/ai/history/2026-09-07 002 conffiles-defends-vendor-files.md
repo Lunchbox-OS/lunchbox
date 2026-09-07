@@ -92,35 +92,105 @@ the `uninstall_*` functions remove both the new and the legacy path.
 
 ## How it was verified
 
-Everything below was run in a throwaway dpkg root (`dpkg --root=… --force-not-root
---force-script-chrootless`), because this dev box is itself a from-source
-shepherd install and chrootless maintainer scripts would act on its real `/etc`.
+The whole thing was run for real on the dev box (Ubuntu 26.04, dpkg 1.23.7):
+its from-source install was removed, the released packaging was installed, the
+defect reproduced, the fix installed over it, and the box put back. Everything
+below is from that run unless it says otherwise.
 
-1. **Synthetic transition test** — established what dpkg actually does for each
-   of the three transitions (conffile → plain shipped file; conffile → shipped
-   at a new path; conffile → written by the postinst), and that `rm_conffile`
-   clears the leftovers. Worth knowing: a conffile that becomes an ordinary file
-   at the *same* path is replaced silently, with the conffile record dropped —
-   no helper needed for `shepherd.conf`.
-2. **Real package upgrade** — built the pre-change `.deb` from a worktree at
-   `HEAD` and the post-change one at a bumped version, then upgraded 0.4.1 →
-   0.4.2 in the fake root, having first rewritten the drop-in the way 0.4.1's
-   postinst does and hand-edited the sway config the way an operator might.
-   Result: no prompt; both `/etc` rules gone and present under `/usr`; the sway
-   config replaced, admin edit and all; one obsolete conffile record left, the
-   drop-in's, as designed. (Maintainer scripts were reduced to their
-   `rm_conffile` loops for this run — the rest would have mutated the host.)
-3. **Drop-in rendering** — the postinst's block run verbatim against a stubbed
-   `systemctl cat` shaped like the real thing (vendor unit first, then a drop-in
-   from an earlier run). Confirmed it picks the daemon rather than reading its
-   own `ExecStart` back, is idempotent across re-runs, removes the drop-in and
-   its directory when there is no `bluetooth.service`, and leaves no `.new` file.
-4. **Install/uninstall symmetry** — `install_system` then `uninstall_system`
-   under one `DESTDIR`: every staged file is removed, the new template included.
-5. `cargo test --workspace --all-targets`, `cargo clippy --workspace
-   --all-targets -- -D warnings`, `cargo fmt --all`, and `shellcheck` over the
-   scripts, all clean.
+### Reproducing the defect
+
+Installing the pre-change 0.4.1 `.deb` and then upgrading, with the drop-in in
+the state a device is in — pointing at *that machine's* `bluetoothd`, which is
+what 0.4.1's postinst writes there:
+
+```
+Configuration file «/etc/systemd/system/bluetooth.service.d/10-shepherd-bluetooth-experimental.conf»
+ ==> Modified (by you or by a script) since installation.
+ ==> Package distributor has shipped an updated version.
+ ==> Keeping old config file as default.
+```
+
+The revised drop-in did not land: dpkg parked it as `.dpkg-dist` and kept the
+old one. On an interactive upgrade this is the prompt; unattended it is silent.
+
+**Worth knowing, because it explains why nobody hit this locally:** when the
+build host and the target have the same `bluetoothd` path, the postinst's `sed`
+is a no-op and the checksum still matches, so the upgrade is quiet. The defect
+needs a device whose daemon path differs from the build host's — and it only
+turns into a *lost update* when the shipped drop-in also changes between
+releases, which any edit to that file's long comment header would do.
+
+### Verifying the fix, on the same box
+
+Baseline: 0.4.1 installed, its drop-in pointing at the device's `bluetoothd`
+(so dpkg sees it modified), and `/etc/sway/shepherd.conf` hand-edited the way an
+operator might.
+
+1. **0.4.1 → 0.5.0, unattended, no force options.** No prompt and no `==>`
+   message. `Removing obsolete conffile /etc/udev/rules.d/71-shepherd-uinput.rules`
+   and the polkit one — both admin directories clear, both rules present under
+   `/usr`. The operator's sway edit is gone (the file is generated) and
+   `shepherd.conf.d/` is untouched. The drop-in is rendered from the staged
+   template with this machine's `ExecStart`.
+2. **0.5.0 → 0.5.1 with the drop-in template edited** — the same change 0.4.3
+   could not deliver above. It lands, `ExecStart` is still correct for the
+   machine, and there is no `.dpkg-dist`.
+3. **`apt install --reinstall`, no `--force-confmiss`,** after deleting the sway
+   config, both rules and the drop-in behind dpkg's back: all four come back
+   (the drop-in via the postinst). The diagnostic in `docs/INSTALL.md` names
+   exactly the missing files.
+4. **`apt remove`** takes the postinst-written drop-in and its directory away —
+   dpkg would not have, since it never unpacked it — and the device's state
+   under `/var/lib/shepherdd/state/kiosk/` is untouched. `apt purge` clears the
+   rest.
+5. **The obsolete conffile record** for the drop-in survives upgrade, reinstall
+   and remove, and clears on purge. That is what the comments in `package.sh`
+   and `path_owned_by_dpkg` say, now measured rather than assumed. On an
+   upgraded box `dpkg-query -S` still answers for that path, so a source
+   `uninstall all` leaves it — observed, along with every other packaged file.
+6. **The subsystems still read the moved rules.** `/dev/uinput` is
+   `root:input 0660` from `/usr/lib/udev/rules.d`; `pkcheck --action-id
+   org.shepherd.firewall.apply-process` answers `yes` for a member of
+   `shepherd-firewall` from `/usr/share/polkit-1/rules.d`; `systemctl show
+   bluetooth.service -p ExecStart` resolves through the drop-in.
+7. **The kiosk session came up on the new layout.** After putting the box back
+   on a from-source install and restarting the session: `shepherdd starting
+   version="0.5.0"`, `Store opened db=/var/lib/shepherdd/state/kiosk/shepherdd.db`,
+   `Configuration loaded entry_count=17 source="the state custodian"`, `Per-entry
+   firewall enforcement is available`, launcher and HUD connected, HTTP API 200,
+   and no sway IPC socket left (the generated config still hardens).
+
+One behaviour change falls out of this and is intended: `apt remove` now deletes
+`/etc/sway/shepherd.conf` and the two rules, where before they survived as
+conffiles until `purge`. They are shepherd's files, so removing the package
+should take them.
+
+### Also checked, off the box
+
+- **Synthetic dpkg-root transitions**, run first to establish what dpkg does for
+  each of the three cases. The useful finding: a conffile that becomes an
+  ordinary file at the *same* path is replaced silently and the record dropped,
+  so `shepherd.conf` needs no helper.
+- **The postinst's render block, run verbatim** against a stubbed `systemctl
+  cat` shaped like the real thing (vendor unit first, then a drop-in from an
+  earlier run): it picks the daemon rather than reading its own `ExecStart`
+  back, is idempotent, removes the drop-in and its directory when there is no
+  `bluetooth.service`, and leaves no `.new` file.
+- **Install/uninstall symmetry** — `install_system` then `uninstall_system`
+  under one `DESTDIR`: every staged file removed, the new template included.
+- `cargo test --workspace --all-targets`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --all`, `shellcheck`, and
+  `shepherd version check` — all clean.
 
 A CI step in the `package` job now asserts the built `.deb` declares no
 `conffiles` and ships no `bluetooth.service.d/` drop-in. Both assertions were
 checked against the old package to confirm they discriminate.
+
+## A note for the next person
+
+`PACKAGE_LAST_CONFFILE_VERSION` in `package.sh` is `0.4.1` — the last release
+that declared conffiles — and this change ships in 0.5.0. It is the
+`prior-version` handed to `rm_conffile`, so it must stay at or above the highest
+released version that still had them. Upgrading from anything newer finds
+nothing to do, so it does not need touching again unless a conffile is
+reintroduced.

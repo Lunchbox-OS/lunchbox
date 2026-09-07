@@ -800,7 +800,9 @@ sudo ./scripts/shepherd uninstall all --restore-to-home
 ```
 
 (If you installed the `.deb`, use `sudo apt-get remove shepherd-launcher`
-instead.)
+instead. Since issue #177 that takes the sway config and the udev and polkit
+rules with it — they are shepherd's files, not conffiles the admin owns — while
+leaving `/etc/sway/shepherd.conf.d/` and the state custodian's data alone.)
 
 The state custodian's own files are left in place by default, and so is the
 `shepherd-state` user that owns them, so a reinstall picks a device's history
