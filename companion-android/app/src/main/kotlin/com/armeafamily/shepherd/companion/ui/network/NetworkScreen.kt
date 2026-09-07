@@ -44,6 +44,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.armeafamily.shepherd.companion.domain.Connectivity
+import com.armeafamily.shepherd.companion.domain.InternetStatusView
 import com.armeafamily.shepherd.companion.domain.NetworkInterfaceKind
 import com.armeafamily.shepherd.companion.domain.NetworkInterfaceView
 import com.armeafamily.shepherd.companion.domain.NetworkSource
@@ -245,6 +246,13 @@ fun NetworkScreen(vm: ShepherdViewModel, onBack: () -> Unit) {
 
             WebInterfaceCard(status.managementApi, status.managementUrls)
 
+            // From the service snapshot this app already holds, not from
+            // `network_status`: the checks are pushed on every
+            // `internet_status_changed`, so duplicating them onto the network
+            // wire type would give one fact two sources that drift apart
+            // between polls.
+            ChecksCard(state.snapshot?.internetStatus.orEmpty())
+
             Text(
                 if (net.reachable.isEmpty()) {
                     "No interface can be reached from another machine"
@@ -327,6 +335,65 @@ private fun WebInterfaceCard(listener: WebListenerView, urls: List<String>) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     urls.forEach { CopyableRow(it, label = "shepherd web interface", emphasis = true) }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The configured connectivity checks and their latest result (issue #182).
+ *
+ * The reason to show them beside the interfaces rather than on the health
+ * screen: "online" is one word for several different failures, and a device
+ * with an address, a gateway and a check that keeps failing is the shape of a
+ * captive portal or a blocked egress rule — which is a question about *this*
+ * page, not a device fault. Also the only place a caregiver can see why an
+ * activity that requires the internet is being held back.
+ */
+@Composable
+private fun ChecksCard(checks: List<InternetStatusView>) {
+    if (checks.isEmpty()) return
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Connectivity checks",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Activities that require the internet are held back when their check last " +
+                    "failed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            checks.forEach { check ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AssistChip(
+                        onClick = {},
+                        enabled = false,
+                        label = { Text(if (check.available) "Reachable" else "Unreachable") },
+                        colors = AssistChipDefaults.assistChipColors(
+                            disabledLabelColor = if (check.available) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            },
+                        ),
+                    )
+                    Text(
+                        check.target,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
         }
