@@ -38,6 +38,7 @@ import com.armeafamily.shepherd.companion.ui.pairing.PairingScreen
 import com.armeafamily.shepherd.companion.ui.settings.SettingsScreen
 import com.armeafamily.shepherd.companion.ui.health.HealthScreen
 import com.armeafamily.shepherd.companion.ui.network.NetworkScreen
+import com.armeafamily.shepherd.companion.ui.webauth.WebAccessScreen
 import com.armeafamily.shepherd.companion.ui.windows.WindowsScreen
 
 object Routes {
@@ -47,6 +48,7 @@ object Routes {
     const val WINDOWS = "windows"
     const val HEALTH = "health"
     const val NETWORK = "network"
+    const val WEB_ACCESS = "web-access"
     const val SETTINGS = "settings"
     const val ENTRY = "entry"
     fun entry(id: String) = "$ENTRY/$id"
@@ -143,7 +145,11 @@ fun App() {
                     onOpenWindows = { navController.navigate(Routes.WINDOWS) },
                     onOpenHealth = { navController.navigate(Routes.HEALTH) },
                     onOpenNetwork = { navController.navigate(Routes.NETWORK) },
+                    onOpenWebAccess = { navController.navigate(Routes.WEB_ACCESS) },
                 )
+            }
+            composable(Routes.WEB_ACCESS) {
+                WebAccessScreen(vm = vm, onBack = { navController.popBackStack() })
             }
             composable(Routes.HEALTH) {
                 HealthScreen(vm = vm, onBack = { navController.popBackStack() })

@@ -43,6 +43,7 @@ fun DeviceControlsScreen(
     onOpenWindows: () -> Unit,
     onOpenHealth: () -> Unit,
     onOpenNetwork: () -> Unit,
+    onOpenWebAccess: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
 
@@ -104,6 +105,13 @@ fun DeviceControlsScreen(
                     // interface came up at all (issue #182).
                     OutlinedButton(onClick = onOpenNetwork, modifier = Modifier.fillMaxWidth()) {
                         Text("Network…")
+                    }
+                    // Approving a browser, and setting the web password (issue
+                    // #156). Here rather than in Settings because it is a thing
+                    // done *to the device* in the moment — a laptop in the next
+                    // room is waiting — not a preference about this phone.
+                    OutlinedButton(onClick = onOpenWebAccess, modifier = Modifier.fillMaxWidth()) {
+                        Text("Web access…")
                     }
                 }
             }

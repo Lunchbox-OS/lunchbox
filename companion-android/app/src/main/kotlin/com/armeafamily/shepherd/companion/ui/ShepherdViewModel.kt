@@ -20,6 +20,7 @@ import com.armeafamily.shepherd.companion.domain.DiagnosticSubject
 import com.armeafamily.shepherd.companion.domain.EntryView
 import com.armeafamily.shepherd.companion.domain.EventPayload
 import com.armeafamily.shepherd.companion.domain.GroupView
+import com.armeafamily.shepherd.companion.domain.LoginRequestInfo
 import com.armeafamily.shepherd.companion.domain.ManagementClient
 import com.armeafamily.shepherd.companion.domain.NetworkInterfaceView
 import com.armeafamily.shepherd.companion.domain.NetworkStatusView
@@ -28,6 +29,7 @@ import com.armeafamily.shepherd.companion.domain.SessionInfo
 import com.armeafamily.shepherd.companion.domain.ShepherdRecord
 import com.armeafamily.shepherd.companion.domain.UsageStat
 import com.armeafamily.shepherd.companion.domain.VolumeInfo
+import com.armeafamily.shepherd.companion.domain.WebAuthStatus
 import com.armeafamily.shepherd.companion.domain.WindowAction
 import com.armeafamily.shepherd.companion.domain.WindowInfo
 import com.armeafamily.shepherd.companion.ui.windows.WindowPresentation
@@ -114,6 +116,24 @@ data class DeviceUiState(
  * an activity can be perfectly available while something about it is
  * misconfigured, and the two answer different questions.
  */
+/**
+ * Browsers waiting to be signed in, and the web UI's password state (issue
+ * #156).
+ *
+ * Polled rather than pushed, like the diagnostics above and for a stronger
+ * reason: a request lives two minutes and a parent looking at this screen is
+ * looking at it *because* they just clicked something on a laptop. A poll
+ * every few seconds while the screen is open is the whole requirement.
+ */
+data class WebAuthUiState(
+    val status: WebAuthStatus? = null,
+    val requests: List<LoginRequestInfo> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+    /** Set after an approval or denial lands, for a one-line confirmation. */
+    val lastAction: String? = null,
+)
+
 data class DiagnosticsUiState(
     val set: DiagnosticSet = DiagnosticSet(items = emptyList(), truncated = false),
     val loading: Boolean = false,
@@ -224,6 +244,8 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _network = MutableStateFlow(NetworkUiState())
     val network: StateFlow<NetworkUiState> = _network
+    private val _webAuth = MutableStateFlow(WebAuthUiState())
+    val webAuth: StateFlow<WebAuthUiState> = _webAuth
 
     /** Default name to claim under — the phone's model. */
     val defaultPhoneName: String = Build.MODEL ?: "Android phone"
@@ -236,6 +258,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private var windowsJob: Job? = null
     private var diagnosticsJob: Job? = null
     private var networkJob: Job? = null
+    private var webAuthJob: Job? = null
     private var bound = false
 
     init {
@@ -307,6 +330,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // Another box's addresses are actively misleading: they would send
         // somebody to SSH into the device they just switched away from.
         if (!sameDevice) _network.value = NetworkUiState()
+        if (!sameDevice) _webAuth.value = WebAuthUiState()
         conn.start()
         eventsJob = viewModelScope.launch {
             conn.events.collect { event -> applyEvent(event.payload) }
@@ -808,6 +832,97 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /**
+     * Re-read the web UI's password state and any browsers waiting for a tap
+     * (issue #156).
+     *
+     * Safe to call on a timer: it returns immediately if a read is already in
+     * flight, and the screen that shows this polls every few seconds while it
+     * is open.
+     */
+    fun refreshWebAuth() {
+        if (webAuthJob?.isActive == true) return
+        val c = client ?: run {
+            _webAuth.update { it.copy(loading = false, error = "Not connected.") }
+            return
+        }
+        _webAuth.update { it.copy(loading = true) }
+        webAuthJob = viewModelScope.launch {
+            try {
+                val status = c.webAuthStatus()
+                val requests = c.listLoginRequests()
+                _webAuth.update {
+                    it.copy(status = status, requests = requests, loading = false, error = null)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _webAuth.update {
+                    it.copy(loading = false, error = why ?: "Couldn't read the sign-in requests.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Let a waiting browser in, or turn it away.
+     *
+     * The parent has already compared the six digits against the screen they
+     * are sitting at; this is the tap that mints the session.
+     */
+    fun decideLoginRequest(id: String, approve: Boolean) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                if (approve) c.approveLoginRequest(id) else c.denyLoginRequest(id)
+                _webAuth.update {
+                    it.copy(
+                        requests = it.requests.filterNot { r -> r.id == id },
+                        lastAction = if (approve) "Signed in." else "Turned away.",
+                        error = null,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _webAuth.update { it.copy(error = why ?: "Couldn't answer the request.") }
+            }
+        }
+    }
+
+    /**
+     * Set the web UI's password from here.
+     *
+     * The reset path that means a parent who has forgotten it does not need an
+     * SSH client. No old password is asked for: reaching this at all required
+     * a bonded, authenticated BLE link to a device this phone is the admin of.
+     */
+    fun setWebPassword(password: String) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                c.setWebPassword(password)
+                _webAuth.update {
+                    it.copy(
+                        status = it.status?.copy(configured = true),
+                        lastAction = "Password set.",
+                        error = null,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _webAuth.update { it.copy(error = why ?: "Couldn't set the password.") }
+            }
+        }
+    }
+
+    /** Clear the one-line confirmation after the UI has shown it. */
+    fun clearWebAuthAction() = _webAuth.update { it.copy(lastAction = null) }
 
     fun refreshWindows() {
         if (windowsJob?.isActive == true) return
