@@ -151,6 +151,15 @@ Example (bedtime restriction):
     reset prompt (only for activities that offer it — `type = "retroarch"`),
     and `: > <path>.down` dismisses whichever is up. Every file is consumed, so
     open/close cycles are just two `touch`es.
+  - **The reading layout** (page-turn buttons, and the bar's worst case for
+    room) has its own permanent debug-build hook: export
+    `SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS=1` before `dev headless`. Okular is
+    not installed here, so there is no real `type = "ebook"` session to start,
+    and both #171 and #178 previously had to add a throwaway override to look
+    at this layout. The hook only forces the buttons *visible*; pressing one
+    still checks the real session state, so it cannot send page keys into an
+    unrelated activity. Pair it with `--size 1280x600` to see the overflow
+    behaviour issue #178 is about.
   - **Any other HUD-only UI action**: add a temporary one-shot debug hook gated
     behind an env var that calls `widget.emit_clicked()`, boot with the env var
     set, screenshot, then remove the hook. `dev key` (keyboard) *does* reach the

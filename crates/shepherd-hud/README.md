@@ -20,7 +20,7 @@ Always-visible HUD overlay for Shepherd.
   bottom, since sideways `‹`/`›` would be meaningless in a column — and they
   name the keys they actually synthesize.
 
-  A reading session is the one case where the bar runs out of room, so while those buttons are shown the volume and brightness percentages are hidden and their sliders shorten. The activity name ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
+  A reading session is the one case where the bar runs out of room, so while those buttons are shown the volume and brightness percentages are hidden and their sliders shorten — by a third horizontally, and by more than half on the vertical bar, where a fixed screen height is the scarce resource rather than a fixed width (issue #178). The activity name ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
 - **Power controls** - Suspend, shutdown, restart
 - **Warning display** - Visual and audio alerts for time warnings
 
@@ -241,6 +241,14 @@ Two further notes:
   they are demanded *across* the bar, and the surface measured **124px** wide
   instead of the intended 48. The `.hud-vertical` rules in `CSS_TEMPLATE` turn
   each of them; anything axis-specific added later needs the same treatment.
+- **Swap the axis, but do not restate the length.** A CSS minimum is a *floor*
+  that GTK takes the maximum of against the widget's own size request, so the
+  `min-height: 80px` the swapped slider rule originally carried outranked the
+  shorter request `apply_slider_lengths` makes for a reading session. The
+  entire #160 overflow response was inert on the vertical bar because of it,
+  and the page-turn buttons were clipped off the bottom on any screen under
+  about 720 logical pixels tall (issue #178). The swapped rule states `0px` on
+  both axes and leaves the length to the size request.
 
 ### The bar is thicker than its exclusive zone, in both layouts
 

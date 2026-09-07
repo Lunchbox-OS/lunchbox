@@ -131,6 +131,17 @@ const BASE_BRIGHTNESS_SLIDER_WIDTH: i32 = 100;
 /// than the last 30px of a volume control.
 const READING_SLIDER_WIDTH: i32 = 66;
 
+/// The same, for the bar running down the side (issue #178).
+///
+/// Shorter than its horizontal counterpart because the vertical bar is under
+/// far more pressure: the two sliders are the largest things on it by a wide
+/// margin (a full-length pair is ~260px of a ~670px minimum), and everything
+/// competing with them — the title, the page-turn buttons — has a hard floor
+/// it cannot ellipsize past. 40px still shows the child where in the range
+/// they are, which is all a slider does here; the icon beside it already says
+/// which control it is.
+const VERTICAL_READING_SLIDER_LENGTH: i32 = 40;
+
 /// Size the two sliders for the current HUD scale, and for whether the bar is
 /// also carrying the page-turn buttons.
 ///
@@ -143,20 +154,52 @@ fn apply_slider_lengths(
     reading: bool,
     orientation: HudOrientation,
 ) {
-    let base = |full: i32| {
-        let base = if reading { READING_SLIDER_WIDTH } else { full };
-        (f64::from(base) * scale).round() as i32
-    };
     for (slider, full) in [
         (volume, BASE_VOLUME_SLIDER_WIDTH),
         (brightness, BASE_BRIGHTNESS_SLIDER_WIDTH),
     ] {
+        let length = slider_length(full, reading, scale, orientation);
         if orientation.is_vertical() {
-            slider.set_height_request(base(full));
+            slider.set_height_request(length);
         } else {
-            slider.set_width_request(base(full));
+            slider.set_width_request(length);
         }
     }
+}
+
+/// Whether the bar should be carrying the page-turn buttons.
+///
+/// Debug builds additionally honour `SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS`,
+/// because the reading session is the bar's worst case for room and there is
+/// otherwise no way to *look* at it: the headless dev session has no reader to
+/// start (okular is not installed there), so every previous attempt at this —
+/// issue #171's layout review, and issue #178's — had to add a throwaway
+/// override, screenshot, and take it out again. Making it permanent is what
+/// lets the layout be checked at any screen size on demand. Never compiled
+/// into a release build, and deliberately *not* consulted by the button
+/// handlers: forcing the buttons visible must not let a stray press send page
+/// keys to whatever holds focus.
+fn show_page_buttons(can_turn_pages: bool) -> bool {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS").is_some() {
+        return true;
+    }
+    can_turn_pages
+}
+
+/// The length one slider should request, in logical pixels.
+///
+/// Split out from the call above so the sizing rules are testable without a
+/// display connection — the reading-session shortening is the bar's only
+/// answer to running out of room, and a regression in it is invisible until a
+/// child opens a book on a small screen.
+fn slider_length(full: i32, reading: bool, scale: f64, orientation: HudOrientation) -> i32 {
+    let base = match (reading, orientation.is_vertical()) {
+        (false, _) => full,
+        (true, false) => READING_SLIDER_WIDTH,
+        (true, true) => VERTICAL_READING_SLIDER_LENGTH,
+    };
+    (f64::from(base) * scale).round() as i32
 }
 
 /// One built bar, plus the handles a rebuild needs to take it down again.
@@ -1360,7 +1403,7 @@ fn build_hud_content(
                 &volume_slider_clone,
                 &brightness_slider_clone,
                 desired_scale,
-                state.session_state().can_turn_pages(),
+                show_page_buttons(state.session_state().can_turn_pages()),
                 orientation,
             );
             // Rebuild the close-confirmation prompt for the new factor. It is
@@ -1452,7 +1495,7 @@ fn build_hud_content(
         }
         // Same rule for the page buttons: they belong to the activity, so a
         // session that is not a reading one never shows them.
-        let can_turn_pages = session_state.can_turn_pages();
+        let can_turn_pages = show_page_buttons(session_state.can_turn_pages());
         if page_box_clone.is_visible() != can_turn_pages {
             page_box_clone.set_visible(can_turn_pages);
             // The bar is full: the two buttons have to come out of something.
@@ -2038,11 +2081,20 @@ const CSS_TEMPLATE: &str = r#"
            held horizontal sliders. Turned on their side those two swap, and
            leaving them alone is what makes the vertical bar demand its 80px of
            slider *across* the bar: the surface measured 124px wide instead of
-           48px until these overrode it. */
+           48px until these overrode it.
+
+           The length is left to `apply_slider_lengths` rather than restated as
+           a `min-height` here. A CSS minimum is a *floor* that GTK takes the
+           maximum of against the widget's size request, so the 80px this rule
+           used to carry silently outranked the 66px request a reading session
+           asks for -- the whole of the #160 overflow machinery was inert on
+           the vertical bar, which is how issue #178 ran out of room and clipped
+           the page-turn buttons off the bottom. Stating 0px keeps the axis
+           swap (the point of the rule) and lets the request through. */
         .hud-vertical .volume-slider,
         .hud-vertical .brightness-slider {
             min-width: 0px;
-            min-height: 80px;
+            min-height: 0px;
         }
 
         .hud-vertical .volume-slider trough,
@@ -2620,5 +2672,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Issue #178: the vertical bar's slider rule must not restate a *length*
+    /// floor.
+    ///
+    /// GTK takes the maximum of a CSS minimum and the widget's size request,
+    /// so the `min-height: 80px` this rule used to carry silently outranked
+    /// the shorter request `apply_slider_lengths` makes for a reading session.
+    /// The whole of the #160 overflow machinery was inert on the vertical bar
+    /// because of it, and the page-turn buttons were clipped off the bottom on
+    /// any screen under about 720 logical pixels tall. The axis swap is the
+    /// point of the rule; the length belongs to the size request.
+    #[test]
+    fn the_vertical_slider_rule_leaves_its_length_to_the_size_request() {
+        let rule = ".hud-vertical .brightness-slider {";
+        let block = CSS_TEMPLATE
+            .split_once(rule)
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(block, _)| block)
+            .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
+        for dim in ["min-width", "min-height"] {
+            let value: i32 = block
+                .split_once(&format!("{dim}:"))
+                .and_then(|(_, rest)| rest.split_once("px"))
+                .and_then(|(value, _)| value.trim().parse().ok())
+                .unwrap_or_else(|| panic!("{rule} must state {dim} in px"));
+            assert_eq!(
+                value, 0,
+                "{rule} {dim} is {value}px, which outranks the slider's own \
+                 size request and takes the reading session's shortening away"
+            );
+        }
+    }
+
+    /// The reading session is the case the bar has no other answer to, so both
+    /// layouts have to actually shorten — and the vertical one by more, since
+    /// its sliders are the largest things competing for a fixed screen height.
+    #[test]
+    fn a_reading_session_shortens_the_sliders_in_both_layouts() {
+        for orientation in [
+            HudOrientation::Top,
+            HudOrientation::Bottom,
+            HudOrientation::Left,
+        ] {
+            let full = slider_length(BASE_VOLUME_SLIDER_WIDTH, false, 1.0, orientation);
+            let reading = slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 1.0, orientation);
+            assert_eq!(full, BASE_VOLUME_SLIDER_WIDTH);
+            assert!(
+                reading < full,
+                "{orientation:?} does not give any slider length back for the page-turn buttons"
+            );
+        }
+        // The vertical bar is the one under real pressure (issue #178): a
+        // full-length pair is over a third of the minimum height of the whole
+        // bar, and everything competing with them has a floor it cannot
+        // ellipsize past.
+        assert!(
+            slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 1.0, HudOrientation::Left)
+                < slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 1.0, HudOrientation::Top)
+        );
+    }
+
+    /// Lengths follow the HUD scale factor like every other dimension the
+    /// timer rescales (issue #114), reading session or not.
+    #[test]
+    fn slider_lengths_follow_the_scale_factor() {
+        assert_eq!(
+            slider_length(BASE_VOLUME_SLIDER_WIDTH, false, 2.0, HudOrientation::Top),
+            2 * BASE_VOLUME_SLIDER_WIDTH
+        );
+        assert_eq!(
+            slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 2.0, HudOrientation::Left),
+            2 * VERTICAL_READING_SLIDER_LENGTH
+        );
     }
 }
