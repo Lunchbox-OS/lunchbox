@@ -159,6 +159,21 @@ message**: every orderly shutdown also ends with `shepherdd` gone and the
 session ending anyway, and a disarm message would be a thing to spoof — send it,
 then kill the daemon. Every disarm comes from logind, none from the wire.
 
+### Measured on a device
+
+An installed kiosk (Ubuntu 26.04, systemd 259), this branch's release binaries,
+`shepherd-kiosk` autologged into the Shepherd session:
+
+| | |
+| --- | --- |
+| wrappers killed first, then `shepherdd` | session gone in **5.10 s**; sway, the activity and its scope with it |
+| `kill -STOP shepherdd` | session gone in **56.9 s**, with the `\|\|` fallback's own processes alive the whole time |
+| the custodian restarted underneath it | reconnected; session still up **99 s** later |
+| the polkit rule removed | `session_not_guarded` **critical** on the launcher — and the attack succeeds, which is the point of saying so |
+
+Details and the rest of the run are in
+[`docs/ai/history/2026-09-07 002`](../../docs/ai/history/).
+
 ### What must not fire it
 
 A watchdog that fires when nothing is wrong costs a child their session

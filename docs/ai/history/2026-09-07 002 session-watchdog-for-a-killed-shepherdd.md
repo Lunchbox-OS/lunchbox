@@ -3,8 +3,10 @@
 > Issue: <https://git.armeafamily.com/albert/shepherd-launcher/issues/172>
 > Depends on: #161 (`crates/shepherd-stated`), which is merged and is what makes
 > this possible at all. Ancestors: #144 and its #147/#148/#158, #157.
-> Prompt: "suggest an approach for #172", then "build it".
-> Status: **built**, and this document is the design it was built from. The one
+> Prompt: "suggest an approach for #172", then "build it", then "test it
+> yourself here".
+> Status: **built and measured on a device** — see "On a device" at the end.
+> This document is the design it was built from. The one
 > load-bearing assumption — that a non-root system user can be granted
 > `TerminateSession` — was measured on this host before any of it was written
 > (below). What the code does differently from the first draft is recorded in
@@ -328,14 +330,26 @@ depth), the session parsed out of a real v2 cgroup line, and every shape that is
 not a session scope — an `app.slice` scope, a system service, `session-.scope`,
 one with a shell metacharacter in the id — reading as "no session".
 
-### What is left on a device
+### Measured on a device
 
-The teardown itself, which is the half a unit test cannot reach: launch a
-firewalled activity, end the session, and confirm the scope is **gone** rather
-than parentless. It shares the two systemd behaviours the watchdog itself rests
-on — that logind's user GC is prompt with no lingering, and that stopping a slice
-stops what is in it — so one device session answers all of it. The `Requires=`
-half of that is measured above; the promptness is not.
+Launched through the real `pkexec` chain on an installed kiosk (see "On a
+device" below for the whole run):
+
+```
+$ systemctl show shepherd-22a3ac7a-….scope -p Slice -p BindsTo -p After -p ControlGroup
+BindsTo=session-11.scope
+After=session-11.scope user-1001.slice
+Slice=user-1001.slice
+ControlGroup=/user.slice/user-1001.slice/shepherd-22a3ac7a-….scope
+$ systemctl show … -p IPAddressDeny -p IPAddressAllow
+IPAddressDeny=0.0.0.0/0 ::/0
+IPAddressAllow=::1/128 127.0.0.0/8          ← the BPF filter is real, not a no-op
+```
+
+The session was derived correctly through `pkexec` — `session-11` was the kiosk's
+— and the scope landed in the user's slice rather than `system.slice`. When the
+watchdog then ended that session, the scope went with it (`is-active` →
+`inactive`), which is the teardown a unit test cannot reach.
 
 ## What this does not close
 
@@ -473,10 +487,59 @@ on, the polkit rule checked against `STATE_USER` in
 `units_match_the_constants.rs` (a fourth fact that cannot be stated once, since
 polkit cannot call Rust either), and the two diagnostic contracts in `shepherdd`.
 
-### Still to do on a device
+### On a device
 
-Step 7's measurements. None of the above has run on real hardware yet: a
-development stack passes `--no-state-custodian`, so it has no custodian to hold
-the other end, and every case that matters — the kill, the `SIGSTOP`, the
-suspend, the second session, the missing rule — is a property of a device with
-one installed.
+Step 7, run on an installed kiosk: Ubuntu 26.04, systemd 259, `shepherd-kiosk`
+(uid 1001) autologged into the Shepherd sway session by gdm, this branch's
+release binaries, the custodian holding the other end. The recipe is in
+CONTRIBUTING; what it measured:
+
+| | |
+| --- | --- |
+| the grant | `sudo -u shepherd-state pkcheck --action-id org.freedesktop.login1.manage` → `polkit\56result=yes` |
+| armed, quietly | custodian: *"The session watchdog can end this session if nothing is supervising it session=11"*; shepherdd: *"The custodian will end this session … deadline_secs=60"*; `diagnostics: []` |
+| **(a) the attack** | kill both `sh -c` wrappers **first**, then `shepherdd` → session removed **5.10 s** later (the settle). sway, the activity and the firewalled scope all gone; `user@1001.service` stopped; reason logged `shepherdd is gone`; custodian exited cleanly, so the socket stayed armed |
+| **(b) `SIGSTOP`** | session removed **56.9 s** later — the 60 s deadline from the last beat — with the wrapper processes **alive throughout**, which is the case #161's `\|\|` can never see. Reason logged `shepherdd stopped sending heartbeats` |
+| **(c) a firewalled activity** | the scope table above; gone with the session |
+| **(d) reconnect** | `systemctl restart shepherd-stated@…` under a live session → shepherdd logged *"The supervision channel broke; reconnecting backoff_ms=500"*, the new instance armed the same session, and it was **still active 99 s later** — well past the deadline. No false fire |
+| **(e) the rule removed** | custodian `ERROR polkit refuses this daemon the right to end a session`; shepherdd raised `session_not_guarded` **critical** with its remedy, over the API and on into the launcher |
+| **(f) the negative control** | with the rule removed, the same attack **succeeded**: session still `active`, sway alive. The defect, reproduced — the rule is the whole difference. The escalation ran on schedule: terminate refused, then **exactly 10.000 s** later *"The session is still here; killing everything this user is running uid=1001"*, also refused |
+| **(g) a cold boot** | after an unplanned reboot the watchdog armed on session 1 with no diagnostics — the startup path works when sway, shepherdd, Steam and the launcher all come up at once |
+
+Two things this settles that were read rather than measured: `TerminateSession`
+does stop the session scope even though the manager reports
+`KillUserProcesses=false` (sway died in (a) and (b)), and logind's user GC does
+stop `user@<uid>.service` — it is just not instant, so a check made in the same
+second as the session ending sees it still `active`.
+
+**Not measured, and why.**
+
+* *A suspend.* This host is a libvirt VM whose only `/sys/power/mem_sleep` is
+  `s2idle`, and it does not resume — the attempt needed a hard reset. The case
+  stays covered by unit tests and needs real hardware. CONTRIBUTING says so, so
+  the next person does not try it here.
+* *A second graphical session.* Cannot be staged on a single seat; `machinectl
+  shell` and friends make `type=tty` sessions, which the resolver filters out
+  before the ambiguity it is meant to catch can arise.
+* *The `{:#}` error-chain change* below — a log-format fix, verified by build
+  and tests only.
+
+### What the device showed that the design did not
+
+* **A killed session *leader* leaves `shepherdd` orphaned and the session
+  `closing`.** Nothing sets `PDEATHSIG`, so `shepherdd` survives its parent, and
+  with `KillUserProcesses=no` logind waits for the scope to empty rather than
+  killing what is left. `TerminateSession` on an already-closing session is a
+  no-op — which is a second, unplanned argument for the `KillUser` escalation:
+  it is the only step that reaches a session logind has already given up on.
+* **The failure message named the *what* and not the *why*.** With the rule
+  removed, the log read `error=asking logind to terminate session 21` — the
+  anyhow context, with the "Interactive authentication required" that explains
+  it dropped, because `%e` on an `anyhow::Error` prints only the outermost
+  layer. The watchdog's failure paths now log `{:#}`, which walks the chain.
+  This is the line an operator reads when a device turns out to be unguarded.
+* **`shepherdd`'s policy watch does not reconnect.** Restarting the custodian
+  under a live session logs *"The policy watch ended; auto-reload is off until
+  restart"* and stays off, while the supervision channel reconnects by itself.
+  Pre-existing (#157's watch), out of scope here, worth its own issue: a device
+  whose custodian restarts quietly stops picking up policy edits.

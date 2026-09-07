@@ -440,9 +440,16 @@ pub async fn run(
                     "Nothing is supervising this session; ending it"
                 );
                 if let Err(e) = terminator.terminate(&target.session).await {
+                    // `{:#}` rather than plain Display: this is the line an
+                    // operator reads when a device turns out to be unguarded,
+                    // and the cause is the whole message. Measured on a device
+                    // with the polkit rule removed, plain Display said only
+                    // "asking logind to terminate session 21" — the *what*,
+                    // with the "Interactive authentication required" that
+                    // explains it dropped.
                     error!(
                         session = %target.session,
-                        error = %e,
+                        error = %format!("{e:#}"),
                         "Could not terminate the session"
                     );
                 }
@@ -457,7 +464,11 @@ pub async fn run(
                     "The session is still here; killing everything this user is running"
                 );
                 if let Err(e) = terminator.kill_user(target.uid).await {
-                    error!(uid = target.uid, error = %e, "Could not kill the user's processes");
+                    error!(
+                        uid = target.uid,
+                        error = %format!("{e:#}"),
+                        "Could not kill the user's processes"
+                    );
                 }
                 info!(session = %target.session, "The watchdog has done what it can");
                 return;

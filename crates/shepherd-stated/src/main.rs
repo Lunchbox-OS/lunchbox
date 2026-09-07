@@ -191,7 +191,10 @@ async fn main() -> Result<()> {
             (authority.armed(), authority.caveat())
         }
         Err(e) => {
-            error!(error = %e, "No way to end the session; the watchdog is inert");
+            error!(
+                error = %format!("{e:#}"),
+                "No way to end the session; the watchdog is inert"
+            );
             // Nothing is driving the guard, so let the events go nowhere rather
             // than pile up in a channel with no reader for the life of the
             // session.
@@ -213,7 +216,10 @@ async fn main() -> Result<()> {
         Ok(forwarder) => {
             tokio::spawn(forwarder);
         }
-        Err(e) => error!(error = %e, "Not watching for suspend; a sleep may look like a wedge"),
+        Err(e) => error!(
+            error = %format!("{e:#}"),
+            "Not watching for suspend; a sleep may look like a wedge"
+        ),
     }
 
     let state_dir = args
