@@ -9,6 +9,7 @@ import "@fontsource/roboto/500.css";
 import "@fontsource/roboto/700.css";
 import theme from "./theme";
 import { App } from "./App";
+import { AuthGate } from "./auth/AuthGate";
 
 const queryClient = new QueryClient();
 
@@ -20,7 +21,9 @@ createRoot(root).render(
     <QueryClientProvider client={queryClient}>
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <App />
+        <AuthGate>
+          <App />
+        </AuthGate>
       </ThemeProvider>
     </QueryClientProvider>
   </StrictMode>,

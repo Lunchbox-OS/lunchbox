@@ -1,3 +1,12 @@
+// The connection drawer.
+//
+// Since issue #156 the token field is no longer how a person signs in — that
+// is a password or an approval on the paired phone, and what it yields is an
+// `HttpOnly` cookie this page cannot read. The field survives for the one case
+// a cookie cannot serve: pointing this UI at a *different* origin, where the
+// browser will not send this origin's cookie, and for `npm run dev` against a
+// real device.
+
 import { useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -68,11 +77,14 @@ export function ConnectionSettings({ onClose }: { onClose: () => void }) {
         />
 
         <TextField
-          label="Auth Token (optional)"
+          label="Machine token (optional)"
           type="password"
-          placeholder="Bearer token"
+          placeholder="service.management_api.auth_token"
           value={token}
           onChange={(e) => setToken(e.target.value)}
+          helperText="Only needed when the server URL above points at another
+            origin — a browser will not send this page's session cookie there.
+            Signing in normally needs nothing here."
           fullWidth
           slotProps={{ htmlInput: { autoComplete: "new-password" } }}
         />
