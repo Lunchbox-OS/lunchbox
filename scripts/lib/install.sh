@@ -830,13 +830,12 @@ _is_policy_placeholder() {
 # and every habit points at is empty. A missing file would be read as "not
 # configured yet"; this says where it went and what to do instead.
 #
-# It is a *valid, empty* policy on purpose. `shepherdd` falls back to this file
-# when the custodian cannot be reached, so it has to parse -- and what it should
-# grant in that state is nothing, because the alternative is a device running a
-# policy nobody can see from where the custodian keeps it. Zero entries plus the
-# `state_not_protected` diagnostic is a device that visibly is not working,
-# which is the honest outcome; a stale policy that still launches games is a
-# device that looks fine and is not.
+# It parses, and grants nothing. Nothing should ever read it as a policy: a
+# device with a signpost has a custodian, and a shepherdd that cannot reach its
+# custodian now refuses to start rather than running on whatever is in the home
+# directory. Keeping the file valid means that if some path ever does read it,
+# what it grants is nothing -- rather than the daemon dying on a parse error
+# somewhere the message would be less clear than the one it exits with.
 _write_policy_placeholder() {
     local user="$1"
     local home dst
@@ -869,10 +868,10 @@ $POLICY_PLACEHOLDER_MARK
 #
 # Either way shepherdd reloads within a second; no restart is needed.
 #
-# Editing *this* file changes nothing while the custodian is reachable. It
-# parses, and grants nothing, because shepherdd reads it if the custodian ever
-# cannot be reached -- a device with no activities and a loud diagnostic, rather
-# than one quietly running a policy you cannot see.
+# Editing *this* file changes nothing. If the custodian ever cannot be reached,
+# shepherdd refuses to start rather than falling back to this one -- the session
+# ends at the login screen, which says something is wrong, where a device with
+# an empty launcher would look like an ordinary evening with nothing available.
 
 config_version = 1
 EOF

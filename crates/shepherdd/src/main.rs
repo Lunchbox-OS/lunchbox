@@ -263,21 +263,13 @@ enum StateProtection {
     Custodian,
     /// Deliberately local (`--no-state-custodian`).
     OptedOut,
-    /// Wanted, but the custodian could not be reached; the store is a file in
-    /// the home directory of the uid activities run as.
-    Degraded {
-        /// Why the custodian could not be used.
-        reason: String,
-        /// Whether this device has a custodian state directory, i.e. whether
-        /// protection *broke* rather than never having been installed.
-        ///
-        /// `/var/lib/shepherdd/state/<user>/` is unreadable here but its
-        /// parents are not, so this is a `stat` shepherdd is allowed to make
-        /// and an activity cannot forge in either direction. It is what tells a
-        /// fresh install apart from a device whose protection failed this boot
-        /// — the second must not go on to present itself as unclaimed.
-        custodian_expected: bool,
-    },
+    /// Wanted, but not had; the store is a file in the home directory of the
+    /// uid activities run as. Carries the reason.
+    ///
+    /// Only ever a device that has no custodian to reach: one whose custodian
+    /// *is* installed and unreachable does not get here, because
+    /// [`Service::unreachable_or_local`] refuses to start it.
+    Degraded(String),
 }
 
 /// What [`StateSource::into_parts`] settles into: the store, the policy source
@@ -326,13 +318,7 @@ enum StateSource {
     /// be reached. `reason` is `None` for the first and the failure for the
     /// second — which is the difference between "the operator asked" and "the
     /// protection was wanted and could not be had".
-    Local {
-        reason: Option<String>,
-        /// Whether this device has custodian state on disk, i.e. whether the
-        /// protection *broke* rather than never having been installed. Always
-        /// `false` when the operator opted out.
-        custodian_expected: bool,
-    },
+    Local { reason: Option<String> },
 }
 
 impl StateSource {
@@ -394,17 +380,13 @@ impl StateSource {
                     // Database protected, policy not. Degraded rather than
                     // Custodian, because a policy an activity can rewrite is
                     // exactly what this issue is about.
-                    StateProtection::Degraded {
-                        reason: "the custodian holds no policy file, so the policy is still \
-                                 read from this user's home where every activity can rewrite \
-                                 it; migrate it with `shepherd install state --user <user>`, \
-                                 or `shepherd-admin setup-user <user>` on a packaged system"
+                    StateProtection::Degraded(
+                        "the custodian holds no policy file, so the policy is still read from \
+                         this user's home where every activity can rewrite it; migrate it with \
+                         `shepherd install state --user <user>`, or `shepherd-admin setup-user \
+                         <user>` on a packaged system"
                             .to_string(),
-                        // The custodian answered; the database is protected. It
-                        // is the policy that is not, and the admin record it
-                        // also holds is reachable, so claiming is fine.
-                        custodian_expected: false,
-                    }
+                    )
                 };
                 // `None` when the custodian holds no policy: the policy is
                 // then a local file, and the reload has to read it from where
@@ -412,16 +394,10 @@ impl StateSource {
                 let policy_files = holds_policy.then_some(Arc::clone(&files));
                 Ok((store, policy_files, files, protection))
             }
-            StateSource::Local {
-                reason,
-                custodian_expected,
-            } => {
+            StateSource::Local { reason } => {
                 let store = Service::open_local_store(data_dir)?;
                 let protection = match reason {
-                    Some(reason) => StateProtection::Degraded {
-                        reason,
-                        custodian_expected,
-                    },
+                    Some(reason) => StateProtection::Degraded(reason),
                     None => StateProtection::OptedOut,
                 };
                 // The same `LocalProtectedFiles` the custodian uses on its own
@@ -456,10 +432,7 @@ impl Service {
                 "Policy and state are in this user's home; every activity runs as this uid \
                  and can read and rewrite them (issue #157)"
             );
-            return Ok(StateSource::Local {
-                reason: None,
-                custodian_expected: false,
-            });
+            return Ok(StateSource::Local { reason: None });
         }
 
         // Whose state to ask for is *this process's* user, not a name from the
@@ -472,50 +445,25 @@ impl Service {
                     "this process's own uid has no user entry, so there is no custodian to ask"
                         .to_string();
                 warn!(%reason, "Falling back to local policy and state");
+                // No name to look a state directory up by, so this cannot be
+                // told apart from a device that never had a custodian.
                 return Ok(StateSource::Local {
                     reason: Some(reason),
-                    // No name to look a state directory up by.
-                    custodian_expected: false,
                 });
             }
         };
 
-        // Retry briefly before giving up. The fallback is a *startup-only*
-        // decision that lasts the whole session, so trading a few seconds at
-        // boot against running unprotected until the next restart is not a
-        // close call — and the custodian is socket-activated, so the first
-        // connection is also what starts it.
+        // Retry briefly before giving up. The custodian is socket-activated, so
+        // the first connection is also what starts it, and it waits for the
+        // graphical session before it answers — a few seconds here covers the
+        // boot race rather than reporting one as a failure.
         let store = match Self::connect_with_retries(&user) {
             Ok(store) => store,
-            Err(e) => {
-                let reason = format!("{e}");
-                let custodian_expected = Self::custodian_holds_state_for(&user);
-                warn!(
-                    error = %reason,
-                    custodian_expected,
-                    "Falling back to local policy and state"
-                );
-                return Ok(StateSource::Local {
-                    reason: Some(reason),
-                    custodian_expected,
-                });
-            }
+            Err(e) => return Self::unreachable_or_local(&user, e),
         };
         let files = match RemoteFiles::connect(&user) {
             Ok(files) => files,
-            Err(e) => {
-                let reason = format!("{e}");
-                let custodian_expected = Self::custodian_holds_state_for(&user);
-                warn!(
-                    error = %reason,
-                    custodian_expected,
-                    "Falling back to local policy and state"
-                );
-                return Ok(StateSource::Local {
-                    reason: Some(reason),
-                    custodian_expected,
-                });
-            }
+            Err(e) => return Self::unreachable_or_local(&user, e),
         };
 
         info!(
@@ -544,6 +492,49 @@ impl Service {
     /// claimed this device".
     fn custodian_holds_state_for(user: &str) -> bool {
         shepherd_state_proto::state_dir(user).is_dir()
+    }
+
+    /// What to do when the custodian did not answer.
+    ///
+    /// Two situations wear the same error, and they want opposite responses.
+    ///
+    /// A device that never had a custodian — a packaged install where
+    /// `setup-user` has not run, or one deliberately left without — has its
+    /// state in the kiosk user's home, where it always was. Nothing has moved,
+    /// nothing is missing, and refusing to start would be refusing over a
+    /// protection this device was never given. It boots, and says so.
+    ///
+    /// A device that *has* one and cannot reach it is a different thing
+    /// entirely. Its state was moved: the database and the admin record are in
+    /// a directory this process cannot read, and the home directory holds a
+    /// signpost saying so. Carrying on would mean opening a fresh empty
+    /// database, presenting a claimed device as unclaimed, and offering a
+    /// launcher with no activities on it — which reads to a child exactly like
+    /// bedtime, and to an adult like the device is merely slow. So it exits,
+    /// and sway's fallback ends the session.
+    ///
+    /// Landing back at the greeter is a worse-looking failure and a better one:
+    /// it says *something is wrong* rather than impersonating a working device
+    /// with nothing configured. The message is written for the journal, because
+    /// that is where whoever hits this will be looking.
+    fn unreachable_or_local(user: &str, error: impl std::fmt::Display) -> Result<StateSource> {
+        let reason = format!("{error}");
+        if Self::custodian_holds_state_for(user) {
+            anyhow::bail!(
+                "the state custodian is installed for {user} and did not answer ({reason}); \
+                 refusing to start, because this device's policy, usage history and BLE admin \
+                 record are in /var/lib/shepherdd, not where an unprotected run would look. \
+                 Check `systemctl status shepherd-stated@{user}.service` and \
+                 `journalctl -u shepherd-stated@{user}.service`"
+            );
+        }
+        warn!(
+            error = %reason,
+            "No state custodian for this user; policy and state stay in the home directory"
+        );
+        Ok(StateSource::Local {
+            reason: Some(reason),
+        })
     }
 
     /// Connect to the custodian, retrying a transient failure.
@@ -721,7 +712,7 @@ impl Service {
         state: &StateProtection,
         diagnostics: &dyn DiagnosticSink,
     ) {
-        if let StateProtection::Degraded { reason, .. } = state {
+        if let StateProtection::Degraded(reason) = state {
             diagnostics.raise(Self::state_not_protected_diagnostic(reason));
         }
     }
@@ -1483,18 +1474,6 @@ impl Service {
                     // holds no *policy*, and the admin record is a different
                     // file the custodian may well be serving.
                     files: Arc::clone(&protected_files),
-                    // A device whose custodian holds the admin record but could
-                    // not be reached must not offer itself to the next phone
-                    // that asks: the fallback location is empty after
-                    // migration, so "no record" there is indistinguishable from
-                    // "cannot see the record" (issue #157).
-                    claims_unreachable: matches!(
-                        state_protection,
-                        StateProtection::Degraded {
-                            custodian_expected: true,
-                            ..
-                        }
-                    ),
                     adapter: ble_cfg.adapter,
                 };
                 // `shepherd-pairing-display` is spawned per pairing
@@ -2683,20 +2662,7 @@ mod harden_diagnostic_tests {
         for (state, expected) in [
             (StateProtection::Custodian, 0),
             (StateProtection::OptedOut, 0),
-            (
-                StateProtection::Degraded {
-                    reason: "socket missing".into(),
-                    custodian_expected: false,
-                },
-                1,
-            ),
-            (
-                StateProtection::Degraded {
-                    reason: "socket missing".into(),
-                    custodian_expected: true,
-                },
-                1,
-            ),
+            (StateProtection::Degraded("socket missing".into()), 1),
         ] {
             let sink = RecordingSink::default();
             Service::degraded_state_protection_is_reported(&state, &sink);

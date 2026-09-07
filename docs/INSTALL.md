@@ -638,11 +638,20 @@ Consequences worth knowing before you debug a device:
 - **The socket is created by systemd, not by the daemon**, which is what stops an
   activity taking its name the way it can with shepherd's own management socket
   (above).
-- **If the custodian cannot be reached, the session still starts.** `shepherdd`
-  falls back to the files in the user's home — unprotected, and reported as the
-  `Critical` diagnostic `state_not_protected` rather than shipping quiet. That
-  decision is made once at startup and never revisited: a daemon that could fall
-  back mid-session would be one an activity could *push* into falling back.
+- **If the custodian cannot be reached, the device does not start.** `shepherdd`
+  exits and the session ends at the login screen. That is deliberate, and it is
+  the one place shepherd prefers a visible failure to a working-looking one: its
+  state has *moved*, so carrying on would mean a fresh empty database, a claimed
+  device presenting itself as unclaimed, and a launcher with no activities on it
+  — which reads to a child like an ordinary evening with nothing available, and
+  to an adult like the device is merely slow. The greeter says "something is
+  wrong"; an empty grid does not. The journal carries the reason, and
+  `systemctl status shepherd-stated@<user>` is where to look.
+
+  A device that has *no* custodian is different and still starts: nothing has
+  moved, its state is where it always was, and it reports the `Critical`
+  diagnostic `state_not_protected` rather than refusing over a protection it was
+  never given.
 - **The `shepherd-state` user and the state survive an uninstall.** Removing them
   would discard a device's usage history and its BLE admin record, which an
   uninstall is not entitled to do.

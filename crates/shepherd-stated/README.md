@@ -177,9 +177,15 @@ activity:       reset today's usage                  -> unable to open database 
 activity:       connect to the state socket          -> Connection reset by peer
 ```
 
-With the custodian stopped, the session still comes up and the device reports
-`state_not_protected` (`Critical`) carrying the underlying reason — the trade
-#144 already makes twice, and never silent.
+With the custodian stopped, a device that *has* one refuses to start: its state
+has moved here, so the alternative is an empty database and a launcher with no
+activities, which looks like an ordinary quiet evening rather than a fault. The
+session ends at the greeter and the journal carries the reason.
+
+A device that never had a custodian still comes up — nothing has moved — and
+reports `state_not_protected` (`Critical`) carrying the underlying reason. That
+is the trade #144 makes twice: an unprotected kiosk beats a dead one *when the
+protection was never there to lose*.
 
 ### There is one policy, and a signpost
 

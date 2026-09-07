@@ -241,16 +241,6 @@ pub struct BleServerConfig {
     /// let the three files live somewhere the custodian does not serve, which
     /// on a device is somewhere an activity can reach.
     pub files: Arc<dyn shepherd_util::ProtectedFiles>,
-    /// This device's admin record belongs to the state custodian, which could
-    /// not be reached this boot (issue #157).
-    ///
-    /// `AdminStore::load` returns `None` both when nobody has claimed a device
-    /// and when the daemon is looking in the wrong place because it fell back,
-    /// and after migration the fallback location is *empty* — so a custodian
-    /// that failed to start would present a claimed device as unclaimed and let
-    /// the next phone to pair take it. Set, claiming is refused until the
-    /// custodian answers again.
-    pub claims_unreachable: bool,
 }
 
 impl std::fmt::Debug for BleServerConfig {
@@ -259,7 +249,6 @@ impl std::fmt::Debug for BleServerConfig {
             .field("device_name", &self.device_name)
             .field("firmware_version", &self.firmware_version)
             .field("adapter", &self.adapter)
-            .field("claims_unreachable", &self.claims_unreachable)
             .finish()
     }
 }
@@ -325,15 +314,7 @@ impl BleServer {
             store.clear()?;
         }
 
-        let mut claim = ClaimMachine::load(store)?;
-        if config.claims_unreachable {
-            warn!(
-                "The state custodian holds this device's admin record and could not be \
-                 reached; refusing to claim until it answers (issue #157)"
-            );
-            claim = claim.with_claims_unreachable();
-        }
-        let claim = Arc::new(claim);
+        let claim = Arc::new(ClaimMachine::load(store)?);
         Ok(Self {
             config,
             svc,
@@ -1764,14 +1745,6 @@ async fn handle_claim_rpc(
         Err(crate::claim::ClaimError::AlreadyClaimed) => {
             RpcResponse::err(id, ErrorCode::AlreadyClaimed, "device already claimed")
         }
-        // `Conflict` rather than a code of its own: the device is in a state
-        // where claiming cannot proceed, which is what `Conflict` already
-        // means, and an existing variant keeps a companion that predates this
-        // build from meeting a value it cannot decode. The message is what
-        // tells an admin the difference.
-        Err(e @ crate::claim::ClaimError::StateUnreachable) => {
-            RpcResponse::err(id, ErrorCode::Conflict, e.to_string())
-        }
         Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
     }
 }
@@ -2191,7 +2164,6 @@ mod tests {
             files: Arc::new(shepherd_util::LocalProtectedFiles::new(
                 dir.path().to_path_buf(),
             )),
-            claims_unreachable: false,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2232,7 +2204,6 @@ mod tests {
             files: Arc::new(shepherd_util::LocalProtectedFiles::new(
                 dir.path().to_path_buf(),
             )),
-            claims_unreachable: false,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2410,7 +2381,6 @@ mod tests {
             firmware_version: "test".into(),
             adapter: None,
             files: Arc::clone(&files),
-            claims_unreachable: false,
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);

@@ -56,20 +56,6 @@ pub enum ClaimError {
     PermissionDenied,
     #[error("admin store error: {0}")]
     Store(#[from] AdminStoreError),
-    /// The device is one the state custodian holds an admin record for, but
-    /// that record could not be reached this boot (issue #157).
-    ///
-    /// Distinct from [`ClaimError::AlreadyClaimed`] because the daemon cannot
-    /// see *whether* it is claimed — only that it is not entitled to say it is
-    /// not. Claiming has to be refused either way: an absent record and an
-    /// unreachable one look identical from here, and treating the second as the
-    /// first would let a custodian that failed to start hand the device to the
-    /// next phone that asks.
-    #[error(
-        "the state custodian holds this device's admin record and could not be reached; \
-         refusing to claim"
-    )]
-    StateUnreachable,
 }
 
 /// State machine uses [`std::sync::RwLock`] so that synchronous
@@ -80,14 +66,6 @@ pub enum ClaimError {
 pub struct ClaimMachine {
     state: RwLock<ClaimState>,
     store: AdminStore,
-    /// Set when this device's admin record lives with the state custodian and
-    /// the custodian could not be reached, so [`ClaimState::Unclaimed`] here
-    /// means "cannot tell" rather than "nobody has claimed it" (issue #157).
-    ///
-    /// Only claiming is refused. The state stays `Unclaimed`, which is what the
-    /// HTTP surface already treats as "no bearer token exists" — the safe
-    /// reading, and one this must not quietly turn into an authenticated one.
-    claims_unreachable: bool,
 }
 
 impl ClaimMachine {
@@ -98,19 +76,7 @@ impl ClaimMachine {
         Self {
             state: RwLock::new(initial),
             store,
-            claims_unreachable: false,
         }
-    }
-
-    /// Refuse to claim this device, because its admin record is one the state
-    /// custodian holds and the custodian could not be reached (issue #157).
-    ///
-    /// Consuming rather than a setter: whether the record was reachable is
-    /// decided once at startup, exactly like the fallback it comes from, and a
-    /// machine that could be told this later is one something could tell.
-    pub fn with_claims_unreachable(mut self) -> Self {
-        self.claims_unreachable = true;
-        self
     }
 
     /// Convenience: load the admin record from disk and wrap it in a
@@ -144,9 +110,6 @@ impl ClaimMachine {
         peer: PeerIdentity,
         device_name: String,
     ) -> Result<AdminRecord, ClaimError> {
-        if self.claims_unreachable {
-            return Err(ClaimError::StateUnreachable);
-        }
         let mut state = self.state.write().expect("claim state lock poisoned");
         match &*state {
             ClaimState::Claimed(existing) if peer.matches(existing) => {
@@ -280,44 +243,6 @@ mod tests {
         let m = ClaimMachine::load(store(&dir)).unwrap();
         assert!(!m.is_claimed());
         assert!(m.current_http_token().is_none());
-    }
-
-    #[test]
-    fn an_unreachable_custodian_refuses_to_claim_rather_than_looking_unclaimed() {
-        // The failure this prevents: migration *moves* `admin.toml` under the
-        // custodian, so when shepherdd falls back it reads an empty directory,
-        // `AdminStore::load` returns `None`, and a claimed device presents
-        // itself to the next phone that asks. An empty store is exactly what
-        // that looks like, so that is what this sets up.
-        let dir = TempDir::new().unwrap();
-        let m = ClaimMachine::load(store(&dir))
-            .unwrap()
-            .with_claims_unreachable();
-
-        // It still reads as unclaimed, deliberately: the daemon cannot see the
-        // record, so it must not manufacture an authenticated state out of one
-        // it cannot read. No record means no bearer token, which is safe.
-        assert!(!m.is_claimed());
-        assert!(m.current_http_token().is_none());
-
-        // What changes is that claiming is refused rather than granted.
-        assert!(matches!(
-            m.claim(peer_a(), "a stranger's phone".into()),
-            Err(ClaimError::StateUnreachable)
-        ));
-
-        // And nothing was written, so the custodian's record is still the only
-        // one when it comes back.
-        assert!(!dir.path().join("admin.toml").exists());
-    }
-
-    #[test]
-    fn a_reachable_custodian_claims_normally() {
-        // The same setup without the flag, so the test above is known to be
-        // measuring the flag and not an empty directory.
-        let dir = TempDir::new().unwrap();
-        let m = ClaimMachine::load(store(&dir)).unwrap();
-        assert!(m.claim(peer_a(), "the admin's phone".into()).is_ok());
     }
 
     #[test]
