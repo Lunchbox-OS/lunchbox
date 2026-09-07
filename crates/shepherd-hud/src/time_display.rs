@@ -12,7 +12,6 @@ mod imp {
 
     #[derive(Default)]
     pub struct TimeDisplay {
-        pub icon: RefCell<Option<gtk4::Image>>,
         pub label: RefCell<Option<gtk4::Label>>,
         pub total_secs: RefCell<Option<u64>>,
         pub remaining_secs: RefCell<Option<u64>>,
@@ -37,13 +36,10 @@ mod imp {
             obj.set_orientation(gtk4::Orientation::Horizontal);
             obj.set_spacing(4);
 
-            // Time icon
-            let icon = gtk4::Image::from_icon_name("preferences-system-time-symbolic");
-            icon.set_pixel_size(20);
-            obj.append(&icon);
-            *self.icon.borrow_mut() = Some(icon);
-
-            // Time label
+            // Time label. There is deliberately no icon beside it: a countdown
+            // is self-describing, and the clock glyph that used to sit here
+            // was the one element of the bar that said nothing the numbers did
+            // not already say (issue #178).
             let label = gtk4::Label::new(Some("--:--"));
             label.add_css_class("time-display");
             obj.append(&label);
@@ -67,26 +63,11 @@ impl TimeDisplay {
         glib::Object::builder().build()
     }
 
-    /// Resize the clock icon. Called with the HUD scale factor applied, like
-    /// every other HUD icon, so it keeps its physical size when shepherdd drops
-    /// the compositor scale for an XWayland activity (issue #114).
-    pub fn set_icon_pixel_size(&self, px: i32) {
-        if let Some(icon) = self.imp().icon.borrow().as_ref() {
-            icon.set_pixel_size(px);
-        }
-    }
-
-    /// Lay the icon out above the readout rather than beside it, and switch
-    /// to the three-character duration format. Both are what the vertical HUD
-    /// needs, and neither makes sense without the other, so they are one call.
+    /// Switch to the three-character duration format the vertical HUD needs,
+    /// where the readout has 48px to fit across rather than along.
     pub fn set_compact(&self, compact: bool) {
         let imp = self.imp();
         imp.compact.set(compact);
-        self.set_orientation(if compact {
-            gtk4::Orientation::Vertical
-        } else {
-            gtk4::Orientation::Horizontal
-        });
         self.update_display();
     }
 

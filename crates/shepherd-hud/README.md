@@ -10,8 +10,8 @@ Always-visible HUD overlay for Shepherd.
 
 - **Time remaining** - Authoritative countdown from the service
 - **Battery level** - Current charge percentage and status
-- **Volume control** - Adjust system volume with enforced limits
-- **Brightness control** - Adjust screen brightness on hosts with a backlight (hidden otherwise)
+- **Volume control** - Adjust system volume with enforced limits. The bar carries the icon; the slider, the mute toggle and the percentage open out of it as a flyout (see [Pop-out controls](#pop-out-controls-issue-178)).
+- **Brightness control** - Adjust screen brightness on hosts with a backlight (hidden otherwise). Same flyout shape, with the automatic-brightness toggle in place of mute.
 - **Session controls** - End session button (confirms first unless the activity opts out via `confirm_on_close = false`)
 - **Reset** - Restart an activity in place, for kinds that offer it (`type = "retroarch"`)
 - **Page turning** - `‹` / `›` for reading activities (`type = "ebook"`), which synthesize `Page Up` / `Page Down` through `/dev/uinput`. They exist because a touchscreen cannot turn a page any other way: readers bind paging to keys, a D-pad or a wheel, and have no swipe gesture. The HUD is where they belong — it is on the overlay layer, above the activity, and it is shepherd's own surface rather than something a reader's own restrictions could take away. See `src/page_turn.rs` and `docs/ebooks.md`.
@@ -20,7 +20,7 @@ Always-visible HUD overlay for Shepherd.
   bottom, since sideways `‹`/`›` would be meaningless in a column — and they
   name the keys they actually synthesize.
 
-  A reading session is the one case where the bar runs out of room, so while those buttons are shown the volume and brightness percentages are hidden and their sliders shorten — by a third horizontally, and by more than half on the vertical bar, where a fixed screen height is the scarce resource rather than a fixed width (issue #178). The activity name ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
+  A reading session used to be the one case where the bar ran out of room, and the sliders and percentages were shortened and hidden to pay for these two buttons. Since the sliders moved into flyouts (issue #178) the bar has the room and nothing has to yield. The activity name still ellipsizes rather than pushing the end-session button off the end, which GTK clips rather than wraps.
 - **Power controls** - Suspend, shutdown, restart
 - **Warning display** - Visual and audio alerts for time warnings
 
@@ -95,13 +95,53 @@ Shows and controls system volume:
 
 - Current level (0-100%)
 - Mute indicator
-- Click to adjust (sends commands to service)
+- Click the icon to open the flyout, then drag to adjust (sends commands to service)
 - Volume maximum may be restricted by policy
 
 ### Controls
 
 - **End Session** - Stops the current session (if allowed)
 - **Power** - Opens menu with Suspend/Shutdown/Restart
+
+## Pop-out controls (issue #178)
+
+The volume and brightness sliders are not in the bar. Each bar icon opens a
+flyout — a `GtkPopover` parented to that icon — holding a toggle, the slider
+and the percentage, the way a tray volume control behaves on any desktop.
+
+They were inline until #178. A pair of inline sliders is ~200 logical pixels of
+a 1280px bar and **over a third of the minimum height of the vertical one**,
+which is what left a reading session on a short screen with nowhere to put the
+page-turn buttons: the bar clipped its bottom, taking the activity title and
+both page buttons with it, on anything under about 720 logical pixels tall.
+Moving them out costs the bar a 32px icon apiece and buys back everything else.
+
+Four consequences worth knowing:
+
+- **The row is horizontal in both layouts.** A popover is its own surface, so
+  it does not inherit the bar's axis. That retired every `.hud-vertical` slider
+  rule, both `set_inverted` calls, and the axis branch in the slider sizing.
+- **Both percentages are back everywhere.** They were dropped from the vertical
+  bar ("100%" does not fit across 48px) and from a reading session (no room);
+  the flyout has room in every case, so neither exception survives.
+- **The toggles moved with the sliders.** The bar icons *were* the mute and
+  automatic-brightness controls; they are now openers, so mute and automatic
+  live at the head of their flyout. The bar keeps reporting the manual state
+  via `.brightness-manual`, so a glance at the bar still says who is driving
+  the backlight.
+- **Their handlers are on `clicked`, not `toggled`.** `gtk_toggle_button_set_active`
+  emits `toggled`, so a handler there would echo an RPC every time the update
+  loop pushed the real state back into the button — which is what the old
+  `auto_updating` guard existed to suppress. `clicked` is only ever the user.
+  Measured, not assumed: flapping `set_active` from the timer for 15s produced
+  20 `toggled` and 0 `clicked`.
+
+Like the confirm prompts, a flyout is **rebuilt on every `HudScaleChanged`**
+rather than restyled: it lives hidden across the change and is measured (by
+`align_popover_to_button`) just before being shown, which is exactly the case
+issue #118 says a fresh widget is required for. The 500ms timer re-pushes
+value, range and sensitivity every tick, so a rebuilt flyout has live state
+back long before anyone can open it.
 
 ## Event Handling
 
@@ -232,23 +272,21 @@ alone would not work:
 
 Two further notes:
 
-- **Both sliders are `set_inverted`.** GTK puts a vertical range's *minimum* at
-  the top, so a slider left at the default turns the volume **down** as the
-  child drags it **up**.
 - **Axis-specific CSS has to be swapped, not inherited.** Rules written for a
   horizontal bar name one axis — 80px of slider length, a 4px-thick trough,
   `padding: 0 4px` separating a control group. Left alone on a vertical bar
   they are demanded *across* the bar, and the surface measured **124px** wide
   instead of the intended 48. The `.hud-vertical` rules in `CSS_TEMPLATE` turn
   each of them; anything axis-specific added later needs the same treatment.
-- **Swap the axis, but do not restate the length.** A CSS minimum is a *floor*
+- **Swap the axis, but never restate the length.** A CSS minimum is a *floor*
   that GTK takes the maximum of against the widget's own size request, so the
   `min-height: 80px` the swapped slider rule originally carried outranked the
-  shorter request `apply_slider_lengths` makes for a reading session. The
-  entire #160 overflow response was inert on the vertical bar because of it,
-  and the page-turn buttons were clipped off the bottom on any screen under
-  about 720 logical pixels tall (issue #178). The swapped rule states `0px` on
-  both axes and leaves the length to the size request.
+  shorter request a reading session asks for. The entire #160 overflow response
+  was inert on the vertical bar because of it, and the page-turn buttons were
+  clipped off the bottom on any screen under about 720 logical pixels tall
+  (issue #178). The sliders have since left the bar entirely, so that rule is
+  gone — but the trap applies to anything else given a swapped rule *and* a
+  size request.
 
 ### The bar is thicker than its exclusive zone, in both layouts
 

@@ -114,58 +114,14 @@ impl ConfirmAction {
 /// the compositor scale for an XWayland activity.
 const BASE_ICON_PIXEL_SIZE: i32 = 20;
 
-/// Logical-pixel width of the volume slider at scale 1.0, scaled the same
-/// way as the icon size above so the slider grows with the rest of the HUD.
-const BASE_VOLUME_SLIDER_WIDTH: i32 = 100;
-
-/// Logical-pixel width of the brightness slider at scale 1.0. Matches the
-/// volume slider so the two indicators line up.
-const BASE_BRIGHTNESS_SLIDER_WIDTH: i32 = 100;
-
-/// Slider width while the page-turn buttons are on the bar (issue #160).
+/// Logical-pixel length of a pop-out slider at scale 1.0, scaled the same way
+/// as the icon size above so the slider grows with the rest of the HUD.
 ///
-/// The bar is full at 1280 logical pixels: two more buttons cost about a
-/// hundred, and the only thing that yields on its own is the activity name,
-/// which ellipsized down to nothing. The sliders give the width back instead —
-/// they stay usable a third shorter, and a name a child can read matters more
-/// than the last 30px of a volume control.
-const READING_SLIDER_WIDTH: i32 = 66;
-
-/// The same, for the bar running down the side (issue #178).
-///
-/// Shorter than its horizontal counterpart because the vertical bar is under
-/// far more pressure: the two sliders are the largest things on it by a wide
-/// margin (a full-length pair is ~260px of a ~670px minimum), and everything
-/// competing with them — the title, the page-turn buttons — has a hard floor
-/// it cannot ellipsize past. 40px still shows the child where in the range
-/// they are, which is all a slider does here; the icon beside it already says
-/// which control it is.
-const VERTICAL_READING_SLIDER_LENGTH: i32 = 40;
-
-/// Size the two sliders for the current HUD scale, and for whether the bar is
-/// also carrying the page-turn buttons.
-///
-/// The request goes on whichever axis the slider runs along, which follows the
-/// bar: a vertical HUD holds vertical sliders, so their length is a height.
-fn apply_slider_lengths(
-    volume: &gtk4::Scale,
-    brightness: &gtk4::Scale,
-    scale: f64,
-    reading: bool,
-    orientation: HudOrientation,
-) {
-    for (slider, full) in [
-        (volume, BASE_VOLUME_SLIDER_WIDTH),
-        (brightness, BASE_BRIGHTNESS_SLIDER_WIDTH),
-    ] {
-        let length = slider_length(full, reading, scale, orientation);
-        if orientation.is_vertical() {
-            slider.set_height_request(length);
-        } else {
-            slider.set_width_request(length);
-        }
-    }
-}
+/// Longer than the 80px the sliders had while they sat in the bar. Once a
+/// control opens into a flyout, its length is nobody's cost but its own — the
+/// bar pays for a 32px icon either way — so the slider gets the room that
+/// makes it easy to hit precisely on a touchscreen (issue #178).
+const BASE_SLIDER_LENGTH: i32 = 140;
 
 /// Whether the bar should be carrying the page-turn buttons.
 ///
@@ -187,21 +143,6 @@ fn show_page_buttons(can_turn_pages: bool) -> bool {
     can_turn_pages
 }
 
-/// The length one slider should request, in logical pixels.
-///
-/// Split out from the call above so the sizing rules are testable without a
-/// display connection — the reading-session shortening is the bar's only
-/// answer to running out of room, and a regression in it is invisible until a
-/// child opens a book on a small screen.
-fn slider_length(full: i32, reading: bool, scale: f64, orientation: HudOrientation) -> i32 {
-    let base = match (reading, orientation.is_vertical()) {
-        (false, _) => full,
-        (true, false) => READING_SLIDER_WIDTH,
-        (true, true) => VERTICAL_READING_SLIDER_LENGTH,
-    };
-    (f64::from(base) * scale).round() as i32
-}
-
 /// One built bar, plus the handles a rebuild needs to take it down again.
 ///
 /// A `GtkPopover` attached with `set_parent` is not owned by its parent the
@@ -214,6 +155,10 @@ struct HudContent {
     container: gtk4::Box,
     confirm_prompt: std::rc::Rc<std::cell::RefCell<ConfirmPrompt>>,
     reset_prompt: std::rc::Rc<std::cell::RefCell<ConfirmPrompt>>,
+    /// The volume and brightness flyouts (issue #178). Rebuilt on a scale
+    /// change like the prompts, so the teardown has to read the *current* one
+    /// through the cell rather than one captured at build time.
+    slider_popovers: [std::rc::Rc<std::cell::RefCell<SliderPopover>>; 2],
     warning_popover: Option<gtk4::Popover>,
 }
 
@@ -224,6 +169,11 @@ impl HudContent {
             let prompt = prompt.borrow();
             prompt.popover.popdown();
             prompt.popover.unparent();
+        }
+        for control in &self.slider_popovers {
+            let control = control.borrow();
+            control.popover.popdown();
+            control.popover.unparent();
         }
         if let Some(popover) = &self.warning_popover {
             popover.popdown();
@@ -802,50 +752,20 @@ fn build_hud_content(
 
     orientation.flow_append(&right_box, &clock_box);
 
-    // Volume control with slider
-    let volume_box = gtk4::Box::builder()
-        .orientation(orientation.group())
-        .spacing(4)
-        .build();
-    volume_box.add_css_class("volume-control");
-
-    // Mute button. Use an explicit child Image so its pixel size follows
-    // the HUD scale factor (see `apply_scale`). `Button::set_icon_name`
-    // would replace this child, so the timer below updates `volume_icon`
+    // Volume. The bar carries the icon; the slider and the mute toggle open
+    // out of it as a flyout (issue #178) — see `SliderPopover` for why they
+    // are no longer in the bar. An explicit child Image, so its pixel size
+    // follows the HUD scale factor (see `apply_scale`); `Button::set_icon_name`
+    // would replace the child, so the timer below updates `volume_icon`
     // directly via `set_from_icon_name`.
     let volume_icon = gtk4::Image::from_icon_name("audio-volume-medium-symbolic");
     volume_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
     let volume_button = gtk4::Button::builder()
         .child(&volume_icon)
         .has_frame(false)
-        .tooltip_text("Toggle mute")
+        .tooltip_text("Volume")
         .build();
     volume_button.add_css_class("indicator-button");
-    volume_button.connect_clicked(|_| {
-        if let Err(e) = crate::volume::toggle_mute() {
-            tracing::error!("Failed to toggle mute: {}", e);
-        }
-    });
-    volume_box.append(&volume_button);
-
-    // Volume slider. Its length request is rescaled by the timer below to
-    // follow the HUD scale factor (see `BASE_VOLUME_SLIDER_WIDTH`), on
-    // whichever axis it runs along.
-    let volume_slider = gtk4::Scale::builder()
-        .orientation(orientation.group())
-        .draw_value(false)
-        .build();
-    // GTK puts a vertical range's *minimum* at the top, so a slider left at
-    // the default would turn the volume down as the child dragged it up.
-    volume_slider.set_inverted(vertical);
-    volume_slider.set_range(0.0, 100.0);
-    volume_slider.set_increments(5.0, 10.0);
-    volume_slider.add_css_class("volume-slider");
-
-    // Set initial value from shepherdd
-    if let Some(info) = crate::volume::get_volume_status() {
-        volume_slider.set_value(info.percent as f64);
-    }
 
     // Handle slider value changes with debouncing
     // Create a channel for volume requests - the worker will debounce them
@@ -880,95 +800,39 @@ fn build_hud_content(
         }
     });
 
+    // Set while the child is dragging the flyout's slider, so the update loop
+    // does not yank the knob back to the last value the daemon reported.
     let slider_changing = std::rc::Rc::new(std::cell::Cell::new(false));
-    let slider_changing_clone = slider_changing.clone();
 
-    volume_slider.connect_change_value(move |slider, _, value| {
-        slider_changing_clone.set(true);
-        let percent = value.clamp(0.0, 100.0) as u8;
+    let volume_popover = std::rc::Rc::new(std::cell::RefCell::new(build_volume_popover(
+        &volume_button,
+        &window,
+        1.0,
+        orientation,
+        &volume_tx,
+        &slider_changing,
+    )));
 
-        // Send to debounce worker (non-blocking)
-        let _ = volume_tx.send(percent);
+    orientation.flow_append(&right_box, &volume_button);
 
-        // Allow the slider to update immediately in UI
-        slider.set_value(value);
-        glib::Propagation::Stop
-    });
-
-    volume_box.append(&volume_slider);
-
-    // Volume percentage label
-    let volume_label = gtk4::Label::new(Some("--%"));
-    volume_label.add_css_class("volume-label");
-    volume_label.set_width_chars(4);
-    // The vertical bar drops the percentage for good: "100%" does not fit
-    // across 48px at the bar's font size, and a full-length slider already
-    // says how loud and how bright at a glance.
-    volume_label.set_visible(!vertical);
-    volume_box.append(&volume_label);
-
-    orientation.flow_append(&right_box, &volume_box);
-
-    // Brightness control. Hidden when the host has no backlight (every
-    // desktop machine, plus laptops missing `/sys/class/backlight/*`); on
-    // hosts with one this is the laptop-style screen-dimmer slider.
-    let brightness_box = gtk4::Box::builder()
-        .orientation(orientation.group())
-        .spacing(4)
-        .visible(false)
-        .build();
-    brightness_box.add_css_class("brightness-control");
-
-    // The brightness icon doubles as the automatic-brightness toggle: pressing
-    // it hands brightness over to the ambient-light loop (on hosts with a
-    // sensor). It's a `ToggleButton` wrapping the icon `Image` — the same
-    // shape as the volume mute button — so the scale timer can keep resizing
-    // the icon via `set_pixel_size`. Automatic is the expected, default state,
-    // so it renders plain; the icon lights up (in the brightness bar's own
-    // colour) only when the user has taken *manual* control.
+    // Brightness. Same shape as volume: the bar carries the icon and the
+    // controls fly out of it. Hidden when the host has no backlight (every
+    // desktop machine, plus laptops missing `/sys/class/backlight/*`).
+    //
+    // The icon used to *be* the automatic-brightness toggle. That toggle moves
+    // into the flyout, where it can say what it is; the bar icon keeps
+    // reporting the state by lighting up in the brightness bar's own colour
+    // when the user has taken manual control (`.brightness-manual`, applied by
+    // the update loop), so nothing is lost from a glance at the bar.
     let brightness_icon = gtk4::Image::from_icon_name("display-brightness-symbolic");
     brightness_icon.set_pixel_size(BASE_ICON_PIXEL_SIZE);
-    let brightness_button = gtk4::ToggleButton::builder()
+    let brightness_button = gtk4::Button::builder()
         .child(&brightness_icon)
         .has_frame(false)
-        .tooltip_text("Automatic brightness")
+        .tooltip_text("Brightness")
+        .visible(false)
         .build();
     brightness_button.add_css_class("indicator-button");
-    brightness_button.add_css_class("brightness-toggle");
-
-    // Guards against the programmatic `set_active` in the update loop
-    // re-triggering `toggled` and echoing a redundant RPC back to the daemon.
-    let auto_updating = std::rc::Rc::new(std::cell::Cell::new(false));
-    let auto_updating_clone = auto_updating.clone();
-    brightness_button.connect_toggled(move |btn| {
-        if auto_updating_clone.get() {
-            return;
-        }
-        if let Err(e) = crate::brightness::set_auto_brightness(btn.is_active()) {
-            tracing::error!("Failed to set auto brightness: {}", e);
-        }
-    });
-    brightness_box.append(&brightness_button);
-
-    let brightness_slider = gtk4::Scale::builder()
-        .orientation(orientation.group())
-        .draw_value(false)
-        .build();
-    // Same inversion as the volume slider: up must mean brighter.
-    brightness_slider.set_inverted(vertical);
-    brightness_slider.set_range(0.0, 100.0);
-    brightness_slider.set_increments(5.0, 10.0);
-    brightness_slider.add_css_class("brightness-slider");
-
-    // The sliders' length used to come from the builder's `width_request`,
-    // which only ever made sense on one axis. Set it once here for both, at
-    // scale 1.0 and with no page-turn buttons; the timer revisits it whenever
-    // either of those changes.
-    apply_slider_lengths(&volume_slider, &brightness_slider, 1.0, false, orientation);
-
-    if let Some(info) = crate::brightness::get_brightness_status() {
-        brightness_slider.set_value(info.percent as f64);
-    }
 
     // Debounce brightness changes the same way as volume: the slider can
     // emit dozens of events per second while the user drags it, and the
@@ -996,29 +860,17 @@ fn build_hud_content(
     });
 
     let brightness_changing = std::rc::Rc::new(std::cell::Cell::new(false));
-    let brightness_changing_clone = brightness_changing.clone();
 
-    brightness_slider.connect_change_value(move |slider, _, value| {
-        brightness_changing_clone.set(true);
-        let percent = value.clamp(0.0, 100.0) as u8;
+    let brightness_popover = std::rc::Rc::new(std::cell::RefCell::new(build_brightness_popover(
+        &brightness_button,
+        &window,
+        1.0,
+        orientation,
+        &brightness_tx,
+        &brightness_changing,
+    )));
 
-        let _ = brightness_tx.send(percent);
-        slider.set_value(value);
-        glib::Propagation::Stop
-    });
-
-    brightness_box.append(&brightness_slider);
-
-    let brightness_label = gtk4::Label::new(Some("--%"));
-    brightness_label.add_css_class("brightness-label");
-    brightness_label.set_width_chars(4);
-    // The vertical bar drops the percentage for good: "100%" does not fit
-    // across 48px at the bar's font size, and a full-length slider already
-    // says how loud and how bright at a glance.
-    brightness_label.set_visible(!vertical);
-    brightness_box.append(&brightness_label);
-
-    orientation.flow_append(&right_box, &brightness_box);
+    orientation.flow_append(&right_box, &brightness_button);
 
     // Display mode toggle (issue #87): mirror ⇄ external-only. Hidden unless an
     // external display is connected. Uses an explicit child Image so its pixel
@@ -1171,6 +1023,27 @@ fn build_hud_content(
     });
     orientation.flow_append(&right_box, &action_button);
 
+    // Open the flyouts from the bar icons (issue #178). Both read the current
+    // popover through the cell rather than one captured here, because a scale
+    // change rebuilds them (see `SliderPopover`).
+    for (button, control) in [
+        (&volume_button, &volume_popover),
+        (&brightness_button, &brightness_popover),
+    ] {
+        let control = control.clone();
+        let window_for_open = window.clone();
+        let state_for_open = state.clone();
+        button.connect_clicked(move |btn| {
+            open_slider_popover(
+                &control,
+                btn,
+                &window_for_open,
+                state_for_open.scale_factor(),
+                orientation,
+            );
+        });
+    }
+
     // One virtual keyboard for the life of the HUD, created on the first
     // press. See `page_turn` for why the key rather than an RPC.
     let page_turner = crate::page_turn::PageTurner::new();
@@ -1231,7 +1104,8 @@ fn build_hud_content(
     // click a GTK button (the synthetic pointer does not fire `clicked`; see the
     // `headless-dev` skill). With `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
     // set, creating `<path>` pops the close-confirmation prompt, `<path>.reset`
-    // pops the reset one, `<path>.down` dismisses whichever is up, and
+    // pops the reset one, `<path>.volume` / `<path>.brightness` open the two
+    // pop-out controls, `<path>.down` dismisses whichever is up, and
     // `<path>.page_next` / `<path>.page_prev` press the page-turn buttons;
     // every file is consumed. That is enough to drive open/close cycles — and scale
     // changes across them — from a shell. Never compiled into a release build.
@@ -1240,14 +1114,20 @@ fn build_hud_content(
         let up = std::path::PathBuf::from(&trigger);
         let up_reset = std::path::PathBuf::from(format!("{trigger}.reset"));
         let down = std::path::PathBuf::from(format!("{trigger}.down"));
+        let volume_up = std::path::PathBuf::from(format!("{trigger}.volume"));
+        let brightness_up = std::path::PathBuf::from(format!("{trigger}.brightness"));
         let page_next = std::path::PathBuf::from(format!("{trigger}.page_next"));
         let page_prev = std::path::PathBuf::from(format!("{trigger}.page_prev"));
+        let volume_for_debug = volume_button.clone();
+        let brightness_for_debug = brightness_button.clone();
         let page_forward_for_debug = page_forward_button.clone();
         let page_back_for_debug = page_back_button.clone();
         let action_button_for_debug = action_button.clone();
         let reset_button_for_debug = reset_button.clone();
         let prompt_for_debug = confirm_prompt.clone();
         let reset_prompt_for_debug = reset_prompt.clone();
+        let volume_popover_for_debug = volume_popover.clone();
+        let brightness_popover_for_debug = brightness_popover.clone();
         let generation_for_debug = generation.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
             // Retire with the bar this hook was built for, like the update
@@ -1264,10 +1144,21 @@ fn build_hud_content(
                 let _ = std::fs::remove_file(&up_reset);
                 reset_button_for_debug.emit_clicked();
             }
+            if volume_up.exists() {
+                let _ = std::fs::remove_file(&volume_up);
+                volume_for_debug.emit_clicked();
+            }
+            if brightness_up.exists() {
+                let _ = std::fs::remove_file(&brightness_up);
+                brightness_for_debug.emit_clicked();
+            }
             if down.exists() {
                 let _ = std::fs::remove_file(&down);
                 prompt_for_debug.borrow().popover.popdown();
                 reset_prompt_for_debug.borrow().popover.popdown();
+                for control in [&volume_popover_for_debug, &brightness_popover_for_debug] {
+                    control.borrow().popover.popdown();
+                }
             }
             if page_next.exists() {
                 let _ = std::fs::remove_file(&page_next);
@@ -1292,16 +1183,19 @@ fn build_hud_content(
     let battery_label_clone = battery_label.clone();
     let volume_button_clone = volume_button.clone();
     let volume_icon_clone = volume_icon.clone();
-    let volume_slider_clone = volume_slider.clone();
-    let volume_label_clone = volume_label.clone();
+    let volume_popover_for_timer = volume_popover.clone();
     let slider_changing_for_update = slider_changing.clone();
-    let brightness_box_clone = brightness_box.clone();
     let brightness_icon_clone = brightness_icon.clone();
-    let brightness_slider_clone = brightness_slider.clone();
-    let brightness_label_clone = brightness_label.clone();
+    let brightness_popover_for_timer = brightness_popover.clone();
     let brightness_changing_for_update = brightness_changing.clone();
     let brightness_button_clone = brightness_button.clone();
-    let auto_updating_for_update = auto_updating.clone();
+    // Handles the scale-change rebuild needs to construct fresh flyouts.
+    let volume_button_for_rebuild = volume_button.clone();
+    let brightness_button_for_rebuild = brightness_button.clone();
+    let volume_tx_for_rebuild = volume_tx.clone();
+    let brightness_tx_for_rebuild = brightness_tx.clone();
+    let slider_changing_for_rebuild = slider_changing.clone();
+    let brightness_changing_for_rebuild = brightness_changing.clone();
     let clock_label_clone = clock_label.clone();
     let action_button_clone = action_button.clone();
     let action_icon_clone = action_icon.clone();
@@ -1311,8 +1205,6 @@ fn build_hud_content(
     let page_box_clone = page_box.clone();
     let analog_clock_for_timer = analog_clock.clone();
     let analog_clock_for_scale = analog_clock.clone();
-    let volume_label_for_pages = volume_label.clone();
-    let brightness_label_for_pages = brightness_label.clone();
     let reset_prompt_for_timer = reset_prompt.clone();
     let reset_button_for_rebuild = reset_button.clone();
     let window_for_rebuild = window.clone();
@@ -1341,7 +1233,6 @@ fn build_hud_content(
         page_back_icon.clone(),
         page_forward_icon.clone(),
     ];
-    let time_display_for_scale = time_display.clone();
     // Every `gtk4::Box` in the HUD, with the spacing it uses at factor 1.0.
     // Box spacing is a widget property rather than CSS, so `scale_px_literals`
     // never reaches it: left alone it keeps its logical-pixel value and the
@@ -1349,14 +1240,15 @@ fn build_hud_content(
     // un-hacked HiDPI panel — most obviously in the close-confirmation prompt,
     // whose whole surface then measures short (issue #118). Rescaling these
     // alongside the icons and sliders closes the gap the #114 fix left open.
-    let scaled_boxes: [(gtk4::Box, i32); 9] = [
+    // The flyouts' own rows are absent on purpose: they are rebuilt for the
+    // new factor rather than rescaled in place (see `SliderPopover`), so they
+    // are constructed with the right spacing already.
+    let scaled_boxes: [(gtk4::Box, i32); 7] = [
         (container.clone(), 16),
         (left_box.clone(), 12),
         (warning_box.clone(), 8),
         (right_box.clone(), 8),
         (clock_box.clone(), 4),
-        (volume_box.clone(), 4),
-        (brightness_box.clone(), 4),
         (network_box.clone(), 4),
         (battery_box.clone(), 4),
     ];
@@ -1388,7 +1280,6 @@ fn build_hud_content(
             for icon in &scaled_icons {
                 icon.set_pixel_size(icon_size);
             }
-            time_display_for_scale.set_icon_pixel_size(icon_size);
             if let Some(face) = &analog_clock_for_scale {
                 crate::analog_clock::set_diameter(
                     face,
@@ -1399,13 +1290,6 @@ fn build_hud_content(
             for (boxed, base_spacing) in &scaled_boxes {
                 boxed.set_spacing((f64::from(*base_spacing) * desired_scale).round() as i32);
             }
-            apply_slider_lengths(
-                &volume_slider_clone,
-                &brightness_slider_clone,
-                desired_scale,
-                show_page_buttons(state.session_state().can_turn_pages()),
-                orientation,
-            );
             // Rebuild the close-confirmation prompt for the new factor. It is
             // hidden right now, and GTK does not restyle hidden widgets, so the
             // one built for the previous factor would keep that factor's sizes
@@ -1434,6 +1318,36 @@ fn build_hud_content(
                     desired_scale,
                     ConfirmAction::ResetActivity,
                     orientation,
+                );
+            }
+            // The flyouts go the same way, and for the same reason: they live
+            // hidden across the change and are *measured* before being shown
+            // (issue #178 built them on the #118 rule deliberately). The state
+            // they carry is re-pushed further down this same tick.
+            {
+                let mut control = volume_popover_for_timer.borrow_mut();
+                control.popover.popdown();
+                control.popover.unparent();
+                *control = build_volume_popover(
+                    &volume_button_for_rebuild,
+                    &window_for_rebuild,
+                    desired_scale,
+                    orientation,
+                    &volume_tx_for_rebuild,
+                    &slider_changing_for_rebuild,
+                );
+            }
+            {
+                let mut control = brightness_popover_for_timer.borrow_mut();
+                control.popover.popdown();
+                control.popover.unparent();
+                *control = build_brightness_popover(
+                    &brightness_button_for_rebuild,
+                    &window_for_rebuild,
+                    desired_scale,
+                    orientation,
+                    &brightness_tx_for_rebuild,
+                    &brightness_changing_for_rebuild,
                 );
             }
             applied_scale_for_timer.set(desired_scale);
@@ -1495,28 +1409,12 @@ fn build_hud_content(
         }
         // Same rule for the page buttons: they belong to the activity, so a
         // session that is not a reading one never shows them.
+        // Showing them costs the bar nothing it has to take back any more.
+        // Until issue #178 the two buttons had to be paid for out of the
+        // sliders' length and the numeric readouts, because the sliders were
+        // in the bar; now they are in flyouts and the bar has the room.
         let can_turn_pages = show_page_buttons(session_state.can_turn_pages());
-        if page_box_clone.is_visible() != can_turn_pages {
-            page_box_clone.set_visible(can_turn_pages);
-            // The bar is full: the two buttons have to come out of something.
-            // The sliders give up a third of their width and the numeric
-            // readouts step aside — the slider position already says how loud
-            // and how bright, and neither is worth the activity name or the
-            // end-session button, which is what would otherwise be pushed off
-            // the end (see `READING_SLIDER_WIDTH`).
-            apply_slider_lengths(
-                &volume_slider_clone,
-                &brightness_slider_clone,
-                applied_scale_for_timer.get(),
-                can_turn_pages,
-                orientation,
-            );
-            // The vertical bar has already given these up for good (they do
-            // not fit across 48px), so there is nothing left for a reading
-            // session to reclaim there.
-            volume_label_for_pages.set_visible(!vertical && !can_turn_pages);
-            brightness_label_for_pages.set_visible(!vertical && !can_turn_pages);
-        }
+        page_box_clone.set_visible(can_turn_pages);
         match &session_state {
             SessionState::NoSession => {
                 app_label_clone.set_text("No session");
@@ -1673,76 +1571,108 @@ fn build_hud_content(
         // Since `VolumeChanged` carries the whole snapshot, the slider bounds
         // below follow the active output's restrictions rather than whichever
         // ones happened to be in effect at connect time (issue #124).
+        //
+        // The flyout's widgets are read out of the cell rather than captured,
+        // because a scale change replaces them; clone them out and drop the
+        // borrow before touching them, the same discipline the prompts use.
+        let (mute_toggle, mute_icon, volume_slider, volume_label) = {
+            let control = volume_popover_for_timer.borrow();
+            (
+                control.toggle.clone(),
+                control.toggle_icon.clone(),
+                control.slider.clone(),
+                control.label.clone(),
+            )
+        };
         if let Some(volume) = state.volume_info() {
             volume_icon_clone.set_icon_name(Some(volume.icon_name()));
-            volume_label_clone.set_text(&format!("{}%", volume.percent));
+            mute_icon.set_icon_name(Some(volume.icon_name()));
+            volume_label.set_text(&format!("{}%", volume.percent));
 
             // Name the active output in the tooltip only. This is the
             // child-facing surface, so the bar itself stays uncluttered; device
             // names are long and mean nothing to the person using it.
             let tooltip = match volume.output.as_ref() {
                 Some(o) if !o.description.is_empty() => {
-                    format!("Toggle mute \u{2014} {}", o.description)
+                    format!("Volume \u{2014} {}", o.description)
                 }
-                _ => "Toggle mute".to_string(),
+                _ => "Volume".to_string(),
             };
             volume_button_clone.set_tooltip_text(Some(&tooltip));
 
             // Only update slider if user is not actively dragging it
             if !slider_changing_for_update.get() {
-                volume_slider_clone.set_value(volume.percent as f64);
+                volume_slider.set_value(volume.percent as f64);
             }
             // Reset the changing flag after a short delay
             slider_changing_for_update.set(false);
 
             // Disable slider when muted or when restrictions don't allow changes
             let slider_enabled = !volume.muted && volume.restrictions.allow_change;
-            volume_slider_clone.set_sensitive(slider_enabled);
-            volume_button_clone.set_sensitive(volume.restrictions.allow_mute);
+            volume_slider.set_sensitive(slider_enabled);
+            // The restriction lands on the mute button itself now, not on the
+            // bar icon: the icon opens the flyout, which is worth doing even
+            // when muting is not allowed — the level may still be adjustable.
+            mute_toggle.set_sensitive(volume.restrictions.allow_mute);
+            // Safe to push unconditionally: the toggle's handler is on
+            // `clicked`, which `set_active` does not emit.
+            mute_toggle.set_active(volume.muted);
 
             // Update slider range based on restrictions
             let min = volume.restrictions.min_volume.unwrap_or(0) as f64;
             let max = volume.restrictions.max_volume.unwrap_or(100) as f64;
-            volume_slider_clone.set_range(min, max);
+            volume_slider.set_range(min, max);
         } else {
-            volume_label_clone.set_text("--%");
-            volume_slider_clone.set_sensitive(false);
+            volume_label.set_text("--%");
+            volume_slider.set_sensitive(false);
         }
 
         // Update brightness slider from cached state. Hidden entirely on
         // hosts that don't expose a backlight (`available=false`).
-        if let Some(brightness) = state.brightness_info() {
-            if brightness.available {
-                brightness_box_clone.set_visible(true);
-                brightness_icon_clone.set_icon_name(Some(brightness.icon_name()));
-                brightness_label_clone.set_text(&format!("{}%", brightness.percent));
+        let (auto_toggle, brightness_slider, brightness_label) = {
+            let control = brightness_popover_for_timer.borrow();
+            (
+                control.toggle.clone(),
+                control.slider.clone(),
+                control.label.clone(),
+            )
+        };
+        let backlight = state.brightness_info().filter(|b| b.available);
+        brightness_button_clone.set_visible(backlight.is_some());
+        if let Some(brightness) = backlight {
+            brightness_icon_clone.set_icon_name(Some(brightness.icon_name()));
+            brightness_label.set_text(&format!("{}%", brightness.percent));
 
-                if !brightness_changing_for_update.get() {
-                    brightness_slider_clone.set_value(brightness.percent as f64);
-                }
-                brightness_changing_for_update.set(false);
-
-                brightness_slider_clone.set_sensitive(brightness.restrictions.allow_change);
-
-                let min = brightness.restrictions.min_brightness.unwrap_or(0) as f64;
-                let max = brightness.restrictions.max_brightness.unwrap_or(100) as f64;
-                brightness_slider_clone.set_range(min, max);
-
-                // The brightness icon toggles auto brightness, but only when a
-                // light sensor exists; otherwise it stays a plain, inert icon.
-                brightness_button_clone.set_sensitive(brightness.auto_available);
-                if brightness.auto_available
-                    && brightness_button_clone.is_active() != brightness.auto_enabled
-                {
-                    auto_updating_for_update.set(true);
-                    brightness_button_clone.set_active(brightness.auto_enabled);
-                    auto_updating_for_update.set(false);
-                }
-            } else {
-                brightness_box_clone.set_visible(false);
+            if !brightness_changing_for_update.get() {
+                brightness_slider.set_value(brightness.percent as f64);
             }
-        } else {
-            brightness_box_clone.set_visible(false);
+            brightness_changing_for_update.set(false);
+
+            brightness_slider.set_sensitive(brightness.restrictions.allow_change);
+
+            let min = brightness.restrictions.min_brightness.unwrap_or(0) as f64;
+            let max = brightness.restrictions.max_brightness.unwrap_or(100) as f64;
+            brightness_slider.set_range(min, max);
+
+            // Automatic is offered only where a light sensor exists; otherwise
+            // the toggle is present but inert, so the flyout's shape does not
+            // change from host to host.
+            auto_toggle.set_sensitive(brightness.auto_available);
+            // Same as mute: the handler is on `clicked`, so pushing the real
+            // state in cannot echo an RPC back out. This is what retired the
+            // `auto_updating` re-entrancy guard.
+            auto_toggle.set_active(brightness.auto_enabled);
+            // Keep the *bar* reporting what the toggle says, so the state is
+            // still readable without opening the flyout. Automatic is the
+            // expected state and renders plain; the icon lights up only when
+            // the user has taken manual control, which is exactly what the
+            // icon did back when it was the toggle.
+            let manual = brightness.auto_available && !brightness.auto_enabled;
+            if manual {
+                brightness_button_clone.add_css_class("brightness-manual");
+            } else {
+                brightness_button_clone.remove_css_class("brightness-manual");
+            }
         }
 
         glib::ControlFlow::Continue
@@ -1752,6 +1682,7 @@ fn build_hud_content(
         container,
         confirm_prompt,
         reset_prompt,
+        slider_popovers: [volume_popover, brightness_popover],
         warning_popover: warning.popover.clone(),
     }
 }
@@ -1791,6 +1722,280 @@ const CONFIRM_ROW_SPACING_PX: f64 = 12.0;
 
 /// Spacing between the confirm prompt's two buttons, at factor 1.0.
 const CONFIRM_BUTTON_SPACING_PX: f64 = 8.0;
+
+/// Spacing between a pop-out control's toggle, slider and readout, at factor 1.0.
+const SLIDER_POPOVER_SPACING_PX: f64 = 8.0;
+
+/// Which of the two pop-out controls a [`SliderPopover`] is.
+///
+/// The two are the same shape — a toggle, a slider, a percentage — and differ
+/// only in what they are called and which RPCs they drive, so one builder
+/// makes both and this enum carries the differences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderControl {
+    Volume,
+    Brightness,
+}
+
+impl SliderControl {
+    /// The `.volume-slider` / `.brightness-slider` styling, which is what
+    /// gives each control its own highlight colour.
+    fn slider_class(self) -> &'static str {
+        match self {
+            Self::Volume => "volume-slider",
+            Self::Brightness => "brightness-slider",
+        }
+    }
+
+    fn label_class(self) -> &'static str {
+        match self {
+            Self::Volume => "volume-label",
+            Self::Brightness => "brightness-label",
+        }
+    }
+
+    /// The toggle that sits at the head of the flyout: mute for volume,
+    /// automatic for brightness. Both were in the bar before the flyout
+    /// existed — the bar's icon *was* the toggle — and both move in here,
+    /// because the icon now has a job of its own.
+    fn toggle_class(self) -> &'static str {
+        match self {
+            Self::Volume => "mute-toggle",
+            Self::Brightness => "brightness-toggle",
+        }
+    }
+
+    fn toggle_icon(self) -> &'static str {
+        match self {
+            Self::Volume => "audio-volume-medium-symbolic",
+            Self::Brightness => "display-brightness-symbolic",
+        }
+    }
+
+    fn toggle_tooltip(self) -> &'static str {
+        match self {
+            Self::Volume => "Mute",
+            Self::Brightness => "Automatic brightness",
+        }
+    }
+}
+
+/// One of the bar's pop-out controls: the flyout that opens from the volume or
+/// brightness icon (issue #178).
+///
+/// Both sliders used to sit in the bar beside their icons. A pair of them is
+/// ~200 logical pixels of a 1280px bar, and over a third of the *minimum
+/// height* of the vertical one — which is what left a reading session on a
+/// short screen with nowhere to put the page-turn buttons, and what the #160
+/// shortening was trying and failing to buy back. Opening them from the icon
+/// costs the bar a 32px button instead, gives the slider more room than it
+/// ever had inline, and is how a tray volume control behaves on every desktop,
+/// so it needs no explaining to the person using it.
+///
+/// **Rebuilt on every `HudScaleChanged`, like the confirm prompts.** It lives
+/// hidden across a scale change and [`align_popover_to_button`] measures it
+/// just before showing it, which is precisely the case issue #118 says a fresh
+/// widget is needed for: GTK leaves a hidden widget's style alone, so one that
+/// survived the change would be measured at the previous factor's size. The
+/// 500ms timer re-pushes value, range and sensitivity every tick, so a rebuilt
+/// control has the live state back long before anyone can open it.
+struct SliderPopover {
+    popover: gtk4::Popover,
+    /// The child box, measured by [`align_popover_to_button`]. A `GtkPopover`
+    /// is a native surface and reports a near-zero size before it is mapped.
+    content: gtk4::Box,
+    /// Mute, or automatic brightness.
+    toggle: gtk4::ToggleButton,
+    toggle_icon: gtk4::Image,
+    slider: gtk4::Scale,
+    label: gtk4::Label,
+}
+
+/// Build one pop-out control's widgets, parented to the bar icon that opens it
+/// and sized for HUD scale `factor`.
+///
+/// Layout only — the callers below connect the handlers, because that is the
+/// whole of what differs between volume and brightness. The row is horizontal
+/// in **both** bar layouts: a popover is not the bar, so it does not inherit
+/// the bar's axis, and a horizontal slider is what the flyout has room for
+/// whichever edge it flew out of.
+fn build_slider_popover(
+    control: SliderControl,
+    anchor: &gtk4::Button,
+    window: &gtk4::ApplicationWindow,
+    factor: f64,
+    orientation: HudOrientation,
+) -> SliderPopover {
+    let popover = gtk4::Popover::new();
+    popover.set_parent(anchor);
+    popover.add_css_class("slider-popover");
+    // Out of the bar and into the screen, the same direction and for the same
+    // reason as the confirm prompts: a layer-shell popup that lands past the
+    // screen edge is clipped rather than slid back on.
+    popover.set_position(if orientation.is_vertical() {
+        gtk4::PositionType::Right
+    } else {
+        gtk4::PositionType::Bottom
+    });
+    // Autohide, so tapping the activity puts the flyout away. As with the
+    // confirm prompts that needs an input grab, which needs the layer surface
+    // to accept keyboard focus — hence the `OnDemand` switch at the press and
+    // the `closed` handler below that gives it straight back. The always-
+    // present bar must never hold keyboard focus itself.
+    popover.set_autohide(true);
+
+    let content = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing((SLIDER_POPOVER_SPACING_PX * factor).round() as i32)
+        .build();
+
+    let toggle_icon = gtk4::Image::from_icon_name(control.toggle_icon());
+    toggle_icon.set_pixel_size((f64::from(BASE_ICON_PIXEL_SIZE) * factor).round() as i32);
+    let toggle = gtk4::ToggleButton::builder()
+        .child(&toggle_icon)
+        .has_frame(false)
+        .tooltip_text(control.toggle_tooltip())
+        .build();
+    toggle.add_css_class("indicator-button");
+    toggle.add_css_class(control.toggle_class());
+    content.append(&toggle);
+
+    let slider = gtk4::Scale::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .draw_value(false)
+        .build();
+    slider.add_css_class(control.slider_class());
+    slider.set_width_request((f64::from(BASE_SLIDER_LENGTH) * factor).round() as i32);
+    content.append(&slider);
+
+    // The percentage comes back for both layouts. It was dropped from the
+    // vertical bar because "100%" does not fit across 48px, and from a reading
+    // session because the bar was full; the flyout has room for it in every
+    // case, so neither exception survives.
+    let label = gtk4::Label::new(Some("--%"));
+    label.add_css_class(control.label_class());
+    label.set_width_chars(4);
+    content.append(&label);
+
+    popover.set_child(Some(&content));
+
+    let window_for_closed = window.clone();
+    popover.connect_closed(move |_| {
+        window_for_closed.set_keyboard_mode(KeyboardMode::None);
+    });
+
+    SliderPopover {
+        popover,
+        content,
+        toggle,
+        toggle_icon,
+        slider,
+        label,
+    }
+}
+
+/// The volume flyout: mute, level, percentage.
+fn build_volume_popover(
+    anchor: &gtk4::Button,
+    window: &gtk4::ApplicationWindow,
+    factor: f64,
+    orientation: HudOrientation,
+    requests: &mpsc::Sender<u8>,
+    dragging: &std::rc::Rc<std::cell::Cell<bool>>,
+) -> SliderPopover {
+    let control = build_slider_popover(SliderControl::Volume, anchor, window, factor, orientation);
+    control.slider.set_range(0.0, 100.0);
+    control.slider.set_increments(5.0, 10.0);
+
+    // `clicked` rather than `toggled`: a `GtkToggleButton` emits `toggled` from
+    // `set_active` too, so the update loop pushing the real mute state back
+    // into the button would echo an RPC on every tick. `clicked` is only ever
+    // the user. That is what retired the `auto_updating` re-entrancy guard the
+    // brightness toggle used to carry, and it was measured rather than assumed:
+    // flapping `set_active` from the timer for 15s produced 20 `toggled` and
+    // **0** `clicked`.
+    control.toggle.connect_clicked(|_| {
+        if let Err(e) = crate::volume::toggle_mute() {
+            tracing::error!("Failed to toggle mute: {}", e);
+        }
+    });
+
+    let tx = requests.clone();
+    let dragging = dragging.clone();
+    control
+        .slider
+        .connect_change_value(move |slider, _, value| {
+            dragging.set(true);
+            let _ = tx.send(value.clamp(0.0, 100.0) as u8);
+            // Move the knob straight away; the debounced worker catches up.
+            slider.set_value(value);
+            glib::Propagation::Stop
+        });
+
+    control
+}
+
+/// The brightness flyout: automatic on/off, level, percentage.
+fn build_brightness_popover(
+    anchor: &gtk4::Button,
+    window: &gtk4::ApplicationWindow,
+    factor: f64,
+    orientation: HudOrientation,
+    requests: &mpsc::Sender<u8>,
+    dragging: &std::rc::Rc<std::cell::Cell<bool>>,
+) -> SliderPopover {
+    let control = build_slider_popover(
+        SliderControl::Brightness,
+        anchor,
+        window,
+        factor,
+        orientation,
+    );
+    control.slider.set_range(0.0, 100.0);
+    control.slider.set_increments(5.0, 10.0);
+
+    // See the note on the mute toggle: `clicked` is the user's press only, so
+    // the update loop can set the button's state without echoing an RPC back.
+    control.toggle.connect_clicked(|btn| {
+        if let Err(e) = crate::brightness::set_auto_brightness(btn.is_active()) {
+            tracing::error!("Failed to set auto brightness: {}", e);
+        }
+    });
+
+    let tx = requests.clone();
+    let dragging = dragging.clone();
+    control
+        .slider
+        .connect_change_value(move |slider, _, value| {
+            dragging.set(true);
+            let _ = tx.send(value.clamp(0.0, 100.0) as u8);
+            slider.set_value(value);
+            glib::Propagation::Stop
+        });
+
+    control
+}
+
+/// Open a pop-out control, aligned so it cannot land past the end of the bar.
+///
+/// Takes its own clones and drops the borrow before `popup()`, the same
+/// discipline the confirm prompts use: popping up runs signal handlers, and
+/// one of them reaching back into the cell would panic.
+fn open_slider_popover(
+    control: &std::rc::Rc<std::cell::RefCell<SliderPopover>>,
+    button: &gtk4::Button,
+    window: &gtk4::ApplicationWindow,
+    factor: f64,
+    orientation: HudOrientation,
+) {
+    let (popover, content) = {
+        let control = control.borrow();
+        (control.popover.clone(), control.content.clone())
+    };
+    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    align_popover_to_button(&popover, &content, button, factor, orientation);
+    popover.popup();
+}
 
 /// The HUD's close-confirmation prompt: the popover itself, the content box
 /// (measured to right-align it against the "X"), and the message label (retitled
@@ -1914,6 +2119,13 @@ fn build_confirm_prompt(
 /// back on-screen, so it is simply clipped (issue #97). Shifting the center left
 /// by (popover_width - button_width)/2 lands the popover's right edge on the
 /// button's right edge, fully on-screen, without relying on any slide-to-fit.
+///
+/// The pop-out volume and brightness controls (issue #178) use it too. Their
+/// icons sit further in from the end of the bar, so how much room they have
+/// depends on which indicators the host shows — a box with a backlight but no
+/// battery leaves the brightness icon close enough to the end for a centered
+/// flyout to overhang it. Aligning to the bar's end unconditionally is both
+/// safe in every combination and what a tray flyout does anyway.
 ///
 /// `content` is the popover's child box: a `GtkPopover` is a native surface and
 /// reports a near-zero preferred size before it is mapped, so the width has to
@@ -2076,54 +2288,31 @@ const CSS_TEMPLATE: &str = r#"
             padding: 12px 6px;
         }
 
-        /* The slider rules further down name a specific axis -- 80px of
-           length, a 4px-thick trough -- because a horizontal bar only ever
-           held horizontal sliders. Turned on their side those two swap, and
-           leaving them alone is what makes the vertical bar demand its 80px of
-           slider *across* the bar: the surface measured 124px wide instead of
-           48px until these overrode it.
+        /* The sliders used to need an axis swap here: written for a
+           horizontal bar they name 80px of length and a 4px-thick trough, and
+           left alone on a vertical bar they demanded that length *across* it
+           -- the surface measured 124px wide instead of 48px. They no longer
+           need one, because they are no longer in the bar: both open out of
+           their icon as a flyout, which is a popover and so keeps its own
+           horizontal axis whichever edge the bar is on (issue #178).
 
-           The length is left to `apply_slider_lengths` rather than restated as
-           a `min-height` here. A CSS minimum is a *floor* that GTK takes the
-           maximum of against the widget's size request, so the 80px this rule
-           used to carry silently outranked the 66px request a reading session
-           asks for -- the whole of the #160 overflow machinery was inert on
-           the vertical bar, which is how issue #178 ran out of room and clipped
-           the page-turn buttons off the bottom. Stating 0px keeps the axis
-           swap (the point of the rule) and lets the request through. */
-        .hud-vertical .volume-slider,
-        .hud-vertical .brightness-slider {
-            min-width: 0px;
-            min-height: 0px;
-        }
-
-        .hud-vertical .volume-slider trough,
-        .hud-vertical .volume-slider highlight,
-        .hud-vertical .brightness-slider trough,
-        .hud-vertical .brightness-slider highlight {
-            min-width: 4px;
-            min-height: 0px;
-        }
-
-        /* The separation these give a control group is meant to run *along*
-           the bar. Left alone on a vertical bar it runs across it instead,
-           where every pixel is thickness the activity pays for -- 8px of the
-           bar's width bought nothing. Turned with the bar it does the job it
-           was written for. */
-        .hud-vertical .volume-control,
-        .hud-vertical .brightness-control {
-            padding: 4px 0;
-        }
+           The lesson the swap taught is still worth keeping for whatever comes
+           next, and it has its own trap: state the axis, never the *length*. A
+           CSS minimum is a floor GTK takes the maximum of against the widget's
+           size request, so a `min-height` restated here silently outranks the
+           request -- which is how the #160 reading-session shortening came to
+           be inert on the vertical bar, and how #178 ran out of height and
+           clipped the page-turn buttons off the bottom. */
 
         .hud-vertical .network-indicator {
             padding: 2px 0;
         }
 
-        /* The readouts that have to fit *across* a 48px bar rather than along
-           it. At the bar's 14px "100%" is wider than the space between the
-           paddings; the battery percentage is the one worth keeping, so it
-           gets a size that fits instead of being dropped like the volume and
-           brightness ones. */
+        /* The one readout that still has to fit *across* a 48px bar rather
+           than along it. At the bar's 14px "100%" is wider than the space
+           between the paddings, so it gets a size that fits. The volume and
+           brightness percentages used to be dropped from this bar for the same
+           reason; they are in the flyouts now, which have room (issue #178). */
         .hud-vertical .battery-label {
             font-size: 11px;
         }
@@ -2235,16 +2424,35 @@ const CSS_TEMPLATE: &str = r#"
             background-color: var(--hover-bg);
         }
 
-        /* The brightness icon is a toggle: automatic is the default, so it
-           stays plain when checked (auto on). It lights up only in the
-           *manual* state (unchecked, and only when a sensor makes auto an
-           option at all), using the brightness bar's own highlight colour so
-           the two read as one control. */
-        .brightness-toggle:not(:checked):not(:disabled) {
+        /* Automatic brightness is the default, so its toggle stays plain when
+           checked (auto on) and lights up only in the *manual* state
+           (unchecked, and only when a sensor makes auto an option at all),
+           using the brightness bar's own highlight colour so the two read as
+           one control.
+
+           `.brightness-manual` is the same state shown on the *bar* icon,
+           which the update loop sets. The toggle itself moved into the flyout
+           with issue #178, and without this the bar would have stopped saying
+           who is driving the backlight until someone opened the flyout. */
+        .brightness-toggle:not(:checked):not(:disabled),
+        .indicator-button.brightness-manual {
             background-color: var(--color-warning);
         }
 
-        .brightness-toggle:not(:checked):not(:disabled) image {
+        .brightness-toggle:not(:checked):not(:disabled) image,
+        .indicator-button.brightness-manual image {
+            color: #2e3440;
+        }
+
+        /* A muted volume is worth showing on its own toggle the same way, so
+           the flyout says which state it is in rather than only the icon
+           shape. Checked means muted here, the opposite of the brightness
+           toggle above, because muted is the exceptional state. */
+        .mute-toggle:checked:not(:disabled) {
+            background-color: var(--color-critical);
+        }
+
+        .mute-toggle:checked:not(:disabled) image {
             color: #2e3440;
         }
 
@@ -2290,12 +2498,12 @@ const CSS_TEMPLATE: &str = r#"
             color: var(--color-critical);
         }
 
-        .volume-control {
-            padding: 0 4px;
-        }
-
+        /* Length comes from the widget's size request (`BASE_SLIDER_LENGTH`),
+           which is what lets it follow the HUD scale factor. Stating a floor
+           here as well would outrank a shorter request -- see the note by the
+           `.hud-vertical` rules above. */
         .volume-slider {
-            min-width: 80px;
+            min-width: 0px;
         }
 
         .volume-slider trough {
@@ -2343,12 +2551,9 @@ const CSS_TEMPLATE: &str = r#"
             text-align: right;
         }
 
-        .brightness-control {
-            padding: 0 4px;
-        }
-
+        /* Matches `.volume-slider` -- see the note there. */
         .brightness-slider {
-            min-width: 80px;
+            min-width: 0px;
         }
 
         .brightness-slider trough {
@@ -2414,6 +2619,23 @@ const CSS_TEMPLATE: &str = r#"
                without it the Cancel / End labels keep the theme's unscaled
                size while the box around them grows. */
             font-size: 14px;
+        }
+
+        /* The pop-out volume / brightness controls (issue #178). Same opaque
+           surface as the prompt above and for the same reasons: a popover does
+           not inherit the bar's background, the activity behind it must not
+           bleed through, and the base font size has to be stated here or the
+           readout inside falls back to the theme's unscaled default (#114). */
+        .slider-popover > contents {
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 14px;
+        }
+
+        .slider-popover > arrow {
+            background-color: #1e1e1e;
+            border: none;
         }
 
         .confirm-close-popover > arrow {
@@ -2674,77 +2896,79 @@ mod tests {
         }
     }
 
-    /// Issue #178: the vertical bar's slider rule must not restate a *length*
-    /// floor.
-    ///
-    /// GTK takes the maximum of a CSS minimum and the widget's size request,
-    /// so the `min-height: 80px` this rule used to carry silently outranked
-    /// the shorter request `apply_slider_lengths` makes for a reading session.
-    /// The whole of the #160 overflow machinery was inert on the vertical bar
-    /// because of it, and the page-turn buttons were clipped off the bottom on
-    /// any screen under about 720 logical pixels tall. The axis swap is the
-    /// point of the rule; the length belongs to the size request.
+    /// Issue #178: the flyout is a text root of its own, so like the bar and
+    /// the confirm prompt it has to state a `font-size` — its percentage
+    /// readout would otherwise keep the theme's logical-pixel size and render
+    /// 1/factor too small under the counter-scale (issue #114's rule).
     #[test]
-    fn the_vertical_slider_rule_leaves_its_length_to_the_size_request() {
-        let rule = ".hud-vertical .brightness-slider {";
+    fn the_slider_flyout_declares_a_scalable_font_size() {
+        let rule = ".slider-popover > contents {";
         let block = CSS_TEMPLATE
             .split_once(rule)
             .and_then(|(_, rest)| rest.split_once('}'))
             .map(|(block, _)| block)
             .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
-        for dim in ["min-width", "min-height"] {
+        assert!(
+            block.contains("font-size:"),
+            "{rule} must set a font-size so the readout does not fall back to \
+             the theme default"
+        );
+    }
+
+    /// Issue #178: neither slider rule may state a *length* floor.
+    ///
+    /// A CSS minimum is a floor GTK takes the maximum of against the widget's
+    /// size request, so a `min-width` here outranks a shorter request — which
+    /// is exactly how the vertical bar's swapped rule silently cancelled the
+    /// #160 reading-session shortening and left the page-turn buttons clipped
+    /// off the bottom of the bar. The length is `BASE_SLIDER_LENGTH`, applied
+    /// as a request so it can follow the HUD scale factor.
+    #[test]
+    fn slider_rules_leave_their_length_to_the_size_request() {
+        for rule in [".volume-slider {", ".brightness-slider {"] {
+            let block = CSS_TEMPLATE
+                .split_once(rule)
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(block, _)| block)
+                .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
             let value: i32 = block
-                .split_once(&format!("{dim}:"))
+                .split_once("min-width:")
                 .and_then(|(_, rest)| rest.split_once("px"))
                 .and_then(|(value, _)| value.trim().parse().ok())
-                .unwrap_or_else(|| panic!("{rule} must state {dim} in px"));
+                .unwrap_or_else(|| panic!("{rule} must state min-width in px"));
             assert_eq!(
                 value, 0,
-                "{rule} {dim} is {value}px, which outranks the slider's own \
-                 size request and takes the reading session's shortening away"
+                "{rule} min-width is {value}px, which outranks the slider's \
+                 own size request"
             );
         }
     }
 
-    /// The reading session is the case the bar has no other answer to, so both
-    /// layouts have to actually shorten — and the vertical one by more, since
-    /// its sliders are the largest things competing for a fixed screen height.
+    /// The sliders are out of the bar, so nothing in the stylesheet should
+    /// still be turning them for the vertical layout. A leftover rule here
+    /// would apply to the flyout — a popover is a descendant of the bar icon
+    /// it is parented to, so `.hud-vertical` still matches inside it — and
+    /// would zero the width of a slider that is horizontal in both layouts.
     #[test]
-    fn a_reading_session_shortens_the_sliders_in_both_layouts() {
-        for orientation in [
-            HudOrientation::Top,
-            HudOrientation::Bottom,
-            HudOrientation::Left,
+    fn the_vertical_layout_no_longer_turns_the_sliders() {
+        for dead in [
+            ".hud-vertical .volume-slider",
+            ".hud-vertical .brightness-slider",
+            ".hud-vertical .volume-control",
+            ".hud-vertical .brightness-control",
         ] {
-            let full = slider_length(BASE_VOLUME_SLIDER_WIDTH, false, 1.0, orientation);
-            let reading = slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 1.0, orientation);
-            assert_eq!(full, BASE_VOLUME_SLIDER_WIDTH);
+            // Only selectors count; the explanatory comment above them names
+            // the rules deliberately, and naming them is the point.
+            let stylesheet: String = CSS_TEMPLATE
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(['/', '*', '-']))
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(
-                reading < full,
-                "{orientation:?} does not give any slider length back for the page-turn buttons"
+                !stylesheet.contains(dead),
+                "{dead} is still in the stylesheet; the sliders left the bar in \
+                 issue #178 and a rule that turns them now hits the flyout"
             );
         }
-        // The vertical bar is the one under real pressure (issue #178): a
-        // full-length pair is over a third of the minimum height of the whole
-        // bar, and everything competing with them has a floor it cannot
-        // ellipsize past.
-        assert!(
-            slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 1.0, HudOrientation::Left)
-                < slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 1.0, HudOrientation::Top)
-        );
-    }
-
-    /// Lengths follow the HUD scale factor like every other dimension the
-    /// timer rescales (issue #114), reading session or not.
-    #[test]
-    fn slider_lengths_follow_the_scale_factor() {
-        assert_eq!(
-            slider_length(BASE_VOLUME_SLIDER_WIDTH, false, 2.0, HudOrientation::Top),
-            2 * BASE_VOLUME_SLIDER_WIDTH
-        );
-        assert_eq!(
-            slider_length(BASE_VOLUME_SLIDER_WIDTH, true, 2.0, HudOrientation::Left),
-            2 * VERTICAL_READING_SLIDER_LENGTH
-        );
     }
 }
