@@ -1735,8 +1735,24 @@ impl Service {
             web.set_companion(admin_authority.clone());
         }
 
+        // Worked out before `management_api_config` is consumed below, because
+        // the setup card wants to tell the parent where to type the code.
+        //
+        // A wildcard bind has no single address to name, so it contributes a
+        // port and no URL, and the card says "port 8080 on this device"
+        // instead of inventing a hostname.
+        let web_setup_target: Option<(Option<String>, u16)> =
+            management_api_config.as_ref().map(|cfg| {
+                let url = (!cfg.bind.is_unspecified()).then(|| {
+                    let scheme = if cfg.tls.is_tls() { "https" } else { "http" };
+                    format!("{scheme}://{}:{}", cfg.bind, cfg.port)
+                });
+                (url, cfg.port)
+            });
+
         let http_handle = match management_api_config {
             Some(api_cfg) => {
+                announce_web_auth_state(web_auth.as_ref(), &api_cfg);
                 let http_state = HttpAppState { svc: svc.clone() };
                 let http_server = HttpServer::new(http_state, api_cfg)
                     .with_admin_authority(admin_authority)
@@ -1761,6 +1777,51 @@ impl Service {
             }
             None => None,
         };
+
+        // The web credential store's housekeeping (issue #156), and the
+        // on-screen setup code that goes with it.
+        //
+        // One task for both because they are the same question asked on the
+        // same clock: is this device set up, and are its sessions still alive.
+        // The card is shown while there is a code to show and torn down the
+        // moment a password exists — the parent who just finished setting one
+        // should not have to look at their setup code any more.
+        if let Some(web) = web_auth.clone() {
+            let mut sweep_shutdown = shutdown_rx.clone();
+            let setup_target = web_setup_target.clone();
+            tokio::spawn(async move {
+                let mut card: Option<pairing_display::SetupCodeDisplay> = None;
+                let mut ticker = tokio::time::interval(Duration::from_secs(30));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            web.sweep();
+                            match web.enrolment_code() {
+                                Some(code) if card.is_none() => {
+                                    card = Some(pairing_display::SetupCodeDisplay::show(
+                                        &code,
+                                        setup_target
+                                            .as_ref()
+                                            .and_then(|(url, _)| url.as_deref()),
+                                        setup_target.as_ref().map(|(_, port)| *port),
+                                    ));
+                                }
+                                None if card.is_some() => {
+                                    card = None;
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ = sweep_shutdown.changed() => {
+                            if *sweep_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // System event watcher (logind + NetworkManager). Always running so the
         // suspend cover (issue #73) works regardless of internet gating: it
@@ -2732,6 +2793,37 @@ fn local_hostnames() -> Vec<String> {
     }
     names.dedup();
     names
+}
+
+/// Say, once at startup, what state web management authentication is in.
+///
+/// An unconfigured device puts its setup code in the journal, because the
+/// on-screen card needs a compositor and this needs to work on a device whose
+/// display has not come up — or over SSH, where the person reading the journal
+/// is the one who will set the password.
+fn announce_web_auth_state(
+    web_auth: Option<&Arc<shepherd_management::WebAuth>>,
+    cfg: &shepherd_config::ManagementApiConfig,
+) {
+    let Some(web) = web_auth else { return };
+    let scheme = if cfg.tls.is_tls() { "https" } else { "http" };
+    let host = if cfg.bind.is_unspecified() {
+        "<this device>".to_string()
+    } else {
+        cfg.bind.to_string()
+    };
+    match web.enrolment_code() {
+        Some(code) => {
+            warn!(
+                "Management web UI has no password yet. Open {scheme}://{host}:{} and enter \
+                 setup code {code} to choose one.",
+                cfg.port
+            );
+        }
+        None => {
+            info!("Management web UI is password-protected");
+        }
+    }
 }
 
 #[tokio::main]
