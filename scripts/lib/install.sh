@@ -894,6 +894,8 @@ install_state() {
     # postinst instead (scripts/lib/package.sh, _package_write_control), and
     # leaves the per-user enable to the admin. Keep them in sync.
     if [[ -z "$destdir" ]]; then
+        remove_superseded_copy \
+            "$POLKIT_LEGACY_RULES_DIR/$SESSION_GUARD_RULES_NAME" "$guard_dst"
         if ! getent passwd "$STATED_USER" >/dev/null; then
             info "Creating system user: $STATED_USER"
             # No home and no shell: this uid exists to own files and answer one
@@ -1616,6 +1618,8 @@ uninstall_state() {
     # behind would be leaving a uid the right to end sessions after the only
     # thing that had a reason to do so is gone.
     remove_path "$destdir$POLKIT_RULES_DIR/$SESSION_GUARD_RULES_NAME"
+    # An install from before #177 put the rule in polkit's admin directory.
+    remove_path "$destdir$POLKIT_LEGACY_RULES_DIR/$SESSION_GUARD_RULES_NAME"
 
     if [[ -z "$destdir" ]]; then
         systemctl daemon-reload 2>/dev/null || true

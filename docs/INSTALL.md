@@ -422,10 +422,11 @@ This installs:
 - A `bluetoothd` drop-in enabling experimental D-Bus interfaces, which
   shepherd needs to stop the device auto-dialling the paired phone (see
   "Keeping the device from dialling the phone" above)
-- A udev rule at `/usr/lib/udev/rules.d/71-shepherd-uinput.rules` and a polkit
-  rule at `/usr/share/polkit-1/rules.d/50-shepherd-firewall.rules` — vendor
-  directories, so a site override still goes in the matching `/etc` one (see
-  "Who owns the files under /etc" below)
+- A udev rule at `/usr/lib/udev/rules.d/71-shepherd-uinput.rules` and polkit
+  rules at `/usr/share/polkit-1/rules.d/50-shepherd-firewall.rules` and
+  `50-shepherd-session-guard.rules` — vendor directories, so a site override
+  still goes in the matching `/etc` one (see "Who owns the files under /etc"
+  below)
 - The policy to `/var/lib/shepherdd/state/kiosk/config.toml`, with a signpost at
   `~kiosk/.config/shepherd/config.toml` saying where it went
 
@@ -673,8 +674,8 @@ Consequences worth knowing before you debug a device:
   the first beat.
 
   Ending a session it does not own needs polkit, which is what
-  `/etc/polkit-1/rules.d/50-shepherd-session-guard.rules` grants (installed with
-  the custodian, removed with it). Without that rule everything still works
+  `/usr/share/polkit-1/rules.d/50-shepherd-session-guard.rules` grants (installed
+  with the custodian, removed with it). Without that rule everything still works
   except the part that matters: the device raises the `Critical` diagnostic
   `session_not_guarded` and the journal names the file. **The rule grants
   `shepherd-state` the right to end any session on the machine**, an
@@ -859,8 +860,9 @@ local edits an upgrade will preserve or ask you about. That is deliberate.
   machine's `bluetoothd`.
 
 The udev and polkit rules are not under `/etc` at all any more. They live at
-`/usr/lib/udev/rules.d/71-shepherd-uinput.rules` and
-`/usr/share/polkit-1/rules.d/50-shepherd-firewall.rules`, next to the polkit
+`/usr/lib/udev/rules.d/71-shepherd-uinput.rules`,
+`/usr/share/polkit-1/rules.d/50-shepherd-firewall.rules` and
+`/usr/share/polkit-1/rules.d/50-shepherd-session-guard.rules`, next to the polkit
 action shepherd has always installed to `/usr/share/polkit-1/actions/`. Both
 subsystems read their `/etc` directory as well, and a same-named file there
 wins — so that is still where a site override goes, it is simply no longer
