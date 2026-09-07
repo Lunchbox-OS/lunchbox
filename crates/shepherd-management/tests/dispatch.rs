@@ -11,7 +11,10 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use shepherd_api::{EntryKind, Event};
+use shepherd_api::{
+    AddressFamily, Connectivity, EntryKind, Event, NetworkAddressView, NetworkInterfaceKind,
+    NetworkInterfaceView, NetworkSource, WifiView,
+};
 use shepherd_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
     ServiceConfig, TokensPolicy, VolumePolicy,
@@ -20,12 +23,12 @@ use shepherd_core::CoreEngine;
 use shepherd_host_api::{
     BrightnessCapabilities, BrightnessController, BrightnessResult, BrightnessStatus,
     HostCapabilities, LightSensor, LightSensorCapabilities, LightSensorResult, MockHost,
-    NoOpDisplayController, NoOpHidpiController, NoOpHudLayoutController, VolumeCapabilities,
-    VolumeController, VolumeResult, VolumeStatus,
+    NetworkSnapshot, NoOpDisplayController, NoOpHidpiController, NoOpHudLayoutController,
+    StaticNetworkInfo, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
 };
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
-    ManagementService, RpcDispatchError, dispatch_json,
+    ManagementService, RpcDispatchError, WebListenerHandle, dispatch_json,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
@@ -375,6 +378,11 @@ fn make_svc_full(
         display: Arc::new(NoOpDisplayController),
         last_audio_state: Arc::new(Mutex::new(None)),
         diagnostics: None,
+        // The dispatch tests that care about networking build their own
+        // provider; the rest get a host that cannot look, which is a real
+        // shape a device can be in and must not panic.
+        network: None,
+        web_listener: WebListenerHandle::default(),
     }
 }
 
@@ -1868,4 +1876,153 @@ async fn a_reordered_output_list_is_not_a_change() {
     svc.audio_watch_tick().await;
 
     assert_eq!(next_volume_event(&mut rx), None);
+}
+
+// ---------------------------------------------------------------------------
+// Network status (issue #182)
+// ---------------------------------------------------------------------------
+
+/// A device with one wireless interface carrying a real address, one container
+/// bridge, and loopback — the shape of the machine this was written on.
+fn a_device_on_wifi() -> NetworkSnapshot {
+    NetworkSnapshot {
+        connectivity: Connectivity::Full,
+        source: NetworkSource::NetworkManager,
+        interfaces: vec![
+            NetworkInterfaceView {
+                name: "lo".into(),
+                kind: NetworkInterfaceKind::Loopback,
+                up: true,
+                addresses: vec![address("127.0.0.1", 8)],
+                gateway: None,
+                dns: vec![],
+                wifi: None,
+                reachable: false,
+            },
+            NetworkInterfaceView {
+                name: "lxcbr0".into(),
+                kind: NetworkInterfaceKind::Bridge,
+                up: true,
+                addresses: vec![address("10.0.3.1", 24)],
+                gateway: None,
+                dns: vec![],
+                wifi: None,
+                reachable: false,
+            },
+            NetworkInterfaceView {
+                name: "wlan0".into(),
+                kind: NetworkInterfaceKind::Wifi,
+                up: true,
+                addresses: vec![address("192.168.0.139", 24)],
+                gateway: Some("192.168.0.1".into()),
+                dns: vec!["192.168.0.1".into()],
+                wifi: Some(WifiView {
+                    ssid: Some("Home".into()),
+                    signal_percent: Some(60),
+                    frequency_mhz: Some(5_220),
+                }),
+                reachable: false,
+            },
+        ],
+    }
+}
+
+fn address(address: &str, prefix: u8) -> NetworkAddressView {
+    NetworkAddressView {
+        address: address.into(),
+        prefix,
+        family: AddressFamily::V4,
+    }
+}
+
+/// A service that can see the given network, with a web listener in the given
+/// state.
+fn make_svc_with_network(
+    snapshot: NetworkSnapshot,
+    listener: WebListenerHandle,
+    config_path: PathBuf,
+) -> DefaultManagementService {
+    DefaultManagementService {
+        network: Some(Arc::new(StaticNetworkInfo(snapshot))),
+        web_listener: listener,
+        ..make_svc(test_policy(), config_path)
+    }
+}
+
+fn listening_on_everything() -> WebListenerHandle {
+    let handle = WebListenerHandle::configured("0.0.0.0:8080".parse().unwrap());
+    handle.set_listening("0.0.0.0:8080".parse().unwrap());
+    handle
+}
+
+#[tokio::test]
+async fn network_status_leads_with_the_address_somebody_can_reach() {
+    let cfg = temp_config();
+    let svc = make_svc_with_network(
+        a_device_on_wifi(),
+        listening_on_everything(),
+        cfg.path().to_path_buf(),
+    );
+
+    let status = ok(&svc, "network_status", json!({})).await;
+
+    assert_eq!(status["connectivity"], "full");
+    assert_eq!(status["source"], "network_manager");
+    // The whole point of the ticket: a phone that reached this device over BLE
+    // now has a URL it can open, without arp-ing the LAN for it.
+    assert_eq!(
+        status["management_urls"],
+        json!(["http://192.168.0.139:8080"])
+    );
+    let interfaces = status["interfaces"].as_array().unwrap();
+    assert_eq!(
+        interfaces[0]["name"], "wlan0",
+        "the reachable interface sorts first, not the alphabetical one"
+    );
+    assert_eq!(interfaces[0]["reachable"], true);
+    assert_eq!(interfaces[0]["wifi"]["ssid"], "Home");
+    assert!(
+        interfaces
+            .iter()
+            .all(|i| i["name"] == "wlan0" || i["reachable"] == false),
+        "loopback and a container bridge are not ways in"
+    );
+}
+
+#[tokio::test]
+async fn a_web_interface_that_never_bound_says_so_instead_of_offering_a_url() {
+    let cfg = temp_config();
+    let failed = WebListenerHandle::configured("10.147.17.8:8080".parse().unwrap());
+    failed.set_failed("Cannot assign requested address");
+    let svc = make_svc_with_network(a_device_on_wifi(), failed, cfg.path().to_path_buf());
+
+    let status = ok(&svc, "network_status", json!({})).await;
+
+    assert_eq!(status["management_api"]["state"], "failed");
+    assert_eq!(status["management_api"]["addr"], "10.147.17.8:8080");
+    assert_eq!(
+        status["management_api"]["error"],
+        "Cannot assign requested address"
+    );
+    assert_eq!(
+        status["management_urls"],
+        json!([]),
+        "an address that will refuse the connection sends somebody to debug \
+         the wrong machine"
+    );
+}
+
+#[tokio::test]
+async fn a_host_that_cannot_look_says_unavailable_rather_than_offline() {
+    // A device with no NetworkManager and no readable interfaces is not a
+    // device with no network, and a UI must be able to tell them apart.
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+
+    let status = ok(&svc, "network_status", json!({})).await;
+
+    assert_eq!(status["source"], "unavailable");
+    assert_eq!(status["connectivity"], "unknown");
+    assert_eq!(status["interfaces"], json!([]));
+    assert_eq!(status["management_api"]["state"], "disabled");
 }

@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
     BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, GroupView, HealthStatus, ServiceStateSnapshot, SessionInfo, StopMode, TokenStatus,
-    UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    Event, GroupView, HealthStatus, NetworkStatusView, ServiceStateSnapshot, SessionInfo, StopMode,
+    TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WebListenerView, WindowAction,
+    WindowInfo,
 };
 use shepherd_management::{LaunchOutcome, ManagementError, ManagementResult, ManagementService};
 use shepherd_util::{EntryId, LimitSubject};
@@ -232,6 +233,10 @@ impl ManagementService for MockSvc {
     async fn ping(&self) {}
     async fn list_diagnostics(&self) -> shepherd_api::DiagnosticSet {
         Default::default()
+    }
+
+    async fn network_status(&self) -> NetworkStatusView {
+        NetworkStatusView::unavailable(WebListenerView::disabled())
     }
 
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {

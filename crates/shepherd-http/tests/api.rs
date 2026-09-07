@@ -32,7 +32,7 @@ use shepherd_host_api::{
     HostCapabilities, MockHost, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
 };
 use shepherd_http::{AppState, handlers};
-use shepherd_management::{AutoBrightnessState, DefaultManagementService};
+use shepherd_management::{AutoBrightnessState, DefaultManagementService, WebListenerHandle};
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
 use std::collections::HashMap;
@@ -259,6 +259,11 @@ fn make_app_with_admin_and_policy(
         display: Arc::new(shepherd_host_api::NoOpDisplayController),
         last_audio_state: Arc::new(tokio::sync::Mutex::new(None)),
         diagnostics: None,
+        // Network status has no HTTP-specific behaviour — it is exercised
+        // transport-free in `shepherd-management/tests/dispatch.rs`, so this
+        // fixture is a host that cannot look.
+        network: None,
+        web_listener: WebListenerHandle::default(),
     });
     let state = AppState { svc };
     handlers::router(

@@ -21,6 +21,7 @@ use shepherd_host_api::{
 };
 use shepherd_management::{
     AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementService,
+    WebListenerHandle,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
@@ -176,6 +177,8 @@ fn harness() -> Harness {
         display: Arc::new(NoOpDisplayController),
         last_audio_state: Arc::new(Mutex::new(None)),
         diagnostics: None,
+        network: None,
+        web_listener: WebListenerHandle::default(),
     };
 
     Harness {
