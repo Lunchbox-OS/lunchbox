@@ -283,6 +283,22 @@ schema shape it does not recognise rather than emitting a plausible mirror —
 so an exotic serde attribute on either side fails codegen instead of quietly
 producing types that typecheck and decode wrongly.
 
+**Doc-comment a fieldless enum's variants either all or none.** `schemars`
+renders a unit-only enum as a plain `"enum": [...]` array when no variant
+carries a doc comment, and as a `oneOf` of string `const`s when they all do.
+Document *some* of them and it emits a mix — the documented ones as `const`s,
+each undocumented run collapsed into one `enum` entry — which is neither shape
+the Kotlin renderer knows, so codegen fails with
+
+```
+NetworkInterfaceKind is an untagged or externally-tagged enum with no Kotlin
+equivalent; add it to HAND_WRITTEN in kotlin_types.rs
+```
+
+That message names the wrong fix for this cause. The right one is to document
+the remaining variants (or none of them); `HAND_WRITTEN` is for enums that
+genuinely have no Kotlin equivalent.
+
 ### Generated defaults
 
 Two of the generated files carry *values* rather than types: what a field falls
@@ -455,6 +471,22 @@ cd companion-android
 export ANDROID_SDK_ROOT=/opt/android-sdk   # see below
 ./gradlew :app:assembleDebug               # debug APK (sideload-friendly)
 ./gradlew :app:testDebugUnitTest           # unit tests
+```
+
+**Gradle here needs JDK 21, and the system default may be newer.** Ubuntu 26.04
+ships JDK 25 as `default-java`; the Gradle wrapper this repo pins (8.10.2)
+cannot parse that version string and every task dies with a bare
+
+```
+* What went wrong:
+25.0.4
+```
+
+— no mention of Java, Gradle, or a version. Export the JDK the Android deps set
+installs before invoking the wrapper directly:
+
+```sh
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 ```
 
 Gradle does not find the SDK on its own here: `deps install android` puts it in

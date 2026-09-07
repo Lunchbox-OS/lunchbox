@@ -129,6 +129,20 @@ Example (bedtime restriction):
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/shepherd-ipc/src/client.rs`.
+  - **A page in the web UI** (`shepherd-webui`): `dev click` does not activate
+    a link or a nav item in a browser either, and the SPA has no URL routing to
+    deep-link with — so to render one page, temporarily change the initial
+    `useState<Page>` in `src/App.tsx`, `npm run build`, and re-boot (the daemon
+    embeds `dist/` at compile time, so this needs a full `dev headless`, not
+    `--no-build`). Run the browser inside the session by sourcing
+    `dev-runtime/headless/session.env` and launching `firefox --kiosk
+    http://127.0.0.1:8080/` with `MOZ_ENABLE_WAYLAND=1`. Firefox on Ubuntu is a
+    **snap**: a `--profile` outside `$HOME/snap/firefox/common` fails with
+    "Your Firefox profile cannot be loaded", and the half-started instance then
+    holds a lock that makes every later launch claim Firefox is "already
+    running, but is not responding" — use the default profile. `Page_Down` does
+    nothing without content focus; `wtype -M ctrl -k minus -m ctrl` (zoom out)
+    is the reliable way to get more of a long page into one screenshot.
   - **The vertical HUD** (issue #171): export `SHEPHERD_HUD_ANCHOR=left` before
     `dev headless`. That **pins** the bar, so it also stops the HUD following
     shepherdd — which is what you want to look at the layout, and not what you
