@@ -31,8 +31,20 @@ PACKAGE_NAME="$DISTRO_PACKAGE_NAME"
 PACKAGE_MAINTAINER="Albert Armea <shepherd-launcher-patch@albertarmea.com>"
 # Where the package drops the example config + media library. A from-source
 # install copies these into the user's config dir from the repo (install_config);
-# a .deb user has no repo, so they live here for the admin to copy.
-PACKAGE_EXAMPLE_DIR="$PACKAGE_PREFIX/share/shepherd"
+# a .deb user has no repo, so they live here for the admin to copy. The path is
+# single-sourced from install.sh, which this lib sources: the bluetoothd
+# drop-in template is staged under the same root by install_bluetooth_dropin,
+# and shepherd-admin reads it as SHEPHERD_DATA_DIR.
+PACKAGE_EXAMPLE_DIR="$PACKAGED_DATA_DIR"
+
+# The last released version that declared conffiles (issue #177 dropped them
+# all). It is the `prior-version` argument the .deb's maintainer scripts hand
+# `dpkg-maintscript-helper rm_conffile`, which is how the two rules it moved
+# out of /etc get cleared from the admin directories they used to live in.
+# Upgrading from anything newer finds nothing to do, so this only ever needs
+# changing if a conffile is reintroduced -- read the comment above the control
+# file's missing `conffiles` before doing that.
+PACKAGE_LAST_CONFFILE_VERSION="0.4.1"
 
 # Build the .deb for the host architecture.
 package_deb() {
@@ -334,8 +346,46 @@ _package_stage_admin_cli() {
     ln -sf /usr/lib/shepherd/shepherd-admin "$stage/usr/bin/shepherd-admin"
 }
 
-# Write the DEBIAN control directory (control, conffiles, maintainer scripts)
-# into the staged tree.
+# Emit the `dpkg-maintscript-helper rm_conffile` calls that retire the rules
+# issue #177 moved out of the admin directories.
+#
+# dpkg does not remove a conffile just because a new version stopped shipping
+# it: it keeps the file on disk and remembers it as obsolete. udev and polkit
+# both read /etc *after* their vendor directory and let the /etc copy win, so a
+# leftover would go on overriding the file that replaced it -- on exactly the
+# devices that upgraded rather than installed fresh. The helper is the supported
+# way to retire one; it deletes an unmodified file and preserves an edited one
+# as `.dpkg-bak`.
+#
+# Emitted into all three maintainer scripts because the helper has to see the
+# install, the configure and the abort to do its job.
+#
+# The session watchdog's rule (#172) is in the list even though no *release*
+# ever declared it a conffile: it was added to the list after 0.4.1 was cut, so
+# only a device tracking `main` has dpkg holding a record of it, and that record
+# carries 0.4.1's version number like the other two. Where it was never
+# registered the helper finds nothing and does nothing, which costs one no-op
+# and saves an unreleased leftover from outranking the rule that replaced it.
+#
+# The bluetoothd drop-in is deliberately not in this list. Its path did not
+# move -- the postinst writes it now -- so retiring it would rename every
+# device's copy to `.dpkg-bak` a moment before the postinst wrote a fresh one
+# over the top. dpkg keeps an obsolete conffile record for it instead, which
+# costs one stale line in `dpkg-query -W -f='${Conffiles}'` and buys the file
+# being cleaned up on purge.
+_package_retired_conffiles() {
+    printf 'for cf in %s %s %s; do\n' \
+        "$UDEV_LEGACY_RULES_DIR/$UINPUT_RULES_NAME" \
+        "$POLKIT_LEGACY_RULES_DIR/$FIREWALL_RULES_NAME" \
+        "$POLKIT_LEGACY_RULES_DIR/$SESSION_GUARD_RULES_NAME"
+    # shellcheck disable=SC2016  # $cf and "$@" are the *emitted* script's
+    printf '    dpkg-maintscript-helper rm_conffile "$cf" %s %s -- "$@"\n' \
+        "$PACKAGE_LAST_CONFFILE_VERSION" "$PACKAGE_NAME"
+    printf 'done\n'
+}
+
+# Write the DEBIAN control directory (control, maintainer scripts) into the
+# staged tree.
 _package_write_control() {
     local stage="$1" version="$2" repo_root="$3" arch="$4"
     local debian="$stage/DEBIAN"
@@ -356,6 +406,12 @@ _package_write_control() {
     # find_adb / android_download_apk).
     local suggests="adb, curl"
 
+    # Pre-Depends on dpkg is what Debian policy asks of a package whose
+    # maintainer scripts call `dpkg-maintscript-helper` -- the scripts run
+    # before an ordinary Depends is guaranteed satisfied. 1.15.7.2 is the
+    # release that introduced the helper; every dpkg shepherd runs on is far
+    # newer, so this is a formality rather than a real constraint.
+    #
     # Installed-Size in KiB (Debian policy: excludes the control area).
     local size
     size="$(du -ks "$stage" | cut -f1)"
@@ -369,6 +425,7 @@ Section: admin
 Priority: optional
 Homepage: https://git.armeafamily.com/albert/shepherd-launcher
 Depends: $depends
+Pre-Depends: dpkg (>= 1.15.7.2)
 Suggests: $suggests
 Installed-Size: $size
 Description: Parent-guided kiosk desktop environment for Wayland
@@ -384,18 +441,61 @@ Description: Parent-guided kiosk desktop environment for Wayland
  shepherd install config --user USER && shepherd install groups --user USER
 EOF
 
-    # conffiles: admin-editable files under /etc, so dpkg preserves local edits
-    # across upgrades. Paths are built from install.sh's own location constants
-    # (this lib sources install.sh) so they can't drift from where the install
-    # steps actually placed the files. The .conf.d drop-in dir is left unmanaged
-    # on purpose.
-    cat > "$debian/conffiles" <<EOF
-$SWAY_CONFIG_DIR/$SHEPHERD_SWAY_CONFIG
-$UDEV_RULES_DIR/$UINPUT_RULES_NAME
-$POLKIT_RULES_DIR/$FIREWALL_RULES_NAME
-$POLKIT_RULES_DIR/$SESSION_GUARD_RULES_NAME
-$BLUETOOTH_DROPIN_DIR/$BLUETOOTH_DROPIN_NAME
-EOF
+    # There is deliberately no conffiles file (issue #177).
+    #
+    # `conffiles` means "the admin owns this; keep their edits and ask before
+    # replacing them". Nothing this package ships is that. Everything under
+    # /etc here is shepherd's, generated or verified by the install steps, and
+    # each of the files that used to be listed had a reason not to be:
+    #
+    #   /etc/sway/shepherd.conf
+    #       Generated by install_sway_config, which strips
+    #       --no-harden-sway-ipc, --no-restrict-ipc-peers, --trust-environment
+    #       and --no-state-custodian and rewrites `swaymsg exit` (#144, #157,
+    #       #172), then `die`s if any of that failed to apply. Those checks run
+    #       when the file is written and nowhere else, so an admin's preserved
+    #       copy carried old, unchecked content across upgrades forever. Site
+    #       config belongs in /etc/sway/shepherd.conf.d/, which is left
+    #       unmanaged on purpose and is what docs/INSTALL.md has always told
+    #       people to use.
+    #
+    #   the udev rule and the two polkit rules
+    #       Vendor files that were being shipped into admin directories. They
+    #       now go to /usr/lib/udev/rules.d and /usr/share/polkit-1/rules.d --
+    #       where the polkit *action* already went -- so dpkg owns them
+    #       outright and an admin overrides one the way each subsystem
+    #       intends, with a same-named file in /etc that is read first. The
+    #       session watchdog's rule (#172) joined the list after 0.4.1 and is
+    #       treated the same way: it grants shepherd's own uid shepherd's own
+    #       action, which is not a local decision either.
+    #
+    #   the bluetoothd drop-in
+    #       Not shipped at all any more: the postinst renders it from the
+    #       template staged at $BLUETOOTH_DROPIN_TEMPLATE_DIR. It names the
+    #       *target's* bluetoothd, which a build host cannot know, so the old
+    #       arrangement shipped it as a conffile and then `sed`ed it in the
+    #       postinst -- leaving dpkg holding a checksum of a file that had
+    #       already changed. Every later upgrade then saw a locally-modified
+    #       conffile on every device and either prompted or kept the stale
+    #       copy, without anyone having edited anything.
+    #
+    # /etc/systemd/system/shepherd-stated@.{service,socket} were never in the
+    # list and stay out of it for the same reason: they are shepherd's units,
+    # `crates/shepherd-state-proto/tests/units_match_the_constants.rs` pins
+    # their contents against the Rust constants, and a locally-edited copy
+    # surviving an upgrade would break the custodian quietly.
+    #
+    # Consequences worth knowing: dpkg replaces all of these on upgrade without
+    # asking, and `apt install --reinstall` restores any that went missing
+    # without needing --force-confmiss (see docs/INSTALL.md).
+
+    # preinst: nothing to prepare but the retired conffiles, which the helper
+    # has to see before dpkg unpacks over them.
+    {
+        printf '#!/bin/sh\nset -e\n'
+        _package_retired_conffiles
+        printf 'exit 0\n'
+    } > "$debian/preinst"
 
     # postinst: the host-mutating steps install.sh's install_firewall /
     # install_udev run on a real install (guarded out under DESTDIR), re-
@@ -406,8 +506,14 @@ EOF
     # shepherd-admin CLI, which shares its implementation with `shepherd`.
     {
         printf '#!/bin/sh\nset -e\n'
+        _package_retired_conffiles
         printf 'group=%s\n' "$FIREWALL_GROUP"
         printf 'stated_user=%s\n' "$STATED_USER"
+        printf 'dropin_dir=%s\n' "$BLUETOOTH_DROPIN_DIR"
+        printf 'dropin=%s\n' "$BLUETOOTH_DROPIN_DIR/$BLUETOOTH_DROPIN_NAME"
+        printf 'dropin_template=%s\n' \
+            "$BLUETOOTH_DROPIN_TEMPLATE_DIR/$BLUETOOTH_DROPIN_NAME"
+        printf 'bluetoothd_default=%s\n' "$BLUETOOTHD_DEFAULT_PATH"
         cat <<'EOF'
 if [ "$1" = "configure" ]; then
     if ! getent group "$group" >/dev/null 2>&1; then
@@ -433,22 +539,44 @@ if [ "$1" = "configure" ]; then
         # Pick up shepherd-stated@.socket / @.service.
         systemctl daemon-reload || true
     fi
-    # Bluetooth drop-in: the staged file carries the *build* host's daemon
-    # path, so re-point it at this machine's before reloading. Mirrors
-    # install.sh's install_bluetooth_dropin (and its _bluetoothd_exec_path).
-    dropin=/etc/systemd/system/bluetooth.service.d/10-shepherd-bluetooth-experimental.conf
-    if command -v systemctl >/dev/null 2>&1 && [ -f "$dropin" ]; then
-        if systemctl cat bluetooth.service >/dev/null 2>&1; then
+    # Bluetooth drop-in: rendered here from the staged template, not shipped
+    # (issue #177). ExecStart has to name the bluetoothd of the machine the
+    # file ends up on, and the build host is not that machine. Shipping a
+    # drop-in and `sed`ing it in place left dpkg holding a checksum of a file
+    # that had already changed, so every later upgrade saw a locally-modified
+    # conffile on every device. Rendering it here leaves dpkg nothing to
+    # checksum. Mirrors install.sh's install_bluetooth_dropin (and its
+    # _bluetoothd_exec_path); keep the two in sync.
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl cat bluetooth.service >/dev/null 2>&1 \
+            && [ -f "$dropin_template" ]; then
+            # The unit's own ExecStart precedes any drop-in's in `systemctl
+            # cat` output, so the first non-empty one is bluetoothd rather
+            # than the line we wrote last time.
             bluetoothd=$(systemctl cat bluetooth.service 2>/dev/null \
-                | sed -n 's/^ExecStart=[-@:+!]*\([^ ]*\).*/\1/p' \
-                | grep -v '^$' | grep -v 'shepherd' | head -n 1)
-            [ -n "$bluetoothd" ] && sed -i "s|^ExecStart=.* -E$|ExecStart=$bluetoothd -E|" "$dropin"
-            systemctl daemon-reload || true
-            if systemctl is-active --quiet bluetooth.service; then
-                systemctl restart bluetooth.service || true
+                | sed -n 's/^ExecStart=[-@:+!]*\([^ ]\{1,\}\).*/\1/p' \
+                | head -n 1)
+            [ -n "$bluetoothd" ] || bluetoothd=$bluetoothd_default
+            # Non-fatal: shepherd degrades gracefully without the drop-in (it
+            # says so in the log and falls back), so a write that fails here
+            # should not leave the package half-configured.
+            if ! { mkdir -p "$dropin_dir" \
+                && sed "s|@BLUETOOTHD@|$bluetoothd|" "$dropin_template" \
+                    > "$dropin.new" \
+                && chmod 0644 "$dropin.new" \
+                && mv -f "$dropin.new" "$dropin"; }; then
+                rm -f "$dropin.new"
+                echo "warning: could not write $dropin; the Bluetooth bearer pin will not apply" >&2
             fi
         else
+            # No bluetooth.service to extend: leave nothing behind aimed at a
+            # daemon that is not on this machine.
             rm -f "$dropin"
+            rmdir "$dropin_dir" 2>/dev/null || true
+        fi
+        systemctl daemon-reload || true
+        if systemctl is-active --quiet bluetooth.service; then
+            systemctl restart bluetooth.service || true
         fi
     fi
     cat <<'EOM'
@@ -473,19 +601,27 @@ exit 0
 EOF
     } > "$debian/postinst"
 
-    # postrm: reload udev/polkit after our rules leave. The shepherd-firewall
-    # system group is intentionally left in place (leftover files may still
-    # reference it, and it is harmless).
-    cat > "$debian/postrm" <<'EOF'
-#!/bin/sh
-set -e
+    # postrm: reload udev/polkit after our rules leave, and take away the
+    # bluetoothd drop-in the postinst wrote -- dpkg never unpacked that one, so
+    # dpkg will not remove it either (issue #177). The shepherd-firewall system
+    # group is intentionally left in place (leftover files may still reference
+    # it, and it is harmless).
+    {
+        printf '#!/bin/sh\nset -e\n'
+        _package_retired_conffiles
+        printf 'dropin_dir=%s\n' "$BLUETOOTH_DROPIN_DIR"
+        printf 'dropin=%s\n' "$BLUETOOTH_DROPIN_DIR/$BLUETOOTH_DROPIN_NAME"
+        cat <<'EOF'
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    # The postinst wrote this one, so dpkg has no record of it to act on.
+    rm -f "$dropin"
+    # Leave the directory if anything else dropped a file in it.
+    rmdir "$dropin_dir" 2>/dev/null || true
     if command -v udevadm >/dev/null 2>&1; then
         udevadm control --reload-rules || true
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl reload polkit 2>/dev/null || true
-        rmdir /etc/systemd/system/bluetooth.service.d 2>/dev/null || true
         systemctl daemon-reload || true
         if systemctl is-active --quiet bluetooth.service; then
             systemctl restart bluetooth.service || true
@@ -494,8 +630,9 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 fi
 exit 0
 EOF
+    } > "$debian/postrm"
 
-    chmod 0755 "$debian/postinst" "$debian/postrm"
+    chmod 0755 "$debian/preinst" "$debian/postinst" "$debian/postrm"
 }
 
 package_deb_usage() {
