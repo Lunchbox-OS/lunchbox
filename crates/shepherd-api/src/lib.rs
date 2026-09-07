@@ -9,11 +9,13 @@
 mod commands;
 mod diagnostics;
 mod events;
+mod network;
 mod types;
 
 pub use commands::*;
 pub use diagnostics::*;
 pub use events::*;
+pub use network::*;
 pub use types::*;
 
 /// Current API version

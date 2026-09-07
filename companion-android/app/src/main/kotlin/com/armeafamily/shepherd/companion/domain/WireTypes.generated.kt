@@ -32,6 +32,34 @@ typealias IsoTimestamp = String
 /** ISO-8601 local date, e.g. "2026-06-21". */
 typealias IsoDate = String
 
+/**
+ * Which family an address belongs to. Kept explicit rather than sniffed from
+ * the string, so a UI grouping v4 above v6 does not have to count colons.
+ */
+@Serializable(with = AddressFamily.Serializer::class)
+enum class AddressFamily(val wire: String) {
+    V4("v4"),
+    V6("v6"),
+    /**
+     * A [AddressFamily] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<AddressFamily> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("AddressFamily", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: AddressFamily) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): AddressFamily {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
+}
+
 @Serializable
 data class AdminRecord(
     /**
@@ -248,6 +276,51 @@ enum class ClaimStateTag(val wire: String) {
         override fun serialize(encoder: Encoder, value: ClaimStateTag) =
             encoder.encodeString(value.wire)
         override fun deserialize(decoder: Decoder): ClaimStateTag {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
+}
+
+/**
+ * How much of the internet the host believes it can reach.
+ *
+ * Mirrors NetworkManager's connectivity states, which are the only ones any
+ * backend here can distinguish. A host with no NetworkManager reports
+ * [`Connectivity::Unknown`] — which is honest, and different from
+ * [`Connectivity::None`].
+ */
+@Serializable(with = Connectivity.Serializer::class)
+enum class Connectivity(val wire: String) {
+    /**
+     * Nobody could say. Not a claim that the device is offline.
+     */
+    UNKNOWN("unknown"),
+    /**
+     * No route to anywhere.
+     */
+    NONE("none"),
+    /**
+     * A captive portal is intercepting traffic. Worth its own state: the
+     * device looks connected and nothing works, which is the single most
+     * confusing failure to debug remotely.
+     */
+    PORTAL("portal"),
+    /**
+     * A route exists but the connectivity probe did not complete.
+     */
+    LIMITED("limited"),
+    /**
+     * The host reached the internet.
+     */
+    FULL("full");
+
+    internal object Serializer : KSerializer<Connectivity> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("Connectivity", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: Connectivity) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): Connectivity {
             val wire = decoder.decodeString()
             return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
         }
@@ -504,6 +577,23 @@ enum class DiagnosticCode(val wire: String) {
      * end of the first page.
      */
     EBOOK_NO_PAGE_TURN("ebook_no_page_turn"),
+    /**
+     * The web management interface is configured and is not serving, so the
+     * address a parent would browse to refuses the connection (issue #182).
+     *
+     * Until this existed the failure reached exactly one log line on a device
+     * nobody can log into, which is the wrong place for it: the whole reason
+     * to open the web interface is that something else has already gone
+     * wrong. The companion app still works — it is on BLE, not the network —
+     * so this is a path lost rather than a device lost, and it is a
+     * `Warning`.
+     *
+     * Not raised while the daemon is still retrying a bind whose address has
+     * not appeared yet: that is `bind_retry_seconds` doing its job, and a
+     * ZeroTier interface coming up at login would otherwise raise an alarm
+     * every boot and clear it seconds later.
+     */
+    MANAGEMENT_API_UNAVAILABLE("management_api_unavailable"),
     /**
      * A [DiagnosticCode] this build doesn't know about.
      *
@@ -1564,6 +1654,180 @@ enum class MediaSortBy(val wire: String) {
 }
 
 /**
+ * One address on one interface.
+ *
+ * Address and prefix are separate fields rather than one CIDR string because
+ * the address alone is what gets copied into an SSH command, and a UI should
+ * not have to split on `/` to offer that.
+ */
+@Serializable
+data class NetworkAddressView(
+    /**
+     * The address on its own, e.g. `192.168.0.139`.
+     */
+    val address: String,
+    val family: AddressFamily,
+    /**
+     * Prefix length in bits, e.g. `24`.
+     */
+    val prefix: Long,
+)
+
+/**
+ * What kind of interface this is. Advisory: it drives presentation and which
+ * addresses are offered as ways in, never policy.
+ */
+@Serializable(with = NetworkInterfaceKind.Serializer::class)
+enum class NetworkInterfaceKind(val wire: String) {
+    /**
+     * A wireless interface. The one with a network name a person recognises.
+     */
+    WIFI("wifi"),
+    /**
+     * A wired interface.
+     */
+    ETHERNET("ethernet"),
+    /**
+     * A tunnel — WireGuard, ZeroTier, OpenVPN. Reachable, and on a device
+     * administered remotely often the *only* thing reachable, which is why
+     * `service.management_api.bind_retry_seconds` exists at all.
+     */
+    VPN("vpn"),
+    /**
+     * A container or VM bridge (`lxcbr0`, `docker0`). Has an address; that
+     * address is not a way in from the parent's phone.
+     */
+    BRIDGE("bridge"),
+    /**
+     * The host talking to itself. Never a way in.
+     */
+    LOOPBACK("loopback"),
+    /**
+     * Something we could not name. Reported as a possible way in: being wrong
+     * about a veth costs a line in a list, while being wrong about a real
+     * interface costs the address somebody needed.
+     */
+    OTHER("other"),
+    /**
+     * A [NetworkInterfaceKind] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<NetworkInterfaceKind> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("NetworkInterfaceKind", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: NetworkInterfaceKind) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): NetworkInterfaceKind {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
+}
+
+/**
+ * One network interface as an administrator sees it.
+ */
+@Serializable
+data class NetworkInterfaceView(
+    val addresses: List<NetworkAddressView>,
+    /**
+     * Nameservers configured for this interface.
+     */
+    val dns: List<String>,
+    val gateway: String? = null,
+    val kind: NetworkInterfaceKind,
+    /**
+     * Kernel name, e.g. `wlp3s0`.
+     */
+    val name: String,
+    /**
+     * Whether an address here is a plausible way to reach this device from
+     * another machine on the same network.
+     *
+     * Derived, not reported by the host — see
+     * [`NetworkStatusView::new`]. A UI leads with these and folds the rest
+     * away: on a device running containers most interfaces are noise, and the
+     * one a parent needs is the one they will not find by scrolling.
+     */
+    val reachable: Boolean = false,
+    /**
+     * Whether the interface is up and configured.
+     */
+    val up: Boolean,
+    /**
+     * Present only on a wireless interface.
+     */
+    val wifi: WifiView? = null,
+)
+
+/**
+ * Where the status came from, so a UI can say why a field is missing rather
+ * than rendering an empty box.
+ */
+@Serializable(with = NetworkSource.Serializer::class)
+enum class NetworkSource(val wire: String) {
+    /**
+     * NetworkManager over D-Bus: everything below is available.
+     */
+    NETWORK_MANAGER("network_manager"),
+    /**
+     * The kernel's interface list. Addresses are real; SSID, gateway, DNS and
+     * connectivity are not knowable this way and come back empty.
+     */
+    INTERFACES("interfaces"),
+    /**
+     * Neither worked.
+     */
+    UNAVAILABLE("unavailable"),
+    /**
+     * A [NetworkSource] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<NetworkSource> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("NetworkSource", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: NetworkSource) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): NetworkSource {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
+}
+
+/**
+ * The whole read-out.
+ */
+@Serializable
+data class NetworkStatusView(
+    val connectivity: Connectivity,
+    val interfaces: List<NetworkInterfaceView>,
+    val managementApi: WebListenerView,
+    /**
+     * URLs that should open the web management interface, most useful first.
+     *
+     * Derived here rather than in each UI so the phone and the browser agree,
+     * and because the derivation is not obvious: a listener bound to
+     * `0.0.0.0` has no address of its own, so the answer is one URL per
+     * reachable address on the box — which is the whole point of the ticket.
+     */
+    val managementUrls: List<String> = emptyList(),
+    val source: NetworkSource,
+    /**
+     * Whether [`MAX_NETWORK_INTERFACES`] hid anything. UIs must say so.
+     */
+    val truncated: Boolean = false,
+)
+
+/**
  * Structured reason codes for why an entry is unavailable
  */
 @Serializable
@@ -2140,6 +2404,99 @@ data class WarningThreshold(
      */
     val secondsBefore: Long,
     val severity: WarningSeverity,
+)
+
+/**
+ * Whether the web management interface is up, and where.
+ *
+ * The reason this is not simply the configured `bind`/`port`: the daemon
+ * retries a bind that is not yet available (a ZeroTier interface still coming
+ * up at login), and a bind that never succeeds only ever reached a log line.
+ * From every UI, a device whose management API never came up looked exactly
+ * like one that did.
+ */
+@Serializable(with = WebListenerState.Serializer::class)
+enum class WebListenerState(val wire: String) {
+    /**
+     * `service.management_api` is absent or disabled. Nothing is wrong.
+     */
+    DISABLED("disabled"),
+    /**
+     * Configured, and still waiting for its address to exist.
+     */
+    BINDING("binding"),
+    /**
+     * Serving.
+     */
+    LISTENING("listening"),
+    /**
+     * Configured and not serving. Somebody should know.
+     */
+    FAILED("failed"),
+    /**
+     * A [WebListenerState] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<WebListenerState> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("WebListenerState", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: WebListenerState) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): WebListenerState {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
+}
+
+/**
+ * Where the web management interface is listening, if at all.
+ */
+@Serializable
+data class WebListenerView(
+    /**
+     * The socket address as configured, e.g. `0.0.0.0:8080`. `None` only when
+     * [`WebListenerState::Disabled`].
+     */
+    val addr: String? = null,
+    /**
+     * Why it is not serving. Only set with [`WebListenerState::Failed`].
+     */
+    val error: String? = null,
+    /**
+     * The port on its own, for building a URL against some other address.
+     */
+    val port: Long? = null,
+    val state: WebListenerState,
+)
+
+/**
+ * The wireless network an interface is associated with.
+ */
+@Serializable
+data class WifiView(
+    /**
+     * Channel centre frequency in MHz. A UI can turn 5220 into "5 GHz", which
+     * is the part a person debugging a weak signal actually wants.
+     */
+    val frequencyMhz: Long? = null,
+    /**
+     * Signal quality, 0–100, as the driver reports it.
+     */
+    val signalPercent: Long? = null,
+    /**
+     * The network's name.
+     *
+     * `None` when the interface is not associated — and also when the SSID is
+     * not valid UTF-8, which is legal: 802.11 carries an SSID as up to 32
+     * arbitrary octets, not a string. A name we cannot render is reported as
+     * no name rather than as mojibake.
+     */
+    val ssid: String? = null,
 )
 
 /**
