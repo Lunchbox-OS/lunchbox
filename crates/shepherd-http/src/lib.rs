@@ -26,7 +26,7 @@ pub use state::AppState;
 
 use anyhow::Context;
 use shepherd_config::ManagementApiConfig;
-use shepherd_management::AdminAuthority;
+use shepherd_management::{AdminAuthority, WebListenerHandle};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,6 +41,7 @@ pub struct HttpServer {
     state: AppState,
     config: ManagementApiConfig,
     admin: Option<Arc<dyn AdminAuthority>>,
+    listener_status: WebListenerHandle,
 }
 
 impl HttpServer {
@@ -49,6 +50,7 @@ impl HttpServer {
             state,
             config,
             admin: None,
+            listener_status: WebListenerHandle::default(),
         }
     }
 
@@ -61,6 +63,17 @@ impl HttpServer {
         self
     }
 
+    /// Publish where this server actually ends up listening (issue #182).
+    ///
+    /// The configured address is an intention: the bind is retried while its
+    /// address does not exist, and `port = 0` means "whatever is free". The
+    /// network status page reports the bound address, so it has to come from
+    /// the listener rather than from the config.
+    pub fn with_listener_status(mut self, listener_status: WebListenerHandle) -> Self {
+        self.listener_status = listener_status;
+        self
+    }
+
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let addr = SocketAddr::new(self.config.bind, self.config.port);
         let sources = AuthSources {
@@ -69,7 +82,11 @@ impl HttpServer {
         };
         let app = handlers::router(self.state, sources);
         let listener = bind_with_retry(addr, self.config.bind_retry).await?;
-        info!(%addr, "Management HTTP API listening");
+        // The bound address, not the configured one: with `port = 0` they are
+        // different, and this is the one somebody can connect to.
+        let bound = listener.local_addr().unwrap_or(addr);
+        self.listener_status.set_listening(bound);
+        info!(addr = %bound, "Management HTTP API listening");
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.wait_for(|v| *v).await;

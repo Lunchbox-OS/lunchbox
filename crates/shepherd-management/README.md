@@ -19,3 +19,20 @@ into trait calls and back.
 the existing `CoreEngine`, `Store`, `HostAdapter`, `VolumeController`,
 `BrightnessController`, and `HidpiController` collaborators that the
 daemon already wires up.
+
+## `WebListenerHandle`
+
+The one thing in here that is not a call into a collaborator: a shared,
+cheap-to-clone slot holding what the web management interface is *actually*
+doing, written by whoever owns the listener and read by `network_status`
+(issue #182).
+
+It lives in this crate rather than in `shepherd-http` because `shepherd-http`
+depends on this one — the other direction is a dependency cycle.
+
+It exists because the configured `bind` and `port` are an intention, not an
+outcome. The daemon retries a bind whose address does not exist yet
+(`service.management_api.bind_retry_seconds`, added for a ZeroTier interface
+still coming up at login), a `port = 0` binds to something else entirely, and
+a bind that never succeeds previously reached only a log line — on a device
+whose web interface is exactly how somebody would have read it.
