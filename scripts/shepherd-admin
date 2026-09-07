@@ -102,7 +102,7 @@ Examples:
     sudo shepherd-admin apps install retroarch mgba
     shepherd-admin apps install companion        # no sudo: adb keys are per-user
     sudo shepherd-admin harden apply --user kiosk
-    sudo shepherd-admin bluetooth clear --user kiosk
+    sudo shepherd-admin bluetooth clear          # --user only without a custodian
 EOF
 }
 
