@@ -65,11 +65,15 @@ impl HttpServer {
         }
     }
 
-    /// Plug in the web credential store (issue #156). Without one the router
-    /// has no sessions and no login endpoints — which is what the tests want
-    /// and what a device must never be.
-    pub fn with_web_auth(mut self, web: Option<Arc<WebAuth>>) -> Self {
-        self.web = web;
+    /// Plug in the web credential store (issue #156).
+    ///
+    /// Not an `Option`: a management API without a store is the fail-open
+    /// state this replaced, and [`Self::run`] refuses to serve without one.
+    /// An embedding that genuinely wants the trait over HTTP with no login
+    /// machinery builds the router directly with
+    /// [`AuthSources::without_credential_store`].
+    pub fn with_web_auth(mut self, web: Arc<WebAuth>) -> Self {
+        self.web = Some(web);
         self
     }
 
@@ -109,12 +113,18 @@ impl HttpServer {
     pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()> {
         let addr = SocketAddr::new(self.config.bind, self.config.port);
         let tls = self.build_tls(&addr)?;
-        let sources = AuthSources {
-            static_token: self.config.auth_token.clone(),
-            admin: self.admin.clone(),
-            web: self.web.clone(),
-            secure_cookies: tls.is_some(),
-        };
+        // Refusing to start is the point: a server built without a store
+        // would authenticate nobody and therefore admit everybody, on a
+        // device whose first boot has no other credential at all. Better a
+        // daemon that will not come up than one that comes up open.
+        let web = self.web.clone().context(
+            "the management API was built without a web credential store, which would serve \
+             administration to anyone who can reach the port",
+        )?;
+        let sources = AuthSources::new(web)
+            .with_static_token(self.config.auth_token.clone())
+            .with_admin(self.admin.clone())
+            .with_secure_cookies(tls.is_some());
         let app = handlers::router(self.state, sources);
         let listener = bind_with_retry(addr, self.config.bind_retry).await?;
         // The bound address, not the configured one: with `port = 0` they are

@@ -26,10 +26,11 @@ use crate::state::AppState;
 
 /// Build the full API router under `/api/v1`.
 ///
-/// `auth_sources` carries the static config token (if any) and the
-/// optional admin authority that sources BLE-derived tokens at request
-/// time. Pass `AuthSources::default()` to leave the API open (legacy
-/// behaviour when neither auth source is configured).
+/// `auth_sources` carries the credential store, the static config token (if
+/// any) and the optional admin authority that sources BLE-derived tokens at
+/// request time. Build it with [`AuthSources::new`]; the storeless
+/// [`AuthSources::without_credential_store`] leaves the API open when nothing
+/// else authenticates it, which is the pre-#156 behaviour and never a device.
 pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
     // Everything that needs a credential. The auth middleware sits on this
     // router alone, so adding a route here is automatically gated and adding

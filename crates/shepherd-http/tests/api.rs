@@ -241,6 +241,35 @@ fn make_app_full(
     web: Option<Arc<shepherd_management::WebAuth>>,
     secure_cookies: bool,
 ) -> axum::Router {
+    let state = make_state_full(policy, config_path, web.clone());
+    // `without_credential_store` is the pre-#156 shape: no login endpoints and
+    // no sessions, which is what most of the tests below assert against. It is
+    // spelled out rather than defaulted into, because on a device it is the
+    // fail-open state -- and `shepherdd` cannot build it at all.
+    let sources = match web {
+        Some(web) => shepherd_http::AuthSources::new(web),
+        None => shepherd_http::AuthSources::without_credential_store(),
+    };
+    handlers::router(
+        state,
+        sources
+            .with_static_token(auth_token.map(str::to_owned))
+            .with_admin(admin)
+            .with_secure_cookies(secure_cookies),
+    )
+}
+
+/// The service fixture on its own, for a test that wants an [`AppState`]
+/// without a router around it.
+fn make_state(policy: Policy, config_path: PathBuf) -> AppState {
+    make_state_full(policy, config_path, None)
+}
+
+fn make_state_full(
+    policy: Policy,
+    config_path: PathBuf,
+    web: Option<Arc<shepherd_management::WebAuth>>,
+) -> AppState {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let host = Arc::new(MockHost::new());
     let volume = Arc::new(MockVolume::new());
@@ -278,20 +307,11 @@ fn make_app_full(
         // fixture is a host that cannot look.
         network: None,
         web_listener: WebListenerHandle::default(),
-        web_auth: web.clone(),
+        web_auth: web,
     });
-    let state = AppState {
-        svc: svc.clone() as Arc<dyn shepherd_management::ManagementService>,
-    };
-    handlers::router(
-        state,
-        shepherd_http::AuthSources {
-            static_token: auth_token.map(str::to_owned),
-            admin,
-            web,
-            secure_cookies,
-        },
-    )
+    AppState {
+        svc: svc as Arc<dyn shepherd_management::ManagementService>,
+    }
 }
 
 /// Write a minimal valid config to a temp file
@@ -626,6 +646,46 @@ async fn enrol(app: &axum::Router, web: &shepherd_management::WebAuth) -> String
     assert_eq!(status, StatusCode::OK);
     let cookie = cookie.expect("setup sets a session cookie");
     cookie.split(';').next().unwrap().to_string()
+}
+
+/// A management API built without a credential store must not come up.
+///
+/// This is the invariant the whole of issue #156 rests on, and until now
+/// nothing checked it: `shepherdd` built a store next to the server and the
+/// two were correct only because they were written that way. `with_web_auth`
+/// now takes a store rather than an `Option`, so forgetting the call is the
+/// only way left to get here — and `run` turns that into a daemon that
+/// refuses to start rather than one that starts open.
+#[tokio::test]
+async fn a_server_with_no_credential_store_refuses_to_serve() {
+    let cfg = temp_config();
+    let state = make_state(test_policy(), cfg.path().to_path_buf());
+    let api_cfg = shepherd_config::ManagementApiConfig {
+        // Port 0 would still be a real bind; the check has to fire before it,
+        // so a misassembled server never holds the port at all.
+        port: 0,
+        bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        bind_retry: Some(std::time::Duration::from_secs(1)),
+        auth_token: Some("a machine token is not a substitute".into()),
+        tls: shepherd_config::TlsMode::Off,
+        auth: shepherd_config::WebAuthLimits::default(),
+    };
+    let (_tx, rx) = watch::channel(false);
+    // Bounded, because the regression this guards against does not fail --
+    // it *serves*. Without the check `run` binds and then never returns, so an
+    // unbounded await would hang CI rather than report anything.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        shepherd_http::HttpServer::new(state, api_cfg).run(rx),
+    )
+    .await
+    .expect("a server with no credential store must refuse rather than serve");
+    let err = outcome.expect_err("a server with no credential store must not serve");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("credential store"),
+        "the error has to name the reason: {message}"
+    );
 }
 
 #[tokio::test]

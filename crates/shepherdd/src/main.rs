@@ -1768,14 +1768,18 @@ impl Service {
             web.set_companion(admin_authority.clone());
         }
 
-        let http_handle = match management_api_config {
-            Some(api_cfg) => {
-                announce_web_auth_state(web_auth.as_ref(), &api_cfg);
+        // Zipped, not two `if let`s: the store is built above from exactly this
+        // `Option`, so pairing them here is what makes "an API always has a
+        // credential store" a thing the compiler carries rather than a thing
+        // two nearby blocks happen to agree on.
+        let http_handle = match management_api_config.zip(web_auth.clone()) {
+            Some((api_cfg, web)) => {
+                announce_web_auth_state(&web, &api_cfg);
                 let http_state = HttpAppState { svc: svc.clone() };
                 let http_server = HttpServer::new(http_state, api_cfg)
                     .with_admin_authority(admin_authority)
                     .with_listener_status(web_listener.clone())
-                    .with_web_auth(web_auth.clone())
+                    .with_web_auth(web)
                     .with_protected_files(Arc::clone(&protected_files))
                     .with_hostnames(local_hostnames());
                 let http_shutdown_rx = shutdown_rx.clone();
@@ -2849,10 +2853,9 @@ fn local_hostnames() -> Vec<String> {
 /// display has not come up — or over SSH, where the person reading the journal
 /// is the one who will set the password.
 fn announce_web_auth_state(
-    web_auth: Option<&Arc<shepherd_management::WebAuth>>,
+    web: &shepherd_management::WebAuth,
     cfg: &shepherd_config::ManagementApiConfig,
 ) {
-    let Some(web) = web_auth else { return };
     let scheme = if cfg.tls.is_tls() { "https" } else { "http" };
     let host = if cfg.bind.is_unspecified() {
         "<this device>".to_string()

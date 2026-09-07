@@ -23,10 +23,17 @@
 //! the entire management surface to anyone who could reach the port. That is
 //! gone from any device with a credential store: `WebAuth` always exists when
 //! shepherdd runs the API, and an unconfigured store answers the setup
-//! endpoints and nothing else. [`AuthSources::is_open`] survives for
-//! embeddings that construct a router with no store at all — the tests, and
-//! anything else that wants the trait over HTTP without the credential
-//! machinery — and shepherdd never builds one.
+//! endpoints and nothing else.
+//!
+//! [`AuthSources::is_open`] survives for embeddings that construct a router
+//! with no store at all — the tests, and anything else that wants the trait
+//! over HTTP without the credential machinery. Reaching that shape is
+//! deliberately awkward: the fields are private, [`AuthSources::new`] demands
+//! a store, and the only way to get one without is
+//! [`AuthSources::without_credential_store`], which says so in its name at
+//! every call site. There is no `Default`, because a defaulted `AuthSources`
+//! would be the fail-open shape and `unwrap_or_default()` is exactly the kind
+//! of line that gets written without noticing.
 
 use axum::{
     extract::{ConnectInfo, Request},
@@ -59,24 +66,86 @@ pub enum Identity {
 }
 
 /// The credentials this router will accept.
-#[derive(Clone, Default)]
+///
+/// Fields are private and there is no `Default`: the shape with no credential
+/// store is the fail-open one, and it should be impossible to reach by
+/// forgetting something. Build one with [`Self::new`], or say
+/// [`Self::without_credential_store`] out loud.
+#[derive(Clone)]
 pub struct AuthSources {
     /// Static config token from `[service.management_api].auth_token`.
-    pub static_token: Option<String>,
+    static_token: Option<String>,
     /// The BLE claim's minted token, read fresh on every request because a
     /// factory reset rotates it.
-    pub admin: Option<Arc<dyn AdminAuthority>>,
+    admin: Option<Arc<dyn AdminAuthority>>,
     /// The web credential store. `Some` on any device; `None` only where a
     /// router was built without one.
-    pub web: Option<Arc<WebAuth>>,
+    web: Option<Arc<WebAuth>>,
     /// Whether the listener is TLS, which decides the `Secure` attribute on
     /// the session cookie. A `Secure` cookie on a plaintext origin is simply
     /// dropped by the browser, so this has to follow the listener rather than
     /// being hardcoded to the safer-sounding value.
-    pub secure_cookies: bool,
+    secure_cookies: bool,
 }
 
 impl AuthSources {
+    /// The shape every device has: a credential store, so an unconfigured
+    /// device is closed rather than open.
+    pub fn new(web: Arc<WebAuth>) -> Self {
+        Self {
+            static_token: None,
+            admin: None,
+            web: Some(web),
+            secure_cookies: false,
+        }
+    }
+
+    /// A router with **no** credential store, which is open when nothing else
+    /// authenticates it. The pre-#156 shape, kept for the `shepherd-http`
+    /// tests and for an embedding that wants the management trait over HTTP
+    /// without the login machinery.
+    ///
+    /// Never correct on a device. `shepherdd` cannot reach it:
+    /// [`crate::HttpServer::with_web_auth`] takes a store rather than an
+    /// `Option`, and [`crate::HttpServer::run`] refuses to serve without one.
+    pub fn without_credential_store() -> Self {
+        Self {
+            static_token: None,
+            admin: None,
+            web: None,
+            secure_cookies: false,
+        }
+    }
+
+    /// The machine credential from `[service.management_api].auth_token`.
+    pub fn with_static_token(mut self, token: Option<String>) -> Self {
+        self.static_token = token;
+        self
+    }
+
+    /// The BLE claim's authority, whose token is read fresh per request.
+    pub fn with_admin(mut self, admin: Option<Arc<dyn AdminAuthority>>) -> Self {
+        self.admin = admin;
+        self
+    }
+
+    /// Whether to mark the session cookie `Secure`. Follows the listener: a
+    /// `Secure` cookie on a plaintext origin is dropped by the browser.
+    pub fn with_secure_cookies(mut self, secure: bool) -> Self {
+        self.secure_cookies = secure;
+        self
+    }
+
+    /// The credential store, for the handlers that mint and revoke sessions.
+    pub fn web(&self) -> Option<&Arc<WebAuth>> {
+        self.web.as_ref()
+    }
+
+    /// Whether a minted cookie should carry `Secure`.
+    pub fn secure_cookies(&self) -> bool {
+        self.secure_cookies
+    }
+
     /// True when this router has nothing to authenticate against.
     ///
     /// Only possible without a credential store: with one, an unconfigured
@@ -209,11 +278,13 @@ fn origin_is_foreign(req: &Request) -> bool {
 }
 
 pub async fn require_auth(req: Request, next: Next) -> Response {
-    let sources: AuthSources = req
-        .extensions()
-        .get::<AuthSources>()
-        .cloned()
-        .unwrap_or_default();
+    // No sources in the extensions means the layer that inserts them is not
+    // on this route. That used to `unwrap_or_default()` into the open shape;
+    // a router misassembled that way now refuses every request instead of
+    // serving the management surface to anyone who can reach the port.
+    let Some(sources) = req.extensions().get::<AuthSources>().cloned() else {
+        return unauthorized();
+    };
 
     let Some(identity) = sources.authenticate(&req) else {
         return unauthorized();

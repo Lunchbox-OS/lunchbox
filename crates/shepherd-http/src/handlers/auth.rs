@@ -106,7 +106,7 @@ pub async fn setup(req: Request) -> Response {
         Ok(pair) => pair,
         Err(e) => return e.into_response(),
     };
-    let (Some(web), sources) = (web(&parts), sources(&parts)) else {
+    let (Some(web), Some(sources)) = (web(&parts), sources(&parts)) else {
         return not_configured();
     };
     let label = label_from_user_agent(user_agent(&parts).as_deref());
@@ -127,7 +127,7 @@ pub async fn login(req: Request) -> Response {
         Ok(pair) => pair,
         Err(e) => return e.into_response(),
     };
-    let (Some(web), sources) = (web(&parts), sources(&parts)) else {
+    let (Some(web), Some(sources)) = (web(&parts), sources(&parts)) else {
         return not_configured();
     };
     let label = label_from_user_agent(user_agent(&parts).as_deref());
@@ -165,7 +165,7 @@ pub async fn poll_login(req: Request) -> Response {
         Ok(pair) => pair,
         Err(e) => return e.into_response(),
     };
-    let (Some(web), sources) = (web(&parts), sources(&parts)) else {
+    let (Some(web), Some(sources)) = (web(&parts), sources(&parts)) else {
         return not_configured();
     };
     match web.poll_login(&body.poll_token) {
@@ -209,7 +209,7 @@ pub async fn current_session(req: Request) -> Response {
 
 pub async fn signout(req: Request) -> Response {
     let (parts, _) = req.into_parts();
-    let (Some(web), sources) = (web(&parts), sources(&parts)) else {
+    let (Some(web), Some(sources)) = (web(&parts), sources(&parts)) else {
         return not_configured();
     };
     if let Some(Identity::Session { token, .. }) = parts.extensions.get::<Identity>() {
@@ -218,7 +218,7 @@ pub async fn signout(req: Request) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&clear_cookie_header(sources.secure_cookies))
+        HeaderValue::from_str(&clear_cookie_header(sources.secure_cookies()))
             .expect("cookie header is ASCII"),
     );
     response
@@ -240,7 +240,7 @@ pub async fn list_sessions(req: Request) -> Response {
 
 pub async fn revoke_session(Path(id): Path<String>, req: Request) -> Response {
     let (parts, _) = req.into_parts();
-    let (Some(web), sources) = (web(&parts), sources(&parts)) else {
+    let (Some(web), Some(sources)) = (web(&parts), sources(&parts)) else {
         return not_configured();
     };
     let revoking_self = matches!(
@@ -253,7 +253,7 @@ pub async fn revoke_session(Path(id): Path<String>, req: Request) -> Response {
             if revoking_self {
                 response.headers_mut().insert(
                     header::SET_COOKIE,
-                    HeaderValue::from_str(&clear_cookie_header(sources.secure_cookies))
+                    HeaderValue::from_str(&clear_cookie_header(sources.secure_cookies()))
                         .expect("cookie header is ASCII"),
                 );
             }
@@ -319,16 +319,16 @@ fn bad_request(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-fn sources(parts: &Parts) -> AuthSources {
-    parts
-        .extensions
-        .get::<AuthSources>()
-        .cloned()
-        .unwrap_or_default()
+/// The credentials this request was routed with. `None` only if the layer
+/// that inserts them is not on this route — in which case the handler answers
+/// "not configured" rather than defaulting to a shape with no store, which is
+/// the one that authenticates nobody.
+fn sources(parts: &Parts) -> Option<AuthSources> {
+    parts.extensions.get::<AuthSources>().cloned()
 }
 
 fn web(parts: &Parts) -> Option<std::sync::Arc<shepherd_management::WebAuth>> {
-    parts.extensions.get::<AuthSources>()?.web.clone()
+    parts.extensions.get::<AuthSources>()?.web().cloned()
 }
 
 fn user_agent(parts: &Parts) -> Option<String> {
@@ -354,7 +354,7 @@ fn set_cookie(response: &mut Response, token: &str, sources: &AuthSources) {
         HeaderValue::from_str(&session_cookie_header(
             token,
             max_age,
-            sources.secure_cookies,
+            sources.secure_cookies(),
         ))
         .expect("cookie header is ASCII"),
     );
