@@ -386,6 +386,35 @@ jobs:
           done
           echo "OK: control.tar.xz + data.tar.xz"
 
+      - name: Assert the .deb declares no conffiles
+        # Issue #177: every file this package ships is shepherd's, not the
+        # admin's — the sway config is generated and verified as it is written,
+        # the udev and polkit rules go to their vendor directories, and the
+        # bluetoothd drop-in is rendered by the postinst because its ExecStart
+        # names the target's daemon. A conffile among them would put dpkg back
+        # to preserving an unverified local copy across upgrades, or (as the
+        # drop-in did) prompting on every device because the postinst rewrote
+        # a file dpkg had just checksummed. The reasoning lives next to the
+        # missing `conffiles` in scripts/lib/package.sh; read it before
+        # deleting this check.
+        shell: bash
+        run: |
+          set -euo pipefail
+          debs=(dist/pkg/*.deb)
+          deb="${debs[0]}"
+          if dpkg-deb --ctrl-tarfile "$deb" | tar t | grep -q '^\./conffiles$'; then
+            echo "::error::$deb declares conffiles:"
+            dpkg-deb --ctrl-tarfile "$deb" | tar xO ./conffiles
+            exit 1
+          fi
+          # The drop-in must not be *shipped* either: the postinst renders it
+          # from the template staged under /usr/share/shepherd/systemd/.
+          if dpkg-deb -c "$deb" | grep -q 'bluetooth\.service\.d/'; then
+            echo "::error::$deb ships a bluetooth.service.d drop-in; the postinst should render it"
+            exit 1
+          fi
+          echo "OK: no conffiles, and no shipped bluetoothd drop-in"
+
   versions:
     name: Version harmony
     # No custom image needed: the default job container (node:20-bookworm) has

@@ -23,6 +23,13 @@ source "$INSTALL_LIB_DIR/config.sh"
 # this file (not the other way round).
 DISTRO_PACKAGE_NAME="shepherd-launcher"
 
+# Where a packaged install keeps the data files that have no repo to come from
+# (the example config, the media library, VERSION, and the bluetoothd drop-in
+# template). `scripts/shepherd-admin` points `SHEPHERD_DATA_DIR` here, and
+# `package.sh` stages into it; it lives here because both of those are
+# downstream of this file.
+PACKAGED_DATA_DIR="/usr/share/shepherd"
+
 # Default installation paths
 DEFAULT_PREFIX="/usr/local"
 DEFAULT_BINDIR="bin"
@@ -39,9 +46,20 @@ DESKTOP_ENTRY_NAME="shepherd.desktop"
 # Firewall helper paths (hardcoded -- the polkit .policy file references
 # the absolute path to the helper binary, and polkit's own dirs are fixed
 # system locations regardless of $prefix).
+#
+# Both the action and the rule go to polkit's *vendor* directories under
+# /usr/share, because both are shepherd's own files rather than site policy
+# (issue #177). The rule grants shepherd's own action to shepherd's own group;
+# nothing about it is a local decision. An admin who wants to override it still
+# can, the way polkit intends: a same-named file in /etc/polkit-1/rules.d,
+# which is read first and wins.
 FIREWALL_HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
 POLKIT_ACTIONS_DIR="/usr/share/polkit-1/actions"
-POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+POLKIT_RULES_DIR="/usr/share/polkit-1/rules.d"
+# Where the rule used to go, before #177 moved it. Installs and uninstalls
+# clear a copy left there by an older from-source install; the .deb's
+# maintainer scripts do the same with `dpkg-maintscript-helper rm_conffile`.
+POLKIT_LEGACY_RULES_DIR="/etc/polkit-1/rules.d"
 FIREWALL_POLICY_NAME="org.shepherd.firewall.policy"
 FIREWALL_RULES_NAME="50-shepherd-firewall.rules"
 FIREWALL_GROUP="shepherd-firewall"
@@ -118,9 +136,15 @@ stated_socket_unit_for() {
 }
 
 # udev rules. Installed to a fixed system location regardless of --prefix
-# (udev only reads /etc/udev/rules.d and /usr/lib/udev/rules.d). Currently
+# (udev only reads /usr/lib/udev/rules.d and /etc/udev/rules.d). Currently
 # just the /dev/uinput access rule the input-compat sidecars need.
-UDEV_RULES_DIR="/etc/udev/rules.d"
+#
+# The vendor directory, for the same reason as the polkit rule above (issue
+# #177): this is shepherd's rule, not the site's. /etc/udev/rules.d is read
+# afterwards and a same-named file there still overrides it.
+UDEV_RULES_DIR="/usr/lib/udev/rules.d"
+# Where the rule used to go, before #177 moved it. See POLKIT_LEGACY_RULES_DIR.
+UDEV_LEGACY_RULES_DIR="/etc/udev/rules.d"
 UINPUT_RULES_NAME="71-shepherd-uinput.rules"
 
 # systemd drop-in that runs bluetoothd with experimental D-Bus interfaces,
@@ -130,8 +154,13 @@ UINPUT_RULES_NAME="71-shepherd-uinput.rules"
 # there means fighting the distro's conffile on every upgrade.
 BLUETOOTH_DROPIN_DIR="/etc/systemd/system/bluetooth.service.d"
 BLUETOOTH_DROPIN_NAME="10-shepherd-bluetooth-experimental.conf"
-# Used only when the target's own unit can't be read (i.e. under DESTDIR,
-# where we are staging on a build host rather than the eventual machine).
+# The drop-in names the *rendering* machine's bluetoothd, so a build host can
+# never write a correct one -- which is why a package ships the template here
+# instead of the rendered file and renders it in its postinst (issue #177).
+BLUETOOTH_DROPIN_TEMPLATE_DIR="$PACKAGED_DATA_DIR/systemd"
+# Used only when the target's own unit is readable but its ExecStart is not
+# (a shape of bluetooth.service we have never seen). Rendering nothing would
+# be worse than rendering the path every distro we support actually uses.
 BLUETOOTHD_DEFAULT_PATH="/usr/libexec/bluetooth/bluetoothd"
 
 # Install release binaries
@@ -508,8 +537,9 @@ install_user_groups() {
 # ExecStart matches the distro rather than a guess. Getting this wrong is
 # not a cosmetic error — a drop-in pointing at a non-existent binary stops
 # Bluetooth working entirely — so we read it back from the unit that is
-# installed, and only fall back to the well-known Ubuntu path when there is
-# no unit to read (staging under DESTDIR on a build host).
+# installed, and only fall back to the well-known Ubuntu path when the unit is
+# there but its ExecStart cannot be parsed. (A machine with no bluetooth.service
+# at all never reaches here: install_bluetooth_dropin returns first.)
 _bluetoothd_exec_path() {
     local line
     line="$(systemctl cat bluetooth.service 2>/dev/null \
@@ -547,8 +577,26 @@ install_bluetooth_dropin() {
         die "Bluetooth drop-in missing at $template"
     fi
 
-    # No bluetooth unit and not staging a package? Nothing to extend.
-    if [[ -z "$destdir" ]] && ! systemctl cat bluetooth.service >/dev/null 2>&1; then
+    # Packaging stages the *template*, not the drop-in (issue #177).
+    #
+    # ExecStart has to name the bluetoothd of the machine the file ends up on,
+    # and under DESTDIR that machine is a build host. The old arrangement
+    # shipped a drop-in carrying the build host's path and had the postinst
+    # `sed` it -- which worked, but rewriting a file dpkg had just checksummed
+    # made every subsequent upgrade see a locally-modified conffile and either
+    # prompt or silently keep the stale copy. Handing the postinst a template
+    # to render leaves nothing for dpkg to checksum and no prompt to answer.
+    if [[ -n "$destdir" ]]; then
+        local template_dst="$destdir$BLUETOOTH_DROPIN_TEMPLATE_DIR/$BLUETOOTH_DROPIN_NAME"
+        info "Staging bluetoothd drop-in template to $template_dst..."
+        ensure_dir "$(dirname "$template_dst")" 0755
+        install -m 0644 -o root -g root "$template" "$template_dst"
+        success "Staged bluetoothd drop-in template"
+        return 0
+    fi
+
+    # No bluetooth unit? Nothing to extend.
+    if ! systemctl cat bluetooth.service >/dev/null 2>&1; then
         info "No bluetooth.service on this system; skipping the bluetoothd drop-in"
         return 0
     fi
@@ -562,23 +610,49 @@ install_bluetooth_dropin() {
     chmod 0644 "$dropin_dst"
     chown root:root "$dropin_dst"
 
-    # Reload + restart only on a real (non-packaging) install; under DESTDIR
-    # these would touch the build host.
+    # Only a real install gets here (the DESTDIR branch returned above), so the
+    # reload is unconditional.
     #
-    # NOTE: the .deb runs these same steps from its generated postinst
-    # instead (scripts/lib/package.sh, _package_write_control). Keep them in
-    # sync.
-    if [[ -z "$destdir" ]]; then
-        systemctl daemon-reload 2>/dev/null \
-            || warn "Could not reload systemd; the drop-in applies at next boot"
-        if systemctl is-active --quiet bluetooth.service; then
-            info "Restarting bluetooth to apply (briefly drops Bluetooth connections)"
-            systemctl restart bluetooth.service 2>/dev/null \
-                || warn "Could not restart bluetooth; restart it or reboot to apply"
-        fi
+    # NOTE: the .deb renders and reloads from its generated postinst instead
+    # (scripts/lib/package.sh, _package_write_control). Keep them in sync.
+    systemctl daemon-reload 2>/dev/null \
+        || warn "Could not reload systemd; the drop-in applies at next boot"
+    if systemctl is-active --quiet bluetooth.service; then
+        info "Restarting bluetooth to apply (briefly drops Bluetooth connections)"
+        systemctl restart bluetooth.service 2>/dev/null \
+            || warn "Could not restart bluetooth; restart it or reboot to apply"
     fi
 
     success "Installed bluetoothd drop-in"
+}
+
+# Drop a copy of one of shepherd's files left at a path an earlier release used.
+#
+# Issue #177 moved the udev and polkit rules out of the admin directories into
+# the vendor ones. Both subsystems read both locations, so a copy left behind is
+# not merely untidy -- it is a second, older rule that still applies, and the
+# one in /etc is the one that wins. Only a from-source install can have put one
+# there; the .deb clears its own with `dpkg-maintscript-helper rm_conffile`
+# (see scripts/lib/package.sh), and a file the package manager still owns is
+# left for it rather than deleted behind its back (path_owned_by_dpkg, defined
+# with the uninstall functions below, explains why that matters).
+#
+# Callers must only reach this on a real install: under DESTDIR the argument
+# names a path on the build host, not in the staging tree.
+#
+# Args:
+#   $1 -- the superseded absolute path
+#   $2 -- where the file lives now, for the log line
+remove_superseded_copy() {
+    local path="$1" now_at="$2"
+
+    [[ -e "$path" ]] || return 0
+    if path_owned_by_dpkg "$path"; then
+        warn "  Leaving the superseded $path (owned by an installed package)"
+        return 0
+    fi
+    info "  Removing the superseded $path (this file now lives at $now_at)"
+    rm -f "$path"
 }
 
 # Install the udev rules shepherd-launcher needs.
@@ -613,6 +687,8 @@ install_udev() {
     # (scripts/lib/package.sh, _package_write_control). If you change the
     # udev reload/trigger here, mirror it there.
     if [[ -z "$destdir" ]]; then
+        remove_superseded_copy \
+            "$UDEV_LEGACY_RULES_DIR/$UINPUT_RULES_NAME" "$rules_dst"
         if command -v udevadm >/dev/null 2>&1; then
             info "Reloading udev rules so the new rule takes effect"
             udevadm control --reload-rules 2>/dev/null \
@@ -681,6 +757,8 @@ install_firewall() {
     # postinst instead (scripts/lib/package.sh, _package_write_control), and
     # emits the per-user usermod as printed guidance. Keep them in sync.
     if [[ -z "$destdir" ]]; then
+        remove_superseded_copy \
+            "$POLKIT_LEGACY_RULES_DIR/$FIREWALL_RULES_NAME" "$rules_dst"
         if ! getent group "$FIREWALL_GROUP" >/dev/null; then
             info "Creating system group: $FIREWALL_GROUP"
             groupadd --system "$FIREWALL_GROUP"
@@ -1204,17 +1282,23 @@ UNINSTALL_SKIPPED_OWNED=0
 
 # True when dpkg tracks $1 as belonging to an installed package.
 #
-# A source uninstall must never delete a file the package manager owns.
-# The .deb ships four of them as *conffiles* -- /etc/sway/shepherd.conf,
-# the polkit rule, the udev rule and the bluetoothd drop-in -- and dpkg
-# records a hash for each. Delete one behind dpkg's back and it reads the
-# absence as "the admin removed this deliberately", so it will not put the
-# file back, not even on `apt install --reinstall` of the same version.
-# The result is a box that reports itself installed while missing its sway
-# config (the session bounces straight back to the greeter) and its
-# bluetoothd drop-in (the bearer pin silently cannot apply).
+# A source uninstall must never delete a file the package manager owns. On a
+# packaged box that is most of what these functions would remove -- the
+# binaries, the sway config, the polkit and udev rules -- and dpkg's file list
+# goes stale the moment one of them disappears behind its back: the box reports
+# itself installed while missing its sway config, and the session bounces
+# straight back to the greeter.
 #
-# Recovering from that needs --force-confmiss; see docs/INSTALL.md.
+# The package declares no conffiles (issue #177), so everything it ships is an
+# ordinary file and `apt install --reinstall shepherd-launcher` puts the lot
+# back. That was not true while the four files below were conffiles: dpkg read
+# a missing conffile as a deliberate admin removal and needed --force-confmiss
+# to restore it. See docs/INSTALL.md.
+#
+# An upgraded box still answers "yes" here for the bluetoothd drop-in, which
+# dpkg remembers as an *obsolete* conffile from before #177 even though the
+# postinst now writes it. Leaving it to dpkg is the conservative answer there
+# too: `apt remove` runs a postrm that deletes it.
 path_owned_by_dpkg() {
     local path="$1"
     # Under DESTDIR the paths point into a staging tree, where ownership is
@@ -1268,6 +1352,8 @@ uninstall_firewall() {
     remove_path "$destdir$FIREWALL_HELPER_PATH"
     remove_path "$destdir$POLKIT_ACTIONS_DIR/$FIREWALL_POLICY_NAME"
     remove_path "$destdir$POLKIT_RULES_DIR/$FIREWALL_RULES_NAME"
+    # An install from before #177 put the rule in polkit's admin directory.
+    remove_path "$destdir$POLKIT_LEGACY_RULES_DIR/$FIREWALL_RULES_NAME"
 
     # Reload polkit on a real (non-packaging) uninstall so the dropped rule
     # stops applying. The shepherd-firewall system group is intentionally left
@@ -1486,7 +1572,7 @@ _restore_state_for_every_user() {
 #
 # The half of `uninstall state --restore-to-home` a packaged device needs. There
 # the units and the binary belong to dpkg -- deleting them behind its back is
-# what `uninstall` already refuses to do to conffiles -- and `apt` is what
+# what `uninstall` already refuses to do to a packaged file -- and `apt` is what
 # removes them. What `apt` cannot do is move a device's state back out of the
 # custodian first, and a downgrade that skips that starts from an empty database
 # and an unclaimed device.
@@ -1588,6 +1674,11 @@ uninstall_bluetooth_dropin() {
     remove_path "$dropin_dst"
     # Leave the directory if anything else dropped files in it.
     rmdir "$destdir$BLUETOOTH_DROPIN_DIR" 2>/dev/null || true
+    # The template a packaged install carries so its postinst can render the
+    # drop-in (issue #177). Only staging puts one there, so on a real box this
+    # is either absent or dpkg's, and remove_path leaves dpkg's alone.
+    remove_path "$destdir$BLUETOOTH_DROPIN_TEMPLATE_DIR/$BLUETOOTH_DROPIN_NAME"
+    rmdir "$destdir$BLUETOOTH_DROPIN_TEMPLATE_DIR" 2>/dev/null || true
 
     if [[ -z "$destdir" ]]; then
         systemctl daemon-reload 2>/dev/null \
@@ -1612,6 +1703,8 @@ uninstall_udev() {
 
     info "Removing udev rule..."
     remove_path "$rules_dst"
+    # An install from before #177 put the rule in udev's admin directory.
+    remove_path "$destdir$UDEV_LEGACY_RULES_DIR/$UINPUT_RULES_NAME"
 
     # Reload rules on a real (non-packaging) uninstall so the dropped rule
     # stops applying. Mirrors the .deb postrm (scripts/lib/package.sh).
