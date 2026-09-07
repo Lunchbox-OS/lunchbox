@@ -1,0 +1,93 @@
+# shepherd's state custodian (issue #157).
+#
+# Owns `shepherdd.db`, `config.toml` and the BLE admin record at a uid the
+# activities do not have, and serves them to shepherdd over the socket in the
+# matching `.socket` unit. See `crates/shepherd-stated/README.md`.
+#
+# Started by socket activation, so nothing runs until shepherdd connects.
+
+[Unit]
+Description=shepherd state custodian (user %i)
+Documentation=https://git.armeafamily.com/albert/shepherd-launcher/issues/157
+Requires=shepherd-stated@%i.socket
+After=shepherd-stated@%i.socket systemd-logind.service
+
+# Do not let a run of failures take the *socket* down with the service.
+#
+# Measured on a device: five quick failures hit systemd's default start limit,
+# which failed `shepherd-stated@.socket` with `service-start-limit-hit`. After
+# that every connection for the rest of the boot was refused, shepherdd fell
+# back to an unprotected local store, and its fallback is a startup-only
+# decision — so a transient became a downgrade lasting until the next reboot.
+#
+# The root cause is fixed (the daemon waits for the session and exits cleanly
+# when there is none), so a failure here now means something genuinely wrong.
+# The window is widened rather than removed so a real crash-loop still stops,
+# but a slow boot cannot cost a device its protection.
+StartLimitBurst=10
+StartLimitIntervalSec=120
+
+[Service]
+ExecStart=/usr/libexec/shepherd-stated --user %i
+User=shepherd-state
+Group=shepherd-state
+
+# Two directories, both created by the service manager and owned by this
+# daemon's uid. 0700 is what makes the state unreachable for everyone else,
+# including the kiosk user every activity runs as — which is the whole mechanism
+# this issue turns on.
+#
+#   shepherdd/state/<user>  this child's policy and database
+#   shepherdd/admin         the device's admin record, unbond queue and reset
+#                           sentinel, shared by every kiosk user
+#
+# The second is shared because what it holds is: there is one Bluetooth adapter
+# and one BlueZ bond table, and forgetting a bond forgets it for the machine.
+# Every instance of this unit runs as the same uid, so they can all reach it.
+StateDirectory=shepherdd/state/%i shepherdd/admin
+StateDirectoryMode=0700
+
+# A logout takes the trusted session's cgroup away with it, so the daemon exits
+# rather than serving a stale one. The next connection starts it again and it
+# resolves the new session — which is why this restarts rather than staying up.
+#
+# `on-failure` only: the daemon exits 0 for the two ordinary endings (the
+# session went away, or nobody was logged in), and neither should spend restart
+# budget.
+Restart=on-failure
+RestartSec=1s
+
+# Sandboxing. Verified to actually apply for a system unit on 26.04 (the same
+# directives are silently ignored in a *user* manager, measured in
+# `docs/ai/history/2026-08-29 005`, which is worth knowing before trusting them
+# anywhere else).
+#
+# The daemon opens a SQLite file it owns, reads TOML it owns, and asks logind a
+# read-only question over the system bus. Nothing here needs privilege, a
+# network, or the home directory of anyone — so it gets none of them, and a
+# hypothetical parser bug yields a uid that holds exactly the files this is
+# protecting and nothing else.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+# AF_UNIX only: the system bus and the state socket are both Unix sockets, and
+# this daemon has no business anywhere else.
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native

@@ -78,6 +78,25 @@ pub enum DiagnosticCode {
     /// running, so nothing else about the device looks wrong and the downgrade
     /// is invisible unless it is said out loud.
     IpcSocketNotHardened,
+    /// shepherd's policy and state are files at the uid activities run as,
+    /// because this device has no state custodian (issue #157).
+    ///
+    /// The session is deliberately left running — an unprotected kiosk beats a
+    /// child staring at a dead screen — so, like
+    /// [`Self::IpcSocketNotHardened`], nothing else about the device looks
+    /// wrong and the downgrade is invisible unless it is said out loud.
+    ///
+    /// Only for a device that never had one: a packaged install where
+    /// `shepherd-admin setup-user` has not run, or one deliberately left
+    /// without. A device whose custodian *is* installed and unreachable does
+    /// not reach this — it refuses to start, because its state has moved and
+    /// running anyway would mean an empty database and a launcher with no
+    /// activities, which looks like a quiet evening rather than a fault.
+    ///
+    /// Raised only at startup. A device that fell back mid-session would be a
+    /// device an activity could *push* into falling back, which is the one
+    /// thing this must not be.
+    StateNotProtected,
     /// Something at this uid tried to drive the daemon from outside the
     /// session and was refused (issue #144). Worth an administrator's
     /// attention: an activity probing the management socket is not something

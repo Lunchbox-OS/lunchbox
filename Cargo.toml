@@ -15,6 +15,8 @@ members = [
     "crates/shepherd-http",
     "crates/shepherd-ble",
     "crates/shepherdd",
+    "crates/shepherd-state-proto",
+    "crates/shepherd-stated",
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
     "crates/shepherd-pairing-display",
@@ -53,6 +55,8 @@ default-members = [
     "crates/shepherd-http",
     "crates/shepherd-ble",
     "crates/shepherdd",
+    "crates/shepherd-state-proto",
+    "crates/shepherd-stated",
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
     "crates/shepherd-pairing-display",
@@ -93,6 +97,8 @@ shepherd-store = { path = "crates/shepherd-store" }
 shepherd-core = { path = "crates/shepherd-core" }
 shepherd-host-linux = { path = "crates/shepherd-host-linux" }
 shepherd-ipc = { path = "crates/shepherd-ipc" }
+shepherd-state-proto = { path = "crates/shepherd-state-proto" }
+shepherd-stated = { path = "crates/shepherd-stated" }
 shepherd-management = { path = "crates/shepherd-management" }
 shepherd-management-macros = { path = "crates/shepherd-management-macros" }
 shepherd-http = { path = "crates/shepherd-http" }

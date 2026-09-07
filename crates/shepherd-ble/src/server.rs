@@ -49,7 +49,6 @@ use shepherd_api::{
 use shepherd_management::ManagementService;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -218,7 +217,7 @@ fn advertised_name(name: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{}{ADV_NAME_ELLIPSIS}", &name[..end]))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BleServerConfig {
     /// Advertised local name (also the device name in `DeviceInfo`).
     /// Defaults to the system hostname when constructed via `default`.
@@ -226,26 +225,31 @@ pub struct BleServerConfig {
     /// Firmware version string surfaced via `DeviceInfo`. Typically the
     /// crate version of the daemon.
     pub firmware_version: String,
-    /// Where to persist the admin record. Should match the daemon's
-    /// state directory.
-    pub admin_record_path: PathBuf,
-    /// Sentinel file that, when present at startup, wipes the admin
-    /// record and the BlueZ bond and returns to the unclaimed state.
-    pub reset_sentinel_path: PathBuf,
     /// Which controller to serve on: an address (`"DC:56:7B:1F:7D:EA"`)
     /// or an interface name (`"hci1"`). `None` takes whichever BlueZ
     /// lists first. See [`resolve_adapter`].
     pub adapter: Option<String>,
+    /// Where the admin record, the unbond queue and the reset sentinel live.
+    ///
+    /// On a device the state custodian, at a uid activities do not have, which
+    /// matters most for the admin record — it carries the minted HTTP token, so
+    /// a copy at the shared uid is a credential every activity can read and
+    /// present to the management API. In a dev stack and the tests,
+    /// `LocalProtectedFiles` over a directory.
+    ///
+    /// Not an `Option` and not a set of paths. Both were the same mistake: they
+    /// let the three files live somewhere the custodian does not serve, which
+    /// on a device is somewhere an activity can reach.
+    pub files: Arc<dyn shepherd_util::ProtectedFiles>,
 }
 
-impl BleServerConfig {
-    /// Retry list for BlueZ bonds we still owe a removal, kept beside the
-    /// admin record. Derived rather than configured: it belongs in the
-    /// same state directory by definition and has no meaning apart from
-    /// the record it shadows.
-    fn pending_unbond_path(&self) -> PathBuf {
-        self.admin_record_path
-            .with_file_name("ble-pending-unbond.toml")
+impl std::fmt::Debug for BleServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BleServerConfig")
+            .field("device_name", &self.device_name)
+            .field("firmware_version", &self.firmware_version)
+            .field("adapter", &self.adapter)
+            .finish()
     }
 }
 
@@ -276,14 +280,12 @@ impl BleServer {
         svc: Arc<dyn ManagementService>,
         display: Arc<dyn PairingDisplay>,
     ) -> anyhow::Result<Self> {
-        let store = AdminStore::new(config.admin_record_path.clone());
-        let pending_unbond = PendingUnbondStore::new(config.pending_unbond_path());
+        let store = AdminStore::new(Arc::clone(&config.files));
+        let pending_unbond = PendingUnbondStore::new(Arc::clone(&config.files));
+        let reset_requested = check_reset_sentinel(config.files.as_ref());
 
-        if check_reset_sentinel(&config.reset_sentinel_path) {
-            warn!(
-                sentinel = %config.reset_sentinel_path.display(),
-                "Factory-reset sentinel present at startup; clearing admin record",
-            );
+        if reset_requested {
+            warn!("Factory-reset sentinel present at startup; clearing admin record");
             // Record the bond for removal *before* clearing the admin
             // record, and durably. Without the removal the phone stays
             // bonded while the device goes Unclaimed, so every reconnect
@@ -1849,7 +1851,9 @@ mod tests {
     /// `not_claimed`.
     fn claimed_machine() -> Arc<ClaimMachine> {
         let record = AdminRecord::new("AA:BB:CC:DD:EE:FF".into(), "public".into(), "tester".into());
-        let store = AdminStore::new(PathBuf::from("/nonexistent/shepherd-ble-test/admin.toml"));
+        let store = AdminStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
+            std::path::PathBuf::from("/nonexistent/shepherd-ble-test"),
+        )));
         Arc::new(ClaimMachine::new(store, ClaimState::Claimed(record)))
     }
 
@@ -2156,9 +2160,10 @@ mod tests {
         let config = BleServerConfig {
             device_name: "test".into(),
             firmware_version: "0".into(),
-            admin_record_path: dir.path().join("admin.json"),
-            reset_sentinel_path: dir.path().join("reset"),
             adapter: None,
+            files: Arc::new(shepherd_util::LocalProtectedFiles::new(
+                dir.path().to_path_buf(),
+            )),
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2195,9 +2200,10 @@ mod tests {
         let config = BleServerConfig {
             device_name: "test".into(),
             firmware_version: "0".into(),
-            admin_record_path: dir.path().join("admin.json"),
-            reset_sentinel_path: dir.path().join("reset"),
             adapter: None,
+            files: Arc::new(shepherd_util::LocalProtectedFiles::new(
+                dir.path().to_path_buf(),
+            )),
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2277,7 +2283,9 @@ mod tests {
     /// and must not queue a bond removal (there is no bond to forget).
     #[tokio::test]
     async fn factory_reset_when_unclaimed_requests_no_removal() {
-        let store = AdminStore::new(PathBuf::from("/nonexistent/shepherd-ble-test/admin.toml"));
+        let store = AdminStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
+            std::path::PathBuf::from("/nonexistent/shepherd-ble-test"),
+        )));
         let claim: Arc<ClaimMachine> = Arc::new(ClaimMachine::new(store, ClaimState::Unclaimed));
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let state = TransportState::new();
@@ -2348,10 +2356,17 @@ mod tests {
     #[test]
     fn sentinel_reset_captures_bond_for_removal() {
         let dir = TempDir::new().unwrap();
-        let admin_path = dir.path().join("admin.toml");
-        let sentinel_path = dir.path().join(".factory-reset-ble");
+        let files: Arc<dyn shepherd_util::ProtectedFiles> = Arc::new(
+            shepherd_util::LocalProtectedFiles::new(dir.path().to_path_buf()),
+        );
+        let admin_path = dir
+            .path()
+            .join(shepherd_util::ProtectedFile::AdminRecord.file_name());
+        let sentinel_path = dir
+            .path()
+            .join(shepherd_util::ProtectedFile::ResetSentinel.file_name());
 
-        let store = AdminStore::new(admin_path.clone());
+        let store = AdminStore::new(Arc::clone(&files));
         store
             .save(&AdminRecord::new(
                 "AA:BB:CC:DD:EE:FF".into(),
@@ -2364,9 +2379,8 @@ mod tests {
         let config = BleServerConfig {
             device_name: "shepherd".into(),
             firmware_version: "test".into(),
-            admin_record_path: admin_path.clone(),
-            reset_sentinel_path: sentinel_path,
             adapter: None,
+            files: Arc::clone(&files),
         };
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let display: Arc<dyn PairingDisplay> = Arc::new(NoopPairingDisplay);
@@ -2384,7 +2398,7 @@ mod tests {
         // fresh store on the same path stands in for that next startup.
         let queued = server.pending_unbond.list().unwrap();
         assert_eq!(queued, vec!["AA:BB:CC:DD:EE:FF".to_string()]);
-        let next_boot = PendingUnbondStore::new(server.pending_unbond.path().to_path_buf());
+        let next_boot = PendingUnbondStore::new(Arc::clone(&files));
         assert_eq!(next_boot.list().unwrap(), queued);
     }
 }

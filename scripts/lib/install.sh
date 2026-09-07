@@ -13,6 +13,11 @@ source "$INSTALL_LIB_DIR/common.sh"
 # shellcheck source=build.sh
 source "$INSTALL_LIB_DIR/build.sh"
 
+# Source config utilities: `install policy` validates before it installs, and
+# `get_validate_binary` is where the validator's path is decided.
+# shellcheck source=config.sh
+source "$INSTALL_LIB_DIR/config.sh"
+
 # Distro package name. Lives here rather than in package.sh because the
 # uninstall path needs it to point at `apt purge`, and package.sh sources
 # this file (not the other way round).
@@ -40,6 +45,71 @@ POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
 FIREWALL_POLICY_NAME="org.shepherd.firewall.policy"
 FIREWALL_RULES_NAME="50-shepherd-firewall.rules"
 FIREWALL_GROUP="shepherd-firewall"
+
+# State custodian (issue #157). Like the firewall helper, the binary lives at a
+# fixed path regardless of --prefix, because a systemd unit references it
+# absolutely and units are not relocatable. It is not a command an operator
+# runs, so /usr/libexec is where it belongs anyway.
+STATED_PATH="/usr/libexec/shepherd-stated"
+STATED_USER="shepherd-state"
+STATED_UNIT_DIR="/etc/systemd/system"
+STATED_SOCKET_UNIT="shepherd-stated@.socket"
+STATED_SERVICE_UNIT="shepherd-stated@.service"
+# Where the protected files live. `/var/lib/shepherdd` is already the tree's
+# system state root (harden.sh keeps its rollback state there), and both
+# crates/shepherdd/README.md and docs/INSTALL.md have always described state as
+# living under it.
+STATED_STATE_ROOT="/var/lib/shepherdd/state"
+
+# The file names shepherd's protected files have, and what happens to each when
+# a device gains or loses the custodian.
+#
+# These mirror `ProtectedFile` in `shepherd-util`, which is the Rust half of the
+# same list, plus `shepherdd.db`, which the custodian owns without it being a
+# `ProtectedFile` (it is reached through `Store`, not `ProtectedFiles`).
+# `crates/shepherd-util/tests/installer_covers_protected_files.rs` fails if a
+# name is added there and not accounted for here -- the two lists cannot be one
+# list, so they are held together by something that breaks loudly instead of by
+# a comment asking nicely.
+#
+# Moved from `~/.local/share/shepherdd/` into this user's custodian directory,
+# and back again by `uninstall state --restore-to-home`.
+SHEPHERD_MIGRATED_FILES=(shepherdd.db)
+# The device's files rather than a user's, so they move to the *shared*
+# directory instead. There is one Bluetooth adapter and one BlueZ bond table,
+# and forgetting a bond forgets it for the machine -- so an admin record kept
+# per-user while the bond was system-wide gave a two-child device behaviour
+# nobody chose. `ProtectedFile::scope` is the Rust half of this split.
+SHEPHERD_SYSTEM_FILES=(admin.toml unbond-queue.toml)
+# Where they go. Shared by every kiosk user, at the same uid and mode as the
+# per-user directories, so it is no more reachable from an activity.
+STATED_ADMIN_DIR="/var/lib/shepherdd/admin"
+# The policy, moved from `~/.config/shepherd/` -- a different directory, so it
+# is handled apart from the list above rather than being in it.
+SHEPHERD_POLICY_FILE="config.toml"
+# Deliberately *not* moved: a one-shot instruction rather than state, so moving
+# a stale one would factory-reset a device during an upgrade. Declared rather
+# than merely omitted, so the drift test can tell "decided against" apart from
+# "forgotten" -- which is the whole distinction it exists to check. (It is a
+# device file like the two above, and shepherdd reads it from the shared
+# directory; it is simply never carried across.)
+# shellcheck disable=SC2034  # read by installer_covers_protected_files.rs
+SHEPHERD_UNMIGRATED_FILES=(.factory-reset-ble)
+# Named individually where a caller needs one by name. shellcheck reads each
+# file alone, so it cannot see `bluetooth.sh` using these two.
+# shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
+SHEPHERD_ADMIN_RECORD_FILE="admin.toml"
+# shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
+SHEPHERD_RESET_SENTINEL_FILE=".factory-reset-ble"
+
+# The socket unit instance that serves `$1`.
+#
+# A function rather than a format string repeated at each call site: the
+# template names above are the *unit files*, and this is the instance, which is
+# what `systemctl enable` and `systemctl stop` actually take.
+stated_socket_unit_for() {
+    echo "shepherd-stated@$1.socket"
+}
 
 # udev rules. Installed to a fixed system location regardless of --prefix
 # (udev only reads /etc/udev/rules.d and /usr/lib/udev/rules.d). Currently
@@ -134,17 +204,38 @@ install_sway_config() {
     # environment (GDM's PAM stack reads `~/.pam_environment`). Only the e2e
     # suite passes it, but a hand-edited config could.
     #
+    # `--no-state-custodian` is stripped for the same reason again: it keeps
+    # shepherd's policy and state in the kiosk user's home, where every
+    # activity can read and rewrite them (issue #157).
+    #
     # `--no-restrict-ipc-peers` is stripped for the same reason. It opens
     # shepherdd's *own* management socket to every process at this uid, which is
     # every activity: without the check a game can call `logout`, `stop_current`
     # or `launch`. It is in `sway.conf` because a dev stack runs entirely inside
     # one shell's cgroup, where the check cannot mean anything.
     #
+    # The two `swaymsg exit` fallbacks are rewritten rather than stripped (issue
+    # #144's open defect 2, tracked as #172) -- the one that runs when shepherdd
+    # exits, and the one behind the `Mod4+Shift+Escape` escape hatch, which fires
+    # only when there is no shepherdd to signal. `swaymsg exit` cannot work on a
+    # device:
+    # shepherdd unlinks sway's IPC socket once it has connected, so a daemon
+    # that dies after that leaves sway up with nothing supervising the session.
+    # `loginctl terminate-session` needs no compositor socket, and terminating
+    # one's own session needs no polkit authorisation. `sway.conf` keeps
+    # `swaymsg exit` because a development sway is nested inside the developer's
+    # own login session and inherits its `XDG_SESSION_ID`.
+    #
+    # This does not make a *deliberate* kill safe: the `sh -c` wrapper runs at
+    # the kiosk uid, so an activity can kill it first and leave nothing to run
+    # the fallback. See the note above the exec line in `sway.conf`.
     # `sway.conf` carries both flags because it is the development config, where
     # the unlink would take the socket away from `swaymsg` and the headless
     # harness. An installed kiosk wants the defaults, so they come back out
     # here — and the checks below are the ones that matter: a rename upstream
     # that silently left one in would ship an unhardened device.
+    # shellcheck disable=SC2016  # $XDG_SESSION_ID must reach the config
+    # literally, for the session's own shell to expand when the fallback runs.
     sed \
         -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
         -e "s|./target/debug/shepherd-hud|$bindir/shepherd-hud|g" \
@@ -154,6 +245,9 @@ install_sway_config() {
         -e "s| --no-harden-sway-ipc||g" \
         -e "s| --no-restrict-ipc-peers||g" \
         -e "s| --trust-environment||g" \
+        -e "s| --no-state-custodian||g" \
+        -e '/^exec .*shepherdd -c /s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
+        -e '/^bindsym .*pkill -TERM shepherdd/s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
         "$src_config" > "$dst_config"
 
     # Scoped to the exec line: the comment above it names the flag too, and a
@@ -168,6 +262,23 @@ install_sway_config() {
     fi
     if [[ "$dst_exec_line" == *--no-restrict-ipc-peers* ]]; then
         die "Failed to strip --no-restrict-ipc-peers from $dst_config; the installed device would let every activity drive shepherd's own management socket (issue #144)"
+    fi
+    if [[ "$dst_exec_line" == *--no-state-custodian* ]]; then
+        die "Failed to strip --no-state-custodian from $dst_config; the installed device would keep policy and state in the kiosk user's home, where every activity can rewrite them (issue #157)"
+    fi
+    if [[ "$dst_exec_line" == *"swaymsg exit"* ]]; then
+        die "Failed to rewrite the 'swaymsg exit' fallback in $dst_config; shepherdd unlinks sway's IPC socket, so a daemon that died would leave the session running with nothing supervising it (issue #144)"
+    fi
+    if [[ "$dst_exec_line" != *"terminate-session"* ]]; then
+        die "No session-teardown fallback on the exec line in $dst_config; a daemon that died would leave the session running with nothing supervising it (issue #144)"
+    fi
+    local dst_exit_binding
+    dst_exit_binding="$(grep -E "^bindsym .*pkill -TERM shepherdd" "$dst_config" || true)"
+    if [[ -z "$dst_exit_binding" ]]; then
+        die "No 'pkill -TERM shepherdd' exit binding in $dst_config (sway.conf's exit keybinding may have changed)"
+    fi
+    if [[ "$dst_exit_binding" == *"swaymsg exit"* ]]; then
+        die "Failed to rewrite the 'swaymsg exit' fallback on the exit binding in $dst_config; shepherdd unlinks sway's IPC socket, so the escape hatch would do nothing when there is no shepherdd to signal (issue #144)"
     fi
     if [[ "$dst_exec_line" == *--trust-environment* ]]; then
         die "Failed to strip --trust-environment from $dst_config; the installed device would take helper binaries, and the browser-policy root, from an environment the kiosk user can write (issue #144)"
@@ -210,10 +321,9 @@ EOF
 install_config() {
     local user="${1:-}"
     local source_config="${2:-}"
-    local force="${3:-false}"
-    
+
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install config --user USER [--source CONFIG] [--force]"
+        die "Usage: shepherd install config --user USER [--source CONFIG]"
     fi
     
     validate_user "$user"
@@ -246,19 +356,40 @@ install_config() {
     maybe_sudo chown "$user:$user" "$user_config_dir"
     maybe_sudo chmod 0755 "$user_config_dir"
     
-    # Check if config already exists
-    if maybe_sudo test -f "$dst_config"; then
-        if [[ "$force" == "true" ]]; then
-            warn "Overwriting existing config at $dst_config"
-            maybe_sudo cp "$source_config" "$dst_config"
-            maybe_sudo chown "$user:$user" "$dst_config"
-            maybe_sudo chmod 0644 "$dst_config"
-            success "Overwrote user configuration for $user"
+    # Deploy the example only where there is nothing yet. There is deliberately
+    # no way to make this overwrite: `install config` seeds a device, and
+    # replacing a policy is `install policy`'s job, which writes the copy that
+    # actually decides what a child may do and validates before it does.
+    #
+    # An overwrite here used to exist as `--force`, and under the custodian it
+    # was the worst of both (issue #157): it replaced the home copy, which is
+    # only the seed, and left the custodian's copy -- the one shepherdd reads --
+    # untouched. The operator saw "Overwrote user configuration" and the device
+    # kept running the old policy.
+    #
+    # Where it lands depends on whether this device has a custodian. With one,
+    # the example goes straight to it and the home path gets the signpost --
+    # seeding the home copy and then syncing it would recreate exactly the two
+    # files this issue stopped having. Without one (a dev box, a DESTDIR stage,
+    # a device that opted out) the home path is the live policy and this is
+    # unchanged.
+    local custodian_dir="$STATED_STATE_ROOT/$user"
+    if [[ -d "$custodian_dir" && -z "${DESTDIR:-}" ]]; then
+        if [[ -e "$custodian_dir/config.toml" ]]; then
+            warn "Policy already exists at $custodian_dir/config.toml, leaving it alone"
+            info "  To change the policy this device runs:"
+            info "    shepherd install policy --user $user --source PATH"
         else
-            warn "Config file already exists at $dst_config, skipping (use --force to overwrite)"
+            install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
+                "$source_config" "$custodian_dir/config.toml"
+            success "Installed $user's policy to the state custodian"
         fi
+        _write_policy_placeholder "$user"
+    elif maybe_sudo test -f "$dst_config"; then
+        warn "Config file already exists at $dst_config, leaving it alone"
+        info "  To change the policy this device runs:"
+        info "    shepherd install policy --user $user [--source PATH]"
     else
-        # Copy config file
         maybe_sudo cp "$source_config" "$dst_config"
         maybe_sudo chown "$user:$user" "$dst_config"
         maybe_sudo chmod 0644 "$dst_config"
@@ -273,15 +404,7 @@ install_config() {
     local dst_library="$user_config_dir/movies.toml"
     if [[ -f "$source_library" ]]; then
         if maybe_sudo test -f "$dst_library"; then
-            if [[ "$force" == "true" ]]; then
-                warn "Overwriting existing media library at $dst_library"
-                maybe_sudo cp "$source_library" "$dst_library"
-                maybe_sudo chown "$user:$user" "$dst_library"
-                maybe_sudo chmod 0644 "$dst_library"
-                success "Overwrote media library for $user"
-            else
-                info "Media library already exists at $dst_library, skipping"
-            fi
+            info "Media library already exists at $dst_library, skipping"
         else
             maybe_sudo cp "$source_library" "$dst_library"
             maybe_sudo chown "$user:$user" "$dst_library"
@@ -574,6 +697,402 @@ install_firewall() {
     success "Firewall helper installed"
 }
 
+# Give one user a custodian: the directory, their migrated state, and the socket.
+#
+# Split out of `install_state` because a packaged device cannot reach that.
+# The `.deb` ships `shepherd-admin`, which has no `install` verb -- so on a
+# packaged system this is the only route to the per-user half, and
+# `shepherd-admin setup-user` is what calls it. Without that, `setup-user`
+# enabled the socket and nothing else: the custodian came up with an empty
+# directory while the device's real history sat in the home directory, and the
+# diagnostic that noticed named `shepherd install state`, a command that does
+# not exist there.
+#
+# Args:
+#   $1 -- the kiosk user
+setup_state_for_user() {
+    local user="$1"
+
+    require_root
+    id "$user" >/dev/null 2>&1 || die "No such user: $user"
+    getent passwd "$STATED_USER" >/dev/null \
+        || die "The system user $STATED_USER does not exist; install the state custodian first"
+
+    # Create the state directory here rather than leaving it to the unit's
+    # `StateDirectory=`. That would also do it -- but only when the *service*
+    # first starts, and socket activation means that is the moment shepherdd
+    # first connects. Migration has to have already happened by then, or the
+    # daemon creates an empty database and the device's history is stranded in
+    # the home directory it came from.
+    #
+    # `StateDirectory=` is idempotent, so it accepts what is already here and
+    # keeps enforcing the mode.
+    info "Creating $STATED_STATE_ROOT/$user"
+    install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_STATE_ROOT/$user"
+
+    _migrate_state_for_user "$user"
+
+    info "Enabling the state custodian's socket for $user"
+    local socket_unit
+    socket_unit="$(stated_socket_unit_for "$user")"
+    systemctl enable --now "$socket_unit" 2>/dev/null \
+        || warn "Could not enable $socket_unit; enable it manually"
+}
+
+# Install the state custodian: the binary, its systemd units, and the system
+# user that owns shepherd's policy and state (issue #157).
+#
+# Why this exists at all: shepherdd runs as the same uid as every activity it
+# launches, so `shepherdd.db`, `config.toml` and the BLE admin record are
+# writable by the software the device is meant to be supervising. That was
+# measured, not inferred — an activity resetting today's usage and adding an
+# unlimited entry to the policy, live, on an installed device
+# (docs/ai/history/2026-08-29 005). No file mode can help at a shared uid, so
+# the files move to a uid the activities do not have and shepherdd reaches them
+# over a socket that admits only its own session's cgroup.
+#
+# Args:
+#   $1 -- the kiosk user whose session is trusted (required outside DESTDIR)
+#   $2 -- "true" for release binaries (default), "false" for debug
+install_state() {
+    local user="${1:-}"
+    local release="${2:-true}"
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_repo_root)"
+
+    require_root
+
+    local bin_src
+    bin_src="$(get_target_dir "$release")/shepherd-stated"
+    if [[ ! -x "$bin_src" ]]; then
+        if [[ "$release" == "true" ]]; then
+            die "shepherd-stated not found at $bin_src; run 'shepherd build --release' first"
+        else
+            die "shepherd-stated not found at $bin_src; run 'cargo build --bin shepherd-stated' first"
+        fi
+    fi
+    for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT"; do
+        [[ -f "$repo_root/dist/systemd/$unit" ]] \
+            || die "systemd unit missing at $repo_root/dist/systemd/$unit"
+    done
+
+    info "Installing state custodian to $destdir$STATED_PATH..."
+    ensure_dir "$(dirname "$destdir$STATED_PATH")" 0755
+    install -m 0755 -o root -g root "$bin_src" "$destdir$STATED_PATH"
+
+    for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT"; do
+        info "Installing $unit to $destdir$STATED_UNIT_DIR/..."
+        ensure_dir "$destdir$STATED_UNIT_DIR" 0755
+        install -m 0644 -o root -g root "$repo_root/dist/systemd/$unit" \
+            "$destdir$STATED_UNIT_DIR/$unit"
+    done
+
+    # Host mutation only on a real install; under DESTDIR these would change the
+    # build host and bake its state into the package.
+    #
+    # NOTE: the .deb runs the user-create + daemon-reload from its generated
+    # postinst instead (scripts/lib/package.sh, _package_write_control), and
+    # leaves the per-user enable to the admin. Keep them in sync.
+    if [[ -z "$destdir" ]]; then
+        if ! getent passwd "$STATED_USER" >/dev/null; then
+            info "Creating system user: $STATED_USER"
+            # No home and no shell: this uid exists to own files and answer one
+            # socket. Anything it could log in with is surface it does not need.
+            useradd --system --no-create-home --home-dir /nonexistent \
+                --shell /usr/sbin/nologin "$STATED_USER"
+        fi
+
+        systemctl daemon-reload 2>/dev/null \
+            || warn "Could not reload systemd; the state custodian applies at next boot"
+
+        [[ -n "$user" ]] && setup_state_for_user "$user"
+    fi
+
+    success "State custodian installed"
+}
+
+# The line that marks a policy file as shepherd's signpost rather than a policy.
+#
+# Matched, not just written: `install policy` must never push one of these to
+# the custodian, and the migration must not "move" one it wrote itself on an
+# earlier run.
+POLICY_PLACEHOLDER_MARK="# shepherd: this device's policy lives with the state custodian"
+
+# Whether $1 is the placeholder rather than a real policy.
+_is_policy_placeholder() {
+    [[ -f "$1" ]] && grep -qF "$POLICY_PLACEHOLDER_MARK" "$1"
+}
+
+# Leave a signpost where the policy used to be.
+#
+# The policy now lives at a uid activities do not have, and the path every doc
+# and every habit points at is empty. A missing file would be read as "not
+# configured yet"; this says where it went and what to do instead.
+#
+# It parses, and grants nothing. Nothing should ever read it as a policy: a
+# device with a signpost has a custodian, and a shepherdd that cannot reach its
+# custodian now refuses to start rather than running on whatever is in the home
+# directory. Keeping the file valid means that if some path ever does read it,
+# what it grants is nothing -- rather than the daemon dying on a parse error
+# somewhere the message would be less clear than the one it exits with.
+_write_policy_placeholder() {
+    local user="$1"
+    local home dst
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -n "$home" ]] || return 0
+    dst="$home/.config/shepherd/config.toml"
+
+    # Never over a real policy: on a device without a custodian that file is
+    # the live one, and this function is called from paths that also run there.
+    if [[ -e "$dst" ]] && ! _is_policy_placeholder "$dst"; then
+        return 0
+    fi
+
+    install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
+    cat > "$dst" <<EOF
+$POLICY_PLACEHOLDER_MARK
+#
+# It was moved to a uid no activity has, so that the software this device
+# supervises cannot rewrite the rules it is supervised by (issue #157):
+#
+#     $STATED_STATE_ROOT/$user/config.toml
+#
+# To change what this device allows, edit that file as root --
+#
+#     sudoedit $STATED_STATE_ROOT/$user/config.toml
+#
+# -- or install one from anywhere, validated before it is applied:
+#
+#     sudo shepherd install policy --user $user --source ./new-config.toml
+#
+# Either way shepherdd reloads within a second; no restart is needed.
+#
+# Editing *this* file changes nothing. If the custodian ever cannot be reached,
+# shepherdd refuses to start rather than falling back to this one -- the session
+# ends at the login screen, which says something is wrong, where a device with
+# an empty launcher would look like an ordinary evening with nothing available.
+
+config_version = 1
+EOF
+    chown "$user:$user" "$dst"
+    chmod 0644 "$dst"
+    info "  Left a signpost at $dst"
+}
+
+# Move an existing device's state into the custodian's directory.
+#
+# Without this an upgrade looks like a factory reset: shepherdd would ask the
+# custodian for a database that has never been written, and a child's usage
+# history, quota balances and BLE admin record would still be sitting in their
+# home directory, unread. Silently starting from zero is the worst available
+# outcome, so this runs as part of the install rather than being left to a note
+# in a changelog.
+#
+# Root's job, necessarily: `shepherd-state` cannot read the user's home (0750),
+# so it could not migrate its own state even if it wanted to.
+#
+# Idempotent and non-destructive. A file already in the protected directory is
+# never overwritten -- if both exist, the protected one is the live one and the
+# home copy is stale, so it is left alone and reported rather than merged.
+#
+# The policy moves with everything else, and a placeholder takes its place at
+# the familiar path saying where it went. Leaving a real copy there was the
+# earlier design and it was worse: two files that look equally authoritative,
+# only one of which decides anything, and a diagnostic whose whole job was to
+# notice they had drifted apart. One file that decides, and one signpost, needs
+# no diagnostic.
+_migrate_state_for_user() {
+    local user="$1"
+    local home state_dir moved=0 skipped=0
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -n "$home" && -d "$home" ]] || return 0
+    state_dir="$STATED_STATE_ROOT/$user"
+
+    # Created by the caller just above; if it is not there, something went
+    # wrong earlier and moving files into nowhere would lose them.
+    [[ -d "$state_dir" ]] || return 0
+
+    # `.factory-reset-ble` is deliberately not migrated: it is a one-shot
+    # instruction, not state, and moving a stale one would factory-reset a
+    # device during an upgrade.
+    local src dst name
+    for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
+        src="$home/.local/share/shepherdd/$name"
+        dst="$state_dir/$name"
+        [[ -f "$src" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; leaving $src in place (the protected copy is the live one)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Moving $name into the custodian's directory"
+        install -m 0600 -o "$STATED_USER" -g "$STATED_USER" "$src" "$dst"
+        # SQLite may have side files; move them with the database or the next
+        # open sees a journal that does not match.
+        local side
+        for side in "-wal" "-shm" "-journal"; do
+            [[ -f "$src$side" ]] || continue
+            install -m 0600 -o "$STATED_USER" -g "$STATED_USER" "$src$side" "$dst$side"
+            rm -f "$src$side"
+        done
+        rm -f "$src"
+        moved=$((moved + 1))
+    done
+
+    # The device's files, into the shared directory rather than this user's.
+    #
+    # First user wins on a machine where two of them were separately claimed
+    # before the custodian existed: there is one bond table, so there can only
+    # be one admin record, and picking the later one would silently discard a
+    # pairing that still works. The one left behind is reported, not deleted.
+    install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_ADMIN_DIR"
+    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+        src="$home/.local/share/shepherdd/$name"
+        dst="$STATED_ADMIN_DIR/$name"
+        [[ -f "$src" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; leaving $user's $name in place"
+            info "    This device already has an admin record. A second one cannot apply:"
+            info "    the BlueZ bond it names is the machine's, not $user's."
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Moving $name into the device's shared directory"
+        install -m 0600 -o "$STATED_USER" -g "$STATED_USER" "$src" "$dst"
+        rm -f "$src"
+        moved=$((moved + 1))
+    done
+
+    # The policy, moved like the rest, with a signpost left behind.
+    src="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
+    dst="$state_dir/$SHEPHERD_POLICY_FILE"
+    if [[ -f "$src" ]] && ! _is_policy_placeholder "$src"; then
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; not replacing it from $src"
+            skipped=$((skipped + 1))
+        else
+            info "  Moving the policy into the custodian's directory"
+            install -m 0600 -o "$STATED_USER" -g "$STATED_USER" "$src" "$dst"
+            rm -f "$src"
+            moved=$((moved + 1))
+        fi
+    fi
+    # Whether or not there was one to move: a device that reaches here keeps
+    # its policy with the custodian, and the familiar path should say so rather
+    # than be missing. Also covers a re-run, where the move already happened.
+    if [[ -d "$state_dir" ]]; then
+        _write_policy_placeholder "$user"
+    fi
+
+    if [[ "$moved" -gt 0 ]]; then
+        success "Migrated $moved state file(s) for $user into $state_dir"
+    fi
+    if [[ "$skipped" -gt 0 ]]; then
+        info "  $skipped file(s) were left in $home/.local/share/shepherdd (already migrated)"
+    fi
+}
+
+# Where to find the policy validator, installed or built.
+#
+# A device has it on `PATH` -- it ships in the package -- and a source tree has
+# it under `target/`. Checked in that order, because on a device the installed
+# one is the one that matches the daemon, and a stale `target/` from an old
+# checkout would be the wrong answer to validate against.
+#
+# Deliberately never *builds* it, unlike `shepherd config validate`: this runs
+# as root, and a cargo build as root leaves a root-owned `target/` behind that
+# the developer's next plain build cannot write.
+_resolve_validator() {
+    local release="${1:-true}"
+    local installed
+    if installed="$(command -v shepherd-validate-config 2>/dev/null)" && [[ -x "$installed" ]]; then
+        echo "$installed"
+        return 0
+    fi
+    local built
+    built="$(get_validate_binary "$release")"
+    if [[ -x "$built" ]]; then
+        echo "$built"
+        return 0
+    fi
+    return 1
+}
+
+# Push a policy to the custodian, and say so.
+#
+# `install config` deploys the *example* config; this is the other direction --
+# take a policy and make it the one the daemon reads. That is the remedy
+# shepherdd's divergence warning names, so it has to exist as a command an
+# operator can actually run.
+#
+# With `--source` the policy comes straight from a path the administrator
+# names, and the kiosk user's home is never touched. That is the case hardening
+# creates: `harden apply` gives the kiosk user `nologin` and denies it SSH, so
+# an administrator cannot `su` in to edit the config the way every doc used to
+# assume. Editing it as root through `~kiosk/` still works and remains the
+# default when no `--source` is given, but routing an edit through the home
+# directory of the uid this issue exists to distrust should not be the only way
+# to reconfigure a device.
+#
+# Args:
+#   $1 -- the kiosk user whose custodian receives the policy (required)
+#   $2 -- policy to push (default: that user's ~/.config/shepherd/config.toml)
+#   $3 -- "true" for the release validator (default), "false" for debug
+install_policy() {
+    local user="${1:-}"
+    local source_config="${2:-}"
+    local release="${3:-true}"
+    require_root
+    [[ -n "$user" ]] || die "Usage: shepherd install policy --user USER [--source PATH]"
+    validate_user "$user"
+
+    local home src
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    if [[ -n "$source_config" ]]; then
+        src="$source_config"
+        [[ -f "$src" ]] || die "No policy at $src to push"
+    else
+        src="$home/.config/shepherd/config.toml"
+        [[ -f "$src" ]] \
+            || die "No policy at $src to push (name one with --source PATH)"
+    fi
+
+    # The signpost is not a policy. Pushing one would replace a device's real
+    # policy with an empty one -- every activity gone -- which is a bad enough
+    # outcome to be worth a check rather than a comment.
+    if _is_policy_placeholder "$src"; then
+        die "$src is the signpost shepherd leaves when the policy moves to the custodian, not a policy.
+  The live one is at $STATED_STATE_ROOT/$user/config.toml -- edit it with
+    sudoedit $STATED_STATE_ROOT/$user/config.toml
+  or install a different one with --source PATH."
+    fi
+
+    [[ -d "$STATED_STATE_ROOT/$user" ]] \
+        || die "No state custodian for $user; run 'shepherd install state --user $user' first"
+
+    # Validate before installing, not after. shepherdd tolerates a bad policy on
+    # *reload* -- it keeps the running one and logs -- but at startup
+    # `load_policy` is fatal, and since #172 a shepherdd that exits takes the
+    # session down with `loginctl terminate-session`. So a policy with a typo
+    # costs nothing until the next boot, and then costs the whole session, on a
+    # device whose kiosk user has no shell to fix it from. The validator already
+    # exists and the file is right here; there is no reason to find out later.
+    local validator
+    validator="$(_resolve_validator "$release")" \
+        || die "shepherd-validate-config not found; run 'shepherd build' first (from a source tree), \
+or reinstall the package, which ships it"
+    info "Validating $src..."
+    "$validator" "$src" \
+        || die "$src did not validate; nothing was pushed (the device keeps its current policy)"
+
+    install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
+        "$src" "$STATED_STATE_ROOT/$user/config.toml"
+    success "Pushed $src to $user's state custodian"
+    info "shepherdd reloads it within a second; no restart needed."
+}
+
+
 # Install the system-wide components: everything that is host-global and
 # DESTDIR-safe. This is the single source of truth for "what a system install
 # places" — `install_all` (from-source) and `package_deb` (.deb staging, in
@@ -590,6 +1109,7 @@ install_system() {
 
     install_bins "$prefix"
     install_firewall "$firewall_user" "true"
+    install_state "$firewall_user" "true"
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"
     install_udev
@@ -600,10 +1120,9 @@ install_system() {
 install_all() {
     local user="${1:-}"
     local prefix="${2:-$DEFAULT_PREFIX}"
-    local force="${3:-false}"
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install all --user USER [--prefix PREFIX] [--force]"
+        die "Usage: shepherd install all --user USER [--prefix PREFIX]"
     fi
 
     require_root
@@ -612,17 +1131,32 @@ install_all() {
     info "Installing shepherd-launcher (prefix: $prefix)..."
 
     install_system "$prefix" "$user"
-    install_config "$user" "" "$force"
+    install_config "$user" ""
     install_user_groups "$user"
 
     success "Installation complete!"
     info ""
     info "Next steps:"
-    info "  1. Edit user config at ~$user/.config/shepherd/config.toml"
+    # Step 1 named ~/.config/shepherd/config.toml until issue #157 moved the
+    # policy to the custodian and left a signpost there. An operator following
+    # the old wording would edit a file that decides nothing.
+    info "  1. Set the policy. It lives with the state custodian now --"
+    info "     $STATED_STATE_ROOT/$user/config.toml -- and"
+    info "     ~$user/.config/shepherd/config.toml is a signpost saying so."
+    info "     Edit it in place:"
+    info "       sudoedit $STATED_STATE_ROOT/$user/config.toml"
+    info "     or install one from anywhere, validated before it is applied:"
+    info "       sudo shepherd install policy --user $user --source PATH"
+    info "     Either way shepherdd reloads within a second."
     info "  2. Have $user log out and back in (so the new shepherd-firewall"
     info "     group membership takes effect for per-entry firewall rules)"
     info "  3. Select 'Shepherd Kiosk' session at login"
-    info "  4. Optionally run 'shepherd harden apply --user $user' for kiosk mode"
+    # Not "optionally" any more (issue #157): two of shepherd's own protections
+    # rest on hardening, so a device a child uses is not finished without it.
+    info "  4. Run 'shepherd harden apply --user $user'. On a device a child"
+    info "     uses this is not optional: it is what stops a second login for"
+    info "     $user, which the state custodian refuses to choose between, and"
+    info "     what stops PAM reading an environment $user wrote."
 }
 
 # --- Uninstall -------------------------------------------------------------
@@ -760,6 +1294,251 @@ uninstall_desktop_entry() {
 }
 
 # Remove the bluetoothd drop-in. Mirrors install_bluetooth_dropin.
+# Move a device's state back out of the custodian's directory (issue #157).
+#
+# The way out, and the reason `uninstall state` is not a one-way door.
+# `_migrate_state_for_user` *moved* the database and the admin record in, so a
+# device that goes back to keeping state in the kiosk user's home -- a rollback
+# to a build older than this one, or a deliberate `--no-state-custodian` --
+# finds that home empty and starts from zero: no usage history, no quota
+# balances, and an absent `admin.toml`, which `ClaimMachine::load` reads as
+# `Unclaimed`. A downgrade would look like a factory reset, and the next phone
+# to pair would claim the device. This is what stops that.
+#
+# Non-destructive in the same direction as the forward migration: a file
+# already in the home directory is never overwritten. On this path that copy is
+# the one shepherdd would read next, so it is the one that wins.
+#
+# Args:
+#   $1 -- the user whose state is being restored
+_restore_state_to_home() {
+    local user="$1"
+    local home state_dir data_dir moved=0 skipped=0
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    if [[ -z "$home" || ! -d "$home" ]]; then
+        warn "  $user has no home directory; leaving their state in $STATED_STATE_ROOT/$user"
+        return 0
+    fi
+    state_dir="$STATED_STATE_ROOT/$user"
+    [[ -d "$state_dir" ]] || return 0
+    data_dir="$home/.local/share/shepherdd"
+
+    info "Restoring $user's state to $data_dir..."
+    # Each component explicitly: `install -d` applies its mode and ownership to
+    # the *last* path element only, so a missing `~/.local/share` would be
+    # created root-owned and the user could then not write inside it.
+    local dir
+    for dir in "$home/.local" "$home/.local/share" "$data_dir"; do
+        [[ -d "$dir" ]] || install -d -m 0755 -o "$user" -g "$user" "$dir"
+    done
+
+    local src dst name side
+    for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
+        src="$state_dir/$name"
+        dst="$data_dir/$name"
+        [[ -f "$src" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; leaving $src where it is"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Moving $name back to $data_dir"
+        install -m 0600 -o "$user" -g "$user" "$src" "$dst"
+        # SQLite side files travel with the database, exactly as they do on the
+        # way in: a journal left behind does not match the database it belongs
+        # to, and the next open is what finds out.
+        for side in "-wal" "-shm" "-journal"; do
+            [[ -f "$src$side" ]] || continue
+            install -m 0600 -o "$user" -g "$user" "$src$side" "$dst$side"
+            rm -f "$src$side"
+        done
+        rm -f "$src"
+        moved=$((moved + 1))
+    done
+
+    # The policy moves back over the signpost, which is the one file here that
+    # is not worth preserving: it exists to say the policy went somewhere else,
+    # and it is about to be wrong. A real policy at that path is a different
+    # matter and is left alone like everything else.
+    src="$state_dir/$SHEPHERD_POLICY_FILE"
+    dst="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
+    if [[ -f "$src" ]]; then
+        if [[ -e "$dst" ]] && ! _is_policy_placeholder "$dst"; then
+            warn "  $dst is a real policy; leaving $src where it is"
+            skipped=$((skipped + 1))
+        else
+            info "  Moving the policy back to $dst"
+            install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
+            install -m 0644 -o "$user" -g "$user" "$src" "$dst"
+            rm -f "$src"
+            moved=$((moved + 1))
+        fi
+    fi
+
+    # The device's files are *copied* to each user, not moved, because before
+    # the custodian every user had their own -- that is the arrangement being
+    # restored. `_drop_shared_admin_files` removes the shared originals once
+    # every user has taken a copy.
+    local shared
+    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+        shared="$STATED_ADMIN_DIR/$name"
+        dst="$data_dir/$name"
+        [[ -f "$shared" ]] || continue
+        if [[ -e "$dst" ]]; then
+            warn "  $dst already exists; not replacing it from $shared"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        info "  Copying the device's $name to $data_dir"
+        install -m 0600 -o "$user" -g "$user" "$shared" "$dst"
+        moved=$((moved + 1))
+    done
+
+    if [[ "$moved" -gt 0 ]]; then
+        success "  Restored $moved file(s) to $data_dir"
+    fi
+    if [[ "$skipped" -gt 0 ]]; then
+        info "  $skipped file(s) needed a decision and were left for you (above)"
+    fi
+}
+
+# Remove the device's shared files, once every user has a copy.
+#
+# Separate from `_restore_state_to_home` because it must happen exactly once,
+# after the last user -- copying to two users and deleting after the first would
+# leave the second without an admin record.
+_drop_shared_admin_files() {
+    [[ -d "$STATED_ADMIN_DIR" ]] || return 0
+    local name
+    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+        rm -f "$STATED_ADMIN_DIR/$name"
+    done
+    # The sentinel is an instruction, not state; a stale one left here would
+    # factory-reset the device the next time a custodian is installed.
+    rm -f "$STATED_ADMIN_DIR/${SHEPHERD_UNMIGRATED_FILES[0]}"
+    rmdir "$STATED_ADMIN_DIR" 2>/dev/null || true
+}
+
+# Stop and disable every running instance of the custodian.
+#
+# Before removing its unit files, or systemd keeps a socket bound to a unit that
+# no longer exists. Before any restore too: the custodian holds the database
+# open for its whole life, and moving a file from under a live writer is how a
+# database gets a journal that no longer matches it.
+_stop_stated_instances() {
+    local unit
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        info "Stopping $unit"
+        systemctl disable --now "$unit" 2>/dev/null || true
+    done < <(systemctl list-units --all --no-legend 'shepherd-stated@*' 2>/dev/null \
+        | awk '{print $1}' | grep -E '^shepherd-stated@' || true)
+}
+
+# Put every user's state back in their home directory.
+#
+# Every user the custodian holds state for, not one named on the command line:
+# this runs when a device is leaving the custodian behind, and a device with two
+# kiosk users would otherwise have half its state moved and half left.
+_restore_state_for_every_user() {
+    [[ -d "$STATED_STATE_ROOT" ]] || return 0
+    local state_user_dir
+    for state_user_dir in "$STATED_STATE_ROOT"/*/; do
+        [[ -d "$state_user_dir" ]] || continue
+        state_user_dir="${state_user_dir%/}"
+        _restore_state_to_home "$(basename "$state_user_dir")"
+    done
+    # Only now that every user has their copy.
+    _drop_shared_admin_files
+}
+
+# Stop the custodian and return every user's state to their home, leaving the
+# binary and units alone.
+#
+# The half of `uninstall state --restore-to-home` a packaged device needs. There
+# the units and the binary belong to dpkg -- deleting them behind its back is
+# what `uninstall` already refuses to do to conffiles -- and `apt` is what
+# removes them. What `apt` cannot do is move a device's state back out of the
+# custodian first, and a downgrade that skips that starts from an empty database
+# and an unclaimed device.
+restore_state_to_home() {
+    require_root
+
+    _stop_stated_instances
+    _restore_state_for_every_user
+
+    success "Shepherd's state is back in the users' home directories"
+    info "  The custodian's binary and units are untouched; they belong to the"
+    info "  package manager. Downgrade or remove the package to finish."
+}
+
+# Remove the state custodian.
+#
+# Args:
+#   $1 -- "true" to move every user's state back to their home directory first
+#         (default "false": the state is left where it is)
+uninstall_state() {
+    local restore="${1:-false}"
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    # Stop and disable every instance first, or systemd keeps a socket bound to
+    # a unit file that no longer exists. This is also what has to happen before
+    # any restore: the custodian holds the database open for its whole life, and
+    # moving a file out from under a live writer is how a database gets a
+    # journal that no longer matches it.
+    if [[ -z "$destdir" ]]; then
+        _stop_stated_instances
+        [[ "$restore" == "true" ]] && _restore_state_for_every_user
+    fi
+
+    info "Removing the state custodian..."
+    remove_path "$destdir$STATED_PATH"
+    remove_path "$destdir$STATED_UNIT_DIR/$STATED_SOCKET_UNIT"
+    remove_path "$destdir$STATED_UNIT_DIR/$STATED_SERVICE_UNIT"
+
+    if [[ -z "$destdir" ]]; then
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    # The state itself is deliberately left behind, and so is the system user
+    # that owns it. A device's usage history, quota balances and BLE admin
+    # record are the things an uninstall is least entitled to destroy, and a
+    # reinstall picks them straight back up. Removing the uid would orphan them
+    # to a number rather than a name, which is worse than leaving both.
+    #
+    # Both directories, named separately: the per-user one holds the policy and
+    # the database, the shared one the admin record and the unbond queue. A
+    # message naming only the first would tell an operator they still had a BLE
+    # admin record and then point them at the directory it is not in.
+    local left=()
+    [[ -d "$destdir$STATED_STATE_ROOT" ]] && left+=("$destdir$STATED_STATE_ROOT")
+    [[ -d "$destdir$STATED_ADMIN_DIR" ]] && left+=("$destdir$STATED_ADMIN_DIR")
+    if [[ "${#left[@]}" -gt 0 ]]; then
+        if [[ "$restore" == "true" ]]; then
+            info "Left in place, owned by $STATED_USER: ${left[*]}"
+            info "  Anything still in them is named above; the rest went back to the"
+            info "  users' home directories. Remove them by hand once you are happy."
+        else
+            info "Left shepherd's state, owned by $STATED_USER:"
+            local dir
+            for dir in "${left[@]}"; do
+                case "$dir" in
+                    *"$STATED_ADMIN_DIR") info "    $dir  (BLE admin record, unbond queue)" ;;
+                    *) info "    $dir  (policy and usage database, per user)" ;;
+                esac
+            done
+            info "  Remove them by hand if you mean to discard a child's usage history"
+            info "  and this device's pairing."
+            info "  To put it back where shepherdd looks without the custodian, re-run with"
+            info "  --restore-to-home (a build older than issue #157 will not find it here)."
+        fi
+    fi
+
+    success "Removed the state custodian"
+}
+
 uninstall_bluetooth_dropin() {
     local destdir="${DESTDIR:-}"
 
@@ -814,9 +1593,11 @@ uninstall_udev() {
 # group memberships are left untouched (see the note atop the uninstall block).
 uninstall_system() {
     local prefix="${1:-$DEFAULT_PREFIX}"
+    local restore="${2:-false}"
 
     uninstall_bins "$prefix"
     uninstall_firewall
+    uninstall_state "$restore"
     uninstall_sway_config
     uninstall_desktop_entry "$prefix"
     uninstall_udev
@@ -826,12 +1607,13 @@ uninstall_system() {
 # Remove everything shepherd installed system-wide.
 uninstall_all() {
     local prefix="${1:-$DEFAULT_PREFIX}"
+    local restore="${2:-false}"
 
     require_root
 
     info "Uninstalling shepherd-launcher (prefix: $prefix)..."
 
-    uninstall_system "$prefix"
+    uninstall_system "$prefix" "$restore"
 
     success "Uninstall complete!"
 
@@ -855,12 +1637,17 @@ uninstall_main() {
     shift || true
 
     local prefix="$DEFAULT_PREFIX"
+    local restore="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --prefix)
                 prefix="$2"
                 shift 2
+                ;;
+            --restore-to-home)
+                restore="true"
+                shift
                 ;;
             *)
                 die "Unknown option: $1"
@@ -875,6 +1662,9 @@ uninstall_main() {
         firewall)
             uninstall_firewall
             ;;
+        state)
+            uninstall_state "$restore"
+            ;;
         sway-config)
             uninstall_sway_config
             ;;
@@ -885,7 +1675,7 @@ uninstall_main() {
             uninstall_udev
             ;;
         all)
-            uninstall_all "$prefix"
+            uninstall_all "$prefix" "$restore"
             ;;
         ""|help|-h|--help)
             cat <<EOF
@@ -897,6 +1687,8 @@ Removes files that 'shepherd install' placed system-wide. Per-user config
 Commands:
     bins              Remove the installed binaries
     firewall          Remove the firewall helper + polkit assets
+    state             Remove the state custodian's binary and units (the state
+                      itself, and the system user that owns it, are kept)
     sway-config       Remove the sway configuration
     desktop-entry     Remove the display-manager desktop entry
     udev              Remove the udev rule
@@ -905,6 +1697,12 @@ Commands:
 Options:
     --prefix PREFIX   Installation prefix the files were installed under
                       (default: $DEFAULT_PREFIX)
+    --restore-to-home For 'state' and 'all': move each user's database and BLE
+                      admin record back to ~/.local/share/shepherdd first, where
+                      a build without the state custodian looks for them. The
+                      migration that put them under the custodian moved them, so
+                      without this a downgrade starts from an empty database and
+                      an unclaimed device.
 
 Environment:
     DESTDIR           Removal root, mirroring 'install' (default: empty).
@@ -914,6 +1712,7 @@ Examples:
     shepherd uninstall bins
     shepherd uninstall bins --prefix /usr
     shepherd uninstall all
+    shepherd uninstall state --restore-to-home
 EOF
             ;;
         *)
@@ -930,7 +1729,6 @@ install_main() {
     local user=""
     local prefix="$DEFAULT_PREFIX"
     local source_config=""
-    local force="false"
     local release="true"
 
     # Parse remaining arguments
@@ -947,10 +1745,6 @@ install_main() {
             --source)
                 source_config="$2"
                 shift 2
-                ;;
-            --force|-f)
-                force="true"
-                shift
                 ;;
             --debug)
                 release="false"
@@ -973,8 +1767,14 @@ install_main() {
         firewall)
             install_firewall "$user" "$release"
             ;;
+        state)
+            install_state "$user" "$release"
+            ;;
+        policy)
+            install_policy "$user" "$source_config" "$release"
+            ;;
         config)
-            install_config "$user" "$source_config" "$force"
+            install_config "$user" "$source_config"
             ;;
         sway-config)
             install_sway_config "$prefix"
@@ -989,7 +1789,7 @@ install_main() {
             install_udev
             ;;
         all)
-            install_all "$user" "$prefix" "$force"
+            install_all "$user" "$prefix"
             ;;
         ""|help|-h|--help)
             cat <<EOF
@@ -998,6 +1798,12 @@ Usage: shepherd install <command> [OPTIONS]
 Commands:
     bins              Install release binaries
     firewall          Install the privileged firewall helper + polkit rule
+    state             Install the state custodian: its binary, systemd units
+                      and system user (issue #157)
+    policy            Push a policy to the custodian, making it the one
+                      shepherdd reads. Takes the user's edited
+                      ~/.config/shepherd/config.toml, or any file named with
+                      --source. Validated before it is installed.
     config            Deploy user configuration
     sway-config       Install sway configuration
     desktop-entry     Install display manager desktop entry
@@ -1012,8 +1818,9 @@ Options:
                       (required for config / groups / all; optional for
                       firewall)
     --prefix PREFIX   Installation prefix (default: $DEFAULT_PREFIX)
-    --source CONFIG   Source config file (default: config.example.toml)
-    --force, -f       Overwrite existing configuration files
+    --source CONFIG   Source config file. For 'config', what to deploy
+                      (default: config.example.toml); for 'policy', the policy
+                      to push (default: the user's own config.toml)
     --release         Use release binaries (default)
     --debug           Use debug binaries (for 'firewall' during development)
 
@@ -1030,7 +1837,9 @@ Notes:
 Examples:
     shepherd install bins --prefix /usr/local
     shepherd install firewall --user kiosk
-    shepherd install config --user kiosk --force
+    shepherd install config --user kiosk
+    shepherd install policy --user kiosk
+    shepherd install policy --user kiosk --source ./new-config.toml
     shepherd install groups --user kiosk
     shepherd install udev
     shepherd install all --user kiosk --prefix /usr

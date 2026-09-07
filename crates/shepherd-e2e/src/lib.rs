@@ -393,6 +393,13 @@ impl TestHarness {
             } else {
                 &["--no-restrict-ipc-peers"][..]
             })
+            // Unconditional, unlike the peer check above: there is no state
+            // custodian for the harness to talk to, and it starts its own
+            // shepherdd with an explicit `-d <temp dir>`, so it keeps the
+            // pre-#157 local store. Without this every e2e run would fall back
+            // and raise a Critical diagnostic several tests would have to know
+            // to ignore (issue #157).
+            .arg("--no-state-custodian")
             // The suite stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` and
             // points `SHEPHERD_FIREWALL_HELPER` at a fake, so it needs the
             // daemon to take binaries from the environment (issue #144). Its
@@ -696,15 +703,46 @@ pub mod proc_inspect {
     use super::*;
     use std::fs;
 
-    /// Returns true if any process owned by the current user matches the
-    /// given command basename and includes the given session-id-ish marker
-    /// in its argv (usually the path to a temp file).
+    /// Returns true if any process this harness could have launched matches
+    /// the given command basename. See [`find_processes_matching`] for what
+    /// "could have launched" is narrowed to, and why.
     pub fn any_process_matching(comm: &str) -> bool {
         !find_processes_matching(comm).is_empty()
     }
 
+    /// The pids of processes owned by the current user whose command name is
+    /// `comm` *and* whose `argv[0]` is the absolute path this harness's
+    /// generated config launches activities by (`/usr/bin/<comm>`).
+    ///
+    /// Both filters are load-bearing, and neither is theoretical. The scan
+    /// walks all of `/proc`, so without the uid check it answers for every
+    /// user on the machine -- a shared CI runner, or a developer box with a
+    /// kiosk session on it, and this suite would report an activity that is
+    /// not its own. Without the `argv[0]` check any `sleep` counts, including
+    /// the ones in a developer's own `until ...; do sleep 1; done` shell loop
+    /// while they watch a test run; that has already produced false failures
+    /// here, and they are expensive because they look exactly like the bug the
+    /// test is written to catch.
+    ///
+    /// `argv[0]` is what separates the two: the config launches
+    /// `/usr/bin/sleep` by absolute path, while a shell running `sleep 1`
+    /// execs it with a bare `sleep`. Matching the whole argv would be tighter
+    /// still, but it would couple this to the durations in the config, and the
+    /// path alone is enough to exclude everything that is not started the way
+    /// an activity is.
+    ///
+    /// It is still not an isolation boundary: two concurrent runs of this
+    /// suite as the same user would see each other's activities. Cargo runs a
+    /// crate's tests in one process, and these tests already serialise, so
+    /// that costs nothing today -- but a second checkout running at the same
+    /// time would need a per-run marker in the argv rather than a sharper
+    /// filter here.
     pub fn find_processes_matching(comm: &str) -> Vec<u32> {
+        use std::os::unix::fs::MetadataExt;
+
         let mut out = vec![];
+        let me = nix::unistd::getuid().as_raw();
+        let launched_as = format!("/usr/bin/{comm}");
         let Ok(entries) = fs::read_dir("/proc") else {
             return out;
         };
@@ -712,10 +750,28 @@ pub mod proc_inspect {
             let name = entry.file_name();
             let Some(s) = name.to_str() else { continue };
             let Ok(pid) = s.parse::<u32>() else { continue };
+
+            // `/proc/<pid>` is owned by the uid the process runs as.
+            let Ok(meta) = fs::metadata(format!("/proc/{pid}")) else {
+                continue;
+            };
+            if meta.uid() != me {
+                continue;
+            }
+
             let Ok(this_comm) = fs::read_to_string(format!("/proc/{pid}/comm")) else {
                 continue;
             };
-            if this_comm.trim() == comm {
+            if this_comm.trim() != comm {
+                continue;
+            }
+
+            // argv is NUL-separated; a kernel thread's is empty.
+            let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            let argv0 = cmdline.split(|b| *b == 0).next().unwrap_or_default();
+            if argv0 == launched_as.as_bytes() {
                 out.push(pid);
             }
         }
@@ -747,4 +803,56 @@ pub mod proc_inspect {
 pub fn json_body(resp: &HttpResponse) -> Result<Value> {
     resp.json()
         .with_context(|| format!("response body was not JSON: {:?}", resp.body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proc_inspect::find_processes_matching;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// Poll, because `spawn` returns after the fork and `/proc/<pid>/comm`
+    /// still reads the parent's name until the exec lands.
+    fn wait_for(pid: u32) -> Vec<u32> {
+        let start = Instant::now();
+        loop {
+            let found = find_processes_matching("sleep");
+            if found.contains(&pid) || start.elapsed() > Duration::from_secs(5) {
+                return found;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The scan walks all of `/proc`, so it has to distinguish an activity
+    /// from any other `sleep` the same user is running. A developer watching a
+    /// test run with `until ...; do sleep 1; done` used to fail this suite,
+    /// because their shell loop counted as a running activity.
+    #[test]
+    fn ignores_a_sleep_that_was_not_launched_the_way_an_activity_is() {
+        // A shell runs `sleep` found on PATH, so argv[0] is the bare name.
+        let mut shellish = Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn a shell-style sleep");
+        // The generated config launches `/usr/bin/sleep`, so argv[0] is the
+        // absolute path.
+        let mut activityish = Command::new("/usr/bin/sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn an activity-style sleep");
+
+        let found = wait_for(activityish.id());
+
+        let seen_activity = found.contains(&activityish.id());
+        let seen_shell = found.contains(&shellish.id());
+
+        let _ = shellish.kill();
+        let _ = activityish.kill();
+        let _ = shellish.wait();
+        let _ = activityish.wait();
+
+        assert!(seen_activity, "an activity's own process must be found");
+        assert!(!seen_shell, "a bare `sleep` must not count as an activity");
+    }
 }

@@ -13,8 +13,14 @@
 package com.armeafamily.shepherd.companion.domain
 
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonClassDiscriminator
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.modules.SerializersModule
@@ -49,9 +55,27 @@ data class AdminRecord(
     val role: AdminRole,
 )
 
-@Serializable
-enum class AdminRole {
-    @SerialName("admin") ADMIN,
+@Serializable(with = AdminRole.Serializer::class)
+enum class AdminRole(val wire: String) {
+    ADMIN("admin"),
+    /**
+     * A [AdminRole] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<AdminRole> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("AdminRole", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: AdminRole) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): AdminRole {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -83,15 +107,26 @@ data class AudioOutput(
  * nondescript `analog-output` route and no udev form-factor — so `Unknown` is a
  * routine outcome, not a failure.
  */
-@Serializable
-enum class AudioOutputKind {
-    @SerialName("speakers") SPEAKERS,
-    @SerialName("headphones") HEADPHONES,
-    @SerialName("hdmi") HDMI,
-    @SerialName("digital") DIGITAL,
-    @SerialName("line_out") LINE_OUT,
-    @SerialName("bluetooth") BLUETOOTH,
-    @SerialName("unknown") UNKNOWN,
+@Serializable(with = AudioOutputKind.Serializer::class)
+enum class AudioOutputKind(val wire: String) {
+    SPEAKERS("speakers"),
+    HEADPHONES("headphones"),
+    HDMI("hdmi"),
+    DIGITAL("digital"),
+    LINE_OUT("line_out"),
+    BLUETOOTH("bluetooth"),
+    UNKNOWN("unknown");
+
+    internal object Serializer : KSerializer<AudioOutputKind> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("AudioOutputKind", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: AudioOutputKind) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): AudioOutputKind {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -195,10 +230,28 @@ data class BrightnessRestrictions(
     val minBrightness: Long? = null,
 )
 
-@Serializable
-enum class ClaimStateTag {
-    @SerialName("unclaimed") UNCLAIMED,
-    @SerialName("claimed") CLAIMED,
+@Serializable(with = ClaimStateTag.Serializer::class)
+enum class ClaimStateTag(val wire: String) {
+    UNCLAIMED("unclaimed"),
+    CLAIMED("claimed"),
+    /**
+     * A [ClaimStateTag] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<ClaimStateTag> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("ClaimStateTag", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: ClaimStateTag) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): ClaimStateTag {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -270,26 +323,26 @@ data class Diagnostic(
  * What is wrong. An enum rather than a string so the UIs can special-case
  * presentation and the wire drift test covers the variant set.
  */
-@Serializable
-enum class DiagnosticCode {
+@Serializable(with = DiagnosticCode.Serializer::class)
+enum class DiagnosticCode(val wire: String) {
     /**
      * Per-entry firewall enforcement is unavailable on this host — the helper
      * is not installed, or polkit denies it.
      */
-    @SerialName("firewall_unenforceable") FIREWALL_UNENFORCEABLE,
+    FIREWALL_UNENFORCEABLE("firewall_unenforceable"),
     /**
      * This entry configures a firewall that cannot be applied, so it will not
      * launch. Distinct from [`Self::FirewallUnenforceable`], which is the
      * host-wide cause: this one names an activity the child has lost.
      */
-    @SerialName("firewall_not_applied") FIREWALL_NOT_APPLIED,
+    FIREWALL_NOT_APPLIED("firewall_not_applied"),
     /**
      * shepherd cannot talk to the compositor, so it cannot see what is on
      * screen. The escape sweep closes nothing and no orphaned window is
      * reported, which is indistinguishable from a clear screen unless it is
      * said out loud (issue #147).
      */
-    @SerialName("compositor_unreachable") COMPOSITOR_UNREACHABLE,
+    COMPOSITOR_UNREACHABLE("compositor_unreachable"),
     /**
      * The compositor's IPC socket is still reachable by every process at this
      * uid, because hardening it failed (issue #144).
@@ -299,7 +352,7 @@ enum class DiagnosticCode {
      * only trace is one log line, and a device ships without a protection it
      * is configured to have.
      */
-    @SerialName("compositor_not_hardened") COMPOSITOR_NOT_HARDENED,
+    COMPOSITOR_NOT_HARDENED("compositor_not_hardened"),
     /**
      * Something replaced or removed shepherdd's management socket, so the
      * daemon is no longer reachable at the path its clients use (issue #144).
@@ -312,7 +365,7 @@ enum class DiagnosticCode {
      * a breach; without saying so, it looks like a launcher that stopped
      * working for no reason.
      */
-    @SerialName("ipc_socket_replaced") IPC_SOCKET_REPLACED,
+    IPC_SOCKET_REPLACED("ipc_socket_replaced"),
     /**
      * shepherdd's own management socket is reachable by processes that are
      * not part of the session — the peer allow-list is not armed, or it is
@@ -322,32 +375,53 @@ enum class DiagnosticCode {
      * running, so nothing else about the device looks wrong and the downgrade
      * is invisible unless it is said out loud.
      */
-    @SerialName("ipc_socket_not_hardened") IPC_SOCKET_NOT_HARDENED,
+    IPC_SOCKET_NOT_HARDENED("ipc_socket_not_hardened"),
+    /**
+     * shepherd's policy and state are files at the uid activities run as,
+     * because this device has no state custodian (issue #157).
+     *
+     * The session is deliberately left running — an unprotected kiosk beats a
+     * child staring at a dead screen — so, like
+     * [`Self::IpcSocketNotHardened`], nothing else about the device looks
+     * wrong and the downgrade is invisible unless it is said out loud.
+     *
+     * Only for a device that never had one: a packaged install where
+     * `shepherd-admin setup-user` has not run, or one deliberately left
+     * without. A device whose custodian *is* installed and unreachable does
+     * not reach this — it refuses to start, because its state has moved and
+     * running anyway would mean an empty database and a launcher with no
+     * activities, which looks like a quiet evening rather than a fault.
+     *
+     * Raised only at startup. A device that fell back mid-session would be a
+     * device an activity could *push* into falling back, which is the one
+     * thing this must not be.
+     */
+    STATE_NOT_PROTECTED("state_not_protected"),
     /**
      * Something at this uid tried to drive the daemon from outside the
      * session and was refused (issue #144). Worth an administrator's
      * attention: an activity probing the management socket is not something
      * that happens by accident.
      */
-    @SerialName("ipc_peer_rejected") IPC_PEER_REJECTED,
+    IPC_PEER_REJECTED("ipc_peer_rejected"),
     /**
      * This entry sets a browser policy that its kind does not support, so the
      * policy is ignored.
      */
-    @SerialName("browser_policy_ignored") BROWSER_POLICY_IGNORED,
+    BROWSER_POLICY_IGNORED("browser_policy_ignored"),
     /**
      * A media activity references YouTube but `yt-dlp` is not installed.
      */
-    @SerialName("yt_dlp_missing") YT_DLP_MISSING,
+    YT_DLP_MISSING("yt_dlp_missing"),
     /**
      * Free space on the media cache volume is below the configured floor, so
      * prefetch has stopped.
      */
-    @SerialName("media_cache_disk_low") MEDIA_CACHE_DISK_LOW,
+    MEDIA_CACHE_DISK_LOW("media_cache_disk_low"),
     /**
      * A media library could not be read or parsed.
      */
-    @SerialName("media_library_unreadable") MEDIA_LIBRARY_UNREADABLE,
+    MEDIA_LIBRARY_UNREADABLE("media_library_unreadable"),
     /**
      * An administrator asked for a media refresh (issue #165) and it could not
      * reach what it was told to re-fetch — the device is offline, the playlist
@@ -360,11 +434,11 @@ enum class DiagnosticCode {
      * whatever it had cached, so this is a refresh that did not happen rather
      * than a library that is gone.
      */
-    @SerialName("media_refresh_failed") MEDIA_REFRESH_FAILED,
+    MEDIA_REFRESH_FAILED("media_refresh_failed"),
     /**
      * No sound backend was detected; volume control does nothing.
      */
-    @SerialName("no_sound_backend") NO_SOUND_BACKEND,
+    NO_SOUND_BACKEND("no_sound_backend"),
     /**
      * The sound backend is present but its device topology could not be read,
      * so which output is selected and which are plugged in are both unknown.
@@ -372,43 +446,61 @@ enum class DiagnosticCode {
      * per-output volume limits are running on the last state seen rather than
      * on what is true now.
      */
-    @SerialName("audio_topology_unreadable") AUDIO_TOPOLOGY_UNREADABLE,
+    AUDIO_TOPOLOGY_UNREADABLE("audio_topology_unreadable"),
     /**
      * No readable input devices, so input-gated entries cannot be evaluated.
      */
-    @SerialName("input_devices_unavailable") INPUT_DEVICES_UNAVAILABLE,
+    INPUT_DEVICES_UNAVAILABLE("input_devices_unavailable"),
     /**
      * The BlueZ pairing agent could not be registered; a new phone will not be
      * shown a pairing code.
      */
-    @SerialName("ble_pairing_agent_unavailable") BLE_PAIRING_AGENT_UNAVAILABLE,
+    BLE_PAIRING_AGENT_UNAVAILABLE("ble_pairing_agent_unavailable"),
     /**
      * A RetroArch entry names a libretro core that is not installed, so the
      * activity will not launch.
      */
-    @SerialName("retroarch_core_missing") RETROARCH_CORE_MISSING,
+    RETROARCH_CORE_MISSING("retroarch_core_missing"),
     /**
      * A RetroArch entry's content — its ROM or disc image — is not there, so
      * the activity will not launch.
      */
-    @SerialName("retroarch_content_missing") RETROARCH_CONTENT_MISSING,
+    RETROARCH_CONTENT_MISSING("retroarch_content_missing"),
     /**
      * An ebook entry's book is not there, so the activity opens on an error
      * instead of a page.
      */
-    @SerialName("ebook_book_missing") EBOOK_BOOK_MISSING,
+    EBOOK_BOOK_MISSING("ebook_book_missing"),
     /**
      * An ebook entry's reader, or the backend for that book's format, is not
      * installed. On Ubuntu the EPUB backend ships separately from Okular, so
      * this is the likely first-run failure.
      */
-    @SerialName("ebook_reader_missing") EBOOK_READER_MISSING,
+    EBOOK_READER_MISSING("ebook_reader_missing"),
     /**
      * An ebook entry lays the book out in pages on a device that has no way
      * to turn one: a touchscreen and nothing else. Reading would stop at the
      * end of the first page.
      */
-    @SerialName("ebook_no_page_turn") EBOOK_NO_PAGE_TURN,
+    EBOOK_NO_PAGE_TURN("ebook_no_page_turn"),
+    /**
+     * A [DiagnosticCode] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<DiagnosticCode> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("DiagnosticCode", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: DiagnosticCode) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): DiagnosticCode {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -435,21 +527,39 @@ data class DiagnosticSet(
 /**
  * How bad it is. Declaration order is the sort order: `Critical` first.
  */
-@Serializable
-enum class DiagnosticSeverity {
+@Serializable(with = DiagnosticSeverity.Serializer::class)
+enum class DiagnosticSeverity(val wire: String) {
     /**
      * The configuration claims a protection the device is not providing.
      * Unmissable in both UIs.
      */
-    @SerialName("critical") CRITICAL,
+    CRITICAL("critical"),
     /**
      * A feature is unavailable or degraded.
      */
-    @SerialName("warning") WARNING,
+    WARNING("warning"),
     /**
      * Worth knowing; nothing is broken.
      */
-    @SerialName("info") INFO,
+    INFO("info"),
+    /**
+     * A [DiagnosticSeverity] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<DiagnosticSeverity> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("DiagnosticSeverity", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: DiagnosticSeverity) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): DiagnosticSeverity {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -496,23 +606,41 @@ sealed interface DiagnosticSubject {
  * Exactly one logical output is ever active in every variant, so the
  * one-activity-at-a-time invariant always holds.
  */
-@Serializable
-enum class DisplayMode {
+@Serializable(with = DisplayMode.Serializer::class)
+enum class DisplayMode(val wire: String) {
     /**
      * Only the internal/primary panel is active — the state when no external
      * display is connected.
      */
-    @SerialName("single_internal") SINGLE_INTERNAL,
+    SINGLE_INTERNAL("single_internal"),
     /**
      * The external display mirrors the primary. Default whenever an external
      * display connects.
      */
-    @SerialName("mirror") MIRROR,
+    MIRROR("mirror"),
     /**
      * The primary panel is disabled and the external display drives the
      * session at its native resolution.
      */
-    @SerialName("external_only") EXTERNAL_ONLY,
+    EXTERNAL_ONLY("external_only"),
+    /**
+     * A [DisplayMode] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<DisplayMode> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("DisplayMode", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: DisplayMode) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): DisplayMode {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -541,24 +669,24 @@ data class DurationSecs(
 /**
  * How an [`EntryKind::Ebook`] activity lays pages out.
  */
-@Serializable
-enum class EbookLayout {
+@Serializable(with = EbookLayout.Serializer::class)
+enum class EbookLayout(val wire: String) {
     /**
      * Two pages side by side, like an open book. Fits a landscape panel: a
      * single portrait page fitted to 16:9 is letterboxed and small.
      */
-    @SerialName("facing") FACING,
+    FACING("facing"),
     /**
      * The same, with the first page alone — so the spreads fall where a
      * printed book's would, cover on its own and chapter openings on the
      * right. The default: it costs nothing over `facing` and matches what a
      * child holding a paper book expects.
      */
-    @SerialName("facing_first_centered") FACING_FIRST_CENTERED,
+    FACING_FIRST_CENTERED("facing_first_centered"),
     /**
      * One page at a time. The right choice on a portrait screen.
      */
-    @SerialName("single") SINGLE,
+    SINGLE("single"),
     /**
      * One continuous column, scrolled rather than paged, fitted to the width.
      *
@@ -568,7 +696,25 @@ enum class EbookLayout {
      * only the pinch gesture, and has no swipe-to-turn anywhere in its
      * desktop view.
      */
-    @SerialName("scroll") SCROLL,
+    SCROLL("scroll"),
+    /**
+     * A [EbookLayout] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<EbookLayout> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("EbookLayout", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: EbookLayout) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): EbookLayout {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -577,14 +723,32 @@ enum class EbookLayout {
  * Open rather than closed on purpose: the config surface here — a book and a
  * place in it — is reader-agnostic, even though only one reader is wired up.
  */
-@Serializable
-enum class EbookViewer {
+@Serializable(with = EbookViewer.Serializer::class)
+enum class EbookViewer(val wire: String) {
     /**
      * Okular (`okular`), with `okular-extra-backends` for EPUB. Covers EPUB,
      * PDF, CBZ, DjVu and FictionBook, and is the only reader in Ubuntu with a
      * documented way to disable its own escape hatches.
      */
-    @SerialName("okular") OKULAR,
+    OKULAR("okular"),
+    /**
+     * A [EbookViewer] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<EbookViewer> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("EbookViewer", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: EbookViewer) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): EbookViewer {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -874,17 +1038,35 @@ sealed interface EntryKind {
 /**
  * Entry kind tag for capability matching
  */
-@Serializable
-enum class EntryKindTag {
-    @SerialName("process") PROCESS,
-    @SerialName("snap") SNAP,
-    @SerialName("steam") STEAM,
-    @SerialName("flatpak") FLATPAK,
-    @SerialName("vm") VM,
-    @SerialName("media") MEDIA,
-    @SerialName("retroarch") RETROARCH,
-    @SerialName("ebook") EBOOK,
-    @SerialName("custom") CUSTOM,
+@Serializable(with = EntryKindTag.Serializer::class)
+enum class EntryKindTag(val wire: String) {
+    PROCESS("process"),
+    SNAP("snap"),
+    STEAM("steam"),
+    FLATPAK("flatpak"),
+    VM("vm"),
+    MEDIA("media"),
+    RETROARCH("retroarch"),
+    EBOOK("ebook"),
+    CUSTOM("custom"),
+    /**
+     * A [EntryKindTag] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<EntryKindTag> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("EntryKindTag", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: EntryKindTag) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): EntryKindTag {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -993,21 +1175,39 @@ data class HealthStatus(
  * top. `Right` is deliberately not offered yet — nothing in the layout
  * forecloses it, but no config or code path ships for it.
  */
-@Serializable
-enum class HudOrientation {
+@Serializable(with = HudOrientation.Serializer::class)
+enum class HudOrientation(val wire: String) {
     /**
      * A horizontal bar along the top edge. The default, and what every device
      * shipped before issue #171 uses.
      */
-    @SerialName("top") TOP,
+    TOP("top"),
     /**
      * A horizontal bar along the bottom edge.
      */
-    @SerialName("bottom") BOTTOM,
+    BOTTOM("bottom"),
     /**
      * A vertical bar down the left edge.
      */
-    @SerialName("left") LEFT,
+    LEFT("left"),
+    /**
+     * A [HudOrientation] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<HudOrientation> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("HudOrientation", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: HudOrientation) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): HudOrientation {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1021,40 +1221,58 @@ enum class HudOrientation {
  * grab or produce the touchscreen, so at most one of them can be active at a
  * time.
  */
-@Serializable
-enum class InputCompatMode {
+@Serializable(with = InputCompatMode.Serializer::class)
+enum class InputCompatMode(val wire: String) {
     /**
      * Grab touchscreens and emit synthesized pointer events via
      * `zwlr_virtual_pointer_v1` for the lifetime of the activity.
      */
-    @SerialName("touch_to_mouse") TOUCH_TO_MOUSE,
+    TOUCH_TO_MOUSE("touch_to_mouse"),
     /**
      * Grab absolute pointers / tablets and emit synthesized touch events for
      * activities that only handle touch input — the inverse of
      * `TouchToMouse`. Useful for developing touch support against
      * mouse/pen-only hardware, or VMs whose pointer is an absolute tablet.
      */
-    @SerialName("tablet_to_touch") TABLET_TO_TOUCH,
+    TABLET_TO_TOUCH("tablet_to_touch"),
     /**
      * Grab every touchscreen and discard its events for the lifetime of the
      * activity, effectively disabling the touchscreen. Unlike `TouchToMouse`
      * it emits nothing — useful for activities that misbehave on touch input
      * but should still be playable with a mouse or gamepad.
      */
-    @SerialName("disable_touch") DISABLE_TOUCH,
+    DISABLE_TOUCH("disable_touch"),
     /**
      * Remap a gamepad to mouse + keyboard using the productivity preset:
      * triggers = LMB, shoulders = RMB, left stick = mouse, right stick =
      * scroll, stick-click toggles which stick drives the mouse, D-pad =
      * arrow keys, A = Enter, Start = Escape.
      */
-    @SerialName("gamepad_productivity") GAMEPAD_PRODUCTIVITY,
+    GAMEPAD_PRODUCTIVITY("gamepad_productivity"),
     /**
      * Remap a gamepad to mouse + keyboard using the GPD/FPS preset:
      * LT = LMB, RT = RMB, LB = MMB, left stick = WASD, right stick = mouse,
      * D-pad = scroll, A = Space, X = R, B = E, Y = F.
      */
-    @SerialName("gamepad_gpd") GAMEPAD_GPD,
+    GAMEPAD_GPD("gamepad_gpd"),
+    /**
+     * A [InputCompatMode] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<InputCompatMode> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("InputCompatMode", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: InputCompatMode) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): InputCompatMode {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1071,24 +1289,42 @@ enum class InputCompatMode {
  * marks them as future work and this enum is closed, so configuring one is a
  * parse error rather than a silently-ignored value.
  */
-@Serializable
-enum class InputDeviceType {
+@Serializable(with = InputDeviceType.Serializer::class)
+enum class InputDeviceType(val wire: String) {
     /**
      * A relative pointing device (mouse, trackball, trackpad).
      */
-    @SerialName("mouse") MOUSE,
+    MOUSE("mouse"),
     /**
      * A finger touchscreen (an absolute, direct-input touch device).
      */
-    @SerialName("touch") TOUCH,
+    TOUCH("touch"),
     /**
      * A physical alphabetic keyboard.
      */
-    @SerialName("keyboard") KEYBOARD,
+    KEYBOARD("keyboard"),
     /**
      * A gamepad / game controller / joystick.
      */
-    @SerialName("gamepad") GAMEPAD,
+    GAMEPAD("gamepad"),
+    /**
+     * A [InputDeviceType] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<InputDeviceType> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("InputDeviceType", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: InputDeviceType) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): InputDeviceType {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1115,33 +1351,51 @@ data class InternetStatusView(
  * This enum is the canonical catalog: config validates against it, and the
  * host adapter attaches the per-kind CEF detection signatures.
  */
-@Serializable
-enum class InterstitialKind {
+@Serializable(with = InterstitialKind.Serializer::class)
+enum class InterstitialKind(val wire: String) {
     /**
      * "Unable to Sync" Steam Cloud warning shown when launching offline with
      * un-uploaded saves. Affirmative action: "Play anyway". (Verified.)
      */
-    @SerialName("cloud_sync") CLOUD_SYNC,
+    CLOUD_SYNC("cloud_sync"),
     /**
      * "Grab a controller…" advisory for controller-recommended games launched
      * without a controller. Affirmative action: "OK". (Verified.)
      */
-    @SerialName("controller_recommended") CONTROLLER_RECOMMENDED,
+    CONTROLLER_RECOMMENDED("controller_recommended"),
     /**
      * First-launch "intro to Steam Input" notice. Affirmative action: "OK".
      * (Best-effort signature.)
      */
-    @SerialName("steam_input_intro") STEAM_INPUT_INTRO,
+    STEAM_INPUT_INTRO("steam_input_intro"),
     /**
      * Game *requires* a controller. Dismissing launches a game that cannot be
      * played without one, so this is risky. (Best-effort signature.)
      */
-    @SerialName("controller_required") CONTROLLER_REQUIRED,
+    CONTROLLER_REQUIRED("controller_required"),
     /**
      * Game requires a VR headset. Dismissing launches something unusable
      * without VR hardware, so this is risky. (Best-effort signature.)
      */
-    @SerialName("vr_required") VR_REQUIRED,
+    VR_REQUIRED("vr_required"),
+    /**
+     * A [InterstitialKind] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<InterstitialKind> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("InterstitialKind", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: InterstitialKind) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): InterstitialKind {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1161,16 +1415,34 @@ typealias LimitSubject = String
 /**
  * How a [`EntryKind::Media`] activity opens.
  */
-@Serializable
-enum class MediaMode {
+@Serializable(with = MediaMode.Serializer::class)
+enum class MediaMode(val wire: String) {
     /**
      * Open the poster grid over the whole library; the user picks items.
      */
-    @SerialName("browse") BROWSE,
+    BROWSE("browse"),
     /**
      * Play a single item end to end; the grid is never shown.
      */
-    @SerialName("play") PLAY,
+    PLAY("play"),
+    /**
+     * A [MediaMode] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<MediaMode> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("MediaMode", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: MediaMode) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): MediaMode {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1180,24 +1452,42 @@ enum class MediaMode {
  * config layer don't depend on the media crates. `shepherd-media`'s `cli`
  * module holds the test that keeps the two spellings in agreement.
  */
-@Serializable
-enum class MediaQuality {
+@Serializable(with = MediaQuality.Serializer::class)
+enum class MediaQuality(val wire: String) {
     /**
      * No height restriction — the best available.
      */
-    @SerialName("best") BEST,
+    BEST("best"),
     /**
      * Up to 1080p (default).
      */
-    @SerialName("1080p") Q_1080P,
+    Q_1080P("1080p"),
     /**
      * Up to 720p.
      */
-    @SerialName("720p") Q_720P,
+    Q_720P("720p"),
     /**
      * Up to 480p.
      */
-    @SerialName("480p") Q_480P,
+    Q_480P("480p"),
+    /**
+     * A [MediaQuality] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<MediaQuality> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("MediaQuality", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: MediaQuality) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): MediaQuality {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1206,32 +1496,50 @@ enum class MediaQuality {
  * Mirrors `shepherd-media`'s `--sort-by` values; see [`MediaQuality`] for
  * where that agreement is tested.
  */
-@Serializable
-enum class MediaSortBy {
+@Serializable(with = MediaSortBy.Serializer::class)
+enum class MediaSortBy(val wire: String) {
     /**
      * Preserve the order from the library file or playlist (default).
      */
-    @SerialName("library") LIBRARY,
+    LIBRARY("library"),
     /**
      * Display title, case-insensitive.
      */
-    @SerialName("title") TITLE,
+    TITLE("title"),
     /**
      * Stable item id.
      */
-    @SerialName("id") ID,
+    ID("id"),
     /**
      * Item kind (audio before video).
      */
-    @SerialName("kind") KIND,
+    KIND("kind"),
     /**
      * Optional category string, case-insensitive.
      */
-    @SerialName("category") CATEGORY,
+    CATEGORY("category"),
     /**
      * Optional duration in seconds, ascending.
      */
-    @SerialName("duration") DURATION,
+    DURATION("duration"),
+    /**
+     * A [MediaSortBy] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<MediaSortBy> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("MediaSortBy", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: MediaSortBy) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): MediaSortBy {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1406,8 +1714,8 @@ sealed interface ReasonCode {
  * in-game save (SRAM / battery save) is flushed on a clean exit either way,
  * and periodically while playing.
  */
-@Serializable
-enum class RetroarchSaveState {
+@Serializable(with = RetroarchSaveState.Serializer::class)
+enum class RetroarchSaveState(val wire: String) {
     /**
      * Write a save state when the activity closes and load it on the next
      * open, so the child resumes exactly where they stopped — mid-battle,
@@ -1416,12 +1724,30 @@ enum class RetroarchSaveState {
      * Note this makes the console's own power-on screen unreachable, which is
      * what the HUD's reset button is for.
      */
-    @SerialName("auto") AUTO,
+    AUTO("auto"),
     /**
      * Leave save states alone. Every launch boots the content from scratch;
      * only the in-game save carries over.
      */
-    @SerialName("off") OFF,
+    OFF("off"),
+    /**
+     * A [RetroarchSaveState] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<RetroarchSaveState> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("RetroarchSaveState", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: RetroarchSaveState) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): RetroarchSaveState {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1568,24 +1894,24 @@ data class SessionInfo(
 /**
  * Current session state
  */
-@Serializable
-enum class SessionState {
+@Serializable(with = SessionState.Serializer::class)
+enum class SessionState(val wire: String) {
     /**
      * Approved and spawning; the activity has not mapped a window yet.
      */
-    @SerialName("launching") LAUNCHING,
+    LAUNCHING("launching"),
     /**
      * The activity is running normally.
      */
-    @SerialName("running") RUNNING,
+    RUNNING("running"),
     /**
      * Running, and at least one time warning has been issued.
      */
-    @SerialName("warned") WARNED,
+    WARNED("warned"),
     /**
      * Past its deadline and being wound down.
      */
-    @SerialName("expiring") EXPIRING,
+    EXPIRING("expiring"),
     /**
      * Teardown has been requested and the activity is being stopped.
      *
@@ -1596,26 +1922,62 @@ enum class SessionState {
      * that their press registered, which is why they pressed again on
      * 2026-08-20 (issue #136).
      */
-    @SerialName("stopping") STOPPING,
+    STOPPING("stopping"),
     /**
      * Settled and cleared; no activity is running.
      */
-    @SerialName("ended") ENDED,
+    ENDED("ended"),
+    /**
+     * A [SessionState] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<SessionState> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("SessionState", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: SessionState) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): SessionState {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
  * Stop mode for session termination
  */
-@Serializable
-enum class StopMode {
+@Serializable(with = StopMode.Serializer::class)
+enum class StopMode(val wire: String) {
     /**
      * Try graceful termination first
      */
-    @SerialName("graceful") GRACEFUL,
+    GRACEFUL("graceful"),
     /**
      * Force immediate termination
      */
-    @SerialName("force") FORCE,
+    FORCE("force"),
+    /**
+     * A [StopMode] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<StopMode> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("StopMode", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: StopMode) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): StopMode {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1721,11 +2083,29 @@ data class VolumeRestrictions(
 /**
  * Warning severity level
  */
-@Serializable
-enum class WarningSeverity {
-    @SerialName("info") INFO,
-    @SerialName("warn") WARN,
-    @SerialName("critical") CRITICAL,
+@Serializable(with = WarningSeverity.Serializer::class)
+enum class WarningSeverity(val wire: String) {
+    INFO("info"),
+    WARN("warn"),
+    CRITICAL("critical"),
+    /**
+     * A [WarningSeverity] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<WarningSeverity> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("WarningSeverity", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: WarningSeverity) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): WarningSeverity {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1744,20 +2124,38 @@ data class WarningThreshold(
 /**
  * An action that can be performed on a window via the debug API.
  */
-@Serializable
-enum class WindowAction {
+@Serializable(with = WindowAction.Serializer::class)
+enum class WindowAction(val wire: String) {
     /**
      * Ask the window to close (sway `kill`).
      */
-    @SerialName("close") CLOSE,
+    CLOSE("close"),
     /**
      * Move the window to the scratchpad to hide it from view.
      */
-    @SerialName("hide") HIDE,
+    HIDE("hide"),
     /**
      * Pull the window out of the scratchpad so it is shown again.
      */
-    @SerialName("show") SHOW,
+    SHOW("show"),
+    /**
+     * A [WindowAction] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<WindowAction> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("WindowAction", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: WindowAction) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): WindowAction {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**
@@ -1823,33 +2221,51 @@ data class WindowInfo(
  * supervising, which is what lets an admin UI tell "the game the child is
  * playing" apart from "something on the screen that no session owns".
  */
-@Serializable
-enum class WindowOwner {
+@Serializable(with = WindowOwner.Serializer::class)
+enum class WindowOwner(val wire: String) {
     /**
      * Shepherd's own furniture: the launcher, the HUD, the pairing UI, the
      * mirror, and background processes it keeps warm (the preloaded Steam
      * client). Expected to outlive every session.
      */
-    @SerialName("shepherd") SHEPHERD,
+    SHEPHERD("shepherd"),
     /**
      * A process shepherd is supervising for the current session — the
      * activity itself, something in its process group, a Steam game
      * launched on its behalf, or one of its input sidecars.
      */
-    @SerialName("activity") ACTIVITY,
+    ACTIVITY("activity"),
     /**
      * An activity that outlived its own teardown. Its session is over and
      * the host is still working on killing it — the same condition that
      * writes an `ActivityEscaped` audit record.
      */
-    @SerialName("escaped") ESCAPED,
+    ESCAPED("escaped"),
     /**
      * No process shepherd knows about. Either something started outside
      * shepherd entirely, or an activity that got away without the host ever
      * noticing — the case supervision cannot fix on its own, and the reason
      * this field exists.
      */
-    @SerialName("unowned") UNOWNED,
+    UNOWNED("unowned"),
+    /**
+     * A [WindowOwner] this build doesn't know about.
+     *
+     * A newer device degrades to this one value instead of failing the
+     * decode of everything around it. Never sent by a device.
+     */
+    UNKNOWN("__unknown");
+
+    internal object Serializer : KSerializer<WindowOwner> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("WindowOwner", PrimitiveKind.STRING)
+        override fun serialize(encoder: Encoder, value: WindowOwner) =
+            encoder.encodeString(value.wire)
+        override fun deserialize(decoder: Decoder): WindowOwner {
+            val wire = decoder.decodeString()
+            return entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+        }
+    }
 }
 
 /**

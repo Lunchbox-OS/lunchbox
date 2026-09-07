@@ -15,6 +15,7 @@ shepherd-api = { workspace = true }
 shepherd-bridge = { workspace = true }
 shepherd-host-api = { workspace = true }
 shepherd-config = { workspace = true }
+shepherd-state-proto = { workspace = true }
 shepherd-store = { workspace = true }
 shepherd-core = { workspace = true }
 shepherd-host-linux = { workspace = true }

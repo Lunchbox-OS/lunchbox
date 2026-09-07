@@ -405,6 +405,14 @@ headless_start() {
         die "sway.conf no longer passes --no-restrict-ipc-peers on its shepherdd exec line, so a dev session would refuse clients started from any other terminal (issue #144)"
     fi
 
+    # Same shape for the state custodian (issue #157): a dev box has no
+    # `shepherd-stated` installed and no kiosk session for one to trust, so
+    # without the opt-out every run falls back to a local store and raises a
+    # Critical diagnostic. True, but noise rather than news here.
+    if [[ "$exec_line" != *--no-state-custodian* ]]; then
+        die "sway.conf no longer passes --no-state-custodian on its shepherdd exec line, so every dev session would raise state_not_protected (issue #157)"
+    fi
+
     if [[ "$do_build" -eq 1 ]]; then
         info "Building shepherd binaries..."
         build_cargo false

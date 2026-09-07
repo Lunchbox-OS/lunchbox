@@ -2,21 +2,36 @@
 # Bluetooth admin operations for shepherd-launcher.
 #
 # Currently one subcommand: `clear`, which force-disconnects and unpairs
-# every BLE peer recorded in a user's shepherdd admin record, then
-# deletes the admin record + factory-reset sentinel so the user's next
-# kiosk session comes up in an unclaimed state.
+# every BLE peer recorded in shepherd's admin record, then deletes the record
+# and any factory-reset sentinel so the next kiosk session comes up unclaimed.
+#
+# Since issue #157 that record is the *device's*, not a user's: there is one
+# Bluetooth adapter and one BlueZ bond table, so there is one admin record,
+# shared by every kiosk user on the machine. `--user` still names whose session
+# to check and whose home to fall back to, but on a device with the custodian
+# what this clears belongs to all of them.
 
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-# Default location of shepherdd's admin record under a user's home.
-# Must match shepherd_management::DefaultAdminRecordPath, i.e. the
-# default `<data_dir>/admin.toml` where data_dir defaults to
-# ~/.local/share/shepherdd (`APP_DIR = "shepherdd"` in shepherd-util).
-SHEPHERD_DEFAULT_ADMIN_REL=".local/share/shepherdd/admin.toml"
+# For STATED_STATE_ROOT and the protected file names (issue #157). Sourced
+# rather than restated: this file used to carry its own copy of the custodian's
+# directory with a comment saying it "must match install.sh's", which is the
+# arrangement that has to be checked by hand and therefore is not.
+# shellcheck source=install.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 
-# Same idea for the factory-reset sentinel.
-SHEPHERD_DEFAULT_SENTINEL_REL=".local/share/shepherdd/.factory-reset-ble"
+# Where shepherdd's admin record and factory-reset sentinel live.
+#
+# Two possible homes since issue #157. On a device with the state custodian they
+# are in its shared directory, at a uid the kiosk user does not have; before it,
+# and on a stack running with `--no-state-custodian`, they are under the user's
+# own. `bluetooth_clear` picks between them, and that choice is also what decides
+# whether `--user` was needed -- see the comment there.
+#
+# `<data_dir>/<name>`, where data_dir defaults to ~/.local/share/shepherdd
+# (`APP_DIR = "shepherdd"` in shepherd-util).
+SHEPHERD_DEFAULT_DATA_REL=".local/share/shepherdd"
 
 # Refuse to operate on a user who currently has an active login
 # session. The whole point of this command is to clean up *after*
@@ -35,6 +50,21 @@ user_has_active_session() {
         # systemd system, but be defensive).
         who 2>/dev/null | awk -v u="$user" '$1 == u { found=1 } END { exit !found }'
     fi
+}
+
+# Every kiosk user the custodian holds state for.
+#
+# The admin record is the device's, so any of them could have a shepherdd
+# holding it open -- not just the one named on the command line. Empty on a
+# device without a custodian, where the record really is per-user and the named
+# one is the only session that matters.
+_users_with_custodian_state() {
+    [[ -d "$STATED_STATE_ROOT" ]] || return 0
+    local dir
+    for dir in "$STATED_STATE_ROOT"/*/; do
+        [[ -d "$dir" ]] || continue
+        basename "${dir%/}"
+    done
 }
 
 # Read the `identity_address` field out of an admin TOML file.
@@ -118,29 +148,51 @@ bluetooth_clear() {
         esac
     done
 
-    if [[ -z "$user" ]]; then
-        die "Usage: shepherd bluetooth clear --user USER"
-    fi
-
     require_root
-    validate_user "$user"
+    [[ -z "$user" ]] || validate_user "$user"
 
-    if user_has_active_session "$user" && [[ "$force" != "true" ]]; then
-        die "User '$user' currently has an active login session; pass --force to override (this will race with their running shepherdd)"
+    # Where the record lives decides whether `--user` was needed at all.
+    #
+    # With the custodian it is the device's, at a path with no user in it, so
+    # naming one adds nothing: the session guard below checks every kiosk user
+    # regardless, and the home directory is not consulted. Without one the
+    # record really is per-user and there is nothing else to go on, so it is
+    # required -- and the error says which of the two this device is.
+    if [[ -z "$admin_record" || -z "$sentinel" ]]; then
+        if [[ -d "$STATED_ADMIN_DIR" ]]; then
+            [[ -n "$admin_record" ]] \
+                || admin_record="$STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE"
+            [[ -n "$sentinel" ]] \
+                || sentinel="$STATED_ADMIN_DIR/$SHEPHERD_RESET_SENTINEL_FILE"
+        else
+            [[ -n "$user" ]] || die "This device has no state custodian, so the admin record is one user's rather than the device's; pass --user USER"
+            local home
+            home="$(get_user_home "$user")"
+            [[ -n "$home" ]] || die "Could not determine home directory for '$user'"
+            [[ -n "$admin_record" ]] \
+                || admin_record="$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE"
+            [[ -n "$sentinel" ]] \
+                || sentinel="$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE"
+        fi
     fi
 
-    local home
-    home="$(get_user_home "$user")"
-    if [[ -z "$home" ]]; then
-        die "Could not determine home directory for '$user'"
+    # The record this deletes is the device's, so the race is with *any* kiosk
+    # user's shepherdd, not only the named one. Checking just `--user` would let
+    # a second child's live session have the record pulled out from under it --
+    # the thing this guard exists to prevent, one user over.
+    local busy=()
+    local candidate
+    for candidate in ${user:+"$user"} $(_users_with_custodian_state); do
+        user_has_active_session "$candidate" || continue
+        [[ " ${busy[*]-} " == *" $candidate "* ]] && continue
+        busy+=("$candidate")
+    done
+    if [[ "${#busy[@]}" -gt 0 && "$force" != "true" ]]; then
+        die "Active login session for: ${busy[*]}. shepherd's admin record is the device's, so clearing it races with any running shepherdd; log them out, or pass --force"
     fi
 
-    if [[ -z "$admin_record" ]]; then
-        admin_record="$home/$SHEPHERD_DEFAULT_ADMIN_REL"
-    fi
-    if [[ -z "$sentinel" ]]; then
-        sentinel="$home/$SHEPHERD_DEFAULT_SENTINEL_REL"
-    fi
+    info "Admin record: $admin_record"
+    info "Sentinel:     $sentinel"
 
     # Collect peer addresses from the admin record (currently only one
     # admin peer is supported, but loop in case the schema grows).
@@ -154,7 +206,7 @@ bluetooth_clear() {
             warn "Admin record $admin_record exists but has no identity_address; nothing to unpair in BlueZ"
         fi
     else
-        info "No admin record at $admin_record (user is already unclaimed); skipping BlueZ unpair step"
+        info "No admin record at $admin_record (already unclaimed); skipping BlueZ unpair step"
     fi
 
     if [[ "${#addresses[@]}" -gt 0 ]]; then
@@ -173,7 +225,12 @@ bluetooth_clear() {
         success "Removed leftover reset sentinel $sentinel"
     fi
 
-    success "Bluetooth state cleared for user '$user'"
+    if [[ "$admin_record" == "$STATED_ADMIN_DIR/"* ]]; then
+        success "Bluetooth state cleared for this device"
+        info "  The admin record is shared, so every kiosk user is now unclaimed."
+    else
+        success "Bluetooth state cleared for user '$user'"
+    fi
 }
 
 # Subcommand dispatcher.
@@ -190,21 +247,30 @@ bluetooth_main() {
 Usage: shepherd bluetooth <command> [options]
 
 Commands:
-    clear     Force-disconnect + unpair the bonded BLE peer for a user
-              and delete their admin record so the next session starts
-              unclaimed.
+    clear     Force-disconnect + unpair the bonded BLE peer and delete
+              shepherd's admin record, so the next session starts unclaimed.
+              With the state custodian that record is the device's, so this
+              unclaims it for every kiosk user on the machine.
 
 Options for 'clear':
-    --user USER             Target user (required).
-    --admin-record PATH     Override admin.toml location
-                            (default: ~USER/$SHEPHERD_DEFAULT_ADMIN_REL).
-    --sentinel PATH         Override reset-sentinel location
-                            (default: ~USER/$SHEPHERD_DEFAULT_SENTINEL_REL).
+    --user USER             Whose record to clear. Only needed on a device
+                            without the state custodian, where the admin record
+                            is one user's; with the custodian it is the
+                            device's and there is nothing to name.
+    --admin-record PATH     Override admin.toml location (default:
+                            $STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE on a
+                            device with the state custodian, else
+                            ~USER/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE).
+    --sentinel PATH         Override reset-sentinel location (default:
+                            $STATED_ADMIN_DIR/$SHEPHERD_RESET_SENTINEL_FILE on a
+                            device with the state custodian, else
+                            ~USER/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE).
     --force                 Proceed even if the user is currently logged in.
 
 Examples:
-    sudo shepherd bluetooth clear --user shepherd-kiosk
-    sudo shepherd bluetooth clear --user shepherd-kiosk --force
+    sudo shepherd bluetooth clear                             # with a custodian
+    sudo shepherd bluetooth clear --user kiosk                # without one
+    sudo shepherd bluetooth clear --force                     # ignore live sessions
 EOF
             ;;
         *)

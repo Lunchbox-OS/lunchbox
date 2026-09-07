@@ -21,20 +21,20 @@ get_default_config_path() {
 
 EXAMPLE_CONFIG_NAME="config.example.toml"
 
-# Get path to the validate-config binary
+# Get path to the shepherd-validate-config binary
 get_validate_binary() {
     local release="${1:-false}"
     local repo_root
     repo_root="$(get_repo_root)"
     
     if [[ "$release" == "true" ]]; then
-        echo "$repo_root/target/release/validate-config"
+        echo "$repo_root/target/release/shepherd-validate-config"
     else
-        echo "$repo_root/target/debug/validate-config"
+        echo "$repo_root/target/debug/shepherd-validate-config"
     fi
 }
 
-# Build the validate-config binary if needed
+# Build the shepherd-validate-config binary if needed
 build_validate_binary() {
     local release="${1:-false}"
     local repo_root
@@ -46,11 +46,11 @@ build_validate_binary() {
     cd "$repo_root" || die "Failed to change directory to $repo_root"
     
     if [[ "$release" == "true" ]]; then
-        info "Building validate-config (release mode)..."
-        cargo build --release --bin validate-config
+        info "Building shepherd-validate-config (release mode)..."
+        cargo build --release --bin shepherd-validate-config
     else
-        info "Building validate-config..."
-        cargo build --bin validate-config
+        info "Building shepherd-validate-config..."
+        cargo build --bin shepherd-validate-config
     fi
 }
 

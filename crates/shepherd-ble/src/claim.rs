@@ -218,7 +218,9 @@ mod tests {
     use tempfile::TempDir;
 
     fn store(dir: &TempDir) -> AdminStore {
-        AdminStore::new(dir.path().join("admin.toml"))
+        AdminStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
+            dir.path().to_path_buf(),
+        )))
     }
 
     fn peer_a() -> PeerIdentity {

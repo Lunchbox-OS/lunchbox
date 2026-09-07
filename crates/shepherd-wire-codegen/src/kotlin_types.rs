@@ -264,34 +264,98 @@ fn render_data_class(name: &str, schema: &Value) -> String {
 }
 
 fn render_string_enum(name: &str, variants: &[Value], schema: &Value) -> String {
-    let mut out = doc_comment(schema, "");
-    out.push_str("@Serializable\n");
-    out.push_str(&format!("enum class {} {{\n", kotlin_name(name)));
-    for v in variants {
-        let wire = v.get("const").and_then(Value::as_str).unwrap_or_default();
-        out.push_str(&doc_comment(v, "    "));
-        out.push_str(&format!(
-            "    @SerialName(\"{wire}\") {},\n",
-            constant_name(wire)
-        ));
-    }
-    out.push_str("}\n");
-    out
+    let cases: Vec<(String, String)> = variants
+        .iter()
+        .map(|v| {
+            let wire = v.get("const").and_then(Value::as_str).unwrap_or_default();
+            (wire.to_string(), doc_comment(v, "    "))
+        })
+        .collect();
+    render_enum(name, &cases, schema)
 }
 
 /// A plain `{"type": "string", "enum": [...]}` — how schemars renders a
 /// fieldless enum whose variants carry no docs.
 fn render_plain_enum(name: &str, values: &[Value], schema: &Value) -> String {
+    let cases: Vec<(String, String)> = values
+        .iter()
+        .map(|v| (v.as_str().unwrap_or_default().to_string(), String::new()))
+        .collect();
+    render_enum(name, &cases, schema)
+}
+
+/// The wire value a generated fallback variant carries.
+///
+/// Matches the `__unknown` the sealed-enum fallback uses, and cannot collide
+/// with a real one: serde renders Rust variants in `snake_case`, which never
+/// starts with an underscore.
+const UNKNOWN_WIRE: &str = "__unknown";
+
+/// Render a string-valued enum that tolerates a value it has never heard of.
+///
+/// `cases` is `(wire value, rendered doc comment)` in declaration order.
+///
+/// Forward compatibility, for the same reason the tagged enums above have an
+/// `Unknown` variant: a device running a newer shepherdd can send a value this
+/// build predates. kotlinx's default enum serializer *throws* on one, and the
+/// exception takes down the decode of the whole enclosing response — so an
+/// older companion would fail to read a device's state entirely because one
+/// field gained a variant. That is worst exactly when it matters: a new
+/// `DiagnosticCode` is reported when something is already wrong with the
+/// device.
+///
+/// `ignoreUnknownKeys` does not cover this. It forgives an unknown *key*; this
+/// is a known key with an unknown *value*.
+///
+/// The fallback is a real variant so callers can match on it. An enum that
+/// already has one (because the Rust type does, like `AudioOutputKind`) reuses
+/// it rather than gaining a second — which also keeps any exhaustive `when`
+/// over it compiling.
+fn render_enum(name: &str, cases: &[(String, String)], schema: &Value) -> String {
+    let kname = kotlin_name(name);
+    let existing_fallback = cases
+        .iter()
+        .find(|(wire, _)| constant_name(wire) == "UNKNOWN")
+        .map(|(wire, _)| constant_name(wire));
+    let fallback = existing_fallback
+        .clone()
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+
     let mut out = doc_comment(schema, "");
-    out.push_str("@Serializable\n");
-    out.push_str(&format!("enum class {} {{\n", kotlin_name(name)));
-    for v in values {
-        let wire = v.as_str().unwrap_or_default();
-        out.push_str(&format!(
-            "    @SerialName(\"{wire}\") {},\n",
-            constant_name(wire)
-        ));
+    out.push_str(&format!(
+        "@Serializable(with = {kname}.Serializer::class)\n"
+    ));
+    out.push_str(&format!("enum class {kname}(val wire: String) {{\n"));
+    for (wire, docs) in cases {
+        out.push_str(docs);
+        out.push_str(&format!("    {}(\"{wire}\"),\n", constant_name(wire)));
     }
+    if existing_fallback.is_none() {
+        out.push_str(&format!(
+            "    /**\n     * A [{kname}] this build doesn't know about.\n     *\n\
+             \x20    * A newer device degrades to this one value instead of failing the\n\
+             \x20    * decode of everything around it. Never sent by a device.\n     */\n"
+        ));
+        out.push_str(&format!("    {fallback}(\"{UNKNOWN_WIRE}\"),\n"));
+    }
+    // Replace the trailing comma of the last constant with the semicolon Kotlin
+    // needs before members.
+    if out.ends_with(",\n") {
+        out.truncate(out.len() - 2);
+        out.push_str(";\n");
+    }
+    out.push_str(&format!(
+        "\n    internal object Serializer : KSerializer<{kname}> {{\n\
+         \x20       override val descriptor: SerialDescriptor =\n\
+         \x20           PrimitiveSerialDescriptor(\"{kname}\", PrimitiveKind.STRING)\n\
+         \x20       override fun serialize(encoder: Encoder, value: {kname}) =\n\
+         \x20           encoder.encodeString(value.wire)\n\
+         \x20       override fun deserialize(decoder: Decoder): {kname} {{\n\
+         \x20           val wire = decoder.decodeString()\n\
+         \x20           return entries.firstOrNull {{ it.wire == wire }} ?: {fallback}\n\
+         \x20       }}\n\
+         \x20   }}\n"
+    ));
     out.push_str("}\n");
     out
 }
@@ -404,8 +468,14 @@ pub fn render(defs: &Map<String, Value>) -> String {
     out.push_str("@file:OptIn(ExperimentalSerializationApi::class)\n\n");
     out.push_str("package com.armeafamily.shepherd.companion.domain\n\n");
     out.push_str("import kotlinx.serialization.ExperimentalSerializationApi\n");
+    out.push_str("import kotlinx.serialization.KSerializer\n");
     out.push_str("import kotlinx.serialization.SerialName\n");
     out.push_str("import kotlinx.serialization.Serializable\n");
+    out.push_str("import kotlinx.serialization.descriptors.PrimitiveKind\n");
+    out.push_str("import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n");
+    out.push_str("import kotlinx.serialization.descriptors.SerialDescriptor\n");
+    out.push_str("import kotlinx.serialization.encoding.Decoder\n");
+    out.push_str("import kotlinx.serialization.encoding.Encoder\n");
     out.push_str("import kotlinx.serialization.json.JsonClassDiscriminator\n");
     out.push_str("import kotlinx.serialization.json.JsonElement\n");
     out.push_str("import kotlinx.serialization.modules.SerializersModule\n");

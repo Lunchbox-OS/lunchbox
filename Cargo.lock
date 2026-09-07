@@ -4609,6 +4609,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "shepherd-state-proto"
+version = "0.4.1"
+dependencies = [
+ "chrono",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "shepherd-api",
+ "shepherd-store",
+ "shepherd-util",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "shepherd-stated"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "nix 0.29.0",
+ "notify",
+ "serde",
+ "serde_json",
+ "shepherd-ipc",
+ "shepherd-state-proto",
+ "shepherd-store",
+ "shepherd-util",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "shepherd-store"
 version = "0.4.1"
 dependencies = [
@@ -4706,6 +4743,7 @@ dependencies = [
  "shepherd-media-app",
  "shepherd-media-cache",
  "shepherd-media-core",
+ "shepherd-state-proto",
  "shepherd-store",
  "shepherd-util",
  "tempfile",

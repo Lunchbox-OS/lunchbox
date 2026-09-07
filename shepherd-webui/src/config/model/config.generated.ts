@@ -119,11 +119,6 @@ export interface RawBleManagementConfig {
    */
   adapter?: string | null;
   /**
-   * Where the admin record (`AdminRecord` TOML) is persisted.
-   * Defaults to `<data_dir>/admin.toml`.
-   */
-  admin_record_path?: string | null;
-  /**
    * Advertised local name and the device name returned in `DeviceInfo`.
    * Defaults to `"shepherd"`. Pick something the companion app can
    * disambiguate when multiple shepherd devices are in range.
@@ -133,13 +128,6 @@ export interface RawBleManagementConfig {
    * Whether the BLE management transport is enabled (default: false).
    */
   enabled?: boolean;
-  /**
-   * Sentinel file path. When present at daemon startup, the admin
-   * record is wiped and the device returns to the unclaimed state
-   * (and the file is removed). Defaults to
-   * `<data_dir>/.factory-reset-ble`.
-   */
-  reset_sentinel_path?: string | null;
 }
 
 /**

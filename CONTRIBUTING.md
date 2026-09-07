@@ -113,6 +113,25 @@ session. To see it work end to end, run `shepherdd` by hand without the flag and
 connect from `systemd-run --user --scope`; the measurements are in
 [`docs/ai/history/2026-08-29 002`](./docs/ai/history/).
 
+**To get the production cgroup shape on a dev box**, install to a second user
+and start the session through `su`, which is what makes logind create a real
+session scope — the placement a display manager gives it:
+
+```sh
+sudo ./scripts/shepherd install all --user kiosk
+sudo su - kiosk -c 'exec env WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
+    WLR_RENDERER=pixman WLR_RENDERER_ALLOW_SOFTWARE=1 XDG_SESSION_TYPE=wayland \
+    sway -c /etc/sway/shepherd.conf --unsupported-gpu'
+```
+
+The whole stack then lands in `/user.slice/user-<uid>.slice/session-<n>.scope`
+(root-owned, unjoinable) and activities land in `app.slice` or `system.slice`,
+so the peer check is a real boundary and `--no-restrict-ipc-peers` is not
+needed. `sudo loginctl terminate-user kiosk` tears it down. This is a manual
+recipe, not a harness: the session is headless, so drive it over the management
+API rather than expecting `dev shot` to work against it. Measurements taken this
+way are in [`docs/ai/history/2026-08-29 005`](./docs/ai/history/).
+
 **Not usable for GPU performance work.** The headless session exports
 `LIBGL_ALWAYS_SOFTWARE=1` for every client, so even `--gpu` (which only swaps
 wlroots' own renderer) leaves the launcher, HUD and `shepherd-media` on

@@ -13,7 +13,7 @@ mod server;
 pub use client::*;
 pub use peer::{
     PeerError, PeerPolicy, Rejection, ServerCheck, classify_server, is_delegated_user_cgroup,
-    kernel_supports_peer_cgroup, own_cgroup_path, skip_without_peer_cgroup,
+    kernel_supports_peer_cgroup, own_cgroup_path, peer_uid, skip_without_peer_cgroup,
 };
 pub use server::*;
 

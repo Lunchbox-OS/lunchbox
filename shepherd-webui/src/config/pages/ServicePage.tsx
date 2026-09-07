@@ -728,22 +728,6 @@ function BleEditor({ config }: { config: RawConfig }) {
         onChange={(e) => f.setField("adapter", e.target.value)}
         helperText="A controller address, or an interface name like hci1. Prefer the address: interface numbering tracks probe order and moves between boots."
       />
-      <TextField
-        size="small"
-        label="Admin record path"
-        value={v?.admin_record_path ?? ""}
-        placeholder="<data directory>/admin.toml"
-        onChange={(e) => f.setField("admin_record_path", e.target.value)}
-        helperText="Where the claimed admin is persisted."
-      />
-      <TextField
-        size="small"
-        label="Factory-reset sentinel path"
-        value={v?.reset_sentinel_path ?? ""}
-        placeholder="<data directory>/.factory-reset-ble"
-        onChange={(e) => f.setField("reset_sentinel_path", e.target.value)}
-        helperText="Creating this file and restarting the daemon wipes the admin record and returns the device to unclaimed. The daemon removes it afterwards."
-      />
     </Stack>
   );
 }

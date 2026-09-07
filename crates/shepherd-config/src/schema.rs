@@ -1115,16 +1115,6 @@ pub struct RawBleManagementConfig {
     /// disambiguate when multiple shepherd devices are in range.
     pub device_name: Option<String>,
 
-    /// Where the admin record (`AdminRecord` TOML) is persisted.
-    /// Defaults to `<data_dir>/admin.toml`.
-    pub admin_record_path: Option<PathBuf>,
-
-    /// Sentinel file path. When present at daemon startup, the admin
-    /// record is wiped and the device returns to the unclaimed state
-    /// (and the file is removed). Defaults to
-    /// `<data_dir>/.factory-reset-ble`.
-    pub reset_sentinel_path: Option<PathBuf>,
-
     /// Which Bluetooth controller to serve on, when the host has more
     /// than one.
     ///
