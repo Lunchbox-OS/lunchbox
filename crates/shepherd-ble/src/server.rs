@@ -854,14 +854,45 @@ fn spawn_device_watcher(
         // watchdog of each pair to no-op on a stale generation) and put
         // two identical lines in the journal for every event, which is
         // its own cost when the journal is the debugging tool.
+        //
+        // The event payload is *not* the state, and this is the whole
+        // reason the loop reads the property back. `bluer::Device::events`
+        // keeps only the changed properties, throwing away the interface
+        // that emitted them (`device.rs`: `Event::PropertiesChanged {
+        // changed, .. }`), and then matches on the property *name*. On
+        // BlueZ >= 5.82 with `Experimental` — which shepherd requires for
+        // `PreferredBearer`, so every device has it — one device object
+        // carries `org.bluez.Device1`, `org.bluez.Bearer.LE1` *and*
+        // `org.bluez.Bearer.BREDR1`, and all three have a `Connected`
+        // property. So a dual-mode phone bringing its classic profiles up
+        // and down (A2DP, AVRCP, HFP — captured on the wire) arrives here
+        // as `Connected(true)` then `Connected(false)` for a bearer that
+        // has nothing to do with the LE link carrying our GATT service,
+        // which never went anywhere.
+        //
+        // `is_connected()` asks for `Device1`'s own property, so it
+        // answers for the device rather than for whichever bearer last
+        // twitched. Reading it back costs one round trip per event and
+        // turns "something about connectivity changed" into the fact.
         let mut connected: Option<bool> = None;
         while let Some(DeviceEvent::PropertyChanged(prop)) = events.next().await {
-            if let DeviceProperty::Connected(now) = prop
-                && connected.replace(now) == Some(now)
-            {
+            if !matches!(prop, DeviceProperty::Connected(_)) {
                 continue;
             }
-            match prop {
+            let now = match device.is_connected().await {
+                Ok(now) => now,
+                // The object is going away — the stream is about to end
+                // anyway, and guessing from the payload is what this is
+                // here to avoid.
+                Err(e) => {
+                    debug!(peer = %addr, error = %e, "could not read Connected; ignoring the event");
+                    continue;
+                }
+            };
+            if connected.replace(now) == Some(now) {
+                continue;
+            }
+            match DeviceProperty::Connected(now) {
                 // A companion drains both outboxes before it will send
                 // its first RPC, so the depth logged here *is* the
                 // connect latency it's about to pay. Without this line a
@@ -903,9 +934,15 @@ fn spawn_device_watcher(
                     }
                     spawn_first_rpc_watchdog(device.clone(), addr, generation, state.clone());
                 }
+                // "Reported gone", not "gone": this property lags the
+                // traffic it describes, and the bearer pin above provokes
+                // one of these on every fresh pairing while the link is
+                // still carrying ATT. Bumping the epoch is
+                // safe either way — it only retires watchdogs — and
+                // `reset_session` is careful about what it discards.
                 DeviceProperty::Connected(false) => {
                     state.epoch.fetch_add(1, Ordering::Relaxed);
-                    info!(peer = %addr, "BLE peer disconnected; clearing transport session state");
+                    info!(peer = %addr, "BLE peer reported disconnected; releasing session state");
                     state.reset_session().await;
                 }
                 _ => {}
@@ -1031,13 +1068,58 @@ impl TransportState {
         }
     }
 
-    /// Drop every byte of per-session transport state: any half-assembled
-    /// request frame, the last-peer marker, and both read-poll outboxes.
+    /// Drop per-session transport state after BlueZ reports the peer
+    /// gone — *except* an outbox the peer is visibly still draining.
+    ///
+    /// `Device.Connected` is not a trustworthy account of whether the
+    /// GATT link still carries ATT traffic. It arrives late (over a
+    /// second behind the reads and writes it purports to describe), and
+    /// [`pin_peer_to_bredr`] provokes a spurious `Connected(false)` of
+    /// its own: pinning a freshly-paired peer tears down the kernel's LE
+    /// auto-connect, BlueZ reports the device disconnected, and it never
+    /// reports it back — while the companion carries on reading and
+    /// writing over the same link for the rest of the session.
+    ///
+    /// Wiping a mid-delivery outbox on that report is the whole defect.
+    /// The response the companion is halfway through
+    /// draining vanishes underneath it; it has no way to notice, because
+    /// a truncated read is indistinguishable from an idle one, so it
+    /// polls an empty characteristic until its 15-second RPC timeout.
+    /// After a first pairing that response is the opening `service_state`
+    /// and the companion's first screen is empty.
+    ///
+    /// So the outboxes go through [`Outbox::clear_if_aligned`], which
+    /// declines while a peer holds a partial frame — the same rule
+    /// [`Outbox::push_inner`] and the connect handler already follow, and
+    /// for the same reason: bytes a peer is in the middle of reading are
+    /// not ours to throw away. Anything genuinely stale is disposed of
+    /// twice over, by the companion's post-connect drain and by the
+    /// `id == 1` clear in [`handle_request`].
+    ///
+    /// The request-side reader is reset unconditionally, and that
+    /// asymmetry is deliberate. A surviving partial *request* has no such
+    /// second chance: nothing on this side can resync a byte stream that
+    /// starts mid-frame, so the next session's writes would stitch onto
+    /// the orphan and every frame after it would be garbage. Requests are
+    /// small enough to arrive in a single ATT write in practice, so there
+    /// is next to nothing in flight to protect.
     async fn reset_session(&self) {
         *self.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
         *self.last_peer.lock().await = None;
-        self.response_outbox.clear().await;
-        self.events_outbox.clear().await;
+        for (label, outbox) in [
+            ("response", &self.response_outbox),
+            ("events", &self.events_outbox),
+        ] {
+            if outbox.clear_if_aligned().await.is_none() {
+                let (frames, bytes) = outbox.depth().await;
+                info!(
+                    outbox = label,
+                    frames,
+                    bytes,
+                    "peer reported gone mid-delivery; keeping what it is still reading",
+                );
+            }
+        }
     }
 }
 
@@ -2046,11 +2128,11 @@ mod tests {
         assert!(responses[0].error.is_none());
     }
 
-    /// On a peer disconnect the monitor wipes every scrap of per-session
-    /// transport state — both outboxes, the last-peer marker, and any
-    /// half-assembled request frame — so a companion that resumes the
-    /// same connection across a transient drop (no fresh `id == 1`)
-    /// doesn't inherit a desynced byte stream.
+    /// With no peer mid-read, a reported disconnect still wipes every
+    /// scrap of per-session transport state — both outboxes, the
+    /// last-peer marker, and any half-assembled request frame — so a
+    /// companion that resumes the same connection across a transient drop
+    /// (no fresh `id == 1`) doesn't inherit a desynced byte stream.
     #[tokio::test]
     async fn reset_session_wipes_all_session_state() {
         let state = TransportState::new();
@@ -2085,6 +2167,107 @@ mod tests {
             .expect("a complete frame is present");
         let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
         assert_eq!(parsed.id, 8);
+    }
+
+    /// `pin_peer_to_bredr` makes BlueZ report a fresh pairing's
+    /// peer disconnected ~600 ms after it connects, while the companion is
+    /// mid-drain of the `service_state` it just asked for. Wiping the
+    /// outbox there took the rest of that response with it, and a
+    /// truncated read looks exactly like an idle one — so the companion
+    /// polled an empty characteristic until its RPC timeout and showed an
+    /// empty device screen.
+    ///
+    /// A peer that holds a partial frame keeps its bytes.
+    #[tokio::test]
+    async fn a_reported_disconnect_spares_a_response_the_peer_is_still_reading() {
+        let state = TransportState::new();
+        let body = vec![b'x'; 4096];
+        state.response_outbox.push(encode_frame(&body)).await;
+        let queued = state.response_outbox.pending_bytes().await;
+
+        // The companion has drained one ATT read's worth: the head is now
+        // mid-delivery, which is the whole signal that it is still there.
+        let first = state.response_outbox.read(512).await;
+        assert_eq!(first.len(), 512);
+
+        state.reset_session().await;
+
+        assert_eq!(
+            state.response_outbox.pending_bytes().await,
+            queued - 512,
+            "the rest of the response the peer is reading is still there",
+        );
+
+        // And it is still the *same* frame: draining the remainder yields
+        // the body byte for byte, so the peer's reassembler stays aligned.
+        let mut rest = Vec::new();
+        loop {
+            let chunk = state.response_outbox.read(512).await;
+            if chunk.is_empty() {
+                break;
+            }
+            rest.extend_from_slice(&chunk);
+        }
+        let whole = [first, rest].concat();
+        assert_eq!(whole, encode_frame(&body), "the frame is delivered intact");
+    }
+
+    /// The other half of it: once the peer has finished the frame the
+    /// outbox is aligned again, so a genuine disconnect clears it. This is
+    /// what stops the guard from turning into a leak.
+    #[tokio::test]
+    async fn a_reported_disconnect_clears_an_outbox_no_one_is_mid_frame_on() {
+        let state = TransportState::new();
+        state.response_outbox.push(encode_frame(b"first")).await;
+        state.response_outbox.push(encode_frame(b"second")).await;
+
+        // Drain the head exactly, leaving the queue aligned on a frame
+        // boundary with a whole message still behind it.
+        let head = state.response_outbox.read(usize::MAX).await;
+        assert_eq!(head, encode_frame(b"first"));
+
+        state.reset_session().await;
+
+        assert_eq!(
+            state.response_outbox.pending_bytes().await,
+            0,
+            "nothing is mid-delivery, so the stale frame goes",
+        );
+    }
+
+    /// The request side is reset either way, and deliberately so: an
+    /// orphaned partial *request* cannot be resynced from this end, and
+    /// the next session's writes would stitch onto it.
+    #[tokio::test]
+    async fn a_reported_disconnect_always_drops_a_half_written_request() {
+        let state = TransportState::new();
+        // Mid-delivery on the way out, to prove the two directions are
+        // decided separately rather than by one shared condition.
+        state
+            .response_outbox
+            .push(encode_frame(&vec![b'x'; 4096]))
+            .await;
+        let _ = state.response_outbox.read(512).await;
+        state
+            .reader
+            .lock()
+            .await
+            .push(&request_frame(9, "health")[..3]);
+
+        state.reset_session().await;
+
+        assert!(
+            state.response_outbox.pending_bytes().await > 0,
+            "the outbound frame is spared",
+        );
+        let mut r = state.reader.lock().await;
+        r.push(&request_frame(10, "health"));
+        let frame = r
+            .pop_frame()
+            .expect("frame parses cleanly")
+            .expect("a complete frame is present");
+        let parsed: RpcRequest = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(parsed.id, 10, "no leftover prefix stitched onto it");
     }
 
     /// A suspend/resume is not always visible as a power transition, so
