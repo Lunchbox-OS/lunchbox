@@ -20,6 +20,14 @@ This crate implements the `HostAdapter` trait for Linux systems, providing:
   channel (`LinuxLightSensor`), used by the automatic-brightness feature.
   Read-only and world-readable, so no helper or privilege is needed. Absent
   on hosts without an ALS.
+- **Network status reads** (`network.rs`) — `NetworkInfoProvider` for the
+  management UIs (issue #182): connectivity, interfaces, addresses, gateway,
+  DNS, and the SSID / signal / band of an associated wireless network. Reads
+  NetworkManager over the system D-Bus (every property it needs is readable
+  unprivileged — no polkit rule, nothing to configure), bounded by a 3s
+  timeout, and falls back to `getifaddrs` for interfaces and addresses on a
+  host with no NetworkManager. Read-only: nothing here joins a network or
+  changes one.
 - **Compositor IPC** (`sway_ipc.rs`) — a client for sway's own socket
   (`sway-ipc(7)`): one connection behind a mutex for requests, a second per
   event subscription. Replaces the `swaymsg` subprocess every compositor call

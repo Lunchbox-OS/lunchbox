@@ -16,7 +16,8 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
-nix = { workspace = true }
+zbus = { workspace = true }
+nix = { workspace = true, features = ["net"] }
 async-trait = "0.1"
 dirs = "5.0"
 shell-escape = "0.1"

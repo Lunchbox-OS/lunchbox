@@ -8,6 +8,7 @@
 //! - Volume control with auto-detection of sound systems
 //! - Screen brightness control via sysfs / `brightnessctl`
 //! - Ambient-light-sensor reads via IIO sysfs (for automatic brightness)
+//! - Read-only network status via NetworkManager, falling back to `getifaddrs`
 
 mod adapter;
 mod audio;
@@ -17,6 +18,7 @@ mod browser;
 mod ebook;
 pub mod helpers;
 mod light;
+mod network;
 mod process;
 mod retroarch;
 mod sidecar;
@@ -35,6 +37,7 @@ pub use helpers::{
     resolve as resolve_helper, resolve_arg as resolve_helper_arg, resolve_daemon_sibling,
 };
 pub use light::*;
+pub use network::LinuxNetworkInfo;
 pub use process::*;
 pub use retroarch::{MissingCore, missing_content, missing_core};
 pub use sway::{

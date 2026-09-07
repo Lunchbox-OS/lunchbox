@@ -8,6 +8,7 @@ mod capabilities;
 mod handle;
 mod light;
 mod mock;
+mod network;
 mod traits;
 mod volume;
 
@@ -16,5 +17,6 @@ pub use capabilities::*;
 pub use handle::*;
 pub use light::*;
 pub use mock::*;
+pub use network::*;
 pub use traits::*;
 pub use volume::*;
