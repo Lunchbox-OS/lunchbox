@@ -54,12 +54,16 @@ struct Args {
     #[arg(long)]
     setup_code: Option<String>,
 
-    /// Where to type it — the management URL, shown under the code so the
-    /// parent does not have to be told the device's address separately. Only
-    /// meaningful when the daemon knows its own address; a wildcard bind has
-    /// none, and passes `--port` instead.
-    #[arg(long)]
-    url: Option<String>,
+    /// Where to type it — a management URL, shown under the code so the
+    /// parent does not have to be told the device's address separately.
+    ///
+    /// Repeatable, because a device bound to `0.0.0.0` is reachable at one
+    /// address per network it is on (issue #182): wifi and a VPN are two
+    /// different answers, and which one works depends on where the parent's
+    /// laptop is. The daemon passes none while its listener is still coming
+    /// up, and `--port` covers that.
+    #[arg(long = "url")]
+    urls: Vec<String>,
 
     /// The management port, for the wildcard-bind case where there is no one
     /// URL to name. "Port 8080 on this device" is still most of the answer.
@@ -96,7 +100,7 @@ fn main() -> Result<()> {
     let mode = match args.setup_code {
         Some(code) => Mode::Setup {
             code,
-            url: args.url.clone(),
+            urls: args.urls.clone(),
             port: args.port,
         },
         None => Mode::Pairing {
@@ -132,7 +136,7 @@ enum Mode {
     },
     Setup {
         code: String,
-        url: Option<String>,
+        urls: Vec<String>,
         port: Option<u16>,
     },
 }
@@ -180,14 +184,22 @@ fn build_overlay_window(app: &gtk4::Application, mode: &Mode) {
             device,
             method,
         } => build_content(*passkey, device, *method),
-        Mode::Setup { code, url, port } => build_setup_content(code, url.as_deref(), *port),
+        Mode::Setup { code, urls, port } => build_setup_content(code, urls, *port),
     };
     window.set_child(Some(&content));
     window.present();
 }
 
+/// How many addresses the card offers.
+///
+/// A device on wifi and a VPN has two ways in and both are worth naming; a box
+/// running containers has more, and the ones past this are not addresses
+/// anybody at the television is going to retype. The count of what is left out
+/// is shown rather than silently dropped.
+const MAX_SETUP_URLS: usize = 3;
+
 /// The setup card: what the code is for, the code, and where to type it.
-fn build_setup_content(code: &str, url: Option<&str>, port: Option<u16>) -> gtk4::Box {
+fn build_setup_content(code: &str, urls: &[String], port: Option<u16>) -> gtk4::Box {
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     outer.set_halign(gtk4::Align::Center);
     outer.set_valign(gtk4::Align::Center);
@@ -205,28 +217,69 @@ fn build_setup_content(code: &str, url: Option<&str>, port: Option<u16>) -> gtk4
     // copy — with nothing on this device to paste it into anyway.
     outer.append(&code_label);
 
-    let instruction = match (url, port) {
-        (Some(url), _) => {
-            format!("Open {url} on your phone or laptop\nand enter this code to choose a password.")
-        }
-        // A wildcard bind has no single address to name, so name the port and
-        // let the parent supply the address they already reach the device by.
-        (None, Some(port)) => format!(
-            "Open this device's address in a browser on port {port},\nand enter this code to \
-             choose a password."
-        ),
-        (None, None) => {
-            "Open this device's management page and enter this code to choose a password."
-                .to_string()
-        }
-    };
-    let instruction_label = gtk4::Label::new(Some(&instruction));
+    let instruction_label = gtk4::Label::new(Some(&setup_instruction(urls, port)));
     instruction_label.add_css_class("setup-instruction");
     instruction_label.set_justify(gtk4::Justification::Center);
     instruction_label.set_wrap(true);
     outer.append(&instruction_label);
 
+    // The addresses get their own label rather than joining the sentence: they
+    // are the part somebody is copying by eye onto another device, so they are
+    // monospaced and left alone by the wrapping that the prose above wants.
+    if let Some(addresses) = setup_addresses(urls) {
+        let address_label = gtk4::Label::new(Some(&addresses));
+        address_label.add_css_class("setup-addresses");
+        // Left-justified inside a centred block: a column of addresses that is
+        // ragged on both edges is harder to read off a television than one
+        // that lines up, and the trailing "and N more" is not an address.
+        address_label.set_justify(gtk4::Justification::Left);
+        address_label.set_halign(gtk4::Align::Center);
+        outer.append(&address_label);
+    }
+
     outer
+}
+
+/// The sentence above the addresses.
+///
+/// Three shapes, because the daemon knows three different amounts: every
+/// address it is reachable at, only the port (a listener that has not come up
+/// yet, or a device with nothing routable), or nothing at all.
+fn setup_instruction(urls: &[String], port: Option<u16>) -> String {
+    match (urls.is_empty(), port) {
+        (false, _) => {
+            let plural = if urls.len() == 1 {
+                "this address"
+            } else {
+                "one of these"
+            };
+            format!("Enter this code at {plural} on your phone or laptop\nto choose a password:")
+        }
+        // A listener still binding, or a device with no routable address, has
+        // no URL to name — so name the port and let the parent supply the
+        // address they already reach the device by.
+        (true, Some(port)) => format!(
+            "Open this device's address in a browser on port {port},\nand enter this code to \
+             choose a password."
+        ),
+        (true, None) => {
+            "Open this device's management page and enter this code to choose a password."
+                .to_string()
+        }
+    }
+}
+
+/// The addresses block, or `None` when there are no addresses to show.
+fn setup_addresses(urls: &[String]) -> Option<String> {
+    if urls.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = urls.iter().take(MAX_SETUP_URLS).cloned().collect();
+    let hidden = urls.len().saturating_sub(MAX_SETUP_URLS);
+    if hidden > 0 {
+        lines.push(format!("and {hidden} more"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn build_content(passkey: u32, device: &str, method: PairingMethodArg) -> gtk4::Box {
@@ -353,4 +406,69 @@ window.setup-window {
     opacity: 0.85;
     max-width: 460px;
 }
+/* The addresses are what somebody retypes on another device, so they get
+   monospace and full opacity — the prose around them can fade, these cannot. */
+.setup-addresses {
+    font-size: 22px;
+    font-family: monospace;
+    font-weight: 600;
+    margin-top: 4px;
+}
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn urls(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("https://192.168.0.{i}:8080"))
+            .collect()
+    }
+
+    #[test]
+    fn the_addresses_are_named_when_the_daemon_knows_them() {
+        // The point of the change: a parent at the television should not have
+        // to be told the device's address by some other means.
+        let text = setup_instruction(&urls(1), Some(8080));
+        assert!(text.contains("this address"), "{text}");
+        assert_eq!(
+            setup_addresses(&urls(1)).as_deref(),
+            Some("https://192.168.0.0:8080")
+        );
+    }
+
+    #[test]
+    fn several_ways_in_all_get_a_line() {
+        // A device on wifi and a VPN: which one works depends on where the
+        // laptop is, so naming only the first would be a coin flip.
+        assert!(setup_instruction(&urls(2), Some(8080)).contains("one of these"));
+        assert_eq!(
+            setup_addresses(&urls(2)).as_deref(),
+            Some("https://192.168.0.0:8080\nhttps://192.168.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn a_box_with_too_many_addresses_says_how_many_it_hid() {
+        let text = setup_addresses(&urls(MAX_SETUP_URLS + 2)).expect("addresses");
+        assert_eq!(text.lines().count(), MAX_SETUP_URLS + 1);
+        assert!(text.ends_with("and 2 more"), "{text}");
+    }
+
+    #[test]
+    fn a_listener_that_is_not_up_yet_falls_back_to_the_port() {
+        // `management_urls` is empty until the listener is actually serving,
+        // which on a cold boot it is not — the card still has to say something
+        // a parent can act on.
+        let text = setup_instruction(&[], Some(8080));
+        assert!(text.contains("port 8080"), "{text}");
+        assert_eq!(setup_addresses(&[]), None);
+    }
+
+    #[test]
+    fn knowing_neither_still_reads_as_a_sentence() {
+        let text = setup_instruction(&[], None);
+        assert!(text.contains("management page"), "{text}");
+    }
+}

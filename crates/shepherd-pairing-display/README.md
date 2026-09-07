@@ -37,14 +37,25 @@ matches what the phone is actually asking for.
 ### Web management setup code
 
 ```
-shepherd-pairing-display --setup-code 419624 --url https://192.168.1.10:8080
-shepherd-pairing-display --setup-code 419624 --port 8080     # wildcard bind
+shepherd-pairing-display --setup-code 419624 \
+    --url https://192.168.1.10:8080 --url https://10.147.17.8:8080
+shepherd-pairing-display --setup-code 419624 --port 8080     # listener not up yet
 ```
 
-`--url` when the daemon knows its own address; `--port` when it binds a
-wildcard and there is no single address to name, in which case the card says
-"port 8080 on this device" rather than inventing a hostname. Neither is
-required — without both, the card falls back to naming no address at all.
+`--url` is **repeatable**, and `shepherdd` passes one per way in, taken from
+the live network status rather than from the config (issue #182): a device
+bound to `0.0.0.0` is reachable at one address per network it is on, and which
+of them the parent's laptop can use is not something the device can know. The
+card shows up to three and says how many it left out.
+
+`--port` is the fallback for the window where there is no address to name — the
+listener is still binding, or nothing on the box is routable — in which case
+the card says "port 8080 on this device" rather than inventing a hostname.
+Neither is required; without both, the card names no address at all.
+
+The scheme comes from the listener, not from a guess. A device serving TLS
+answers a plaintext request with a connection reset, so an `http://` URL for an
+`https` listener would send a parent to debug their browser.
 
 Unlike the pairing passkey, the setup code is **not** selectable: GTK renders a
 selectable label pre-selected, and a fully highlighted number on a small card

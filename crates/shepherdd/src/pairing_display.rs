@@ -131,11 +131,14 @@ impl SetupCodeDisplay {
     /// A failure to spawn is logged and nothing else: the code is also in the
     /// journal, and a device with no compositor up yet — or no overlay binary
     /// installed — must still finish starting.
-    pub fn show(code: &str, url: Option<&str>, port: Option<u16>) -> Self {
+    pub fn show(code: &str, urls: &[String], port: Option<u16>) -> Self {
         #[allow(clippy::disallowed_methods)]
         let mut cmd = Command::new(shepherd_host_linux::resolve_daemon_sibling(BINARY));
         cmd.args(["--setup-code", code]);
-        if let Some(url) = url {
+        // One `--url` per way in. A wildcard bind is reachable at one address
+        // per network the device is on (issue #182), and which of them the
+        // parent's laptop can use is not something this end can know.
+        for url in urls {
             cmd.args(["--url", url]);
         }
         if let Some(port) = port {

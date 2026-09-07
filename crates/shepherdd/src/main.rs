@@ -59,6 +59,37 @@ const DIAGNOSTIC_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 /// (issue #144). A minute: this is a deliberate act, not a hot path.
 const SOCKET_WATCH_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How often the web credential store expires what has gone stale (issue #156).
+///
+/// Session expiry is enforced on every request anyway; this only decides how
+/// long a dead session lingers in the list a parent is looking at.
+const WEB_AUTH_SWEEP: Duration = Duration::from_secs(30);
+
+/// How often the on-screen setup card re-checks what it should be saying.
+///
+/// Faster than the sweep because the card goes up during startup, before the
+/// HTTP listener has bound — and until it has, `management_urls` is empty and
+/// the card can only offer a port. Five seconds is how long a parent spends
+/// looking at the weaker message on a cold boot, and a NetworkManager read is
+/// only made while a setup code exists at all.
+const SETUP_CARD_POLL: Duration = Duration::from_secs(5);
+
+/// What the setup card is currently showing (issue #156).
+///
+/// Compared rather than blindly re-spawned: the poll is fast, and restarting
+/// the overlay subprocess on every tick would flash the card in the face of
+/// the person reading the code off it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SetupCardContent {
+    code: String,
+    /// Every URL the device is reachable at, from the live network status —
+    /// so a wildcard bind names its wifi and VPN addresses rather than
+    /// nothing (issue #182).
+    urls: Vec<String>,
+    /// The port on its own, for the window before the listener has bound.
+    port: Option<u16>,
+}
+
 mod diagnostics;
 mod display;
 mod display_watch;
@@ -1510,7 +1541,9 @@ impl Service {
         // configured listener starts out `Binding`: the address it wants may
         // not exist yet, which is what `bind_retry_seconds` is for.
         let web_listener = match &management_api_config {
-            Some(cfg) => WebListenerHandle::configured(SocketAddr::new(cfg.bind, cfg.port)),
+            Some(cfg) => {
+                WebListenerHandle::configured(SocketAddr::new(cfg.bind, cfg.port), cfg.tls.is_tls())
+            }
             None => WebListenerHandle::disabled(),
         };
 
@@ -1735,21 +1768,6 @@ impl Service {
             web.set_companion(admin_authority.clone());
         }
 
-        // Worked out before `management_api_config` is consumed below, because
-        // the setup card wants to tell the parent where to type the code.
-        //
-        // A wildcard bind has no single address to name, so it contributes a
-        // port and no URL, and the card says "port 8080 on this device"
-        // instead of inventing a hostname.
-        let web_setup_target: Option<(Option<String>, u16)> =
-            management_api_config.as_ref().map(|cfg| {
-                let url = (!cfg.bind.is_unspecified()).then(|| {
-                    let scheme = if cfg.tls.is_tls() { "https" } else { "http" };
-                    format!("{scheme}://{}:{}", cfg.bind, cfg.port)
-                });
-                (url, cfg.port)
-            });
-
         let http_handle = match management_api_config {
             Some(api_cfg) => {
                 announce_web_auth_state(web_auth.as_ref(), &api_cfg);
@@ -1788,29 +1806,54 @@ impl Service {
         // should not have to look at their setup code any more.
         if let Some(web) = web_auth.clone() {
             let mut sweep_shutdown = shutdown_rx.clone();
-            let setup_target = web_setup_target.clone();
+            let svc_for_setup = svc.clone();
             tokio::spawn(async move {
                 let mut card: Option<pairing_display::SetupCodeDisplay> = None;
-                let mut ticker = tokio::time::interval(Duration::from_secs(30));
+                // What the card on screen is currently saying, so a tick that
+                // changes nothing does not restart the subprocess and flash the
+                // card at whoever is reading it.
+                let mut showing: Option<SetupCardContent> = None;
+                let mut ticker = tokio::time::interval(SETUP_CARD_POLL);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut since_sweep = Duration::ZERO;
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
-                            web.sweep();
-                            match web.enrolment_code() {
-                                Some(code) if card.is_none() => {
-                                    card = Some(pairing_display::SetupCodeDisplay::show(
-                                        &code,
-                                        setup_target
-                                            .as_ref()
-                                            .and_then(|(url, _)| url.as_deref()),
-                                        setup_target.as_ref().map(|(_, port)| *port),
-                                    ));
+                            // The sweep is expiry housekeeping and wants the
+                            // slower clock; the card wants the faster one,
+                            // because at boot it goes up before the listener
+                            // has bound and should stop saying "port 8080 on
+                            // this device" as soon as it can say an address.
+                            since_sweep += SETUP_CARD_POLL;
+                            if since_sweep >= WEB_AUTH_SWEEP {
+                                since_sweep = Duration::ZERO;
+                                web.sweep();
+                            }
+                            let wanted = match web.enrolment_code() {
+                                // Only asked for while a code exists: this is a
+                                // NetworkManager round trip, and a device that
+                                // finished setup months ago has no use for one.
+                                Some(code) => {
+                                    let status = svc_for_setup.network_status().await;
+                                    Some(SetupCardContent {
+                                        code,
+                                        urls: status.management_urls,
+                                        port: status.management_api.port,
+                                    })
                                 }
-                                None if card.is_some() => {
-                                    card = None;
-                                }
-                                _ => {}
+                                None => None,
+                            };
+                            if wanted != showing {
+                                // Torn down before the replacement goes up:
+                                // two overlays anchored to the same corner
+                                // would stack rather than replace.
+                                drop(card.take());
+                                card = wanted.as_ref().map(|c| {
+                                    pairing_display::SetupCodeDisplay::show(
+                                        &c.code, &c.urls, c.port,
+                                    )
+                                });
+                                showing = wanted;
                             }
                         }
                         _ = sweep_shutdown.changed() => {
@@ -1820,6 +1863,10 @@ impl Service {
                         }
                     }
                 }
+                // Explicit: the card is a child process, and shutdown is the
+                // one path where leaving it to the end of scope would be easy
+                // to lose in a later refactor.
+                drop(card);
             });
         }
 
