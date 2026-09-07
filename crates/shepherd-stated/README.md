@@ -112,6 +112,108 @@ The socket's own mode is `0666`, and deliberately so: connecting to a Unix
 socket needs *write* permission on the inode, and `shepherdd` is at a different
 uid. **The peer check is the gate; the file mode is not.**
 
+## It also ends the session when nothing is supervising it (issue [#172])
+
+Every activity runs as the kiosk uid, and so does `shepherdd`. Signal permission
+is a uid comparison, so an activity can `kill` its own supervisor — and the
+`sh -c` wrapper that turns a dead `shepherdd` into `loginctl terminate-session`
+runs at that uid too, so killing it first defeats it. `kill -STOP shepherdd`
+defeats it without killing anything at all: a stopped daemon never exits, so the
+wrapper's `||` never fires, while the engine that counts a child's time has
+stopped.
+
+This daemon is the only part of shepherd that is outside the session, at a uid
+nothing inside it can signal, and it already knows which session is the kiosk's.
+So it holds the dead man's switch.
+
+```
+shepherdd ──Supervise──▶ custodian     "will anything happen if I die?"
+          ◀──armed────   (asks polkit once, at startup)
+          ──Heartbeat──▶ every 5s, emitted from the engine tick
+              …
+          ╳ killed       EOF        ─▶ settle 5s  ─▶ TerminateSession
+          ╳ SIGSTOPped   no beats   ─▶ deadline 60s ─▶ TerminateSession
+                                       still there after 10s ─▶ KillUser
+```
+
+The escalation is `KillUser`, not `KillSession`, and the difference matters:
+the session scope holds sway, the launcher and the HUD, while the activities are
+in `shepherd-<id>.scope` under the user manager's `app.slice` (or a snap's or
+flatpak's own scope). Killing the session scope in the one case this escalation
+exists for would take the compositor and leave the game running. `KillUser`
+covers both and needs no second polkit grant. A firewalled Process entry is a
+*system* manager scope — `IPAddressDeny=` needs `CAP_NET_ADMIN` — and used to be
+outside all of this; the firewall helper now creates it inside
+`user-<uid>.slice` and bound to the session, so both the terminate and this
+reach it.
+
+**The beat comes from the engine tick**, the same 100 ms loop that decides
+whether a child's time is up — not from a timer of its own, which would attest
+only that *a thread* is alive. A `shepherdd` whose engine has stopped and whose
+runtime has not is exactly the failure a watchdog is for.
+
+**Nothing has to be sent for it to fire.** A killed process closes its
+descriptors whether it meant to or not; the heartbeats exist only for the
+failures that keep the descriptor open. There is deliberately **no goodbye
+message**: every orderly shutdown also ends with `shepherdd` gone and the
+session ending anyway, and a disarm message would be a thing to spoof — send it,
+then kill the daemon. Every disarm comes from logind, none from the wire.
+
+### Measured on a device
+
+An installed kiosk (Ubuntu 26.04, systemd 259), this branch's release binaries,
+`shepherd-kiosk` autologged into the Shepherd session:
+
+| | |
+| --- | --- |
+| wrappers killed first, then `shepherdd` | session gone in **5.10 s**; sway, the activity and its scope with it |
+| `kill -STOP shepherdd` | session gone in **56.9 s**, with the `\|\|` fallback's own processes alive the whole time |
+| the custodian restarted underneath it | reconnected; session still up **99 s** later |
+| the polkit rule removed | `session_not_guarded` **critical** on the launcher — and the attack succeeds, which is the point of saying so |
+
+Details and the rest of the run are in
+[`docs/ai/history/2026-09-07 002`](../../docs/ai/history/).
+
+### What must not fire it
+
+A watchdog that fires when nothing is wrong costs a child their session
+mid-activity, for a reason nothing on screen explains. Three cases are handled
+rather than left to the deadline:
+
+| | |
+| --- | --- |
+| **a suspend** | logind's `PrepareForSleep` stands the guard down and re-arms it on resume with a *full* deadline, so the first beat after a resume is never late |
+| **a slow boot** | the first beat gets two minutes rather than the deadline's one: this channel opens while `shepherdd` is still starting, and its engine tick runs after that. Nothing is unguarded meanwhile — an activity cannot launch before the engine that would launch it |
+| **a reconnect** | losing the connection starts a five-second settle rather than firing, so a client that comes back cancels it by arriving |
+
+A fourth is structural: the guard is never armed against a session that did not
+resolve to exactly one id. `resolve` refuses to guess between two, and a
+watchdog that guessed during a `switch user` would end whichever session was
+next.
+
+Every one of those is a `Guard` unit test, driven as arithmetic against a fake
+clock — the state machine has no socket, no bus and no clock of its own, which
+is what makes "a suspend that outlasts the deadline" a test rather than a
+device.
+
+### The authority, and what it widens
+
+`TerminateSession` from a uid that does not own the session needs polkit's
+`org.freedesktop.login1.manage`, granted to `shepherd-state` by
+`dist/polkit/50-shepherd-session-guard.rules`. polkit passes no details for that
+call, so the grant **cannot be narrowed to one session**: it covers any session
+on the machine, an administrator's SSH login included. What keeps it acceptable
+is the shape of the thing holding it — no network, no subprocesses,
+`ProtectSystem=strict`, one call site, and a session id resolved from logind
+rather than taken from the wire.
+
+The daemon asks polkit at startup whether it is allowed, and the answer travels
+back on the `Supervise` reply. Without the rule the device still boots and
+everything else still works; `shepherdd` raises the `Critical` diagnostic
+`session_not_guarded` and the journal names the file. That check exists because
+a watchdog that cannot fire is worse than none: it is the shape that looks like
+protection.
+
 ## What it is not
 
 * **Not root.** It opens a SQLite file it owns, reads TOML it owns, and asks
@@ -120,7 +222,11 @@ uid. **The peer check is the gate; the file mode is not.**
 * **Not a policy engine.** It never learns what a limit means or whether a child
   may launch something; that stays in `shepherd-core`. Custody, not judgment.
 * **Not a spawner.** No subprocess at all, which keeps the `$PATH`-substitution
-  class ([`2026-08-29 004`], finding 1) away from it entirely.
+  class ([`2026-08-29 004`], finding 1) away from it entirely — the session
+  watchdog ends a session over D-Bus rather than by running `loginctl`, so that
+  stays true.
+* **Not able to end a session by itself.** It asks logind, and logind asks
+  polkit. Remove the rule and the daemon keeps every other job it has.
 
 The unit backs that up with sandboxing — verified applied on 26.04, where the
 running service has no capabilities, `NoNewPrivs: 1`, loopback-only networking,
@@ -228,5 +334,6 @@ reaches every effect this protects. Closing one without the other moves the
 adversary one socket to the left.
 
 [#157]: https://git.armeafamily.com/albert/shepherd-launcher/issues/157
+[#172]: https://git.armeafamily.com/albert/shepherd-launcher/issues/172
 [`2026-08-29 004`]: ../../docs/ai/history/
 [`2026-08-29 005`]: ../../docs/ai/history/

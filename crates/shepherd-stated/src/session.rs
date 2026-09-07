@@ -63,6 +63,28 @@ trait LogindManager {
 
     #[zbus(signal)]
     fn session_removed(&self, id: String, path: OwnedObjectPath) -> zbus::Result<()>;
+
+    /// End a session (issue #172). Needs polkit's
+    /// `org.freedesktop.login1.manage` from a uid that does not own the
+    /// session, which is what `dist/polkit/50-shepherd-session-guard.rules`
+    /// grants and what [`crate::polkit`] checks for at startup.
+    fn terminate_session(&self, session_id: &str) -> zbus::Result<()>;
+
+    /// Kill everything a uid is running, for when asking did not work.
+    ///
+    /// `KillUser` rather than `KillSession` deliberately: the session scope
+    /// holds the compositor and shepherd's own UI, while the activities live in
+    /// the user manager's `app.slice`. See [`crate::guard::Terminator::kill_user`].
+    fn kill_user(&self, uid: u32, signal_number: i32) -> zbus::Result<()>;
+
+    /// `true` as the machine goes to sleep, `false` once it is back.
+    ///
+    /// The watchdog disarms on the first and re-arms on the second: a sleeping
+    /// machine is not a wedged one, and a device that slept through the night
+    /// must not wake to a session that was terminated for not beating while
+    /// nothing was running at all.
+    #[zbus(signal)]
+    fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
 }
 
 /// One session's properties, as far as the filter cares.
@@ -359,6 +381,91 @@ fn scope_cgroup_path(uid: u32, scope: &str) -> PathBuf {
     PathBuf::from("/sys/fs/cgroup/user.slice")
         .join(format!("user-{uid}.slice"))
         .join(scope)
+}
+
+/// [`crate::guard::Terminator`] over logind.
+///
+/// The session id is the one [`resolve`] settled on, carried from there rather
+/// than looked up again: the filter that produced it is the security-relevant
+/// part, and a terminator that re-resolved could end a session the guard was
+/// never watching.
+pub struct LogindTerminator {
+    manager: LogindManagerProxy<'static>,
+}
+
+impl LogindTerminator {
+    pub async fn new(conn: &zbus::Connection) -> Result<Self> {
+        Ok(Self {
+            manager: LogindManagerProxy::new(conn)
+                .await
+                .context("connecting to logind to be able to end the session")?,
+        })
+    }
+}
+
+impl crate::guard::Terminator for LogindTerminator {
+    fn terminate<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.manager
+                .terminate_session(session_id)
+                .await
+                .with_context(|| format!("asking logind to terminate session {session_id}"))
+        })
+    }
+
+    fn kill_user(&self, uid: u32) -> futures_util::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.manager
+                // SIGKILL, and everything the uid is running: this only runs
+                // after a terminate has already been ignored for ten seconds,
+                // and something that ignored logind is not going to be moved by
+                // a politer signal.
+                .kill_user(uid, nix::sys::signal::Signal::SIGKILL as i32)
+                .await
+                .with_context(|| format!("asking logind to kill everything uid {uid} is running"))
+        })
+    }
+}
+
+/// Turn logind's sleep signal into guard events.
+///
+/// Returns a future to spawn. Failing to subscribe is *not* fatal: the guard
+/// still works, it just loses the one thing that tells a suspend apart from a
+/// wedge, so it is reported loudly and the daemon carries on.
+pub async fn forward_sleep_signals(
+    conn: &zbus::Connection,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::guard::Event>,
+) -> Result<impl std::future::Future<Output = ()> + use<>> {
+    let manager = LogindManagerProxy::new(conn)
+        .await
+        .context("connecting to logind")?;
+    let mut signals = manager
+        .receive_prepare_for_sleep()
+        .await
+        .context("subscribing to logind's sleep signal")?;
+
+    Ok(async move {
+        use futures_util::StreamExt as _;
+        while let Some(signal) = signals.next().await {
+            let Ok(args) = signal.args() else { continue };
+            let event = if args.start {
+                tracing::info!("The machine is suspending; the watchdog stands down");
+                crate::guard::Event::Suspending
+            } else {
+                tracing::info!("Resumed; the watchdog is armed again with a full deadline");
+                crate::guard::Event::Resumed
+            };
+            if tx.send(event).is_err() {
+                return;
+            }
+        }
+        tracing::warn!(
+            "logind's sleep signal ended; a suspend would now look like a wedged shepherdd"
+        );
+    })
 }
 
 #[cfg(test)]

@@ -1,10 +1,12 @@
-//! The systemd units and this crate's constants describe the same socket.
+//! The systemd units, the polkit rule and this crate's constants describe the
+//! same socket, the same directory and the same uid.
 //!
-//! Three facts are stated twice and cannot be stated once, because systemd
-//! cannot call Rust: where the socket is, where the state directory is, and
-//! which uid owns it. The unit files say them in `ListenStream=`,
-//! `StateDirectory=` and `User=`; this crate says them in [`socket_path`],
-//! [`state_dir`] and [`STATE_USER`].
+//! Four facts are stated twice and cannot be stated once, because neither
+//! systemd nor polkit can call Rust: where the socket is, where the state
+//! directory is, which uid owns it, and which uid may end a session. The unit
+//! files say the first three in `ListenStream=`, `StateDirectory=` and `User=`,
+//! and `50-shepherd-session-guard.rules` says the fourth; this crate says them
+//! in [`socket_path`], [`state_dir`] and [`STATE_USER`].
 //!
 //! A drift between them fails in the least helpful way available. The service
 //! manager binds one path and `shepherdd` dials another, so the connection is
@@ -108,5 +110,49 @@ fn the_service_unit_owns_the_directory_the_client_stats() {
         directive(&service, "StateDirectoryMode"),
         "0700",
         "the custodian's directory must stay unreadable to the uid activities run as"
+    );
+}
+
+/// The polkit rule and the unit have to name the same uid (issue #172).
+///
+/// A fourth fact stated twice for the same reason as the other three: polkit
+/// cannot call Rust either. The rule grants a *user name* the right to end a
+/// session; the unit decides which user the daemon actually runs as. Rename one
+/// and the watchdog keeps running, keeps counting, fires — and is refused, on a
+/// device whose journal will say only that `TerminateSession` was not
+/// authorised.
+///
+/// The check is deliberately crude — the file has to mention the action and the
+/// user — because anything cleverer would be re-implementing polkit's JavaScript
+/// to catch a rename.
+#[test]
+fn the_polkit_rule_names_the_user_the_daemon_runs_as() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dist/polkit/50-shepherd-session-guard.rules")
+        .canonicalize()
+        .expect("dist/polkit/50-shepherd-session-guard.rules is where packaging expects it");
+    let rule = std::fs::read_to_string(&path).expect("reading the polkit rule");
+    let granting: String = rule
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect();
+
+    assert!(
+        granting.contains("org.freedesktop.login1.manage"),
+        "the session watchdog's polkit rule no longer grants the action that ends a session, \
+         so the watchdog would notice a killed shepherdd and then be refused"
+    );
+    assert!(
+        granting.contains(&format!("\"{STATE_USER}\"")),
+        "the polkit rule does not name {STATE_USER}, which is the user \
+         shepherd-stated@.service runs as -- so the grant applies to nobody and the watchdog \
+         cannot end a session"
+    );
+
+    let service = unit("shepherd-stated@.service");
+    assert_eq!(
+        directive(&service, "User"),
+        STATE_USER,
+        "the unit runs as a user the polkit rule does not grant"
     );
 }

@@ -60,6 +60,12 @@ STATED_SERVICE_UNIT="shepherd-stated@.service"
 # crates/shepherdd/README.md and docs/INSTALL.md have always described state as
 # living under it.
 STATED_STATE_ROOT="/var/lib/shepherdd/state"
+# The session watchdog's authority (issue #172). The custodian is outside the
+# kiosk session at its own uid, which is what lets it notice a killed shepherdd
+# -- and what means logind treats it as a stranger to the session it has to end.
+# This rule is the difference between a watchdog that fires and one that only
+# looks like it will.
+SESSION_GUARD_RULES_NAME="50-shepherd-session-guard.rules"
 
 # The file names shepherd's protected files have, and what happens to each when
 # a device gains or loses the custodian.
@@ -215,10 +221,9 @@ install_sway_config() {
     # one shell's cgroup, where the check cannot mean anything.
     #
     # The two `swaymsg exit` fallbacks are rewritten rather than stripped (issue
-    # #144's open defect 2, tracked as #172) -- the one that runs when shepherdd
-    # exits, and the one behind the `Mod4+Shift+Escape` escape hatch, which fires
-    # only when there is no shepherdd to signal. `swaymsg exit` cannot work on a
-    # device:
+    # #144's defect 2) -- the one that runs when shepherdd exits, and the one
+    # behind the `Mod4+Shift+Escape` escape hatch, which fires only when there is
+    # no shepherdd to signal. `swaymsg exit` cannot work on a device:
     # shepherdd unlinks sway's IPC socket once it has connected, so a daemon
     # that dies after that leaves sway up with nothing supervising the session.
     # `loginctl terminate-session` needs no compositor socket, and terminating
@@ -226,9 +231,12 @@ install_sway_config() {
     # `swaymsg exit` because a development sway is nested inside the developer's
     # own login session and inherits its `XDG_SESSION_ID`.
     #
-    # This does not make a *deliberate* kill safe: the `sh -c` wrapper runs at
-    # the kiosk uid, so an activity can kill it first and leave nothing to run
-    # the fallback. See the note above the exec line in `sway.conf`.
+    # This does not make a *deliberate* kill safe on its own: the `sh -c` wrapper
+    # runs at the kiosk uid, so an activity can kill it first and leave nothing
+    # to run the fallback. What closes that is the state custodian's session
+    # watchdog (#172), which is outside the session at a uid nothing in it can
+    # signal; this line stays as the fast path for the ordinary case. See the
+    # note above the exec line in `sway.conf`.
     # `sway.conf` carries both flags because it is the development config, where
     # the unlink would take the socket away from `swaymsg` and the headless
     # harness. An installed kiosk wants the defaults, so they come back out
@@ -776,6 +784,9 @@ install_state() {
         [[ -f "$repo_root/dist/systemd/$unit" ]] \
             || die "systemd unit missing at $repo_root/dist/systemd/$unit"
     done
+    local guard_src="$repo_root/dist/polkit/$SESSION_GUARD_RULES_NAME"
+    [[ -f "$guard_src" ]] \
+        || die "Session watchdog polkit rule missing at $guard_src"
 
     info "Installing state custodian to $destdir$STATED_PATH..."
     ensure_dir "$(dirname "$destdir$STATED_PATH")" 0755
@@ -787,6 +798,16 @@ install_state() {
         install -m 0644 -o root -g root "$repo_root/dist/systemd/$unit" \
             "$destdir$STATED_UNIT_DIR/$unit"
     done
+
+    # Without this the watchdog is inert: it notices, logs, calls
+    # TerminateSession and is refused (issue #172). Installed with the custodian
+    # rather than beside the firewall's rule because it is the custodian's
+    # authority, and a device that has one without the other is the shape this
+    # is trying to avoid.
+    local guard_dst="$destdir$POLKIT_RULES_DIR/$SESSION_GUARD_RULES_NAME"
+    info "Installing session watchdog polkit rule to $guard_dst..."
+    ensure_dir "$(dirname "$guard_dst")" 0755
+    install -m 0644 -o root -g root "$guard_src" "$guard_dst"
 
     # Host mutation only on a real install; under DESTDIR these would change the
     # build host and bake its state into the package.
@@ -805,6 +826,14 @@ install_state() {
 
         systemctl daemon-reload 2>/dev/null \
             || warn "Could not reload systemd; the state custodian applies at next boot"
+
+        if systemctl is-active --quiet polkit 2>/dev/null; then
+            info "Reloading polkit so the session watchdog may end a session"
+            systemctl reload polkit 2>/dev/null \
+                || systemctl restart polkit 2>/dev/null \
+                || warn "Could not reload polkit; restart it manually or the session watchdog \
+will be refused when it fires"
+        fi
 
         [[ -n "$user" ]] && setup_state_for_user "$user"
     fi
@@ -1497,9 +1526,18 @@ uninstall_state() {
     remove_path "$destdir$STATED_PATH"
     remove_path "$destdir$STATED_UNIT_DIR/$STATED_SOCKET_UNIT"
     remove_path "$destdir$STATED_UNIT_DIR/$STATED_SERVICE_UNIT"
+    # The authority goes with the daemon that held it (issue #172). Leaving it
+    # behind would be leaving a uid the right to end sessions after the only
+    # thing that had a reason to do so is gone.
+    remove_path "$destdir$POLKIT_RULES_DIR/$SESSION_GUARD_RULES_NAME"
 
     if [[ -z "$destdir" ]]; then
         systemctl daemon-reload 2>/dev/null || true
+        if systemctl is-active --quiet polkit 2>/dev/null; then
+            systemctl reload polkit 2>/dev/null \
+                || systemctl restart polkit 2>/dev/null \
+                || warn "Could not reload polkit; restart it manually"
+        fi
     fi
 
     # The state itself is deliberately left behind, and so is the system user

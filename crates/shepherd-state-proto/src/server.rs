@@ -104,6 +104,20 @@ pub fn handle(store: &dyn Store, files: &dyn ProtectedFiles, request: StateReque
             })
         }
 
+        StateRequest::Supervise | StateRequest::Heartbeat => {
+            // Same as `WatchConfig`: the connection loop takes these over
+            // before dispatch, because what they do is change what the
+            // *connection* is (issue #172). One that arrives here is a
+            // heartbeat on a connection nothing is watching, which is a client
+            // bug rather than an attack — so it is answered, and the client
+            // sees an error instead of a watchdog it wrongly believes in.
+            encode(WireResult::<()>::Err {
+                kind: crate::WireErrorKind::Serialization,
+                message: "Supervise and Heartbeat must be intercepted by the connection loop"
+                    .into(),
+            })
+        }
+
         // Unreachable: `dispatch_store` hands back only what is not a `Store`
         // call, so every remaining variant is named above. Answered rather than
         // `unreachable!`, for the reason `WatchConfig` gives — under socket

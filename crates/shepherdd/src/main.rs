@@ -33,7 +33,7 @@ use shepherd_ipc::{IpcServer, ServerMessage};
 use shepherd_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementService,
 };
-use shepherd_state_proto::{RemoteFiles, RemoteStore};
+use shepherd_state_proto::{RemoteFiles, RemoteStore, Supervision};
 use shepherd_store::{AuditEvent, AuditEventType, SqliteStore, Store};
 use shepherd_util::{
     LocalProtectedFiles, MonotonicInstant, ProtectedFile, ProtectedFiles, RateLimiter,
@@ -233,6 +233,39 @@ struct Service {
     /// Where the BLE admin record, unbond queue and reset sentinel live.
     /// Always present, unlike `policy_files` — see [`StateParts`].
     protected_files: Arc<dyn ProtectedFiles>,
+    /// The connection the custodian watches to know this daemon is still
+    /// supervising the session (issue #172).
+    ///
+    /// Held for its `Drop` as much as for [`Supervision::beat`]: closing it is
+    /// how an orderly exit tells the watchdog, and a killed process closes it
+    /// without being asked. `None` where there is no custodian to tell.
+    supervision: Option<Supervision>,
+    /// Whether anything outside the session would notice this daemon dying, and
+    /// what to say if not. Carried for the same reason [`StateProtection`] is:
+    /// it is settled before there is a diagnostics channel to report it on.
+    session_guard: SessionGuard,
+}
+
+/// Whether the session survives this daemon being killed (issue #172).
+///
+/// Four outcomes rather than a bool, for the reason [`IpcPeerHardening`] has
+/// three: "there is no custodian on this device" and "there is one and it
+/// cannot end a session" look identical from here and mean entirely different
+/// things to whoever is responsible for the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionGuard {
+    /// No custodian answered, so nothing outside the session is watching. The
+    /// device already says so through [`DiagnosticCode::StateNotProtected`];
+    /// saying it twice would be two alarms for one fact.
+    NoCustodian,
+    /// The custodian is watching and can end the session.
+    Armed,
+    /// Watching, with something worth reporting — it could not check whether it
+    /// is allowed to end a session, so it will find out when it tries.
+    Caveat(String),
+    /// Watching and unable to act, or not watching at all. The worst shape
+    /// available, because it is the one that looks like protection.
+    Inert(String),
 }
 
 /// What arming the management socket's peer allow-list actually achieved.
@@ -438,9 +471,9 @@ impl Service {
         // Whose state to ask for is *this process's* user, not a name from the
         // environment: on a device the environment belongs to the kiosk user,
         // and so to every activity (issue #144, finding 1).
-        let user = match nix::unistd::User::from_uid(nix::unistd::getuid()) {
-            Ok(Some(user)) => user.name,
-            Ok(None) | Err(_) => {
+        let user = match Self::this_user() {
+            Some(user) => user,
+            None => {
                 let reason =
                     "this process's own uid has no user entry, so there is no custodian to ask"
                         .to_string();
@@ -474,6 +507,18 @@ impl Service {
             files: Arc::new(files),
             store: Arc::new(store),
         })
+    }
+
+    /// This process's own user name, which is whose state the custodian serves.
+    ///
+    /// Read from the uid rather than from `$USER` for the reason the whole of
+    /// #144 turns on: on a device the environment belongs to the kiosk user, so
+    /// it belongs to every activity too.
+    fn this_user() -> Option<String> {
+        nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten()
+            .map(|user| user.name)
     }
 
     /// Whether the custodian holds state for `user`, asked of the filesystem
@@ -717,6 +762,90 @@ impl Service {
         }
     }
 
+    /// Open the watchdog connection, and settle what it is worth.
+    ///
+    /// Called only where the custodian answered: it is the one process outside
+    /// the session, at a uid nothing inside it can signal, and without it there
+    /// is nothing to hold the other end of this.
+    ///
+    /// Never fatal. A device that could not open this connection is exactly as
+    /// supervised as every device was before #172, and refusing to start over
+    /// it would trade a defence-in-depth failure for a child staring at a
+    /// greeter.
+    fn start_supervision(user: &str) -> (Option<Supervision>, SessionGuard) {
+        match Supervision::start(user) {
+            Ok((supervision, reply)) => {
+                let guard = match (reply.armed, reply.reason) {
+                    (true, None) => {
+                        info!(
+                            deadline_secs = reply.deadline.as_secs(),
+                            "The custodian will end this session if this daemon stops \
+                             supervising it"
+                        );
+                        SessionGuard::Armed
+                    }
+                    (true, Some(caveat)) => {
+                        warn!(%caveat, "The session watchdog is armed with a caveat");
+                        SessionGuard::Caveat(caveat)
+                    }
+                    (false, reason) => {
+                        let reason = reason.unwrap_or_else(|| {
+                            "the custodian did not say why it cannot end the session".to_string()
+                        });
+                        error!(%reason, "The session watchdog cannot end the session");
+                        SessionGuard::Inert(reason)
+                    }
+                };
+                (Some(supervision), guard)
+            }
+            Err(e) => {
+                error!(error = %e, "Could not open the supervision channel");
+                (
+                    None,
+                    SessionGuard::Inert(format!(
+                        "the supervision channel to the custodian could not be opened ({e})"
+                    )),
+                )
+            }
+        }
+    }
+
+    /// What to say about a session nothing is guarding.
+    fn session_not_guarded_diagnostic(guard: &SessionGuard) -> Option<Diagnostic> {
+        let (severity, reason) = match guard {
+            // Already reported, once, as `StateNotProtected`.
+            SessionGuard::NoCustodian | SessionGuard::Armed => return None,
+            SessionGuard::Caveat(reason) => (DiagnosticSeverity::Warning, reason),
+            SessionGuard::Inert(reason) => (DiagnosticSeverity::Critical, reason),
+        };
+        Some(Diagnostic {
+            code: DiagnosticCode::SessionNotGuarded,
+            subject: DiagnosticSubject::Service,
+            severity,
+            message: format!(
+                "an activity runs as this daemon's own uid and can kill or stop it; if it \
+                 does, nothing outside the session will end the session — {reason}"
+            ),
+            remedy: Some(
+                "Install the polkit rule that lets the state custodian end a session \
+                 (/etc/polkit-1/rules.d/50-shepherd-session-guard.rules, shipped with the \
+                 package and installed by `shepherd install state`), then restart the \
+                 session."
+                    .to_string(),
+            ),
+            since: shepherd_util::now(),
+        })
+    }
+
+    /// Report an unguarded session once diagnostics exist, for the same
+    /// ordering reason [`Self::degraded_state_protection_is_reported`] is
+    /// separate: this is settled at startup, before there is anywhere to say it.
+    fn unguarded_session_is_reported(guard: &SessionGuard, diagnostics: &dyn DiagnosticSink) {
+        if let Some(diagnostic) = Self::session_not_guarded_diagnostic(guard) {
+            diagnostics.raise(diagnostic);
+        }
+    }
+
     async fn new(args: &Args) -> Result<Self> {
         // Where policy and state come from, decided once and for both. Splitting
         // the decision would let a device end up with a protected database and a
@@ -747,8 +876,26 @@ impl Service {
             .with_context(|| format!("Failed to create data directory {:?}", data_dir))?;
 
         // Initialize store
+        //
+        // Asked before `into_parts` consumes it, and asked of the *source*
+        // rather than of the protection: a custodian that answers but holds no
+        // policy yet is `Degraded`, and it is still the process that can end
+        // this session if this daemon stops supervising it (issue #172).
+        let custodian_answered = matches!(state, StateSource::Custodian { .. });
         let (store, policy_files, protected_files, state_protection) =
             state.into_parts(&data_dir)?;
+        let (supervision, session_guard) = match (custodian_answered, Self::this_user()) {
+            (true, Some(user)) => Self::start_supervision(&user),
+            (true, None) => (
+                None,
+                SessionGuard::Inert(
+                    "this process's own uid has no user entry, so the custodian serving it \
+                     cannot be named"
+                        .to_string(),
+                ),
+            ),
+            (false, _) => (None, SessionGuard::NoCustodian),
+        };
         if state_protection == StateProtection::Custodian {
             Self::warn_about_a_superseded_local_store(&data_dir);
         }
@@ -860,6 +1007,8 @@ impl Service {
             state_protection,
             policy_files,
             protected_files,
+            supervision,
+            session_guard,
         })
     }
 
@@ -1181,6 +1330,12 @@ impl Service {
         let harden_sway_ipc = self.harden_sway_ipc;
         let ipc_peer_hardening = self.ipc_peer_hardening.clone();
         let state_protection = self.state_protection.clone();
+        let session_guard = self.session_guard.clone();
+        // Moved out rather than cloned: what keeps the watchdog quiet is this
+        // value existing, so the loop below has to be the thing that owns it.
+        // When `run` returns, it drops, the connection closes, and the custodian
+        // ends the session — which is what an exiting shepherdd wants anyway.
+        let supervision = self.supervision.take();
         let policy_files = self.policy_files.clone();
         let protected_files = Arc::clone(&self.protected_files);
 
@@ -1611,6 +1766,7 @@ impl Service {
         // (issue #144).
         Self::degraded_ipc_hardening_is_reported(&ipc_peer_hardening, &diagnostic_publisher);
         Self::degraded_state_protection_is_reported(&state_protection, &diagnostic_publisher);
+        Self::unguarded_session_is_reported(&session_guard, &diagnostic_publisher);
 
         // Every sway connection this daemon needs is now open, so the socket's
         // name in the filesystem has done its job (issue #144).
@@ -1676,6 +1832,16 @@ impl Service {
 
                 // Tick timer - check warnings and expiry
                 _ = tick_timer.tick() => {
+                    // The watchdog's heartbeat rides this loop rather than a
+                    // timer of its own (issue #172). A beat sent by an
+                    // independent task would attest that *a thread* is alive,
+                    // which is not the property anyone wants: this is the loop
+                    // that decides whether a child's time is up, and it is the
+                    // one whose silence has to end the session.
+                    if let Some(supervision) = &supervision {
+                        supervision.beat();
+                    }
+
                     let now_mono = MonotonicInstant::now();
                     let now = shepherd_util::now();
 
@@ -2651,6 +2817,68 @@ mod harden_diagnostic_tests {
             d.message
         );
         assert!(d.remedy.is_some(), "a Critical condition needs an answer");
+    }
+
+    /// A watchdog that cannot fire is the shape that looks like protection, so
+    /// it is `Critical` and it carries the reason (issue #172).
+    #[test]
+    fn a_watchdog_that_cannot_fire_is_a_critical_service_condition() {
+        let d = Service::session_not_guarded_diagnostic(&SessionGuard::Inert(
+            "polkit refuses org.freedesktop.login1.manage to this daemon's uid".to_string(),
+        ))
+        .expect("an inert watchdog is reported");
+
+        assert_eq!(d.code, DiagnosticCode::SessionNotGuarded);
+        assert_eq!(d.severity, DiagnosticSeverity::Critical);
+        assert!(matches!(d.subject, DiagnosticSubject::Service));
+        assert!(
+            d.message.contains("polkit refuses"),
+            "the underlying reason has to survive into the message: {}",
+            d.message
+        );
+        assert!(
+            d.remedy
+                .as_deref()
+                .is_some_and(|r| r.contains("50-shepherd-session-guard.rules")),
+            "the answer is a named file, not advice to investigate"
+        );
+    }
+
+    /// The four outcomes, and why only two of them say anything.
+    ///
+    /// A device with no custodian already reports `StateNotProtected`, and one
+    /// whose watchdog is armed has nothing to report — so the channel stays
+    /// worth reading. The caveat is a `Warning` rather than a `Critical`
+    /// because "could not check" is not "will not work": the watchdog still
+    /// fires, and finds out then.
+    #[test]
+    fn only_a_watchdog_worth_worrying_about_reports() {
+        for (guard, expected) in [
+            (SessionGuard::Armed, None),
+            (SessionGuard::NoCustodian, None),
+            (
+                SessionGuard::Caveat("polkit did not answer".into()),
+                Some(DiagnosticSeverity::Warning),
+            ),
+            (
+                SessionGuard::Inert("no polkit rule".into()),
+                Some(DiagnosticSeverity::Critical),
+            ),
+        ] {
+            let sink = RecordingSink::default();
+            Service::unguarded_session_is_reported(&guard, &sink);
+            let raised = sink.raised.lock().expect("lock");
+            match expected {
+                None => assert!(raised.is_empty(), "{guard:?} should say nothing"),
+                Some(_) => assert_eq!(
+                    *raised,
+                    vec![DiagnosticCode::SessionNotGuarded],
+                    "{guard:?} should report an unguarded session"
+                ),
+            }
+            let severity = Service::session_not_guarded_diagnostic(&guard).map(|d| d.severity);
+            assert_eq!(severity, expected, "{guard:?} reported the wrong severity");
+        }
     }
 
     /// Only a *degraded* store is reported. An operator who passed

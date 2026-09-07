@@ -43,9 +43,11 @@ mod methods;
 pub mod client;
 pub mod files;
 pub mod server;
+pub mod supervise;
 
 pub use client::{CallError, RemoteStore, Transport};
 pub use files::{ConfigWatch, RemoteFiles};
+pub use supervise::Supervision;
 
 /// The protocol both ends must agree on.
 ///
@@ -160,6 +162,24 @@ macro_rules! define_state_request {
             /// Turn this connection into a notification stream for policy
             /// changes. Answered by the connection loop, not by `handle`.
             WatchConfig,
+
+            /// Turn this connection into the supervision channel (issue #172).
+            ///
+            /// Answered once with a [`SuperviseReply`], after which the client
+            /// only writes [`StateRequest::Heartbeat`] and the custodian only
+            /// reads. Losing the connection, or going quiet on it, is what
+            /// tells the custodian that nothing is supervising the session any
+            /// more -- which is the whole mechanism, so it is a *connection*
+            /// rather than a request: a killed shepherdd cannot decline to
+            /// close its file descriptors.
+            Supervise,
+
+            /// One beat on a [`StateRequest::Supervise`] connection.
+            ///
+            /// Carries nothing. It means "the loop that decides whether a
+            /// child's time is up ran recently", and the only thing the
+            /// custodian does with it is push the deadline out.
+            Heartbeat,
         }
     };
 }
@@ -192,6 +212,8 @@ impl StateRequest {
                 | Self::GetSetting { .. }
                 | Self::ReadFile { .. }
                 | Self::WatchConfig
+                | Self::Supervise
+                | Self::Heartbeat
         )
     }
 }
@@ -277,6 +299,26 @@ pub struct ConfigChanged {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloReply {
     pub proto: u32,
+}
+
+/// What a [`StateRequest::Supervise`] connection is answered with, once.
+///
+/// The answer shepherdd needs is not "did you hear me" but **"will anything
+/// happen if I die"**, because a watchdog that cannot fire is worse than none:
+/// it looks like one. So the custodian says whether it is actually able to end
+/// the session, and shepherdd -- which is still alive at that moment, and has a
+/// diagnostics channel the watchdog will not have when it is needed -- says so
+/// out loud if the answer is no.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuperviseReply {
+    /// Whether losing this connection will end the session.
+    pub armed: bool,
+    /// Why it will not, when it will not. `None` when `armed`.
+    pub reason: Option<String>,
+    /// How long the custodian will wait for a heartbeat before it acts, so the
+    /// client can pick a beat interval from the deadline rather than from a
+    /// constant the two crates would each have to hold a copy of.
+    pub deadline: Duration,
 }
 
 #[cfg(test)]

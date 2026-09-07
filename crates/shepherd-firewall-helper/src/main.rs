@@ -171,6 +171,8 @@ fn apply_process(args: impl Iterator<Item = OsString>) -> ExitCode {
         format!("--uid={}", uid),
         format!("--gid={}", gid),
     ];
+    // Make the scope die with the session that asked for it (issue #172).
+    sd_args.extend(lifetime_args(uid, session_scope_of_self().as_deref()));
     if let Some(c) = cwd {
         sd_args.push(format!("--working-directory={}", c));
     }
@@ -302,6 +304,87 @@ fn stop_scope(args: impl Iterator<Item = OsString>) -> ExitCode {
     let err = Command::new("systemctl").args(["stop", &scope_name]).exec();
     eprintln!("{}: execvp(systemctl): {}", HELPER_NAME, err);
     ExitCode::from(127)
+}
+
+// ---------------------------------------------------------------------------
+// Lifetime (issue #172)
+// ---------------------------------------------------------------------------
+
+/// The properties that tie this scope's life to the session that asked for it.
+///
+/// Without them a firewalled activity outlives everything. The scope is a
+/// **system** manager unit -- it has to be, because the `cgroup_skb` programs
+/// behind `IPAddressDeny=` need `CAP_NET_ADMIN` and a per-user manager cannot
+/// attach them -- so it sits outside `user-<uid>.slice`, where neither logind's
+/// `TerminateSession`, nor its teardown of `user@<uid>.service`, nor `KillUser`
+/// reaches it. The only thing that ever stopped one was `shepherdd` itself
+/// calling back through this helper's `stop-scope`, and issue #172 is precisely
+/// about `shepherdd` not being there to call anything.
+///
+/// So the lifetime is declared when the scope is created rather than enforced
+/// when something dies. Nothing gains an authority it did not have: the session
+/// watchdog's existing `TerminateSession` ends up doing the whole job.
+///
+/// Two properties, because they answer different questions:
+///
+/// * `--slice=user-<uid>.slice` puts the scope in the kiosk user's slice, which
+///   logind stops when the user's last session goes -- and which is also what
+///   `KillUser` kills, so the watchdog's escalation reaches it too. A unit gets
+///   an implicit `Requires=` on its slice, and a stopped slice stops what
+///   requires it.
+/// * `BindsTo=`/`After=` the caller's own session scope ends it when *that
+///   session* ends, which is the sharper statement: a device with two kiosk
+///   users has two sessions and one user slice each, and an activity belongs to
+///   a session rather than to a uid.
+///
+/// The session is **derived, never passed**. The polkit rule admits the
+/// `shepherd-firewall` group, which is the kiosk user, so an argument here
+/// would be attacker-chosen. Reading it from this process's own cgroup -- which
+/// is the caller's, inherited through `pkexec`, before `systemd-run` moves
+/// anything -- means a caller can only ever name the session it is actually in.
+/// (Lying would in any case only shorten its own activity's life: `BindsTo` is
+/// one-way and cannot stop the unit it names.)
+///
+/// When the caller is not in a session scope at all -- a development stack, a
+/// hand-run helper -- the binding is simply omitted rather than guessed, and
+/// the slice still applies.
+fn lifetime_args(uid: u32, session_scope: Option<&str>) -> Vec<String> {
+    let mut args = vec![format!("--slice=user-{}.slice", uid)];
+    if let Some(scope) = session_scope {
+        args.push(format!("--property=BindsTo={}", scope));
+        args.push(format!("--property=After={}", scope));
+    }
+    args
+}
+
+/// The session scope this process is in, if it is in one.
+fn session_scope_of_self() -> Option<String> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    session_scope_in_cgroup(&cgroup)
+}
+
+/// Pick `session-<id>.scope` out of the contents of `/proc/<pid>/cgroup`.
+///
+/// Validated rather than trusted even though it comes from the kernel: it goes
+/// into an argv, so it is held to logind's own shape -- `session-`, an
+/// alphanumeric id, `.scope` -- and anything else is treated as "not in a
+/// session".
+fn session_scope_in_cgroup(cgroup: &str) -> Option<String> {
+    cgroup
+        .lines()
+        .flat_map(|line| line.rsplit('/'))
+        .find(|component| is_session_scope(component))
+        .map(str::to_string)
+}
+
+fn is_session_scope(component: &str) -> bool {
+    let Some(id) = component
+        .strip_prefix("session-")
+        .and_then(|rest| rest.strip_suffix(".scope"))
+    else {
+        return false;
+    };
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +597,66 @@ mod tests {
         assert!(!is_acceptable_command("foo;bar"));
         assert!(!is_acceptable_command("/this/path/should/not/exist"));
         assert!(!is_acceptable_command("relative/path"));
+    }
+
+    #[test]
+    fn a_firewalled_scope_is_bound_to_the_session_that_asked_for_it() {
+        // Issue #172. Without these the scope is a system-manager unit outside
+        // the user's slice, which nothing ends when the session does -- so a
+        // killed shepherdd leaves a firewalled activity running with its rules
+        // and no supervisor.
+        let args = lifetime_args(1000, Some("session-2.scope"));
+        assert!(args.contains(&"--slice=user-1000.slice".to_string()));
+        assert!(args.contains(&"--property=BindsTo=session-2.scope".to_string()));
+        assert!(
+            args.contains(&"--property=After=session-2.scope".to_string()),
+            "BindsTo without After orders the teardown by luck"
+        );
+    }
+
+    #[test]
+    fn no_session_means_the_slice_alone_rather_than_a_guess() {
+        // A development stack, or the helper run by hand: there is no session
+        // scope to bind to, and naming one that does not exist would fail the
+        // unit's start -- which is an activity that will not launch, for a
+        // property that is defence in depth.
+        let args = lifetime_args(1000, None);
+        assert_eq!(args, vec!["--slice=user-1000.slice".to_string()]);
+    }
+
+    #[test]
+    fn the_session_comes_out_of_a_real_cgroup_line() {
+        // v2, which is what a device has.
+        assert_eq!(
+            session_scope_in_cgroup("0::/user.slice/user-1000.slice/session-2.scope\n"),
+            Some("session-2.scope".to_string())
+        );
+        // The activity's own scope is deeper, but this helper runs before
+        // `systemd-run` moves anything, so what it sees is the session.
+        assert_eq!(
+            session_scope_in_cgroup("0::/user.slice/user-1000.slice/session-c1.scope\n"),
+            Some("session-c1.scope".to_string())
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_session_scope_is_no_session() {
+        // The value reaches an argv, so it is held to logind's shape rather
+        // than trusted for coming from the kernel.
+        for cgroup in [
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/shepherd-abc.scope\n",
+            "0::/system.slice/shepherd-stated@kiosk.service\n",
+            "0::/user.slice/user-1000.slice/session-.scope\n",
+            "0::/user.slice/user-1000.slice/session-2;rm.scope\n",
+            "0::/\n",
+            "",
+        ] {
+            assert_eq!(
+                session_scope_in_cgroup(cgroup),
+                None,
+                "should not have read a session out of {cgroup:?}"
+            );
+        }
     }
 
     #[test]

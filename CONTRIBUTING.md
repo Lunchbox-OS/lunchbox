@@ -152,6 +152,43 @@ master without a graphical login. See
 [`docs/ai/history/2026-07-28 001 shepherd-media performance investigation.md`](./docs/ai/history/)
 for a worked example.
 
+### Testing against a real kiosk session over SSH
+
+Some things are not reachable from the headless session at all — anything that
+turns on logind seeing a *graphical* session for the kiosk user: the state
+custodian's peer check (#157), the session watchdog (#172), a firewalled
+activity's transient scope. A dev stack passes `--no-state-custodian` and its
+sway is not a logind graphical session, so those paths simply do not run.
+
+What works, with no graphical login of your own, is driving gdm's autologin:
+
+```sh
+# 1. install this branch for the kiosk user (skip `install all` -- its
+#    `install config` step overwrites the device's real policy with the example)
+for step in bins "firewall --user shepherd-kiosk" "state --user shepherd-kiosk"             sway-config desktop-entry udev "groups --user shepherd-kiosk"; do
+    sudo ./scripts/shepherd install $step
+done
+# 2. autologin, then restart gdm to make it take effect now
+sudo sed -i '/^\[daemon\]/a AutomaticLoginEnable=true\nAutomaticLogin=shepherd-kiosk' \
+    /etc/gdm3/custom.conf
+sudo systemctl restart gdm
+# 3. teardown: put custom.conf back, then `sudo systemctl restart gdm`
+```
+
+Three things that will waste your time otherwise:
+
+* **`systemctl restart gdm` does not end a session that is already running.** It
+  kills the session *leader*, which orphans `shepherdd` (nothing sets
+  `PDEATHSIG`), and with `KillUserProcesses=no` logind then leaves the session in
+  state `closing` waiting for the scope to empty. `TerminateSession` on an
+  already-closing session is a no-op. End the session first
+  (`loginctl terminate-session`), confirm it is gone, and only then restart gdm.
+* **Do not suspend this VM.** On the libvirt host the only `/sys/power/mem_sleep`
+  is `s2idle` and it does not come back — a `systemctl suspend` needed a hard
+  reset. Anything that has to be measured across a suspend needs real hardware.
+* **The agent scratchpad is under `/tmp`, which a reboot clears.** Back up the
+  device's policy and database somewhere that survives one before you start.
+
 ### Web UI
 
 The management API HTTP server (`shepherd-http`) embeds the React SPA at compile

@@ -653,6 +653,34 @@ Consequences worth knowing before you debug a device:
   moved, its state is where it always was, and it reports the `Critical`
   diagnostic `state_not_protected` rather than refusing over a protection it was
   never given.
+- **The custodian also ends the session if `shepherdd` stops supervising it**
+  (issue #172). Every activity runs as the kiosk uid, and so does `shepherdd`,
+  so an activity can `kill` — or `SIGSTOP` — its own supervisor and carry on
+  with no time accounting, no bedtime and no audit. The `sh -c` wrapper in the
+  sway config catches a daemon that merely *exits*, but it runs at that same uid
+  and can be killed first. The custodian cannot: it is outside the session, at a
+  uid nothing inside it can signal.
+
+  So `shepherdd` holds a connection open to it and beats on it from the same
+  loop that decides whether a child's time is up. Lose the connection and the
+  session ends five seconds later; go quiet on it for a minute and the session
+  ends too. Neither a suspend nor a slow boot counts as going quiet — the
+  custodian stands down on logind's `PrepareForSleep` and allows two minutes for
+  the first beat.
+
+  Ending a session it does not own needs polkit, which is what
+  `/etc/polkit-1/rules.d/50-shepherd-session-guard.rules` grants (installed with
+  the custodian, removed with it). Without that rule everything still works
+  except the part that matters: the device raises the `Critical` diagnostic
+  `session_not_guarded` and the journal names the file. **The rule grants
+  `shepherd-state` the right to end any session on the machine**, an
+  administrator's SSH login included — polkit passes no details for
+  `TerminateSession`, so it cannot be narrowed. The rule's own comments say so
+  and say why it is worth it.
+
+  Consequence for debugging: on a device you cannot pause or restart `shepherdd`
+  in place. Attaching a debugger that stops it ends the session, exactly as a
+  child killing it would.
 - **The `shepherd-state` user and the state survive an uninstall.** Removing them
   would discard a device's usage history and its BLE admin record, which an
   uninstall is not entitled to do.
