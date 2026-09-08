@@ -32,6 +32,7 @@ import {
   BrightnessEditor,
   VolumeEditor,
 } from "../components/RestrictionEditors";
+import { DangerZone } from "../components/DangerZone";
 import { Section } from "../components/Section";
 import { StringListEditor } from "../components/StringListEditor";
 import { WarningTimeline } from "../components/WarningTimeline";
@@ -207,22 +208,35 @@ export function ServicePage({ config }: { config: RawConfig }) {
           <DisplayEditor config={config} />
         </Section>
 
-        <Section
-          title="Management API"
-          description="The HTTP interface this editor will eventually talk to."
-          present={service.management_api != null}
-          onTogglePresent={(on) =>
-            on
-              ? apply(
-                  set(servicePath("management_api"), {
-                    enabled: true,
-                  } as never),
-                )
-              : apply(unset(servicePath("management_api")))
+        <DangerZone
+          warning={
+            <>
+              These settings decide whether the device has a web interface at
+              all, and who can reach it — including this editor, when it is
+              opened from the device itself. Turning the API off, moving it to
+              an address this browser cannot reach, or dropping TLS on a
+              non-loopback bind will end the session that saved the change, and
+              a hardened device has no SSH to go back in with.
+            </>
           }
         >
-          <ManagementApiEditor config={config} />
-        </Section>
+          <Section
+            title="Management API"
+            description="The HTTP interface the web management UI and this editor talk to."
+            present={service.management_api != null}
+            onTogglePresent={(on) =>
+              on
+                ? apply(
+                    set(servicePath("management_api"), {
+                      enabled: true,
+                    } as never),
+                  )
+                : apply(unset(servicePath("management_api")))
+            }
+          >
+            <ManagementApiEditor config={config} />
+          </Section>
+        </DangerZone>
 
         <Section
           title="Bluetooth management"

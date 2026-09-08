@@ -372,18 +372,23 @@ from one source:
 | Target | Build | Dev server | Output |
 |---|---|---|---|
 | Standalone static site | `shepherd build config-editor` | `shepherd dev webui --standalone` | `dist-standalone/`, for a static host |
-| Embedded in shepherdd | `npm run build` | `shepherd dev webui` | `dist/` — the management UI, which does **not** route to the editor today |
+| Embedded in shepherdd | `npm run build` | `shepherd dev webui` | `dist/` — the management UI, whose **Config** tab is this editor |
 
-The editor is not reachable from the management UI yet, and `src/App.tsx` says
-why at the point where the route would go. Its only `ConfigSource` reads and
-writes files on whatever computer is doing the browsing, so a "Config" tab in a
-device's own web UI would read as "edit this device's configuration" while doing
-nothing of the sort. That waits on a `DeviceConfigSource`, which waits on
-privilege separation in `shepherd-http` — a config write runs arbitrary commands,
-and one blanket auth layer currently covers all of `/api/v1`.
+Which config it edits is a prop, not a build flag. The standalone bundle passes
+`FileConfigSource` (files on whatever computer is doing the browsing); the
+management UI passes `DeviceConfigSource`
+([`src/sources/`](shepherd-webui/src/sources/)), which reads and writes *this
+device's* policy over `GET`/`PUT /api/v1/config`. Everything in between asks
+the source what it can do rather than asking which build it is in.
 
-Leaving it unrouted also keeps the editor's chunks and its ~800 kB wasm
-validator out of `dist/`, and so out of the binary `rust-embed` builds from it.
+`DeviceConfigSource` lives outside `src/config/` because
+`scripts/check-boundary.mjs` forbids that tree from importing `src/api/` — it
+also builds into the standalone bundle, which has no daemon to talk to.
+
+Routing the editor is what puts its chunks and its ~950 kB wasm validator into
+`dist/`, and so into the binary `rust-embed` builds from it: about +1.5 MB on
+`dist/` and +5% on a release `shepherdd`. Both are lazy chunks, so a browser
+that never opens the tab never fetches them.
 
 The two **must** write different directories — anything left in `dist/` is
 compiled into the daemon binary by `rust-embed`. `rsbuild.config.ts` switches on

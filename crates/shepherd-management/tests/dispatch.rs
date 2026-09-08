@@ -31,12 +31,14 @@ use shepherd_management::{
     ManagementService, RpcDispatchError, WebListenerHandle, dispatch_json,
 };
 use shepherd_store::SqliteStore;
-use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
+use shepherd_util::{
+    DaysOfWeek, EntryId, LimitSubject, LocalProtectedFiles, TimeWindow, WallClock,
+};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 use tokio::sync::{Mutex, broadcast, watch};
 
 // ---------------------------------------------------------------------------
@@ -371,6 +373,7 @@ fn make_svc_full(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        policy_files: None,
         media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
@@ -1020,6 +1023,160 @@ async fn reload_config_valid_file_wraps_entry_count() {
     // wrap_result = "entry_count"
     let body = ok(&svc, "reload_config", json!({})).await;
     assert!(body["entry_count"].is_number());
+}
+
+/// A policy with `n` entries, as TOML — the shape an editor would send.
+fn policy_toml(ids: &[&str]) -> String {
+    let mut out = String::from("config_version = 1\n");
+    for id in ids {
+        out.push_str(&format!(
+            "\n[[entries]]\nid = \"{id}\"\nlabel = \"{id}\"\n\n[entries.kind]\ntype = \"process\"\ncommand = \"/bin/true\"\n"
+        ));
+    }
+    out
+}
+
+/// A service whose policy the custodian holds, plus the temp dir standing in
+/// for `/var/lib/shepherdd/state/<user>/`.
+///
+/// `LocalProtectedFiles` is the real implementation the custodian itself uses,
+/// so this exercises the same code path a device does — only the directory
+/// differs.
+fn make_custodial_svc(local_signpost: &Path) -> (DefaultManagementService, TempDir) {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("config.toml"), policy_toml(&["a", "b"])).unwrap();
+    let mut svc = make_svc(test_policy(), local_signpost.to_path_buf());
+    svc.policy_files = Some(Arc::new(LocalProtectedFiles::new(dir.path().to_path_buf())));
+    (svc, dir)
+}
+
+/// The signpost `shepherd install state` leaves behind: a valid policy that
+/// grants nothing, at the path the policy used to live at.
+fn temp_signpost() -> NamedTempFile {
+    let f = NamedTempFile::new().unwrap();
+    std::fs::write(f.path(), "config_version = 1\n").unwrap();
+    f
+}
+
+#[tokio::test]
+async fn reload_config_reads_the_custodian_not_the_signpost() {
+    // The bug this covers: reloading from `config_path` on a device with a
+    // custodian reloaded the zero-entry signpost, which empties the launcher.
+    let signpost = temp_signpost();
+    let (svc, _dir) = make_custodial_svc(signpost.path());
+    let body = ok(&svc, "reload_config", json!({})).await;
+    assert_eq!(body["entry_count"], 2);
+}
+
+#[tokio::test]
+async fn read_policy_hands_back_the_custodians_bytes() {
+    let signpost = temp_signpost();
+    let (svc, _dir) = make_custodial_svc(signpost.path());
+    let doc = svc.read_policy().unwrap();
+    assert!(doc.text.contains("id = \"a\""), "{}", doc.text);
+    assert!(!doc.version.is_empty());
+}
+
+#[tokio::test]
+async fn read_policy_hands_back_a_config_that_does_not_parse() {
+    // The case an editor is most needed for. Refusing here would leave the
+    // only fix to a device that may have no shell on it.
+    let signpost = temp_signpost();
+    let (svc, dir) = make_custodial_svc(signpost.path());
+    std::fs::write(dir.path().join("config.toml"), "not = valid = toml").unwrap();
+    assert_eq!(svc.read_policy().unwrap().text, "not = valid = toml");
+}
+
+#[tokio::test]
+async fn write_policy_replaces_the_file_and_reload_sees_it() {
+    let signpost = temp_signpost();
+    let (svc, dir) = make_custodial_svc(signpost.path());
+    let version = svc.read_policy().unwrap().version;
+
+    let written = svc
+        .write_policy(&policy_toml(&["a", "b", "c"]), Some(&version))
+        .unwrap();
+    assert_ne!(written.version, version);
+
+    let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(on_disk.contains("id = \"c\""));
+
+    // The device would reload from the watcher; this stands in for it.
+    let body = ok(&svc, "reload_config", json!({})).await;
+    assert_eq!(body["entry_count"], 3);
+}
+
+#[tokio::test]
+async fn write_policy_refuses_a_config_that_does_not_parse() {
+    let signpost = temp_signpost();
+    let (svc, dir) = make_custodial_svc(signpost.path());
+    let version = svc.read_policy().unwrap().version;
+
+    let err = svc
+        .write_policy("not = valid = toml", Some(&version))
+        .unwrap_err();
+    assert!(matches!(err, ManagementError::Unprocessable(_)), "{err:?}");
+
+    // And nothing was written: a rejected policy must not cost the device the
+    // one it has.
+    let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(on_disk.contains("id = \"a\""));
+}
+
+#[tokio::test]
+async fn write_policy_refuses_a_stale_version() {
+    let signpost = temp_signpost();
+    let (svc, dir) = make_custodial_svc(signpost.path());
+    let stale = svc.read_policy().unwrap().version;
+
+    // Someone else — `sudoedit`, or `shepherd install policy` — got there
+    // first.
+    std::fs::write(dir.path().join("config.toml"), policy_toml(&["z"])).unwrap();
+
+    let err = svc
+        .write_policy(&policy_toml(&["a", "b", "c"]), Some(&stale))
+        .unwrap_err();
+    assert!(matches!(err, ManagementError::Conflict(_)), "{err:?}");
+    let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(on_disk.contains("id = \"z\""));
+}
+
+#[tokio::test]
+async fn write_policy_with_no_precondition_overwrites() {
+    let signpost = temp_signpost();
+    let (svc, dir) = make_custodial_svc(signpost.path());
+    svc.write_policy(&policy_toml(&["z"]), None).unwrap();
+    let on_disk = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(on_disk.contains("id = \"z\""));
+}
+
+#[tokio::test]
+async fn write_policy_without_a_custodian_writes_the_local_path() {
+    let cfg = temp_signpost();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+    svc.write_policy(&policy_toml(&["a"]), None).unwrap();
+    assert!(
+        std::fs::read_to_string(cfg.path())
+            .unwrap()
+            .contains("id = \"a\"")
+    );
+    let body = ok(&svc, "reload_config", json!({})).await;
+    assert_eq!(body["entry_count"], 1);
+}
+
+#[tokio::test]
+async fn write_policy_is_audited() {
+    let signpost = temp_signpost();
+    let (svc, _dir) = make_custodial_svc(signpost.path());
+    svc.write_policy(&policy_toml(&["a"]), None).unwrap();
+    let audits = svc.store.get_recent_audits(10).unwrap();
+    assert!(
+        audits.iter().any(|a| matches!(
+            a.event,
+            shepherd_store::AuditEventType::PolicyWritten { entry_count: 1 }
+        )),
+        "{audits:?}"
+    );
 }
 
 #[tokio::test]

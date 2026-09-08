@@ -617,7 +617,7 @@ Consequences worth knowing before you debug a device:
   in that state is show no activities and report `state_not_protected`, not
   quietly run a policy nobody can see from where the custodian keeps it.
 
-  Two ways to change what a device allows, both reloading within a second:
+  Three ways to change what a device allows, all reloading within a second:
 
   ```sh
   sudoedit /var/lib/shepherdd/state/kiosk/config.toml
@@ -625,9 +625,14 @@ Consequences worth knowing before you debug a device:
   sudo shepherd-admin policy kiosk --source ./new-config.toml   # packaged
   ```
 
-  The last two validate the file before installing it; `sudoedit` does not, and
-  a policy shepherdd cannot parse is fatal at its next startup rather than on
-  reload.
+  ...and the **Config** tab in the web management UI (issue #185), which edits
+  this same file graphically and writes it back over the management API. It is
+  the only one of the three that needs neither a terminal nor a file, and it
+  validates in the browser as you type.
+
+  All but `sudoedit` validate the file before installing it; `sudoedit` does
+  not, and a policy shepherdd cannot parse is fatal at its next startup rather
+  than on reload.
 - **An administrator can reconfigure a device without touching the kiosk's home
   at all**, which is what a hardened device needs: `harden apply` gives the
   kiosk user `nologin` and denies it SSH, so there is no `su` into it to edit a
@@ -638,7 +643,7 @@ Consequences worth knowing before you debug a device:
   ```
 
   That writes straight to the custodian, and is the same file `sudoedit` above
-  opens — one policy, reachable two ways.
+  opens and the web editor saves to — one policy, reachable three ways.
 
   **Both forms validate before they install.** A policy shepherdd cannot parse
   is survivable on reload — it keeps the running one and logs — but fatal at

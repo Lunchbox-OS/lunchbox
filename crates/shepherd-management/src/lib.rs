@@ -18,7 +18,7 @@ pub use service::{
     AUTO_BRIGHTNESS_SETTING_KEY, DefaultManagementService, ManagementService, ObservedAudioState,
     RPC_SCHEMA_JSON, dispatch_json,
 };
-pub use types::LaunchOutcome;
+pub use types::{LaunchOutcome, PolicyDocument};
 pub use webauth::{
     LoginPoll, LoginRequestInfo, MintedSession, WebAuth, WebAuthError, WebAuthPolicy,
     WebAuthStatus, WebSessionInfo, label_from_user_agent,

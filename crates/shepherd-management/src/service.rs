@@ -10,15 +10,15 @@ use shepherd_api::{
     HudOrientation, NetworkStatusView, ServiceStateSnapshot, SessionEndReason, SessionInfo,
     StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
-use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
+use shepherd_config::{BrightnessPolicy, VolumePolicy, parse_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
     LightSensor, NetworkInfoProvider, NetworkSnapshot, SpawnOptions, SponsorBlockSpec,
     VolumeController, VolumeError,
 };
-use shepherd_store::Store;
-use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
+use shepherd_store::{AuditEvent, AuditEventType, Store};
+use shepherd_util::{EntryId, LimitSubject, MonotonicInstant, ProtectedFile, ProtectedFiles};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 use crate::error::{ManagementError, ManagementResult};
 use crate::listener::WebListenerHandle;
-use crate::types::LaunchOutcome;
+use crate::types::{LaunchOutcome, PolicyDocument};
 use crate::webauth::{LoginRequestInfo, WebAuth, WebAuthError, WebAuthStatus, WebSessionInfo};
 
 /// Store key under which the runtime auto-brightness on/off state persists.
@@ -195,6 +195,59 @@ pub trait ManagementService: Send + Sync {
     #[rpc(wrap_result = "entry_count")]
     async fn reload_config(&self) -> ManagementResult<usize>;
 
+    // The policy file itself (issue #185). Read and replaced by the web
+    // config editor.
+    //
+    // **Neither is `async`, deliberately.** `#[management_rpc]` turns every
+    // async method into a `dispatch_json` arm, and a policy is tens of
+    // kilobytes against BLE's 16 KiB frame cap
+    // (`shepherd_ble::protocol::MAX_FRAME_BYTES`) — so putting a config on
+    // the JSON-RPC surface would be publishing a method that exists and
+    // cannot work. They are reached over dedicated HTTP routes instead, the
+    // same way #156 kept the login exchange off this trait. The macro skips
+    // non-async items, so this is the whole of the mechanism.
+    //
+    // Synchronous also because [`shepherd_util::ProtectedFiles`] is: on a
+    // device each call is a round trip to the state custodian's socket.
+    // Callers on an async runtime should use `spawn_blocking`.
+
+    /// The policy file's exact bytes, with a tag for [`Self::write_policy`].
+    ///
+    /// Returns the text whether or not it parses. A config the daemon cannot
+    /// read is exactly the one an editor is most needed for, and refusing to
+    /// hand it over would leave the only fix to a device with no shell on it.
+    fn read_policy(&self) -> ManagementResult<PolicyDocument> {
+        Err(ManagementError::Unprocessable(
+            "This device does not expose its policy file".into(),
+        ))
+    }
+
+    /// Replace the policy file.
+    ///
+    /// Validates `text` with the parser the daemon boots from *before*
+    /// anything touches the disk. That check is the control, not the editor's
+    /// client-side validator: a policy shepherdd cannot parse is survivable on
+    /// reload — it keeps the running one — but fatal at startup, which on a
+    /// device is a session that ends rather than a message someone reads.
+    ///
+    /// `if_match` is a [`PolicyDocument::version`] the caller believes is
+    /// current; a mismatch is a [`ManagementError::Conflict`] and nothing is
+    /// written. `None` skips the check, which is what a caller that has not
+    /// read the file first is asking for.
+    ///
+    /// **Does not reload.** The write lands through a rename, which the state
+    /// custodian's watch — or shepherdd's own, on a device without one — turns
+    /// into a reload within a second. That is the same path `sudoedit` and
+    /// `shepherd install policy` already take, and going around it here would
+    /// only add a second `PolicyLoaded` row to the audit log a moment before
+    /// the watcher's arrives.
+    fn write_policy(&self, text: &str, if_match: Option<&str>) -> ManagementResult<PolicyDocument> {
+        let _ = (text, if_match);
+        Err(ManagementError::Unprocessable(
+            "This device does not expose its policy file".into(),
+        ))
+    }
+
     /// Re-fetch what the media libraries are made of, now (issue #165).
     ///
     /// Everything on the media path is cached with a TTL and swept on a timer:
@@ -329,6 +382,22 @@ impl ObservedAudioState {
     }
 }
 
+/// Write `text` to `path` through a temp file and a rename.
+///
+/// The same shape [`shepherd_util::LocalProtectedFiles::write`] uses, for the
+/// case it does not cover: a device without the state custodian, whose policy
+/// is an ordinary file at an arbitrary path. A partial write must not be able
+/// to leave a policy the daemon cannot parse, and the rename is also what the
+/// config watcher is watching for.
+fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Production implementation of [`ManagementService`]. Composes the
 /// daemon's existing collaborators; constructed once by `shepherdd` and
 /// shared via `Arc<dyn ManagementService>` to all transports.
@@ -348,7 +417,19 @@ pub struct DefaultManagementService {
     /// Broadcasts an event to all subscribers (IPC clients and SSE clients
     /// alike). Set by the daemon's main loop.
     pub broadcast_fn: Arc<dyn Fn(Event) + Send + Sync>,
+    /// Where the policy lives when the custodian does not hold it: the path
+    /// `--config` named. On a device with a custodian this is the *signpost*,
+    /// which grants nothing — see `policy_files`.
     pub config_path: PathBuf,
+    /// The state custodian's files, when it holds this device's policy
+    /// (issue #157). `Some` exactly when `shepherdd`'s own
+    /// `StateSource::holds_policy` is true.
+    ///
+    /// Load-bearing rather than decorative: without it this service reads
+    /// `config_path`, which on an installed device is the zero-entry signpost
+    /// that stands where the policy used to be. A reload from there empties
+    /// the launcher.
+    pub policy_files: Option<Arc<dyn ProtectedFiles>>,
     /// Nudges shepherdd's media prefetcher to re-fetch libraries and segments
     /// immediately (issue #165). `None` on any embedding without a prefetcher —
     /// in which case [`ManagementService::refresh_media`] reports that rather
@@ -1271,7 +1352,15 @@ impl ManagementService for DefaultManagementService {
 
     // ---------------------------------------------------------------- config
     async fn reload_config(&self) -> ManagementResult<usize> {
-        match load_config(&self.config_path) {
+        // Read from where this device actually keeps its policy, which since
+        // #157 is the state custodian rather than a path in the kiosk user's
+        // home. Reading `config_path` here used to reload the *signpost* — a
+        // valid policy with zero entries — so pressing "reload" on an
+        // installed device emptied the launcher until something wrote the real
+        // file again.
+        match self.policy_text().and_then(|text| {
+            parse_config(&text).map_err(|e| ManagementError::Unprocessable(e.to_string()))
+        }) {
             Ok(policy) => {
                 let entry_count = policy.entries.len();
                 {
@@ -1285,9 +1374,66 @@ impl ManagementService for DefaultManagementService {
             }
             Err(e) => {
                 warn!(error = %e, "Config reload failed via management API");
-                Err(ManagementError::Unprocessable(e.to_string()))
+                Err(e)
             }
         }
+    }
+
+    fn read_policy(&self) -> ManagementResult<PolicyDocument> {
+        Ok(PolicyDocument::of(self.policy_text()?))
+    }
+
+    fn write_policy(&self, text: &str, if_match: Option<&str>) -> ManagementResult<PolicyDocument> {
+        // Before anything else, and before anything touches the disk. The
+        // editor validates too, in wasm, but that is an affordance the caller
+        // controls; this is the check.
+        let policy =
+            parse_config(text).map_err(|e| ManagementError::Unprocessable(e.to_string()))?;
+
+        if let Some(expected) = if_match {
+            // A missing file reads as "no version", which no caller can match,
+            // so a device whose policy vanished under an open editor gets the
+            // conflict rather than a silent recreate.
+            let current = self
+                .policy_text()
+                .ok()
+                .map(|t| PolicyDocument::version_of(&t));
+            if current.as_deref() != Some(expected) {
+                return Err(ManagementError::Conflict(
+                    "The policy on the device changed since this copy of it was read".into(),
+                ));
+            }
+        }
+
+        match &self.policy_files {
+            Some(files) => files.write(ProtectedFile::Config, text).map_err(|e| {
+                ManagementError::Internal(format!(
+                    "The state custodian refused to write the policy: {e}"
+                ))
+            })?,
+            None => write_atomically(&self.config_path, text).map_err(|e| {
+                ManagementError::Internal(format!(
+                    "Could not write {}: {e}",
+                    self.config_path.display()
+                ))
+            })?,
+        }
+
+        let entry_count = policy.entries.len();
+        // Best-effort, like every other audit call on this path: failing to
+        // record a change that happened must not report the change as failed.
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::PolicyWritten {
+                entry_count,
+            }));
+        info!(
+            entry_count,
+            custodial = self.policy_files.is_some(),
+            "Policy replaced through the management API"
+        );
+
+        Ok(PolicyDocument::of(text.to_string()))
     }
 
     async fn refresh_media(&self) -> ManagementResult<()> {
@@ -1424,6 +1570,40 @@ fn web_auth_error(e: WebAuthError) -> ManagementError {
 }
 
 impl DefaultManagementService {
+    /// The policy file's text, from wherever this device keeps it.
+    ///
+    /// One place, so a reload and a read can never disagree about which file
+    /// decides what a child may do. Mirrors `shepherdd`'s own
+    /// `StateSource::load_policy`: the custodian when it holds a policy, the
+    /// local path otherwise.
+    fn policy_text(&self) -> ManagementResult<String> {
+        match &self.policy_files {
+            Some(files) => files
+                .read(ProtectedFile::Config)
+                .map_err(|e| {
+                    ManagementError::Internal(format!(
+                        "The state custodian would not read the policy: {e}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ManagementError::NotFound("The state custodian holds no policy file".into())
+                }),
+            None => std::fs::read_to_string(&self.config_path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    ManagementError::NotFound(format!(
+                        "No policy file at {}",
+                        self.config_path.display()
+                    ))
+                } else {
+                    ManagementError::Internal(format!(
+                        "Could not read {}: {e}",
+                        self.config_path.display()
+                    ))
+                }
+            }),
+        }
+    }
+
     fn require_web_auth(&self) -> ManagementResult<&Arc<WebAuth>> {
         self.web_auth.as_ref().ok_or_else(|| {
             ManagementError::Conflict("the management API is not enabled on this device".into())

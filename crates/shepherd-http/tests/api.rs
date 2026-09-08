@@ -295,6 +295,7 @@ fn make_state_full(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        policy_files: None,
         media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),
@@ -1253,4 +1254,146 @@ async fn a_stale_cookie_falls_through_to_unauthorized_rather_than_erroring() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// The policy file (issue #185)
+//
+// `GET`/`PUT /api/v1/config` are the config editor's end of the device. They
+// are not RPC methods -- see `handlers/config.rs` for why -- so they need
+// their own coverage of the things the RPC endpoint's tests establish once:
+// that the auth layer covers them, and how a `ManagementError` reaches the
+// wire.
+// ---------------------------------------------------------------------------
+
+/// A valid single-entry policy, as an editor would send it.
+const ONE_ENTRY: &str = "config_version = 1\n\n[[entries]]\nid = \"a\"\nlabel = \"A\"\n\n\
+                         [entries.kind]\ntype = \"process\"\ncommand = \"/bin/true\"\n";
+
+/// Send a request and hand back the status, the `ETag`, and the body as text.
+async fn send_raw(app: &axum::Router, req: Request<Body>) -> (StatusCode, Option<String>, String) {
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, etag, String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn get_config() -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/api/v1/config")
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn put_config(body: &str, if_match: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("PUT")
+        .uri("/api/v1/config")
+        .header(header::CONTENT_TYPE, "text/plain")
+        // Same-origin, so the CSRF check has nothing to object to.
+        .header(header::HOST, "device.local")
+        .header(header::ORIGIN, "https://device.local");
+    if let Some(tag) = if_match {
+        b = b.header(header::IF_MATCH, tag);
+    }
+    b.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn config_get_returns_the_file_and_an_etag() {
+    let cfg = temp_config();
+    std::fs::write(cfg.path(), ONE_ENTRY).unwrap();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, etag, body) = send_raw(&app, get_config()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, ONE_ENTRY);
+    assert!(etag.is_some_and(|t| t.starts_with('"')), "quoted ETag");
+}
+
+#[tokio::test]
+async fn config_put_without_if_match_is_refused() {
+    // Forgetting the precondition must not be the same as overwriting: on a
+    // device the other writer is a person at a terminal.
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, _, _) = send_raw(&app, put_config(ONE_ENTRY, None)).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    assert_eq!(
+        std::fs::read_to_string(cfg.path()).unwrap(),
+        "config_version = 1\n"
+    );
+}
+
+#[tokio::test]
+async fn config_put_round_trips_through_its_own_etag() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (_, etag, _) = send_raw(&app, get_config()).await;
+    let (status, new_etag, _) = send_raw(&app, put_config(ONE_ENTRY, etag.as_deref())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(new_etag, etag);
+    assert_eq!(std::fs::read_to_string(cfg.path()).unwrap(), ONE_ENTRY);
+}
+
+#[tokio::test]
+async fn config_put_with_a_stale_etag_is_412() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, _, body) = send_raw(
+        &app,
+        put_config(ONE_ENTRY, Some("\"0123456789abcdef0123456789abcdef\"")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert!(body.contains("changed since"), "{body}");
+    assert_eq!(
+        std::fs::read_to_string(cfg.path()).unwrap(),
+        "config_version = 1\n"
+    );
+}
+
+#[tokio::test]
+async fn config_put_with_a_star_overwrites() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, _, _) = send_raw(&app, put_config(ONE_ENTRY, Some("*"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(cfg.path()).unwrap(), ONE_ENTRY);
+}
+
+#[tokio::test]
+async fn config_put_that_does_not_parse_is_422_and_changes_nothing() {
+    let cfg = temp_config();
+    let app = make_app(None, cfg.path().to_path_buf());
+    let (status, _, body) = send_raw(&app, put_config("not = valid = toml", Some("*"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_error(&body), "unprocessable");
+    assert_eq!(
+        std::fs::read_to_string(cfg.path()).unwrap(),
+        "config_version = 1\n"
+    );
+}
+
+#[tokio::test]
+async fn config_routes_are_behind_the_auth_layer() {
+    let cfg = temp_config();
+    let app = make_app(Some("secret"), cfg.path().to_path_buf());
+    let (status, _, _) = send_raw(&app, get_config()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = send_raw(&app, put_config(ONE_ENTRY, Some("*"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// The `error` field of a JSON error body.
+fn body_error(body: &str) -> String {
+    serde_json::from_str::<Value>(body).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }

@@ -27,6 +27,17 @@ import type { ConfigDocument, ConfigSource } from "../sources/ConfigSource";
 /** How long to wait after the last edit before re-projecting and validating. */
 const DEBOUNCE_MS = 120;
 
+/**
+ * The readable half of a thrown value.
+ *
+ * A source raises an `Error` whose message is already written for a person —
+ * `DeviceConfigSource` turns a 412 into a sentence about someone else having
+ * edited the file — and `${e}` would prefix all of them with "Error:".
+ */
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 interface ConfigDocContextValue {
   /** Null until the wasm module has loaded. */
   ready: boolean;
@@ -66,7 +77,8 @@ interface ConfigDocContextValue {
   ) => AvailabilityView | null;
 
   openFrom: (source: ConfigSource) => Promise<void>;
-  save: (source: ConfigSource, as?: boolean) => Promise<void>;
+  /** Resolves true when the document actually reached the source. */
+  save: (source: ConfigSource, as?: boolean) => Promise<boolean>;
   startBlank: () => void;
   /** The most recent failure from a patch or a file operation. */
   error: string | null;
@@ -205,23 +217,28 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       setVersion((v) => v + 1);
       setError(null);
     } catch (e) {
-      setError(`Could not open that file: ${e}`);
+      setError(`Could not open that config: ${messageOf(e)}`);
     }
   }, []);
 
   const save = useCallback(
-    async (source: ConfigSource, as = false) => {
+    async (source: ConfigSource, as = false): Promise<boolean> => {
       const doc = docRef.current;
-      if (!doc) return;
+      if (!doc) return false;
       const current = doc.text();
       try {
         const saved =
           as || !source.canSaveInPlace(document)
             ? await source.saveAs(document, current)
             : await source.save(document, current);
-        if (saved) setDocument(saved);
+        // Null means the user dismissed a picker, which is neither a success
+        // nor an error — the caller must not tell them it was saved.
+        if (!saved) return false;
+        setDocument(saved);
+        return true;
       } catch (e) {
-        setError(`Could not save: ${e}`);
+        setError(`Could not save: ${messageOf(e)}`);
+        return false;
       }
     },
     [document],

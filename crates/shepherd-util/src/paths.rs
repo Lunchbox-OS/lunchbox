@@ -257,7 +257,9 @@ mod tests {
 #[serde(rename_all = "snake_case")]
 pub enum ProtectedFile {
     /// `config.toml` — every entry, limit, availability window and firewall
-    /// spec. Read by the daemon; written out of band by an operator.
+    /// spec. Read by the daemon at boot and on every reload; written by an
+    /// operator (`sudoedit`, `shepherd install policy`) or, since issue #185,
+    /// by the daemon itself on behalf of the web config editor.
     Config,
     /// `admin.toml` — the bonded admin's identity and the minted HTTP token.
     AdminRecord,

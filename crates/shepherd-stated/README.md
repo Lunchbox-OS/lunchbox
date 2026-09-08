@@ -313,14 +313,19 @@ the custodian cannot be reached: a device with no activities and a `Critical`
 `state_not_protected` is visibly not working, and that is honest. A stale policy
 that still launches games would be a device that looks fine and is not.
 
-Two ways to set a policy, both landing on the same file and reloading within a
-second — `sudoedit /var/lib/shepherdd/state/<user>/config.toml`, or
-`shepherd install policy --user <user> --source PATH`. The second is what a
-hardened device needs: `harden apply` leaves the kiosk user with `nologin` and
-no SSH, so there is nothing to `su` into. Both validate first — a policy this
+Three ways to set a policy, all landing on the same file and reloading within a
+second — `sudoedit /var/lib/shepherdd/state/<user>/config.toml`,
+`shepherd install policy --user <user> --source PATH`, or the config editor in
+the web management UI (issue #185), which writes through `shepherdd` and so
+through this daemon's `WriteFile`. The second and third are what a hardened
+device needs: `harden apply` leaves the kiosk user with `nologin` and no SSH,
+so there is nothing to `su` into. All three validate first — a policy this
 daemon serves and shepherdd cannot parse is fatal at *startup* (tolerated only
 on reload), which on a device is a session that ends rather than a message
 someone reads.
+
+The reload after any of them is this daemon's own directory watch, which fires
+on the rename all three writers end with. Nothing has to ask for it.
 
 ### What is still open
 
@@ -329,9 +334,13 @@ user's home, deliberately — it is diagnostic rather than authoritative, and th
 audit trail that matters is the `audit_log` table, which moves with the
 database. Tamper-evident logs want journald, which is its own piece of work.
 
-Beyond it: the management HTTP API still ships open by default (#156), and it
-reaches every effect this protects. Closing one without the other moves the
-adversary one socket to the left.
+Beyond it: the management HTTP API used to ship open by default, and it reaches
+every effect this protects — closing one without the other would have moved the
+adversary one socket to the left. #156 closed it, so a device with no password
+set answers the setup endpoints and nothing else. Since #185 that API also
+*writes* the policy this daemon holds, on behalf of the web config editor;
+`WriteFile` was always in the protocol, and what changed is that shepherdd now
+sends one.
 
 [#157]: https://git.armeafamily.com/albert/shepherd-launcher/issues/157
 [#172]: https://git.armeafamily.com/albert/shepherd-launcher/issues/172

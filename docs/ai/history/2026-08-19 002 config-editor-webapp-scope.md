@@ -605,11 +605,29 @@ before saving; `export_clean`; templates seeded from `config.example.toml`; a
 **week scrubber** — drag a time cursor and watch the entry list update to show
 what would be available then, which `is_available` already answers for free.
 
-**Phase 4 — in the management UI.** Gated on privilege separation in
-`shepherd-http` plus new `get_config` / `set_config` RPCs (with
+**Phase 4 — in the management UI.** ~~Gated on privilege separation in
+`shepherd-http`~~ plus new ~~`get_config` / `set_config` RPCs~~ (with
 `reload_config()` already there to apply the result). Then: enable the nav item
 in the embedded target, add `DeviceConfigSource`, and add a
-read-the-current-config-and-diff flow. The editor itself needs no changes.
+read-the-current-config-and-diff flow. ~~The editor itself needs no changes.~~
+
+> **Done, 2026-09-07, differently — issue #185.** Three of the four clauses
+> above did not survive contact:
+>
+> - **The privilege-separation gate was struck, not satisfied.** #156 shipped
+>   `set_web_password` behind the same blanket layer with "the caller has
+>   already proved they are the administrator by reaching this trait at all",
+>   which settles the question for a config write too.
+> - **Not RPCs.** `dispatch_json` serves BLE, whose frame cap is 16 KiB against
+>   a ~50 KB config, so the endpoints are `GET`/`PUT /api/v1/config` with
+>   `ETag`/`If-Match` — off the trait, as #156 kept the login exchange off it.
+> - **The editor did need changes**: `ConfigApp` had `FileConfigSource` named
+>   in five places, and now takes its source as a prop.
+> - `reload_config()` was *not* "already there to apply the result": on any
+>   device with a state custodian it reloaded the zero-entry signpost. Fixed in
+>   the same work.
+>
+> See [`2026-09-07 007 config-editor-in-web-management-scope.md`](2026-09-07%20007%20config-editor-in-web-management-scope.md).
 
 **Phase 5 — Tauri v2.** `TauriConfigSource`; native `ConfigDoc` commands
 replacing wasm; native dialogs and recent files. Optional: `movies.toml` editing,
@@ -621,7 +639,7 @@ device push from the desktop app.
 |---|---|
 | `src/config/` accidentally imports `src/api/`, dragging axios and daemon assumptions into the standalone bundle | The one new discipline the merge costs. `shepherd-webui` has no linter today; cheapest guard is a CI size budget on the standalone bundle plus a grep for `from "../api` under `src/config/`. Adding ESLint with `no-restricted-imports` is the tidier version if a linter is wanted anyway. |
 | The patch engine is the main new complexity | Four ops over a plain tree, and the phase-0 exit criterion tests it before any UI exists. Merge-on-save is a known retreat needing no UI change. |
-| A `set_config` RPC is an RCE primitive behind a blanket auth layer | Phase 4 is explicitly gated on privilege separation. Do not ship `set_config` before it. |
+| A `set_config` RPC is an RCE primitive behind a blanket auth layer | Phase 4 is explicitly gated on privilege separation. Do not ship `set_config` before it. **Overtaken by #156/#185:** the gate became the login, and the argument for a further control died with `set_web_password`. |
 | Reordering `warnings` can move a comment off its line | Entries and groups are id-addressed and immune. `move` is omitted from phase 1. |
 | Cross-midnight rendering looks like a bug | It *is* the engine's behavior. Draw both bands, connect them, explain in a tooltip. |
 | Grid normalization rewrites the user's day spelling | Explicit rule: preserve existing preset/spelling whenever it still matches the day set. Covered by `windows.ts` tests. |
@@ -766,6 +784,11 @@ three source activities and the earn graph with ×0.5 edge labels.
 - **Phase 4's `DeviceConfigSource`**, which stays gated on privilege separation
   in `shepherd-http`. `ConfigSource` is in place and documents the constraint;
   `FileConfigSource` is the only implementation.
+
+  > **Superseded, 2026-09-07 (#185).** `DeviceConfigSource` exists, in
+  > `shepherd-webui/src/sources/` rather than `src/config/sources/` — the
+  > import boundary this document introduced is what puts it there. The
+  > privilege-separation gate was struck; see the note on phase 4 above.
 
 ### Follow-up: the tab that should not have shipped
 
