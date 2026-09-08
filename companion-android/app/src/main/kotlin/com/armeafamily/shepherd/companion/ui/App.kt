@@ -1,6 +1,7 @@
 package com.armeafamily.shepherd.companion.ui
 
 import android.Manifest
+import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,6 +31,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.compose.runtime.DisposableEffect
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.armeafamily.shepherd.companion.ui.admins.AdminsScreen
 import com.armeafamily.shepherd.companion.ui.device.DeviceControlsScreen
 import com.armeafamily.shepherd.companion.ui.entry.EntryDetailScreen
 import com.armeafamily.shepherd.companion.ui.group.GroupDetailScreen
@@ -49,6 +51,7 @@ object Routes {
     const val HEALTH = "health"
     const val NETWORK = "network"
     const val WEB_ACCESS = "web-access"
+    const val ADMINS = "admins"
     const val SETTINGS = "settings"
     const val ENTRY = "entry"
     fun entry(id: String) = "$ENTRY/$id"
@@ -76,8 +79,16 @@ fun App() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // BLUETOOTH_SCAN/BLUETOOTH_CONNECT do not exist below Android 12, and
+    // requesting an undefined permission returns a permanent denial — the
+    // gate below would never open. Pre-12 the runtime ask is the location
+    // grant instead; BLUETOOTH and BLUETOOTH_ADMIN are install-time.
     val permissions = rememberMultiplePermissionsState(
-        listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT),
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        },
     )
 
     if (!permissions.allPermissionsGranted) {
@@ -165,7 +176,11 @@ fun App() {
                     vm = vm,
                     onBack = { navController.popBackStack() },
                     onAllForgotten = { navController.popBackStack(Routes.HOME, inclusive = false) },
+                    onOpenAdmins = { navController.navigate(Routes.ADMINS) },
                 )
+            }
+            composable(Routes.ADMINS) {
+                AdminsScreen(vm = vm, onBack = { navController.popBackStack() })
             }
         }
     }

@@ -4376,6 +4376,7 @@ dependencies = [
  "shepherd-api",
  "shepherd-management",
  "shepherd-util",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

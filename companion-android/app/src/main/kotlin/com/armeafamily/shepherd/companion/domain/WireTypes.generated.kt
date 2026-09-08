@@ -75,6 +75,20 @@ data class AdminRecord(
      */
     val httpToken: String,
     /**
+     * Stable public handle for this admin, minted once and never reused.
+     *
+     * Not a credential: it is what `revoke_admin` names and what
+     * [`AdminSummary`] hands to a phone listing the others, so it has to be
+     * safe to show. The identity address would have served, but an admin is
+     * revoked and re-enrolled at the same address often enough — a phone
+     * reset, a re-pair — that naming rows by address makes a stale tap in a
+     * list act on a record the parent was not looking at.
+     *
+     * Defaulted rather than required so a v1 record, written before this
+     * field existed, still parses and gets one on load.
+     */
+    val id: String? = null,
+    /**
      * The BlueZ-resolved identity address for the bonded peer. Once
      * pairing completes BlueZ presents this address regardless of the
      * peer's random MAC rotation, so it doubles as the stable identity.
@@ -105,6 +119,31 @@ enum class AdminRole(val wire: String) {
         }
     }
 }
+
+/**
+ * One admin, as another admin sees them.
+ *
+ * Carries no credential. [`AdminRecord`] holds the minted HTTP bearer token,
+ * which is the whole reason this type exists: listing admins over BLE hands
+ * the list to a phone, and a phone that can read every other phone's token
+ * does not need to be revoked to keep using the device after it has been.
+ */
+@Serializable
+data class AdminSummary(
+    val bondedAt: IsoTimestamp,
+    val deviceName: String,
+    val id: String,
+    /**
+     * Shown so a parent can tell two phones with the same name apart.
+     */
+    val identityAddress: String,
+    /**
+     * True for the phone doing the asking, so the UI can label its own row
+     * and warn before revoking it.
+     */
+    val isSelf: Boolean,
+    val role: AdminRole,
+)
 
 /**
  * The audio output a volume reading applies to.
@@ -257,6 +296,45 @@ data class BrightnessRestrictions(
      */
     val minBrightness: Long? = null,
 )
+
+/**
+ * What `claim` did.
+ */
+@Serializable
+@JsonClassDiscriminator("status")
+sealed interface ClaimOutcome {
+    /**
+     * The caller is an admin: freshly enrolled, or already one and asking
+     * again. Carries the record, token and all — this is the one moment the
+     * token crosses the wire.
+     */
+    @Serializable
+    @SerialName("claimed")
+    data class Claimed(
+        val admin: AdminRecord,
+    ) : ClaimOutcome
+
+    /**
+     * The device already has admins and this phone is not one. It has to be
+     * approved from a phone that is; poll `claim` again to find out.
+     */
+    @Serializable
+    @SerialName("pending")
+    data class Pending(
+        val request: EnrolmentRequestInfo,
+    ) : ClaimOutcome
+
+    /**
+     * A [ClaimOutcome] this build doesn't know about.
+     *
+     * Registered as the polymorphic default in `ShepherdWireModule`, so a
+     * newer device degrades this one value instead of failing the decode of
+     * everything around it.
+     */
+    @Serializable
+    @SerialName("__unknown")
+    data class Unknown(val status: String? = null) : ClaimOutcome
+}
 
 @Serializable(with = ClaimStateTag.Serializer::class)
 enum class ClaimStateTag(val wire: String) {
@@ -901,6 +979,36 @@ enum class EbookViewer(val wire: String) {
         }
     }
 }
+
+/**
+ * A phone waiting to be let in, as the admin who can let it in sees it.
+ */
+@Serializable
+data class EnrolmentRequestInfo(
+    /**
+     * Six digits the requesting phone is displaying. The approving parent
+     * compares them against that phone's screen.
+     *
+     * Same ritual as BLE pairing's Numeric Comparison and #156's login code,
+     * and for the same reason: a racing attacker's request carries different
+     * digits, so comparing is what picks the right row out of a list.
+     */
+    val code: String,
+    /**
+     * What the requesting phone calls itself.
+     */
+    val deviceName: String,
+    val expiresAt: IsoTimestamp,
+    /**
+     * Public handle — what `approve_enrolment_request` takes. Safe to list.
+     */
+    val id: String,
+    /**
+     * Its address, so two phones with the same name are still distinguishable.
+     */
+    val peer: String,
+    val requestedAt: IsoTimestamp,
+)
 
 /**
  * Unique identifier for an entry in the policy whitelist
@@ -2826,6 +2934,7 @@ enum class WindowOwner(val wire: String) {
  * throws and fails the decode of the entire enclosing response.
  */
 val ShepherdWireModule: SerializersModule = SerializersModule {
+    polymorphic(ClaimOutcome::class) { defaultDeserializer { ClaimOutcome.Unknown.serializer() } }
     polymorphic(DiagnosticSubject::class) { defaultDeserializer { DiagnosticSubject.Unknown.serializer() } }
     polymorphic(EntryKind::class) { defaultDeserializer { EntryKind.Unknown.serializer() } }
     polymorphic(ReasonCode::class) { defaultDeserializer { ReasonCode.Unknown.serializer() } }

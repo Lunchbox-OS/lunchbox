@@ -10,7 +10,10 @@ import com.armeafamily.shepherd.companion.ble.RpcException
 import com.armeafamily.shepherd.companion.ble.ShepherdConnection
 import com.armeafamily.shepherd.companion.domain.AdminRecord
 import com.armeafamily.shepherd.companion.domain.AudioOutputRecord
+import com.armeafamily.shepherd.companion.domain.AdminSummary
 import com.armeafamily.shepherd.companion.domain.BrightnessInfo
+import com.armeafamily.shepherd.companion.domain.ClaimOutcome
+import com.armeafamily.shepherd.companion.domain.EnrolmentRequestInfo
 import com.armeafamily.shepherd.companion.domain.ClaimStateTag
 import com.armeafamily.shepherd.companion.domain.DailyOverride
 import com.armeafamily.shepherd.companion.domain.Diagnostic
@@ -144,6 +147,21 @@ data class WebAuthUiState(
     val lastAction: String? = null,
 )
 
+/**
+ * The device's administrators, and the phones waiting to become one
+ * (issue #149).
+ */
+data class AdminsUiState(
+    val admins: List<AdminSummary> = emptyList(),
+    val requests: List<EnrolmentRequestInfo> = emptyList(),
+    val loading: Boolean = false,
+    /** True once a roster has arrived, so "empty" is not shown before asking. */
+    val loaded: Boolean = false,
+    val error: String? = null,
+    /** Set after an approval, denial or revocation lands, for a one-liner. */
+    val lastAction: String? = null,
+)
+
 data class DiagnosticsUiState(
     val set: DiagnosticSet = DiagnosticSet(items = emptyList(), truncated = false),
     val loading: Boolean = false,
@@ -225,8 +243,31 @@ sealed interface PairingPhase {
     /** Bond in progress; show the "compare the digits" guidance + [mac]. */
     data class Comparing(val deviceName: String?, val mac: String) : PairingPhase
     data class Claiming(val deviceName: String?) : PairingPhase
+
+    /**
+     * The device already has an administrator, so this phone is queued
+     * (issue #149). It shows [code]; whoever holds the other phone compares
+     * those digits against the row in their Administrators list before
+     * approving.
+     *
+     * The code can change while this is on screen: a request expires after a
+     * few minutes and the next poll starts a fresh one, so the phone always
+     * displays the digits the device would currently list.
+     */
+    data class AwaitingApproval(
+        val deviceName: String?,
+        val code: String,
+        val requestId: String,
+    ) : PairingPhase
+
     data class Success(val record: ShepherdRecord) : PairingPhase
-    data class Failed(val reason: String, val alreadyClaimed: Boolean = false) : PairingPhase
+
+    /**
+     * [needsApproval] marks the refusal a parent can act on — an
+     * administrator on another phone turned this request down — as opposed to
+     * a transport failure they can only retry.
+     */
+    data class Failed(val reason: String, val needsApproval: Boolean = false) : PairingPhase
 }
 
 /**
@@ -264,6 +305,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private val _webAuth = MutableStateFlow(WebAuthUiState())
     val webAuth: StateFlow<WebAuthUiState> = _webAuth
 
+    private val _admins = MutableStateFlow(AdminsUiState())
+    val admins: StateFlow<AdminsUiState> = _admins
+
     /** Default name to claim under — the phone's model. */
     val defaultPhoneName: String = Build.MODEL ?: "Android phone"
 
@@ -276,6 +320,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private var diagnosticsJob: Job? = null
     private var networkJob: Job? = null
     private var webAuthJob: Job? = null
+    private var adminsJob: Job? = null
     private var bound = false
 
     init {
@@ -348,6 +393,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // somebody to SSH into the device they just switched away from.
         if (!sameDevice) _network.value = NetworkUiState()
         if (!sameDevice) _webAuth.value = WebAuthUiState()
+        if (!sameDevice) _admins.value = AdminsUiState()
         conn.start()
         eventsJob = viewModelScope.launch {
             conn.events.collect { event -> applyEvent(event.payload) }
@@ -851,6 +897,106 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Re-read the device's administrators and anyone waiting to become one
+     * (issue #149).
+     *
+     * Safe to call on a timer, like [refreshWebAuth], and for the same reason:
+     * a pending enrolment has no event behind it, so the screen that shows it
+     * polls while it is open and nothing polls while it is not.
+     */
+    fun refreshAdmins() {
+        if (adminsJob?.isActive == true) return
+        val c = client ?: run {
+            _admins.update { it.copy(loading = false, error = "Not connected.") }
+            return
+        }
+        _admins.update { it.copy(loading = true) }
+        adminsJob = viewModelScope.launch {
+            try {
+                val roster = c.listAdmins()
+                val waiting = c.listEnrolmentRequests()
+                _admins.update {
+                    it.copy(
+                        admins = roster,
+                        requests = waiting,
+                        loading = false,
+                        loaded = true,
+                        error = null,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _admins.update {
+                    it.copy(loading = false, error = why ?: "Couldn't read the administrators.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Let a waiting phone administer this device, or turn it away.
+     *
+     * The parent has already compared the six digits against the other phone's
+     * screen; this is the tap that enrols it.
+     */
+    fun decideEnrolment(id: String, approve: Boolean) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                val enrolled = if (approve) c.approveEnrolmentRequest(id) else null
+                if (!approve) c.denyEnrolmentRequest(id)
+                _admins.update {
+                    it.copy(
+                        requests = it.requests.filterNot { r -> r.id == id },
+                        admins = if (enrolled != null) it.admins + enrolled else it.admins,
+                        lastAction = if (approve) "Added as an administrator." else "Turned away.",
+                        error = null,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _admins.update { it.copy(error = why ?: "Couldn't answer the request.") }
+            }
+        }
+    }
+
+    /**
+     * Remove an administrator, which also tells the device to forget that
+     * phone's Bluetooth bond.
+     *
+     * The device refuses to remove the last one — that would leave it with
+     * nobody able to reach it and a phone still bonded to it — and says so.
+     */
+    fun revokeAdmin(id: String) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                c.revokeAdmin(id)
+                _admins.update {
+                    it.copy(
+                        admins = it.admins.filterNot { a -> a.id == id },
+                        lastAction = "Removed.",
+                        error = null,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _admins.update { it.copy(error = why ?: "Couldn't remove that administrator.") }
+            }
+        }
+    }
+
+    fun consumeAdminsAction() {
+        _admins.update { it.copy(lastAction = null) }
+    }
+
+    /**
      * Re-read the web UI's password state and any browsers waiting for a tap
      * (issue #156).
      *
@@ -1178,24 +1324,33 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                     fail(conn, "This device speaks protocol v${info.protocolVersion}; update the app.")
                     return@launch
                 }
-                if (info.claimState == ClaimStateTag.CLAIMED) {
-                    conn.close()
-                    _pairing.value = PairingPhase.Failed(
-                        "This device is already paired with another phone.",
-                        alreadyClaimed = true,
-                    )
-                    return@launch
-                }
+                // A claimed device is no longer a dead end (issue #149): this
+                // phone bonds anyway and then asks, and an administrator on
+                // another phone decides. Only the *first* phone gets in
+                // without being asked about.
+                val alreadyClaimed = info.claimState == ClaimStateTag.CLAIMED
 
                 _pairing.value = PairingPhase.Comparing(info.deviceName, identifier)
                 // Drop the bond only if this phone already had one when the
-                // flow started. The device has just reported itself
-                // Unclaimed, so a bond that old is provably stale, and
-                // trusting it would skip straight to claim over a link that
-                // can never encrypt. A bond that appeared *during* the flow
-                // is this pairing's own and must be kept — which is why the
-                // decision uses the sample taken before we touched the
-                // peripheral.
+                // flow started *and* the device says it is unclaimed. That
+                // combination is the only one where the bond is provably
+                // stale: an unclaimed device has forgotten every bond, so
+                // trusting ours would skip straight to claim over a link that
+                // can never encrypt.
+                //
+                // A claimed device is explicitly *not* that case, and getting
+                // this wrong cost a pairing during #149. A second phone that
+                // bonded on a previous attempt and has not been approved yet
+                // holds a bond the device also holds; dropping it leaves the
+                // device with a key the phone no longer has, and the next
+                // connect is torn down mid-handshake ("Disconnect detected")
+                // with nothing on either side explaining why. Keeping it means
+                // a genuinely stale bond surfaces as a pairing error instead —
+                // recoverable, and far rarer.
+                //
+                // A bond that appeared *during* the flow is this pairing's own
+                // and must be kept either way — which is why the decision uses
+                // the sample taken before we touched the peripheral.
                 //
                 // Removing a bond also drops the GATT link it belongs to, so
                 // this cannot happen underneath a connection we still need:
@@ -1204,7 +1359,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 // "cancelled or failed" that had nothing to do with the
                 // user. Retire this connection first, then build a fresh one
                 // on the other side of the removal.
-                if (hadPriorBond) {
+                if (hadPriorBond && !alreadyClaimed) {
                     conn.close()
                     container.bondManager.dropBond(identifier)
                     conn = ShepherdConnection.fromIdentifier(identifier, viewModelScope)
@@ -1218,7 +1373,20 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 _pairing.value = PairingPhase.Claiming(info.deviceName)
-                val admin: AdminRecord = ManagementClient(conn).claim(phoneName)
+                val client = ManagementClient(conn)
+                // On a claimed device this may come back pending, in which
+                // case the phone waits here — showing the digits — until an
+                // administrator decides.
+                val admin: AdminRecord = when (val outcome = client.claim(phoneName)) {
+                    is ClaimOutcome.Claimed -> outcome.admin
+                    is ClaimOutcome.Pending ->
+                        awaitApproval(client, info.deviceName, phoneName, outcome.request)
+                            ?: return@launch
+                    is ClaimOutcome.Unknown -> {
+                        fail(conn, "This device answered in a way this app doesn't understand.")
+                        return@launch
+                    }
+                }
                 val record = admin.toShepherdRecord(
                     androidIdentifier = identifier,
                     deviceName = info.deviceName,
@@ -1229,9 +1397,9 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 adopt(record, conn)
                 _pairing.value = PairingPhase.Success(record)
             } catch (e: RpcException) {
-                if (e.code == com.armeafamily.shepherd.companion.ble.ErrorCode.ALREADY_CLAIMED) {
+                if (e.code == com.armeafamily.shepherd.companion.ble.ErrorCode.ENROLMENT_DENIED) {
                     conn.close()
-                    _pairing.value = PairingPhase.Failed(ReasonText.describe(e), alreadyClaimed = true)
+                    _pairing.value = PairingPhase.Failed(ReasonText.describe(e), needsApproval = true)
                 } else {
                     fail(conn, ReasonText.describe(e))
                 }
@@ -1239,6 +1407,46 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 conn.close(); throw e
             } catch (e: Exception) {
                 fail(conn, e.message ?: "Pairing failed.")
+            }
+        }
+    }
+
+    /**
+     * Sit on the approval screen until an administrator decides.
+     *
+     * Returns the minted record once approved, or `null` when the phase has
+     * already been moved to a terminal state (denial is thrown as an
+     * [RpcException] by `claim` and handled by the caller).
+     *
+     * Polling `claim` is the whole protocol: the device answers with the same
+     * request while it is pending, the record once it is approved, and an
+     * `enrolment_denied` error if it was turned down. Nothing else is needed —
+     * and because the bond is the requester's identity, there is no polling
+     * secret to hold on to.
+     *
+     * If the request expires the device starts a fresh one with new digits, so
+     * the displayed code is refreshed from every answer rather than being
+     * captured once. That keeps this screen and the approver's list showing
+     * the same number no matter how long the walk between them takes.
+     */
+    private suspend fun awaitApproval(
+        client: ManagementClient,
+        deviceName: String?,
+        phoneName: String,
+        first: EnrolmentRequestInfo,
+    ): AdminRecord? {
+        var request = first
+        while (true) {
+            _pairing.value = PairingPhase.AwaitingApproval(deviceName, request.code, request.id)
+            delay(ENROLMENT_POLL)
+            when (val outcome = client.claim(phoneName)) {
+                is ClaimOutcome.Claimed -> return outcome.admin
+                is ClaimOutcome.Pending -> request = outcome.request
+                is ClaimOutcome.Unknown -> {
+                    _pairing.value =
+                        PairingPhase.Failed("This device answered in a way this app doesn't understand.")
+                    return null
+                }
             }
         }
     }
@@ -1303,6 +1511,24 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
          * is up.
          */
         const val RETRY_AFTER_GIVE_UP_MS = 60_000L
+
+        /**
+         * How often a phone waiting to be enrolled asks again (issue #149).
+         *
+         * Each poll is one BLE round trip on an otherwise idle link, and the
+         * thing it is waiting for is a human walking to another phone, so
+         * there is nothing to gain from being quicker. Slow enough to be
+         * unnoticeable, fast enough that the approval feels immediate.
+         */
+        const val ENROLMENT_POLL = 3_000L
+
+        /**
+         * How often the administrators screen re-reads the roster and the
+         * queue while it is open. Same shape as the web-access screen's poll,
+         * and for the same reason: there is no event for either, and a screen
+         * nobody is looking at polls nothing.
+         */
+        const val ADMINS_POLL_MS = 3_000L
     }
 }
 

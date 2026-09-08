@@ -8,6 +8,22 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- Android 11 and below have no split Bluetooth permissions. Scanning
+         and connecting are gated by the legacy install-time pair plus a
+         runtime location grant, so `neverForLocation` above cannot spare
+         those users the location prompt — the platform has no way to
+         express the promise. Capped at 30 so Android 12+ never requests
+         any of them; `ui/App.kt` picks the matching runtime list. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />

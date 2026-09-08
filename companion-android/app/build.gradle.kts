@@ -25,7 +25,12 @@ android {
 
     defaultConfig {
         applicationId = "com.armeafamily.shepherd.companion"
-        minSdk = 31
+        // 30, not 31, so Android 11 handsets are supported. A household
+        // with several caregivers has whatever phones it has (issue #149),
+        // and nothing in the dependency set floors above 21 — the only cost
+        // is the pre-Android-12 Bluetooth permission model, handled in the
+        // manifest and in `ui/App.kt`.
+        minSdk = 30
         targetSdk = 35
         versionCode = shepherdVersionCode
         versionName = shepherdVersion

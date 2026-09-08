@@ -79,6 +79,7 @@ object ReasonText {
         ErrorCode.NOT_CLAIMED -> "This device isn't set up yet."
         ErrorCode.ALREADY_CLAIMED -> "Another phone is already paired with this device."
         ErrorCode.PERMISSION_DENIED -> "This phone is not authorised to control this device."
+        ErrorCode.ENROLMENT_DENIED -> "The request was turned down on the other phone."
         ErrorCode.NOT_FOUND -> error.message
         ErrorCode.BAD_REQUEST -> error.message
         ErrorCode.FORBIDDEN -> "This action is not allowed by the policy."

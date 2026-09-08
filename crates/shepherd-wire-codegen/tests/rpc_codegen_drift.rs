@@ -130,3 +130,59 @@ fn codegen_outputs_match_checked_in() {
         );
     }
 }
+
+/// The companion's `Protocol.kt` is hand-written — the GATT UUIDs and the
+/// protocol version are a wire contract the codegen does not emit — so nothing
+/// else notices when one side moves and the other does not.
+///
+/// Bumping `PROTOCOL_VERSION` on the device and not in the app compiles
+/// cleanly on both sides and surfaces only as a phone that refuses to pair,
+/// with a message blaming the app for being out of date. That is how it was
+/// found during #149, on a phone that had just been given the new build.
+#[test]
+fn protocol_constants_match_the_companion() {
+    let kotlin = std::fs::read_to_string(repo_root().join(
+        "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/Protocol.kt",
+    ))
+    .expect("companion Protocol.kt");
+
+    let expected_version = format!(
+        "const val PROTOCOL_VERSION: Long = {}",
+        shepherd_ble::protocol::PROTOCOL_VERSION
+    );
+    assert!(
+        kotlin.contains(&expected_version),
+        "companion Protocol.kt does not declare `{expected_version}`; the device speaks \
+         protocol v{} and the app has to agree",
+        shepherd_ble::protocol::PROTOCOL_VERSION,
+    );
+
+    for (name, uuid) in [
+        (
+            "MANAGEMENT_SERVICE",
+            shepherd_ble::protocol::SHEPHERD_MANAGEMENT_SERVICE_UUID,
+        ),
+        (
+            "DEVICE_INFO_CHAR",
+            shepherd_ble::protocol::SHEPHERD_DEVICE_INFO_CHAR_UUID,
+        ),
+        (
+            "REQUEST_CHAR",
+            shepherd_ble::protocol::SHEPHERD_REQUEST_CHAR_UUID,
+        ),
+        (
+            "RESPONSE_CHAR",
+            shepherd_ble::protocol::SHEPHERD_RESPONSE_CHAR_UUID,
+        ),
+        (
+            "EVENTS_CHAR",
+            shepherd_ble::protocol::SHEPHERD_EVENTS_CHAR_UUID,
+        ),
+    ] {
+        let expected = format!("val {name}: Uuid = Uuid.parse(\"{uuid}\")");
+        assert!(
+            kotlin.contains(&expected),
+            "companion Protocol.kt does not declare `{expected}`",
+        );
+    }
+}

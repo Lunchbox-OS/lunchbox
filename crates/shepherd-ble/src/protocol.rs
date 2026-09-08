@@ -37,7 +37,13 @@ pub const SHEPHERD_EVENTS_CHAR_UUID: Uuid = Uuid::from_u128(0x8c0c0005_3b21_4abc
 /// Current BLE management protocol version. Bumped on backwards-
 /// incompatible wire changes; the companion app rejects unknown
 /// versions.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 (issue #149): `claim` answers with a tagged
+/// [`crate::claim::ClaimOutcome`] rather than a bare `AdminRecord`, because a
+/// second phone's claim may come back `pending` instead of granting anything.
+/// An older app would decode that as a malformed record, so the version gate
+/// is what turns a confusing failure into "update the app".
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum logical-frame size accepted on the request characteristic.
 /// Prevents a malicious or buggy client from advertising a huge length
@@ -82,8 +88,13 @@ pub enum ErrorCode {
     MethodNotFound,
     InvalidParams,
     NotClaimed,
+    /// No longer emitted: a second phone reaching an already-claimed device
+    /// now gets a pending enrolment rather than a refusal (issue #149). Kept
+    /// so a device still speaking v1 to an older app decodes the same way.
     AlreadyClaimed,
     PermissionDenied,
+    /// An administrator turned down this phone's request to be enrolled.
+    EnrolmentDenied,
     NotFound,
     BadRequest,
     Forbidden,

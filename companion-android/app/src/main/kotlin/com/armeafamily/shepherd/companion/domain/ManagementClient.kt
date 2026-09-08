@@ -24,12 +24,45 @@ class ManagementClient(private val connection: ShepherdConnection) {
 
     // --- claim flow ----------------------------------------------------
 
-    suspend fun claim(deviceName: String): AdminRecord =
+    /**
+     * Ask to administer this device.
+     *
+     * Answers [ClaimOutcome.Claimed] when this phone is (or has just become)
+     * an administrator, and [ClaimOutcome.Pending] when the device already has
+     * one and somebody has to approve. Calling it again while pending is how
+     * the phone finds out what happened — the device returns the same request
+     * until it is approved, denied or expires.
+     */
+    suspend fun claim(deviceName: String): ClaimOutcome =
         decode(call("claim", buildJsonObject { put("device_name", JsonPrimitive(deviceName)) }))
 
     suspend fun factoryReset() {
         call("factory_reset", JsonObject(emptyMap()))
     }
+
+    // --- administrators (issue #149) -----------------------------------
+    //
+    // Like the claim flow above, these live in `crates/shepherd-ble` rather
+    // than on `ManagementService`, so they build their own params.
+
+    suspend fun listAdmins(): List<AdminSummary> =
+        decode(call("list_admins", JsonObject(emptyMap())))
+
+    suspend fun revokeAdmin(id: String) {
+        call("revoke_admin", byId(id))
+    }
+
+    suspend fun listEnrolmentRequests(): List<EnrolmentRequestInfo> =
+        decode(call("list_enrolment_requests", JsonObject(emptyMap())))
+
+    suspend fun approveEnrolmentRequest(id: String): AdminSummary =
+        decode(call("approve_enrolment_request", byId(id)))
+
+    suspend fun denyEnrolmentRequest(id: String) {
+        call("deny_enrolment_request", byId(id))
+    }
+
+    private fun byId(id: String): JsonObject = buildJsonObject { put("id", JsonPrimitive(id)) }
 
     // --- health / state ------------------------------------------------
 

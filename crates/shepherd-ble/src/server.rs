@@ -57,7 +57,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::admin::{AdminStore, PendingUnbondStore, check_reset_sentinel};
 use crate::agent::{PairingDisplay, build_agent};
-use crate::claim::{AuthDecision, ClaimMachine, PeerIdentity};
+use crate::claim::{AuthDecision, ClaimError, ClaimMachine, PeerIdentity};
 use crate::framing::{FrameReader, encode_frame};
 use crate::outbox::{COALESCE_DIAGNOSTICS, COALESCE_STATE_CHANGED, CoalesceKey, Outbox};
 use crate::protocol::{
@@ -296,19 +296,23 @@ impl BleServer {
             // removal that never happened, which the next startup fixes;
             // the reverse order would lose the address entirely.
             match store.load() {
-                Ok(Some(record)) => {
-                    if let Err(e) = pending_unbond.add(&record.identity_address) {
-                        warn!(
-                            peer = %record.identity_address,
-                            error = %e,
-                            "Could not queue BlueZ bond removal after reset; the peer may stay bonded",
-                        );
+                // Every admin, not just the first: a device with two bonded
+                // phones has two bonds to forget, and leaving one behind is
+                // the asymmetric-bond lockout for whichever phone was missed.
+                Ok(stored) => {
+                    for record in &stored.admins {
+                        if let Err(e) = pending_unbond.add(&record.identity_address) {
+                            warn!(
+                                peer = %record.identity_address,
+                                error = %e,
+                                "Could not queue BlueZ bond removal after reset; the peer may stay bonded",
+                            );
+                        }
                     }
                 }
-                Ok(None) => {}
                 Err(e) => warn!(
                     error = %e,
-                    "Could not read admin record before reset; BlueZ bond will not be removed",
+                    "Could not read admin record before reset; BlueZ bonds will not be removed",
                 ),
             }
             store.clear()?;
@@ -473,9 +477,19 @@ impl BleServer {
                 if let Err(e) = unbond_store.add(&text) {
                     warn!(peer = %addr, error = %e, "Could not persist the pending unbond");
                 }
-                match unbond_adapter.remove_device(addr).await {
+                // Same identity-vs-path resolution as the startup drain: the
+                // address came from an admin record, and the live BlueZ object
+                // may sit at the random address the peer connected under.
+                let removed = match device_path_for(&unbond_adapter, addr).await {
+                    Some(path) => unbond_adapter.remove_device(path).await,
+                    None => {
+                        info!(peer = %addr, "BlueZ already has no such peer; nothing to unbond");
+                        Ok(())
+                    }
+                };
+                match removed {
                     Ok(()) => {
-                        info!(peer = %addr, "Removed BlueZ bond after factory_reset");
+                        info!(peer = %addr, "Removed BlueZ bond");
                         if let Err(e) = unbond_store.remove(&text) {
                             warn!(peer = %addr, error = %e, "Bond removed but the retry entry stayed");
                         }
@@ -483,7 +497,7 @@ impl BleServer {
                     Err(e) => warn!(
                         peer = %addr,
                         error = %e,
-                        "BlueZ bond removal after factory_reset failed; queued for retry at next startup",
+                        "BlueZ bond removal failed; queued for retry at next startup",
                     ),
                 }
             }
@@ -649,6 +663,51 @@ async fn events_forwarder(svc: Arc<dyn ManagementService>, outbox: Arc<Outbox>) 
     }
 }
 
+/// Find the BlueZ device object for a peer we know by its identity address.
+///
+/// `Adapter::remove_device` addresses a device by its D-Bus object path, and
+/// that path is the address the object was *created* under — for a phone using
+/// privacy, the random address its link came up on. The admin record holds the
+/// identity address instead, deliberately (see [`resolve_peer`]), so handing it
+/// straight to `remove_device` asks BlueZ about an object that does not exist.
+///
+/// Observed on the bench (2026-09-07): revoking an administrator logged
+/// `Bluetooth device does not exist: Does Not Exist` for `64:11:A4:B0:7B:D9`
+/// while the live object sat at `dev_53_B5_E3_8D_D6_49`. Worse, the startup
+/// drain then read the same absence as "already settled" and dropped the queue
+/// entry — so the bond a revocation was supposed to remove would have survived
+/// forever, with nothing left saying it should not have.
+///
+/// So: try the address as a path first, and otherwise ask each known device for
+/// its identity. `None` means BlueZ genuinely has no such peer, which is the
+/// one case where the debt really is settled.
+async fn device_path_for(adapter: &bluer::Adapter, wanted: Address) -> Option<Address> {
+    let addresses = match adapter.device_addresses().await {
+        Ok(addresses) => addresses,
+        Err(e) => {
+            warn!(error = %e, "Could not enumerate BlueZ devices while looking for a bond");
+            return None;
+        }
+    };
+    if addresses.contains(&wanted) {
+        return Some(wanted);
+    }
+    for address in addresses {
+        let Ok(device) = adapter.device(address) else {
+            continue;
+        };
+        if device.remote_address().await.is_ok_and(|id| id == wanted) {
+            debug!(
+                identity = %wanted,
+                path = %address,
+                "Bond is recorded by identity but its BlueZ object is at another address",
+            );
+            return Some(address);
+        }
+    }
+    None
+}
+
 /// Work through the pending-unbond list, dropping entries only once the
 /// peer is provably gone from BlueZ.
 ///
@@ -665,14 +724,6 @@ async fn drain_pending_unbonds(adapter: &bluer::Adapter, store: &PendingUnbondSt
         }
     };
 
-    let known: HashSet<Address> = match adapter.device_addresses().await {
-        Ok(addrs) => addrs.into_iter().collect(),
-        Err(e) => {
-            warn!(error = %e, "Could not enumerate BlueZ devices; deferring pending unbonds");
-            return;
-        }
-    };
-
     for text in queued {
         let addr = match text.parse::<Address>() {
             Ok(a) => a,
@@ -684,12 +735,15 @@ async fn drain_pending_unbonds(adapter: &bluer::Adapter, store: &PendingUnbondSt
                 continue;
             }
         };
-        if !known.contains(&addr) {
+        // By identity, not by the queued string: the entry came from an admin
+        // record, and BlueZ may still hold the object under the random address
+        // the peer last connected with. See [`device_path_for`].
+        let Some(path) = device_path_for(adapter, addr).await else {
             info!(peer = %addr, "Pending unbond already settled; BlueZ does not know this peer");
             let _ = store.remove(&text);
             continue;
-        }
-        match adapter.remove_device(addr).await {
+        };
+        match adapter.remove_device(path).await {
             Ok(()) => {
                 info!(peer = %addr, "Removed BlueZ bond");
                 if let Err(e) = store.remove(&text) {
@@ -1030,10 +1084,16 @@ struct TransportState {
     /// Request-side reassembly. v1 holds a single reader because only one
     /// admin connection is expected at a time.
     reader: Mutex<FrameReader>,
-    /// Who we last accepted a request write from. Set by the first write
-    /// of a session, cleared when the peer drops — which is what the
-    /// watchdog reads as "this link has never carried anything".
-    last_peer: Mutex<Option<PeerIdentity>>,
+    /// Who currently holds the session, and when they last wrote.
+    ///
+    /// Set by the first write of a session, cleared when the peer drops —
+    /// which is what the watchdog reads as "this link has never carried
+    /// anything". It is also the turn-taking lock: everything below this
+    /// struct is single-session (one reader, one pair of outboxes), so a
+    /// second administrator writing here would interleave frames into the
+    /// same reassembler and read replies out of the same queue. See
+    /// [`SESSION_HANDOVER_IDLE`].
+    last_peer: Mutex<Option<SessionOwner>>,
     /// The read-poll queues the companion drains over GATT: RPC replies
     /// and live state events. `Arc`, not plain, because each is also
     /// captured by its own read characteristic and — for events — by the
@@ -1053,7 +1113,27 @@ struct TransportState {
     /// [`spawn_first_rpc_watchdog`]; see [`pin_peer_to_bredr`] for why
     /// the pin is the actual fix.
     bearer: BearerPin,
+    /// Peers resolved to their identity address this session, keyed by the
+    /// address their requests arrive under. See [`resolve_peer`].
+    identities: Mutex<HashMap<Address, PeerIdentity>>,
 }
+
+/// The peer holding the session, and when it last proved it.
+struct SessionOwner {
+    peer: PeerIdentity,
+    last_write: std::time::Instant,
+}
+
+/// How long a silent session owner keeps its claim on the transport.
+///
+/// The normal handover is a disconnect: BlueZ reports the peer gone and
+/// [`TransportState::reset_session`] releases the session. This is the backstop
+/// for when that report never comes — a phone that walked out of range without
+/// a clean teardown must not lock the other parent out of the device forever.
+///
+/// Comfortably past the companion's own 15-second per-RPC timeout, so a slow
+/// call in progress is never mistaken for an abandoned session.
+const SESSION_HANDOVER_IDLE: Duration = Duration::from_secs(30);
 
 impl TransportState {
     fn new() -> Self {
@@ -1065,6 +1145,7 @@ impl TransportState {
             epoch: AtomicU64::new(0),
             had_session: AtomicBool::new(false),
             bearer: BearerPin::default(),
+            identities: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1103,9 +1184,53 @@ impl TransportState {
     /// the orphan and every frame after it would be garbage. Requests are
     /// small enough to arrive in a single ATT write in practice, so there
     /// is next to nothing in flight to protect.
+    /// Whether `addr` may drain the outboxes right now.
+    ///
+    /// Nobody owning the session means yes: the companion drains both outboxes
+    /// inside `connect()`, before it has written anything, so the first reads
+    /// of every session necessarily arrive without an owner. Once someone has
+    /// written, the queues are theirs — a second phone polling the same
+    /// characteristics would otherwise carry off replies addressed to the
+    /// first, and neither side could tell.
+    async fn may_read(&self, addr: Address) -> bool {
+        match &*self.last_peer.lock().await {
+            None => true,
+            Some(owner) => owner.peer.address.eq_ignore_ascii_case(&addr.to_string()),
+        }
+    }
+
+    /// Take the session for `peer`, or report who has it.
+    ///
+    /// `Ok(fresh)` — the session is theirs; `fresh` means the previous owner
+    /// was someone else, so the request reassembler has to be reset before
+    /// their bytes are pushed into it.
+    async fn take_session(&self, peer: &PeerIdentity) -> Result<bool, String> {
+        let mut owner = self.last_peer.lock().await;
+        let now = std::time::Instant::now();
+        if let Some(current) = owner.as_mut() {
+            if current.peer == *peer {
+                current.last_write = now;
+                return Ok(false);
+            }
+            let idle = now.duration_since(current.last_write);
+            if idle < SESSION_HANDOVER_IDLE {
+                return Err(current.peer.address.clone());
+            }
+        }
+        *owner = Some(SessionOwner {
+            peer: peer.clone(),
+            last_write: now,
+        });
+        Ok(true)
+    }
+
     async fn reset_session(&self) {
         *self.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
         *self.last_peer.lock().await = None;
+        // Cheap to rebuild — one property read on the next session's first
+        // write — and holding it across a re-pair would answer with the
+        // identity of a bond that no longer exists.
+        self.identities.lock().await.clear();
         for (label, outbox) in [
             ("response", &self.response_outbox),
             ("events", &self.events_outbox),
@@ -1380,6 +1505,7 @@ async fn go_on_air(
     state: &Arc<TransportState>,
 ) -> bluer::Result<OnAir> {
     let application = build_application(
+        adapter.clone(),
         config.clone(),
         svc.clone(),
         claim.clone(),
@@ -1498,6 +1624,7 @@ async fn register_agent(
 }
 
 fn build_application(
+    adapter: bluer::Adapter,
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
@@ -1510,16 +1637,18 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(svc, claim, unbond_tx, state.clone()),
+                request_characteristic(adapter, svc, claim, unbond_tx, state.clone()),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
                     state.response_outbox.clone(),
                     "Response",
+                    state.clone(),
                 ),
                 outbox_read_characteristic(
                     SHEPHERD_EVENTS_CHAR_UUID,
                     state.events_outbox.clone(),
                     "Events",
+                    state.clone(),
                 ),
             ],
             ..Default::default()
@@ -1574,6 +1703,7 @@ fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>)
 /// pairing too — that gives us the property we actually want
 /// (encrypted + authenticated link) without requiring LESC.
 fn request_characteristic(
+    adapter: bluer::Adapter,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
     unbond_tx: mpsc::Sender<Address>,
@@ -1591,6 +1721,7 @@ fn request_characteristic(
             write_without_response: true,
             encrypt_authenticated_write: true,
             method: CharacteristicWriteMethod::Fun(Box::new(move |chunk, req| {
+                let adapter = adapter.clone();
                 let svc = svc.clone();
                 let claim = claim.clone();
                 let unbond_tx = unbond_tx.clone();
@@ -1601,15 +1732,11 @@ fn request_characteristic(
                 // ever act on a silent one.
                 state.had_session.store(true, Ordering::Relaxed);
                 async move {
-                    let peer = PeerIdentity {
-                        address: req.device_address.to_string(),
-                        // bluer doesn't expose address type on the
-                        // write request; the value the admin record
-                        // holds matches what BlueZ stores, which we
-                        // synthesize at claim time. v1 single-admin
-                        // ignores this field on the inbound side.
-                        address_type: "public".to_string(),
-                    };
+                    // The request names its peer by D-Bus object path, which
+                    // for a phone using privacy is not the address its bond is
+                    // filed under. Ask BlueZ before anything compares it
+                    // against a record — see [`resolve_peer`].
+                    let peer = resolve_peer(&adapter, req.device_address, &state).await;
                     handle_write(&peer, chunk, claim, svc, &unbond_tx, &state).await
                 }
                 .boxed()
@@ -1632,6 +1759,7 @@ fn outbox_read_characteristic(
     uuid: bluer::Uuid,
     outbox: Arc<Outbox>,
     label: &'static str,
+    state: Arc<TransportState>,
 ) -> Characteristic {
     Characteristic {
         uuid,
@@ -1640,7 +1768,18 @@ fn outbox_read_characteristic(
             encrypt_authenticated_read: true,
             fun: Box::new(move |req| {
                 let outbox = outbox.clone();
+                let state = state.clone();
                 async move {
+                    // The other half of the turn-taking rule in `handle_write`
+                    // (issue #149): while one administrator holds the session,
+                    // a second bonded phone polling these characteristics
+                    // would carry off replies meant for the first. An empty
+                    // read is what an idle queue looks like, so the newcomer
+                    // simply sees nothing until its own write is refused and
+                    // tells it why.
+                    if !state.may_read(req.device_address).await {
+                        return Ok(Vec::new());
+                    }
                     // Blob reads (offset > 0) shouldn't happen for our
                     // bounded responses, but if BlueZ ever issues one
                     // we'd return stale head bytes — answer empty so
@@ -1687,6 +1826,68 @@ fn outbox_read_characteristic(
     }
 }
 
+/// Ask BlueZ who a request actually came from.
+///
+/// A GATT request names its peer by the address the D-Bus device object was
+/// created under. For a phone using privacy that is the random address the link
+/// came up on, which is *not* the address the bond is filed under and not the
+/// one the next connection will arrive with. `Device1.Address` on the same
+/// object is — bluer's own docs for the property say it "represents … Identity
+/// Address after pairing", and on the bench a mid-pairing claim from path
+/// `79:C2:1B:08:F0:32` resolved to the `64:11:A4:B0:7B:D9` its bond was being
+/// written to.
+///
+/// Recording the wrong one writes an administrator that can never authorize
+/// again. So this runs before the first request of a session is dispatched, and
+/// the answer is cached: it is one property read per session, not per RPC.
+///
+/// A failure falls back to the request address — the pre-#149 behaviour, which
+/// still works for the common case where the two are the same — rather than
+/// refusing to serve a peer because BlueZ was momentarily unhelpful.
+async fn resolve_peer(
+    adapter: &bluer::Adapter,
+    addr: Address,
+    state: &TransportState,
+) -> PeerIdentity {
+    if let Some(known) = state.identities.lock().await.get(&addr) {
+        return known.clone();
+    }
+    let mut peer = PeerIdentity::unresolved(addr.to_string(), "public");
+    match adapter.device(addr) {
+        Ok(device) => {
+            match device.remote_address().await {
+                Ok(identity) => peer.resolved = Some(identity.to_string()),
+                Err(e) => debug!(
+                    peer = %addr,
+                    error = %e,
+                    "Could not read the peer's identity address; using the request address",
+                ),
+            }
+            if let Ok(kind) = device.address_type().await {
+                peer.address_type = kind.to_string();
+            }
+        }
+        Err(e) => debug!(
+            peer = %addr,
+            error = %e,
+            "No BlueZ device object for the peer; using the request address",
+        ),
+    }
+    if peer
+        .resolved
+        .as_deref()
+        .is_some_and(|r| !r.eq_ignore_ascii_case(&peer.address))
+    {
+        info!(
+            peer = %peer.address,
+            identity = %peer.identity(),
+            "Peer connected under a different address than its bond identity",
+        );
+    }
+    state.identities.lock().await.insert(addr, peer.clone());
+    peer
+}
+
 async fn handle_write(
     peer: &PeerIdentity,
     chunk: Vec<u8>,
@@ -1701,14 +1902,33 @@ async fn handle_write(
         "BLE request chunk arrived"
     );
 
-    // Reset the reader if the peer changed mid-flight — keeps a stuck
-    // half-frame from one client from polluting the next client's
-    // first request.
-    {
-        let mut lp = state.last_peer.lock().await;
-        if lp.as_ref() != Some(peer) {
-            *lp = Some(peer.clone());
-            *state.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES);
+    // One administrator at a time (issue #149). A device can have several
+    // bonded phones now, and everything below this point is single-session:
+    // one `FrameReader`, one response outbox, one events outbox. Two phones
+    // writing at once would interleave frames into the same reassembler and
+    // each would read the other's replies out of the same queue — silently, in
+    // both directions, because a truncated read is indistinguishable from an
+    // idle one.
+    //
+    // So the newcomer is refused at the GATT layer rather than served badly.
+    // `InProgress` reaches the phone as a write failure, which its stack
+    // surfaces immediately; pushing an error frame into the response outbox
+    // instead would have queued the refusal where the *other* phone reads.
+    //
+    // Taking the session also resets the reassembler when the owner changes,
+    // so a stuck half-frame from the previous holder cannot pollute the next
+    // one's first request.
+    match state.take_session(peer).await {
+        Ok(false) => {}
+        Ok(true) => *state.reader.lock().await = FrameReader::new(MAX_FRAME_BYTES),
+        Err(holder) => {
+            warn!(
+                peer = %peer.address,
+                holder = %holder,
+                idle_secs = SESSION_HANDOVER_IDLE.as_secs(),
+                "Refusing a write: another administrator holds the session",
+            );
+            return Err(bluer::gatt::local::ReqError::InProgress);
         }
     }
 
@@ -1782,18 +2002,28 @@ async fn dispatch_frame(
         "BLE RPC received"
     );
     let response = match request.method.as_str() {
+        // Ungated: this is how a phone *becomes* an administrator, so it
+        // cannot require already being one.
         "claim" => handle_claim_rpc(id, request.params, peer, claim).await,
+        // Gates itself, because it has to succeed on an unclaimed device too.
         "factory_reset" => handle_factory_reset_rpc(id, peer, claim, unbond_tx).await,
+        // The roster methods (issue #149). Handled here rather than through
+        // `ManagementService` because they act on the claim machine, which
+        // lives in this crate — `shepherd-management` sits *below* it and
+        // cannot name it without a dependency cycle.
+        method @ ("list_admins"
+        | "revoke_admin"
+        | "list_enrolment_requests"
+        | "approve_enrolment_request"
+        | "deny_enrolment_request") => match claim.authorize(peer) {
+            AuthDecision::Allow => {
+                handle_admin_rpc(id, method, request.params, peer, claim, unbond_tx).await
+            }
+            AuthDecision::Deny { reason } => denied(id, claim, reason),
+        },
         _ => match claim.authorize(peer) {
             AuthDecision::Allow => dispatch_management(svc.as_ref(), request).await,
-            AuthDecision::Deny { reason } => {
-                let code = if claim.is_claimed() {
-                    ErrorCode::PermissionDenied
-                } else {
-                    ErrorCode::NotClaimed
-                };
-                RpcResponse::err(id, code, reason)
-            }
+            AuthDecision::Deny { reason } => denied(id, claim, reason),
         },
     };
     info!(
@@ -1803,6 +2033,35 @@ async fn dispatch_frame(
         "BLE RPC response queued"
     );
     push_response(&state.response_outbox, &response).await;
+}
+
+/// The refusal an unauthorized caller gets, with the code that says which kind
+/// of "no" it is: an unclaimed device has nobody to authorize against, while a
+/// claimed one is telling this particular phone it is not an administrator.
+fn denied(id: u32, claim: &Arc<ClaimMachine>, reason: String) -> RpcResponse {
+    let code = if claim.is_claimed() {
+        ErrorCode::PermissionDenied
+    } else {
+        ErrorCode::NotClaimed
+    };
+    RpcResponse::err(id, code, reason)
+}
+
+/// Map a claim-machine error onto the wire.
+fn claim_error(id: u32, e: ClaimError) -> RpcResponse {
+    let message = e.to_string();
+    let code = match e {
+        ClaimError::EnrolmentDenied => ErrorCode::EnrolmentDenied,
+        ClaimError::NoSuchRequest | ClaimError::NoSuchAdmin => ErrorCode::NotFound,
+        // Revoking the last administrator is refused because it is the wrong
+        // operation, not because the caller lacks standing — `factory_reset`
+        // is the one that unclaims a device, and it also drops the bond.
+        ClaimError::LastAdmin => ErrorCode::Conflict,
+        ClaimError::NotClaimed => ErrorCode::NotClaimed,
+        ClaimError::PermissionDenied => ErrorCode::PermissionDenied,
+        ClaimError::Store(_) => ErrorCode::Internal,
+    };
+    RpcResponse::err(id, code, message)
 }
 
 async fn handle_claim_rpc(
@@ -1820,14 +2079,102 @@ async fn handle_claim_rpc(
         Err(e) => return RpcResponse::err(id, ErrorCode::InvalidParams, e.to_string()),
     };
     match claim.claim(peer.clone(), parsed.device_name) {
-        Ok(record) => match serde_json::to_value(&record) {
+        Ok(outcome) => match serde_json::to_value(&outcome) {
             Ok(v) => RpcResponse::ok(id, v),
             Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
         },
-        Err(crate::claim::ClaimError::AlreadyClaimed) => {
-            RpcResponse::err(id, ErrorCode::AlreadyClaimed, "device already claimed")
+        Err(e) => claim_error(id, e),
+    }
+}
+
+/// The admin-roster RPCs (issue #149), all of which the caller has already
+/// been authorized for.
+async fn handle_admin_rpc(
+    id: u32,
+    method: &str,
+    params: serde_json::Value,
+    peer: &PeerIdentity,
+    claim: &Arc<ClaimMachine>,
+    unbond_tx: &mpsc::Sender<Address>,
+) -> RpcResponse {
+    #[derive(serde::Deserialize)]
+    struct ById {
+        id: String,
+    }
+    fn by_id(id: u32, params: serde_json::Value) -> Result<String, RpcResponse> {
+        serde_json::from_value::<ById>(params)
+            .map(|p| p.id)
+            .map_err(|e| RpcResponse::err(id, ErrorCode::InvalidParams, e.to_string()))
+    }
+    fn ok(id: u32, value: impl serde::Serialize) -> RpcResponse {
+        match serde_json::to_value(value) {
+            Ok(v) => RpcResponse::ok(id, v),
+            Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
         }
-        Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
+    }
+
+    match method {
+        "list_admins" => ok(id, claim.list_admins(peer)),
+        "list_enrolment_requests" => ok(id, claim.list_requests()),
+        "approve_enrolment_request" => match by_id(id, params) {
+            Err(resp) => resp,
+            Ok(request_id) => match claim.approve_request(&request_id) {
+                Ok(summary) => ok(id, summary),
+                Err(e) => claim_error(id, e),
+            },
+        },
+        "deny_enrolment_request" => match by_id(id, params) {
+            Err(resp) => resp,
+            Ok(request_id) => match claim.deny_request(&request_id) {
+                Ok(()) => RpcResponse::ok(id, serde_json::Value::Null),
+                Err(e) => claim_error(id, e),
+            },
+        },
+        "revoke_admin" => match by_id(id, params) {
+            Err(resp) => resp,
+            Ok(admin_id) => match claim.revoke_admin(&admin_id) {
+                Ok(removed) => {
+                    queue_unbond(&removed.identity_address, unbond_tx, "revoke_admin").await;
+                    RpcResponse::ok(id, serde_json::Value::Null)
+                }
+                Err(e) => claim_error(id, e),
+            },
+        },
+        // Unreachable: the caller matched this same list to get here. Answered
+        // rather than panicked so a future edit to one list and not the other
+        // is a bad response, not a dead daemon.
+        other => RpcResponse::err(
+            id,
+            ErrorCode::MethodNotFound,
+            format!("unknown admin method '{other}'"),
+        ),
+    }
+}
+
+/// Ask the adapter-owning task to forget `address`'s bond.
+///
+/// A revoked or reset admin that stays bonded reaches the link layer on every
+/// reconnect and is then refused by `authorize`, which is a lockout re-pairing
+/// cannot clear because the bond already exists. The task on the other end
+/// records the debt durably before attempting the removal, so a failure here
+/// is retried at the next startup.
+async fn queue_unbond(address: &str, unbond_tx: &mpsc::Sender<Address>, why: &'static str) {
+    match address.parse::<Address>() {
+        Ok(addr) => {
+            if unbond_tx.send(addr).await.is_err() {
+                warn!(
+                    peer = %address,
+                    why,
+                    "unbond channel closed; BlueZ bond not removed",
+                );
+            }
+        }
+        Err(e) => warn!(
+            peer = %address,
+            why,
+            error = %e,
+            "Could not parse admin identity address; BlueZ bond not removed",
+        ),
     }
 }
 
@@ -1849,8 +2196,8 @@ async fn handle_factory_reset_rpc(
             // disconnects the peer, so delivery of the ok is best-effort —
             // acceptable, since a factory reset ends the session anyway.
             Ok(previous) => {
-                if let Some(record) = previous {
-                    request_unbond(unbond_tx, &record.identity_address).await;
+                for record in &previous {
+                    queue_unbond(&record.identity_address, unbond_tx, "factory_reset").await;
                 }
                 RpcResponse::ok(id, serde_json::Value::Null)
             }
@@ -1865,28 +2212,6 @@ async fn handle_factory_reset_rpc(
                 RpcResponse::err(id, ErrorCode::PermissionDenied, reason)
             }
         }
-    }
-}
-
-/// Ask the unbond task (which owns the adapter) to remove the BlueZ bond
-/// for `identity_address`. Best-effort: a parse failure or a closed
-/// channel is logged, not surfaced to the caller, since the admin record
-/// is already cleared and the reset itself succeeded.
-async fn request_unbond(unbond_tx: &mpsc::Sender<Address>, identity_address: &str) {
-    match identity_address.parse::<Address>() {
-        Ok(addr) => {
-            if unbond_tx.send(addr).await.is_err() {
-                warn!(
-                    peer = %addr,
-                    "unbond channel closed; BlueZ bond not removed after factory_reset",
-                );
-            }
-        }
-        Err(e) => warn!(
-            address = %identity_address,
-            error = %e,
-            "Could not parse admin identity address; BlueZ bond not removed after factory_reset",
-        ),
     }
 }
 
@@ -1920,10 +2245,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn peer(address: &str) -> PeerIdentity {
-        PeerIdentity {
-            address: address.to_string(),
-            address_type: "public".to_string(),
-        }
+        PeerIdentity::unresolved(address.to_string(), "public".to_string())
     }
 
     /// A claimed machine that never touches disk: `authorize` reads only
@@ -1932,11 +2254,21 @@ mod tests {
     /// allowed through to the service rather than denied with
     /// `not_claimed`.
     fn claimed_machine() -> Arc<ClaimMachine> {
-        let record = AdminRecord::new("AA:BB:CC:DD:EE:FF".into(), "public".into(), "tester".into());
+        machine_admin_for(&["AA:BB:CC:DD:EE:FF"])
+    }
+
+    /// The same, with a chosen roster — `authorize` compares addresses now
+    /// (issue #149), so a test driving the write path has to be an admin at
+    /// the address it writes from or every RPC comes back `permission_denied`.
+    fn machine_admin_for(addresses: &[&str]) -> Arc<ClaimMachine> {
+        let records = addresses
+            .iter()
+            .map(|a| AdminRecord::new((*a).to_string(), "public".into(), "tester".into()))
+            .collect();
         let store = AdminStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
             std::path::PathBuf::from("/nonexistent/shepherd-ble-test"),
         )));
-        Arc::new(ClaimMachine::new(store, ClaimState::Claimed(record)))
+        Arc::new(ClaimMachine::new(store, ClaimState::Claimed(records)))
     }
 
     /// A live unbond sender for the write path. None of these tests drive
@@ -2043,9 +2375,15 @@ mod tests {
         assert_eq!(responses[0].id, 2);
     }
 
+    /// A disconnect releases the session, and the next administrator to write
+    /// starts on a clean reassembler.
+    ///
+    /// The partial frame is the point: if A's leftover header bytes survived
+    /// the handover they would be read as B's length prefix, and B's first
+    /// request would come back as a garbage `id=0` parse error.
     #[tokio::test]
-    async fn peer_change_resets_partial_frame() {
-        let claim = claimed_machine();
+    async fn handover_resets_a_partial_frame() {
+        let claim = machine_admin_for(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let state = TransportState::new();
 
@@ -2066,9 +2404,9 @@ mod tests {
             "an incomplete frame must not produce a response"
         );
 
-        // Peer B writes a complete frame. If A's leftover header bytes
-        // weren't dropped on the peer change, they'd be read as B's length
-        // prefix and yield a garbage (id=0 parse-error) frame instead.
+        // BlueZ reports A gone, which is what normally frees the session.
+        state.reset_session().await;
+
         handle_write(
             &peer("BB:BB:BB:BB:BB:BB"),
             request_frame(8, "health"),
@@ -2086,9 +2424,129 @@ mod tests {
         assert!(responses[0].error.is_none());
     }
 
+    /// Turn-taking (issue #149). Two administrators may both be bonded, but
+    /// the transport below is single-session, so the second one to arrive is
+    /// refused at the GATT layer rather than being allowed to interleave its
+    /// frames into the first one's reassembler.
+    #[tokio::test]
+    async fn a_second_administrator_is_refused_while_the_first_holds_the_session() {
+        let claim = machine_admin_for(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
+        let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
+        let state = TransportState::new();
+        let a = peer("AA:AA:AA:AA:AA:AA");
+        let b = peer("BB:BB:BB:BB:BB:BB");
+
+        handle_write(
+            &a,
+            request_frame(1, "health"),
+            claim.clone(),
+            svc.clone(),
+            &unbond_sender(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        // B is a perfectly good administrator, and still gets turned away —
+        // as a write failure its own stack surfaces, not as an error frame
+        // queued where A would read it.
+        let refused = handle_write(
+            &b,
+            request_frame(1, "health"),
+            claim.clone(),
+            svc.clone(),
+            &unbond_sender(),
+            &state,
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(bluer::gatt::local::ReqError::InProgress)
+        ));
+
+        // A's reply is intact and unaccompanied: nothing of B's reached the
+        // queue at all.
+        let responses = drain_responses(&state.response_outbox).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].id, 1);
+        assert!(responses[0].error.is_none());
+    }
+
+    /// The other half of the rule: while A owns the session, B's polls of the
+    /// read characteristics come back empty, so it can never carry off a reply
+    /// addressed to A.
+    #[tokio::test]
+    async fn only_the_session_owner_may_drain_the_outboxes() {
+        let state = TransportState::new();
+        let a: Address = "AA:AA:AA:AA:AA:AA".parse().unwrap();
+        let b: Address = "BB:BB:BB:BB:BB:BB".parse().unwrap();
+
+        // Before anyone has written, both may read: the companion drains both
+        // outboxes inside `connect()`, before its first RPC.
+        assert!(state.may_read(a).await);
+        assert!(state.may_read(b).await);
+
+        state
+            .take_session(&peer("AA:AA:AA:AA:AA:AA"))
+            .await
+            .unwrap();
+        assert!(state.may_read(a).await);
+        assert!(!state.may_read(b).await);
+
+        // A disconnect frees the queues for whoever comes next.
+        state.reset_session().await;
+        assert!(state.may_read(b).await);
+    }
+
+    /// A phone that walked out of range without a clean teardown must not
+    /// hold the device against the other parent forever. BlueZ reporting the
+    /// disconnect is the normal release; this is the backstop for when that
+    /// report never comes.
+    #[tokio::test]
+    async fn an_idle_owner_loses_the_session() {
+        let state = TransportState::new();
+        let a = peer("AA:AA:AA:AA:AA:AA");
+        let b = peer("BB:BB:BB:BB:BB:BB");
+
+        state.take_session(&a).await.unwrap();
+        assert_eq!(
+            state.take_session(&b).await.unwrap_err(),
+            a.address,
+            "a live owner keeps the session, and is named in the refusal",
+        );
+
+        // Age the owner past the handover window rather than waiting it out.
+        {
+            let mut owner = state.last_peer.lock().await;
+            let owner = owner.as_mut().expect("A holds the session");
+            owner.last_write = owner.last_write - SESSION_HANDOVER_IDLE - Duration::from_secs(1);
+        }
+        assert!(
+            state.take_session(&b).await.unwrap(),
+            "the session changed hands, so the reassembler wants resetting",
+        );
+        assert!(!state.may_read("AA:AA:AA:AA:AA:AA".parse().unwrap()).await);
+    }
+
+    /// The owner writing again is not a handover: the reassembler must be
+    /// left alone, or every multi-write frame would be truncated.
+    #[tokio::test]
+    async fn the_owner_keeps_its_reassembler_across_writes() {
+        let state = TransportState::new();
+        let a = peer("AA:AA:AA:AA:AA:AA");
+        assert!(
+            state.take_session(&a).await.unwrap(),
+            "first write claims it"
+        );
+        assert!(
+            !state.take_session(&a).await.unwrap(),
+            "the same peer writing again is the same session",
+        );
+    }
+
     #[tokio::test]
     async fn framing_error_drops_state_and_recovers() {
-        let claim = claimed_machine();
+        let claim = machine_admin_for(&["CC:CC:CC:CC:CC:CC"]);
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let state = TransportState::new();
         let p = peer("CC:CC:CC:CC:CC:CC");
@@ -2136,7 +2594,10 @@ mod tests {
     #[tokio::test]
     async fn reset_session_wipes_all_session_state() {
         let state = TransportState::new();
-        *state.last_peer.lock().await = Some(peer("AA:BB:CC:DD:EE:FF"));
+        state
+            .take_session(&peer("AA:BB:CC:DD:EE:FF"))
+            .await
+            .unwrap();
 
         // Bytes a dropped session left behind: unread outbox frames plus
         // the head of a request frame whose tail never arrived.
@@ -2553,11 +3014,11 @@ mod tests {
 
         let store = AdminStore::new(Arc::clone(&files));
         store
-            .save(&AdminRecord::new(
+            .save_all(&[AdminRecord::new(
                 "AA:BB:CC:DD:EE:FF".into(),
                 "public".into(),
                 "phone".into(),
-            ))
+            )])
             .unwrap();
         std::fs::write(&sentinel_path, "").unwrap();
 

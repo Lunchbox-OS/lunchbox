@@ -44,6 +44,7 @@ fun SettingsScreen(
     vm: ShepherdViewModel,
     onBack: () -> Unit,
     onAllForgotten: () -> Unit,
+    onOpenAdmins: () -> Unit,
 ) {
     val context = LocalContext.current
     val state by vm.state.collectAsState()
@@ -93,6 +94,15 @@ fun SettingsScreen(
                             onClick = { vm.updateNickname(record.androidIdentifier, nickname) },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Save nickname") }
+                        OutlinedButton(
+                            onClick = onOpenAdmins,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Administrators") }
+                        Text(
+                            "Add another parent's phone, or remove one (issue #149).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Button(
                             onClick = { confirmReset = true },
                             modifier = Modifier.fillMaxWidth(),
@@ -130,7 +140,13 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { confirmReset = false },
             title = { Text("Factory reset?") },
-            text = { Text("This wipes the bond on ${record.displayName} and removes it from this phone. You'll need to pair again from scratch.") },
+            text = {
+                Text(
+                    "This unpairs ${record.displayName} from *every* phone that administers " +
+                        "it, wipes their bonds, and removes it from this phone. To remove just " +
+                        "one phone, use Administrators instead.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirmReset = false

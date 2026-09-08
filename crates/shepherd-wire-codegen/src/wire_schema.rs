@@ -86,6 +86,13 @@ struct WireTypes {
     device_info: shepherd_ble::protocol::DeviceInfo,
     claim_state_tag: shepherd_ble::protocol::ClaimStateTag,
     admin_record: shepherd_ble::admin::AdminRecord,
+    // The admin roster and the enrolment handshake (issue #149). `claim` now
+    // answers with the tagged outcome rather than a bare record, and the other
+    // three are reachable only as results of the roster RPCs.
+    claim_outcome: shepherd_ble::claim::ClaimOutcome,
+    admin_summary: shepherd_ble::admin::AdminSummary,
+    admin_role: shepherd_ble::admin::AdminRole,
+    enrolment_request_info: shepherd_ble::claim::EnrolmentRequestInfo,
 }
 
 /// The `$defs` block describing every wire type, keyed by Rust type name.

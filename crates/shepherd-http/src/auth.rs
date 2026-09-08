@@ -153,11 +153,7 @@ impl AuthSources {
     fn is_open(&self) -> bool {
         self.web.is_none()
             && self.static_token.is_none()
-            && self
-                .admin
-                .as_ref()
-                .and_then(|a| a.current_http_token())
-                .is_none()
+            && !self.admin.as_ref().is_some_and(|a| a.has_admin())
     }
 
     /// Match a bearer token against the machine credentials. Session tokens
@@ -169,9 +165,12 @@ impl AuthSources {
         {
             return true;
         }
+        // The admin authority does its own constant-time comparison, across
+        // every administrator's token — there can be more than one (issue
+        // #149), and it holds them so that they never have to be copied out
+        // here to be checked.
         if let Some(a) = &self.admin
-            && let Some(t) = a.current_http_token()
-            && constant_time_eq(presented, &t)
+            && a.verify_http_token(presented)
         {
             return true;
         }
