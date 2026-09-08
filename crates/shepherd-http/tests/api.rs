@@ -295,6 +295,7 @@ fn make_state_full(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        policy_files: None,
         media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(shepherd_host_api::NoOpHidpiController),

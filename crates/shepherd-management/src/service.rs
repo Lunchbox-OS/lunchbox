@@ -10,7 +10,7 @@ use shepherd_api::{
     HudOrientation, NetworkStatusView, ServiceStateSnapshot, SessionEndReason, SessionInfo,
     StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
 };
-use shepherd_config::{BrightnessPolicy, VolumePolicy, load_config};
+use shepherd_config::{BrightnessPolicy, VolumePolicy, parse_config};
 use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
@@ -18,7 +18,7 @@ use shepherd_host_api::{
     VolumeController, VolumeError,
 };
 use shepherd_store::Store;
-use shepherd_util::{EntryId, LimitSubject, MonotonicInstant};
+use shepherd_util::{EntryId, LimitSubject, MonotonicInstant, ProtectedFile, ProtectedFiles};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -348,7 +348,19 @@ pub struct DefaultManagementService {
     /// Broadcasts an event to all subscribers (IPC clients and SSE clients
     /// alike). Set by the daemon's main loop.
     pub broadcast_fn: Arc<dyn Fn(Event) + Send + Sync>,
+    /// Where the policy lives when the custodian does not hold it: the path
+    /// `--config` named. On a device with a custodian this is the *signpost*,
+    /// which grants nothing — see `policy_files`.
     pub config_path: PathBuf,
+    /// The state custodian's files, when it holds this device's policy
+    /// (issue #157). `Some` exactly when `shepherdd`'s own
+    /// `StateSource::holds_policy` is true.
+    ///
+    /// Load-bearing rather than decorative: without it this service reads
+    /// `config_path`, which on an installed device is the zero-entry signpost
+    /// that stands where the policy used to be. A reload from there empties
+    /// the launcher.
+    pub policy_files: Option<Arc<dyn ProtectedFiles>>,
     /// Nudges shepherdd's media prefetcher to re-fetch libraries and segments
     /// immediately (issue #165). `None` on any embedding without a prefetcher —
     /// in which case [`ManagementService::refresh_media`] reports that rather
@@ -1271,7 +1283,15 @@ impl ManagementService for DefaultManagementService {
 
     // ---------------------------------------------------------------- config
     async fn reload_config(&self) -> ManagementResult<usize> {
-        match load_config(&self.config_path) {
+        // Read from where this device actually keeps its policy, which since
+        // #157 is the state custodian rather than a path in the kiosk user's
+        // home. Reading `config_path` here used to reload the *signpost* — a
+        // valid policy with zero entries — so pressing "reload" on an
+        // installed device emptied the launcher until something wrote the real
+        // file again.
+        match self.policy_text().and_then(|text| {
+            parse_config(&text).map_err(|e| ManagementError::Unprocessable(e.to_string()))
+        }) {
             Ok(policy) => {
                 let entry_count = policy.entries.len();
                 {
@@ -1285,7 +1305,7 @@ impl ManagementService for DefaultManagementService {
             }
             Err(e) => {
                 warn!(error = %e, "Config reload failed via management API");
-                Err(ManagementError::Unprocessable(e.to_string()))
+                Err(e)
             }
         }
     }
@@ -1424,6 +1444,40 @@ fn web_auth_error(e: WebAuthError) -> ManagementError {
 }
 
 impl DefaultManagementService {
+    /// The policy file's text, from wherever this device keeps it.
+    ///
+    /// One place, so a reload and a read can never disagree about which file
+    /// decides what a child may do. Mirrors `shepherdd`'s own
+    /// `StateSource::load_policy`: the custodian when it holds a policy, the
+    /// local path otherwise.
+    fn policy_text(&self) -> ManagementResult<String> {
+        match &self.policy_files {
+            Some(files) => files
+                .read(ProtectedFile::Config)
+                .map_err(|e| {
+                    ManagementError::Internal(format!(
+                        "The state custodian would not read the policy: {e}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ManagementError::NotFound("The state custodian holds no policy file".into())
+                }),
+            None => std::fs::read_to_string(&self.config_path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    ManagementError::NotFound(format!(
+                        "No policy file at {}",
+                        self.config_path.display()
+                    ))
+                } else {
+                    ManagementError::Internal(format!(
+                        "Could not read {}: {e}",
+                        self.config_path.display()
+                    ))
+                }
+            }),
+        }
+    }
+
     fn require_web_auth(&self) -> ManagementResult<&Arc<WebAuth>> {
         self.web_auth.as_ref().ok_or_else(|| {
             ManagementError::Conflict("the management API is not enabled on this device".into())

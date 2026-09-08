@@ -31,12 +31,14 @@ use shepherd_management::{
     ManagementService, RpcDispatchError, WebListenerHandle, dispatch_json,
 };
 use shepherd_store::SqliteStore;
-use shepherd_util::{DaysOfWeek, EntryId, LimitSubject, TimeWindow, WallClock};
+use shepherd_util::{
+    DaysOfWeek, EntryId, LimitSubject, LocalProtectedFiles, TimeWindow, WallClock,
+};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 use tokio::sync::{Mutex, broadcast, watch};
 
 // ---------------------------------------------------------------------------
@@ -371,6 +373,7 @@ fn make_svc_full(
             let _ = tx_for_fn.send(event);
         }),
         config_path,
+        policy_files: None,
         media_refresh_tx: None,
         shutdown_tx,
         hidpi: Arc::new(NoOpHidpiController),
@@ -1020,6 +1023,49 @@ async fn reload_config_valid_file_wraps_entry_count() {
     // wrap_result = "entry_count"
     let body = ok(&svc, "reload_config", json!({})).await;
     assert!(body["entry_count"].is_number());
+}
+
+/// A policy with `n` entries, as TOML — the shape an editor would send.
+fn policy_toml(ids: &[&str]) -> String {
+    let mut out = String::from("config_version = 1\n");
+    for id in ids {
+        out.push_str(&format!(
+            "\n[[entries]]\nid = \"{id}\"\nlabel = \"{id}\"\n\n[entries.kind]\ntype = \"process\"\ncommand = \"/bin/true\"\n"
+        ));
+    }
+    out
+}
+
+/// A service whose policy the custodian holds, plus the temp dir standing in
+/// for `/var/lib/shepherdd/state/<user>/`.
+///
+/// `LocalProtectedFiles` is the real implementation the custodian itself uses,
+/// so this exercises the same code path a device does — only the directory
+/// differs.
+fn make_custodial_svc(local_signpost: &Path) -> (DefaultManagementService, TempDir) {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("config.toml"), policy_toml(&["a", "b"])).unwrap();
+    let mut svc = make_svc(test_policy(), local_signpost.to_path_buf());
+    svc.policy_files = Some(Arc::new(LocalProtectedFiles::new(dir.path().to_path_buf())));
+    (svc, dir)
+}
+
+/// The signpost `shepherd install state` leaves behind: a valid policy that
+/// grants nothing, at the path the policy used to live at.
+fn temp_signpost() -> NamedTempFile {
+    let f = NamedTempFile::new().unwrap();
+    std::fs::write(f.path(), "config_version = 1\n").unwrap();
+    f
+}
+
+#[tokio::test]
+async fn reload_config_reads_the_custodian_not_the_signpost() {
+    // The bug this covers: reloading from `config_path` on a device with a
+    // custodian reloaded the zero-entry signpost, which empties the launcher.
+    let signpost = temp_signpost();
+    let (svc, _dir) = make_custodial_svc(signpost.path());
+    let body = ok(&svc, "reload_config", json!({})).await;
+    assert_eq!(body["entry_count"], 2);
 }
 
 #[tokio::test]

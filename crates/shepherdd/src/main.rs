@@ -1634,6 +1634,7 @@ impl Service {
                     let _ = event_tx_for_broadcast.send(event);
                 }),
                 config_path: config_path.clone(),
+                policy_files: policy_files.clone(),
                 media_refresh_tx: Some(media_refresh_tx),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
