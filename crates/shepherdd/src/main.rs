@@ -708,22 +708,36 @@ impl Service {
             };
         }
 
-        let watched_path = config_path.to_path_buf();
+        // Match on the *file name*, not the whole path. The watch is on one
+        // directory and is not recursive, so a name is already unique within
+        // it — and comparing whole paths meant comparing the spelling
+        // `--config` was given against the one `notify` reports. A relative
+        // `-c ./config.example.toml`, which is how every dev entry point
+        // starts the daemon, never matched, so auto-reload was silently off
+        // for the entire development stack while the log said "Watching config
+        // file for changes".
+        let Some(watched_name) = config_path.file_name().map(|n| n.to_os_string()) else {
+            warn!("Config path names no file, so auto-reload is disabled");
+            return PolicyWatch::None;
+        };
         let watcher = RecommendedWatcher::new(
             move |result: notify::Result<notify::Event>| {
-                if let Ok(event) = result {
-                    let is_relevant = matches!(
-                        event.kind,
-                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
-                    );
-                    if is_relevant && event.paths.iter().any(|p| p == &watched_path) {
-                        let _ = tx.send(());
-                    }
+                if let Ok(event) = result
+                    && policy_event_matches(&event, &watched_name)
+                {
+                    let _ = tx.send(());
                 }
             },
             notify::Config::default(),
         );
-        match (watcher, config_path.parent()) {
+        // `Path::parent` of a bare `config.toml` is `Some("")`, which is not a
+        // directory anything can watch; that spelling means the working
+        // directory.
+        let dir = match config_path.parent() {
+            Some(p) if p.as_os_str().is_empty() => Some(Path::new(".")),
+            other => other,
+        };
+        match (watcher, dir) {
             (Ok(mut watcher), Some(dir)) => match watcher.watch(dir, RecursiveMode::NonRecursive) {
                 Ok(()) => {
                     info!(config_path = %config_path.display(), "Watching config file for changes");
@@ -2895,6 +2909,98 @@ async fn main() -> Result<()> {
     // Create and run the service
     let service = Service::new(&args).await?;
     service.run().await
+}
+
+/// Whether a filesystem event is "the policy file changed".
+///
+/// A free function so the rule can be tested without a filesystem, a working
+/// directory or a timing window — all three of which are what let the bug this
+/// replaced live: the old rule compared whole paths, the watched one spelled
+/// however `--config` was given and the reported one spelled however `notify`
+/// resolved it. Every dev entry point passes `-c ./config.example.toml`, so
+/// nothing ever matched and auto-reload was off for the whole development
+/// stack while the log said it was on.
+///
+/// Matching on the file name is exact rather than lax: the watch is on one
+/// directory and is not recursive, so a name is unique within what it can see.
+fn policy_event_matches(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
+    matches!(
+        event.kind,
+        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+    ) && event.paths.iter().any(|p| p.file_name() == Some(name))
+}
+
+#[cfg(test)]
+mod policy_watch_tests {
+    use super::policy_event_matches;
+    use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind};
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    fn event(kind: EventKind, path: &str) -> notify::Event {
+        notify::Event {
+            kind,
+            paths: vec![PathBuf::from(path)],
+            attrs: Default::default(),
+        }
+    }
+
+    /// The regression. `notify` reports the path it resolved; `--config` is
+    /// spelled however the caller typed it, and every dev entry point types
+    /// `./config.example.toml`. Comparing the two as paths never matched, so
+    /// auto-reload was silently off for the whole development stack — and for
+    /// anyone else running shepherdd with a relative `-c`.
+    #[test]
+    fn a_relative_config_matches_the_absolute_path_the_watcher_reports() {
+        assert!(policy_event_matches(
+            &event(
+                EventKind::Modify(ModifyKind::Any),
+                "/home/someone/shepherd/config.example.toml"
+            ),
+            OsStr::new("config.example.toml"),
+        ));
+    }
+
+    /// A rename-into-place — which is how `LocalProtectedFiles::write`,
+    /// `shepherd install policy` and every careful editor land a new policy —
+    /// arrives as a create on the target.
+    #[test]
+    fn a_rename_into_place_counts() {
+        assert!(policy_event_matches(
+            &event(
+                EventKind::Create(CreateKind::File),
+                "/var/lib/x/config.toml"
+            ),
+            OsStr::new("config.toml"),
+        ));
+    }
+
+    #[test]
+    fn another_file_in_the_same_directory_does_not() {
+        // The temp file the atomic write leaves next to the target, most of
+        // all: reloading from a half-written policy is the failure the rename
+        // exists to prevent.
+        assert!(!policy_event_matches(
+            &event(
+                EventKind::Create(CreateKind::File),
+                "/var/lib/x/config.toml.tmp"
+            ),
+            OsStr::new("config.toml"),
+        ));
+    }
+
+    #[test]
+    fn a_deletion_is_not_a_reason_to_reload() {
+        // There would be nothing to read, and the running policy is better
+        // than none.
+        assert!(!policy_event_matches(
+            &event(
+                EventKind::Remove(RemoveKind::File),
+                "/var/lib/x/config.toml"
+            ),
+            OsStr::new("config.toml"),
+        ));
+    }
 }
 
 #[cfg(test)]
