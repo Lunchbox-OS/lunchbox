@@ -282,3 +282,51 @@ export function openEventStream(signal: AbortSignal): Promise<Response> {
     cache: "no-store", // long-lived stream; never serve it from cache
   });
 }
+
+// ---------------------------------------------------------------------------
+// The policy file (issue #185)
+//
+// Not RPCs. `GET`/`PUT /api/v1/config` carry the config as text with an
+// `ETag`, because the thing being moved is a file — see
+// `crates/shepherd-http/src/handlers/config.rs` for why it is off the RPC
+// endpoint entirely.
+// ---------------------------------------------------------------------------
+
+/** The device's config as it is on disk, plus the tag needed to write it back. */
+export interface DeviceConfig {
+  text: string;
+  /** The `ETag` verbatim, quotes included. Pass it straight back. */
+  etag: string | null;
+}
+
+export async function getDeviceConfig(): Promise<DeviceConfig> {
+  const res = await axiosInstance.get<string>("/config", {
+    // Without both of these axios sees TOML that happens to start with a
+    // number and hands back something that is not a string.
+    responseType: "text",
+    transformResponse: (data: string) => data,
+  });
+  return { text: res.data, etag: res.headers.etag ?? null };
+}
+
+/**
+ * Replace the device's config.
+ *
+ * `etag` is what the last read (or write) returned; `null` means "overwrite
+ * whatever is there", which the daemon spells `If-Match: *`. A 412 means
+ * somebody else — `sudoedit`, `shepherd install policy`, another browser —
+ * wrote the file in between, and the honest answer is to re-read rather than
+ * to retry.
+ */
+export async function putDeviceConfig(
+  text: string,
+  etag: string | null,
+): Promise<DeviceConfig> {
+  const res = await axiosInstance.put<{ version: string }>("/config", text, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "If-Match": etag ?? "*",
+    },
+  });
+  return { text, etag: res.headers.etag ?? `"${res.data.version}"` };
+}

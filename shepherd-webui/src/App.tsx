@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Suspense, lazy, useMemo, useState } from "react";
 import AppBar from "@mui/material/AppBar";
 import BottomNavigation from "@mui/material/BottomNavigation";
 import BottomNavigationAction from "@mui/material/BottomNavigationAction";
@@ -18,6 +18,7 @@ import AppsIcon from "@mui/icons-material/Apps";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import SettingsIcon from "@mui/icons-material/Settings";
 import BugReportIcon from "@mui/icons-material/BugReport";
+import TuneIcon from "@mui/icons-material/Tune";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import WifiIcon from "@mui/icons-material/Wifi";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -27,24 +28,33 @@ import { AdminPage } from "./pages/AdminPage";
 import { WindowsPage } from "./pages/WindowsPage";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 import { NetworkPage } from "./pages/NetworkPage";
+import { DeviceConfigSource } from "./sources/DeviceConfigSource";
 
-// The config editor (src/config/) is deliberately NOT routed from here.
+// The config editor (src/config/), routed here since issue #185.
 //
-// Its only ConfigSource is FileConfigSource, which edits a file on whatever
-// computer is doing the browsing. In this device's own management UI a "Config"
-// tab reads as "edit this device's configuration", which it would not be. Until
-// DeviceConfigSource exists there is nothing honest for the tab to do.
+// Two things had to be true first, and both are now. It needed a ConfigSource
+// that edits *this device's* config rather than a file on whatever computer is
+// doing the browsing — that is DeviceConfigSource, over GET/PUT /api/v1/config.
+// And it needed the API to be shut: before #156 a device with no static token
+// and no BLE claim served the whole management surface to anyone who could
+// reach the port, and a config write runs whatever `kind = { type = "process",
+// command = ... }` is given.
 //
-// That waits on privilege separation in shepherd-http: a config write is an
-// arbitrary-code-execution primitive (`kind = { type = "process", command =
-// ... }` runs whatever it is given), and today one blanket auth layer covers
-// all of /api/v1, so any token that can read usage stats could call it.
+// It is deliberately NOT gated any further than that. The earlier plan wanted
+// privilege separation — a config write restricted to some subset of the
+// credentials — and #156 settled the question the other way when it shipped
+// `set_web_password` with "the caller has already proved they are the
+// administrator by reaching this trait at all". A surface that already hands
+// over the device's credential is not made safe by withholding a config write.
 //
-// To bring it back, add a `config` page here behind `React.lazy(() =>
-// import("./config/ConfigApp"))` and give ConfigDocProvider a
-// DeviceConfigSource. The editor itself needs no changes. Leaving it unrouted
-// also keeps its chunks and its ~800 kB wasm validator out of dist/, and so out
-// of the daemon binary that rust-embed builds from it.
+// Lazy, and mounted as a full-screen takeover rather than as a page inside the
+// nav: the editor renders its own AppBar and tabs and wants the viewport. The
+// lazy import is also what keeps its chunks and its ~950 kB wasm validator out
+// of the initial load — though not out of dist/, and so not out of the daemon
+// binary, which is the ~1.5 MB this tab costs.
+const ConfigApp = lazy(() =>
+  import("./config/ConfigApp").then((m) => ({ default: m.ConfigApp })),
+);
 
 type Page =
   | "dashboard"
@@ -53,7 +63,8 @@ type Page =
   | "admin"
   | "network"
   | "health"
-  | "windows";
+  | "windows"
+  | "config";
 
 const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [
   { id: "dashboard", label: "Now", Icon: PlayArrowIcon },
@@ -63,6 +74,7 @@ const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [
   { id: "network", label: "Network", Icon: WifiIcon },
   { id: "health", label: "Health", Icon: HealthAndSafetyIcon },
   { id: "windows", label: "Windows", Icon: BugReportIcon },
+  { id: "config", label: "Config", Icon: TuneIcon },
 ];
 
 const DRAWER_WIDTH = 200;
@@ -71,6 +83,35 @@ export function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const theme = useTheme();
   const isDesktop = useMediaQuery(theme.breakpoints.up("sm"));
+
+  // One instance for the life of the app: the editor holds the document's
+  // ETag in the source's handle, and a source rebuilt on every render would
+  // hand `openFrom` a new identity each time.
+  const deviceConfig = useMemo(() => new DeviceConfigSource(), []);
+
+  // The editor takes the whole viewport, above the drawer and the bottom nav.
+  // It has its own AppBar, its own tabs and a Back control, so nesting it
+  // inside this chrome would put two of each on screen — and leave the week
+  // grid a phone's width of a phone's width.
+  if (page === "config") {
+    return (
+      <Suspense
+        fallback={
+          <Box sx={{ display: "flex", justifyContent: "center", p: 6 }}>
+            <Typography variant="body2" color="text.secondary">
+              Loading the editor…
+            </Typography>
+          </Box>
+        }
+      >
+        <ConfigApp
+          source={deviceConfig}
+          autoOpen
+          onClose={() => setPage("dashboard")}
+        />
+      </Suspense>
+    );
+  }
 
   const content = (
     <>

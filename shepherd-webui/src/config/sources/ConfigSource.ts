@@ -5,11 +5,10 @@
  * one component tree serve three homes:
  *
  * - `FileConfigSource` — local files, for the standalone static build.
- * - `DeviceConfigSource` — a shepherd device over the management API. Waits on
- *   privilege separation in `shepherd-http`: writing a config is an arbitrary
- *   code execution primitive (`kind = { type = "process", command = ... }`
- *   runs whatever it is given), and today every management token is
- *   all-powerful.
+ * - `DeviceConfigSource` — a shepherd device over `GET`/`PUT /api/v1/config`
+ *   (issue #185). It lives in `src/sources/` rather than here, because this
+ *   tree may not import `src/api/`: it also builds into the standalone bundle,
+ *   which has no daemon to talk to.
  * - `TauriConfigSource` — native file dialogs in a desktop shell.
  */
 export interface ConfigDocument {

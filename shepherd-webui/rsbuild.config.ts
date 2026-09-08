@@ -6,14 +6,15 @@ import { pluginReact } from "@rsbuild/plugin-react";
  *
  * - `embedded` (default) builds the management UI into `dist/`, which
  *   `rust-embed` compiles into shepherdd (see
- *   `crates/shepherd-http/src/web_assets.rs`). The config editor is *not* part
- *   of it: nothing imports `src/config/ConfigApp` from `src/App.tsx`, so its
- *   chunks and its ~800 kB wasm validator stay out of `dist/`, and out of the
- *   daemon binary built from it. `src/App.tsx` records why it is unrouted and
- *   what it would take to route it.
+ *   `crates/shepherd-http/src/web_assets.rs`). Since issue #185 the config
+ *   editor is part of it: `src/App.tsx` mounts it lazily as the Config tab,
+ *   with a `DeviceConfigSource` that edits the device's own policy. That is
+ *   about +1.5 MB on `dist/` — most of it the ~950 kB wasm validator — and so
+ *   the same on the daemon binary. The chunks are async, so a browser that
+ *   never opens the tab never fetches them.
  * - `standalone` builds only the config editor into `dist-standalone/`, for a
  *   static host. It never talks to a daemon, so it carries none of the API
- *   layer.
+ *   layer — `scripts/check-boundary.mjs` is what keeps that true.
  *
  * The two must write different directories: anything left in `dist/` ends up
  * inside the daemon binary.
