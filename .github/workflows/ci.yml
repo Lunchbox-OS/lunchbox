@@ -725,8 +725,10 @@ jobs:
       # Worth checking rather than assuming: `output.distPath` in
       # rsbuild.config.ts is resolved relative to the working directory, so a
       # build run from the wrong cwd succeeds and writes somewhere else — and
-      # writing into dist/ instead would quietly add ~800 kB of wasm to the
-      # daemon binary that rust-embed builds from it.
+      # writing into dist/ instead would put the *standalone* bundle, which
+      # talks to no daemon, into the daemon binary that rust-embed builds from
+      # it. (Since #185 dist/ legitimately carries the editor and its wasm —
+      # from the embedded build, which this job does not run.)
       - name: Check the bundle landed in dist-standalone/
         run: |
           test -f shepherd-webui/dist-standalone/index.html
