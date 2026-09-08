@@ -136,6 +136,10 @@ struct Harness {
     host: Arc<MockHost>,
     events: broadcast::Receiver<Event>,
     hidpi_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    /// Whether shepherdd has been asked to end the desktop session. Held here
+    /// rather than dropped so the watch keeps a receiver — a `send` with none
+    /// left fails, and every logout in this crate goes out on this channel.
+    shutdown: watch::Receiver<bool>,
 }
 
 fn harness() -> Harness {
@@ -155,7 +159,7 @@ fn harness() -> Harness {
     )));
     let (tx, events) = broadcast::channel::<Event>(64);
     let tx_for_fn = tx.clone();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, shutdown) = watch::channel(false);
 
     let svc = DefaultManagementService {
         engine,
@@ -188,6 +192,7 @@ fn harness() -> Harness {
         host,
         events,
         hidpi_log,
+        shutdown,
     }
 }
 
@@ -857,6 +862,97 @@ async fn leaving_administrator_mode_unlocks_the_screen() {
         !*h.host.locked.lock().unwrap(),
         "the host must be told to uncover the screen, not just the engine"
     );
+}
+
+/// Leaving administrator mode ends the desktop session (issue #154).
+///
+/// The flag going off is not a reset. Everything the mode starts is started
+/// outside supervision on purpose — `launch_unsupervised` `setsid`s it so a
+/// package install survives a daemon restart — so nothing here can enumerate a
+/// signed-in Steam client or a dbus service that was not there at boot, let
+/// alone reap one. Only the session going away resets the machine the child's
+/// next activity meets, which is why the exit asks for a logout.
+#[tokio::test]
+async fn leaving_administrator_mode_logs_the_session_out() {
+    let h = harness();
+    assert!(!*h.shutdown.borrow(), "nothing has asked to log out yet");
+
+    h.svc.enter_admin_mode().await.unwrap();
+    assert!(
+        !*h.shutdown.borrow(),
+        "entering the mode is not what ends the session"
+    );
+
+    h.svc.exit_admin_mode().await.unwrap();
+    assert!(
+        *h.shutdown.borrow(),
+        "leaving the mode must log the session out, not merely clear the flag"
+    );
+    assert!(!h.svc.engine.lock().await.admin_mode());
+}
+
+/// The idle timeout's exit is the same exit, logout included: a mode nobody
+/// came back to leaves exactly the same processes behind as one somebody left
+/// on purpose.
+#[tokio::test]
+async fn the_idle_timeouts_exit_logs_the_session_out_too() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+
+    // MockHost reports no windows, so this is the empty case: leave.
+    assert!(h.svc.admin_idle_timeout().await.unwrap());
+    assert!(*h.shutdown.borrow(), "the timeout's exit is still an exit");
+}
+
+/// Its *lock* branch is not an exit, and must not end anything. This is the
+/// walk-away case the lock exists for: the download keeps running.
+#[tokio::test]
+async fn locking_on_the_idle_timeout_does_not_log_out() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+    h.host.set_windows(vec![shepherd_api::WindowInfo {
+        id: 1,
+        name: Some("Steam".into()),
+        app_id: Some("steam".into()),
+        window_class: None,
+        pid: Some(4242),
+        workspace: Some("1".into()),
+        in_scratchpad: false,
+        visible: true,
+        focused: true,
+        owner: shepherd_api::WindowOwner::Unowned,
+    }]);
+
+    assert!(!h.svc.admin_idle_timeout().await.unwrap(), "kept the mode");
+    assert!(
+        !*h.shutdown.borrow(),
+        "locking must leave the caregiver's work running, session included"
+    );
+}
+
+/// An exit that finds the mode already off leaves the session alone.
+///
+/// `exit_admin_mode` is ungated and idempotent on purpose — it is what rescues
+/// a device whose last window refuses to close — so the two clients and the
+/// timeout can and do race each other. The one that arrives second must not
+/// tear down whatever session the device has moved on to.
+#[tokio::test]
+async fn an_exit_that_finds_the_mode_already_off_leaves_the_session_alone() {
+    let h = harness();
+
+    h.svc.exit_admin_mode().await.unwrap();
+    assert!(
+        !*h.shutdown.borrow(),
+        "an exit that left nothing has nothing to clean up after"
+    );
+
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.exit_admin_mode().await.unwrap();
+    // The real one logged out; a duplicate arriving behind it changes nothing,
+    // which is all this can assert about a latch that is already set.
+    assert!(*h.shutdown.borrow());
+    h.svc.exit_admin_mode().await.unwrap();
+    assert!(!h.svc.engine.lock().await.admin_mode());
 }
 
 /// The same divergence, on the other path out of the mode.

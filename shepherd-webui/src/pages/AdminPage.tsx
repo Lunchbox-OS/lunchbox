@@ -344,8 +344,8 @@ export function AdminPage() {
             {adminMode
               ? locked
                 ? "The screen is locked. Whatever you left running is still running — this is only a cover. Unlocking is possible from here and from the companion app, and nowhere on the device itself."
-                : "The kiosk's restrictions are relaxed so you can set this device up in place. Activities cannot be launched, and the screen will not blank. It turns itself off after 15 minutes idle — or locks instead, if you left something open."
-              : "Relax the kiosk so you can log into Steam, install packages or set up controls directly on the device, without switching to another desktop. Nothing can be launched as an activity while it is on."}
+                : "The kiosk's restrictions are relaxed so you can set this device up in place. Activities cannot be launched, and the screen will not blank. Turning it off logs the device out, which closes whatever you started here — save your work first. It turns itself off after 15 minutes idle — or locks instead, if you left something open."
+              : "Relax the kiosk so you can log into Steam, install packages or set up controls directly on the device, without switching to another desktop. Nothing can be launched as an activity while it is on, and turning it off again logs the device out so nothing you started here is left behind."}
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", rowGap: 1 }}>
             <Button
@@ -363,7 +363,7 @@ export function AdminPage() {
                   : <BuildIcon />
               }
             >
-              {adminMode ? "Turn Off Administrator Mode" : "Turn On Administrator Mode"}
+              {adminMode ? "Turn Off & Log Out" : "Turn On Administrator Mode"}
             </Button>
             {/*
               Locking is offered only inside the mode; unlocking is offered

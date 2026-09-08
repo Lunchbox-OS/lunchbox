@@ -88,13 +88,17 @@ fun DeviceControlsScreen(
                                 "here or the management page, and nowhere on the device."
                         } else if (state.adminMode) {
                             "The kiosk's restrictions are relaxed. Activities can't be " +
-                                "launched and the screen won't blank. It turns itself off " +
-                                "after 15 minutes idle — or locks instead, if you left " +
-                                "something open."
+                                "launched and the screen won't blank. Turning it off logs " +
+                                "the device out, closing whatever you started here, so " +
+                                "save your work first. It turns itself off after 15 " +
+                                "minutes idle — or locks instead, if you left something " +
+                                "open."
                         } else {
                             "Relax the kiosk so you can log into Steam, install things or " +
                                 "set up controls on the device itself. Nothing can be " +
-                                "launched as an activity while it's on."
+                                "launched as an activity while it's on, and turning it " +
+                                "off logs the device out so nothing you started is left " +
+                                "behind."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
@@ -108,7 +112,7 @@ fun DeviceControlsScreen(
                             enabled = !state.locked,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("Turn off administrator mode")
+                            Text("Turn off and log out")
                         }
                         // The phone is one of only two places the screen can be
                         // unlocked, so this button is never hidden or disabled

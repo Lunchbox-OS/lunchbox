@@ -1263,7 +1263,11 @@ fn build_hud_content(
                     });
                 }
                 None => {
-                    tracing::info!("Leaving administrator mode");
+                    // Leaving logs the session out (issue #154), so this HUD is
+                    // one of the things about to go away. Nothing to do about
+                    // that here — the daemon drains its clients before it tears
+                    // sway down — but it is why the button says "log out".
+                    tracing::info!("Leaving administrator mode; the session will end");
                     spawn_action(socket_path, "exit_admin_mode", |mut client| async move {
                         client.exit_admin_mode().await
                     });
@@ -1650,7 +1654,10 @@ fn build_hud_content(
             // none, then changes to the way out of the mode.
             if admin_windows_on_screen(&state.windows()).is_empty() {
                 action_icon_clone.set_icon_name(Some("system-log-out-symbolic"));
-                action_button_clone.set_tooltip_text(Some("Leave administrator mode"));
+                // Says "log out" because it is one: leaving the mode ends the
+                // session, which is how anything the caregiver started stops
+                // following the child around.
+                action_button_clone.set_tooltip_text(Some("Leave administrator mode and log out"));
             } else {
                 action_icon_clone.set_icon_name(Some("window-close-symbolic"));
                 action_button_clone.set_tooltip_text(Some("Close the focused window"));

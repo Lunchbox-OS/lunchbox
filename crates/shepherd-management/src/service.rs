@@ -350,12 +350,20 @@ pub trait ManagementService: Send + Sync {
     /// say so.
     async fn enter_admin_mode(&self) -> ManagementResult<()>;
 
-    /// Leave administrator mode.
+    /// Leave administrator mode **and log the desktop session out**.
+    ///
+    /// The logout is the point, not a side effect: nothing tracks what a
+    /// caregiver started in the mode, so ending the session is the only way to
+    /// guarantee the child's next activity meets the machine it would have met
+    /// at boot. Whatever is still on screen goes with it, and the device comes
+    /// back to a fresh kiosk.
     ///
     /// Deliberately never refused, and idempotent. This is the escape hatch:
     /// the HUD only offers its own exit once no windows are left, so a window
     /// that will not close would otherwise strand the device. Leaving from
-    /// here always works, whatever is still on screen.
+    /// here always works, whatever is still on screen. A call that finds the
+    /// mode already off leaves the session alone — it did not leave anything,
+    /// so it has nothing to clean up after.
     async fn exit_admin_mode(&self) -> ManagementResult<()>;
 
     /// The compositor reports the seat has been idle for the configured span.
@@ -365,6 +373,10 @@ pub trait ManagementService: Send + Sync {
     /// the motivating case — so a timeout that closed a caregiver's windows
     /// would break the most valuable thing the mode does. With windows up this
     /// is a no-op and the mode persists until somebody leaves it deliberately.
+    ///
+    /// Leaving this way logs the session out too, exactly as
+    /// [`ManagementService::exit_admin_mode`] does — a mode nobody came back
+    /// to is no cleaner than one somebody left on purpose.
     ///
     /// Returns whether it actually left. Idle notification comes from
     /// `swayidle`, which is already the device's idle authority.
@@ -1581,7 +1593,7 @@ impl ManagementService for DefaultManagementService {
 
     // ------------------------------------------------------------------ user
     async fn logout(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.request_logout();
     }
 
     async fn ping(&self) {}
@@ -1637,25 +1649,7 @@ impl ManagementService for DefaultManagementService {
     }
 
     async fn exit_admin_mode(&self) -> ManagementResult<()> {
-        let (event, snap) = {
-            let mut eng = self.engine.lock().await;
-            (eng.exit_admin_mode(false), eng.get_state())
-        };
-        // `CoreEngine::exit_admin_mode` clears the lock flag, because a lock
-        // whose only exit is an administrator RPC cannot outlive the mode that
-        // reaches it. The compositor has to be told the same thing or the
-        // screen stays covered while every client reports it open — a device
-        // that looks bricked, with no button anywhere offering to fix it.
-        // Idempotent, so it is asked unconditionally.
-        self.release_screen_lock().await;
-        // Asked unconditionally, so a compositor left in the admin binding mode
-        // by a crash is recovered by pressing the button again.
-        if let Err(e) = self.host.set_admin_mode(false).await {
-            warn!(error = %e, "Left administrator mode, but the compositor did not switch binding mode");
-        }
-        if let Some(event) = event {
-            self.broadcast_admin_mode(event, snap);
-        }
+        self.leave_admin_mode(false).await;
         Ok(())
     }
 
@@ -1689,24 +1683,14 @@ impl ManagementService for DefaultManagementService {
             return Ok(false);
         }
 
-        let (event, snap) = {
-            let mut eng = self.engine.lock().await;
-            (eng.exit_admin_mode(true), eng.get_state())
-        };
-        // Same reason as the deliberate exit above.
-        self.release_screen_lock().await;
-        if let Err(e) = self.host.set_admin_mode(false).await {
-            warn!(error = %e, "Idle timeout left administrator mode, but the compositor did not switch binding mode");
+        // Same path as the deliberate exit, logout included: a timed-out
+        // session is no cleaner than one somebody left on purpose.
+        if self.leave_admin_mode(true).await {
+            info!("Administrator mode timed out with nothing open");
+            return Ok(true);
         }
-        match event {
-            Some(event) => {
-                info!("Administrator mode timed out with nothing open");
-                self.broadcast_admin_mode(event, snap);
-                Ok(true)
-            }
-            // Raced with a deliberate exit; the mode is off either way.
-            None => Ok(false),
-        }
+        // Raced with a deliberate exit; the mode is off either way.
+        Ok(false)
     }
 
     async fn lock_device(&self) -> ManagementResult<()> {
@@ -1859,6 +1843,71 @@ impl DefaultManagementService {
         };
         (self.broadcast_fn)(Event::new(EventPayload::AdminModeChanged { active }));
         (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+    }
+
+    /// Leave administrator mode, whoever asked and for whatever reason, and
+    /// log the desktop session out behind it (issue #154).
+    ///
+    /// **Leaving the mode ends the session.** Everything a caregiver starts in
+    /// administrator mode is started deliberately outside supervision —
+    /// `launch_unsupervised` even `setsid`s it, so a package install survives a
+    /// daemon restart — which means nothing here can enumerate what is left
+    /// running, let alone reap it. A signed-in Steam client, a dbus-activated
+    /// service that was not there at boot, a package manager still holding its
+    /// lock: each one changes how the *child's* next activity behaves, and none
+    /// of them appears in the window list the HUD's "no windows left" gate
+    /// reads. Ending the session is the only reset this daemon can actually
+    /// promise, and the device comes straight back to a fresh kiosk.
+    ///
+    /// The logout is asked for only when the engine really did leave the mode.
+    /// `exit_admin_mode` is idempotent and ungated on purpose — it is the
+    /// rescue path for a window that will not close — and a second, racing call
+    /// must not tear down whatever session the device has moved on to.
+    ///
+    /// Returns whether this call is the one that left.
+    async fn leave_admin_mode(&self, timed_out: bool) -> bool {
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            (eng.exit_admin_mode(timed_out), eng.get_state())
+        };
+        // `CoreEngine::exit_admin_mode` clears the lock flag, because a lock
+        // whose only exit is an administrator RPC cannot outlive the mode that
+        // reaches it. The compositor has to be told the same thing or the
+        // screen stays covered while every client reports it open — a device
+        // that looks bricked, with no button anywhere offering to fix it.
+        // Idempotent, so it is asked unconditionally.
+        self.release_screen_lock().await;
+        // Asked unconditionally too, so a compositor left in the admin binding
+        // mode by a crash is recovered by pressing the button again.
+        if let Err(e) = self.host.set_admin_mode(false).await {
+            warn!(error = %e, "Left administrator mode, but the compositor did not switch binding mode");
+        }
+
+        let Some(event) = event else {
+            return false;
+        };
+
+        // Announced before the logout is asked for: the remote clients are the
+        // ones that outlive the session, and "the mode is off" is the last
+        // thing they can be told before the device goes away underneath them.
+        self.broadcast_admin_mode(event, snap);
+        info!(
+            timed_out,
+            "Left administrator mode; logging the session out to clear anything it started"
+        );
+        // Only asks. shepherdd's main loop stops the (impossible, in this mode)
+        // session, drains the HTTP server and then tears sway down, which is
+        // what keeps this call's own reply ahead of the compositor going away.
+        self.request_logout();
+        true
+    }
+
+    /// Ask shepherdd to end the desktop session.
+    ///
+    /// The one place that flips the shutdown watch, so [`Self::logout`] and the
+    /// administrator-mode exit cannot drift into meaning different things.
+    fn request_logout(&self) {
+        let _ = self.shutdown_tx.send(true);
     }
 
     /// Tell the host to uncover the screen, whatever it currently believes.

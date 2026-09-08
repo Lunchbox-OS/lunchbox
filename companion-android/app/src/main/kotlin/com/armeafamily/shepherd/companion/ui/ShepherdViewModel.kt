@@ -1014,11 +1014,17 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         refreshSnapshot()
     }
 
-    /** Leave administrator mode. Never refused, whatever is still on screen. */
+    /**
+     * Leave administrator mode. Never refused, whatever is still on screen.
+     *
+     * No `refreshSnapshot()` afterwards, unlike every other control here:
+     * leaving logs the device's session out (issue #154), so the snapshot this
+     * would ask for is one the device is in no position to answer. Same
+     * reasoning as [logoutDevice], which has never refreshed either.
+     */
     fun exitAdminMode() = action { c ->
         c.exitAdminMode()
-        _message.value = "Administrator mode off."
-        refreshSnapshot()
+        _message.value = "Administrator mode off; the device is logging out."
     }
 
     /** Lock the device's screen. Only meaningful inside administrator mode. */

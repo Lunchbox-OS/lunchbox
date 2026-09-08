@@ -230,6 +230,10 @@ class ManagementClient(private val connection: ShepherdConnection) {
      * Leave administrator mode. Never refused by the device, whatever is still
      * on screen — this is the escape hatch when the HUD will not offer its own
      * exit because a window refuses to close.
+     *
+     * The device logs its desktop session out on the way (issue #154), which is
+     * what makes leaving a reset rather than a flag flip: nothing tracks what
+     * the mode started. Expect the connection to drop shortly afterwards.
      */
     suspend fun exitAdminMode() {
         call("exit_admin_mode", RpcParams.exitAdminMode())

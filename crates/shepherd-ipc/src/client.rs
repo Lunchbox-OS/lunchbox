@@ -199,6 +199,12 @@ impl IpcClient {
 
     /// Leave administrator mode (issue #154). Offered by the HUD only once
     /// every window is closed; the management clients can always do it.
+    ///
+    /// **This logs the desktop session out**, which is what makes leaving a
+    /// reset rather than a flag flip — nothing tracks what the mode started, so
+    /// the session going away is the only guarantee the child's next activity
+    /// gets the machine it would have got at boot. Expect this connection to
+    /// die shortly after the reply.
     pub async fn exit_admin_mode(&mut self) -> IpcResult<()> {
         self.call::<Value>("exit_admin_mode", Value::Null)
             .await
@@ -231,7 +237,8 @@ impl IpcClient {
     }
 
     /// Report that the seat has been idle long enough to leave administrator
-    /// mode. The daemon decides whether to act; `true` means it left the mode.
+    /// mode. The daemon decides whether to act; `true` means it left the mode —
+    /// and, as with any exit, logged the session out.
     pub async fn admin_idle_timeout(&mut self) -> IpcResult<bool> {
         self.call::<bool>("admin_idle_timeout", Value::Null).await
     }
