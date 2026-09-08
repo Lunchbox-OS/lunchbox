@@ -77,6 +77,15 @@ pub enum AuditEventType {
     /// Config reload requested
     ConfigReloaded { success: bool },
 
+    /// An administrator replaced the whole policy file through the management
+    /// API (issue #185).
+    ///
+    /// Distinct from `PolicyLoaded`, which the engine records every time it
+    /// picks a policy up — including the reload this write triggers a moment
+    /// later. This row is the one that says a *person* changed what the device
+    /// allows, rather than that the daemon re-read a file.
+    PolicyWritten { entry_count: usize },
+
     /// Client connected
     ClientConnected {
         client_id: String,

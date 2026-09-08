@@ -20,6 +20,29 @@ the existing `CoreEngine`, `Store`, `HostAdapter`, `VolumeController`,
 `BrightnessController`, and `HidpiController` collaborators that the
 daemon already wires up.
 
+## The policy file, and the two methods that are not RPCs
+
+`read_policy` and `write_policy` (issue #185) hand the config editor the
+device's `config.toml` and take it back. Everything else on the trait is
+`async` and therefore reachable over every transport; these two are
+deliberately **synchronous**, which is the whole mechanism by which they are
+not:
+
+- `#[management_rpc]` builds a `dispatch_json` arm for each `async` method and
+  skips the rest. BLE serves that dispatcher, and its frame cap is 16 KiB
+  against a config that is comfortably 50 KB — so a policy on the JSON-RPC
+  surface would be a method that exists and cannot work. `shepherd-http`
+  reaches these over dedicated routes instead.
+- `ProtectedFiles` is a blocking interface anyway: on a device each call is a
+  round trip to the state custodian's socket. Callers on an async runtime use
+  `spawn_blocking`.
+
+Where they read and write is `policy_files` when the custodian holds the
+policy and `config_path` otherwise — the same choice `shepherdd` makes at boot,
+in one place so a read and a reload cannot disagree about which file decides
+what a child may do. `reload_config` goes through the same helper, which is
+what fixed it reloading the zero-entry signpost on every custodial device.
+
 ## `WebListenerHandle`
 
 The one thing in here that is not a call into a collaborator: a shared,
