@@ -11,8 +11,11 @@
 //!   stays on its own endpoint rather than folding into RPC.
 //! - `/api/v1/auth/*` — signing in (issue #156). Five of these are the only
 //!   routes under `/api/v1` reachable without a credential; see [`auth`].
+//! - `GET`/`PUT /api/v1/config` — the policy file itself (issue #185), for the
+//!   web config editor. Off the RPC endpoint on purpose; see [`config`].
 
 pub mod auth;
+pub mod config;
 pub mod rpc;
 pub mod sse;
 
@@ -38,6 +41,7 @@ pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
     let guarded = Router::new()
         .route("/rpc", post(rpc::dispatch))
         .route("/events", get(sse::sse_handler))
+        .route("/config", get(config::read).put(config::write))
         .route("/auth/session", get(auth::current_session))
         .route("/auth/signout", post(auth::signout))
         .route("/auth/sessions", get(auth::list_sessions))

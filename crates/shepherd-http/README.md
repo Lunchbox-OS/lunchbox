@@ -8,12 +8,13 @@ Exposes a local/LAN JSON-RPC endpoint that lets a parent or administrator manage
 Shepherd from a phone or browser on the same network, without needing direct
 access to the launcher UI.
 
-The surface is two endpoints plus the login flow:
+The surface is three endpoints plus the login flow:
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/v1/rpc` | JSON-RPC dispatch into every `ManagementService` method. |
 | `GET`  | `/api/v1/events` | Server-Sent Events stream of every `shepherd_api::Event`. |
+| `GET`/`PUT` | `/api/v1/config` | The policy file itself. See [The policy file](#the-policy-file). |
 | — | `/api/v1/auth/*` | Signing in. See [Auth](#auth). |
 
 Authentication is a session, not a shared secret (issue #156). See below.
@@ -97,6 +98,40 @@ returns show up as an object with a named field instead of a bare primitive
 - `extend_current` → `{ "new_deadline": <timestamp | null> }`
 - `delete_override` → `{ "deleted": <bool> }`
 - `reload_config` → `{ "entry_count": <number> }`
+
+## The policy file
+
+`config.toml`, for the web config editor (issue #185).
+
+| Method | Path | Body | Answers |
+|---|---|---|---|
+| `GET` | `/api/v1/config` | — | `200 text/plain` + `ETag`, `Cache-Control: no-store` |
+| `PUT` | `/api/v1/config` | TOML | `200` + the new `ETag`; `If-Match` **required** |
+
+Both sit inside the same `require_auth` layer as everything else.
+
+**Why these are not RPCs.** `#[management_rpc]` turns every `async` trait
+method into a `dispatch_json` arm, which BLE serves too — and a policy is tens
+of kilobytes against BLE's 16 KiB frame cap, so a config on that surface would
+be a method that exists and cannot work. What the trait carries instead is
+`read_policy` / `write_policy`, which are **synchronous** and therefore skipped
+by the macro. #156 kept the login exchange off the trait for the mirror reason.
+
+**`If-Match` is required, not optional.** A device's policy has three writers —
+`sudoedit`, `shepherd install policy`, and this — so forgetting the
+precondition answers `428 Precondition Required` rather than silently
+overwriting whoever got there first. A tag that no longer matches is `412`. A
+caller that means "overwrite whatever is there" says `If-Match: *`.
+
+**The write validates server-side** with the same `parse_config` the daemon
+boots from, and answers `422` with the parser's own message if it fails. The
+editor's wasm validator is an affordance the caller controls; this is the
+check. A policy shepherdd cannot parse is survivable on *reload* and fatal at
+*startup*, which on a device is a session that ends.
+
+**The write does not reload.** It lands through a rename, which the state
+custodian's watch — or shepherdd's own, on a device without one — turns into a
+reload within a second, exactly as it does for the other two writers.
 
 ## Auth
 
