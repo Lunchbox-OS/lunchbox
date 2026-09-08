@@ -2697,14 +2697,42 @@ impl HostAdapter for LinuxHost {
     }
 
     async fn launch_unsupervised(&self, argv: &[String]) -> HostResult<()> {
-        let Some((program, args)) = argv.split_first() else {
+        let Some((requested, _)) = argv.split_first() else {
             return Err(HostError::SpawnFailed("empty command".into()));
         };
+
+        // Into a transient scope of its own, exactly as an activity is
+        // (issue #144). The management socket trusts shepherdd's cgroup, and a
+        // program the caregiver picked out of a `.desktop` file is the least
+        // trusted thing on the device — a plain child here would be a peer the
+        // daemon believes, holding `unlock_device` for as long as it ran. Empty
+        // when the user manager cannot be reached, which is the same trade the
+        // activity path makes and the same diagnostic reports.
+        let tag = std::path::Path::new(requested)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app");
+        let wrapped: Vec<String> = crate::process::admin_scope_argv_prefix(tag)
+            .into_iter()
+            .chain(argv.iter().cloned())
+            .collect();
+        // `split_first` again, on the wrapped argv: with a scope prefix the
+        // program is `systemd-run`, which execs the real one in this same
+        // process — so the pid below is still the application's.
+        let (program, args) = wrapped
+            .split_first()
+            .expect("wrapped argv is never empty: argv had at least one element");
 
         // No shell. `Command` passes the arguments straight to `execvp`, so a
         // `.desktop` file whose Exec contains `;` or `$(...)` gets those as
         // literal argument text rather than as syntax.
-        let mut cmd = tokio::process::Command::new(program);
+        //
+        // Through `helpers` so a bare program name resolves against the
+        // compiled-in trusted directories rather than the session's `$PATH`
+        // (issue #144), which the kiosk user chooses. The narrowing is
+        // deliberate: a `.desktop` file naming a binary that exists only
+        // somewhere writable by that uid no longer launches from the picker.
+        let mut cmd = crate::helpers::tokio_command(program);
         cmd.args(args)
             .envs(crate::process::build_inherited_env(&HashMap::new()))
             .stdin(std::process::Stdio::null())
@@ -2728,9 +2756,12 @@ impl HostAdapter for LinuxHost {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| HostError::SpawnFailed(format!("Failed to spawn {program}: {e}")))?;
+            // Names the application, not the `systemd-run` in front of it: a
+            // failure to exec the application itself happens on the far side of
+            // that wrapper and never reaches this arm anyway.
+            .map_err(|e| HostError::SpawnFailed(format!("Failed to spawn {requested}: {e}")))?;
         let pid = child.id();
-        info!(pid, program = %program, "Launched an unsupervised program (admin mode)");
+        info!(pid, program = %requested, "Launched an unsupervised program (admin mode)");
 
         // Nothing supervises this, but somebody has to reap it or every launch
         // leaves a zombie for the life of the daemon. Waiting is all this task

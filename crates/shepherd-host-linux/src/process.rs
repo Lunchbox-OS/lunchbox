@@ -267,6 +267,65 @@ pub fn helper_scope_argv_prefix(tag: &str) -> Vec<String> {
     }
 }
 
+/// The argv prefix for a program **administrator mode** launches (issue #154).
+///
+/// Same mechanism as [`user_scope_argv_prefix`], and the same reason as
+/// [`helper_scope_argv_prefix`]: shepherdd's management socket trusts the
+/// processes in shepherdd's own cgroup, so anything spawned as a plain child of
+/// the daemon is a peer the daemon believes. An administrator-launched program
+/// is the *least* trusted thing on the device — arbitrary third-party code,
+/// picked out of `.desktop` files an activity can itself write into
+/// `~/.local/share/applications` — so it has to land outside that cgroup
+/// exactly as an activity does. Without this, a terminal opened in
+/// administrator mode is handed `unlock_device`, `launch` and every other
+/// management RPC, and it keeps them for as long as it runs.
+///
+/// `tag` names the program in the unit so a stray scope is identifiable in
+/// `systemctl --user list-units`; it is sanitised because it comes from a
+/// `.desktop` file's `Exec` and systemd unit names accept a narrow alphabet.
+/// The pid and counter are what keep two launches of the same program from
+/// colliding on a unit name, which would fail the second launch outright.
+///
+/// Returns an **empty** prefix when the user manager cannot be reached, meaning
+/// "run it bare" — the same trade the activity path makes, and reported by the
+/// same `ipc_socket_not_hardened` diagnostic at startup.
+pub fn admin_scope_argv_prefix(tag: &str) -> Vec<String> {
+    match activity_isolation_status() {
+        ActivityIsolationStatus::Supported => {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            user_scope_argv_prefix(&make_scope_name(&format!(
+                "admin-{}-{}-{n}",
+                sanitize_unit_tag(tag),
+                std::process::id()
+            )))
+        }
+        ActivityIsolationStatus::Unsupported { .. } => Vec::new(),
+    }
+}
+
+/// Reduce an arbitrary program name to characters a systemd unit name accepts.
+///
+/// Everything else becomes `-`, and an empty result becomes `app`, so the unit
+/// name is always well-formed however exotic the `Exec` line was.
+fn sanitize_unit_tag(tag: &str) -> String {
+    let cleaned: String = tag
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "app".into()
+    } else {
+        cleaned
+    }
+}
+
 /// The argv for the preloaded Steam client, in a scope of its own (issue #144).
 ///
 /// `scope` is `None` when [`activity_isolation_status`] says the user manager
