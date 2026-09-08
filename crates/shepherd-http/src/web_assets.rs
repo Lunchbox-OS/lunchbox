@@ -58,6 +58,11 @@ fn mime_type(path: &str) -> &'static str {
         "js" | "mjs" => "application/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json",
+        // The config editor's validator (issue #185). Without this the module
+        // is served as `application/octet-stream`, `instantiateStreaming`
+        // refuses it, and wasm-bindgen's glue falls back to buffering the
+        // whole megabyte — with a console warning naming this line as the bug.
+        "wasm" => "application/wasm",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
