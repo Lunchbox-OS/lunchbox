@@ -60,7 +60,12 @@ pub use supervise::Supervision;
 /// and `ListAudioOutputs` encode as `{"LoadSnapshot":{}}` instead of
 /// `"LoadSnapshot"`. Both ends ship together, so this only ever shows up as a
 /// half-finished upgrade — which is exactly what the handshake is for.
-pub const PROTO_VERSION: u32 = 2;
+///
+/// 3: the token gate stopped ratcheting (issue #193), so `SetTokenRatchet` is
+/// gone and `TokenState` lost its `ratcheted` field. A removal, unlike an
+/// addition, is not harmless to an older client: it would fail to decode every
+/// token state for want of the field, and treat every gate as locked.
+pub const PROTO_VERSION: u32 = 3;
 
 /// The system user that owns the state and answers this socket.
 ///
@@ -345,11 +350,6 @@ mod tests {
                 day,
                 carry_over: false,
                 delta_secs: 1,
-            },
-            StateRequest::SetTokenRatchet {
-                subject: subject.clone(),
-                day,
-                carry_over: false,
             },
             StateRequest::SetCooldownUntil {
                 subject: subject.clone(),

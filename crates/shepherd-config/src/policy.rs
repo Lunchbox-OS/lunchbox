@@ -925,14 +925,16 @@ pub struct TokensPolicy {
 impl TokensPolicy {
     /// Whether the gate is open for `balance`.
     ///
-    /// `minimum` is a threshold to *cross*, not one to stay above: once the
-    /// balance has reached it the gate ratchets open (`ratcheted`) and stays
-    /// open until the balance is spent to zero. Otherwise a session that spent
-    /// the balance part-way down would re-lock the activity and strand the
-    /// remainder — earned time the child could never use, and which
-    /// `carry_over = false` destroys at midnight.
-    pub fn unlocked(&self, balance: Duration, ratcheted: bool) -> bool {
-        !balance.is_zero() && (ratcheted || balance >= self.minimum)
+    /// `minimum` has to be banked every time the gate opens, not only the
+    /// first (issue #193). It is there so that a session is long enough to be
+    /// worth starting — a whole battle, a whole level — and a gate that stayed
+    /// open below it would hand out exactly the short sessions it exists to
+    /// prevent. A session that does start is still capped by the *whole*
+    /// balance rather than `balance - minimum`, so nothing is cut off at the
+    /// threshold; whatever it leaves below the threshold stays banked and
+    /// counts toward opening the gate again.
+    pub fn unlocked(&self, balance: Duration) -> bool {
+        !balance.is_zero() && balance >= self.minimum
     }
 
     /// Time banked by a session of `duration` on one of the source entries,

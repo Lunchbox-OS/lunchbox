@@ -145,9 +145,6 @@ macro_rules! with_store_methods {
                 carry_over: val bool,
                 delta_secs: val i64
             ) -> TokenState;
-            SetTokenRatchet => set_token_ratchet(
-                subject: rf LimitSubject, day: val NaiveDate, carry_over: val bool
-            ) -> ();
 
             // Cooldowns
             GetCooldownUntil => get_cooldown_until(

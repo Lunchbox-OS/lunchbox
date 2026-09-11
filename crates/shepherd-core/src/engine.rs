@@ -680,7 +680,7 @@ impl CoreEngine {
         // daily-quota checks above.
         if !manually_enabled && let Some(tokens) = &entry.tokens {
             let state = self.token_state_of(&entry.subject(), tokens, today);
-            if !tokens.unlocked(state.balance, state.ratcheted) {
+            if !tokens.unlocked(state.balance) {
                 enabled = false;
                 reasons.push(ReasonCode::TokensInsufficient {
                     balance: state.balance,
@@ -876,7 +876,7 @@ impl CoreEngine {
 
         if !manually_enabled && let Some(tokens) = &group.tokens {
             let state = self.token_state_of(&group.subject(), tokens, today);
-            if !tokens.unlocked(state.balance, state.ratcheted) {
+            if !tokens.unlocked(state.balance) {
                 reasons.push(ReasonCode::TokensInsufficient {
                     balance: state.balance,
                     required: tokens.minimum,
@@ -941,7 +941,7 @@ impl CoreEngine {
         TokenStatus {
             balance: state.balance,
             minimum: tokens.minimum,
-            unlocked: tokens.unlocked(state.balance, state.ratcheted),
+            unlocked: tokens.unlocked(state.balance),
             max_balance: tokens.max_balance,
             carry_over: tokens.carry_over,
         }
@@ -992,14 +992,6 @@ impl CoreEngine {
                 Ok(state) => balance = state.balance,
                 Err(e) => warn!(subject = %subject, error = %e, "Failed to cap token balance"),
             }
-        }
-
-        if balance >= tokens.minimum
-            && let Err(e) = self
-                .store
-                .set_token_ratchet(subject, today, tokens.carry_over)
-        {
-            warn!(subject = %subject, error = %e, "Failed to record token gate unlock");
         }
 
         let _ = self
@@ -1221,7 +1213,7 @@ impl CoreEngine {
             return;
         }
 
-        let mut balance = match self.store.adjust_token_balance(
+        let balance = match self.store.adjust_token_balance(
             target,
             today,
             tokens.carry_over,
@@ -1240,24 +1232,12 @@ impl CoreEngine {
             && balance > max_balance
         {
             let excess = (balance - max_balance).as_secs() as i64;
-            match self
-                .store
-                .adjust_token_balance(target, today, tokens.carry_over, -excess)
+            if let Err(e) =
+                self.store
+                    .adjust_token_balance(target, today, tokens.carry_over, -excess)
             {
-                Ok(state) => balance = state.balance,
-                Err(e) => warn!(subject = %target, error = %e, "Failed to cap token balance"),
+                warn!(subject = %target, error = %e, "Failed to cap token balance");
             }
-        }
-
-        // Earning is the only way a balance grows, so this is the only place
-        // the gate can ratchet open (issue #8). Once open it stays open until
-        // the balance is spent to zero, which the store handles.
-        if balance >= tokens.minimum
-            && let Err(e) = self
-                .store
-                .set_token_ratchet(target, today, tokens.carry_over)
-        {
-            warn!(subject = %target, error = %e, "Failed to record token gate unlock");
         }
     }
 
@@ -4109,10 +4089,12 @@ mod tests {
         );
     }
 
-    /// `minimum_seconds` is a threshold to cross, not one to stay above: a
-    /// partial spend must not re-lock the activity and strand the remainder.
+    /// `minimum_seconds` has to be banked every time the gate opens, not just
+    /// the first (issue #193): it is what guarantees a session long enough to
+    /// be worth starting, so a partial spend that leaves less than it re-locks
+    /// the activity until more is earned — without losing what was left.
     #[test]
-    fn test_token_gate_ratchets_open_after_a_partial_spend() {
+    fn test_token_gate_relocks_when_a_spend_leaves_less_than_the_minimum() {
         let policy = make_token_policy(TokensPolicy {
             from: vec![LimitSubject::entry("scratch")],
             earn_ratio: 1.0,
@@ -4128,41 +4110,105 @@ mod tests {
         run_session(&mut engine, "scratch", Duration::from_secs(500), now);
         assert!(!view(&engine.list_entries(now), "minecraft").enabled);
 
-        // Crossing it opens the gate.
+        // Crossing it opens the gate, onto the whole balance rather than only
+        // the part above the threshold.
         run_session(&mut engine, "scratch", Duration::from_secs(200), now);
-        assert!(view(&engine.list_entries(now), "minecraft").enabled);
+        let entries = engine.list_entries(now);
+        let minecraft = view(&entries, "minecraft");
+        assert!(minecraft.enabled);
+        assert_eq!(
+            minecraft.max_run_if_started_now,
+            Some(Duration::from_secs(700)),
+            "a session should not be cut off at the threshold"
+        );
 
-        // Spending part of the balance leaves it below the threshold, but the
-        // gate stays open for what's left rather than stranding it.
+        // A session that leaves less than the minimum re-locks the entry...
         run_session(&mut engine, "minecraft", Duration::from_secs(300), now);
         let entries = engine.list_entries(now);
         let minecraft = view(&entries, "minecraft");
         assert!(
-            minecraft.enabled,
-            "a partial spend should not re-lock the entry: {:?}",
-            minecraft.reasons
+            !minecraft.enabled,
+            "a balance below the minimum should lock the entry again"
         );
         assert_eq!(
-            minecraft.max_run_if_started_now,
-            Some(Duration::from_secs(400)),
-            "the remaining balance should still be spendable"
+            minecraft.reasons,
+            vec![ReasonCode::TokensInsufficient {
+                balance: Duration::from_secs(400),
+                required: Duration::from_secs(600),
+            }]
+        );
+        assert!(
+            matches!(
+                engine.request_launch(&EntryId::new("minecraft"), now),
+                LaunchDecision::Denied { .. }
+            ),
+            "a locked gate should refuse a launch, not only hide the tile"
         );
 
-        // Spending it all the way down re-locks, and the threshold has to be
-        // crossed again from zero.
-        run_session(&mut engine, "minecraft", Duration::from_secs(400), now);
-        assert!(!view(&engine.list_entries(now), "minecraft").enabled);
-        run_session(&mut engine, "scratch", Duration::from_secs(100), now);
-        assert!(
-            !view(&engine.list_entries(now), "minecraft").enabled,
-            "the ratchet should release once the balance is spent"
+        // ...but keeps the remainder banked, and it counts toward the next
+        // unlock, which again opens onto the whole balance.
+        assert_eq!(
+            balance_of(&engine, "minecraft", now),
+            Duration::from_secs(400)
         );
+        run_session(&mut engine, "scratch", Duration::from_secs(200), now);
+        let entries = engine.list_entries(now);
+        let minecraft = view(&entries, "minecraft");
+        assert!(minecraft.enabled, "{:?}", minecraft.reasons);
+        assert_eq!(
+            minecraft.max_run_if_started_now,
+            Some(Duration::from_secs(600))
+        );
+    }
+
+    /// The same at group level, where the issue was reported (issue #193): a
+    /// member's session that leaves the category's shared balance below its
+    /// minimum locks every member, not just the one that was played.
+    #[test]
+    fn test_group_token_gate_relocks_every_member_below_the_minimum() {
+        let policy = make_group_policy(group(
+            "games",
+            no_limits(),
+            Some(TokensPolicy {
+                from: vec![LimitSubject::entry("ungrouped")],
+                earn_ratio: 1.0,
+                minimum: Duration::from_secs(300),
+                max_balance: None,
+                carry_over: false,
+            }),
+        ));
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy, store, HostCapabilities::minimal());
+        let now = noon();
+
+        run_session(&mut engine, "ungrouped", Duration::from_secs(400), now);
+        let entries = engine.list_entries(now);
+        assert!(view(&entries, "game-a").enabled);
+        assert!(view(&entries, "game-b").enabled);
+
+        run_session(&mut engine, "game-a", Duration::from_secs(200), now);
+        assert_eq!(
+            group_balance_of(&engine, "games", now),
+            Duration::from_secs(200)
+        );
+        let entries = engine.list_entries(now);
+        for member in ["game-a", "game-b"] {
+            assert!(
+                !view(&entries, member).enabled,
+                "{member} should lock with the category below its minimum"
+            );
+        }
+
+        run_session(&mut engine, "ungrouped", Duration::from_secs(100), now);
+        let entries = engine.list_entries(now);
+        assert!(view(&entries, "game-a").enabled);
+        assert!(view(&entries, "game-b").enabled);
     }
 
     /// A caregiver's grant behaves exactly like earned time: banked, capped,
     /// spendable, and opening the gate only at `minimum_seconds` (issue #8).
     #[test]
-    fn test_manual_grant_banks_time_and_ratchets_at_the_minimum() {
+    fn test_manual_grant_banks_time_and_opens_at_the_minimum() {
         let policy = make_token_policy(TokensPolicy {
             from: vec![LimitSubject::entry("scratch")],
             earn_ratio: 1.0,
@@ -4190,12 +4236,14 @@ mod tests {
         assert!(v.enabled);
         assert_eq!(v.max_run_if_started_now, Some(Duration::from_secs(600)));
 
-        // Granted time is spent by a session like any other.
+        // Granted time is spent by a session like any other, and what that
+        // leaves below the minimum is locked again (issue #193).
         run_session(&mut engine, "minecraft", Duration::from_secs(200), now);
         assert_eq!(
             balance_of(&engine, "minecraft", now),
             Duration::from_secs(400)
         );
+        assert!(!view(&engine.list_entries(now), "minecraft").enabled);
 
         // The ceiling applies to grants too, and revoking saturates at zero.
         assert_eq!(

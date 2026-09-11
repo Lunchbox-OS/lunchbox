@@ -12,15 +12,14 @@ use crate::{AuditEvent, StoreResult};
 /// `Serialize`/`Deserialize` because this crosses the wire to the state
 /// custodian (issue #157); `Duration` and `bool` both have serde impls, so the
 /// derive is enough and the representation stays the obvious one.
+///
+/// Whether the gate is open is deliberately not part of it: that follows from
+/// the balance and `minimum_seconds` alone (issue #193), and only the engine
+/// knows the threshold.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenState {
     /// Time banked and not yet spent.
     pub balance: Duration,
-    /// Whether the gate has already opened for this balance. Once the balance
-    /// has reached `minimum_seconds` the gate ratchets open and stays open
-    /// until the balance is spent to zero, so a partial spend can't strand the
-    /// remainder below the threshold.
-    pub ratcheted: bool,
 }
 
 /// Main store trait
@@ -59,9 +58,6 @@ pub trait Store: Send + Sync {
     /// state. Saturates at zero; `carry_over` has the same meaning as in
     /// [`Store::get_token_state`], so a non-carrying balance from an earlier
     /// day is treated as zero before the delta is applied.
-    ///
-    /// A balance that reaches zero also clears the ratchet: an empty balance is
-    /// locked whatever it once held.
     fn adjust_token_balance(
         &self,
         subject: &LimitSubject,
@@ -69,19 +65,6 @@ pub trait Store: Send + Sync {
         carry_over: bool,
         delta_secs: i64,
     ) -> StoreResult<TokenState>;
-
-    /// Record that a subject's gate has been unlocked, so it stays unlocked
-    /// while the balance lasts (issue #8).
-    ///
-    /// Only the engine knows the `minimum_seconds` threshold, so it decides
-    /// when the ratchet catches; the store just remembers it alongside the
-    /// balance, and resets it with the balance at local midnight.
-    fn set_token_ratchet(
-        &self,
-        subject: &LimitSubject,
-        day: NaiveDate,
-        carry_over: bool,
-    ) -> StoreResult<()>;
 
     // Cooldown tracking
 

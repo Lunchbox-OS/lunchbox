@@ -138,15 +138,11 @@ fn tokens_cooldowns_and_overrides_survive_the_wire() {
         .adjust_token_balance(&subject, day(), false, 600)
         .expect("adjust");
     assert_eq!(state.balance, Duration::from_secs(600));
-    f.remote
-        .set_token_ratchet(&subject, day(), false)
-        .expect("ratchet");
     let after: TokenState = f
         .remote
         .get_token_state(&subject, day(), false)
         .expect("get tokens");
     assert_eq!(after.balance, Duration::from_secs(600));
-    assert!(after.ratcheted, "the ratchet has to cross the wire too");
 
     let until = shepherd_util::now() + chrono::Duration::minutes(5);
     f.remote
@@ -253,14 +249,6 @@ impl Store for FailingStore {
         _: bool,
         _: i64,
     ) -> shepherd_store::StoreResult<TokenState> {
-        fail!()
-    }
-    fn set_token_ratchet(
-        &self,
-        _: &LimitSubject,
-        _: NaiveDate,
-        _: bool,
-    ) -> shepherd_store::StoreResult<()> {
         fail!()
     }
     fn get_cooldown_until(
