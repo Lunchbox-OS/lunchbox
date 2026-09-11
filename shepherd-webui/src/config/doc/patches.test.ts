@@ -18,6 +18,7 @@ import {
   entryPath,
   groupPath,
   insert,
+  kindPatches,
   move,
   servicePath,
   set,
@@ -101,5 +102,44 @@ describe("the path grammar", () => {
 
   it("puts service settings under [service]", () => {
     expect(servicePath("volume", "max_volume")).toBe("service.volume.max_volume");
+  });
+});
+
+describe("writing a kind back (issue #192)", () => {
+  const path = entryPath("the-hobbit", "kind");
+  // As the view has it: every default filled in, every unset option null.
+  const hobbit = {
+    type: "ebook",
+    book: "~/Books/the-hobbit.epub",
+    viewer: "okular",
+    open_at: null,
+    layout: "facing_first_centered",
+    font_size: 16,
+    font_family: "Noto Serif",
+    command: null,
+    args: [],
+    env: {},
+    kiosk: true,
+  };
+
+  it("writes only the field that changed", () => {
+    expect(kindPatches(path, hobbit, { ...hobbit, book: "~/Books/b.epub" })).toEqual([
+      set(`${path}.book`, "~/Books/b.epub"),
+    ]);
+  });
+
+  it("removes a field that became null rather than writing null", () => {
+    expect(kindPatches(path, { ...hobbit, open_at: 12 }, hobbit)).toEqual([
+      unset(`${path}.open_at`),
+    ]);
+  });
+
+  it("writes nothing when nothing changed", () => {
+    expect(kindPatches(path, hobbit, { ...hobbit, env: {} })).toEqual([]);
+  });
+
+  it("replaces the whole kind when its type changes", () => {
+    const flatpak = { type: "flatpak", app_id: "org.kde.krita" };
+    expect(kindPatches(path, hobbit, flatpak)).toEqual([set(path, flatpak)]);
   });
 });

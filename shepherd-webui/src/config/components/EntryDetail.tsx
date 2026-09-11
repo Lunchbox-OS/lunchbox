@@ -16,7 +16,7 @@ import Typography from "@mui/material/Typography";
 import Badge from "@mui/material/Badge";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { useFields } from "../doc/useFields";
-import { entryPath, insert, set, unset } from "../doc/patches";
+import { entryPath, insert, kindPatches, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry, RawEntryKind } from "../model/config.generated";
 import { confirmsOnCloseByDefault, defaultInputCompat } from "../model/kindDefaults";
 import {
@@ -87,7 +87,14 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
             </Typography>
             <KindEditor
               kind={entry.kind}
-              onChange={(kind: RawEntryKind) => apply(set(`${base}.kind`, kind as never))}
+              onChange={(kind: RawEntryKind) => {
+                // Sometimes more than one field (a RetroArch core swaps its
+                // name for a path), but still one edit to undo.
+                for (const p of kindPatches(`${base}.kind`, entry.kind, kind)) {
+                  apply(p, `kind:${base}`);
+                }
+                endGesture();
+              }}
             />
           </Box>
 
