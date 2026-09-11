@@ -164,9 +164,9 @@ export function TokensEditor({
         />
 
         <Typography variant="caption" color="text.secondary">
-          Once the threshold is crossed the gate ratchets open and stays open until the
-          balance is spent to zero, so a partly-used balance never re-locks
-          {isGroup ? " the category" : " the activity"}.
+          The minimum applies every time, not just the first: once a session leaves
+          less than it banked, {isGroup ? "the category" : "the activity"} locks again
+          until more is earned. What was left stays banked and counts toward that.
         </Typography>
 
         {(tokens?.from ?? []).length > 0 && (

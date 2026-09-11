@@ -52,8 +52,6 @@ pub trait Store: Send + Sync {
         -> StoreResult<TokenState>;
     fn adjust_token_balance(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool,
         delta_secs: i64) -> StoreResult<TokenState>;
-    fn set_token_ratchet(&self, subject: &LimitSubject, day: NaiveDate, carry_over: bool)
-        -> StoreResult<()>;
 
     // Cooldown tracking, keyed by limit subject
     fn get_cooldown_until(&self, subject: &LimitSubject) -> StoreResult<Option<DateTime<Local>>>;
@@ -203,15 +201,13 @@ CREATE TABLE usage (
 -- of the last mutation, so a non-carrying balance resets lazily at midnight
 -- rather than needing a sweep job. This is a live balance, not a per-day
 -- ledger: callers pass the *current* day, never a past one, so the stamp can
--- never move backwards over a balance written since (issue #170). `ratcheted` records that the balance has
--- already reached `minimum_seconds`; it is cleared when the balance is spent to
--- zero, and it expires with the balance. Only the engine knows the threshold,
--- so the engine sets it and the store just remembers it.
+-- never move backwards over a balance written since (issue #170). Whether the
+-- gate is open is not stored: it follows from the balance and the policy's
+-- `minimum_seconds` (issue #193), which only the engine knows.
 CREATE TABLE token_balances (
     subject TEXT PRIMARY KEY,
     balance_secs INTEGER NOT NULL DEFAULT 0,
-    updated_day TEXT NOT NULL,  -- YYYY-MM-DD
-    ratcheted INTEGER NOT NULL DEFAULT 0
+    updated_day TEXT NOT NULL  -- YYYY-MM-DD
 );
 
 -- Cooldown tracking
@@ -261,8 +257,11 @@ no-ops on a fresh or already-migrated database and safe to run on every startup:
   `daily_overrides` and `token_balances` to `subject` (issue #5). It is
   metadata-only: an entry's `LimitSubject` string form *is* its bare entry ID, so
   every pre-existing row is already valid and no data is read or rewritten.
-- `add_missing_column` adds a column to a table that already exists — today,
-  `token_balances.ratcheted`.
+- `drop_obsolete_column` drops a column nothing reads any more from a table that
+  already exists — today, `token_balances.ratcheted`, retired when the token
+  gate stopped staying open below its minimum (issue #193). An older binary
+  opened against the migrated database adds it back with its default, so a
+  downgrade is safe.
 
 **Every table listed in a migration has to stay listed.** `token_balances` was
 originally left out of the rename, and the failure mode is the argument for the

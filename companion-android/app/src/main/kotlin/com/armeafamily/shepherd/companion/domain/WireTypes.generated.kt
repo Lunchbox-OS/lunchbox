@@ -2395,8 +2395,8 @@ data class TokenStatus(
      */
     val minimum: DurationSecs,
     /**
-     * Whether the gate is open right now. Not simply `balance >= minimum`:
-     * once opened it stays open until the balance is spent to zero.
+     * Whether the gate is open right now: the balance is above zero and at
+     * least `minimum`. That holds every time, not only the first (issue #193).
      */
     val unlocked: Boolean,
 )

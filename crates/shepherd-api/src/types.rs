@@ -812,8 +812,8 @@ pub struct TokenStatus {
     pub balance: Duration,
     /// Balance needed to open the gate. Zero means any balance opens it.
     pub minimum: Duration,
-    /// Whether the gate is open right now. Not simply `balance >= minimum`:
-    /// once opened it stays open until the balance is spent to zero.
+    /// Whether the gate is open right now: the balance is above zero and at
+    /// least `minimum`. That holds every time, not only the first (issue #193).
     pub unlocked: bool,
     /// Ceiling on the balance. None means unlimited. A grant past this is
     /// clawed back, so a UI should say so rather than let it vanish.

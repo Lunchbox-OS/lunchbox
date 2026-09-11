@@ -317,12 +317,16 @@ Things to watch for when combining a token gate with the other limits:
   and it opens the gate only once the balance reaches `minimum_seconds`. To
   switch an activity on regardless of its balance, use an availability override.
   Both management apps expose this as a ±5 min stepper beside the balance.
-- **`minimum_seconds` is a threshold to cross, not one to stay above.** Once the
-  balance reaches it the gate ratchets open and stays open until the balance is
-  spent to zero, so a short session doesn't re-lock the activity and strand the
-  rest. With `minimum_seconds = 600` and 700 s banked, a 5-minute session leaves
-  400 s that are still spendable. Spending the balance out closes the gate again,
-  and the threshold has to be crossed from zero.
+- **`minimum_seconds` has to be banked every time, not just once.** The
+  activity is locked whenever the balance is below it (issue #193). The minimum
+  is what guarantees a session long enough to be worth starting — a whole
+  battle, a whole level — so a gate that stayed open below it would hand out
+  exactly the short sessions it exists to prevent. A session that does start
+  can spend the *whole* balance, so nothing is cut off at the threshold. With
+  `minimum_seconds = 600` and 700 s banked, a 5-minute session leaves 400 s:
+  the activity locks, the 400 s stays banked, and another 200 s earned opens it
+  again onto all 600 s. With `carry_over = false` a remainder that is never
+  topped up expires at midnight like any other balance.
 - **Cooldowns stack on both ends**: a gated entry still cools down after
   spending, and a cooldown on a *source* throttles the rate of earning.
 
