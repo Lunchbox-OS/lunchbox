@@ -413,6 +413,25 @@ headless_start() {
         die "sway.conf no longer passes --no-state-custodian on its shepherdd exec line, so every dev session would raise state_not_protected (issue #157)"
     fi
 
+    # The idle blank must keep its own `resume` (issue #197). `swayidle` parses
+    # `resume` as a suffix of the timeout it FOLLOWS — `timeout <secs> <cmd>
+    # [resume <cmd>]` — so a timeout inserted between the blank and its resume
+    # re-parents the wake onto the new timer and leaves the blank with none.
+    # The screen then blanks and never comes back, because `--screen-on` is the
+    # only thing that turns the panel on. #154 did exactly that and nothing
+    # noticed until a device blanked in a child's hands: swayidle accepts both
+    # forms in silence, so this assertion is the only thing that can notice.
+    # The exec spans backslash continuations, so join them before matching.
+    local idle_line
+    idle_line="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$sway_config" \
+        | grep -E "^exec swayidle " || true)"
+    if [[ -z "$idle_line" ]]; then
+        die "sway.conf no longer has an 'exec swayidle' line, so nothing would blank or wake the screen (issue #197)"
+    fi
+    if ! printf '%s\n' "$idle_line" | grep -qE -- "--screen-off' +resume +'[^']*--screen-on'"; then
+        die "sway.conf's swayidle '--screen-off' timeout has lost its own \"resume '\$launcher --screen-on'\" (issue #197): swayidle binds 'resume' to the timeout it follows, so the screen would blank and never wake. Keep the pair on one line and add new timeouts after it."
+    fi
+
     if [[ "$do_build" -eq 1 ]]; then
         info "Building shepherd binaries..."
         build_cargo false
