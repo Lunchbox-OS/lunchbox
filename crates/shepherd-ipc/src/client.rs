@@ -177,6 +177,72 @@ impl IpcClient {
             .map(|_| ())
     }
 
+    /// The compositor's windows (issue #154), for the administrator taskbar.
+    pub async fn list_windows(&mut self) -> IpcResult<Vec<shepherd_api::WindowInfo>> {
+        self.call::<Vec<shepherd_api::WindowInfo>>("list_windows", Value::Null)
+            .await
+    }
+
+    /// Focus, close, hide or show one of them.
+    pub async fn act_on_window(
+        &mut self,
+        id: u64,
+        action: shepherd_api::WindowAction,
+    ) -> IpcResult<()> {
+        self.call::<Value>(
+            "act_on_window",
+            serde_json::json!({ "id": id, "action": action }),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Leave administrator mode (issue #154). Offered by the HUD only once
+    /// every window is closed; the management clients can always do it.
+    ///
+    /// **This logs the desktop session out**, which is what makes leaving a
+    /// reset rather than a flag flip — nothing tracks what the mode started, so
+    /// the session going away is the only guarantee the child's next activity
+    /// gets the machine it would have got at boot. Expect this connection to
+    /// die shortly after the reply.
+    pub async fn exit_admin_mode(&mut self) -> IpcResult<()> {
+        self.call::<Value>("exit_admin_mode", Value::Null)
+            .await
+            .map(|_| ())
+    }
+
+    /// Every application the system's `.desktop` files offer (issue #154),
+    /// for administrator mode's picker.
+    pub async fn list_desktop_apps(&mut self) -> IpcResult<Vec<shepherd_api::DesktopApp>> {
+        self.call::<Vec<shepherd_api::DesktopApp>>("list_desktop_apps", Value::Null)
+            .await
+    }
+
+    /// Start one of them by desktop file ID. Refused unless administrator mode
+    /// is on.
+    pub async fn launch_desktop_app(&mut self, id: &str) -> IpcResult<()> {
+        self.call::<Value>("launch_desktop_app", serde_json::json!({ "id": id }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Cover the screen while leaving administrator mode's work running
+    /// (issue #154). There is no `unlock` counterpart here on purpose: the
+    /// screen is opened again from the companion or web app, never from the
+    /// device itself.
+    pub async fn lock_device(&mut self) -> IpcResult<()> {
+        self.call::<Value>("lock_device", Value::Null)
+            .await
+            .map(|_| ())
+    }
+
+    /// Report that the seat has been idle long enough to leave administrator
+    /// mode. The daemon decides whether to act; `true` means it left the mode —
+    /// and, as with any exit, logged the session out.
+    pub async fn admin_idle_timeout(&mut self) -> IpcResult<bool> {
+        self.call::<bool>("admin_idle_timeout", Value::Null).await
+    }
+
     /// Reset the running activity to its starting state, keeping the session.
     /// Errors when there is no session or its activity can't be reset.
     pub async fn reset_current(&mut self) -> IpcResult<()> {

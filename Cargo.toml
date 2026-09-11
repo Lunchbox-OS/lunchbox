@@ -20,6 +20,7 @@ members = [
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
     "crates/shepherd-pairing-display",
+    "crates/shepherd-lock",
     "crates/shepherd-e2e",
     "crates/shepherd-media-core",
     "crates/shepherd-media-app",
@@ -60,6 +61,7 @@ default-members = [
     "crates/shepherd-launcher-ui",
     "crates/shepherd-hud",
     "crates/shepherd-pairing-display",
+    "crates/shepherd-lock",
     "crates/shepherd-e2e",
     "crates/shepherd-media-core",
     "crates/shepherd-media-app",
@@ -106,6 +108,7 @@ shepherd-ble = { path = "crates/shepherd-ble" }
 shepherd-bridge = { path = "crates/shepherd-bridge" }
 shepherd-wire-codegen = { path = "crates/shepherd-wire-codegen" }
 shepherd-config-wasm = { path = "crates/shepherd-config-wasm" }
+shepherd-lock = { path = "crates/shepherd-lock" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -169,6 +172,16 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # well past the 4.10 it asks for, so it cannot raise the bar.
 gtk4 = { version = "0.9", features = ["v4_10"] }
 gtk4-layer-shell = "0.4"
+
+# The session lock (issue #154). Not GTK: `ext-session-lock-v1` has no GTK
+# binding in this generation, and the lock has to be a real session lock rather
+# than a layer-shell overlay — an overlay can be closed by anything that can
+# talk to the compositor, which is the one thing a lock must not be. All three
+# were already in Cargo.lock transitively (gtk4 pulls cairo, the wayland stack
+# comes with it), so this adds no new dependency tree.
+smithay-client-toolkit = "0.20"
+wayland-client = "0.31"
+cairo-rs = "0.20"
 
 # HTTP API
 axum = { version = "0.8", features = ["macros"] }

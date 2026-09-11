@@ -335,6 +335,52 @@ pub trait HostAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Tell the host the device has entered or left administrator mode
+    /// (issue #154).
+    ///
+    /// Hosts that can relax their kiosk restrictions do so here — on Linux,
+    /// switching the compositor's binding mode so key grabs the kiosk holds are
+    /// released, and suppressing the orphan reporting that would otherwise call
+    /// every window the caregiver opens unsupervised.
+    ///
+    /// Defaults to a no-op so a host with nothing to relax still lets the mode
+    /// be entered: the daemon-side effects (no launches, no idle blanking) are
+    /// worth having on their own.
+    async fn set_admin_mode(&self, _active: bool) -> HostResult<()> {
+        Ok(())
+    }
+
+    /// Lock or unlock the screen (issue #154).
+    ///
+    /// On Linux this runs `shepherd-lock`, an `ext-session-lock-v1` client, and
+    /// unlocks it with SIGTERM. The protocol is what makes the lock worth
+    /// having: if the client dies the compositor keeps the session locked
+    /// rather than revealing the desktop, so the failure mode is "stuck
+    /// locked", never "silently unlocked".
+    ///
+    /// Idempotent in both directions.
+    async fn set_locked(&self, _locked: bool) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
+    /// Start a program outside any session, for administrator mode's app
+    /// picker (issue #154).
+    ///
+    /// Deliberately unsupervised, which is the whole point of the mode: no
+    /// session, no deadline, no per-entry firewall, no usage billed. The
+    /// caregiver is the supervision.
+    ///
+    /// `argv` is already tokenized and field-code-free — hosts must not run it
+    /// through a shell, so that a `.desktop` file whose `Exec` contains shell
+    /// metacharacters cannot mean something other than what its arguments say.
+    ///
+    /// Nothing is returned to identify the process: it is not tracked, and the
+    /// window it maps is how the caregiver finds it. `Ok` means the host
+    /// accepted the request, not that the program is still running.
+    async fn launch_unsupervised(&self, _argv: &[String]) -> HostResult<()> {
+        Err(HostError::Internal("Not supported".into()))
+    }
+
     /// Optional: check if the host adapter is healthy
     fn is_healthy(&self) -> bool {
         true

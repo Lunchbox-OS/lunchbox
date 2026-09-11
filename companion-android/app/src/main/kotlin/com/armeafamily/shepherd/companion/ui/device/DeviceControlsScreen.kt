@@ -71,6 +71,75 @@ fun DeviceControlsScreen(
             }
             state.brightness?.let { BrightnessCard(it, vm) }
 
+            // Administrator mode (issue #154). Above Maintenance because it is
+            // the thing a caregiver comes here to do while standing at the
+            // device, rather than a repair for when something has gone wrong.
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Administrator mode",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (state.locked) {
+                            "The screen is locked. Whatever you left running is still " +
+                                "running — this is only a cover. It can be unlocked from " +
+                                "here or the management page, and nowhere on the device."
+                        } else if (state.adminMode) {
+                            "The kiosk's restrictions are relaxed. Activities can't be " +
+                                "launched and the screen won't blank. Turning it off logs " +
+                                "the device out, closing whatever you started here, so " +
+                                "save your work first. It turns itself off after 15 " +
+                                "minutes idle — or locks instead, if you left something " +
+                                "open."
+                        } else {
+                            "Relax the kiosk so you can log into Steam, install things or " +
+                                "set up controls on the device itself. Nothing can be " +
+                                "launched as an activity while it's on, and turning it " +
+                                "off logs the device out so nothing you started is left " +
+                                "behind."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    if (state.adminMode) {
+                        // Filled, and always offered: the device's own HUD only
+                        // turns the mode off once every window is closed, so
+                        // this is the way out when one won't.
+                        Button(
+                            onClick = vm::exitAdminMode,
+                            enabled = !state.locked,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Turn off and log out")
+                        }
+                        // The phone is one of only two places the screen can be
+                        // unlocked, so this button is never hidden or disabled
+                        // while the lock is on.
+                        if (state.locked) {
+                            Button(
+                                onClick = vm::unlockDevice,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("Unlock screen")
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = vm::lockDevice,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("Lock screen")
+                            }
+                        }
+                    } else {
+                        OutlinedButton(onClick = vm::enterAdminMode, modifier = Modifier.fillMaxWidth()) {
+                            Text("Turn on administrator mode")
+                        }
+                    }
+                }
+            }
+
             Card(Modifier.fillMaxWidth()) {
                 Column(androidx.compose.ui.Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Maintenance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)

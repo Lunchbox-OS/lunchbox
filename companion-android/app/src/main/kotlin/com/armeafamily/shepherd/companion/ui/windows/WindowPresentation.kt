@@ -71,8 +71,28 @@ object WindowPresentation {
      * something no time limit will end and no usage record will count, which
      * is the entire reason this screen can be reached from a phone.
      */
-    fun isOrphan(w: WindowInfo): Boolean =
-        w.owner == WindowOwner.ESCAPED || w.owner == WindowOwner.UNOWNED
+    fun isOrphan(w: WindowInfo, adminMode: Boolean = false): Boolean {
+        // In administrator mode a caregiver is deliberately opening things, so
+        // every window is unowned by construction and none of them is a
+        // problem. Framing them as unsupervised would put a red banner over
+        // the caregiver's own work — the exact false positive the owner
+        // attribution exists to remove.
+        if (adminMode) return false
+        return w.owner == WindowOwner.ESCAPED || w.owner == WindowOwner.UNOWNED
+    }
+
+    /**
+     * Whether switching to this window is something to offer.
+     *
+     * Two windows are excluded, for different reasons. A scratchpad window is
+     * left to its own Show button: sway's `focus` would in fact raise it too
+     * (it clears `in_scratchpad`), so this is about each row having one
+     * obvious action rather than about `focus` not working there. The
+     * already-focused window is a genuine no-op that still costs a BLE round
+     * trip, which on this link is hundreds of milliseconds of a button
+     * appearing to hang.
+     */
+    fun canFocus(w: WindowInfo): Boolean = !w.inScratchpad && !w.focused
 
     /** The chip naming who the device thinks is behind the window. */
     fun ownerLabel(w: WindowInfo): String = when (w.owner) {

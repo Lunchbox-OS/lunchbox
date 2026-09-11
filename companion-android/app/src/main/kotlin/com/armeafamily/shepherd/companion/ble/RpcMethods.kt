@@ -64,6 +64,13 @@ object RpcMethods {
     const val LOGOUT: String = "logout"
     const val LIST_DIAGNOSTICS: String = "list_diagnostics"
     const val NETWORK_STATUS: String = "network_status"
+    const val ENTER_ADMIN_MODE: String = "enter_admin_mode"
+    const val EXIT_ADMIN_MODE: String = "exit_admin_mode"
+    const val ADMIN_IDLE_TIMEOUT: String = "admin_idle_timeout"
+    const val LOCK_DEVICE: String = "lock_device"
+    const val UNLOCK_DEVICE: String = "unlock_device"
+    const val LIST_DESKTOP_APPS: String = "list_desktop_apps"
+    const val LAUNCH_DESKTOP_APP: String = "launch_desktop_app"
     const val LIST_WINDOWS: String = "list_windows"
     const val ACT_ON_WINDOW: String = "act_on_window"
 

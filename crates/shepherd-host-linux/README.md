@@ -472,6 +472,21 @@ prefetch timer, with no activity launched, parsing whatever a remote host
 returns — so a parser bug there would be a peer the daemon trusts. The URLs come
 from admin-configured libraries, so an activity cannot choose the target.
 
+## Administrator mode's launches get one too (issues #144, #154)
+
+`launch_unsupervised` — the spawn behind administrator mode's `.desktop` picker
+— wraps its argv in `admin_scope_argv_prefix`, the same `systemd-run --user
+--scope` an activity gets. It is the launch path with the *weakest* claim to
+shepherd's cgroup, not the strongest: the program is arbitrary third-party code,
+chosen from `.desktop` files that an activity can itself write into
+`~/.local/share/applications`. As a plain child of the daemon it would be a peer
+the management socket believes, holding `unlock_device` and `launch` for as long
+as it ran — and, since these launches are `setsid`, potentially long after the
+mode ended.
+
+It keeps `setsid` as well: `systemd-run --scope` execs the program in the same
+process, so the pid the reaper waits on is still the application's.
+
 Still unscoped, and deliberately: the input-compat sidecars (`sidecar.rs`),
 `wl-mirror`, and the pairing overlay. All three are shepherd's own furniture
 with no remote input, and two of them need the session's own devices.

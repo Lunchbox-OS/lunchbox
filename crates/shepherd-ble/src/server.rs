@@ -2405,6 +2405,8 @@ mod tests {
             entries: vec![],
             internet_status: vec![],
             diagnostics: Default::default(),
+            admin_mode: false,
+            locked: false,
         };
         assert_eq!(
             coalesce_key_for(&EventPayload::StateChanged(snapshot)),

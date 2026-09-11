@@ -52,4 +52,10 @@ pub enum CoreEvent {
 
     /// Policy was reloaded
     PolicyReloaded { entry_count: usize },
+
+    /// The device entered or left administrator mode (issue #154).
+    AdminModeChanged { active: bool },
+
+    /// The screen was locked or unlocked (issue #154).
+    LockChanged { locked: bool },
 }

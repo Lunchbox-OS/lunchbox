@@ -6,6 +6,16 @@
 //! - Time windows, limits, and warnings
 //! - Validation with clear error messages
 
+/// Administrator mode's `.desktop` enumerator (issue #154).
+///
+/// Unix-only: it reads the XDG application directories and asks the filesystem
+/// which files carry an execute bit, neither of which means anything to the
+/// `wasm32-unknown-unknown` build of this crate that the config editor is
+/// compiled from. Gating the module rather than the one `PermissionsExt` call
+/// keeps that build from carrying a `.desktop` parser it has no device to
+/// enumerate.
+#[cfg(unix)]
+pub mod desktop;
 mod icon;
 mod internet;
 mod load_defaults;
@@ -13,6 +23,8 @@ mod policy;
 mod schema;
 mod validation;
 
+#[cfg(unix)]
+pub use desktop::DesktopEntry;
 pub use internet::*;
 pub use load_defaults::*;
 pub use policy::*;

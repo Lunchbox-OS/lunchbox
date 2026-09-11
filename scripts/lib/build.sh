@@ -16,6 +16,17 @@ SHEPHERD_BINARIES=(
     "shepherd-hud"
     "shepherd-media"
     "shepherd-pairing-display"
+    # The screen lock administrator mode spawns (issue #154). Like the pairing
+    # overlay above it, it is a standalone binary shepherdd starts for one
+    # purpose rather than a daemon or a sidecar -- and like it, shepherdd looks
+    # for it beside its own executable and then, failing that, on the trusted
+    # path (issue #144). Leaving it out of this list left a device where
+    # `lock_device` answered "failed to start shepherd-lock: No such file or
+    # directory", because the sibling probe finds nothing next to
+    # /usr/bin/shepherdd and nothing installed it there either. This list is the
+    # only one: `binaries_exist`, `install_bins` and `uninstall_bins` all read
+    # it, and the .deb is built by driving install.sh with DESTDIR set.
+    "shepherd-lock"
     "shepherd-touch-bridge"
     "shepherd-tablet-bridge"
     "shepherd-gamepad-bridge"

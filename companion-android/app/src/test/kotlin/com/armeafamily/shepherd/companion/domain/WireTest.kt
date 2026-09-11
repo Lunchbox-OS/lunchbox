@@ -455,6 +455,7 @@ class WireTest {
         assertEquals("\"close\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.CLOSE))
         assertEquals("\"hide\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.HIDE))
         assertEquals("\"show\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.SHOW))
+        assertEquals("\"focus\"", ShepherdJson.encodeToString(WindowAction.serializer(), WindowAction.FOCUS))
     }
 
     @Test

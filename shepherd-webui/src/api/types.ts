@@ -92,6 +92,11 @@ export function reasonLabel(r: ReasonCode): string {
         : "Requires an input device";
     case "tokens_insufficient":
       return "Not enough time earned yet";
+    // Applies to every entry at once and clears itself when the caregiver
+    // leaves the mode, so it reads as a state of the device rather than a
+    // restriction on this activity.
+    case "admin_mode":
+      return "Administrator mode is on";
     // Deliberately vague: this is the child-facing half, and nothing they can
     // do fixes it. The detail is the matching diagnostic on the admin side.
     case "protection_unavailable":

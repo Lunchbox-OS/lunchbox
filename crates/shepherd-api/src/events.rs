@@ -83,6 +83,17 @@ pub enum EventPayload {
     /// Policy was reloaded
     PolicyReloaded { entry_count: usize },
 
+    /// The device entered or left administrator mode (issue #154).
+    ///
+    /// Carries the flag rather than being two variants so a client that only
+    /// cares about the current value can handle one arm. The full snapshot also
+    /// carries `admin_mode`, so a client that resubscribes mid-mode is not left
+    /// guessing.
+    AdminModeChanged { active: bool },
+
+    /// The screen was locked or unlocked (issue #154).
+    LockChanged { locked: bool },
+
     /// Entry availability changed (for UI updates)
     EntryAvailabilityChanged { entry_id: EntryId, enabled: bool },
 

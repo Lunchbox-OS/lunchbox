@@ -221,6 +221,38 @@ class ManagementClient(private val connection: ShepherdConnection) {
     suspend fun networkStatus(): NetworkStatusView =
         decode(call("network_status", RpcParams.networkStatus()))
 
+    /** Relax the kiosk so the device can be set up in place (issue #154). */
+    suspend fun enterAdminMode() {
+        call("enter_admin_mode", RpcParams.enterAdminMode())
+    }
+
+    /**
+     * Leave administrator mode. Never refused by the device, whatever is still
+     * on screen — this is the escape hatch when the HUD will not offer its own
+     * exit because a window refuses to close.
+     *
+     * The device logs its desktop session out on the way (issue #154), which is
+     * what makes leaving a reset rather than a flag flip: nothing tracks what
+     * the mode started. Expect the connection to drop shortly afterwards.
+     */
+    suspend fun exitAdminMode() {
+        call("exit_admin_mode", RpcParams.exitAdminMode())
+    }
+
+    /** Cover the screen while leaving everything running (issue #154). */
+    suspend fun lockDevice() {
+        call("lock_device", RpcParams.lockDevice())
+    }
+
+    /**
+     * Uncover it. This and the web app are the only places it can be done: the
+     * device itself offers no way back in, which is what makes locking it and
+     * walking away safe.
+     */
+    suspend fun unlockDevice() {
+        call("unlock_device", RpcParams.unlockDevice())
+    }
+
     suspend fun listWindows(): List<WindowInfo> =
         decode(call("list_windows", RpcParams.listWindows()))
 

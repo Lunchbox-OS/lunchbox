@@ -200,12 +200,28 @@ pub async fn set_screen_power(on: bool) -> HostResult<()> {
     .await
 }
 
-/// Perform a debug action on the window with the given sway con_id.
+/// Switch the compositor's active binding mode.
+///
+/// The kiosk's key grabs live in `sway.conf`'s default mode and the relaxed set
+/// in `mode "admin"` (issue #154); switching between them is how admin mode
+/// hands `Home`, `Ctrl+w` and `Alt+F4` back to whatever is on screen. Named
+/// modes are the one part of the config that *is* switchable at runtime —
+/// `for_window` rules are evaluated at map time and stay as the kiosk set them.
+///
+/// This is deliberately reachable only from the host adapter: a UI client
+/// shelling out to `swaymsg` would work in dev and fail on a device that has
+/// hardened sway's IPC socket.
+pub async fn set_binding_mode(mode: &str) -> HostResult<()> {
+    run_command(&format!("mode \"{mode}\"")).await
+}
+
+/// Perform an action on the window with the given sway con_id.
 pub async fn act_on_window(window_id: u64, action: WindowAction) -> HostResult<()> {
     let verb = match action {
         WindowAction::Close => "kill",
         WindowAction::Hide => "move scratchpad",
         WindowAction::Show => "scratchpad show",
+        WindowAction::Focus => "focus",
     };
     run_command(&format!("[con_id={window_id}] {verb}")).await
 }

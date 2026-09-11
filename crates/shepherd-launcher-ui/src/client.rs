@@ -185,6 +185,25 @@ impl CommandClient {
             .map_err(Into::into)
     }
 
+    /// The applications administrator mode's picker offers (issue #154).
+    pub async fn list_desktop_apps(&self) -> Result<Vec<shepherd_api::DesktopApp>> {
+        let mut client = IpcClient::connect(&self.socket_path).await?;
+        client.list_desktop_apps().await.map_err(Into::into)
+    }
+
+    /// Start one of them.
+    pub async fn launch_desktop_app(&self, id: &str) -> Result<()> {
+        let mut client = IpcClient::connect(&self.socket_path).await?;
+        client.launch_desktop_app(id).await.map_err(Into::into)
+    }
+
+    /// Tell shepherdd the seat is idle; it leaves administrator mode only if
+    /// nothing the caregiver opened is still on screen (issue #154).
+    pub async fn admin_idle_timeout(&self) -> Result<bool> {
+        let mut client = IpcClient::connect(&self.socket_path).await?;
+        client.admin_idle_timeout().await.map_err(Into::into)
+    }
+
     pub async fn get_state(&self) -> Result<ServiceStateSnapshot> {
         let mut client = IpcClient::connect(&self.socket_path).await?;
         client.service_state().await.map_err(Into::into)
@@ -249,6 +268,10 @@ fn reason_to_message(reason: &ReasonCode) -> &'static str {
         // the detail is in the administrator's diagnostic (issue #143).
         ReasonCode::ProtectionUnavailable => "Unavailable until set up",
         ReasonCode::TokensInsufficient { .. } => "Not enough time earned yet",
+        // Not a restriction on the child, and not their doing: someone is
+        // setting the device up. Says so plainly rather than "unavailable",
+        // since it clears on its own when the caregiver is finished.
+        ReasonCode::AdminMode => "A grown-up is setting things up",
         // The group's restriction is what actually blocks the entry, so report
         // it; `reason_tooltip` names the group.
         ReasonCode::GroupRestricted { reason, .. } => reason_to_message(reason),

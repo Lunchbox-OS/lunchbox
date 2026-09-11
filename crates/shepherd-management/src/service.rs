@@ -4,14 +4,15 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use shepherd_api::{
-    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, Diagnostic,
-    DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject,
-    DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload, GroupView, HealthStatus,
-    HudOrientation, NetworkStatusView, ServiceStateSnapshot, SessionEndReason, SessionInfo,
-    StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WindowAction, WindowInfo,
+    AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, DesktopApp,
+    Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink,
+    DiagnosticSubject, DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload,
+    GroupView, HealthStatus, HudOrientation, NetworkStatusView, ServiceStateSnapshot,
+    SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo,
+    VolumeRestrictions, WindowAction, WindowInfo, WindowOwner,
 };
 use shepherd_config::{BrightnessPolicy, VolumePolicy, parse_config};
-use shepherd_core::{BeginStopDecision, CoreEngine, LaunchDecision, TokenAdjustError};
+use shepherd_core::{BeginStopDecision, CoreEngine, CoreEvent, LaunchDecision, TokenAdjustError};
 use shepherd_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
     LightSensor, NetworkInfoProvider, NetworkSnapshot, SpawnOptions, SponsorBlockSpec,
@@ -164,7 +165,9 @@ pub trait ManagementService: Send + Sync {
     /// The "is anything running?" check lives here rather than in the caller
     /// because it used to be a separate `--is-idle-allowed` process, and a
     /// launch landing between that check and the blank turned the screen off on
-    /// a child mid-activity. Returns whether it actually acted.
+    /// a child mid-activity. "Anything" includes administrator mode (issue
+    /// #154), which runs no session for the first half of that check to see.
+    /// Returns whether it actually acted.
     async fn set_screen_power(&self, on: bool) -> ManagementResult<bool>;
 
     /// The HUD counter-scale factor in force (1.0 unless an
@@ -336,6 +339,78 @@ pub trait ManagementService: Send + Sync {
     /// ride `service_state`'s `internet_status`, and a UI showing both reads
     /// them from there.
     async fn network_status(&self) -> NetworkStatusView;
+
+    // Administrator mode (issue #154)
+    /// Relax the kiosk so a caregiver can set the device up in place: the
+    /// compositor's key grabs are released, the screen stops blanking, and
+    /// windows opened here stop being reported as unsupervised.
+    ///
+    /// Refused while an activity is running — the caregiver stops it first,
+    /// rather than this ending a child's session from a button that does not
+    /// say so.
+    async fn enter_admin_mode(&self) -> ManagementResult<()>;
+
+    /// Leave administrator mode **and log the desktop session out**.
+    ///
+    /// The logout is the point, not a side effect: nothing tracks what a
+    /// caregiver started in the mode, so ending the session is the only way to
+    /// guarantee the child's next activity meets the machine it would have met
+    /// at boot. Whatever is still on screen goes with it, and the device comes
+    /// back to a fresh kiosk.
+    ///
+    /// Deliberately never refused, and idempotent. This is the escape hatch:
+    /// the HUD only offers its own exit once no windows are left, so a window
+    /// that will not close would otherwise strand the device. Leaving from
+    /// here always works, whatever is still on screen. A call that finds the
+    /// mode already off leaves the session alone — it did not leave anything,
+    /// so it has nothing to clean up after.
+    async fn exit_admin_mode(&self) -> ManagementResult<()>;
+
+    /// The compositor reports the seat has been idle for the configured span.
+    ///
+    /// Leaves administrator mode, but **only when nothing is open**. Walking
+    /// away is a legitimate workflow — a Steam download on a slow connection is
+    /// the motivating case — so a timeout that closed a caregiver's windows
+    /// would break the most valuable thing the mode does. With windows up this
+    /// is a no-op and the mode persists until somebody leaves it deliberately.
+    ///
+    /// Leaving this way logs the session out too, exactly as
+    /// [`ManagementService::exit_admin_mode`] does — a mode nobody came back
+    /// to is no cleaner than one somebody left on purpose.
+    ///
+    /// Returns whether it actually left. Idle notification comes from
+    /// `swayidle`, which is already the device's idle authority.
+    async fn admin_idle_timeout(&self) -> ManagementResult<bool>;
+
+    /// Lock the screen (issue #154).
+    ///
+    /// Available only inside administrator mode, and the way to walk away from
+    /// a device mid-setup: the Steam download keeps running, and the child
+    /// cannot touch it. There is deliberately no local way back — see
+    /// [`ManagementService::unlock_device`].
+    async fn lock_device(&self) -> ManagementResult<()>;
+
+    /// Unlock the screen.
+    ///
+    /// The counterpart, and the reason the lock is safe to offer: it exists
+    /// only here, on the management transports, so the person who locked the
+    /// device is the only one who can open it again.
+    async fn unlock_device(&self) -> ManagementResult<()>;
+
+    /// Every application the system's `.desktop` files offer, as a normal
+    /// desktop would list them (issue #154).
+    ///
+    /// Readable outside administrator mode — it is a catalogue, and a picker
+    /// wants it drawn before the mode is entered — but nothing in it can be
+    /// started until the mode is on.
+    async fn list_desktop_apps(&self) -> ManagementResult<Vec<DesktopApp>>;
+
+    /// Start one of them, by desktop file ID.
+    ///
+    /// **Refused unless administrator mode is on.** Otherwise this would be a
+    /// permanently open "run anything" RPC on a device whose entire purpose is
+    /// that only configured activities run.
+    async fn launch_desktop_app(&self, id: String) -> ManagementResult<()>;
 
     // Debug windows
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>>;
@@ -1302,8 +1377,22 @@ impl ManagementService for DefaultManagementService {
         // Blanking is suppressed while an activity is on screen; turning the
         // screen back on never is, so a device that blanked just before a
         // launch still wakes.
-        if !on && self.current_session().await.is_some() {
-            return Ok(false);
+        //
+        // Administrator mode counts alongside an activity (issue #154): the
+        // screen must not blank on a caregiver halfway through a package
+        // install or a Steam login, and the mode deliberately creates no
+        // session for the first check to see.
+        if !on {
+            let busy = {
+                // One lock for both questions: two would be a needless second
+                // acquire on the daemon's hottest mutex, on a path swayidle
+                // takes every two minutes.
+                let eng = self.engine.lock().await;
+                eng.current_session().is_some() || eng.admin_mode()
+            };
+            if busy {
+                return Ok(false);
+            }
         }
         self.host
             .set_screen_power(on)
@@ -1504,7 +1593,7 @@ impl ManagementService for DefaultManagementService {
 
     // ------------------------------------------------------------------ user
     async fn logout(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.request_logout();
     }
 
     async fn ping(&self) {}
@@ -1533,6 +1622,136 @@ impl ManagementService for DefaultManagementService {
             .list_windows()
             .await
             .map_err(|e| ManagementError::Internal(e.to_string()))
+    }
+
+    // ------------------------------------------------------- administrator
+    async fn enter_admin_mode(&self) -> ManagementResult<()> {
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            let event = eng.enter_admin_mode().map_err(|entry_id| {
+                ManagementError::Conflict(format!(
+                    "'{entry_id}' is running; stop it before entering administrator mode"
+                ))
+            })?;
+            (event, eng.get_state())
+        };
+
+        // The compositor is told after the engine has committed, so a failure
+        // here leaves the mode on everywhere except the key grabs, rather than
+        // a daemon that denies being in a mode it is in. Reported rather than
+        // swallowed: a caregiver whose Ctrl+w still ends the session needs to
+        // know why.
+        if let Err(e) = self.host.set_admin_mode(true).await {
+            warn!(error = %e, "Entered administrator mode, but the compositor did not switch binding mode");
+        }
+        self.broadcast_admin_mode(event, snap);
+        Ok(())
+    }
+
+    async fn exit_admin_mode(&self) -> ManagementResult<()> {
+        self.leave_admin_mode(false).await;
+        Ok(())
+    }
+
+    async fn admin_idle_timeout(&self) -> ManagementResult<bool> {
+        if !self.engine.lock().await.admin_mode() {
+            return Ok(false);
+        }
+
+        // Shepherd's own furniture — the launcher, the HUD — is always mapped,
+        // so "nothing is open" means nothing the caregiver opened. A window
+        // stashed on the scratchpad counts as open: it is somebody's work, and
+        // it comes back.
+        let open = self
+            .host
+            .list_windows()
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?
+            .into_iter()
+            .filter(|w| w.owner != WindowOwner::Shepherd)
+            .count();
+        if open > 0 {
+            // Decision 10 of the design: with work still on screen the timeout
+            // locks rather than leaving. Walking away from a slow download is a
+            // supported way to use the mode, so the timeout must protect the
+            // device without touching what is running on it.
+            debug!(
+                open,
+                "Seat idle with windows open; locking instead of leaving"
+            );
+            self.set_locked(true, true).await?;
+            return Ok(false);
+        }
+
+        // Same path as the deliberate exit, logout included: a timed-out
+        // session is no cleaner than one somebody left on purpose.
+        if self.leave_admin_mode(true).await {
+            info!("Administrator mode timed out with nothing open");
+            return Ok(true);
+        }
+        // Raced with a deliberate exit; the mode is off either way.
+        Ok(false)
+    }
+
+    async fn lock_device(&self) -> ManagementResult<()> {
+        self.set_locked(true, false).await
+    }
+
+    async fn unlock_device(&self) -> ManagementResult<()> {
+        self.set_locked(false, false).await
+    }
+
+    async fn list_desktop_apps(&self) -> ManagementResult<Vec<DesktopApp>> {
+        // Reads a few dozen small files across the XDG search path. Off the
+        // async worker so a slow or stale network mount cannot stall the
+        // runtime, which is also where every other RPC is served from.
+        tokio::task::spawn_blocking(shepherd_config::desktop::list_desktop_apps)
+            .await
+            .map_err(|e| ManagementError::Internal(format!("desktop scan failed: {e}")))
+    }
+
+    async fn launch_desktop_app(&self, id: String) -> ManagementResult<()> {
+        if !self.engine.lock().await.admin_mode() {
+            return Err(ManagementError::Conflict(
+                "Administrator mode is not on; turn it on before launching applications".into(),
+            ));
+        }
+
+        let wanted = id.clone();
+        let entry = tokio::task::spawn_blocking(move || {
+            shepherd_config::desktop::find_desktop_app(&wanted)
+        })
+        .await
+        .map_err(|e| ManagementError::Internal(format!("desktop lookup failed: {e}")))?
+        .ok_or_else(|| ManagementError::NotFound(format!("No application with id '{id}'")))?;
+
+        let argv = if entry.app.terminal {
+            shepherd_config::desktop::terminal_command(&entry.argv).ok_or_else(|| {
+                ManagementError::Unprocessable(format!(
+                    "'{}' needs a terminal emulator and none is installed",
+                    entry.app.name
+                ))
+            })?
+        } else {
+            entry.argv.clone()
+        };
+
+        // Audited before the spawn, and deliberately even if the spawn then
+        // fails: an unsupervised launch leaves no other trace, so "it was
+        // asked for" is worth more than "it definitely started".
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::AdminAppLaunched {
+                id: entry.app.id.clone(),
+                name: entry.app.name.clone(),
+            }));
+
+        self.host
+            .launch_unsupervised(&argv)
+            .await
+            .map_err(|e| ManagementError::Internal(e.to_string()))?;
+        info!(id = %entry.app.id, name = %entry.app.name, "Launched from the administrator picker");
+        Ok(())
     }
 
     async fn act_on_window(&self, id: u64, action: WindowAction) -> ManagementResult<()> {
@@ -1608,6 +1827,146 @@ impl DefaultManagementService {
         self.web_auth.as_ref().ok_or_else(|| {
             ManagementError::Conflict("the management API is not enabled on this device".into())
         })
+    }
+
+    /// Announce an administrator-mode transition (issue #154).
+    ///
+    /// Both the delta and a fresh full snapshot go out. The delta is what the
+    /// shells react to; the snapshot is what keeps `admin_mode`, and the entry
+    /// availability that changes with it, correct for a client that joined
+    /// mid-transition — every entry becomes unavailable on entry and available
+    /// again on exit, and nothing else would tell them so.
+    fn broadcast_admin_mode(&self, event: CoreEvent, snap: ServiceStateSnapshot) {
+        let CoreEvent::AdminModeChanged { active } = event else {
+            debug_assert!(false, "broadcast_admin_mode called with {event:?}");
+            return;
+        };
+        (self.broadcast_fn)(Event::new(EventPayload::AdminModeChanged { active }));
+        (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+    }
+
+    /// Leave administrator mode, whoever asked and for whatever reason, and
+    /// log the desktop session out behind it (issue #154).
+    ///
+    /// **Leaving the mode ends the session.** Everything a caregiver starts in
+    /// administrator mode is started deliberately outside supervision —
+    /// `launch_unsupervised` even `setsid`s it, so a package install survives a
+    /// daemon restart — which means nothing here can enumerate what is left
+    /// running, let alone reap it. A signed-in Steam client, a dbus-activated
+    /// service that was not there at boot, a package manager still holding its
+    /// lock: each one changes how the *child's* next activity behaves, and none
+    /// of them appears in the window list the HUD's "no windows left" gate
+    /// reads. Ending the session is the only reset this daemon can actually
+    /// promise, and the device comes straight back to a fresh kiosk.
+    ///
+    /// The logout is asked for only when the engine really did leave the mode.
+    /// `exit_admin_mode` is idempotent and ungated on purpose — it is the
+    /// rescue path for a window that will not close — and a second, racing call
+    /// must not tear down whatever session the device has moved on to.
+    ///
+    /// Returns whether this call is the one that left.
+    async fn leave_admin_mode(&self, timed_out: bool) -> bool {
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            (eng.exit_admin_mode(timed_out), eng.get_state())
+        };
+        // `CoreEngine::exit_admin_mode` clears the lock flag, because a lock
+        // whose only exit is an administrator RPC cannot outlive the mode that
+        // reaches it. The compositor has to be told the same thing or the
+        // screen stays covered while every client reports it open — a device
+        // that looks bricked, with no button anywhere offering to fix it.
+        // Idempotent, so it is asked unconditionally.
+        self.release_screen_lock().await;
+        // Asked unconditionally too, so a compositor left in the admin binding
+        // mode by a crash is recovered by pressing the button again.
+        if let Err(e) = self.host.set_admin_mode(false).await {
+            warn!(error = %e, "Left administrator mode, but the compositor did not switch binding mode");
+        }
+
+        let Some(event) = event else {
+            return false;
+        };
+
+        // Announced before the logout is asked for: the remote clients are the
+        // ones that outlive the session, and "the mode is off" is the last
+        // thing they can be told before the device goes away underneath them.
+        self.broadcast_admin_mode(event, snap);
+        info!(
+            timed_out,
+            "Left administrator mode; logging the session out to clear anything it started"
+        );
+        // Only asks. shepherdd's main loop stops the (impossible, in this mode)
+        // session, drains the HTTP server and then tears sway down, which is
+        // what keeps this call's own reply ahead of the compositor going away.
+        self.request_logout();
+        true
+    }
+
+    /// Ask shepherdd to end the desktop session.
+    ///
+    /// The one place that flips the shutdown watch, so [`Self::logout`] and the
+    /// administrator-mode exit cannot drift into meaning different things.
+    fn request_logout(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Tell the host to uncover the screen, whatever it currently believes.
+    ///
+    /// Called on every path that leaves administrator mode. A failure is logged
+    /// rather than propagated: leaving the mode must not be refusable, and the
+    /// caller cannot do anything useful with the error anyway — pressing unlock
+    /// retries it.
+    async fn release_screen_lock(&self) {
+        if let Err(e) = self.host.set_locked(false).await {
+            warn!(error = %e, "Could not release the screen lock while leaving administrator mode");
+        }
+    }
+
+    /// Lock or unlock, keeping the engine, the compositor and every client in
+    /// step (issue #154).
+    ///
+    /// The order differs by direction, and both are deliberate. Locking tells
+    /// the *host* first: if the lock client cannot start, the screen is not
+    /// covered, and a daemon that had already announced `locked: true` would be
+    /// telling every client something untrue about a safety control. Unlocking
+    /// commits to the engine first, because the RPC must not be refusable —
+    /// a host that fails to release the lock leaves a stuck screen that
+    /// pressing the button again can retry.
+    async fn set_locked(&self, locked: bool, timed_out: bool) -> ManagementResult<()> {
+        if locked {
+            if !self.engine.lock().await.admin_mode() {
+                return Err(ManagementError::Conflict(
+                    "The screen can only be locked from administrator mode".into(),
+                ));
+            }
+            self.host.set_locked(true).await.map_err(|e| {
+                ManagementError::Internal(format!("could not lock the screen: {e}"))
+            })?;
+        }
+
+        let (event, snap) = {
+            let mut eng = self.engine.lock().await;
+            let event = if locked {
+                eng.lock(timed_out).map_err(|_| {
+                    ManagementError::Conflict(
+                        "The screen can only be locked from administrator mode".into(),
+                    )
+                })?
+            } else {
+                eng.unlock()
+            };
+            (event, eng.get_state())
+        };
+
+        if !locked {
+            self.release_screen_lock().await;
+        }
+
+        if let Some(CoreEvent::LockChanged { locked }) = event {
+            (self.broadcast_fn)(Event::new(EventPayload::LockChanged { locked }));
+            (self.broadcast_fn)(Event::new(EventPayload::StateChanged(snap)));
+        }
+        Ok(())
     }
 
     /// Close out a reset started by `CoreEngine::begin_restart`, handing the

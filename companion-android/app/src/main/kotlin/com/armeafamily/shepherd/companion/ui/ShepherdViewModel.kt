@@ -97,6 +97,16 @@ data class DeviceUiState(
 ) {
     val entries: List<EntryView> get() = snapshot?.entries.orEmpty()
 
+    /**
+     * Whether the device is in administrator mode (issue #154). Rides the
+     * snapshot, so it needs no RPC of its own and is correct the moment the
+     * link comes up.
+     */
+    val adminMode: Boolean get() = snapshot?.adminMode ?: false
+
+    /** Whether the device's screen is currently locked (issue #154). */
+    val locked: Boolean get() = snapshot?.locked ?: false
+
     /** The category an activity belongs to, for labelling its row. */
     fun groupOf(entry: EntryView): GroupView? =
         entry.group?.let { id -> groups.firstOrNull { it.groupId == id } }
@@ -183,6 +193,13 @@ data class WindowsUiState(
     val error: String? = null,
     /** Window with an action in flight; its row's buttons are disabled. */
     val busyId: Long? = null,
+    /**
+     * Whether the device was in administrator mode as of the last refresh.
+     * Carried here rather than read from the device state at render time so
+     * the three groupings below stay a pure function of this object, and stay
+     * testable without a device.
+     */
+    val adminMode: Boolean = false,
 ) {
     /**
      * Windows on the child's screen that nothing is supervising.
@@ -194,9 +211,9 @@ data class WindowsUiState(
      * draws before it warns about one.
      */
     val orphaned: List<WindowInfo>
-        get() = windows.filter { !it.inScratchpad && WindowPresentation.isOrphan(it) }
+        get() = windows.filter { !it.inScratchpad && WindowPresentation.isOrphan(it, adminMode) }
     val onScreen: List<WindowInfo>
-        get() = windows.filter { !it.inScratchpad && !WindowPresentation.isOrphan(it) }
+        get() = windows.filter { !it.inScratchpad && !WindowPresentation.isOrphan(it, adminMode) }
     val scratchpad: List<WindowInfo> get() = windows.filter { it.inScratchpad }
 }
 
@@ -934,8 +951,15 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         windowsJob = viewModelScope.launch {
             try {
                 val list = c.listWindows()
+                val adminMode = _state.value.adminMode
                 _windows.update {
-                    it.copy(windows = list, loading = false, loaded = true, error = null)
+                    it.copy(
+                        windows = list,
+                        loading = false,
+                        loaded = true,
+                        error = null,
+                        adminMode = adminMode,
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -962,6 +986,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                 WindowAction.CLOSE -> "Asked the window to close."
                 WindowAction.HIDE -> "Moved to the scratchpad."
                 WindowAction.SHOW -> "Pulled off the scratchpad."
+                WindowAction.FOCUS -> "Switched to the window."
                 // Unreachable in practice: `act` comes from this app's own
                 // buttons, not off the wire. It exists because the enum has to
                 // tolerate a value a newer device might send, and the honest
@@ -977,6 +1002,43 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // duplicate and leaves the list a beat stale.
         windowsJob?.cancel()
         refreshWindows()
+    }
+
+    /**
+     * Enter administrator mode (issue #154). Refused by the device while an
+     * activity is running; the message says which, so it is shown as-is.
+     */
+    fun enterAdminMode() = action { c ->
+        c.enterAdminMode()
+        _message.value = "Administrator mode on."
+        refreshSnapshot()
+    }
+
+    /**
+     * Leave administrator mode. Never refused, whatever is still on screen.
+     *
+     * No `refreshSnapshot()` afterwards, unlike every other control here:
+     * leaving logs the device's session out (issue #154), so the snapshot this
+     * would ask for is one the device is in no position to answer. Same
+     * reasoning as [logoutDevice], which has never refreshed either.
+     */
+    fun exitAdminMode() = action { c ->
+        c.exitAdminMode()
+        _message.value = "Administrator mode off; the device is logging out."
+    }
+
+    /** Lock the device's screen. Only meaningful inside administrator mode. */
+    fun lockDevice() = action { c ->
+        c.lockDevice()
+        _message.value = "Screen locked."
+        refreshSnapshot()
+    }
+
+    /** Unlock it. There is no way to do this from the device itself. */
+    fun unlockDevice() = action { c ->
+        c.unlockDevice()
+        _message.value = "Screen unlocked."
+        refreshSnapshot()
     }
 
     fun upsertOverride(

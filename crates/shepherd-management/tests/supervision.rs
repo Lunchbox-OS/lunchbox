@@ -20,8 +20,8 @@ use shepherd_host_api::{
     NoOpDisplayController, NoOpVolumeController,
 };
 use shepherd_management::{
-    AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementService,
-    WebListenerHandle,
+    AutoBrightnessState, DefaultManagementService, LaunchOutcome, ManagementError,
+    ManagementService, WebListenerHandle,
 };
 use shepherd_store::SqliteStore;
 use shepherd_util::EntryId;
@@ -136,6 +136,10 @@ struct Harness {
     host: Arc<MockHost>,
     events: broadcast::Receiver<Event>,
     hidpi_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    /// Whether shepherdd has been asked to end the desktop session. Held here
+    /// rather than dropped so the watch keeps a receiver — a `send` with none
+    /// left fails, and every logout in this crate goes out on this channel.
+    shutdown: watch::Receiver<bool>,
 }
 
 fn harness() -> Harness {
@@ -155,7 +159,7 @@ fn harness() -> Harness {
     )));
     let (tx, events) = broadcast::channel::<Event>(64);
     let tx_for_fn = tx.clone();
-    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, shutdown) = watch::channel(false);
 
     let svc = DefaultManagementService {
         engine,
@@ -188,6 +192,7 @@ fn harness() -> Harness {
         host,
         events,
         hidpi_log,
+        shutdown,
     }
 }
 
@@ -261,6 +266,29 @@ async fn a_blank_reaches_the_compositor_when_nothing_is_running() {
         "set_screen_power(false) must report that it acted"
     );
     assert_eq!(*h.host.screen_power_calls.lock().unwrap(), vec![false]);
+}
+
+/// Administrator mode has to suppress the blank too (issue #154), and it is the
+/// case the session check cannot cover: the mode creates no session on purpose,
+/// so to `current_session` a caregiver halfway through a Steam login looks
+/// exactly like an idle kiosk.
+#[tokio::test]
+async fn a_blank_is_suppressed_while_administering() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+
+    assert!(
+        !h.svc.set_screen_power(false).await.unwrap(),
+        "set_screen_power(false) must report that it did not act"
+    );
+    assert!(
+        h.host.screen_power_calls.lock().unwrap().is_empty(),
+        "the screen must not blank on a caregiver setting the device up"
+    );
+
+    // Waking is not suppressed here either.
+    assert!(h.svc.set_screen_power(true).await.unwrap());
+    assert_eq!(*h.host.screen_power_calls.lock().unwrap(), vec![true]);
 }
 
 /// Waking is never suppressed. A device that blanked just before a launch has
@@ -714,4 +742,268 @@ async fn stale_exit_from_previous_activity_does_not_end_the_next_session() {
         "bitwig's session must survive RetroArch's reap"
     );
     let _ = drained(&mut h.events);
+}
+
+// ---------------------------------------------------------------------------
+// Administrator mode's app picker (issue #154)
+// ---------------------------------------------------------------------------
+
+/// The gate that keeps `launch_desktop_app` from being a permanently open "run
+/// anything" RPC on a device whose whole purpose is that only configured
+/// activities run.
+///
+/// Asserted against the host, not just the return value: a refusal that still
+/// spawned would be the worst possible outcome, and the error alone cannot
+/// tell the two apart.
+#[tokio::test]
+async fn the_picker_cannot_launch_anything_outside_administrator_mode() {
+    let h = harness();
+
+    let err = h
+        .svc
+        .launch_desktop_app("org.example.Anything.desktop".into())
+        .await
+        .expect_err("launching outside administrator mode must be refused");
+    assert!(
+        matches!(err, ManagementError::Conflict(_)),
+        "refused because of the mode, not because the app is missing: {err:?}"
+    );
+    assert!(
+        h.host.unsupervised_launches.lock().unwrap().is_empty(),
+        "the refusal must stop the spawn, not merely report one"
+    );
+}
+
+/// The catalogue is readable whenever: a picker wants to draw the list before
+/// the caregiver commits to entering the mode. Only *starting* is gated.
+#[tokio::test]
+async fn the_catalogue_is_readable_outside_the_mode() {
+    let h = harness();
+    // The device this runs on decides what is installed, so the assertion is
+    // that it answers at all rather than what is in it.
+    h.svc
+        .list_desktop_apps()
+        .await
+        .expect("listing must not depend on administrator mode");
+}
+
+/// Inside the mode the gate is open, and an id that matches nothing is a
+/// not-found rather than a silent success.
+#[tokio::test]
+async fn inside_the_mode_an_unknown_application_is_reported_as_missing() {
+    let h = harness();
+    h.svc
+        .enter_admin_mode()
+        .await
+        .expect("nothing is running in a fresh harness");
+
+    let err = h
+        .svc
+        .launch_desktop_app("definitely.not.installed.desktop".into())
+        .await
+        .expect_err("an id matching no desktop file cannot launch");
+    assert!(
+        matches!(err, ManagementError::NotFound(_)),
+        "past the mode gate, so the failure is about the id: {err:?}"
+    );
+    assert!(h.host.unsupervised_launches.lock().unwrap().is_empty());
+}
+
+/// The lock exists to make walking away from a half-configured device safe, so
+/// its two invariants are that it cannot be entered from a child's session and
+/// cannot be left except through a management client.
+#[tokio::test]
+async fn the_screen_locks_only_from_administrator_mode() {
+    let h = harness();
+
+    let err = h
+        .svc
+        .lock_device()
+        .await
+        .expect_err("a child's session must not be lockable");
+    assert!(matches!(err, ManagementError::Conflict(_)), "{err:?}");
+    assert!(!h.svc.engine.lock().await.locked());
+
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.lock_device().await.expect("locking inside the mode");
+    assert!(h.svc.engine.lock().await.locked());
+
+    // Idempotent: a second press is not an error.
+    h.svc.lock_device().await.expect("locking twice");
+    h.svc.unlock_device().await.expect("unlocking");
+    assert!(!h.svc.engine.lock().await.locked());
+    h.svc.unlock_device().await.expect("unlocking twice");
+}
+
+/// Leaving the mode has to clear the lock. The only way out of a locked screen
+/// is an RPC reached through administrator mode, so a lock that outlived the
+/// mode would be a device nobody could get back into.
+#[tokio::test]
+async fn leaving_administrator_mode_unlocks_the_screen() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.lock_device().await.unwrap();
+
+    h.svc.exit_admin_mode().await.unwrap();
+
+    let eng = h.svc.engine.lock().await;
+    assert!(
+        !eng.locked(),
+        "a lock must never outlive the mode that can end it"
+    );
+    assert!(!eng.admin_mode());
+    drop(eng);
+
+    // Regression, found by driving it: the engine cleared its own flag while
+    // nothing told the compositor, so the screen stayed covered with every
+    // client reporting it open — a device that looks bricked, and whose unlock
+    // button is hidden precisely because the daemon believes it is unlocked.
+    assert!(
+        !*h.host.locked.lock().unwrap(),
+        "the host must be told to uncover the screen, not just the engine"
+    );
+}
+
+/// Leaving administrator mode ends the desktop session (issue #154).
+///
+/// The flag going off is not a reset. Everything the mode starts is started
+/// outside supervision on purpose — `launch_unsupervised` `setsid`s it so a
+/// package install survives a daemon restart — so nothing here can enumerate a
+/// signed-in Steam client or a dbus service that was not there at boot, let
+/// alone reap one. Only the session going away resets the machine the child's
+/// next activity meets, which is why the exit asks for a logout.
+#[tokio::test]
+async fn leaving_administrator_mode_logs_the_session_out() {
+    let h = harness();
+    assert!(!*h.shutdown.borrow(), "nothing has asked to log out yet");
+
+    h.svc.enter_admin_mode().await.unwrap();
+    assert!(
+        !*h.shutdown.borrow(),
+        "entering the mode is not what ends the session"
+    );
+
+    h.svc.exit_admin_mode().await.unwrap();
+    assert!(
+        *h.shutdown.borrow(),
+        "leaving the mode must log the session out, not merely clear the flag"
+    );
+    assert!(!h.svc.engine.lock().await.admin_mode());
+}
+
+/// The idle timeout's exit is the same exit, logout included: a mode nobody
+/// came back to leaves exactly the same processes behind as one somebody left
+/// on purpose.
+#[tokio::test]
+async fn the_idle_timeouts_exit_logs_the_session_out_too() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+
+    // MockHost reports no windows, so this is the empty case: leave.
+    assert!(h.svc.admin_idle_timeout().await.unwrap());
+    assert!(*h.shutdown.borrow(), "the timeout's exit is still an exit");
+}
+
+/// Its *lock* branch is not an exit, and must not end anything. This is the
+/// walk-away case the lock exists for: the download keeps running.
+#[tokio::test]
+async fn locking_on_the_idle_timeout_does_not_log_out() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+    h.host.set_windows(vec![shepherd_api::WindowInfo {
+        id: 1,
+        name: Some("Steam".into()),
+        app_id: Some("steam".into()),
+        window_class: None,
+        pid: Some(4242),
+        workspace: Some("1".into()),
+        in_scratchpad: false,
+        visible: true,
+        focused: true,
+        owner: shepherd_api::WindowOwner::Unowned,
+    }]);
+
+    assert!(!h.svc.admin_idle_timeout().await.unwrap(), "kept the mode");
+    assert!(
+        !*h.shutdown.borrow(),
+        "locking must leave the caregiver's work running, session included"
+    );
+}
+
+/// An exit that finds the mode already off leaves the session alone.
+///
+/// `exit_admin_mode` is ungated and idempotent on purpose — it is what rescues
+/// a device whose last window refuses to close — so the two clients and the
+/// timeout can and do race each other. The one that arrives second must not
+/// tear down whatever session the device has moved on to.
+#[tokio::test]
+async fn an_exit_that_finds_the_mode_already_off_leaves_the_session_alone() {
+    let h = harness();
+
+    h.svc.exit_admin_mode().await.unwrap();
+    assert!(
+        !*h.shutdown.borrow(),
+        "an exit that left nothing has nothing to clean up after"
+    );
+
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.exit_admin_mode().await.unwrap();
+    // The real one logged out; a duplicate arriving behind it changes nothing,
+    // which is all this can assert about a latch that is already set.
+    assert!(*h.shutdown.borrow());
+    h.svc.exit_admin_mode().await.unwrap();
+    assert!(!h.svc.engine.lock().await.admin_mode());
+}
+
+/// The same divergence, on the other path out of the mode.
+#[tokio::test]
+async fn the_idle_timeouts_exit_also_releases_the_screen_lock() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+    h.svc.lock_device().await.unwrap();
+    assert!(*h.host.locked.lock().unwrap());
+
+    // No windows, so the timeout leaves the mode rather than locking.
+    assert!(h.svc.admin_idle_timeout().await.unwrap());
+    assert!(
+        !*h.host.locked.lock().unwrap(),
+        "leaving on the timeout must uncover the screen too"
+    );
+}
+
+/// Decision 10: with work still on screen the idle timeout locks rather than
+/// leaving, because walking away from a slow download is a supported way to use
+/// the mode and closing the caregiver's windows would defeat it.
+#[tokio::test]
+async fn the_idle_timeout_locks_when_windows_are_open_and_leaves_when_none_are() {
+    let h = harness();
+    h.svc.enter_admin_mode().await.unwrap();
+
+    // MockHost reports no windows, so this is the empty case: leave.
+    assert!(h.svc.admin_idle_timeout().await.unwrap(), "left the mode");
+    assert!(!h.svc.engine.lock().await.admin_mode());
+    assert!(!h.svc.engine.lock().await.locked(), "leaving does not lock");
+
+    // With a window on screen the mode is kept and the screen is locked.
+    h.svc.enter_admin_mode().await.unwrap();
+    h.host.set_windows(vec![shepherd_api::WindowInfo {
+        id: 1,
+        name: Some("Steam".into()),
+        app_id: Some("steam".into()),
+        window_class: None,
+        pid: Some(4242),
+        workspace: Some("1".into()),
+        in_scratchpad: false,
+        visible: true,
+        focused: true,
+        owner: shepherd_api::WindowOwner::Unowned,
+    }]);
+
+    assert!(
+        !h.svc.admin_idle_timeout().await.unwrap(),
+        "the mode is kept: the caregiver's work is still running"
+    );
+    let eng = h.svc.engine.lock().await;
+    assert!(eng.admin_mode(), "still administering");
+    assert!(eng.locked(), "but the screen is covered");
 }

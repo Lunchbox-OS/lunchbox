@@ -601,6 +601,61 @@
       }
     },
     {
+      "name": "enter_admin_mode",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "exit_admin_mode",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "admin_idle_timeout",
+      "params": [],
+      "result": {
+        "type": "bool"
+      }
+    },
+    {
+      "name": "lock_device",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "unlock_device",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "list_desktop_apps",
+      "params": [],
+      "result": {
+        "type": "Vec<DesktopApp>"
+      }
+    },
+    {
+      "name": "launch_desktop_app",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "list_windows",
       "params": [],
       "result": {

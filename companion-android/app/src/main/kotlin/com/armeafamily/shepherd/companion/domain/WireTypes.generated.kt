@@ -355,6 +355,46 @@ data class DailyOverride(
 )
 
 /**
+ * One launchable application from the system's `.desktop` files, as
+ * administrator mode's app picker sees it (issue #154).
+ *
+ * Enumerated by `shepherd_config::desktop`, which does the Desktop Entry
+ * parsing; this is only the shape that crosses the wire. Deliberately carries
+ * no `Exec`: what a client may do is ask for an id to be launched, not hand
+ * the daemon a command line.
+ */
+@Serializable
+data class DesktopApp(
+    /**
+     * One-line description (`Comment`), localized the same way.
+     */
+    val comment: String? = null,
+    /**
+     * Icon theme name or absolute path, straight from `Icon`. Resolved by
+     * whichever toolkit draws it, exactly as for a configured entry.
+     */
+    val icon: String? = null,
+    /**
+     * The desktop file ID — the path relative to its `applications`
+     * directory with `/` replaced by `-`, e.g. `org.kde.krita.desktop`. The
+     * spec's own identifier, and what `launch_desktop_app` takes.
+     */
+    val id: String,
+    /**
+     * Display name, localized to the device's locale where the file offers a
+     * translation.
+     */
+    val name: String,
+    /**
+     * Whether the application expects a terminal emulator. Shown so a picker
+     * can mark it: on a device with no terminal installed, launching one of
+     * these fails, and saying so up front beats a launch that appears to do
+     * nothing.
+     */
+    val terminal: Boolean,
+)
+
+/**
  * Shape returned from the `DeviceInfo` characteristic. Readable
  * unencrypted; carries only what the companion app needs to decide
  * whether to initiate pairing.
@@ -1954,6 +1994,16 @@ sealed interface ReasonCode {
     ) : ReasonCode
 
     /**
+     * The device is in administrator mode (issue #154), so nothing launches as
+     * an activity. Not a restriction on the child in the sense the others are:
+     * it clears the moment the caregiver leaves the mode, and it applies to
+     * every entry at once.
+     */
+    @Serializable
+    @SerialName("admin_mode")
+    data object AdminMode : ReasonCode
+
+    /**
      * One or more required input devices (issue #96) are not currently
      * connected. `devices` lists the missing device types, sorted and
      * deduplicated.
@@ -2070,6 +2120,19 @@ enum class RetroarchSaveState(val wire: String) {
  */
 @Serializable
 data class ServiceStateSnapshot(
+    /**
+     * Whether the device is in administrator mode (issue #154) — the kiosk's
+     * restrictions relaxed so a caregiver can set activities up in place.
+     *
+     * Every client that behaves differently in the mode reads it from here
+     * rather than tracking it: the shells change what they draw, and the
+     * window panels stop calling admin-launched windows orphans. (The screen
+     * staying awake is not one of them — that check moved inside the daemon
+     * with issue #144, and `set_screen_power` reads the engine directly.)
+     * Absent from an older payload means "not in admin mode", which is the
+     * safe reading.
+     */
+    val adminMode: Boolean = false,
     val apiVersion: Long,
     val currentSession: SessionInfo? = null,
     /**
@@ -2089,6 +2152,15 @@ data class ServiceStateSnapshot(
      * Empty when no connectivity checks are configured.
      */
     val internetStatus: List<InternetStatusView> = emptyList(),
+    /**
+     * Whether the screen is locked (issue #154).
+     *
+     * Only ever set inside administrator mode: it is what makes walking away
+     * from a half-configured device safe, and it is deliberately not something
+     * a child's session can enter. Clearing it is a management RPC — there is
+     * no local affordance, which is the entire point.
+     */
+    val locked: Boolean = false,
     val policyLoaded: Boolean,
 )
 
@@ -2588,7 +2660,7 @@ data class WifiView(
 )
 
 /**
- * An action that can be performed on a window via the debug API.
+ * An action that can be performed on a window through the management API.
  */
 @Serializable(with = WindowAction.Serializer::class)
 enum class WindowAction(val wire: String) {
@@ -2604,6 +2676,19 @@ enum class WindowAction(val wire: String) {
      * Pull the window out of the scratchpad so it is shown again.
      */
     SHOW("show"),
+    /**
+     * Give the window keyboard focus, raising it above the others (sway
+     * `focus`).
+     *
+     * Note that on a window currently *on* the scratchpad this also pulls it
+     * off — verified against sway 1.11, where focusing a stashed window
+     * clears `in_scratchpad` and makes it visible — so it overlaps
+     * [`WindowAction::Show`] for that case rather than being a no-op.
+     * Clients that list the two placements separately should therefore still
+     * offer `Show` on a scratchpad row and `Focus` on an on-screen one, so
+     * each row has one obvious action, not because `Focus` would fail there.
+     */
+    FOCUS("focus"),
     /**
      * A [WindowAction] this build doesn't know about.
      *

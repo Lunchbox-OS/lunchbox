@@ -57,6 +57,7 @@ struct WireTypes {
     network_source: shepherd_api::NetworkSource,
     web_listener_view: shepherd_api::WebListenerView,
     web_listener_state: shepherd_api::WebListenerState,
+    desktop_app: shepherd_api::DesktopApp,
     window_info: shepherd_api::WindowInfo,
     window_action: shepherd_api::WindowAction,
     diagnostic: shepherd_api::Diagnostic,

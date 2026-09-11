@@ -34,6 +34,14 @@ pub enum LauncherState {
         #[allow(dead_code)]
         time_remaining: Option<Duration>,
     },
+    /// A caregiver is setting the device up (issue #154).
+    ///
+    /// Its own state rather than an empty grid: administrator mode disables
+    /// every entry, so `Idle` would render a screen with nothing on it at all —
+    /// no reason, no reassurance for the child, and no reminder to the
+    /// caregiver that the kiosk is still unlocked.
+    AdminMode,
+
     /// Error state
     Error { message: String },
     /// System is suspending: show a static cover so the frozen frame across
@@ -167,6 +175,20 @@ impl SharedState {
                 // EntryAvailabilityChanged / StateChanged; the raw check
                 // status is HUD-only.
             }
+            EventPayload::LockChanged { locked } => {
+                // Nothing for the launcher to draw: a session lock covers every
+                // surface, so whatever it is showing is already hidden by the
+                // compositor. Logged because it explains a gap in the journal.
+                tracing::info!(locked, "Screen lock changed");
+            }
+            EventPayload::AdminModeChanged { active } => {
+                // The tiles are driven by the snapshot that follows this event:
+                // every entry carries `ReasonCode::AdminMode` while the mode is
+                // on, so the grid greys itself out without the launcher
+                // tracking the mode. Logged because it explains a screenful of
+                // suddenly-unavailable entries in the journal.
+                tracing::info!(active, "Administrator mode changed");
+            }
             EventPayload::DisplayModeChanged { .. } => {
                 // External-display arrangement is handled by shepherdd and the
                 // HUD; the launcher doesn't render it (issue #87).
@@ -196,6 +218,11 @@ impl SharedState {
                 entry_label: session.label,
                 time_remaining,
             });
+        } else if snapshot.admin_mode {
+            // Checked after the session, not before: the two are mutually
+            // exclusive in the engine, so if they ever disagree the running
+            // activity is the more urgent truth to show.
+            self.set(LauncherState::AdminMode);
         } else {
             self.set(LauncherState::Idle {
                 entries: snapshot.entries,

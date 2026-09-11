@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Visibility
@@ -157,13 +158,13 @@ fun WindowsScreen(vm: ShepherdViewModel, onBack: () -> Unit) {
                 if (orphaned.isNotEmpty()) {
                     item(key = "orphan-banner") { OrphanBanner(orphaned.size) }
                 }
-                section("Unsupervised", orphaned, windows.busyId, vm, onConfirmClose = { confirmClose = it })
-                section("On screen", windows.onScreen, windows.busyId, vm, onConfirmClose = { confirmClose = it })
+                section("Unsupervised", orphaned, windows.busyId, windows.adminMode, vm, onConfirmClose = { confirmClose = it })
+                section("On screen", windows.onScreen, windows.busyId, windows.adminMode, vm, onConfirmClose = { confirmClose = it })
                 // The scratchpad is where shepherd stashes windows it wants
                 // running but out of sight (the Steam client, chiefly), so
                 // its contents are worth their own heading rather than being
                 // mixed in and distinguishable only by a chip.
-                section("Scratchpad", windows.scratchpad, windows.busyId, vm, onConfirmClose = { confirmClose = it })
+                section("Scratchpad", windows.scratchpad, windows.busyId, windows.adminMode, vm, onConfirmClose = { confirmClose = it })
             }
         }
     }
@@ -241,6 +242,7 @@ private fun LazyListScope.section(
     heading: String,
     windows: List<WindowInfo>,
     busyId: Long?,
+    adminMode: Boolean,
     vm: ShepherdViewModel,
     onConfirmClose: (WindowInfo) -> Unit,
 ) {
@@ -256,6 +258,7 @@ private fun LazyListScope.section(
     items(windows, key = { it.id }) { w ->
         WindowCard(
             w = w,
+            adminMode = adminMode,
             busy = busyId != null,
             onAct = { action -> vm.actOnWindow(w.id, action) },
             onConfirmClose = { onConfirmClose(w) },
@@ -266,11 +269,12 @@ private fun LazyListScope.section(
 @Composable
 private fun WindowCard(
     w: WindowInfo,
+    adminMode: Boolean,
     busy: Boolean,
     onAct: (WindowAction) -> Unit,
     onConfirmClose: () -> Unit,
 ) {
-    val orphan = WindowPresentation.isOrphan(w)
+    val orphan = WindowPresentation.isOrphan(w, adminMode)
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
@@ -302,7 +306,7 @@ private fun WindowCard(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     PlacementChip(w)
-                    OwnerChip(w)
+                    OwnerChip(w, adminMode)
                 }
             }
             // Only for the owners that are a problem: on an ordinary row the
@@ -315,6 +319,16 @@ private fun WindowCard(
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (WindowPresentation.canFocus(w)) {
+                    OutlinedButton(onClick = { onAct(WindowAction.FOCUS) }, enabled = !busy) {
+                        Icon(
+                            Icons.Filled.OpenInFull,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text("Focus", Modifier.padding(start = 8.dp))
+                    }
+                }
                 if (w.inScratchpad) {
                     OutlinedButton(onClick = { onAct(WindowAction.SHOW) }, enabled = !busy) {
                         Icon(
@@ -368,8 +382,8 @@ private fun WindowCard(
  * as a fact rather than a guess.
  */
 @Composable
-private fun OwnerChip(w: WindowInfo) {
-    val color = if (WindowPresentation.isOrphan(w)) {
+private fun OwnerChip(w: WindowInfo, adminMode: Boolean) {
+    val color = if (WindowPresentation.isOrphan(w, adminMode)) {
         MaterialTheme.colorScheme.error
     } else {
         MaterialTheme.colorScheme.outline

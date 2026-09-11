@@ -104,6 +104,31 @@ class WindowPresentationTest {
         assertFalse(WindowPresentation.isOrphan(window(owner = WindowOwner.SHEPHERD)))
     }
 
+    /// Everything a caregiver opens in administrator mode is unowned, so
+    /// without this the phone would put a red "Unsupervised" banner over their
+    /// own work for as long as they were setting the device up.
+    @Test
+    fun `nothing is an orphan while the device is in administrator mode`() {
+        val escaped = window(owner = WindowOwner.ESCAPED)
+        val unowned = window(owner = WindowOwner.UNOWNED)
+
+        assertTrue(WindowPresentation.isOrphan(escaped, adminMode = false))
+        assertTrue(WindowPresentation.isOrphan(unowned, adminMode = false))
+
+        assertFalse(WindowPresentation.isOrphan(escaped, adminMode = true))
+        assertFalse(WindowPresentation.isOrphan(unowned, adminMode = true))
+    }
+
+    @Test
+    fun `focus is offered only for an unfocused window that is on screen`() {
+        assertTrue(WindowPresentation.canFocus(window()))
+        // Already focused: a round trip that changes nothing.
+        assertFalse(WindowPresentation.canFocus(window(focused = true)))
+        // On the scratchpad `focus` does not raise it; Show is that button.
+        assertFalse(WindowPresentation.canFocus(window(inScratchpad = true)))
+        assertFalse(WindowPresentation.canFocus(window(inScratchpad = true, focused = true)))
+    }
+
     @Test
     fun `every owner has a chip label`() {
         assertEquals("Shepherd", WindowPresentation.ownerLabel(window(owner = WindowOwner.SHEPHERD)))

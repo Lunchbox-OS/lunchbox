@@ -14,7 +14,7 @@ use shepherd_util::SessionId;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -368,6 +368,37 @@ pub struct LinuxHost {
     /// created. Broadcast rather than a channel per watch because several
     /// activities can be starting at once and each needs the same event.
     window_created_tx: broadcast::Sender<()>,
+    /// Whether the device is in administrator mode (issue #154). Set by
+    /// [`HostAdapter::set_admin_mode`]; read by the reconciliation sweep, which
+    /// stops reporting unowned windows while it is set — everything a caregiver
+    /// opens in that mode is deliberately outside supervision, so reporting it
+    /// would fill the log with the one false positive the orphan work exists to
+    /// avoid.
+    admin_mode: Arc<AtomicBool>,
+    /// The running `shepherd-lock`, when the screen is locked (issue #154).
+    ///
+    /// Held so it can be asked to unlock. It must be *asked* — a SIGKILL leaves
+    /// the compositor holding an abandoned lock with no client to release it,
+    /// which shows as a blank screen until the session restarts.
+    lock_process: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+}
+
+/// What the reconciliation sweep needs to decide whether a window on screen is
+/// an orphan worth reporting.
+///
+/// One parameter rather than three because they answer one question together —
+/// "is there a list to look at, has this pid been named already, and is anyone
+/// deliberately outside supervision right now?" — and because
+/// `reconcile_escaped` was at the argument limit without them.
+struct OrphanSweep<'a> {
+    /// The compositor's window list, or `None` when it could not be asked.
+    /// Emphatically not the same as an empty screen (issue #147).
+    windows: Option<&'a [WindowInfo]>,
+    /// pids already announced, so each orphan is named once.
+    reported: &'a mut HashSet<u32>,
+    /// Administrator mode: everything on screen is unsupervised on purpose, so
+    /// nothing on it is an orphan (issue #154).
+    admin_mode: bool,
 }
 
 /// An activity that survived teardown and is still on the machine.
@@ -475,6 +506,8 @@ impl LinuxHost {
             event_rx: Arc::new(Mutex::new(Some(rx))),
             steam_auto_dismiss: Arc::new(Mutex::new(HashSet::new())),
             steam_launch_timeout_ms: Arc::new(AtomicU64::new(30_000)),
+            admin_mode: Arc::new(AtomicBool::new(false)),
+            lock_process: Arc::new(tokio::sync::Mutex::new(None)),
             escaped: Arc::new(Mutex::new(HashMap::new())),
             diagnostics: Arc::new(Mutex::new(None)),
             window_nudge_tx: nudge_tx,
@@ -920,7 +953,17 @@ impl LinuxHost {
         windows: &[WindowInfo],
         known: &HashSet<u32>,
         reported: &mut HashSet<u32>,
+        admin_mode: bool,
     ) -> Vec<u32> {
+        // In administrator mode every window a caregiver opens is unowned by
+        // construction, so the report says nothing. The set is cleared rather
+        // than merely skipped: on leaving the mode, a window that is still up
+        // should be reported afresh instead of being remembered as already
+        // announced from a span when the announcement was suppressed.
+        if admin_mode {
+            reported.clear();
+            return Vec::new();
+        }
         let mut fresh = Vec::new();
         for w in windows {
             let Some(pid) = w.pid else { continue };
@@ -1192,8 +1235,7 @@ impl LinuxHost {
         session_info: &Arc<Mutex<HashMap<SessionId, SessionInfo>>>,
         processes: &Arc<Mutex<HashMap<u32, ManagedProcess>>>,
         sidecars: &Arc<Mutex<HashMap<u32, Vec<Child>>>>,
-        windows: Option<&[WindowInfo]>,
-        unowned_reported: &mut HashSet<u32>,
+        orphans: OrphanSweep<'_>,
         event_tx: &mpsc::UnboundedSender<HostEvent>,
     ) {
         let snapshot: Vec<(u32, EscapedActivity)> = {
@@ -1207,6 +1249,11 @@ impl LinuxHost {
         // `unowned_reported` against a list we do not have would forget
         // orphans we already know about. So skip the window half entirely and
         // still work the kills — the caller has raised a diagnostic.
+        let OrphanSweep {
+            windows,
+            reported,
+            admin_mode,
+        } = orphans;
         if let Some(windows) = windows {
             let known: HashSet<u32> = {
                 let mut k: HashSet<u32> = processes.lock().unwrap().keys().copied().collect();
@@ -1214,7 +1261,7 @@ impl LinuxHost {
                 k.extend(snapshot.iter().map(|(pid, _)| *pid));
                 k
             };
-            let _ = Self::report_unowned_windows(windows, &known, unowned_reported);
+            let _ = Self::report_unowned_windows(windows, &known, reported, admin_mode);
         }
 
         if snapshot.is_empty() {
@@ -1611,6 +1658,7 @@ impl LinuxHost {
         let session_info = self.session_info.clone();
         let diagnostics = self.diagnostics.clone();
         let mut window_nudge_rx = self.window_nudge_rx.lock().unwrap().take();
+        let admin_mode = self.admin_mode.clone();
 
         tokio::spawn(async move {
             let mut ticks: u64 = 0;
@@ -1645,8 +1693,11 @@ impl LinuxHost {
                         &session_info,
                         &processes,
                         &sidecars,
-                        windows.as_deref(),
-                        &mut unowned_reported,
+                        OrphanSweep {
+                            windows: windows.as_deref(),
+                            reported: &mut unowned_reported,
+                            admin_mode: admin_mode.load(Ordering::Relaxed),
+                        },
                         &event_tx,
                     )
                     .await;
@@ -2576,6 +2627,168 @@ impl HostAdapter for LinuxHost {
         crate::sway::act_on_window(window_id, action).await
     }
 
+    async fn set_locked(&self, locked: bool) -> HostResult<()> {
+        let mut slot = self.lock_process.lock().await;
+        match (locked, slot.as_mut()) {
+            // Already in the requested state.
+            (true, Some(_)) | (false, None) => Ok(()),
+
+            (true, None) => {
+                // Beside the running binary when there is one, which is what
+                // makes a dev build use its own lock client. The fallback goes
+                // through `helpers` rather than `$PATH` (issue #144): a bare
+                // name here is one an activity could satisfy by dropping its
+                // own `shepherd-lock` on a PATH the kiosk user chooses — and
+                // this particular binary is the thing standing between a child
+                // and a locked screen.
+                let exe = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("shepherd-lock")))
+                    .filter(|p| p.exists())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "shepherd-lock".into());
+                // The resolved path, not the name, because the failure worth
+                // naming is "it is not installed" and the two look identical
+                // otherwise: a device that never shipped `shepherd-lock` and one
+                // whose copy is unreadable both answer ENOENT, and only the path
+                // says which directory was actually looked in.
+                let resolved = crate::helpers::resolve(&exe);
+
+                let child = crate::helpers::tokio_command(&exe)
+                    .envs(crate::process::build_inherited_env(&HashMap::new()))
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| {
+                        HostError::Internal(format!(
+                            "failed to start the screen lock at {}: {e}",
+                            resolved.display()
+                        ))
+                    })?;
+                info!(pid = child.id(), "Screen lock started");
+                *slot = Some(child);
+                Ok(())
+            }
+
+            (false, Some(child)) => {
+                // SIGTERM, never SIGKILL: `shepherd-lock` handles it by
+                // releasing the lock through the protocol. Killing it outright
+                // would leave the compositor showing an abandoned lock that
+                // nothing can clear.
+                if let Some(pid) = child.id() {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGTERM,
+                    );
+                }
+                // Reap it, so the unlock is complete before this returns and a
+                // relock cannot race the old process's teardown.
+                match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                    Ok(Ok(status)) => info!(?status, "Screen lock released"),
+                    Ok(Err(e)) => warn!(error = %e, "Could not wait on the screen lock"),
+                    Err(_) => warn!(
+                        "The screen lock did not exit within 5s; leaving it rather than \
+                         killing it, since a killed lock client cannot be unlocked"
+                    ),
+                }
+                *slot = None;
+                Ok(())
+            }
+        }
+    }
+
+    async fn launch_unsupervised(&self, argv: &[String]) -> HostResult<()> {
+        let Some((requested, _)) = argv.split_first() else {
+            return Err(HostError::SpawnFailed("empty command".into()));
+        };
+
+        // Into a transient scope of its own, exactly as an activity is
+        // (issue #144). The management socket trusts shepherdd's cgroup, and a
+        // program the caregiver picked out of a `.desktop` file is the least
+        // trusted thing on the device — a plain child here would be a peer the
+        // daemon believes, holding `unlock_device` for as long as it ran. Empty
+        // when the user manager cannot be reached, which is the same trade the
+        // activity path makes and the same diagnostic reports.
+        let tag = std::path::Path::new(requested)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app");
+        let wrapped: Vec<String> = crate::process::admin_scope_argv_prefix(tag)
+            .into_iter()
+            .chain(argv.iter().cloned())
+            .collect();
+        // `split_first` again, on the wrapped argv: with a scope prefix the
+        // program is `systemd-run`, which execs the real one in this same
+        // process — so the pid below is still the application's.
+        let (program, args) = wrapped
+            .split_first()
+            .expect("wrapped argv is never empty: argv had at least one element");
+
+        // No shell. `Command` passes the arguments straight to `execvp`, so a
+        // `.desktop` file whose Exec contains `;` or `$(...)` gets those as
+        // literal argument text rather than as syntax.
+        //
+        // Through `helpers` so a bare program name resolves against the
+        // compiled-in trusted directories rather than the session's `$PATH`
+        // (issue #144), which the kiosk user chooses. The narrowing is
+        // deliberate: a `.desktop` file naming a binary that exists only
+        // somewhere writable by that uid no longer launches from the picker.
+        let mut cmd = crate::helpers::tokio_command(program);
+        cmd.args(args)
+            .envs(crate::process::build_inherited_env(&HashMap::new()))
+            .stdin(std::process::Stdio::null())
+            // The caregiver watches the window, not a log file, and an app that
+            // writes steadily to stdout would otherwise fill a pipe nobody
+            // drains and block.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        // Its own session, like every supervised spawn: without this the
+        // program shares shepherdd's process group and dies with it, which
+        // would kill a package install the moment the daemon restarted.
+        //
+        // SAFETY: async-signal-safe, in the pre-exec context.
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setsid().map_err(|e| std::io::Error::other(e.to_string()))?;
+                Ok(())
+            });
+        }
+
+        let mut child = cmd
+            .spawn()
+            // Names the application, not the `systemd-run` in front of it: a
+            // failure to exec the application itself happens on the far side of
+            // that wrapper and never reaches this arm anyway.
+            .map_err(|e| HostError::SpawnFailed(format!("Failed to spawn {requested}: {e}")))?;
+        let pid = child.id();
+        info!(pid, program = %requested, "Launched an unsupervised program (admin mode)");
+
+        // Nothing supervises this, but somebody has to reap it or every launch
+        // leaves a zombie for the life of the daemon. Waiting is all this task
+        // does: the exit status is deliberately not acted on.
+        tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) => debug!(pid, ?status, "Unsupervised program exited"),
+                Err(e) => debug!(pid, error = %e, "Could not wait on unsupervised program"),
+            }
+        });
+        Ok(())
+    }
+
+    async fn set_admin_mode(&self, active: bool) -> HostResult<()> {
+        // Set the flag before touching the compositor, so that a sweep landing
+        // between the two does not report the caregiver's first window. It is
+        // cleared again if the switch fails, since the mode is not in effect.
+        self.admin_mode.store(active, Ordering::Relaxed);
+        let mode = if active { "admin" } else { "default" };
+        if let Err(e) = crate::sway::set_binding_mode(mode).await {
+            self.admin_mode.store(!active, Ordering::Relaxed);
+            return Err(e);
+        }
+        info!(mode, "Compositor binding mode switched");
+        Ok(())
+    }
+
     fn subscribe(&self) -> mpsc::UnboundedReceiver<HostEvent> {
         self.event_rx
             .lock()
@@ -3195,8 +3408,11 @@ mod tests {
             &host.sidecars,
             // The compositor answered and there is nothing on screen — these
             // tests are about the kill path, not the window path.
-            Some(&[]),
-            &mut unowned,
+            OrphanSweep {
+                windows: Some(&[]),
+                reported: &mut unowned,
+                admin_mode: false,
+            },
             &host.event_tx,
         )
         .await;
@@ -3231,8 +3447,11 @@ mod tests {
             &host.sidecars,
             // The compositor answered and there is nothing on screen — these
             // tests are about the kill path, not the window path.
-            Some(&[]),
-            &mut unowned,
+            OrphanSweep {
+                windows: Some(&[]),
+                reported: &mut unowned,
+                admin_mode: false,
+            },
             &host.event_tx,
         )
         .await;
@@ -3295,8 +3514,11 @@ mod tests {
                 &host.session_info,
                 &host.processes,
                 &host.sidecars,
-                Some(&[]),
-                &mut unowned,
+                OrphanSweep {
+                    windows: Some(&[]),
+                    reported: &mut unowned,
+                    admin_mode: false,
+                },
                 &host.event_tx,
             )
             .await;
@@ -3386,6 +3608,31 @@ mod tests {
         );
     }
 
+    /// Everything a caregiver opens in administrator mode is unowned by
+    /// construction, so reporting it would fill the log with exactly the false
+    /// positive the orphan attribution exists to remove — and, through the
+    /// clients, would put an "unsupervised" banner over the caregiver's own
+    /// windows.
+    #[test]
+    fn administrator_mode_suppresses_orphan_reporting_without_latching() {
+        let known: HashSet<u32> = HashSet::new();
+        let mut reported = HashSet::new();
+        let windows = vec![window(102, "org.example.SomethingTheAdminOpened")];
+
+        assert!(
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported, true).is_empty(),
+            "nothing is an orphan while the caregiver is deliberately opening things"
+        );
+
+        // Leaving the mode with that window still up must report it, rather
+        // than treating it as already-announced from the suppressed span.
+        assert_eq!(
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported, false),
+            vec![102],
+            "a window that outlives admin mode is an orphan again, and is announced"
+        );
+    }
+
     #[test]
     fn unowned_windows_are_reported_once_and_forgotten_when_they_close() {
         let known: HashSet<u32> = [100].into_iter().collect();
@@ -3398,19 +3645,19 @@ mod tests {
         ];
 
         assert_eq!(
-            LinuxHost::report_unowned_windows(&windows, &known, &mut reported),
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported, false),
             vec![102],
             "only the surface belonging to nothing we know about"
         );
         assert!(
-            LinuxHost::report_unowned_windows(&windows, &known, &mut reported).is_empty(),
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported, false).is_empty(),
             "a persistent orphan must not be re-announced on every sweep"
         );
 
         // It closes, then something takes its pid slot later: report again.
-        assert!(LinuxHost::report_unowned_windows(&[], &known, &mut reported).is_empty());
+        assert!(LinuxHost::report_unowned_windows(&[], &known, &mut reported, false).is_empty());
         assert_eq!(
-            LinuxHost::report_unowned_windows(&windows, &known, &mut reported),
+            LinuxHost::report_unowned_windows(&windows, &known, &mut reported, false),
             vec![102],
             "a window that comes back must be reported again"
         );
@@ -3465,8 +3712,11 @@ mod tests {
             &host.session_info,
             &host.processes,
             &host.sidecars,
-            None, // the compositor could not be asked
-            &mut unowned,
+            OrphanSweep {
+                windows: None, // the compositor could not be asked
+                reported: &mut unowned,
+                admin_mode: false,
+            },
             &host.event_tx,
         )
         .await;
@@ -3482,8 +3732,11 @@ mod tests {
             &host.session_info,
             &host.processes,
             &host.sidecars,
-            Some(&[]),
-            &mut unowned,
+            OrphanSweep {
+                windows: Some(&[]),
+                reported: &mut unowned,
+                admin_mode: false,
+            },
             &host.event_tx,
         )
         .await;
@@ -3502,7 +3755,8 @@ mod tests {
         hidden.in_scratchpad = true;
         let mut reported = HashSet::new();
         assert!(
-            LinuxHost::report_unowned_windows(&[hidden], &HashSet::new(), &mut reported).is_empty()
+            LinuxHost::report_unowned_windows(&[hidden], &HashSet::new(), &mut reported, false)
+                .is_empty()
         );
     }
 

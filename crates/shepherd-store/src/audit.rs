@@ -19,6 +19,37 @@ pub enum AuditEventType {
     /// Policy loaded/reloaded
     PolicyLoaded { entry_count: usize },
 
+    /// The device entered administrator mode (issue #154).
+    ///
+    /// Admin mode creates no session, so it bills no usage and leaves no trace
+    /// in the usage table. These two events are therefore the only record that
+    /// the device was in use at all for that span, which is why they are
+    /// written before the mode takes effect rather than after.
+    AdminModeEntered,
+
+    /// The device left administrator mode. `timed_out` distinguishes a
+    /// caregiver leaving deliberately from the idle timeout doing it for them.
+    AdminModeExited { timed_out: bool },
+
+    /// The screen was locked. `timed_out` distinguishes a caregiver pressing
+    /// the button from the idle timeout doing it because they walked away with
+    /// work still running.
+    ScreenLocked { timed_out: bool },
+
+    /// The screen was unlocked. Only a management client can do this, so this
+    /// is the record that an administrator was present.
+    ScreenUnlocked,
+
+    /// A `.desktop` application was launched from administrator mode's picker
+    /// (issue #154).
+    ///
+    /// These launches are unsupervised by design — no session, no time limit,
+    /// no usage recorded — so this is the only record that they happened at
+    /// all. `name` is stored alongside the id because a `.desktop` file can be
+    /// uninstalled, and "org.kde.krita.desktop" is a poor answer six months
+    /// later to "what was run on this device?".
+    AdminAppLaunched { id: String, name: String },
+
     /// Session started
     SessionStarted {
         session_id: SessionId,
