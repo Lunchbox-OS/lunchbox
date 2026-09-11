@@ -23,6 +23,7 @@ import {
   HUD_ORIENTATIONS,
   VERTICAL_HUD_DESCRIPTION,
 } from "../model/hudOrientation";
+import { DraftTextField } from "./DraftTextField";
 import { BrowserEditor, FirewallEditor, InternetEditor } from "./NetworkEditors";
 import { BrightnessEditor, VolumeEditor } from "./RestrictionEditors";
 import { InputCompatEditor, RequiresInputEditor } from "./InputEditors";
@@ -53,11 +54,11 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
       config={config}
       basics={
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Icon (optional)"
             value={entry.icon ?? ""}
-            onChange={(e) => f.setField("icon", e.target.value)}
+            onChange={(v) => f.setField("icon", v)}
             sx={{ maxWidth: 400 }}
             helperText="Theme name or absolute path; autodetected when empty."
           />
@@ -106,12 +107,12 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
               on ? f.setField("disabled", true) : f.unsetField("disabled")
             }
           >
-            <TextField
+            <DraftTextField
               size="small"
               fullWidth
               label="Reason (shown to the caregiver)"
               value={entry.disabled_reason ?? ""}
-              onChange={(e) => f.setField("disabled_reason", e.target.value)}
+              onChange={(v) => f.setField("disabled_reason", v)}
             />
           </Section>
         </>

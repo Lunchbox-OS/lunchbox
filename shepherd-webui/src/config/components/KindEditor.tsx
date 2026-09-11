@@ -20,35 +20,11 @@ import type {
   RawMediaSortBy,
   RetroarchSaveState,
 } from "../model/config.generated";
+import { DraftTextField } from "./DraftTextField";
 import { KeyValueEditor } from "./KeyValueEditor";
 import { StringListEditor } from "./StringListEditor";
 import { KIND_FIELD_DEFAULTS } from "../model/field-defaults.generated";
-
-type KindTag = RawEntryKind["type"];
-
-const KIND_LABELS: Record<KindTag, string> = {
-  process: "Program",
-  snap: "Snap",
-  steam: "Steam game",
-  flatpak: "Flatpak",
-  vm: "Virtual machine",
-  media: "Media library",
-  retroarch: "Emulated game",
-  ebook: "Book",
-  custom: "Custom",
-};
-
-const KIND_HINTS: Record<KindTag, string> = {
-  process: "Runs a command directly.",
-  snap: "Launched through snap, with systemd scope-based process management.",
-  steam: "Launched through the Steam snap by App ID.",
-  flatpak: "Launched through flatpak by application ID.",
-  vm: "Handed to a VM driver.",
-  media: "Opens a shepherd-media library.",
-  retroarch: "Boots one ROM or disc image through RetroArch.",
-  ebook: "Opens one book in a reader locked to reading it.",
-  custom: "Passed through to a host adapter that understands the type name.",
-};
+import { KIND_HINTS, KIND_LABELS, blankKind, type KindTag } from "../model/kinds";
 
 // Labelled as Records over the generated unions, not arrays: that is what
 // turned #129's new `retroarch` variant into a compile error here rather than a
@@ -99,64 +75,12 @@ export function KindEditor({ kind, onChange }: Props) {
   const switchTo = (type: KindTag) => {
     if (type === kind.type) return;
     // Carry across what the new shape can also hold; the rest has no analogue.
-    const args = "args" in kind ? kind.args : undefined;
-    const env = "env" in kind ? kind.env : undefined;
-    const base = { type } as Record<string, unknown>;
-    switch (type) {
-      case "process":
-        onChange({
-          ...base,
-          command: "",
-          args: args ?? [],
-          env: env ?? {},
-        } as RawEntryKind);
-        break;
-      case "snap":
-        onChange({
-          ...base,
-          snap_name: "",
-          args: args ?? [],
-          env: env ?? {},
-        } as RawEntryKind);
-        break;
-      case "steam":
-        onChange({
-          ...base,
-          app_id: 0,
-          args: args ?? [],
-          env: env ?? {},
-        } as RawEntryKind);
-        break;
-      case "flatpak":
-        onChange({
-          ...base,
-          app_id: "",
-          args: args ?? [],
-          env: env ?? {},
-        } as RawEntryKind);
-        break;
-      case "vm":
-        onChange({ ...base, driver: "", args: {} } as RawEntryKind);
-        break;
-      case "media":
-        onChange({ ...base, library: "" } as RawEntryKind);
-        break;
-      case "retroarch":
-        onChange({
-          ...base,
-          content: "",
-          core: "",
-          args: args ?? [],
-          env: env ?? {},
-        } as RawEntryKind);
-        break;
-      case "ebook":
-        onChange({ ...base, book: "", args: args ?? [], env: env ?? {} } as RawEntryKind);
-        break;
-      case "custom":
-        onChange({ ...base, type_name: "" } as RawEntryKind);
-        break;
-    }
+    onChange(
+      blankKind(type, {
+        args: "args" in kind && Array.isArray(kind.args) ? kind.args : undefined,
+        env: "env" in kind ? kind.env : undefined,
+      }),
+    );
   };
 
   return (
@@ -178,83 +102,83 @@ export function KindEditor({ kind, onChange }: Props) {
 
       {kind.type === "process" && (
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Command"
             required
             value={kind.command}
-            onChange={(e) => patch({ command: e.target.value })}
+            onChange={(v) => patch({ command: v })}
             placeholder="/usr/bin/tuxmath"
           />
-          <TextField
+          <DraftTextField
             size="small"
             label="Working directory (optional)"
             value={kind.cwd ?? ""}
-            onChange={(e) => patch({ cwd: e.target.value || null })}
+            onChange={(v) => patch({ cwd: v || null })}
           />
         </>
       )}
 
       {kind.type === "snap" && (
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Snap name"
             required
             value={kind.snap_name}
-            onChange={(e) => patch({ snap_name: e.target.value })}
+            onChange={(v) => patch({ snap_name: v })}
             placeholder="mc-installer"
           />
-          <TextField
+          <DraftTextField
             size="small"
             label="Command (defaults to the snap name)"
             value={kind.command ?? ""}
-            onChange={(e) => patch({ command: e.target.value || null })}
+            onChange={(v) => patch({ command: v || null })}
           />
         </>
       )}
 
       {kind.type === "steam" && (
-        <TextField
+        <DraftTextField
           size="small"
           type="number"
           label="Steam App ID"
           required
-          value={kind.app_id}
-          onChange={(e) => patch({ app_id: Number(e.target.value) })}
+          value={String(kind.app_id)}
+          onChange={(v) => patch({ app_id: Number(v) })}
           helperText="From the game's store URL, e.g. 504230 for Celeste."
         />
       )}
 
       {kind.type === "flatpak" && (
-        <TextField
+        <DraftTextField
           size="small"
           label="Application ID"
           required
           value={kind.app_id}
-          onChange={(e) => patch({ app_id: e.target.value })}
+          onChange={(v) => patch({ app_id: v })}
           placeholder="org.prismlauncher.PrismLauncher"
         />
       )}
 
       {kind.type === "vm" && (
-        <TextField
+        <DraftTextField
           size="small"
           label="Driver"
           required
           value={kind.driver}
-          onChange={(e) => patch({ driver: e.target.value })}
+          onChange={(v) => patch({ driver: v })}
         />
       )}
 
       {kind.type === "media" && (
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Library"
             required
             value={kind.library}
-            onChange={(e) => patch({ library: e.target.value })}
+            onChange={(v) => patch({ library: v })}
             placeholder="~/Media/films.toml"
             helperText="A library .toml, .m3u/.m3u8, or a YouTube playlist URL."
           />
@@ -273,12 +197,12 @@ export function KindEditor({ kind, onChange }: Props) {
           </TextField>
           {/* `item` is required by, and only valid with, mode = "play". */}
           {(kind.mode ?? KIND_FIELD_DEFAULTS.media.mode) === "play" && (
-            <TextField
+            <DraftTextField
               size="small"
               label="Item id"
               required
               value={kind.item ?? ""}
-              onChange={(e) => patch({ item: e.target.value || null })}
+              onChange={(v) => patch({ item: v || null })}
               helperText="Which item in the library to play end to end."
             />
           )}
@@ -388,12 +312,12 @@ export function KindEditor({ kind, onChange }: Props) {
 
       {kind.type === "retroarch" && (
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Content"
             required
             value={kind.content}
-            onChange={(e) => patch({ content: e.target.value })}
+            onChange={(v) => patch({ content: v })}
             placeholder="~/Games/pokemon-firered.gba"
             helperText="The ROM or disc image. Absolute, or starting with ~/."
           />
@@ -416,21 +340,21 @@ export function KindEditor({ kind, onChange }: Props) {
             <MenuItem value="path">By path</MenuItem>
           </TextField>
           {kind.core_path != null ? (
-            <TextField
+            <DraftTextField
               size="small"
               label="Core path"
               required
               value={kind.core_path}
-              onChange={(e) => patch({ core_path: e.target.value })}
+              onChange={(v) => patch({ core_path: v })}
               placeholder="/usr/lib/libretro/mgba_libretro.so"
             />
           ) : (
-            <TextField
+            <DraftTextField
               size="small"
               label="Core name"
               required
               value={kind.core ?? ""}
-              onChange={(e) => patch({ core: e.target.value })}
+              onChange={(v) => patch({ core: v })}
               placeholder="mgba"
               helperText="Resolved to e.g. mgba_libretro.so."
             />
@@ -469,11 +393,11 @@ export function KindEditor({ kind, onChange }: Props) {
             }
             label="Offer the HUD's reset button"
           />
-          <TextField
+          <DraftTextField
             size="small"
             label="RetroArch binary (optional)"
             value={kind.command ?? ""}
-            onChange={(e) => patch({ command: e.target.value })}
+            onChange={(v) => patch({ command: v })}
             placeholder={KIND_FIELD_DEFAULTS.retroarch.command}
           />
         </>
@@ -481,12 +405,12 @@ export function KindEditor({ kind, onChange }: Props) {
 
       {kind.type === "ebook" && (
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Book"
             required
             value={kind.book}
-            onChange={(e) => patch({ book: e.target.value })}
+            onChange={(v) => patch({ book: v })}
             placeholder="~/Books/the-hobbit.epub"
             helperText="EPUB, PDF, CBZ or DjVu. Absolute, or starting with ~/."
           />
@@ -504,29 +428,27 @@ export function KindEditor({ kind, onChange }: Props) {
               </MenuItem>
             ))}
           </TextField>
-          <TextField
+          <DraftTextField
             size="small"
             type="number"
             label="Text size"
-            value={kind.font_size ?? KIND_FIELD_DEFAULTS.ebook.font_size}
-            onChange={(e) => patch({ font_size: Number(e.target.value) })}
+            value={String(kind.font_size ?? KIND_FIELD_DEFAULTS.ebook.font_size)}
+            onChange={(v) => patch({ font_size: Number(v) })}
             helperText="Points, for a reflowed EPUB. Changing it repaginates the book, which moves a saved place -- set it before the first read."
           />
-          <TextField
+          <DraftTextField
             size="small"
             label="Font"
             value={kind.font_family ?? ""}
-            onChange={(e) => patch({ font_family: e.target.value })}
+            onChange={(v) => patch({ font_family: v })}
             placeholder={KIND_FIELD_DEFAULTS.ebook.font_family}
           />
-          <TextField
+          <DraftTextField
             size="small"
             type="number"
             label="Open at page (optional)"
-            value={kind.open_at ?? ""}
-            onChange={(e) =>
-              patch({ open_at: e.target.value === "" ? null : Number(e.target.value) })
-            }
+            value={kind.open_at == null ? "" : String(kind.open_at)}
+            onChange={(v) => patch({ open_at: v === "" ? null : Number(v) })}
             helperText="First launch only; after that the reader reopens where it was left."
           />
           <FormControlLabel
@@ -538,23 +460,23 @@ export function KindEditor({ kind, onChange }: Props) {
             }
             label="Lock the reader to this book"
           />
-          <TextField
+          <DraftTextField
             size="small"
             label="Reader binary (optional)"
             value={kind.command ?? ""}
-            onChange={(e) => patch({ command: e.target.value })}
+            onChange={(v) => patch({ command: v })}
             placeholder="okular"
           />
         </>
       )}
 
       {kind.type === "custom" && (
-        <TextField
+        <DraftTextField
           size="small"
           label="Type name"
           required
           value={kind.type_name}
-          onChange={(e) => patch({ type_name: e.target.value })}
+          onChange={(v) => patch({ type_name: v })}
         />
       )}
 

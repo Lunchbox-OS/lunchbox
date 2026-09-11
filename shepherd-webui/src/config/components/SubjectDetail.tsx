@@ -22,10 +22,10 @@ import Alert from "@mui/material/Alert";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
-import TextField from "@mui/material/TextField";
 import { useFields } from "../doc/useFields";
 import { subjectPath, type Subject } from "../doc/patches";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
+import { DraftTextField } from "./DraftTextField";
 import type { RawConfig } from "../model/config.generated";
 import { issuesForEntry, issuesForGroup } from "../model/report";
 import { IssueList } from "./IssueList";
@@ -90,11 +90,11 @@ export function SubjectDetail({
 
       {tab === "basics" && (
         <Stack spacing={2}>
-          <TextField
+          <DraftTextField
             size="small"
             label="Label"
             value={self?.label ?? ""}
-            onChange={(e) => f.setField("label", e.target.value)}
+            onChange={(v) => f.setField("label", v)}
             sx={{ maxWidth: 400 }}
             helperText={
               isGroup

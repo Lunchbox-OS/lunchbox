@@ -104,6 +104,31 @@ describe("editing a book", () => {
   });
 });
 
+// The projection these forms are controlled by is re-derived 120ms after an
+// edit, and the stub never re-derives it at all — so the prop stays exactly
+// where it started, which is what makes the draft visible to a test.
+describe("typing into a path field", () => {
+  beforeEach(() => apply.mockClear());
+  afterEach(cleanup);
+
+  it("shows the character without waiting for the document", async () => {
+    show(hobbit());
+    const field = screen.getByRole("textbox", { name: /^Book/ }) as HTMLInputElement;
+    await userEvent.type(field, "xyz");
+    expect(field.value).toBe("~/Books/the-hobbit.epubxyz");
+  });
+
+  it("goes back to what the document says once it is left", async () => {
+    show(hobbit());
+    const field = screen.getByRole("textbox", { name: /^Book/ }) as HTMLInputElement;
+    await userEvent.type(field, "xyz");
+    await userEvent.tab();
+    // In the app the projection has caught up by now and says "…epubxyz"; here
+    // it never moves, so this is the draft being dropped rather than kept.
+    expect(field.value).toBe("~/Books/the-hobbit.epub");
+  });
+});
+
 describe("a change that touches two fields", () => {
   beforeEach(() => apply.mockClear());
   afterEach(cleanup);
@@ -131,5 +156,82 @@ describe("a change that touches two fields", () => {
     expect(keys[0]).toBeDefined();
     expect(keys[1]).toBe(keys[0]);
     expect(doc.endGesture).toHaveBeenCalled();
+  });
+});
+
+const { EntriesPage } = await import("./pages/EntriesPage");
+
+describe("adding an activity", () => {
+  beforeEach(() => apply.mockClear());
+  afterEach(cleanup);
+
+  const openDialog = async () => {
+    render(<EntriesPage config={{ config_version: 1, entries: [] } as RawConfig} />);
+    await userEvent.click(screen.getByRole("button", { name: "Add activity" }));
+  };
+
+  // The dialog offered five of the nine, so a book, an emulated game, a VM or
+  // a custom kind could not be created at all — only made by hand in the TOML
+  // and then edited here.
+  it("offers every kind the editor knows", async () => {
+    await openDialog();
+    await userEvent.click(screen.getByRole("combobox", { name: "Type" }));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Program",
+      "Snap",
+      "Steam game",
+      "Flatpak",
+      "Virtual machine",
+      "Media library",
+      "Emulated game",
+      "Book",
+      "Custom",
+    ]);
+  });
+
+  it("creates the kind it was asked for, with the fields the schema requires", async () => {
+    await openDialog();
+    await userEvent.type(screen.getByRole("textbox", { name: /^Label/ }), "The Hobbit");
+    await userEvent.click(screen.getByRole("combobox", { name: "Type" }));
+    await userEvent.click(screen.getByRole("option", { name: "Book" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    expect(apply).toHaveBeenCalledWith({
+      op: "insert",
+      path: "entries",
+      value: {
+        id: "the-hobbit",
+        label: "The Hobbit",
+        kind: { type: "ebook", book: "", args: [], env: {} },
+      },
+    });
+  });
+
+  // A media activity was built with `library_id`, which the schema has never
+  // had: the entry parsed as missing its required `library` instead.
+  it("builds a media library on the field the schema actually has", async () => {
+    await openDialog();
+    await userEvent.type(screen.getByRole("textbox", { name: /^Label/ }), "Films");
+    await userEvent.click(screen.getByRole("combobox", { name: "Type" }));
+    await userEvent.click(screen.getByRole("option", { name: "Media library" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    const calls = apply.mock.calls;
+    const value = calls[calls.length - 1]?.[0]?.value as { kind: object };
+    expect(value.kind).toEqual({ type: "media", library: "" });
+  });
+});
+
+const { KIND_LABELS, blankKind } = await import("./model/kinds");
+
+describe("every kind", () => {
+  it("has a blank shape carrying its required fields", () => {
+    for (const type of Object.keys(KIND_LABELS) as (keyof typeof KIND_LABELS)[]) {
+      const blank = blankKind(type) as Record<string, unknown>;
+      expect(blank.type).toBe(type);
+      for (const [key, v] of Object.entries(blank)) {
+        expect(v, `${type}.${key}`).toBeDefined();
+      }
+    }
   });
 });
