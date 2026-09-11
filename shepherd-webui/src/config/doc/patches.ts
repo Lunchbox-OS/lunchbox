@@ -35,6 +35,31 @@ export const move = (path: string, from: number, to: number): Patch => ({
   to,
 });
 
+/**
+ * The patches that take an entry's kind from `before` to `after`.
+ *
+ * `KindEditor` hands back the whole kind, built on the view — where serde
+ * spells every unset option as `null` and fills in every default. Writing that
+ * back whole plants a line for each default in the file, and before #192 failed
+ * outright on the nulls. So only the fields that changed are written, and one
+ * that became null is removed. A change of type replaces the kind whole, since
+ * none of the old fields mean anything to the new one.
+ */
+export const kindPatches = (path: string, before: object, after: object): Patch[] => {
+  const was = before as Record<string, Json | undefined>;
+  const now = after as Record<string, Json | undefined>;
+  if (was.type !== now.type) return [set(path, now as Json)];
+
+  const patches: Patch[] = [];
+  for (const key of new Set([...Object.keys(was), ...Object.keys(now)])) {
+    const from = was[key] ?? null;
+    const to = now[key] ?? null;
+    if (JSON.stringify(from) === JSON.stringify(to)) continue;
+    patches.push(to === null ? unset(`${path}.${key}`) : set(`${path}.${key}`, to));
+  }
+  return patches;
+};
+
 // --- path builders -------------------------------------------------------
 
 export const entryPath = (id: string, ...rest: string[]): string =>

@@ -16,13 +16,14 @@ import Typography from "@mui/material/Typography";
 import Badge from "@mui/material/Badge";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { useFields } from "../doc/useFields";
-import { entryPath, insert, set, unset } from "../doc/patches";
+import { entryPath, insert, kindPatches, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry, RawEntryKind } from "../model/config.generated";
 import { confirmsOnCloseByDefault, defaultInputCompat } from "../model/kindDefaults";
 import {
   HUD_ORIENTATIONS,
   VERTICAL_HUD_DESCRIPTION,
 } from "../model/hudOrientation";
+import { DraftTextField } from "./DraftTextField";
 import { BrowserEditor, FirewallEditor, InternetEditor } from "./NetworkEditors";
 import { BrightnessEditor, VolumeEditor } from "./RestrictionEditors";
 import { InputCompatEditor, RequiresInputEditor } from "./InputEditors";
@@ -53,11 +54,11 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
       config={config}
       basics={
         <>
-          <TextField
+          <DraftTextField
             size="small"
             label="Icon (optional)"
             value={entry.icon ?? ""}
-            onChange={(e) => f.setField("icon", e.target.value)}
+            onChange={(v) => f.setField("icon", v)}
             sx={{ maxWidth: 400 }}
             helperText="Theme name or absolute path; autodetected when empty."
           />
@@ -87,7 +88,14 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
             </Typography>
             <KindEditor
               kind={entry.kind}
-              onChange={(kind: RawEntryKind) => apply(set(`${base}.kind`, kind as never))}
+              onChange={(kind: RawEntryKind) => {
+                // Sometimes more than one field (a RetroArch core swaps its
+                // name for a path), but still one edit to undo.
+                for (const p of kindPatches(`${base}.kind`, entry.kind, kind)) {
+                  apply(p, `kind:${base}`);
+                }
+                endGesture();
+              }}
             />
           </Box>
 
@@ -99,12 +107,12 @@ export function EntryDetail({ entry, config }: { entry: RawEntry; config: RawCon
               on ? f.setField("disabled", true) : f.unsetField("disabled")
             }
           >
-            <TextField
+            <DraftTextField
               size="small"
               fullWidth
               label="Reason (shown to the caregiver)"
               value={entry.disabled_reason ?? ""}
-              onChange={(e) => f.setField("disabled_reason", e.target.value)}
+              onChange={(v) => f.setField("disabled_reason", v)}
             />
           </Section>
         </>

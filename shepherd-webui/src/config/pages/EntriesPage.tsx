@@ -41,6 +41,7 @@ import ErrorIcon from "@mui/icons-material/ErrorOutlined";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { entryPath, insert, set, unset } from "../doc/patches";
 import type { RawConfig, RawEntry } from "../model/config.generated";
+import { KIND_LABELS, blankKind, type KindTag } from "../model/kinds";
 import { issuesForEntry } from "../model/report";
 import { EntryDetail } from "../components/EntryDetail";
 import type { FocusRequest } from "../navigation";
@@ -350,7 +351,7 @@ function AddEntryDialog({
   const [label, setLabel] = useState("");
   const [id, setId] = useState("");
   const [group, setGroup] = useState("");
-  const [kind, setKind] = useState("process");
+  const [kind, setKind] = useState<KindTag>("process");
 
   // Suggest an id from the label until the id is edited by hand.
   const [idTouched, setIdTouched] = useState(false);
@@ -367,21 +368,10 @@ function AddEntryDialog({
   };
 
   const submit = () => {
-    const kindTable: Record<string, unknown> =
-      kind === "process"
-        ? { type: "process", command: "" }
-        : kind === "snap"
-          ? { type: "snap", snap_name: "" }
-          : kind === "flatpak"
-            ? { type: "flatpak", app_id: "" }
-            : kind === "steam"
-              ? { type: "steam", app_id: 0 }
-              : { type: "media", library_id: "" };
-
     onAdd({
       id: effectiveId,
       label: label.trim(),
-      kind: kindTable,
+      kind: blankKind(kind),
       ...(group ? { group } : {}),
     });
     reset();
@@ -420,13 +410,13 @@ function AddEntryDialog({
             size="small"
             label="Type"
             value={kind}
-            onChange={(e) => setKind(e.target.value)}
+            onChange={(e) => setKind(e.target.value as KindTag)}
           >
-            <MenuItem value="process">Program</MenuItem>
-            <MenuItem value="snap">Snap</MenuItem>
-            <MenuItem value="flatpak">Flatpak</MenuItem>
-            <MenuItem value="steam">Steam game</MenuItem>
-            <MenuItem value="media">Media library</MenuItem>
+            {(Object.keys(KIND_LABELS) as KindTag[]).map((t) => (
+              <MenuItem key={t} value={t}>
+                {KIND_LABELS[t]}
+              </MenuItem>
+            ))}
           </TextField>
           {groups.length > 0 && (
             <TextField

@@ -262,6 +262,71 @@ fn an_ebook_entrys_own_fields_survive_the_round_trip() {
     assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
 }
 
+/// The view spells every unset `Option` as `null`, so a kind the editor read
+/// and hands back carries nulls. Written as a standard `[entries.kind]` table
+/// it is merged key by key, and a null there has to mean "absent" — as it
+/// already did in an inline table — rather than failing the edit (issue #192).
+#[test]
+fn a_kind_read_from_the_view_can_be_written_back() {
+    let mut doc = ConfigDoc::open(&example()).unwrap();
+    let view: serde_json::Value = serde_json::from_str(&doc.view().unwrap()).unwrap();
+    let mut kind = view["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "the-hobbit")
+        .expect("the example config still has the ebook entry")["kind"]
+        .clone();
+    assert!(kind["open_at"].is_null(), "sanity: {kind}");
+
+    kind["book"] = serde_json::json!("~/Books/the-silmarillion.epub");
+    let changed = doc
+        .apply(&set("entries[id=the-hobbit].kind", kind), None)
+        .unwrap();
+    assert!(changed);
+
+    let text = doc.text();
+    assert!(
+        text.contains(r#"book = "~/Books/the-silmarillion.epub""#),
+        "got: {text}"
+    );
+    let hobbit = text
+        .split("[[entries]]")
+        .find(|s| s.contains(r#"id = "the-hobbit""#))
+        .unwrap();
+    for key in ["open_at", "command"] {
+        assert!(
+            !hobbit.lines().any(|l| l.starts_with(key)),
+            "{key} was written out: {hobbit}"
+        );
+    }
+    let report: serde_json::Value = serde_json::from_str(&doc.validate()).unwrap();
+    assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
+}
+
+/// The same, for every kind in the example, inline or standard table.
+#[test]
+fn every_kind_in_the_example_can_be_written_back_as_it_reads() {
+    let src = example();
+    let view: serde_json::Value =
+        serde_json::from_str(&ConfigDoc::open(&src).unwrap().view().unwrap()).unwrap();
+    for entry in view["entries"].as_array().unwrap() {
+        let id = entry["id"].as_str().unwrap();
+        let mut doc = ConfigDoc::open(&src).unwrap();
+        doc.apply(
+            &set(&format!("entries[id={id}].kind"), entry["kind"].clone()),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{id}: {e}"));
+        let report: serde_json::Value = serde_json::from_str(&doc.validate()).unwrap();
+        assert_eq!(
+            report["errors"].as_array().unwrap().len(),
+            0,
+            "{id}: {report}"
+        );
+    }
+}
+
 #[test]
 fn creating_a_missing_sub_table_uses_standard_table_style() {
     // `[entries.limits]`, not `limits = { ... }`, matching the house style.

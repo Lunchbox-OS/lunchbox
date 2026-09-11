@@ -511,6 +511,13 @@ fn merge_object_into_table(t: &mut Table, value: &Json) -> DocResult<bool> {
     };
     let mut changed = false;
     for (k, v) in obj {
+        // A null member is an absent key, as in `json_to_table` and
+        // `json_to_value`. The editor's view spells every unset `Option` as
+        // null, so a table it read and hands back is full of them (#192).
+        if v.is_null() {
+            changed |= t.remove(k).is_some();
+            continue;
+        }
         changed |= set_in_table(t, k, v)?;
     }
     // Keys present in the table but absent from the object are removed, which
