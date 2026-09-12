@@ -19,6 +19,10 @@
 //!   cargo test -p shepherd-host-linux --test waydroid_real -- \
 //!       --ignored --nocapture
 
+// Fixture code: probes the live host by naming `waydroid`, `swaymsg` and
+// friends, which the ban makes deliberate rather than accidental (issue #144).
+#![allow(clippy::disallowed_methods)]
+
 use std::process::Command;
 use std::time::Duration;
 

@@ -341,6 +341,13 @@ fn parse_permille(mut args: impl Iterator<Item = String>) -> Result<u32, String>
     Ok(permille)
 }
 
+// Bare names are safe here, unlike anywhere in the daemon (issue #144). This
+// binary only ever runs under `pkexec`, which replaces the environment with a
+// minimal known-safe one -- `PATH` arrives as root-owned directories only, and
+// the caller's never reaches here. That is the whole reason the two privileged
+// Waydroid operations go through pkexec rather than being called directly, and
+// it is the same exception `shepherd-firewall-helper` takes.
+#[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
     let action = parse_args(std::env::args().skip(1)).unwrap_or_else(|e| die(e));
     // These are multi-step / output-inspecting rather than a single
@@ -363,6 +370,13 @@ fn main() -> ExitCode {
 /// success iff it prints `1` (Android finished booting). Any failure to run it
 /// (session down, waydroid missing) or any other value is a non-success exit, so
 /// the caller treats Android as not-yet-ready.
+// Bare names are safe here, unlike anywhere in the daemon (issue #144). This
+// binary only ever runs under `pkexec`, which replaces the environment with a
+// minimal known-safe one -- `PATH` arrives as root-owned directories only, and
+// the caller's never reaches here. That is the whole reason the two privileged
+// Waydroid operations go through pkexec rather than being called directly, and
+// it is the same exception `shepherd-firewall-helper` takes.
+#[allow(clippy::disallowed_methods)]
 fn boot_completed_exit_code(action: &Action) -> ExitCode {
     let (program, args) = action.command();
     match Command::new(program).args(&args).output() {
@@ -375,6 +389,13 @@ fn boot_completed_exit_code(action: &Action) -> ExitCode {
 /// a pid (the package has a live process). `pidof`'s own exit code isn't reliable
 /// through `waydroid shell`, so inspect stdout. Any run failure is a non-success
 /// exit — the caller treats the app as not running.
+// Bare names are safe here, unlike anywhere in the daemon (issue #144). This
+// binary only ever runs under `pkexec`, which replaces the environment with a
+// minimal known-safe one -- `PATH` arrives as root-owned directories only, and
+// the caller's never reaches here. That is the whole reason the two privileged
+// Waydroid operations go through pkexec rather than being called directly, and
+// it is the same exception `shepherd-firewall-helper` takes.
+#[allow(clippy::disallowed_methods)]
 fn is_running_exit_code(action: &Action) -> ExitCode {
     let (program, args) = action.command();
     match Command::new(program).args(&args).output() {
@@ -391,6 +412,13 @@ fn is_running_exit_code(action: &Action) -> ExitCode {
 ///
 /// `action.command()` is the activity-state read; the resize is a second fixed
 /// command whose only variable parts are integers parsed here.
+// Bare names are safe here, unlike anywhere in the daemon (issue #144). This
+// binary only ever runs under `pkexec`, which replaces the environment with a
+// minimal known-safe one -- `PATH` arrives as root-owned directories only, and
+// the caller's never reaches here. That is the whole reason the two privileged
+// Waydroid operations go through pkexec rather than being called directly, and
+// it is the same exception `shepherd-firewall-helper` takes.
+#[allow(clippy::disallowed_methods)]
 fn maximize_exit_code(action: &Action, package: &str) -> ExitCode {
     let (program, args) = action.command();
     let dump = match Command::new(program).args(&args).output() {
@@ -443,6 +471,13 @@ fn maximize_exit_code(action: &Action, package: &str) -> ExitCode {
 ///
 /// `action.command()` is the `--get` read; the `--set` is a second fixed command
 /// whose only variable part is the integer max parsed here.
+// Bare names are safe here, unlike anywhere in the daemon (issue #144). This
+// binary only ever runs under `pkexec`, which replaces the environment with a
+// minimal known-safe one -- `PATH` arrives as root-owned directories only, and
+// the caller's never reaches here. That is the whole reason the two privileged
+// Waydroid operations go through pkexec rather than being called directly, and
+// it is the same exception `shepherd-firewall-helper` takes.
+#[allow(clippy::disallowed_methods)]
 fn max_volume_exit_code(action: &Action) -> ExitCode {
     let (program, args) = action.command();
     let out = match Command::new(program).args(&args).output() {
@@ -488,6 +523,13 @@ fn parse_volume_max(out: &str) -> Option<u32> {
 /// `action.command()` is the `wm density` read; the set is a second fixed command
 /// whose only variable part is the integer density computed here. Reading the
 /// *physical* line keeps this idempotent — re-running never compounds an override.
+// Bare names are safe here, unlike anywhere in the daemon (issue #144). This
+// binary only ever runs under `pkexec`, which replaces the environment with a
+// minimal known-safe one -- `PATH` arrives as root-owned directories only, and
+// the caller's never reaches here. That is the whole reason the two privileged
+// Waydroid operations go through pkexec rather than being called directly, and
+// it is the same exception `shepherd-firewall-helper` takes.
+#[allow(clippy::disallowed_methods)]
 fn scale_density_exit_code(action: &Action, permille: u32) -> ExitCode {
     let (program, args) = action.command();
     let out = match Command::new(program).args(&args).output() {

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use shepherd_host_api::{HostError, HostResult};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -83,7 +83,11 @@ pub fn parse_session_running(status_output: &str) -> bool {
 /// Whether the Waydroid session is currently running. A stopped session means
 /// no app can be launched yet (the daemon should preboot it).
 pub async fn session_running() -> bool {
-    match Command::new("waydroid").arg("status").output().await {
+    match crate::helpers::tokio_command("waydroid")
+        .arg("status")
+        .output()
+        .await
+    {
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stdout);
             parse_session_running(&text)
@@ -103,7 +107,7 @@ pub async fn session_running() -> bool {
 /// child on the boot animation, so the readiness gate keys on this instead.
 /// Returns false if the session is down or the helper isn't installed.
 pub async fn boot_completed() -> bool {
-    match Command::new("pkexec")
+    match crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("boot-completed")
         .status()
@@ -130,7 +134,7 @@ pub async fn boot_completed() -> bool {
 /// that is not the resumed one, which is a race a heavy app loses on a cold boot
 /// — see [`maximize_when_resumed`](crate::adapter::LinuxHost) for the retry.
 pub async fn maximize(package: &str) -> bool {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .args(["maximize", "--package", package])
         .status()
@@ -161,7 +165,7 @@ pub async fn maximize(package: &str) -> bool {
 /// HUD, which hides Android's own caption back button. Logs and returns on
 /// failure.
 pub async fn back() {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("back")
         .status()
@@ -182,7 +186,7 @@ pub async fn back() {
 /// can reach. Maxing it hands the full dynamic range to shepherd's own volume.
 /// Re-applied per launch (the setting can drift within a session). Logs on failure.
 pub async fn max_volume() {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("max-volume")
         .status()
@@ -202,7 +206,7 @@ pub async fn max_volume() {
 /// native scale 1 and carries the display's zoom as Android density instead. Logs
 /// on failure.
 pub async fn scale_density(permille: u32) {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .args(["scale-density", &permille.to_string()])
         .status()
@@ -242,7 +246,7 @@ pub async fn launch_app(package: &str) -> Result<(), LaunchError> {
     let argv = launch_argv(package);
     // Spawn (not `.status()`) so we can kill it if it hangs. `kill_on_drop`
     // reaps it if we bail on any error path.
-    let mut child = Command::new(&argv[0])
+    let mut child = crate::helpers::tokio_command(&argv[0])
         .args(&argv[1..])
         .kill_on_drop(true)
         .spawn()
@@ -281,7 +285,7 @@ pub async fn launch_app(package: &str) -> Result<(), LaunchError> {
 /// closing the Wayland window; this just reclaims the cached Android process
 /// where the helper + polkit rule are installed.
 pub async fn force_stop(package: &str) {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .args(["force-stop", "--package", package])
         .status()
@@ -301,7 +305,7 @@ pub async fn force_stop(package: &str) {
 /// (`pkexec shepherd-waydroid-helper is-running`). False if it isn't running or
 /// the helper couldn't run — the caller then proceeds (treats it as stopped).
 pub async fn is_app_running(package: &str) -> bool {
-    match Command::new("pkexec")
+    match crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .args(["is-running", "--package", package])
         .status()
@@ -353,7 +357,7 @@ pub async fn ensure_app_stopped(package: &str) {
 /// where the service is already enabled at boot this is a no-op; it exists so
 /// preboot can self-heal a stopped container.
 pub async fn preboot_container() {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("preboot")
         .status()
@@ -374,7 +378,7 @@ pub async fn preboot_container() {
 /// home/recents/search buttons. System-wide and persistent until SystemUI
 /// restarts, so the adapter re-applies it per launch.
 pub async fn lock_down() {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("lock-down")
         .status()
@@ -394,7 +398,9 @@ pub async fn lock_down() {
 /// session user (attaches to the caller's compositor via WAYLAND_DISPLAY /
 /// SWAYSOCK); the process exits when its window is closed or it is killed.
 pub fn show_full_ui() -> std::io::Result<Child> {
-    Command::new("waydroid").arg("show-full-ui").spawn()
+    crate::helpers::tokio_command("waydroid")
+        .arg("show-full-ui")
+        .spawn()
 }
 
 /// Best-effort: launch `package` pinned in Lock Task Mode via the DPC, through
@@ -402,7 +408,7 @@ pub fn show_full_ui() -> std::io::Result<Child> {
 /// → the DPC's `LaunchActivity`). Used by the `lock_mode = "locktask"` launch
 /// path; requires the DPC installed + set as device owner.
 pub async fn pin(package: &str) {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .args(["pin", "--package", package])
         .status()
@@ -422,7 +428,7 @@ pub async fn pin(package: &str) {
 /// via the privileged helper (`pkexec shepherd-waydroid-helper unlock` → the
 /// DPC's `ControlReceiver`).
 pub async fn unlock() {
-    let result = Command::new("pkexec")
+    let result = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("unlock")
         .status()
@@ -439,7 +445,7 @@ pub async fn unlock() {
 /// Read a persistent Waydroid property (session user), trimmed. `None` on any
 /// failure or empty value.
 pub async fn get_prop(key: &str) -> Option<String> {
-    let out = Command::new("waydroid")
+    let out = crate::helpers::tokio_command("waydroid")
         .args(["prop", "get", key])
         .output()
         .await
@@ -450,7 +456,7 @@ pub async fn get_prop(key: &str) -> Option<String> {
 
 /// Set a persistent Waydroid property (session user).
 pub async fn set_prop(key: &str, value: &str) -> HostResult<()> {
-    let status = Command::new("waydroid")
+    let status = crate::helpers::tokio_command("waydroid")
         .args(["prop", "set", key, value])
         .status()
         .await
@@ -465,7 +471,7 @@ pub async fn set_prop(key: &str, value: &str) -> HostResult<()> {
 
 /// Stop the Waydroid session (session user). Best-effort.
 pub async fn session_stop() {
-    if let Err(e) = Command::new("waydroid")
+    if let Err(e) = crate::helpers::tokio_command("waydroid")
         .args(["session", "stop"])
         .status()
         .await
@@ -483,7 +489,7 @@ pub async fn start_session_and_wait(timeout: Duration) -> bool {
     if session_running().await {
         return true;
     }
-    let mut child = match Command::new("waydroid")
+    let mut child = match crate::helpers::tokio_command("waydroid")
         .args(["session", "start"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -530,7 +536,7 @@ pub async fn start_session_and_wait(timeout: Duration) -> bool {
 /// observed a fractional output scale sizes its display to `logical x scale`
 /// instead, which renders wrong and is otherwise silent.
 pub async fn display_size() -> Option<(u32, u32)> {
-    let out = Command::new("pkexec")
+    let out = crate::helpers::tokio_command("pkexec")
         .arg(waydroid_helper_path())
         .arg("display-size")
         .output()
