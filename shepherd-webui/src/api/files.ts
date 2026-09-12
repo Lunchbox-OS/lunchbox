@@ -108,6 +108,99 @@ export async function downloadFile(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Writes
+//
+// Every one of these carries a precondition, because the device has more
+// writers than this browser: the activities running at the kiosk's own uid,
+// whoever is sitting at it, and `sudoedit`. A forgotten precondition is a 428
+// rather than a clobber, which is the API's decision and this module's job to
+// honour.
+// ---------------------------------------------------------------------------
+
+/** What the caller believes is at the path, in the header the API expects. */
+export type Precondition =
+  | { kind: "create" }
+  | { kind: "replace"; etag: string }
+  | { kind: "force" };
+
+function preconditionHeaders(precondition: Precondition): Record<string, string> {
+  switch (precondition.kind) {
+    case "create":
+      return { "If-None-Match": "*" };
+    case "replace":
+      return { "If-Match": precondition.etag };
+    case "force":
+      return { "If-Match": "*" };
+  }
+}
+
+export interface UploadResult {
+  path: string;
+  size: number;
+  etag: string;
+}
+
+/**
+ * Send one file.
+ *
+ * A raw body rather than `multipart/form-data`: it streams without a parser,
+ * needs no extra axum feature on the other side, and — the reason it is axios
+ * and not `fetch` — it reports progress, which `fetch` cannot do for an upload.
+ */
+export async function uploadFile(
+  root: string,
+  path: string,
+  file: Blob,
+  precondition: Precondition,
+  options: { signal?: AbortSignal; onProgress?: (sent: number) => void } = {},
+): Promise<UploadResult> {
+  const res = await apiHttp.put<UploadResult>("/files/content", file, {
+    params: { root, path },
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...preconditionHeaders(precondition),
+    },
+    signal: options.signal,
+    onUploadProgress: (event) => options.onProgress?.(event.loaded),
+  });
+  return res.data;
+}
+
+/** Create a folder, and every folder above it that is missing. */
+export async function createDirectory(root: string, path: string): Promise<void> {
+  await apiHttp.post("/files/dir", { root, path });
+}
+
+/**
+ * Rename, or move within one root.
+ *
+ * Cross-root moves are not expressible — the route takes a single `root` —
+ * because `rename(2)` does not cross filesystems. A caller that wants one
+ * downloads and re-uploads.
+ */
+export async function moveEntry(
+  root: string,
+  from: string,
+  to: string,
+  overwrite = false,
+): Promise<void> {
+  await apiHttp.post("/files/move", { root, from, to, overwrite });
+}
+
+/** Delete a file, or a folder and optionally everything in it. */
+export async function deleteEntry(
+  root: string,
+  path: string,
+  precondition: Precondition,
+  recursive = false,
+): Promise<void> {
+  await apiHttp.delete("/files/entry", {
+    params: { root, path, ...(recursive ? { recursive: true } : {}) },
+    headers: preconditionHeaders(precondition),
+  });
+}
+
 function clickDownload(url: string, name: string): void {
   const a = document.createElement("a");
   a.href = url;

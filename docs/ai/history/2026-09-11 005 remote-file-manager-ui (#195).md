@@ -416,7 +416,7 @@ Three landings, each independently useful, in this order:
    out whether the book is on the device. **Built 2026-09-12** — see below.
 2. **Writes.** Upload (toolbar + drop), new folder, rename, delete, the
    transfer tray, every dialog. The bulk of the work and all of the
-   precondition handling.
+   precondition handling. **Built 2026-09-12** — see below.
 3. **Move.** dnd-kit rows, `MoveToDialog`, spring-loaded folders. Last because
    it is the only one with no fallback path today — a parent can already
    download and re-upload to the same effect.
@@ -470,3 +470,42 @@ notes for whoever does this next, because both cost an hour:
   session minted over `curl` skips the login form entirely.
 - `set_web_password` over the machine token is how that session gets a password
   to mint from, without reading a setup code off the device's screen.
+
+## Stage 2, as built (2026-09-12)
+
+Upload, new folder, rename in place, delete. What changed against the design:
+
+- **The queue lives above the pages.** `UploadsProvider` wraps the whole shell
+  in `App.tsx` rather than the Files tab, so a 2 GB video survives a switch to
+  the Usage tab — which the design asked for and which turns out to cost three
+  lines: the old `App` became `AppShell`, and the new one wraps it with the
+  provider and the tray.
+- **Permissions are a tested module of their own** (`permissions.ts`). The two
+  easy mistakes are worth the file: deleting an entry is a permission on its
+  *parent*, and an escaping symlink is deletable — which is the entire reason
+  it is listed rather than hidden. Both are now assertions.
+- **First attempt always creates.** An upload sends `If-None-Match: *`, and a
+  412 becomes a *question* in the tray — a Replace button that resends with
+  `If-Match: *` — rather than an error. Silently overwriting a book somebody
+  else put there is the one thing this must not do.
+- **The caps are checked in the browser.** `max_upload_bytes` and the root's
+  `free_bytes` come back with the roots listing, so a file that is too large
+  never leaves the page.
+- **Rename is inline**, with the stem selected and the extension left alone,
+  committing on Enter or blur and guarding against doing both.
+
+### Verified on the device
+
+Driven through geckodriver again (`drive2.py` in the session scratch): new
+folder from the ⋮ menu, upload through the hidden input, rename `covers-2026`
+to `covers` in place, delete the uploaded file through the confirmation — each
+checked against the filesystem afterwards, not only against the page.
+
+Three harness notes, all of them cost time:
+
+- Snap-confined Firefox cannot read a file under `/tmp/claude-*`, so a file
+  handed to `<input type="file">` over WebDriver has to live in `$HOME`.
+- `clear` on the rename field blurs it, which commits the rename and unmounts
+  the input; type into the selection instead.
+- The success snackbar says the file's name, so "is it gone" has to be asked of
+  the *row* rather than of the page text.

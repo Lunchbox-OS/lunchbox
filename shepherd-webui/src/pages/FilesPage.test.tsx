@@ -9,7 +9,7 @@
  * vanishing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { DirEntryInfo, Listing, RootsResponse } from "../files/types";
@@ -17,6 +17,10 @@ import type { DirEntryInfo, Listing, RootsResponse } from "../files/types";
 const getFileRoots = vi.fn();
 const listDirectory = vi.fn();
 const downloadFile = vi.fn();
+const uploadFile = vi.fn();
+const createDirectory = vi.fn();
+const moveEntry = vi.fn();
+const deleteEntry = vi.fn();
 
 vi.mock("../api/files", async () => {
   const actual =
@@ -28,10 +32,17 @@ vi.mock("../api/files", async () => {
       listDirectory(root, path, maxPages),
     downloadFile: (root: string, path: string, name: string) =>
       downloadFile(root, path, name),
+    uploadFile: (...args: unknown[]) => uploadFile(...args),
+    createDirectory: (...args: unknown[]) => createDirectory(...args),
+    moveEntry: (...args: unknown[]) => moveEntry(...args),
+    deleteEntry: (...args: unknown[]) => deleteEntry(...args),
   };
 });
 
 const { FilesPage } = await import("./FilesPage");
+const { UploadsProvider } = await import("../files/useUploads");
+const { TransferTray } = await import("../files/TransferTray");
+const { ApiError } = await import("../api/client");
 
 /**
  * jsdom has no `matchMedia`, and MUI's `useMediaQuery` answers `false` to
@@ -104,17 +115,35 @@ function listing(root: string, path: string, entries: DirEntryInfo[]): Listing {
   return { root, path, writable: true, entries, truncated: false, cursor: null };
 }
 
-async function renderPage() {
-  getFileRoots.mockResolvedValue(ROOTS);
+async function renderPage(roots: RootsResponse = ROOTS) {
+  getFileRoots.mockResolvedValue(roots);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   render(
     <QueryClientProvider client={client}>
-      <FilesPage />
+      <UploadsProvider>
+        <FilesPage />
+        <TransferTray />
+      </UploadsProvider>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("Files")).toBeTruthy();
+}
+
+/** A dropped payload, in the shape the browser hands the row. */
+function dropOf(...files: File[]) {
+  return { files, types: ["Files"], items: [] };
+}
+
+/** Open Home and wait for its listing. */
+async function openHome() {
+  await userEvent.click(screen.getByLabelText("Expand Home"));
+  // A root row carries a ⋮ too — it is a folder you can upload into — so this
+  // waits for more than one rather than for exactly one.
+  await waitFor(() =>
+    expect(screen.getAllByRole("button", { name: /Actions for/ }).length).toBeGreaterThan(1),
+  );
 }
 
 describe("the file tree", () => {
@@ -248,5 +277,179 @@ describe("the file tree", () => {
     expect(names()[0]).toContain("small.txt");
     await userEvent.click(screen.getByText("Size"));
     expect(names()[0]).toContain("large.bin");
+  });
+
+  // -------------------------------------------------------------------------
+  // Writes
+  // -------------------------------------------------------------------------
+
+  it("uploads a file dropped onto a folder, and will not clobber with it", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [folder("Books")]));
+    uploadFile.mockResolvedValue({ path: "Books/new.epub", size: 4, etag: "4-1" });
+
+    await openHome();
+    const row = screen.getByText("Books").closest("tr")!;
+    fireEvent.drop(row, {
+      dataTransfer: dropOf(new File(["book"], "new.epub")),
+    });
+
+    await waitFor(() => expect(uploadFile).toHaveBeenCalled());
+    const [root, path, , precondition] = uploadFile.mock.calls[0];
+    expect([root, path]).toEqual(["home", "Books/new.epub"]);
+    // Create, not replace: an upload that silently overwrote a book somebody
+    // else put there is the one thing this must not do.
+    expect(precondition).toEqual({ kind: "create" });
+  });
+
+  it("refuses a dropped folder with a sentence rather than an empty file", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [folder("Books")]));
+
+    await openHome();
+    const row = screen.getByText("Books").closest("tr")!;
+    fireEvent.drop(row, {
+      dataTransfer: {
+        types: ["Files"],
+        files: [],
+        items: [
+          {
+            kind: "file",
+            webkitGetAsEntry: () => ({ isDirectory: true, name: "covers" }),
+            getAsFile: () => null,
+          },
+        ],
+      },
+    });
+
+    expect(await screen.findByText(/Dropping a folder is not supported/)).toBeTruthy();
+    expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("asks before replacing, and only then sends with force", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [folder("Books")]));
+    uploadFile.mockRejectedValueOnce(
+      new ApiError(412, "precondition_failed", "Something is already there"),
+    );
+
+    await openHome();
+    fireEvent.drop(screen.getByText("Books").closest("tr")!, {
+      dataTransfer: dropOf(new File(["book"], "hobbit.epub")),
+    });
+
+    // The tray asks rather than failing: the file is there, the question is
+    // whether this one should win.
+    const replace = await screen.findByRole("button", { name: "Replace" });
+    uploadFile.mockResolvedValueOnce({ path: "x", size: 4, etag: "4-1" });
+    await userEvent.click(replace);
+
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(2));
+    expect(uploadFile.mock.calls[1][3]).toEqual({ kind: "force" });
+  });
+
+  it("refuses a file bigger than the device accepts, before sending a byte", async () => {
+    await renderPage({
+      ...ROOTS,
+      limits: { max_upload_bytes: 8, free_space_floor_bytes: 0 },
+    });
+    listDirectory.mockResolvedValue(listing("home", "", [folder("Books")]));
+
+    await openHome();
+    fireEvent.drop(screen.getByText("Books").closest("tr")!, {
+      dataTransfer: dropOf(new File(["far too many bytes"], "big.bin")),
+    });
+
+    expect(await screen.findByText(/larger than this device accepts/)).toBeTruthy();
+    expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("creates a folder where the ⋮ menu was opened", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [folder("Books")]));
+    createDirectory.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for Books"));
+    await userEvent.click(screen.getByText("New folder…"));
+    await userEvent.type(screen.getByLabelText("Name"), "covers");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(createDirectory).toHaveBeenCalledWith("home", "Books/covers"));
+  });
+
+  it("renames in place, keeping the file in its folder", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "Books", [file("hobbit.epub")]));
+    moveEntry.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for hobbit.epub"));
+    await userEvent.click(screen.getByText("Rename"));
+
+    const field = await screen.findByLabelText("New name for hobbit.epub");
+    await userEvent.clear(field);
+    await userEvent.type(field, "the-hobbit.epub{Enter}");
+
+    await waitFor(() =>
+      expect(moveEntry).toHaveBeenCalledWith("home", "hobbit.epub", "the-hobbit.epub"),
+    );
+  });
+
+  it("deletes a file against the version the row was drawn with", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [file("hobbit.epub")]));
+    deleteEntry.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for hobbit.epub"));
+    await userEvent.click(screen.getByText("Delete…"));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(deleteEntry).toHaveBeenCalledWith(
+        "home",
+        "hobbit.epub",
+        { kind: "replace", etag: "1863410-1756557164123456789" },
+        false,
+      ),
+    );
+  });
+
+  it("says what a recursive delete means, and asks for one", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [folder("Books")]));
+    deleteEntry.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for Books"));
+    await userEvent.click(screen.getByText("Delete…"));
+    expect(screen.getByText(/everything in it/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      // A folder has no version to match, so it goes with `If-Match: *`.
+      expect(deleteEntry).toHaveBeenCalledWith("home", "Books", { kind: "force" }, true),
+    );
+  });
+
+  it("offers nothing that would fail on a read-only place", async () => {
+    await renderPage({
+      ...ROOTS,
+      roots: [{ ...ROOTS.roots[0], writable: false }],
+    });
+    listDirectory.mockResolvedValue({
+      ...listing("home", "", [folder("Books", { writable: false })]),
+      writable: false,
+    });
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for Books"));
+    for (const label of ["Upload files here…", "New folder…", "Rename", "Delete…"]) {
+      expect(screen.getByText(label).closest("li")).toHaveProperty(
+        "ariaDisabled",
+        "true",
+      );
+    }
   });
 });

@@ -30,6 +30,8 @@ import { WindowsPage } from "./pages/WindowsPage";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 import { NetworkPage } from "./pages/NetworkPage";
 import { FilesPage } from "./pages/FilesPage";
+import { TransferTray } from "./files/TransferTray";
+import { UploadsProvider } from "./files/useUploads";
 import { DeviceConfigSource } from "./sources/DeviceConfigSource";
 
 // The config editor (src/config/), routed here since issue #185.
@@ -83,7 +85,24 @@ const NAV: { id: Page; label: string; Icon: React.ElementType }[] = [
 
 const DRAWER_WIDTH = 200;
 
+/**
+ * The shell, wrapped in the upload queue (issue #195).
+ *
+ * The provider is here rather than inside the Files tab so a transfer survives
+ * a tab switch: a parent who starts a 2 GB video and then goes to look at
+ * today's usage should come back to a progress bar rather than to nothing. The
+ * tray renders nothing at all while there is nothing in flight.
+ */
 export function App() {
+  return (
+    <UploadsProvider>
+      <AppShell />
+      <TransferTray />
+    </UploadsProvider>
+  );
+}
+
+function AppShell() {
   const [page, setPage] = useState<Page>("dashboard");
   const theme = useTheme();
   const isDesktop = useMediaQuery(theme.breakpoints.up("sm"));

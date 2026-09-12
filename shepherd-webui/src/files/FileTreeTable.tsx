@@ -7,20 +7,26 @@
  * than by moving DOM focus row to row: one focusable container, no focus to
  * juggle when a folder's children arrive underneath it.
  */
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableContainer from "@mui/material/TableContainer";
 import Paper from "@mui/material/Paper";
 import { FileRow } from "./FileRow";
 import { FileTableHead } from "./FileTableHead";
+import Typography from "@mui/material/Typography";
 import type { NodeKey, Row, SortSpec } from "./tree";
 import { isSelectable } from "./tree";
+import { isFileDrag } from "./dnd";
 
 export interface FileTreeTableProps {
   rows: Row[];
   compact: boolean;
   selected: NodeKey | null;
+  /** The row whose name is being edited in place. */
+  renaming: NodeKey | null;
+  /** Folders with an upload arriving, for a spinner on the row. */
+  busy: ReadonlySet<NodeKey>;
   sort: SortSpec;
   onSort: (column: SortSpec["column"]) => void;
   onSelect: (key: NodeKey | null) => void;
@@ -29,6 +35,9 @@ export interface FileTreeTableProps {
   onMenu: (row: Row, anchor: HTMLElement) => void;
   onRetry: (node: NodeKey) => void;
   onShowMore: (node: NodeKey) => void;
+  onRenameCommit: (row: Row, name: string) => void;
+  onRenameCancel: () => void;
+  onDropFiles: (row: Row, transfer: DataTransfer) => void;
 }
 
 /** Row ids have to be stable and DOM-safe; the key is neither. */
@@ -40,6 +49,8 @@ export function FileTreeTable({
   rows,
   compact,
   selected,
+  renaming,
+  busy,
   sort,
   onSort,
   onSelect,
@@ -48,8 +59,16 @@ export function FileTreeTable({
   onMenu,
   onRetry,
   onShowMore,
+  onRenameCommit,
+  onRenameCancel,
+  onDropFiles,
 }: FileTreeTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Which row a file drag is over, and whether one is happening at all. The
+  // second is what draws the hint: a drag that lands between folders would
+  // otherwise look like it should have worked.
+  const [dropTarget, setDropTarget] = useState<NodeKey | null>(null);
+  const [fileDrag, setFileDrag] = useState(false);
   const selectableRows = rows.filter(isSelectable);
   const selectedIndex = rows.findIndex((row) => row.key === selected);
 
@@ -66,6 +85,9 @@ export function FileTreeTable({
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      // The inline rename field is inside a row; the tree must not eat its
+      // arrows, its Enter or its Escape.
+      if (renaming !== null) return;
       const row = rows.find((r) => r.key === selected);
       switch (event.key) {
         case "ArrowDown":
@@ -99,7 +121,7 @@ export function FileTreeTable({
           break;
       }
     },
-    [rows, selected, move, onToggle, onActivate],
+    [rows, selected, renaming, move, onToggle, onActivate],
   );
 
   return (
@@ -114,8 +136,39 @@ export function FileTreeTable({
         selectedIndex >= 0 ? rowDomId(selectedIndex) : undefined
       }
       onKeyDown={onKeyDown}
+      onDragEnter={(e) => {
+        if (isFileDrag(e.dataTransfer)) setFileDrag(true);
+      }}
+      onDragOver={(e) => {
+        // Swallowed at the container as well as the row, so a drop between
+        // rows is a no-op rather than the browser navigating to the file.
+        if (isFileDrag(e.dataTransfer)) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "none";
+        }
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) {
+          setFileDrag(false);
+          setDropTarget(null);
+        }
+      }}
+      onDrop={(e) => {
+        if (isFileDrag(e.dataTransfer)) e.preventDefault();
+        setFileDrag(false);
+        setDropTarget(null);
+      }}
       sx={{ outline: "none", "&:focus-visible": { boxShadow: 2 } }}
     >
+      {fileDrag && dropTarget === null ? (
+        <Typography
+          variant="body2"
+          color="primary"
+          sx={{ p: 1, textAlign: "center", bgcolor: "action.hover" }}
+        >
+          Drop onto a folder to upload into it
+        </Typography>
+      ) : null}
       <Table size="small" stickyHeader>
         {compact ? null : <FileTableHead sort={sort} onSort={onSort} />}
         <TableBody>
@@ -126,6 +179,9 @@ export function FileTreeTable({
               row={row}
               compact={compact}
               selected={row.key === selected}
+              renaming={row.key === renaming}
+              dropTarget={row.key === dropTarget}
+              busy={busy.has(row.key)}
               setSize={rows.length}
               positionInSet={index + 1}
               onSelect={(r) => onSelect(r.key)}
@@ -134,6 +190,13 @@ export function FileTreeTable({
               onMenu={onMenu}
               onRetry={onRetry}
               onShowMore={onShowMore}
+              onRenameCommit={onRenameCommit}
+              onRenameCancel={onRenameCancel}
+              onDropFiles={(r, transfer) => {
+                setFileDrag(false);
+                onDropFiles(r, transfer);
+              }}
+              onDragOverRow={(r) => setDropTarget(r ? r.key : null)}
             />
           ))}
         </TableBody>

@@ -5,10 +5,11 @@
  * nothing. That is what keeps a windowing wrapper a later change rather than a
  * rewrite, and it is why the whole tree can be a flat array.
  */
-import { memo } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
+import InputBase from "@mui/material/InputBase";
 import Link from "@mui/material/Link";
 import TableCell from "@mui/material/TableCell";
 import TableRow from "@mui/material/TableRow";
@@ -26,6 +27,8 @@ import PlaceIcon from "@mui/icons-material/Place";
 import UsbIcon from "@mui/icons-material/Usb";
 import type { Row } from "./tree";
 import { isExpandable } from "./tree";
+import { canWriteInto } from "./permissions";
+import { isFileDrag } from "./dnd";
 import {
   formatBytes,
   formatModified,
@@ -47,12 +50,22 @@ export interface FileRowProps {
   /** Total rows, for `aria-setsize` — a treegrid row has to say where it sits. */
   setSize: number;
   positionInSet: number;
+  /** This row's name is being edited in place. */
+  renaming: boolean;
+  /** A file drag is hovering this row, and it will take it. */
+  dropTarget: boolean;
+  /** Something is being uploaded into this folder right now. */
+  busy: boolean;
   onSelect: (row: Row) => void;
   onToggle: (row: Row) => void;
   onActivate: (row: Row) => void;
   onMenu: (row: Row, anchor: HTMLElement) => void;
   onRetry: (node: string) => void;
   onShowMore: (node: string) => void;
+  onRenameCommit: (row: Row, name: string) => void;
+  onRenameCancel: () => void;
+  onDropFiles: (row: Row, transfer: DataTransfer) => void;
+  onDragOverRow: (row: Row | null) => void;
 }
 
 function FileRowImpl({
@@ -62,12 +75,19 @@ function FileRowImpl({
   rowId,
   setSize,
   positionInSet,
+  renaming,
+  dropTarget,
+  busy,
   onSelect,
   onToggle,
   onActivate,
   onMenu,
   onRetry,
   onShowMore,
+  onRenameCommit,
+  onRenameCancel,
+  onDropFiles,
+  onDragOverRow,
 }: FileRowProps) {
   // The rows that are not nodes: a directory's state, rendered at the depth
   // its children would have had so the tree does not jump when they arrive.
@@ -117,6 +137,7 @@ function FileRowImpl({
   const expandable = isRoot || (entry !== null && isExpandable(entry));
   const name = isRoot ? row.root.label : row.entry.name;
   const hidden = !isRoot && row.entry.hidden;
+  const takesFiles = canWriteInto(row);
 
   return (
     <TableRow
@@ -129,11 +150,35 @@ function FileRowImpl({
       aria-expanded={expandable ? row.expanded : undefined}
       onClick={() => onSelect(row)}
       onDoubleClick={() => onActivate(row)}
+      onDragOver={(e) => {
+        if (!takesFiles || !isFileDrag(e.dataTransfer)) return;
+        // Without this the browser navigates to the file instead.
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+        onDragOverRow(row);
+      }}
+      onDragLeave={(e) => {
+        if (!takesFiles) return;
+        e.stopPropagation();
+        onDragOverRow(null);
+      }}
+      onDrop={(e) => {
+        if (!takesFiles || !isFileDrag(e.dataTransfer)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onDragOverRow(null);
+        onDropFiles(row, e.dataTransfer);
+      }}
       sx={{
         cursor: "default",
         // A row that cannot be acted on should look it, without disappearing:
         // the escaping symlink is listed precisely so somebody can see it.
         opacity: unusable ? 0.55 : hidden ? 0.7 : 1,
+        outline: dropTarget ? 2 : 0,
+        outlineColor: "primary.main",
+        outlineOffset: "-2px",
+        bgcolor: dropTarget ? "action.hover" : undefined,
         "& td": { py: compact ? 1 : 0.25 },
       }}
     >
@@ -158,16 +203,24 @@ function FileRowImpl({
             ) : null}
           </Box>
           <RowIcon row={row} />
-          <Box sx={{ minWidth: 0 }}>
-            <Typography
-              variant="body2"
-              noWrap
-              sx={{ fontWeight: isRoot ? 600 : 400 }}
-              title={isRoot ? row.root.path : name}
-            >
-              {name}
-            </Typography>
-            {compact ? (
+          <Box sx={{ minWidth: 0, flex: 1 }}>
+            {renaming && row.kind === "entry" ? (
+              <RenameField
+                initial={row.entry.name}
+                onCommit={(value) => onRenameCommit(row, value)}
+                onCancel={onRenameCancel}
+              />
+            ) : (
+              <Typography
+                variant="body2"
+                noWrap
+                sx={{ fontWeight: isRoot ? 600 : 400 }}
+                title={isRoot ? row.root.path : name}
+              >
+                {name}
+              </Typography>
+            )}
+            {compact && !renaming ? (
               <Typography variant="caption" color="text.secondary" noWrap>
                 {isRoot
                   ? formatRootSpace(row.root)
@@ -180,6 +233,7 @@ function FileRowImpl({
               </Typography>
             ) : null}
           </Box>
+          {busy ? <CircularProgress size={14} /> : null}
           {unusable ? (
             <Tooltip title={unusableLabel(unusable)}>
               <LinkOffIcon fontSize="small" color="disabled" />
@@ -218,20 +272,82 @@ function FileRowImpl({
       )}
 
       <TableCell align="right" padding="none" sx={{ pr: 1 }}>
-        {isRoot ? null : (
-          <IconButton
-            size="small"
-            aria-label={`Actions for ${name}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onMenu(row, e.currentTarget);
-            }}
-          >
-            <MoreVertIcon fontSize="small" />
-          </IconButton>
-        )}
+        <IconButton
+          size="small"
+          aria-label={`Actions for ${name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMenu(row, e.currentTarget);
+          }}
+        >
+          <MoreVertIcon fontSize="small" />
+        </IconButton>
       </TableCell>
     </TableRow>
+  );
+}
+
+/**
+ * Renaming in place, the way a file list has always done it.
+ *
+ * Commits on Enter and on blur, cancels on Escape — and guards against doing
+ * both, because Enter moves focus away and would otherwise send the rename
+ * twice.
+ */
+function RenameField({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    // Select the stem rather than the extension: renaming `hobbit.epub` is
+    // almost never about the `.epub`.
+    const input = ref.current;
+    if (!input) return;
+    input.focus();
+    const dot = initial.lastIndexOf(".");
+    input.setSelectionRange(0, dot > 0 ? dot : initial.length);
+  }, [initial]);
+
+  const commit = () => {
+    if (done.current) return;
+    done.current = true;
+    const name = value.trim();
+    if (name === "" || name === initial) onCancel();
+    else onCommit(name);
+  };
+
+  return (
+    <InputBase
+      inputRef={ref}
+      value={value}
+      size="small"
+      fullWidth
+      inputProps={{ "aria-label": `New name for ${initial}` }}
+      sx={{ fontSize: "0.875rem", px: 0.5, py: 0, border: 1, borderColor: "primary.main", borderRadius: 1 }}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          done.current = true;
+          onCancel();
+        }
+      }}
+    />
   );
 }
 
