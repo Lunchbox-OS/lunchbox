@@ -40,7 +40,7 @@ Download the `.deb` for the version you want and install it with `apt`, which
 also pulls in the runtime dependencies (Sway, mpv, BlueZ, …):
 
 ```sh
-sudo apt install ./shepherd-launcher_0.2.0_amd64.deb
+sudo apt install ./shepherd-launcher_0.6.0_amd64.deb
 ```
 
 The package installs the binaries, the privileged firewall helper and its
@@ -233,7 +233,7 @@ Every release attaches both APKs. Download the one you want from the
 and install it:
 
 ```sh
-adb install shepherd-companion_0.3.0.apk
+adb install shepherd-companion_0.6.0.apk
 ```
 
 Both APKs are signed with the same key across releases, so an `adb install` over
