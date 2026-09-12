@@ -183,16 +183,6 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
         }
     }
 
-    // Validate the Waydroid lock_mode slug.
-    if let Some(waydroid) = &config.service.waydroid
-        && let Some(mode) = &waydroid.lock_mode
-        && crate::policy::LockMode::parse(mode).is_none()
-    {
-        errors.push(ValidationError::GlobalError(format!(
-            "Unknown service.waydroid.lock_mode '{mode}' (known: off, statusbar, locktask)"
-        )));
-    }
-
     // Check for duplicate entry IDs
     let mut seen_ids = HashSet::new();
     for entry in &config.entries {

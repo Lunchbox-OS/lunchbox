@@ -27,6 +27,10 @@ import {
   HUD_ORIENTATIONS,
   VERTICAL_HUD_DESCRIPTION,
 } from "../model/hudOrientation";
+import {
+  DEFAULT_WAYDROID_LOCK_MODE_LABEL,
+  WAYDROID_LOCK_MODES,
+} from "../model/waydroidLockMode";
 import { DurationField } from "../components/DurationField";
 import {
   BrightnessEditor,
@@ -181,6 +185,19 @@ export function ServicePage({ config }: { config: RawConfig }) {
           }
         >
           <SteamEditor config={config} />
+        </Section>
+
+        <Section
+          title="Android (Waydroid)"
+          description="The Android container that type = &quot;android&quot; activities run in. One container is shared by all of them, so these are device-wide."
+          present={service.waydroid != null}
+          onTogglePresent={(on) =>
+            on
+              ? apply(set(servicePath("waydroid"), {} as never))
+              : apply(unset(servicePath("waydroid")))
+          }
+        >
+          <WaydroidEditor config={config} />
         </Section>
 
         <Section
@@ -562,6 +579,126 @@ function SteamEditor({ config }: { config: RawConfig }) {
           )
         }
         helperText="How long to wait for the game window before giving up."
+        sx={{ maxWidth: 260 }}
+      />
+    </Stack>
+  );
+}
+
+function WaydroidEditor({ config }: { config: RawConfig }) {
+  const f = useFields("service.waydroid");
+  const v = config.service?.waydroid;
+  const mode = v?.lock_mode ?? undefined;
+  return (
+    <Stack spacing={2} sx={{ maxWidth: 520 }}>
+      <TextField
+        select
+        size="small"
+        label="Keep Android warm"
+        // Three states, not two: unset is not "off", it is "decide from
+        // whether any Android activity exists", which is what most devices
+        // want and what a bare switch could not say.
+        slotProps={{
+          select: { displayEmpty: true },
+          inputLabel: { shrink: true },
+        }}
+        value={v?.preboot == null ? "" : String(v.preboot)}
+        onChange={(e) =>
+          f.setField(
+            "preboot",
+            e.target.value === "" ? undefined : e.target.value === "true",
+          )
+        }
+        helperText="Android takes tens of seconds to boot. Kept warm, the child's first open is a couple of seconds; otherwise they wait for the whole boot."
+        fullWidth
+      >
+        <MenuItem value="">
+          Automatic — only if an Android activity exists (the default)
+        </MenuItem>
+        <MenuItem value="true">Always, from startup</MenuItem>
+        <MenuItem value="false">Never</MenuItem>
+      </TextField>
+
+      <TextField
+        select
+        size="small"
+        label="Kiosk lock-in"
+        slotProps={{
+          select: { displayEmpty: true },
+          inputLabel: { shrink: true },
+        }}
+        value={mode ?? ""}
+        onChange={(e) => f.setField("lock_mode", e.target.value || undefined)}
+        helperText="How far an Android activity is stopped from reaching the rest of Android."
+        fullWidth
+      >
+        <MenuItem value="">
+          {DEFAULT_WAYDROID_LOCK_MODE_LABEL} (the default)
+        </MenuItem>
+        {WAYDROID_LOCK_MODES.map((m) => (
+          <MenuItem key={m.value} value={m.value}>
+            {m.label}
+          </MenuItem>
+        ))}
+      </TextField>
+      <Typography variant="caption" color="text.secondary">
+        {WAYDROID_LOCK_MODES.find((m) => m.value === (mode ?? "statusbar"))
+          ?.description}
+      </Typography>
+      {mode === "locktask" && (
+        <Alert severity="warning">
+          Lock Task needs the Device Policy Controller installed and set as
+          device owner, which is a separate step —{" "}
+          <code>shepherd-admin apps install android</code>, run before any
+          Google sign-in. Without it, Android activities will not launch.
+        </Alert>
+      )}
+      {mode === "off" && (
+        <Alert severity="warning">
+          With lock-in off, a child can leave the activity for the Android home
+          screen and Settings.
+        </Alert>
+      )}
+
+      <FormControlLabel
+        control={
+          <Switch
+            checked={v?.multi_window ?? LOAD_TIME_DEFAULTS.waydroid_multi_window}
+            onChange={(e) => f.setField("multi_window", e.target.checked)}
+          />
+        }
+        label="Give each app its own window"
+      />
+      <FormControlLabel
+        control={
+          <Switch
+            checked={
+              v?.suspend_when_idle ?? LOAD_TIME_DEFAULTS.waydroid_suspend_when_idle
+            }
+            onChange={(e) => f.setField("suspend_when_idle", e.target.checked)}
+          />
+        }
+        label="Freeze Android when idle"
+      />
+      <Typography variant="caption" color="text.secondary">
+        Freezing keeps the session warm without spending CPU or memory on it
+        between activities. Turn it off only to debug something that has to keep
+        running in the background.
+      </Typography>
+
+      <TextField
+        size="small"
+        type="number"
+        label="Boot timeout (s)"
+        value={v?.boot_ready_timeout_seconds ?? ""}
+        placeholder={String(LOAD_TIME_DEFAULTS.waydroid_boot_ready_timeout_seconds)}
+        onChange={(e) =>
+          f.setField(
+            "boot_ready_timeout_seconds",
+            e.target.value === "" ? undefined : Number(e.target.value),
+          )
+        }
+        helperText="How long to wait for Android to finish booting before giving up."
         sx={{ maxWidth: 260 }}
       />
     </Stack>

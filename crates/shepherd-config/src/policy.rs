@@ -10,7 +10,7 @@ use crate::schema::{
     RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawHudOrientation, RawInputCompat,
     RawInputCompatOptions, RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawMediaMode,
     RawMediaQuality, RawMediaSortBy, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
-    RawWarningThreshold, RawWaydroidConfig,
+    RawWarningThreshold, RawWaydroidConfig, RawWaydroidLockMode,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use shepherd_api::{
@@ -546,6 +546,14 @@ impl Default for SteamConfig {
 /// Default Waydroid session-ready timeout.
 pub const DEFAULT_WAYDROID_BOOT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Default for `[service.waydroid] multi_window`: each Android app gets its own
+/// Wayland toplevel, which the kiosk needs to fullscreen and track one app.
+pub const DEFAULT_WAYDROID_MULTI_WINDOW: bool = true;
+
+/// Default for `[service.waydroid] suspend_when_idle`: freeze the container
+/// when idle, so a warm session is cheap to keep.
+pub const DEFAULT_WAYDROID_SUSPEND_WHEN_IDLE: bool = true;
+
 /// Kiosk lock-in mode for launched Android sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
@@ -557,15 +565,12 @@ pub enum LockMode {
     Locktask,
 }
 
-impl LockMode {
-    /// Parse a `[service.waydroid] lock_mode` string; `None` for an unrecognized
-    /// value (which `validate_config` reports as an error).
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "off" => Some(Self::Off),
-            "statusbar" => Some(Self::Statusbar),
-            "locktask" => Some(Self::Locktask),
-            _ => None,
+impl From<RawWaydroidLockMode> for LockMode {
+    fn from(raw: RawWaydroidLockMode) -> Self {
+        match raw {
+            RawWaydroidLockMode::Off => Self::Off,
+            RawWaydroidLockMode::Statusbar => Self::Statusbar,
+            RawWaydroidLockMode::Locktask => Self::Locktask,
         }
     }
 }
@@ -594,17 +599,21 @@ impl WaydroidConfig {
     fn from_raw(raw: Option<&RawWaydroidConfig>) -> Self {
         Self {
             preboot: raw.and_then(|c| c.preboot),
-            multi_window: raw.and_then(|c| c.multi_window).unwrap_or(true),
-            suspend_when_idle: raw.and_then(|c| c.suspend_when_idle).unwrap_or(true),
+            multi_window: raw
+                .and_then(|c| c.multi_window)
+                .unwrap_or(DEFAULT_WAYDROID_MULTI_WINDOW),
+            suspend_when_idle: raw
+                .and_then(|c| c.suspend_when_idle)
+                .unwrap_or(DEFAULT_WAYDROID_SUSPEND_WHEN_IDLE),
             boot_ready_timeout: raw
                 .and_then(|c| c.boot_ready_timeout_seconds)
                 .map(Duration::from_secs)
                 .unwrap_or(DEFAULT_WAYDROID_BOOT_READY_TIMEOUT),
-            // Explicit lock_mode wins (invalid values rejected by validation, so
-            // default defensively to statusbar). Else honor the legacy lock_down
-            // bool: false -> off, true/unset -> statusbar.
-            lock_mode: match raw.and_then(|c| c.lock_mode.as_deref()) {
-                Some(s) => LockMode::parse(s).unwrap_or(LockMode::Statusbar),
+            // Explicit lock_mode wins; an unknown one can no longer reach here,
+            // since serde refuses it when the file is parsed. Else honor the
+            // legacy lock_down bool: false -> off, true/unset -> statusbar.
+            lock_mode: match raw.and_then(|c| c.lock_mode) {
+                Some(mode) => mode.into(),
                 None => match raw.and_then(|c| c.lock_down) {
                     Some(false) => LockMode::Off,
                     _ => LockMode::Statusbar,
@@ -1606,27 +1615,45 @@ mod tests {
 
     #[test]
     fn waydroid_lock_mode_resolution() {
-        use crate::schema::RawWaydroidConfig;
-        let mk = |mode: Option<&str>, legacy: Option<bool>| {
+        use crate::schema::{RawWaydroidConfig, RawWaydroidLockMode};
+        let mk = |mode: Option<RawWaydroidLockMode>, legacy: Option<bool>| {
             WaydroidConfig::from_raw(Some(&RawWaydroidConfig {
-                lock_mode: mode.map(str::to_string),
+                lock_mode: mode,
                 lock_down: legacy,
                 ..Default::default()
             }))
             .lock_mode
         };
-        // Explicit lock_mode wins (case-insensitive) and overrides legacy lock_down.
-        assert_eq!(mk(Some("locktask"), None), LockMode::Locktask);
-        assert_eq!(mk(Some("STATUSBAR"), None), LockMode::Statusbar);
-        assert_eq!(mk(Some("off"), Some(true)), LockMode::Off);
-        // Unknown value defaults to statusbar (validate_config reports the error).
-        assert_eq!(mk(Some("bogus"), None), LockMode::Statusbar);
+        // Explicit lock_mode wins and overrides the legacy lock_down.
+        assert_eq!(
+            mk(Some(RawWaydroidLockMode::Locktask), None),
+            LockMode::Locktask
+        );
+        assert_eq!(
+            mk(Some(RawWaydroidLockMode::Off), Some(true)),
+            LockMode::Off
+        );
         // Legacy lock_down fallback when lock_mode is unset.
         assert_eq!(mk(None, Some(false)), LockMode::Off);
         assert_eq!(mk(None, Some(true)), LockMode::Statusbar);
         // Nothing set → statusbar default (unchanged from prior lock_down=true).
         assert_eq!(mk(None, None), LockMode::Statusbar);
         assert_eq!(WaydroidConfig::default().lock_mode, LockMode::Statusbar);
+    }
+
+    /// The typo case a hand-rolled slug check in `validate_config` used to
+    /// cover. It is refused when the file is *parsed* now, and the error names
+    /// the alternatives rather than repeating them in a format string that
+    /// could drift from the modes that actually exist.
+    #[test]
+    fn an_unknown_lock_mode_is_refused_when_the_file_is_parsed() {
+        let err =
+            crate::parse_config("config_version = 1\n[service.waydroid]\nlock_mode = \"bogus\"\n")
+                .expect_err("an unknown lock_mode must not parse");
+        let msg = err.to_string();
+        for expected in ["bogus", "off", "statusbar", "locktask"] {
+            assert!(msg.contains(expected), "{expected:?} missing from {msg:?}");
+        }
     }
 
     #[test]

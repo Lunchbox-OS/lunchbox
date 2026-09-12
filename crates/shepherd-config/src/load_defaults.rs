@@ -55,7 +55,8 @@ use crate::internet::{DEFAULT_INTERNET_CHECK_INTERVAL, DEFAULT_INTERNET_CHECK_TI
 use crate::policy::{
     DEFAULT_COOLDOWN_MIN_SESSION, DEFAULT_MANAGEMENT_API_BIND, DEFAULT_MANAGEMENT_API_BIND_RETRY,
     DEFAULT_MANAGEMENT_API_PORT, DEFAULT_MAX_RUN, DEFAULT_SAVE_GRACE, DEFAULT_STEAM_LAUNCH_TIMEOUT,
-    DEFAULT_TOKEN_EARN_RATIO, default_warning_thresholds,
+    DEFAULT_TOKEN_EARN_RATIO, DEFAULT_WAYDROID_BOOT_READY_TIMEOUT, DEFAULT_WAYDROID_MULTI_WINDOW,
+    DEFAULT_WAYDROID_SUSPEND_WHEN_IDLE, LockMode, WaydroidConfig, default_warning_thresholds,
 };
 
 /// One entry of the default warning schedule.
@@ -88,6 +89,16 @@ pub struct LoadTimeDefaults {
     pub save_grace_seconds: u64,
     /// `service.steam.launch_timeout_seconds`.
     pub steam_launch_timeout_seconds: u64,
+    /// `service.waydroid.multi_window`.
+    pub waydroid_multi_window: bool,
+    /// `service.waydroid.suspend_when_idle`.
+    pub waydroid_suspend_when_idle: bool,
+    /// `service.waydroid.boot_ready_timeout_seconds`.
+    pub waydroid_boot_ready_timeout_seconds: u64,
+    /// `service.waydroid.lock_mode`. The legacy `lock_down` bool only changes
+    /// this when `lock_mode` is absent, so it is still what an untouched
+    /// config gets.
+    pub waydroid_lock_mode: &'static str,
     /// `service.internet.interval_seconds`.
     pub internet_check_interval_seconds: u64,
     /// `service.internet.timeout_ms`.
@@ -121,6 +132,10 @@ impl LoadTimeDefaults {
             cooldown_min_session_seconds: DEFAULT_COOLDOWN_MIN_SESSION.as_secs(),
             save_grace_seconds: DEFAULT_SAVE_GRACE.as_secs(),
             steam_launch_timeout_seconds: DEFAULT_STEAM_LAUNCH_TIMEOUT.as_secs(),
+            waydroid_multi_window: DEFAULT_WAYDROID_MULTI_WINDOW,
+            waydroid_suspend_when_idle: DEFAULT_WAYDROID_SUSPEND_WHEN_IDLE,
+            waydroid_boot_ready_timeout_seconds: DEFAULT_WAYDROID_BOOT_READY_TIMEOUT.as_secs(),
+            waydroid_lock_mode: lock_mode_wire_name(WaydroidConfig::default().lock_mode),
             internet_check_interval_seconds: DEFAULT_INTERNET_CHECK_INTERVAL.as_secs(),
             internet_check_timeout_ms: DEFAULT_INTERNET_CHECK_TIMEOUT.as_millis() as u64,
             management_api_port: DEFAULT_MANAGEMENT_API_PORT,
@@ -149,6 +164,19 @@ fn hud_orientation_wire_name(orientation: HudOrientation) -> &'static str {
         HudOrientation::Top => "top",
         HudOrientation::Bottom => "bottom",
         HudOrientation::Left => "left",
+    }
+}
+
+/// The config spelling of a lock mode, matching its serde rename.
+///
+/// Written out for the same reason as the HUD edges above: adding a mode
+/// without teaching this about it fails to compile here rather than emitting a
+/// string the editor's own types reject.
+fn lock_mode_wire_name(mode: LockMode) -> &'static str {
+    match mode {
+        LockMode::Off => "off",
+        LockMode::Statusbar => "statusbar",
+        LockMode::Locktask => "locktask",
     }
 }
 
@@ -219,6 +247,18 @@ mod tests {
         assert_eq!(
             policy.service.steam.launch_timeout,
             Duration::from_secs(d.steam_launch_timeout_seconds)
+        );
+
+        let waydroid = &policy.service.waydroid;
+        assert_eq!(waydroid.multi_window, d.waydroid_multi_window);
+        assert_eq!(waydroid.suspend_when_idle, d.waydroid_suspend_when_idle);
+        assert_eq!(
+            waydroid.boot_ready_timeout,
+            Duration::from_secs(d.waydroid_boot_ready_timeout_seconds)
+        );
+        assert_eq!(
+            lock_mode_wire_name(waydroid.lock_mode),
+            d.waydroid_lock_mode
         );
 
         let internet = policy.service.internet.check.as_ref().unwrap();

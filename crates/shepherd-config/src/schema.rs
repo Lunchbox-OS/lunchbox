@@ -1100,11 +1100,33 @@ pub struct RawWaydroidConfig {
     /// - `"off"`: no lock-in.
     ///
     /// Requires the privileged helper (`shepherd install waydroid`).
-    pub lock_mode: Option<String>,
+    pub lock_mode: Option<RawWaydroidLockMode>,
 
     /// Deprecated: use `lock_mode`. `true`/unset maps to `lock_mode =
     /// "statusbar"`, `false` to `"off"`. Ignored when `lock_mode` is set.
     pub lock_down: Option<bool>,
+}
+
+/// Kiosk lock-in mode for a launched Android session.
+///
+/// An enum rather than a string so the config editor gets a generated union to
+/// build its picker from -- a mode added here and not there is then a build
+/// error rather than a control quietly missing an option -- and so a typo is
+/// refused when the file is parsed, naming the alternatives. That replaces a
+/// hand-rolled slug check in `validate_config`, which could only run after the
+/// file had already parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RawWaydroidLockMode {
+    /// No lock-in.
+    Off,
+    /// Disable the notification shade / quick settings and the nav-bar
+    /// home/recents buttons. Soft; keeps the multi-window presentation.
+    Statusbar,
+    /// Pin the app in Android Lock Task Mode via the DPC device owner (hard
+    /// containment, single-surface presentation).
+    Locktask,
 }
 
 /// Per-entry internet requirement

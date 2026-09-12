@@ -173,4 +173,8 @@ export const LOAD_TIME_DEFAULTS = {
   steam_launch_timeout_seconds: 30,
   token_earn_ratio: 1.0,
   warnings: [{ seconds_before: 300, severity: "info" }, { seconds_before: 60, severity: "warn" }, { seconds_before: 10, severity: "critical" }],
+  waydroid_boot_ready_timeout_seconds: 60,
+  waydroid_lock_mode: "statusbar",
+  waydroid_multi_window: true,
+  waydroid_suspend_when_idle: true,
 } as const;

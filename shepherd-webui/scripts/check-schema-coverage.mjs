@@ -28,6 +28,11 @@ const GENERATED = join(CONFIG_DIR, "model", "config.generated.ts");
  */
 const EXEMPT = {
   payload: "kind.custom.payload is free-form JSON, like the vm/media driver args",
+  lock_down:
+    "service.waydroid.lock_down is the deprecated bool that lock_mode replaced, and it is " +
+    "ignored whenever lock_mode is set. Offering both would let the editor write a pair " +
+    "that contradicts itself; the menu writes lock_mode, and an existing lock_down stays " +
+    "readable in the raw TOML pane. Delete this line when the field goes.",
   viewer:
     "kind.ebook.viewer has exactly one value (okular), so a one-option select would be " +
     "clutter; wire it up when a second reader lands and this exemption goes stale",
