@@ -413,7 +413,7 @@ Three landings, each independently useful, in this order:
 
 1. **Read-only tree.** Roots, expansion, columns, sorting, download, the ⋮ menu
    with Download only. This is already worth shipping: it is how a parent finds
-   out whether the book is on the device.
+   out whether the book is on the device. **Built 2026-09-12** — see below.
 2. **Writes.** Upload (toolbar + drop), new folder, rename, delete, the
    transfer tray, every dialog. The bulk of the work and all of the
    precondition handling.
@@ -438,3 +438,35 @@ Three landings, each independently useful, in this order:
   `RetroarchContentMissing` both name a path, and the tree could open at its
   folder with the upload button primed. This is the thing that turns a file
   manager into a setup tool, and it wants the read-only tree to exist first.
+
+## Stage 1, as built (2026-09-12)
+
+The read-only tree is in. What landed matches the architecture above, with
+three things worth recording because they were decided at the keyboard rather
+than here.
+
+- **`useQueries` with `combine`, and paging inside the client.** The flat row
+  list means the number of open folders changes between renders, which rules
+  out a hook per node — and therefore rules out `useInfiniteQuery`, which has
+  no `useQueries` form. So `listDirectory` walks the cursor itself up to
+  `DEFAULT_MAX_PAGES`, which is what the infinite hook would have done anyway,
+  and leaves `truncated` meaning exactly what the row at the bottom of the
+  folder says.
+- **The event stream no longer invalidates these queries.** `useEvents`
+  invalidated *everything* on every frame the daemon sent; nothing on that
+  stream describes the filesystem, so an open tree would have refetched every
+  folder on every volume nudge. It now excludes the `["files"]` keys.
+- **`isSelectable` is a type guard**, so the keyboard handler narrows a row to
+  the two kinds that have an `expanded` field instead of re-checking `kind`.
+
+Verified against a real device, not only in jsdom: `shepherd dev headless` with
+a second root configured, then Firefox driven through **geckodriver**. Two
+notes for whoever does this next, because both cost an hour:
+
+- `wtype -k <key>` does not reach Firefox — text typing does, named keys do
+  not — and the virtual pointer does not reach it either. So the session's own
+  input path cannot sign a browser in. WebDriver talks to the page directly,
+  and its Add Cookie command can set an `HttpOnly` cookie, which is how a
+  session minted over `curl` skips the login form entirely.
+- `set_web_password` over the machine token is how that session gets a password
+  to mint from, without reading a setup code off the device's screen.

@@ -43,7 +43,15 @@ export function useEvents(): void {
           // payload is still a single event. Keep-alive comments (":") and
           // fields we don't consume fall through untouched.
           if (frame.split("\n").some((line) => line.startsWith("data:"))) {
-            queryClient.invalidateQueries();
+            // Everything except the file manager's listings (issue #195).
+            // Nothing on the event stream describes the filesystem — the
+            // daemon emits no event when a file changes — so invalidating them
+            // here would refetch every expanded folder on every volume nudge
+            // and session tick, for an answer that cannot have changed because
+            // of the thing that was announced.
+            queryClient.invalidateQueries({
+              predicate: (query) => query.queryKey[0] !== "files",
+            });
           }
         }
       }

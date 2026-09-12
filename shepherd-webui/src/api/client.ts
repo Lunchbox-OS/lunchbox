@@ -26,6 +26,23 @@ function getBase(): string {
 }
 
 /**
+ * Whether the API is the origin that served this page.
+ *
+ * Decides two things for the file manager (issue #195): whether a download can
+ * be a plain link — only a same-origin request carries the `HttpOnly` session
+ * cookie — and whether `connect-src` matters. Empty `apiBase` is the normal
+ * case: the daemon serves the SPA and the API together.
+ */
+export function isSameOriginApi(): boolean {
+  return getBase() === "";
+}
+
+/** Absolute URL for an API path, for the routes that are not dispatched RPCs. */
+export function apiUrl(path: string): string {
+  return `${getBase()}/api/v1${path}`;
+}
+
+/**
  * The *machine* token, since issue #156.
  *
  * A browser signed in normally has no token here at all: it authenticates with
@@ -73,6 +90,14 @@ axiosInstance.interceptors.response.use(
     throw err;
   },
 );
+
+/**
+ * The configured instance, for the handful of routes that are not RPCs.
+ *
+ * `src/api/files.ts` uses it so the file manager inherits the base URL, the
+ * cookie and the bearer header rather than growing a second copy of all three.
+ */
+export { axiosInstance as apiHttp };
 
 /**
  * Dispatch a single RPC. On success returns the trait method's return value;
