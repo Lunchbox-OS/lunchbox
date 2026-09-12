@@ -153,9 +153,10 @@ inotify, no mount-table watcher, no cached root list — the whole cost is one
 {
   "root": "home",
   "path": "Books",
+  "writable": true,
   "entries": [
-    { "name": "covers", "kind": "dir",  "size": null, "modified": "2026-09-01T12:00:00-04:00", "etag": null, "hidden": false, "symlink": false, "usable": true },
-    { "name": "the-hobbit.epub", "kind": "file", "size": 1863410, "modified": "2026-08-30T09:12:44-04:00", "etag": "1863410-1756557164123456789", "hidden": false, "symlink": false, "usable": true }
+    { "name": "covers", "kind": "dir",  "size": null, "modified": "2026-09-01T12:00:00-04:00", "etag": null, "hidden": false, "symlink": false, "writable": true },
+    { "name": "the-hobbit.epub", "kind": "file", "size": 1863410, "modified": "2026-08-30T09:12:44-04:00", "etag": "1863410-1756557164123456789", "hidden": false, "symlink": false }
   ],
   "truncated": false,
   "cursor": null
@@ -540,3 +541,30 @@ a different thing, a credential for somewhere **else**, and handing one out is
 the only power on this surface that "the caller administers this device" does
 not already imply. It is denied for writing too, since an `authorized_keys`
 dropped in through an upload is as much of a problem as a key read out.
+
+## Three gaps the UI design found (2026-09-12)
+
+Designing the tree (`2026-09-11 005 remote-file-manager-ui (#195).md`) turned up
+three places where this contract made a client guess. All three are now fixed,
+and the wire shapes above are updated to match.
+
+1. **`usable: false` became `unusable: <reason>`.** One flag covered an
+   escaping symlink, a name that is not valid UTF-8, a special file and one of
+   the denied directories — and they differ in what they still allow. An
+   escaping link can be *deleted*, which is the entire reason it is listed
+   instead of hidden; a lossy name cannot be turned back into the bytes that
+   address the file, so nothing can be done to it at all. A client handed one
+   `false` for both would have to guess which, and would guess wrong in the
+   direction that offers a button that cannot work.
+2. **Renaming a folder into its own subtree is a `400`.** `rename(2)` answers
+   `EINVAL`, which fell through to `FileError::Internal` and reached the caller
+   as a `500` — a fault in the device, for a thing a person does by accident
+   with a mouse. `EISDIR`, `ENOTDIR` and `ENOTEMPTY` went the same way and are
+   now conflicts, since all three mean the target changed kind between the
+   check and the call.
+3. **Writability is reported per directory.** `Listing::writable` for the
+   directory being listed, and `writable` on directory rows; file rows
+   deliberately carry none, because deleting a file is a permission on its
+   parent and a field on the file would look like the answer without being it.
+   One `access(W_OK)` per directory row, which is a local syscall against a
+   listing that has already done a `stat` each.

@@ -384,24 +384,28 @@ testable without a browser:
 | `useUploads.test.ts` | Queue: concurrency 2, conflict → replace, cancel, the client-side cap check |
 | `FilesPage.test.tsx` | Mount: expand a root and see rows; ⋮ → Delete → confirm → the right call with the right `If-Match`; a `412` renders the conflict dialog rather than a generic error |
 
-## What the API still owes the UI
+## What the API owed the UI
 
-Three small things this design found, none of which block starting:
+Three small things this design found. **All three landed on 2026-09-12**,
+before the first component was written; the wire shapes below are what the API
+does now, and the reasoning is kept because it is why the fields are shaped
+this way.
 
-1. **`usable: false` needs a reason.** The UI must know whether Delete is
+
+1. **`usable: false` needed a reason.** The UI has to know whether Delete is
    offered — an escaping symlink can be deleted, a name that is not valid UTF-8
-   cannot be addressed at all — and today both arrive as the same bare `false`.
-   Proposed: `unusable: "symlink_escapes" | "name_not_utf8" | "special_file"`,
-   absent when the entry is fine.
-2. **`rename` into its own subtree is a `500`.** `EINVAL` falls through to
-   `FileError::Internal`. It should be a `400` saying a folder cannot be moved
-   inside itself, so that the UI's own check is a convenience rather than the
-   only thing standing between a parent and a stack trace.
-3. **Writability is per root, not per directory.** A directory owned by root
-   inside a writable root fails at action time with a `403` the UI could not
-   predict. An `access(W_OK)` per listed entry is one cheap local syscall per
-   row; with it, the drop target and the ⋮ items can be right before the click
-   instead of after it.
+   cannot be addressed at all. Now `unusable: "symlink_escapes" | "name_not_utf8"
+   | "special_file" | "not_browsable"`, absent when the entry is fine. The
+   fourth value is shepherd's own directories and `~/.ssh`, which the design
+   had forgotten are listed too.
+2. **`rename` into its own subtree was a `500`.** `EINVAL` fell through to
+   `FileError::Internal`. Now a `400` saying a folder cannot be moved inside
+   itself, so the UI's own check is a convenience rather than the only thing
+   standing between a parent and a stack trace.
+3. **Writability was per root, not per directory.** Now `writable` on the
+   listing (what delete and rename need — both are permissions on the parent)
+   and on directory rows (what an upload into one needs). File rows carry none,
+   deliberately: it would look like the answer without being it.
 
 ## Staging
 

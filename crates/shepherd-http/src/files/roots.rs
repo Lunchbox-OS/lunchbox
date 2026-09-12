@@ -110,7 +110,7 @@ fn describe(id: String, label: String, kind: RootKind, path: &Path) -> Option<Ro
 /// `access(2)` rather than reading the mode bits: a drive mounted read-only,
 /// or one owned by root, answers the question a mode comparison would get
 /// wrong.
-fn writable(path: &Path) -> bool {
+pub fn writable(path: &Path) -> bool {
     nix::unistd::access(path, nix::unistd::AccessFlags::W_OK).is_ok()
 }
 

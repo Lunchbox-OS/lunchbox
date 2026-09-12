@@ -168,7 +168,9 @@ async fn a_symlink_out_of_the_root_is_listed_but_not_usable() {
         .find(|e| e["name"] == "escape")
         .expect("the link should still be listed, so a person can delete it");
     assert_eq!(escape["symlink"], true);
-    assert_eq!(escape["usable"], false);
+    // A reason, not a bare flag: this one can still be deleted, which is why
+    // it is listed at all.
+    assert_eq!(escape["unusable"], "symlink_escapes");
 
     let (status, _, _) = send(&app, get("/api/v1/files/list?root=home&path=escape")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -211,6 +213,133 @@ async fn an_html_upload_still_comes_back_as_an_attachment() {
             .to_str()
             .unwrap()
             .starts_with("attachment;")
+    );
+}
+
+/// The escaping link is listed so that it can be got rid of, so getting rid of
+/// it has to work.
+#[tokio::test]
+async fn an_escaping_symlink_can_still_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+    std::fs::write(dir.path().join("outside/secret"), b"secret").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("outside"), home.join("escape")).unwrap();
+    let app = app(
+        &home,
+        FileManagerConfig {
+            external_media: false,
+            ..Default::default()
+        },
+    );
+
+    let (status, _, _) = send(
+        &app,
+        delete("/api/v1/files/entry?root=home&path=escape", Some("*")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!home.join("escape").exists());
+    // The link went; what it pointed at did not.
+    assert!(dir.path().join("outside/secret").exists());
+}
+
+/// A directory says whether things can be created in it; a listing says
+/// whether its own contents can be renamed and deleted. Both, because they are
+/// different questions and the second is the one delete and rename need.
+#[tokio::test]
+async fn writability_is_reported_for_folders_and_for_the_listing() {
+    let (_dir, app) = fixture();
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["writable"], true);
+    let books = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "Books")
+        .unwrap();
+    assert_eq!(books["writable"], true);
+    // A file row carries no `writable`: deleting one is a permission on its
+    // parent, and a field here would look like the answer without being it.
+    let hidden = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == ".hidden")
+        .unwrap();
+    assert!(hidden.get("writable").is_none());
+}
+
+#[tokio::test]
+async fn a_read_only_folder_says_so_before_it_is_used() {
+    let (dir, app) = fixture();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=")).await;
+    let row = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "locked")
+        .unwrap();
+    assert_eq!(row["writable"], false);
+
+    // And the listing of that folder agrees, which is what a client draws its
+    // delete and rename controls from.
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=locked")).await;
+    assert_eq!(body["writable"], false);
+}
+
+/// shepherd's own directories are listed — they are in the home, and hiding
+/// them would be a lie about what is on the disk — with the reason they cannot
+/// be opened.
+#[tokio::test]
+async fn a_denied_folder_is_listed_with_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+    unsafe {
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
+    }
+    let app = app(
+        dir.path(),
+        FileManagerConfig {
+            external_media: false,
+            ..Default::default()
+        },
+    );
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=")).await;
+    let ssh = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == ".ssh")
+        .unwrap();
+    assert_eq!(ssh["unusable"], "not_browsable");
+    assert!(ssh.get("writable").is_none());
+}
+
+#[tokio::test]
+async fn a_folder_cannot_be_moved_inside_itself() {
+    let (_dir, app) = fixture();
+    let body = serde_json::json!({
+        "root": "home",
+        "from": "Books",
+        "to": "Books/covers/Books",
+    });
+    let (status, json, _) = send(&app, post("/api/v1/files/move", body)).await;
+    // Not a 500: a client should refuse the gesture, and the one that does not
+    // gets an answer that says what it did rather than a fault in the device.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"], "bad_request");
+    assert!(
+        json["message"].as_str().unwrap().contains("inside itself"),
+        "unhelpful message: {}",
+        json["message"]
     );
 }
 

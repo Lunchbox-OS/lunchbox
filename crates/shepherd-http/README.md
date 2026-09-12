@@ -201,6 +201,21 @@ at the device:
 | `If-Match: *` | replace whatever is there | delete whatever is there |
 | *(none)* | `428` | `428` |
 
+### What a listing says beyond the names
+
+Two fields exist because a client has to draw controls *before* anybody clicks
+them, and guessing wrong means a button that 403s:
+
+- **`unusable`** — absent when the entry is fine, and otherwise
+  `symlink_escapes`, `name_not_utf8`, `special_file` or `not_browsable`. A
+  reason rather than a bare flag because they differ in what they still allow:
+  an escaping link can be **deleted** (which is why it is listed at all), while
+  a name that is not valid UTF-8 cannot be addressed from here in any way.
+- **`writable`** — on the listing itself, and on directory rows. The listing's
+  is what delete and rename need, because both are permissions on the *parent*;
+  a directory row's is what an upload into it needs. File rows deliberately
+  carry none: a `writable` there would look like the answer without being it.
+
 The `etag` is `"<size>-<mtime_nanos>"`, opaque and compared only for equality.
 Deliberately not the content hash `PolicyDocument::version_of` uses: a policy is
 tens of kilobytes and worth hashing so a restore-from-backup reads as
@@ -222,8 +237,8 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
 - **Escape a root.** One resolver (`files::resolve`) sees every caller-supplied
   path; `..` is refused rather than normalised, the parent is canonicalised
   before the check, and a symlink out of the root is *listed* (so a person can
-  delete it) with `usable: false` but never followed. Any activity at the kiosk
-  uid can plant such a link, so this is not hypothetical.
+  delete it) with `unusable: "symlink_escapes"` but never followed. Any
+  activity at the kiosk uid can plant such a link, so this is not hypothetical.
 - **Serve shepherd's own state, or an SSH key.** `~/.local/share/shepherdd`
   (the database), `$XDG_CACHE_HOME/shepherd` (the video cache, which keeps an
   index that hand-deletion desynchronises) and `~/.ssh` are refused, for

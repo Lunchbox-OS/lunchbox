@@ -341,6 +341,22 @@ pub async fn move_entry(State(state): State<AppState>, Json(req): Json<MoveReque
             Some(18) => FileError::BadRequest(
                 "those two places are on different disks; download and re-upload instead".into(),
             ),
+            // EINVAL, which `rename(2)` uses for exactly one thing a person
+            // can do by accident: dragging a folder into a folder inside
+            // itself. A client should refuse the gesture before it gets here,
+            // and this is what stops the one that does not from reading as a
+            // fault in the device.
+            Some(22) => FileError::BadRequest("a folder cannot be moved inside itself".into()),
+            // EISDIR and ENOTDIR: the target changed kind between the check
+            // above and this call. Racy rather than wrong, so it is a conflict
+            // and not an internal error.
+            Some(21) => FileError::Conflict("a folder is already there".into()),
+            Some(20) => FileError::Conflict("that path is not a folder".into()),
+            // ENOTEMPTY, if the target became a non-empty directory in the
+            // same window.
+            Some(39) => {
+                FileError::Conflict("a folder is already there, and it is not empty".into())
+            }
             _ => FileError::from_io(&e, "that move"),
         })
     })

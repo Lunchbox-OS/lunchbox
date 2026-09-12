@@ -143,14 +143,46 @@ pub struct DirEntryInfo {
     pub etag: Option<String>,
     pub hidden: bool,
     pub symlink: bool,
-    /// Whether this API will act on the entry at all.
+    /// Why this API will not act on the entry, or absent when it will.
     ///
-    /// `false` for a symlink whose target leaves the root, and for a name that
-    /// is not valid UTF-8 — the latter can only be shown lossily, and a lossy
-    /// name cannot be turned back into the bytes that address the right file.
-    /// Nothing uploaded here can ever be in that state; it describes what was
-    /// already on the disk.
-    pub usable: bool,
+    /// A reason rather than a bare `usable: false`, because the answers differ
+    /// in what they still allow: an escaping symlink can be *deleted* — which
+    /// is the whole reason it is listed rather than hidden — while a name that
+    /// is not valid UTF-8 cannot be addressed at all, so nothing can be done
+    /// to it from here. A client given one flag for both would have to guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unusable: Option<UnusableReason>,
+    /// For a **directory**: whether this device's kiosk user may create,
+    /// rename and delete inside it. `None` for anything else.
+    ///
+    /// Only directories carry it because only directories answer the question
+    /// a client actually asks. Deleting or renaming a *file* needs write
+    /// permission on its parent, not on the file — so that answer is the
+    /// containing [`Listing::writable`], and a `writable` on a file row would
+    /// be a field that looks like the one you want and is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writable: Option<bool>,
+}
+
+/// Why an entry is listed but cannot be operated on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnusableReason {
+    /// A symlink whose target leaves the root. Listed so a person can see it
+    /// and **delete** it; never followed, never read, never written through.
+    SymlinkEscapes,
+    /// The name is not valid UTF-8. It can only be shown lossily, and a lossy
+    /// name cannot be turned back into the bytes that address the right file,
+    /// so nothing — including a delete — can be done to it here. Nothing
+    /// uploaded through this API can ever be in this state; it describes what
+    /// was already on the disk.
+    NameNotUtf8,
+    /// A socket, fifo, device node or other special file. Listed so it is not
+    /// invisible, and not something this API will open.
+    SpecialFile,
+    /// One of shepherd's own directories, or `~/.ssh`. Refused for reading and
+    /// writing alike — see [`denied_dirs`].
+    NotBrowsable,
 }
 
 /// A page of one directory.
@@ -158,6 +190,14 @@ pub struct DirEntryInfo {
 pub struct Listing {
     pub root: String,
     pub path: String,
+    /// Whether this device's kiosk user may create, rename and delete in the
+    /// directory being listed.
+    ///
+    /// This is what a client needs to decide whether the delete and rename
+    /// controls on these rows do anything: both are operations on the
+    /// *parent*, not on the entry. Without it a root-owned folder inside a
+    /// writable root refuses after the click instead of greying out before it.
+    pub writable: bool,
     pub entries: Vec<DirEntryInfo>,
     pub truncated: bool,
     pub cursor: Option<String>,
@@ -397,10 +437,20 @@ pub fn list_dir(
             Some(_) => EntryKind::Other,
             None => EntryKind::Other,
         };
-        let usable = utf8
-            && kind != EntryKind::Other
-            && (!symlink || resolve::link_stays_inside(&path, &root.canonical, denied))
-            && resolve::check_denied(&path, denied).is_ok();
+        // Ordered by how much they take away: a name that cannot be addressed
+        // leaves nothing possible, while an escaping link can still be
+        // deleted. The first match is what the client is told.
+        let unusable = if !utf8 {
+            Some(UnusableReason::NameNotUtf8)
+        } else if resolve::check_denied(&path, denied).is_err() {
+            Some(UnusableReason::NotBrowsable)
+        } else if symlink && !resolve::link_stays_inside(&path, &root.canonical, denied) {
+            Some(UnusableReason::SymlinkEscapes)
+        } else if kind == EntryKind::Other {
+            Some(UnusableReason::SpecialFile)
+        } else {
+            None
+        };
         let info = DirEntryInfo {
             hidden: name.starts_with('.'),
             kind,
@@ -411,7 +461,13 @@ pub fn list_dir(
             modified: target_meta.as_ref().and_then(modified_of),
             etag: target_meta.as_ref().filter(|m| m.is_file()).map(etag_of),
             symlink,
-            usable,
+            // Asked only of a directory this API would actually descend into:
+            // an `access` on every row of a ROM directory is cheap, and one on
+            // a link pointing out of the root is a question about somewhere
+            // this API will not go.
+            writable: (kind == EntryKind::Dir && unusable.is_none())
+                .then(|| roots::writable(&path)),
+            unusable,
             name,
         };
         let key = sort_key(&info.name, info.kind);
@@ -431,6 +487,7 @@ pub fn list_dir(
     Ok(Listing {
         root: root.id.clone(),
         path: rel.to_string(),
+        writable: roots::writable(dir),
         entries: rows.into_iter().map(|(_, info)| info).collect(),
         truncated,
         cursor: cursor.flatten(),
