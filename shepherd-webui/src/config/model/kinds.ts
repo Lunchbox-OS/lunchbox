@@ -17,6 +17,7 @@ export const KIND_LABELS: Record<KindTag, string> = {
   snap: "Snap",
   steam: "Steam game",
   flatpak: "Flatpak",
+  android: "Android app",
   vm: "Virtual machine",
   media: "Media library",
   retroarch: "Emulated game",
@@ -29,6 +30,7 @@ export const KIND_HINTS: Record<KindTag, string> = {
   snap: "Launched through snap, with systemd scope-based process management.",
   steam: "Launched through the Steam snap by App ID.",
   flatpak: "Launched through flatpak by application ID.",
+  android: "Runs an Android app inside the Waydroid container.",
   vm: "Handed to a VM driver.",
   media: "Opens a shepherd-media library.",
   retroarch: "Boots one ROM or disc image through RetroArch.",
@@ -59,6 +61,10 @@ export function blankKind(type: KindTag, carry: Carry = {}): RawEntryKind {
       return { type, app_id: 0, ...runnable };
     case "flatpak":
       return { type, app_id: "", ...runnable };
+    case "android":
+      // No `env`: the app runs inside the Android container, so the host
+      // environment is not its to inherit.
+      return { type, package_name: "", args: carry.args ?? [] };
     case "vm":
       return { type, driver: "", args: {} };
     case "media":

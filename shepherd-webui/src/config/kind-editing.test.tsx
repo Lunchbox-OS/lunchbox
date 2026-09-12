@@ -181,6 +181,7 @@ describe("adding an activity", () => {
       "Snap",
       "Steam game",
       "Flatpak",
+      "Android app",
       "Virtual machine",
       "Media library",
       "Emulated game",

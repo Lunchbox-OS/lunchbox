@@ -161,6 +161,18 @@ export function KindEditor({ kind, onChange }: Props) {
         />
       )}
 
+      {kind.type === "android" && (
+        <DraftTextField
+          size="small"
+          label="Package name"
+          required
+          value={kind.package_name}
+          onChange={(v) => patch({ package_name: v })}
+          placeholder="com.android.calculator2"
+          helperText="The Android package the Waydroid container launches."
+        />
+      )}
+
       {kind.type === "vm" && (
         <DraftTextField
           size="small"
