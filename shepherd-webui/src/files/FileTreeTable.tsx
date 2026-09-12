@@ -8,16 +8,29 @@
  * juggle when a folder's children arrive underneath it.
  */
 import { useCallback, useRef, useState } from "react";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  TouchSensor,
+  pointerWithin,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableContainer from "@mui/material/TableContainer";
 import Paper from "@mui/material/Paper";
 import { FileRow } from "./FileRow";
 import { FileTableHead } from "./FileTableHead";
+import Paper2 from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import type { NodeKey, Row, SortSpec } from "./tree";
 import { isSelectable } from "./tree";
-import { isFileDrag } from "./dnd";
+import { isFileDrag, moveRefusal } from "./dnd";
 
 export interface FileTreeTableProps {
   rows: Row[];
@@ -38,6 +51,12 @@ export interface FileTreeTableProps {
   onRenameCommit: (row: Row, name: string) => void;
   onRenameCancel: () => void;
   onDropFiles: (row: Row, transfer: DataTransfer) => void;
+  /** A row was dragged onto a folder. */
+  onMove: (source: Row, target: Row) => void;
+  /** A drag ended somewhere it could not go, with the reason. */
+  onMoveRefused: (reason: string) => void;
+  /** Open a folder a drag has hovered — the spring-loaded folder. */
+  onExpand: (key: NodeKey) => void;
 }
 
 /** Row ids have to be stable and DOM-safe; the key is neither. */
@@ -62,6 +81,9 @@ export function FileTreeTable({
   onRenameCommit,
   onRenameCancel,
   onDropFiles,
+  onMove,
+  onMoveRefused,
+  onExpand,
 }: FileTreeTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Which row a file drag is over, and whether one is happening at all. The
@@ -69,6 +91,54 @@ export function FileTreeTable({
   // otherwise look like it should have worked.
   const [dropTarget, setDropTarget] = useState<NodeKey | null>(null);
   const [fileDrag, setFileDrag] = useState(false);
+  // The row being dragged, for the overlay and for asking each folder whether
+  // it would take it.
+  const [dragging, setDragging] = useState<Row | null>(null);
+  const springTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const sensors = useSensors(
+    // A few pixels of movement before a drag starts, so a click on a row is
+    // still a click and the ⋮ button is still reachable.
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    // A long press on a phone, rather than stealing the scroll.
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } }),
+  );
+
+  const cancelSpring = () => {
+    if (springTimer.current) clearTimeout(springTimer.current);
+    springTimer.current = null;
+  };
+
+  const onDragStart = (event: DragStartEvent) => {
+    const row = event.active.data.current?.row as Row | undefined;
+    setDragging(row ?? null);
+  };
+
+  /**
+   * Spring-loaded folders: hovering a shut folder for a moment opens it, so a
+   * drag can navigate downwards without being dropped and picked up again.
+   */
+  const onDragOver = (event: DragOverEvent) => {
+    cancelSpring();
+    const over = event.over?.data.current?.row as Row | undefined;
+    if (!over || !isSelectable(over) || over.expanded) return;
+    const key = over.key;
+    springTimer.current = setTimeout(() => onExpand(key), 800);
+  };
+
+  const onDragEnd = (event: DragEndEvent) => {
+    cancelSpring();
+    const source = event.active.data.current?.row as Row | undefined;
+    const target = event.over?.data.current?.row as Row | undefined;
+    setDragging(null);
+    if (!source || !target) return;
+    const refusal = moveRefusal(source, target);
+    // Checked again at the drop, not only at the highlight: the tree can have
+    // moved under the drag, and "that is where it already is" deserves a
+    // sentence rather than a silent no-op.
+    if (refusal) onMoveRefused(refusal);
+    else onMove(source, target);
+  };
   const selectableRows = rows.filter(isSelectable);
   const selectedIndex = rows.findIndex((row) => row.key === selected);
 
@@ -125,6 +195,19 @@ export function FileTreeTable({
   );
 
   return (
+    <DndContext
+      sensors={sensors}
+      // Pointer-within rather than rectangle intersection: rows are wide and
+      // short, and what a person means is the row under the cursor.
+      collisionDetection={pointerWithin}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragEnd={onDragEnd}
+      onDragCancel={() => {
+        cancelSpring();
+        setDragging(null);
+      }}
+    >
     <TableContainer
       component={Paper}
       variant="outlined"
@@ -182,6 +265,7 @@ export function FileTreeTable({
               renaming={row.key === renaming}
               dropTarget={row.key === dropTarget}
               busy={busy.has(row.key)}
+              dragging={dragging}
               setSize={rows.length}
               positionInSet={index + 1}
               onSelect={(r) => onSelect(r.key)}
@@ -202,5 +286,21 @@ export function FileTreeTable({
         </TableBody>
       </Table>
     </TableContainer>
+    <DragOverlay dropAnimation={null}>
+      {dragging ? (
+        <Paper2
+          elevation={4}
+          sx={{ px: 1.5, py: 0.5, display: "inline-block", pointerEvents: "none" }}
+        >
+          <Typography variant="body2">{labelOf(dragging)}</Typography>
+        </Paper2>
+      ) : null}
+    </DragOverlay>
+    </DndContext>
   );
+}
+
+function labelOf(row: Row): string {
+  if (row.kind === "root") return row.root.label;
+  return row.kind === "entry" ? row.entry.name : "";
 }

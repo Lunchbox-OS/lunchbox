@@ -9,7 +9,14 @@
  * vanishing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { DirEntryInfo, Listing, RootsResponse } from "../files/types";
@@ -451,5 +458,71 @@ describe("the file tree", () => {
         "true",
       );
     }
+  });
+
+  it("moves a file through the ⋮ menu, for anybody who cannot drag", async () => {
+    await renderPage();
+    listDirectory.mockImplementation(async (root: string, path: string) => {
+      if (path === "") return listing(root, "", [folder("Books"), file("hobbit.epub")]);
+      return listing(root, path, []);
+    });
+    moveEntry.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for hobbit.epub"));
+    await userEvent.click(screen.getByText("Move to…"));
+
+    // The picker is the same tree, folders only and one place only — a move
+    // cannot cross roots, so the drive is not offered.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByText("KINGSTON")).toBeNull();
+    expect(within(dialog).queryByText("hobbit.epub")).toBeNull();
+
+    await userEvent.click(within(dialog).getByLabelText("Expand Home"));
+    await userEvent.click(await within(dialog).findByText("Books"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Move" }));
+
+    await waitFor(() =>
+      expect(moveEntry).toHaveBeenCalledWith("home", "hobbit.epub", "Books/hobbit.epub", false),
+    );
+  });
+
+  it("will not offer a destination the move would be refused from", async () => {
+    await renderPage();
+    listDirectory.mockImplementation(async (root: string, path: string) => {
+      if (path === "") return listing(root, "", [folder("Books")]);
+      return listing(root, path, [folder("covers")]);
+    });
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for Books"));
+    await userEvent.click(screen.getByText("Move to…"));
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText("Expand Home"));
+    await userEvent.click(await within(dialog).findByText("Books"));
+    // Its own folder: nothing to do, and the button says so by being off.
+    expect(within(dialog).getByText(/already is/)).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "Move" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
+  /**
+   * dnd-kit puts `role="button"` and a `tabIndex` on whatever it makes
+   * draggable. On a `<tr>` inside a `treegrid` both are wrong, and stripping
+   * them is the kind of thing a dependency bump silently undoes.
+   */
+  it("keeps the treegrid semantics under the drag handles", async () => {
+    await renderPage();
+    listDirectory.mockResolvedValue(listing("home", "", [file("hobbit.epub")]));
+
+    await openHome();
+    const row = screen.getByText("hobbit.epub").closest("tr")!;
+    expect(row.getAttribute("role")).toBeNull();
+    expect(row.getAttribute("tabindex")).toBeNull();
+    expect(screen.getByRole("treegrid")).toBeTruthy();
+    expect(screen.getAllByRole("row").length).toBeGreaterThan(1);
   });
 });

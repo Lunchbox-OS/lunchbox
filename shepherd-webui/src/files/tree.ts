@@ -102,6 +102,11 @@ export interface WalkOptions {
   sort: SortSpec;
   foldersFirst: boolean;
   showHidden: boolean;
+  /**
+   * Leave the files out. For the "move to…" picker, which is asking for a
+   * destination and has no use for the things that cannot be one.
+   */
+  foldersOnly?: boolean;
 }
 
 /**
@@ -239,13 +244,16 @@ export function buildRows(options: WalkOptions): Row[] {
       return;
     }
     const listing = state.listing;
-    const entries = sortEntries(
+    let entries = sortEntries(
       listing.entries,
       options.sort,
       options.foldersFirst,
       options.showHidden,
       !listing.truncated,
     );
+    if (options.foldersOnly) {
+      entries = entries.filter((entry) => entry.kind === "dir");
+    }
     if (entries.length === 0) {
       out.push({ kind: "empty", key: `${key}${FILLER}empty`, depth });
       return;

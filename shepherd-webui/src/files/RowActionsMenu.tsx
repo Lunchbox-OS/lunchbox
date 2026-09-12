@@ -18,6 +18,7 @@ import MenuItem from "@mui/material/MenuItem";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import DownloadIcon from "@mui/icons-material/Download";
+import DriveFileMoveIcon from "@mui/icons-material/DriveFileMove";
 import DriveFileRenameOutlineIcon from "@mui/icons-material/DriveFileRenameOutline";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -33,6 +34,7 @@ export interface RowActionsMenuProps {
   onUploadInto: (row: Row) => void;
   onNewFolder: (row: Row) => void;
   onRename: (row: Row) => void;
+  onMove: (row: Row) => void;
   onDelete: (row: Row) => void;
 }
 
@@ -45,6 +47,7 @@ export function RowActionsMenu({
   onUploadInto,
   onNewFolder,
   onRename,
+  onMove,
   onDelete,
 }: RowActionsMenuProps) {
   if (!row || (row.kind !== "entry" && row.kind !== "root")) {
@@ -100,6 +103,16 @@ export function RowActionsMenu({
             <DriveFileRenameOutlineIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>Rename</ListItemText>
+        </MenuItem>
+      )}
+      {row.kind === "entry" && (
+        <MenuItem disabled={!canRename(row)} onClick={act(onMove)}>
+          <ListItemIcon>
+            <DriveFileMoveIcon fontSize="small" />
+          </ListItemIcon>
+          {/* The drag is the accelerator; this is the interface. A phone has
+              no drag worth the name, and a screen reader has no drop. */}
+          <ListItemText>Move to…</ListItemText>
         </MenuItem>
       )}
       {row.kind === "entry" && (

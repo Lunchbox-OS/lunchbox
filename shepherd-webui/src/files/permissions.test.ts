@@ -12,8 +12,8 @@ import {
   canRename,
   canWriteInto,
 } from "./permissions";
-import { readDrop, isFileDrag, directoriesRefused } from "./dnd";
-import { nodeKey, type Row } from "./tree";
+import { canMove, moveRefusal, readDrop, isFileDrag, directoriesRefused } from "./dnd";
+import { joinPath, nodeKey, type Row } from "./tree";
 import type { DirEntryInfo, RootInfo, UnusableReason } from "./types";
 
 function rootRow(over: Partial<RootInfo> = {}): Row {
@@ -143,5 +143,91 @@ describe("reading a drop", () => {
 
   it("falls back to the plain file list where there is no entry API", () => {
     expect(readDrop({ files: [file] })).toEqual({ files: [file], directories: [] });
+  });
+});
+
+describe("where a row may be dropped", () => {
+  /** A row at `path`, in `rootId`. */
+  function at(path: string, kind: "dir" | "file" = "file", rootId = "home"): Row {
+    return {
+      kind: "entry",
+      key: nodeKey(rootId, path),
+      depth: 1,
+      rootId,
+      path,
+      expanded: false,
+      parentWritable: true,
+      entry: {
+        name: path.split("/").pop() ?? path,
+        kind,
+        size: kind === "file" ? 1 : null,
+        modified: null,
+        etag: kind === "file" ? "1-1" : null,
+        hidden: false,
+        symlink: false,
+        writable: kind === "dir" ? true : undefined,
+      },
+    };
+  }
+
+  function rootAt(id = "home"): Row {
+    return {
+      kind: "root",
+      key: nodeKey(id, ""),
+      depth: 0,
+      expanded: true,
+      root: {
+        id,
+        label: id,
+        kind: "home",
+        path: `/${id}`,
+        writable: true,
+        total_bytes: 10,
+        free_bytes: 5,
+      },
+    };
+  }
+
+  it("moves a file into another folder", () => {
+    expect(canMove(at("Downloads/hobbit.epub"), at("Books", "dir"))).toBe(true);
+  });
+
+  it("refuses the folder it is already in", () => {
+    // Including the top of a place, which is the same statement about `""`.
+    expect(moveRefusal(at("Books/hobbit.epub"), at("Books", "dir"))).toMatch(/already is/);
+    expect(moveRefusal(at("hobbit.epub"), rootAt())).toMatch(/already is/);
+  });
+
+  it("refuses a folder into its own subtree", () => {
+    // `rename("a", "a/b")` is EINVAL, and dragging a folder onto something
+    // inside itself is an easy gesture to make by accident.
+    expect(moveRefusal(at("Books", "dir"), at("Books/covers", "dir"))).toMatch(
+      /inside itself/,
+    );
+    expect(moveRefusal(at("Books", "dir"), at("Books", "dir"))).toMatch(/already is/);
+  });
+
+  it("refuses a second place, because the API cannot express it", () => {
+    expect(moveRefusal(at("hobbit.epub"), rootAt("usb"))).toMatch(/between places/);
+  });
+
+  it("refuses a file as a destination", () => {
+    expect(moveRefusal(at("a.txt"), at("b.txt"))).toMatch(/into a folder/);
+  });
+
+  it("refuses a read-only destination, and an unmovable source", () => {
+    const locked = at("Locked", "dir");
+    if (locked.kind === "entry") locked.entry.writable = false;
+    expect(moveRefusal(at("a.txt"), locked)).toMatch(/read-only/);
+
+    const stuck = at("a.txt");
+    if (stuck.kind === "entry") stuck.parentWritable = false;
+    expect(moveRefusal(stuck, at("Books", "dir"))).toMatch(/cannot be moved/);
+  });
+
+  it("keeps the name when it lands", () => {
+    // What `useFileActions.move` builds: the destination folder plus the name.
+    expect(joinPath("Books", "hobbit.epub")).toBe("Books/hobbit.epub");
+    expect(joinPath("", "hobbit.epub")).toBe("hobbit.epub");
   });
 });

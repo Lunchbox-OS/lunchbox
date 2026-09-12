@@ -6,6 +6,7 @@
  * rewrite, and it is why the whole tree can be a flat array.
  */
 import { memo, useEffect, useRef, useState } from "react";
+import { useDraggable, useDroppable } from "@dnd-kit/core";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
@@ -27,8 +28,8 @@ import PlaceIcon from "@mui/icons-material/Place";
 import UsbIcon from "@mui/icons-material/Usb";
 import type { Row } from "./tree";
 import { isExpandable } from "./tree";
-import { canWriteInto } from "./permissions";
-import { isFileDrag } from "./dnd";
+import { canRename, canWriteInto } from "./permissions";
+import { canMove, isFileDrag } from "./dnd";
 import {
   formatBytes,
   formatModified,
@@ -56,6 +57,8 @@ export interface FileRowProps {
   dropTarget: boolean;
   /** Something is being uploaded into this folder right now. */
   busy: boolean;
+  /** The row being dragged, if one is — for deciding whether this can take it. */
+  dragging: Row | null;
   onSelect: (row: Row) => void;
   onToggle: (row: Row) => void;
   onActivate: (row: Row) => void;
@@ -78,6 +81,7 @@ function FileRowImpl({
   renaming,
   dropTarget,
   busy,
+  dragging,
   onSelect,
   onToggle,
   onActivate,
@@ -89,6 +93,27 @@ function FileRowImpl({
   onDropFiles,
   onDragOverRow,
 }: FileRowProps) {
+  // Hooks before the early returns below, because the filler rows take these
+  // branches and a conditional hook is not a thing.
+  const movable = canRename(row);
+  // Whether this row could *ever* take a drop, which does not depend on what
+  // is being dragged — and must not, because dnd-kit measures its droppables
+  // when a drag begins. A row that only registered once something was moving
+  // would never be measured, and so would never be found under the pointer.
+  const canBeTarget = canWriteInto(row);
+  const takesMove = dragging !== null && canMove(dragging, row);
+  const draggable = useDraggable({ id: row.key, data: { row }, disabled: !movable });
+  // dnd-kit's attributes include `role="button"` and a `tabIndex`, and both are
+  // wrong here: this is a `row` inside a `treegrid`, and the caret is managed
+  // with `aria-activedescendant` on the container rather than by making every
+  // row focusable. What is kept is the part that helps a screen reader — the
+  // roledescription and the instructions dnd-kit renders.
+  const { role: _dragRole, tabIndex: _dragTabIndex, ...dragAttributes } =
+    draggable.attributes;
+  const droppable = useDroppable({ id: row.key, data: { row }, disabled: !canBeTarget });
+  const beingDragged = draggable.isDragging;
+  const moveTarget = takesMove && droppable.isOver;
+
   // The rows that are not nodes: a directory's state, rendered at the depth
   // its children would have had so the tree does not jump when they arrive.
   if (row.kind === "pending") {
@@ -144,6 +169,12 @@ function FileRowImpl({
       id={rowId}
       hover
       selected={selected}
+      ref={(node: HTMLTableRowElement | null) => {
+        draggable.setNodeRef(node);
+        droppable.setNodeRef(node);
+      }}
+      {...(movable ? draggable.listeners : {})}
+      {...(movable ? dragAttributes : {})}
       aria-level={row.depth + 1}
       aria-posinset={positionInSet}
       aria-setsize={setSize}
@@ -171,14 +202,17 @@ function FileRowImpl({
         onDropFiles(row, e.dataTransfer);
       }}
       sx={{
-        cursor: "default",
+        cursor: movable ? "grab" : "default",
+        // The row stays where it is and goes pale: a Finder-style list has no
+        // spare space to open up, and the overlay is what follows the pointer.
+        opacity: beingDragged ? 0.4 : undefined,
         // A row that cannot be acted on should look it, without disappearing:
         // the escaping symlink is listed precisely so somebody can see it.
-        opacity: unusable ? 0.55 : hidden ? 0.7 : 1,
-        outline: dropTarget ? 2 : 0,
+        ...(beingDragged ? {} : { opacity: unusable ? 0.55 : hidden ? 0.7 : 1 }),
+        outline: dropTarget || moveTarget ? 2 : 0,
         outlineColor: "primary.main",
         outlineOffset: "-2px",
-        bgcolor: dropTarget ? "action.hover" : undefined,
+        bgcolor: dropTarget || moveTarget ? "action.hover" : undefined,
         "& td": { py: compact ? 1 : 0.25 },
       }}
     >

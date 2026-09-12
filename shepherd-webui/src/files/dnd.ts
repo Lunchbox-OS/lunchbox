@@ -11,6 +11,9 @@
  * sentence rather than silently dropping its contents.
  */
 
+import { isWithin, parentPath, splitKey, type Row } from "./tree";
+import { canRename, canWriteInto } from "./permissions";
+
 export interface DataTransferItemLike {
   kind: string;
   webkitGetAsEntry?: () => { isDirectory: boolean; name: string } | null;
@@ -83,4 +86,55 @@ export function directoriesRefused(directories: string[]): string {
   return directories.length === 1
     ? `Dropping a folder is not supported yet — open ${names} and drop the files inside it.`
     : `Dropping folders is not supported yet — open them and drop the files inside (${names}).`;
+}
+
+// ---------------------------------------------------------------------------
+// Moving a row onto a folder
+//
+// The other half of dragging, and the one that does *not* use these events:
+// row-to-row moves go through `@dnd-kit`, for the keyboard, screen-reader and
+// touch support it brings. What lives here is the rule, because it is pure and
+// because every one of its clauses is a way to lose a folder.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether `source` may be dropped onto `target` — `null` when it may, and the
+ * sentence to show when it may not.
+ *
+ * A message rather than a bare boolean because the same function decides
+ * whether the row lights up *and* what the snackbar says when somebody manages
+ * the gesture anyway (a keyboard drop, a dialog, a stale tree).
+ */
+export function moveRefusal(source: Row, target: Row): string | null {
+  if (source.kind !== "entry") return "Only the things inside a place can be moved.";
+  if (!canRename(source)) return "This cannot be moved from here.";
+
+  const targetIsFolder =
+    target.kind === "root" || (target.kind === "entry" && target.entry.kind === "dir");
+  if (!targetIsFolder) return "Things can only be moved into a folder.";
+  if (!canWriteInto(target)) return "That folder is read-only.";
+
+  if (splitKey(source.key).rootId !== splitKey(target.key).rootId) {
+    // `POST /files/move` takes one root and cannot express a cross-root move:
+    // `rename(2)` does not cross filesystems.
+    return "Moving between places is not possible; download and upload instead.";
+  }
+  // Onto itself, or back where it already is: not an error, just nothing.
+  if (source.key === target.key) return "That is where it already is.";
+  const targetDir = target.kind === "root" ? "" : target.path;
+  if (parentPath(source.path) === targetDir) return "That is where it already is.";
+  // `rename("a", "a/b")` is EINVAL, and the gesture is an easy one to make by
+  // accident: dragging a folder onto something inside itself.
+  if (isWithin(target.key, source.key)) return "A folder cannot be moved inside itself.";
+  return null;
+}
+
+export function canMove(source: Row, target: Row): boolean {
+  return moveRefusal(source, target) === null;
+}
+
+/** Where a move onto `target` would put things. */
+export function moveDestination(target: Row): { rootId: string; dir: string } {
+  const { rootId, path } = splitKey(target.key);
+  return { rootId, dir: target.kind === "root" ? "" : path };
 }

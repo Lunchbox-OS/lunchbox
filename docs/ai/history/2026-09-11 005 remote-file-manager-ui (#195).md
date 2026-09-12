@@ -419,7 +419,7 @@ Three landings, each independently useful, in this order:
    precondition handling. **Built 2026-09-12** — see below.
 3. **Move.** dnd-kit rows, `MoveToDialog`, spring-loaded folders. Last because
    it is the only one with no fallback path today — a parent can already
-   download and re-upload to the same effect.
+   download and re-upload to the same effect. **Built 2026-09-12** — see below.
 
 ## Later, deliberately not now
 
@@ -509,3 +509,46 @@ Three harness notes, all of them cost time:
   the input; type into the selection instead.
 - The success snackbar says the file's name, so "is it gone" has to be asked of
   the *row* rather than of the page text.
+
+## Stage 3, as built (2026-09-12)
+
+Dragging a row onto a folder moves it; `Move to…` in the ⋮ menu does the same
+thing for anybody who cannot drag; a folder hovered mid-drag springs open.
+
+Three things the design did not know:
+
+- **A droppable that registers only once a drag has started is never found.**
+  dnd-kit measures its droppables when a drag begins, so the first version —
+  which enabled each row's droppable only when the dragged row could go there —
+  produced a drag that looked perfect and dropped on nothing. Eligibility now
+  splits in two: *could this row ever take a drop* (a writable folder; known
+  before any drag, so it is measured) and *would it take **this** one* (the
+  pure rule, used for the highlight and checked again at the drop).
+- **dnd-kit puts `role="button"` and a `tabIndex` on whatever it makes
+  draggable.** On a `<tr>` inside a `treegrid` both are wrong — it destroys the
+  row semantics and fights the `aria-activedescendant` caret — so they are
+  stripped and the `aria-roledescription` and instructions kept. There is a
+  test asserting the rows are still rows, because a dependency bump is exactly
+  the thing that would undo it.
+- **The rule needed a sentence, not a boolean.** `moveRefusal` returns *why*,
+  because the same function decides whether a row lights up and what the
+  message says when somebody gets to a drop anyway — a stale tree, the dialog,
+  a folder dropped into its own subtree. The `Move` button in the dialog is
+  disabled with the reason printed beside it rather than simply dead.
+
+A `409` on a move is a question (replace what is there?) and only for files:
+the API will not replace a folder with one, and a recursive merge is not a
+thing this does.
+
+### Verified on the device
+
+The drag is a real pointer gesture through WebDriver's Actions API, which
+dnd-kit's `PointerSensor` accepts. `notes.txt` dragged onto a shut `Books`:
+the folder sprang open under the drag — asserted *before* the release, which
+is the whole point of the feature — the drop moved the file, and `Move to…`
+moved it back to the top of the place. Each checked against the filesystem
+afterwards.
+
+One more harness note, to go with the three from stage 2: a click by text
+inside a dialog has to be scoped to `[role="dialog"]`, or it finds the same
+name on the tree behind it and WebDriver refuses the click as intercepted.

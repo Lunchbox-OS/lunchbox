@@ -30,6 +30,16 @@ export interface Rename {
   name: string;
 }
 
+export interface Move {
+  rootId: string;
+  /** What is being moved. */
+  from: string;
+  /** The folder it is going into; `""` for the top of the place. */
+  toDir: string;
+  /** Replace what is already there. Only ever true after somebody was asked. */
+  overwrite?: boolean;
+}
+
 export interface Delete {
   rootId: string;
   path: string;
@@ -61,6 +71,17 @@ export function useFileActions(forgetSubtree: (key: NodeKey) => void) {
     },
   });
 
+  const move = useMutation({
+    mutationFn: ({ rootId, from, toDir, overwrite }: Move) =>
+      moveEntry(rootId, from, joinPath(toDir, basename(from)), overwrite ?? false),
+    onSuccess: (_data, { rootId, from, toDir }) => {
+      // Both ends: the folder it left and the folder it arrived in.
+      void refresh.directory(nodeKey(rootId, parentPath(from)));
+      void refresh.directory(nodeKey(rootId, toDir));
+      forgetSubtree(nodeKey(rootId, from));
+    },
+  });
+
   const remove = useMutation({
     mutationFn: ({ rootId, path, etag, recursive }: Delete) =>
       deleteEntry(
@@ -77,9 +98,15 @@ export function useFileActions(forgetSubtree: (key: NodeKey) => void) {
   });
 
   return useMemo(
-    () => ({ newFolder, rename, remove }),
-    [newFolder, rename, remove],
+    () => ({ newFolder, rename, move, remove }),
+    [newFolder, rename, move, remove],
   );
+}
+
+/** The last component of a path — what the thing is called. */
+export function basename(path: string): string {
+  const at = path.lastIndexOf("/");
+  return at < 0 ? path : path.slice(at + 1);
 }
 
 /**

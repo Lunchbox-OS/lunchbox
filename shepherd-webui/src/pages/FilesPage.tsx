@@ -7,9 +7,9 @@
  * directory and two removable drives still be one view — and what lets a
  * parent see both ends of a copy at once.
  *
- * Reading, and now writing: upload (a button, the ⋮ menu, or a drop onto a
- * folder), new folder, rename in place, delete. Moving by dragging a row onto
- * another folder is the part still missing; the architecture it follows is
+ * Reading and writing: upload (a button, the ⋮ menu, or a drop onto a folder),
+ * new folder, rename in place, move (drag a row onto a folder, or "Move to…"
+ * for anybody who cannot drag), delete. The architecture it follows is
  * `docs/ai/history/2026-09-11 005 remote-file-manager-ui (#195).md`.
  */
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -29,11 +29,12 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { useTheme } from "@mui/material/styles";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import { downloadFile, DEFAULT_MAX_PAGES, LARGE_DOWNLOAD_BYTES } from "../api/files";
-import { isSameOriginApi } from "../api/client";
+import { ApiError, isSameOriginApi } from "../api/client";
 import { FileTreeTable } from "../files/FileTreeTable";
 import { RowActionsMenu } from "../files/RowActionsMenu";
 import { DeleteConfirmDialog, NewFolderDialog } from "../files/dialogs";
-import { directoriesRefused, readDrop } from "../files/dnd";
+import { MoveToDialog } from "../files/MoveToDialog";
+import { directoriesRefused, moveDestination, readDrop } from "../files/dnd";
 import { canWriteInto } from "../files/permissions";
 import {
   describe,
@@ -41,7 +42,7 @@ import {
   useFileRoots,
   useFilesRefresh,
 } from "../files/useDirectories";
-import { describeWriteFailure, useFileActions } from "../files/useFileActions";
+import { basename, describeWriteFailure, useFileActions } from "../files/useFileActions";
 import { useFileTree } from "../files/useFileTree";
 import { busyDirectories, useUploads } from "../files/useUploads";
 import {
@@ -75,6 +76,7 @@ export function FilesPage() {
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [newFolderIn, setNewFolderIn] = useState<Target | null>(null);
   const [deleting, setDeleting] = useState<Row | null>(null);
+  const [movingRow, setMovingRow] = useState<Row | null>(null);
   const uploadTarget = useRef<Target | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -172,6 +174,47 @@ export function FilesPage() {
       );
     },
     [actions.rename],
+  );
+
+  /**
+   * Move a row into a folder.
+   *
+   * A `409` is a question rather than a failure — something is already there,
+   * and only a person can say whether this should win. Folders are not
+   * offered the choice: the API will not replace one, and a recursive merge is
+   * not a thing this does.
+   */
+  const doMove = useCallback(
+    (source: Row, target: Row, overwrite = false) => {
+      if (source.kind !== "entry") return;
+      const { rootId, dir } = moveDestination(target);
+      actions.move.mutate(
+        { rootId, from: source.path, toDir: dir, overwrite },
+        {
+          onSuccess: () => {
+            setMovingRow(null);
+            // Open the destination, so the thing that moved is where the
+            // person can see it landed.
+            tree.expand(nodeKey(rootId, dir));
+            say(`${basename(source.path)} moved.`);
+          },
+          onError: (error) => {
+            const clash =
+              error instanceof ApiError &&
+              error.code === "conflict" &&
+              source.entry.kind === "file";
+            if (clash && window.confirm(
+              `Something called ${source.entry.name} is already in that folder. Replace it?`,
+            )) {
+              doMove(source, target, true);
+              return;
+            }
+            say(describeWriteFailure(error, basename(source.path)), true);
+          },
+        },
+      );
+    },
+    [actions.move, tree],
   );
 
   const confirmDelete = () => {
@@ -328,6 +371,9 @@ export function FilesPage() {
           onRenameCommit={commitRename}
           onRenameCancel={() => setRenaming(null)}
           onDropFiles={onDropFiles}
+          onMove={(source, target) => doMove(source, target)}
+          onMoveRefused={(reason) => say(reason, true)}
+          onExpand={tree.expand}
         />
       )}
 
@@ -347,6 +393,7 @@ export function FilesPage() {
           tree.select(row.key);
           setRenaming(row.key);
         }}
+        onMove={(row) => setMovingRow(row)}
         onDelete={(row) => setDeleting(row)}
       />
 
@@ -376,6 +423,23 @@ export function FilesPage() {
             },
           );
         }}
+      />
+
+      <MoveToDialog
+        open={movingRow !== null}
+        source={movingRow}
+        roots={rootList}
+        busy={actions.move.isPending}
+        error={
+          actions.move.error
+            ? describeWriteFailure(actions.move.error, "that")
+            : null
+        }
+        onCancel={() => {
+          setMovingRow(null);
+          actions.move.reset();
+        }}
+        onMove={(target) => movingRow && doMove(movingRow, target)}
       />
 
       <DeleteConfirmDialog
