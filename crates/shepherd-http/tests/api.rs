@@ -309,6 +309,7 @@ fn make_state_full(
         network: None,
         web_listener: WebListenerHandle::default(),
         web_auth: web,
+        admins: Default::default(),
     });
     AppState {
         svc: svc as Arc<dyn shepherd_management::ManagementService>,

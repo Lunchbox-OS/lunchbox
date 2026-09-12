@@ -580,6 +580,59 @@
       }
     },
     {
+      "name": "list_admins",
+      "params": [],
+      "result": {
+        "type": "Vec<AdminSummary>"
+      }
+    },
+    {
+      "name": "revoke_admin",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "list_enrolment_requests",
+      "params": [],
+      "result": {
+        "type": "Vec<EnrolmentRequestInfo>"
+      }
+    },
+    {
+      "name": "approve_enrolment_request",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "AdminSummary"
+      }
+    },
+    {
+      "name": "deny_enrolment_request",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
       "name": "logout",
       "params": [],
       "result": {

@@ -15,14 +15,18 @@
 //! on somebody who is already trusted, which is the same shape #156 built for
 //! letting a browser in, for the same reason.
 
-use crate::admin::{AdminRecord, AdminStore, AdminStoreError, AdminSummary};
+use crate::admin::{AdminRecord, AdminStore, AdminStoreError};
+use bluer::Address;
 use rand::RngCore;
-use shepherd_management::AdminAuthority;
+use shepherd_management::{
+    AdminAuthority, AdminRoster, AdminRosterError, AdminSummary, EnrolmentRequestInfo,
+};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use tracing::{info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 
 use chrono::{DateTime, Duration as ChronoDuration, Local};
 use serde::{Deserialize, Serialize};
@@ -103,27 +107,6 @@ impl PeerIdentity {
     fn is(&self, other: &PeerIdentity) -> bool {
         self.identity().eq_ignore_ascii_case(other.identity())
     }
-}
-
-/// A phone waiting to be let in, as the admin who can let it in sees it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct EnrolmentRequestInfo {
-    /// Public handle — what `approve_enrolment_request` takes. Safe to list.
-    pub id: String,
-    /// Six digits the requesting phone is displaying. The approving parent
-    /// compares them against that phone's screen.
-    ///
-    /// Same ritual as BLE pairing's Numeric Comparison and #156's login code,
-    /// and for the same reason: a racing attacker's request carries different
-    /// digits, so comparing is what picks the right row out of a list.
-    pub code: String,
-    /// What the requesting phone calls itself.
-    pub device_name: String,
-    /// Its address, so two phones with the same name are still distinguishable.
-    pub peer: String,
-    pub requested_at: DateTime<Local>,
-    pub expires_at: DateTime<Local>,
 }
 
 /// What `claim` did.
@@ -207,6 +190,19 @@ struct Inner {
 pub struct ClaimMachine {
     state: RwLock<Inner>,
     store: AdminStore,
+    /// Where to report a bond this device no longer wants.
+    ///
+    /// The machine that drops an administrator's record is the one that owes
+    /// the bond removal, so it holds the channel rather than making every
+    /// caller remember. Unbounded and therefore *synchronously* sendable,
+    /// which is what lets [`AdminRoster`] — reached from the HTTP middleware
+    /// as well as from BLE — stay a synchronous trait.
+    ///
+    /// `None` until the server has an adapter to remove bonds with, and in
+    /// every test and tool that has none. A revocation still succeeds then;
+    /// the debt simply goes unrecorded, which is why the *server* also writes
+    /// it to [`crate::admin::PendingUnbondStore`] before attempting it.
+    unbond: RwLock<Option<mpsc::UnboundedSender<Address>>>,
 }
 
 impl ClaimMachine {
@@ -223,6 +219,7 @@ impl ClaimMachine {
                 pending: Vec::new(),
             }),
             store,
+            unbond: RwLock::new(None),
         }
     }
 
@@ -248,6 +245,39 @@ impl ClaimMachine {
             }
         }
         Ok(Self::new(store, ClaimState::Claimed(stored.admins)))
+    }
+
+    /// Tell the machine where to send bonds that need forgetting.
+    ///
+    /// Set by the BLE server once it has an adapter. Separate from
+    /// construction because the claim machine exists before the channel does —
+    /// the HTTP layer is handed this same machine as an [`AdminRoster`] at
+    /// startup, and it must work whether or not BLE ever came up.
+    pub fn set_unbond_sender(&self, tx: mpsc::UnboundedSender<Address>) {
+        *self.unbond.write().expect("unbond lock poisoned") = Some(tx);
+    }
+
+    /// Ask for `address`'s bond to be forgotten, if anyone is listening.
+    fn request_unbond(&self, address: &str) {
+        let Some(tx) = self.unbond.read().expect("unbond lock poisoned").clone() else {
+            debug!(
+                peer = %address,
+                "No unbond channel; the BlueZ bond stays until the next startup drain",
+            );
+            return;
+        };
+        match address.parse::<Address>() {
+            Ok(addr) => {
+                if tx.send(addr).is_err() {
+                    warn!(peer = %address, "Unbond channel closed; BlueZ bond not removed");
+                }
+            }
+            Err(e) => warn!(
+                peer = %address,
+                error = %e,
+                "Could not parse an admin identity address; BlueZ bond not removed",
+            ),
+        }
     }
 
     pub fn snapshot(&self) -> ClaimState {
@@ -345,8 +375,8 @@ impl ClaimMachine {
         Ok(ClaimOutcome::Pending { request: info })
     }
 
-    /// Every phone waiting on a tap, for the admin who can provide one.
-    pub fn list_requests(&self) -> Vec<EnrolmentRequestInfo> {
+    /// Every phone waiting on a tap, for whoever can provide one.
+    fn requests(&self) -> Vec<EnrolmentRequestInfo> {
         let mut inner = self.state.write().expect("claim state lock poisoned");
         sweep_pending(&mut inner);
         inner
@@ -362,7 +392,7 @@ impl ClaimMachine {
     /// The token is *not* returned here. The approving phone has no use for
     /// another phone's credential, and the requester collects its own by
     /// calling `claim` again over its own bond.
-    pub fn approve_request(&self, id: &str) -> Result<AdminSummary, ClaimError> {
+    fn approve(&self, id: &str) -> Result<AdminSummary, ClaimError> {
         let mut inner = self.state.write().expect("claim state lock poisoned");
         sweep_pending(&mut inner);
         let Some(idx) = inner.pending.iter().position(|r| r.id == id && !r.denied) else {
@@ -382,12 +412,12 @@ impl ClaimMachine {
             device = %record.device_name,
             "Enrolment approved; the phone is now an administrator",
         );
-        Ok(AdminSummary::of(&record, false))
+        Ok(record.summary())
     }
 
     /// Turn a waiting phone away. The refusal is held rather than dropped so
     /// the requester's next poll is told, instead of silently timing out.
-    pub fn deny_request(&self, id: &str) -> Result<(), ClaimError> {
+    fn deny(&self, id: &str) -> Result<(), ClaimError> {
         let mut inner = self.state.write().expect("claim state lock poisoned");
         let Some(request) = inner.pending.iter_mut().find(|r| r.id == id && !r.denied) else {
             return Err(ClaimError::NoSuchRequest);
@@ -397,14 +427,14 @@ impl ClaimMachine {
         Ok(())
     }
 
-    /// The roster, as `asking` sees it — no tokens, own row flagged.
-    pub fn list_admins(&self, asking: &PeerIdentity) -> Vec<AdminSummary> {
+    /// The roster, credential-free.
+    fn roster(&self) -> Vec<AdminSummary> {
         self.state
             .read()
             .expect("claim state lock poisoned")
             .admins
             .iter()
-            .map(|a| AdminSummary::of(a, asking.matches(a)))
+            .map(AdminRecord::summary)
             .collect()
     }
 
@@ -416,7 +446,7 @@ impl ClaimMachine {
     /// it, which is the asymmetric-bond lockout the unbond queue exists to
     /// prevent. `factory_reset` is the way to unclaim a device, and it clears
     /// both halves.
-    pub fn revoke_admin(&self, id: &str) -> Result<AdminRecord, ClaimError> {
+    fn revoke(&self, id: &str) -> Result<AdminRecord, ClaimError> {
         let mut inner = self.state.write().expect("claim state lock poisoned");
         let Some(idx) = inner.admins.iter().position(|a| a.id == id) else {
             return Err(ClaimError::NoSuchAdmin);
@@ -463,6 +493,10 @@ impl ClaimMachine {
                 admins = previous.len(),
                 "Admin roster cleared (factory reset)"
             );
+        }
+        drop(inner);
+        for record in &previous {
+            self.request_unbond(&record.identity_address);
         }
         Ok(previous)
     }
@@ -514,6 +548,56 @@ impl ClaimMachine {
         );
         AuthDecision::Deny {
             reason: "this phone is not an administrator of this device".into(),
+        }
+    }
+}
+
+/// The transport-neutral half, reached from `ManagementService` — and so from
+/// a browser as well as a phone (issue #149).
+///
+/// Everything here goes through the same gate on the way in: over BLE
+/// [`ClaimMachine::authorize`] has already established the caller is an
+/// administrator, and over HTTP the auth middleware has established a live
+/// session or a machine token. Neither is a weaker door than the other, which
+/// is why approving a phone is offered on both.
+impl AdminRoster for ClaimMachine {
+    fn list_admins(&self) -> Vec<AdminSummary> {
+        self.roster()
+    }
+
+    fn revoke_admin(&self, id: &str) -> Result<AdminSummary, AdminRosterError> {
+        let removed = self.revoke(id)?;
+        // The record is gone; the bond has to follow, or the phone stays
+        // bonded to a device that refuses it — accepted at the link layer and
+        // rejected at every RPC, which re-pairing cannot clear.
+        self.request_unbond(&removed.identity_address);
+        Ok(removed.summary())
+    }
+
+    fn list_enrolment_requests(&self) -> Vec<EnrolmentRequestInfo> {
+        self.requests()
+    }
+
+    fn approve_enrolment_request(&self, id: &str) -> Result<AdminSummary, AdminRosterError> {
+        Ok(self.approve(id)?)
+    }
+
+    fn deny_enrolment_request(&self, id: &str) -> Result<(), AdminRosterError> {
+        Ok(self.deny(id)?)
+    }
+}
+
+impl From<ClaimError> for AdminRosterError {
+    fn from(e: ClaimError) -> Self {
+        match e {
+            ClaimError::EnrolmentDenied => AdminRosterError::EnrolmentDenied,
+            ClaimError::NoSuchRequest => AdminRosterError::NoSuchRequest,
+            ClaimError::NoSuchAdmin => AdminRosterError::NoSuchAdmin,
+            ClaimError::LastAdmin => AdminRosterError::LastAdmin,
+            ClaimError::Store(e) => AdminRosterError::Store(e.to_string()),
+            // Neither can arise from a roster call: they are the claim flow's
+            // answers, and the roster's callers have already been authorized.
+            other => AdminRosterError::Store(other.to_string()),
         }
     }
 }
@@ -674,7 +758,7 @@ mod tests {
         assert_eq!(a.http_token, b.http_token);
         assert_eq!(a.id, b.id);
         assert_eq!(b.device_name, "iPhone");
-        assert_eq!(m.list_admins(&peer_a()).len(), 1);
+        assert_eq!(m.list_admins().len(), 1);
     }
 
     /// The heart of #149: a second phone is not refused, it is queued.
@@ -690,14 +774,14 @@ mod tests {
         assert!(request.code.chars().all(|c| c.is_ascii_digit()));
 
         // Still one admin, and B cannot do anything yet.
-        assert_eq!(m.list_admins(&peer_a()).len(), 1);
+        assert_eq!(m.list_admins().len(), 1);
         assert!(matches!(m.authorize(&peer_b()), AuthDecision::Deny { .. }));
 
         // Polling returns the same request rather than making another.
         let again = request_of(m.claim(peer_b(), "B".into()).unwrap());
         assert_eq!(again.id, request.id);
         assert_eq!(again.code, request.code);
-        assert_eq!(m.list_requests().len(), 1);
+        assert_eq!(m.list_enrolment_requests().len(), 1);
     }
 
     #[test]
@@ -706,9 +790,9 @@ mod tests {
         let m = claimed(&dir);
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
 
-        let summary = m.approve_request(&request.id).unwrap();
+        let summary = m.approve_enrolment_request(&request.id).unwrap();
         assert_eq!(summary.device_name, "B");
-        assert!(!summary.is_self);
+        assert_eq!(summary.identity_address, peer_b().address);
 
         // B is now authorized, and collects its own token by asking again.
         assert_eq!(m.authorize(&peer_b()), AuthDecision::Allow);
@@ -716,21 +800,33 @@ mod tests {
         assert!(m.verify_http_token(&record.http_token));
 
         // Two admins, each with their own token, both accepted.
-        let admins = m.list_admins(&peer_b());
+        let admins = m.list_admins();
         assert_eq!(admins.len(), 2);
-        assert!(admins.iter().any(|a| a.is_self && a.device_name == "B"));
-        assert!(admins.iter().any(|a| !a.is_self && a.device_name == "A"));
+        // No "is this me?" flag on the wire — a client recognises its own row
+        // by the identity address it already knows.
+        assert!(
+            admins
+                .iter()
+                .any(|a| a.device_name == "B" && a.identity_address == peer_b().address)
+        );
+        assert!(
+            admins
+                .iter()
+                .any(|a| a.device_name == "A" && a.identity_address == peer_a().address)
+        );
+        // And never a token.
+        assert!(m.verify_http_token(&record.http_token));
 
         // The request is gone, and approving it twice is not a second admin.
-        assert!(m.list_requests().is_empty());
+        assert!(m.list_enrolment_requests().is_empty());
         assert!(matches!(
-            m.approve_request(&request.id),
-            Err(ClaimError::NoSuchRequest)
+            m.approve_enrolment_request(&request.id),
+            Err(AdminRosterError::NoSuchRequest)
         ));
 
         // Survives a reload.
         let again = ClaimMachine::load(store(&dir)).unwrap();
-        assert_eq!(again.list_admins(&peer_a()).len(), 2);
+        assert_eq!(again.list_admins().len(), 2);
         assert!(again.verify_http_token(&record.http_token));
     }
 
@@ -741,7 +837,7 @@ mod tests {
         let m = claimed(&dir);
         let a = admin_of(m.claim(peer_a(), "A".into()).unwrap());
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
-        m.approve_request(&request.id).unwrap();
+        m.approve_enrolment_request(&request.id).unwrap();
         let b = admin_of(m.claim(peer_b(), "B".into()).unwrap());
 
         assert_ne!(a.http_token, b.http_token);
@@ -757,12 +853,12 @@ mod tests {
         let m = claimed(&dir);
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
 
-        m.deny_request(&request.id).unwrap();
+        m.deny_enrolment_request(&request.id).unwrap();
         // A denied request is no longer offered for approval.
-        assert!(m.list_requests().is_empty());
+        assert!(m.list_enrolment_requests().is_empty());
         assert!(matches!(
-            m.approve_request(&request.id),
-            Err(ClaimError::NoSuchRequest)
+            m.approve_enrolment_request(&request.id),
+            Err(AdminRosterError::NoSuchRequest)
         ));
 
         // The requester learns why, exactly once...
@@ -781,7 +877,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = claimed(&dir);
         m.claim(peer_b(), "B".into()).unwrap();
-        assert_eq!(m.list_requests().len(), 1);
+        assert_eq!(m.list_enrolment_requests().len(), 1);
 
         // Reach in and expire it: the TTL is minutes, and a test that waits
         // them out is a test nobody runs.
@@ -789,12 +885,12 @@ mod tests {
             let mut inner = m.state.write().unwrap();
             inner.pending[0].expires = Instant::now() - Duration::from_secs(1);
         }
-        assert!(m.list_requests().is_empty());
+        assert!(m.list_enrolment_requests().is_empty());
         // And a poll after expiry makes a new request rather than resurrecting
         // one nobody is looking at any more.
         let fresh = request_of(m.claim(peer_b(), "B".into()).unwrap());
-        assert_eq!(m.list_requests().len(), 1);
-        assert_eq!(m.list_requests()[0].id, fresh.id);
+        assert_eq!(m.list_enrolment_requests().len(), 1);
+        assert_eq!(m.list_enrolment_requests()[0].id, fresh.id);
     }
 
     #[test]
@@ -807,9 +903,9 @@ mod tests {
         // Distinct handles, so approving one cannot let the other in — which
         // is the whole reason the parent compares digits before tapping.
         assert_ne!(b.id, c.id);
-        assert_eq!(m.list_requests().len(), 2);
+        assert_eq!(m.list_enrolment_requests().len(), 2);
 
-        m.approve_request(&b.id).unwrap();
+        m.approve_enrolment_request(&b.id).unwrap();
         assert_eq!(m.authorize(&peer_b()), AuthDecision::Allow);
         assert!(matches!(m.authorize(&peer_c()), AuthDecision::Deny { .. }));
     }
@@ -880,7 +976,7 @@ mod tests {
         // one that is about to stop existing.
         assert_eq!(request.peer, "64:11:A4:B0:7B:D9");
 
-        let summary = m.approve_request(&request.id).unwrap();
+        let summary = m.approve_enrolment_request(&request.id).unwrap();
         assert_eq!(summary.identity_address, "64:11:A4:B0:7B:D9");
         assert_eq!(
             m.authorize(&PeerIdentity::unresolved("64:11:A4:B0:7B:D9", "public")),
@@ -927,12 +1023,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = claimed(&dir);
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
-        m.approve_request(&request.id).unwrap();
+        m.approve_enrolment_request(&request.id).unwrap();
         let b = admin_of(m.claim(peer_b(), "B".into()).unwrap());
 
         let removed = m.revoke_admin(&b.id).unwrap();
         assert_eq!(removed.identity_address, peer_b().address);
-        assert_eq!(m.list_admins(&peer_a()).len(), 1);
+        assert_eq!(m.list_admins().len(), 1);
         assert!(matches!(m.authorize(&peer_b()), AuthDecision::Deny { .. }));
         // The HTTP door closes with the BLE one.
         assert!(!m.verify_http_token(&b.http_token));
@@ -940,7 +1036,7 @@ mod tests {
         assert_eq!(m.authorize(&peer_a()), AuthDecision::Allow);
 
         let again = ClaimMachine::load(store(&dir)).unwrap();
-        assert_eq!(again.list_admins(&peer_a()).len(), 1);
+        assert_eq!(again.list_admins().len(), 1);
         assert!(!again.verify_http_token(&b.http_token));
     }
 
@@ -952,7 +1048,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = claimed(&dir);
         let a = admin_of(m.claim(peer_a(), "A".into()).unwrap());
-        assert!(matches!(m.revoke_admin(&a.id), Err(ClaimError::LastAdmin)));
+        assert!(matches!(
+            m.revoke_admin(&a.id),
+            Err(AdminRosterError::LastAdmin)
+        ));
         assert!(m.is_claimed());
         assert_eq!(m.authorize(&peer_a()), AuthDecision::Allow);
     }
@@ -963,7 +1062,7 @@ mod tests {
         let m = claimed(&dir);
         assert!(matches!(
             m.revoke_admin("nope"),
-            Err(ClaimError::NoSuchAdmin)
+            Err(AdminRosterError::NoSuchAdmin)
         ));
     }
 
@@ -974,17 +1073,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = claimed(&dir);
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
-        m.approve_request(&request.id).unwrap();
+        m.approve_enrolment_request(&request.id).unwrap();
         let b = admin_of(m.claim(peer_b(), "B".into()).unwrap());
 
         // B is revoked, then asks again, then is revoked... the second ask
         // creates a request; revoking B again is a no-op, but the request from
         // a *revoked* phone must not survive the revocation that removed it.
         m.claim(peer_c(), "C".into()).unwrap();
-        assert_eq!(m.list_requests().len(), 1);
+        assert_eq!(m.list_enrolment_requests().len(), 1);
         m.revoke_admin(&b.id).unwrap();
         // C's request is untouched — only the revoked phone's would go.
-        assert_eq!(m.list_requests().len(), 1);
+        assert_eq!(m.list_enrolment_requests().len(), 1);
     }
 
     #[test]
@@ -992,7 +1091,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = claimed(&dir);
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
-        m.approve_request(&request.id).unwrap();
+        m.approve_enrolment_request(&request.id).unwrap();
         m.claim(peer_c(), "C".into()).unwrap(); // leaves a pending request
 
         let previous = m.factory_reset().unwrap();
@@ -1002,7 +1101,7 @@ mod tests {
         assert!(!m.has_admin());
         assert!(!m.verify_http_token(&previous[0].http_token));
         // Pending requests go too: there is nobody left to approve them.
-        assert!(m.list_requests().is_empty());
+        assert!(m.list_enrolment_requests().is_empty());
 
         let again = ClaimMachine::load(store(&dir)).unwrap();
         assert!(!again.is_claimed());
@@ -1044,7 +1143,7 @@ role = "admin"
         // And it is a normal admin from here on: a second phone can be
         // enrolled alongside it.
         let request = request_of(m.claim(peer_b(), "B".into()).unwrap());
-        m.approve_request(&request.id).unwrap();
-        assert_eq!(m.list_admins(&peer_a()).len(), 2);
+        m.approve_enrolment_request(&request.id).unwrap();
+        assert_eq!(m.list_admins().len(), 2);
     }
 }

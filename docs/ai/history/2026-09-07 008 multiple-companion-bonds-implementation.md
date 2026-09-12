@@ -182,6 +182,55 @@ and the app never reads `ShepherdRecord.httpToken` back, so nothing observable
 depends on it today. It would matter the moment the app offers that token to a
 human.
 
+## The web UI can approve too (2026-09-12)
+
+Asked for after the rebase, and it closed the gap the first cut had listed
+under "left undone": the roster RPCs lived in `shepherd-ble` and a browser
+could not reach them.
+
+**The split.** `AdminSummary` and `EnrolmentRequestInfo` moved to
+`shepherd-management`, beside `WebSessionInfo` and `LoginRequestInfo` and for
+the same reason — both transports return them and that crate sits below
+`shepherd-ble`. A new `AdminRoster` trait lives there too, implemented by
+`ClaimMachine`, exactly as `AdminAuthority` already was. The five methods then
+went onto `ManagementService`, which meant the BLE server's special-casing
+could be *deleted* rather than duplicated: they now fall through to the same
+dispatcher as everything else, and pass the same gate every other RPC passes on
+each transport.
+
+Two consequences fell out of that:
+
+- **`is_self` left the wire.** It only ever meant something for a phone, and
+  over HTTP there is no phone to be. Keeping it would have meant threading a
+  `viewer` argument through `ManagementService` for one transport's benefit, or
+  the device guessing. The companion computes it locally instead — it already
+  knows its own identity address, and the summary carries the same string.
+- **The claim machine owns bond removal.** `revoke_admin` and `factory_reset`
+  queue their own unbonds now, rather than the BLE server doing it for them,
+  because an HTTP caller has no channel to hand them. The channel became
+  unbounded so the send works from synchronous code, which is what lets
+  `AdminRoster` stay a synchronous trait.
+
+**The flow is better from the browser than from a phone.** A peripheral stops
+advertising while connected, so phone-to-phone approval is a relay: B asks, B is
+parked, A approves, A is parked, B collects. The browser does not touch the
+radio, so B stays connected the whole time and flips to "Paired" on its next
+poll. Verified end to end on the bench: a fresh enrolment code off the TV card,
+a real browser session (`machine: false`), the Motorola showing `734977` and the
+browser listing the same digits against `64:11:A4:B0:7B:D9`, one
+`approve_enrolment_request`, and the phone paired seconds later without being
+touched. Revoking from the browser removed the record and the bond too.
+
+The pairing dialog's copy now says "either in the Shepherd app on their phone,
+or on the device's web page", because both are true.
+
+**Worth surfacing rather than burying:** a web session can now enrol a phone,
+and that phone outlives the session. The web credential was already
+administrator-level — it can set the password and rewrite the policy — and
+revocation sits on the same screen, so this is recoverable rather than a hole.
+But the *persistence* is new, and it is the one thing about this change that a
+reviewer should agree with deliberately rather than by default.
+
 ## Left undone
 
 - **A denied or abandoned enrolment leaves the requester's BlueZ bond.**
@@ -193,7 +242,3 @@ human.
 - **Recovery when the last admin phone is lost** is still `factory_reset`. The
   scope raised a TV-displayed enrolment code as the alternative; nothing here
   changes that answer.
-- **`revoke_admin` has no web-UI counterpart.** The roster RPCs live in
-  `shepherd-ble` rather than on `ManagementService`, because they act on the
-  claim machine and `shepherd-management` sits below it. Reaching them from a
-  browser needs the trait split that avoids the cycle.

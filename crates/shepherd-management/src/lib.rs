@@ -9,7 +9,7 @@ pub mod service;
 pub mod types;
 pub mod webauth;
 
-pub use auth::AdminAuthority;
+pub use auth::{AdminAuthority, AdminRoster, AdminRosterError, AdminSummary, EnrolmentRequestInfo};
 pub use auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 pub use dispatch::RpcDispatchError;
 pub use error::{ManagementError, ManagementResult};

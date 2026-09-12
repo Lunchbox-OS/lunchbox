@@ -26,6 +26,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
+use crate::auth::{AdminRoster, AdminRosterError, AdminSummary, EnrolmentRequestInfo};
 use crate::auto_brightness::{AutoAction, AutoBrightnessCurve, AutoBrightnessState};
 use crate::error::{ManagementError, ManagementResult};
 use crate::listener::WebListenerHandle;
@@ -316,6 +317,40 @@ pub trait ManagementService: Send + Sync {
     /// Refuse a waiting browser, so it stops waiting and says so.
     async fn deny_login_request(&self, id: String) -> ManagementResult<()>;
 
+    // Administrators (issue #149).
+    //
+    // On the trait rather than routed inside `shepherd-ble`, so a browser can
+    // do them too. A parent at a laptop is at least as likely to be the one
+    // holding the device when a second phone asks to be let in, and leaving
+    // approval to the phone alone would have meant the household's only way to
+    // add a caregiver was to find whoever already had one.
+    //
+    // Reaching the claim machine from here is what [`crate::AdminRoster`] is
+    // for: it owns the records, the bonds and the enrolment handshake, and
+    // lives in a crate that sits above this one.
+
+    /// Every phone that may administer this device.
+    async fn list_admins(&self) -> ManagementResult<Vec<AdminSummary>>;
+
+    /// Remove one, and forget its Bluetooth bond.
+    ///
+    /// Refuses the last one — that would leave the device with no
+    /// administrator and a phone still bonded to it. `factory_reset`, which is
+    /// the BLE transport's own, is the way to unclaim a device.
+    async fn revoke_admin(&self, id: String) -> ManagementResult<()>;
+
+    /// Phones waiting to be let in, each with the six digits it is showing.
+    /// Whoever approves compares those against that phone's screen — the same
+    /// Numeric Comparison ritual as pairing and as a browser login, for the
+    /// same reason: a racing request carries a different number.
+    async fn list_enrolment_requests(&self) -> ManagementResult<Vec<EnrolmentRequestInfo>>;
+
+    /// Let a waiting phone administer this device.
+    async fn approve_enrolment_request(&self, id: String) -> ManagementResult<AdminSummary>;
+
+    /// Turn a waiting phone away.
+    async fn deny_enrolment_request(&self, id: String) -> ManagementResult<()>;
+
     // User
     async fn logout(&self);
 
@@ -544,6 +579,20 @@ pub struct DefaultManagementService {
     /// a companion that silently set a password on a device with no HTTP
     /// server would be lying to the person holding the phone.
     pub web_auth: Option<Arc<WebAuth>>,
+    /// The device's administrator roster (issue #149) — in practice the BLE
+    /// claim machine, which owns the records and the bonds.
+    ///
+    /// Empty on a device with BLE management switched off, and in every
+    /// embedding that has no claim machine. The roster methods then answer
+    /// "not enabled" rather than an empty list, because "nobody administers
+    /// this device" and "this device cannot tell you" are different answers
+    /// and a UI should not show the first when it means the second.
+    ///
+    /// Behind a lock and set after construction, like
+    /// [`crate::webauth::WebAuth::set_companion`] and for the same reason: the
+    /// claim machine does not exist until the BLE server is built, and the BLE
+    /// server needs this service to build.
+    pub admins: std::sync::RwLock<Option<Arc<dyn AdminRoster>>>,
 }
 
 #[async_trait]
@@ -1591,6 +1640,33 @@ impl ManagementService for DefaultManagementService {
             .map_err(web_auth_error)
     }
 
+    async fn list_admins(&self) -> ManagementResult<Vec<AdminSummary>> {
+        Ok(self.require_admins()?.list_admins())
+    }
+
+    async fn revoke_admin(&self, id: String) -> ManagementResult<()> {
+        self.require_admins()?
+            .revoke_admin(&id)
+            .map(|_| ())
+            .map_err(admin_roster_error)
+    }
+
+    async fn list_enrolment_requests(&self) -> ManagementResult<Vec<EnrolmentRequestInfo>> {
+        Ok(self.require_admins()?.list_enrolment_requests())
+    }
+
+    async fn approve_enrolment_request(&self, id: String) -> ManagementResult<AdminSummary> {
+        self.require_admins()?
+            .approve_enrolment_request(&id)
+            .map_err(admin_roster_error)
+    }
+
+    async fn deny_enrolment_request(&self, id: String) -> ManagementResult<()> {
+        self.require_admins()?
+            .deny_enrolment_request(&id)
+            .map_err(admin_roster_error)
+    }
+
     // ------------------------------------------------------------------ user
     async fn logout(&self) {
         self.request_logout();
@@ -1772,6 +1848,21 @@ impl ManagementService for DefaultManagementService {
 /// The distinctions that survive are the ones a caller can act on: a lockout
 /// and a wrong password are both "no", but only one of them is worth waiting
 /// out, so they do not collapse into the same status.
+fn admin_roster_error(e: AdminRosterError) -> ManagementError {
+    let message = e.to_string();
+    match e {
+        AdminRosterError::NoSuchRequest | AdminRosterError::NoSuchAdmin => {
+            ManagementError::NotFound(message)
+        }
+        // Refusing the last administrator is the wrong *operation*, not a
+        // caller without standing: `factory_reset` is the one that unclaims a
+        // device, and it drops the bond too.
+        AdminRosterError::LastAdmin => ManagementError::Conflict(message),
+        AdminRosterError::EnrolmentDenied => ManagementError::Forbidden(message),
+        AdminRosterError::Store(_) => ManagementError::Internal(message),
+    }
+}
+
 fn web_auth_error(e: WebAuthError) -> ManagementError {
     match e {
         WebAuthError::NotConfigured => ManagementError::Conflict(e.to_string()),
@@ -1821,6 +1912,25 @@ impl DefaultManagementService {
                 }
             }),
         }
+    }
+
+    /// Plug in the administrator roster, once the BLE server has built one.
+    pub fn set_admin_roster(&self, roster: Option<Arc<dyn AdminRoster>>) {
+        *self.admins.write().expect("admin roster lock poisoned") = roster;
+    }
+
+    fn require_admins(&self) -> ManagementResult<Arc<dyn AdminRoster>> {
+        self.admins
+            .read()
+            .expect("admin roster lock poisoned")
+            .clone()
+            .ok_or_else(|| {
+                ManagementError::Conflict(
+                    "Bluetooth management is not enabled on this device, so it has no \
+                     administrators to list"
+                        .into(),
+                )
+            })
     }
 
     fn require_web_auth(&self) -> ManagementResult<&Arc<WebAuth>> {

@@ -185,6 +185,7 @@ fn harness() -> Harness {
         network: None,
         web_listener: WebListenerHandle::default(),
         web_auth: None,
+        admins: Default::default(),
     };
 
     Harness {

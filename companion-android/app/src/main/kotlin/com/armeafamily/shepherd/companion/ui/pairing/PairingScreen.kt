@@ -155,8 +155,8 @@ private fun PairingDialog(phase: PairingPhase, onDone: () -> Unit, onDismiss: ()
                 ) {
                     Text(
                         "${phase.deviceName ?: "This device"} already has an administrator. " +
-                            "Open the Shepherd app on their phone, go to Administrators, and " +
-                            "approve the request showing this code.",
+                            "Approve this code under Administrators — either in the Shepherd " +
+                            "app on their phone, or on the device's web page.",
                     )
                     Text(
                         phase.code,

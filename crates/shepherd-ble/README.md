@@ -78,6 +78,25 @@ Three consequences worth knowing before changing anything here:
   advertising while connected, so the radio enforces this before the transport
   ever has to; the rule is what keeps that from being load-bearing. Per-peer
   transport state is a separate issue.
+- **The roster is not BLE's.** Listing administrators, approving a waiting
+  phone and revoking one are `ManagementService` methods, reached through
+  `shepherd_management::AdminRoster`, which `ClaimMachine` implements. They are
+  dispatched here like any other RPC rather than special-cased alongside
+  `claim` and `factory_reset`.
+
+  That is what lets a browser approve a second phone, and it matters for the
+  case the feature is for: the parent holding the device when a new phone asks
+  is at least as likely to be at a laptop, and requiring the *other phone*
+  would have meant a household could only add a caregiver by finding whoever
+  already was one. It also means the roster passes exactly the gate every other
+  RPC passes on each transport — `authorize` over BLE, the session middleware
+  over HTTP — rather than a second copy of it.
+
+  Worth stating plainly, because it is a real consequence: a web session can
+  now enrol a phone, and that phone outlives the session. The web credential
+  was already administrator-level — it can set the password and rewrite the
+  policy — and revocation is offered on the same screen, but the persistence is
+  new.
 
 ## The claim is the device's, not a user's
 

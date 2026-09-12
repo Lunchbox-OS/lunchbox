@@ -257,6 +257,20 @@ export const getNetworkStatus = () => call("network_status", {});
  */
 export const getServiceState = () => call("service_state", {});
 
+// --- administrators (issue #149) --------------------------------------------
+//
+// The device's paired phones, and the ones asking to be. Reachable from here
+// as well as from the companion because a parent at a laptop is at least as
+// likely to be the one holding the device when a second phone asks.
+
+export const listAdmins = () => call("list_admins", {});
+export const revokeAdmin = (id: string) => call("revoke_admin", { id });
+export const listEnrolmentRequests = () => call("list_enrolment_requests", {});
+export const approveEnrolmentRequest = (id: string) =>
+  call("approve_enrolment_request", { id });
+export const denyEnrolmentRequest = (id: string) =>
+  call("deny_enrolment_request", { id });
+
 export const listWindows = () => call("list_windows", {});
 export const closeWindow = (id: number) =>
   call("act_on_window", { id, action: "close" });

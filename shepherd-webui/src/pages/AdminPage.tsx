@@ -45,6 +45,7 @@ import { useEvents } from "../hooks/useEvents";
 import { Spinner } from "../components/Spinner";
 import { ConnectionSettings } from "./ConnectionSettings";
 import { SessionsCard } from "../components/SessionsCard";
+import { AdministratorsCard } from "../components/AdministratorsCard";
 
 export function AdminPage() {
   const queryClient = useQueryClient();
@@ -450,6 +451,8 @@ export function AdminPage() {
 
       {/* Signed-in browsers (issue #156) */}
       <SessionsCard />
+
+      <AdministratorsCard />
 
       {/* Connection */}
       <Card variant="outlined">

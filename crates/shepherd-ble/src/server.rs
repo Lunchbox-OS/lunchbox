@@ -441,17 +441,15 @@ impl BleServer {
         // handler runs deep in the GATT write path with no adapter access,
         // so it hands the peer address to this task, which owns the
         // adapter and calls `remove_device`.
-        let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
+        // Unbounded, and handed to the claim machine rather than kept here.
+        // Unbounded because the send has to work from synchronous code: the
+        // roster is reached through `AdminRoster`, whose callers include the
+        // HTTP middleware, and a bounded `send` is async. The queue is one
+        // address per administrator dropped, so there is nothing to bound.
+        let (unbond_tx, mut unbond_rx) = mpsc::unbounded_channel::<Address>();
+        self.claim.set_unbond_sender(unbond_tx);
 
-        let mut on_air = go_on_air(
-            &adapter,
-            &self.config,
-            &self.svc,
-            &self.claim,
-            &unbond_tx,
-            &state,
-        )
-        .await?;
+        let mut on_air = go_on_air(&adapter, &self.config, &self.svc, &self.claim, &state).await?;
 
         let events_task = tokio::spawn(events_forwarder(
             self.svc.clone(),
@@ -584,16 +582,7 @@ impl BleServer {
             // paths, and BlueZ rejects a second registration under a path
             // it already holds.
             drop(on_air);
-            match go_on_air(
-                &adapter,
-                &self.config,
-                &self.svc,
-                &self.claim,
-                &unbond_tx,
-                &state,
-            )
-            .await
-            {
+            match go_on_air(&adapter, &self.config, &self.svc, &self.claim, &state).await {
                 Ok(fresh) => on_air = fresh,
                 Err(e) => {
                     error!(
@@ -1501,7 +1490,6 @@ async fn go_on_air(
     config: &BleServerConfig,
     svc: &Arc<dyn ManagementService>,
     claim: &Arc<ClaimMachine>,
-    unbond_tx: &mpsc::Sender<Address>,
     state: &Arc<TransportState>,
 ) -> bluer::Result<OnAir> {
     let application = build_application(
@@ -1509,7 +1497,6 @@ async fn go_on_air(
         config.clone(),
         svc.clone(),
         claim.clone(),
-        unbond_tx.clone(),
         state.clone(),
     );
     let app: ApplicationHandle = adapter.serve_gatt_application(application).await?;
@@ -1628,7 +1615,6 @@ fn build_application(
     config: BleServerConfig,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    unbond_tx: mpsc::Sender<Address>,
     state: Arc<TransportState>,
 ) -> Application {
     Application {
@@ -1637,7 +1623,7 @@ fn build_application(
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
-                request_characteristic(adapter, svc, claim, unbond_tx, state.clone()),
+                request_characteristic(adapter, svc, claim, state.clone()),
                 outbox_read_characteristic(
                     SHEPHERD_RESPONSE_CHAR_UUID,
                     state.response_outbox.clone(),
@@ -1706,7 +1692,6 @@ fn request_characteristic(
     adapter: bluer::Adapter,
     svc: Arc<dyn ManagementService>,
     claim: Arc<ClaimMachine>,
-    unbond_tx: mpsc::Sender<Address>,
     state: Arc<TransportState>,
 ) -> Characteristic {
     // The reassembly state in `state` is single-connection (v1 expects
@@ -1724,7 +1709,6 @@ fn request_characteristic(
                 let adapter = adapter.clone();
                 let svc = svc.clone();
                 let claim = claim.clone();
-                let unbond_tx = unbond_tx.clone();
                 let state = state.clone();
                 // A write landed on an encrypt-authenticated
                 // characteristic, so this link demonstrably works. That is
@@ -1737,7 +1721,7 @@ fn request_characteristic(
                     // filed under. Ask BlueZ before anything compares it
                     // against a record — see [`resolve_peer`].
                     let peer = resolve_peer(&adapter, req.device_address, &state).await;
-                    handle_write(&peer, chunk, claim, svc, &unbond_tx, &state).await
+                    handle_write(&peer, chunk, claim, svc, &state).await
                 }
                 .boxed()
             })),
@@ -1893,7 +1877,6 @@ async fn handle_write(
     chunk: Vec<u8>,
     claim: Arc<ClaimMachine>,
     svc: Arc<dyn ManagementService>,
-    unbond_tx: &mpsc::Sender<Address>,
     state: &TransportState,
 ) -> bluer::gatt::local::ReqResult<()> {
     debug!(
@@ -1939,7 +1922,7 @@ async fn handle_write(
             match r.pop_frame() {
                 Ok(Some(frame)) => {
                     drop(r);
-                    dispatch_frame(peer, &frame, &claim, &svc, unbond_tx, state).await;
+                    dispatch_frame(peer, &frame, &claim, &svc, state).await;
                     r = state.reader.lock().await;
                 }
                 Ok(None) => break,
@@ -1959,7 +1942,6 @@ async fn dispatch_frame(
     frame: &[u8],
     claim: &Arc<ClaimMachine>,
     svc: &Arc<dyn ManagementService>,
-    unbond_tx: &mpsc::Sender<Address>,
     state: &TransportState,
 ) {
     let request: RpcRequest = match serde_json::from_slice(frame) {
@@ -2006,21 +1988,13 @@ async fn dispatch_frame(
         // cannot require already being one.
         "claim" => handle_claim_rpc(id, request.params, peer, claim).await,
         // Gates itself, because it has to succeed on an unclaimed device too.
-        "factory_reset" => handle_factory_reset_rpc(id, peer, claim, unbond_tx).await,
-        // The roster methods (issue #149). Handled here rather than through
-        // `ManagementService` because they act on the claim machine, which
-        // lives in this crate — `shepherd-management` sits *below* it and
-        // cannot name it without a dependency cycle.
-        method @ ("list_admins"
-        | "revoke_admin"
-        | "list_enrolment_requests"
-        | "approve_enrolment_request"
-        | "deny_enrolment_request") => match claim.authorize(peer) {
-            AuthDecision::Allow => {
-                handle_admin_rpc(id, method, request.params, peer, claim, unbond_tx).await
-            }
-            AuthDecision::Deny { reason } => denied(id, claim, reason),
-        },
+        "factory_reset" => handle_factory_reset_rpc(id, peer, claim).await,
+        // The roster methods (`list_admins`, `revoke_admin`, the enrolment
+        // ones) are deliberately *not* special-cased here. They live on
+        // `ManagementService` and fall through to the dispatcher below like
+        // everything else, which is what puts them in front of a browser too
+        // (issue #149) — and means the admin gate they pass is the same one
+        // every other RPC passes, rather than a second copy of it.
         _ => match claim.authorize(peer) {
             AuthDecision::Allow => dispatch_management(svc.as_ref(), request).await,
             AuthDecision::Deny { reason } => denied(id, claim, reason),
@@ -2087,120 +2061,22 @@ async fn handle_claim_rpc(
     }
 }
 
-/// The admin-roster RPCs (issue #149), all of which the caller has already
-/// been authorized for.
-async fn handle_admin_rpc(
-    id: u32,
-    method: &str,
-    params: serde_json::Value,
-    peer: &PeerIdentity,
-    claim: &Arc<ClaimMachine>,
-    unbond_tx: &mpsc::Sender<Address>,
-) -> RpcResponse {
-    #[derive(serde::Deserialize)]
-    struct ById {
-        id: String,
-    }
-    fn by_id(id: u32, params: serde_json::Value) -> Result<String, RpcResponse> {
-        serde_json::from_value::<ById>(params)
-            .map(|p| p.id)
-            .map_err(|e| RpcResponse::err(id, ErrorCode::InvalidParams, e.to_string()))
-    }
-    fn ok(id: u32, value: impl serde::Serialize) -> RpcResponse {
-        match serde_json::to_value(value) {
-            Ok(v) => RpcResponse::ok(id, v),
-            Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
-        }
-    }
-
-    match method {
-        "list_admins" => ok(id, claim.list_admins(peer)),
-        "list_enrolment_requests" => ok(id, claim.list_requests()),
-        "approve_enrolment_request" => match by_id(id, params) {
-            Err(resp) => resp,
-            Ok(request_id) => match claim.approve_request(&request_id) {
-                Ok(summary) => ok(id, summary),
-                Err(e) => claim_error(id, e),
-            },
-        },
-        "deny_enrolment_request" => match by_id(id, params) {
-            Err(resp) => resp,
-            Ok(request_id) => match claim.deny_request(&request_id) {
-                Ok(()) => RpcResponse::ok(id, serde_json::Value::Null),
-                Err(e) => claim_error(id, e),
-            },
-        },
-        "revoke_admin" => match by_id(id, params) {
-            Err(resp) => resp,
-            Ok(admin_id) => match claim.revoke_admin(&admin_id) {
-                Ok(removed) => {
-                    queue_unbond(&removed.identity_address, unbond_tx, "revoke_admin").await;
-                    RpcResponse::ok(id, serde_json::Value::Null)
-                }
-                Err(e) => claim_error(id, e),
-            },
-        },
-        // Unreachable: the caller matched this same list to get here. Answered
-        // rather than panicked so a future edit to one list and not the other
-        // is a bad response, not a dead daemon.
-        other => RpcResponse::err(
-            id,
-            ErrorCode::MethodNotFound,
-            format!("unknown admin method '{other}'"),
-        ),
-    }
-}
-
-/// Ask the adapter-owning task to forget `address`'s bond.
-///
-/// A revoked or reset admin that stays bonded reaches the link layer on every
-/// reconnect and is then refused by `authorize`, which is a lockout re-pairing
-/// cannot clear because the bond already exists. The task on the other end
-/// records the debt durably before attempting the removal, so a failure here
-/// is retried at the next startup.
-async fn queue_unbond(address: &str, unbond_tx: &mpsc::Sender<Address>, why: &'static str) {
-    match address.parse::<Address>() {
-        Ok(addr) => {
-            if unbond_tx.send(addr).await.is_err() {
-                warn!(
-                    peer = %address,
-                    why,
-                    "unbond channel closed; BlueZ bond not removed",
-                );
-            }
-        }
-        Err(e) => warn!(
-            peer = %address,
-            why,
-            error = %e,
-            "Could not parse admin identity address; BlueZ bond not removed",
-        ),
-    }
-}
-
 async fn handle_factory_reset_rpc(
     id: u32,
     peer: &PeerIdentity,
     claim: &Arc<ClaimMachine>,
-    unbond_tx: &mpsc::Sender<Address>,
 ) -> RpcResponse {
     // factory_reset is admin-gated: only the current admin (or no admin,
     // in which case it's a no-op) may invoke it.
     match claim.authorize(peer) {
+        // The claim machine queues each bond removal itself — it dropped the
+        // records, so it owes them. Otherwise the peers stay bonded while the
+        // device is Unclaimed, and every reconnect is link-accepted and then
+        // rejected with `not_claimed`. The response is queued before those
+        // fire, but removing a device disconnects it, so delivery of the ok is
+        // best-effort — acceptable, since a factory reset ends the session.
         AuthDecision::Allow => match claim.factory_reset() {
-            // On a real reset (there was an admin), tell the unbond task
-            // to forget the BlueZ bond too — otherwise the peer stays
-            // bonded while the device is Unclaimed and every reconnect is
-            // link-accepted then rejected with `not_claimed`. The response
-            // is queued before this fires, but removing the device
-            // disconnects the peer, so delivery of the ok is best-effort —
-            // acceptable, since a factory reset ends the session anyway.
-            Ok(previous) => {
-                for record in &previous {
-                    queue_unbond(&record.identity_address, unbond_tx, "factory_reset").await;
-                }
-                RpcResponse::ok(id, serde_json::Value::Null)
-            }
+            Ok(_) => RpcResponse::ok(id, serde_json::Value::Null),
             Err(e) => RpcResponse::err(id, ErrorCode::Internal, e.to_string()),
         },
         AuthDecision::Deny { reason } => {
@@ -2271,16 +2147,6 @@ mod tests {
         Arc::new(ClaimMachine::new(store, ClaimState::Claimed(records)))
     }
 
-    /// A live unbond sender for the write path. None of these tests drive
-    /// `factory_reset`, so nothing is ever sent; the background drainer
-    /// just keeps the receiver alive so `send` wouldn't fail on a closed
-    /// channel if one ever did.
-    fn unbond_sender() -> mpsc::Sender<Address> {
-        let (tx, mut rx) = mpsc::channel::<Address>(4);
-        tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        tx
-    }
-
     /// Encode a request the way the companion does: JSON body wrapped in
     /// a length-prefixed wire frame.
     fn request_frame(id: u32, method: &str) -> Vec<u8> {
@@ -2322,15 +2188,7 @@ mod tests {
 
         // The first RPC of a fresh session always carries id == 1.
         let body = serde_json::to_vec(&req(1, "health", serde_json::Value::Null)).unwrap();
-        dispatch_frame(
-            &peer("AA:BB:CC:DD:EE:FF"),
-            &body,
-            &claim,
-            &svc,
-            &unbond_sender(),
-            &state,
-        )
-        .await;
+        dispatch_frame(&peer("AA:BB:CC:DD:EE:FF"), &body, &claim, &svc, &state).await;
 
         // Events outbox is wiped and nothing re-queues onto it.
         assert_eq!(state.events_outbox.pending_bytes().await, 0);
@@ -2359,15 +2217,7 @@ mod tests {
         // id != 1: a mid-session RPC must not disturb events the companion
         // has not yet polled.
         let body = serde_json::to_vec(&req(2, "health", serde_json::Value::Null)).unwrap();
-        dispatch_frame(
-            &peer("AA:BB:CC:DD:EE:FF"),
-            &body,
-            &claim,
-            &svc,
-            &unbond_sender(),
-            &state,
-        )
-        .await;
+        dispatch_frame(&peer("AA:BB:CC:DD:EE:FF"), &body, &claim, &svc, &state).await;
 
         assert_eq!(state.events_outbox.pending_bytes().await, before);
         let responses = drain_responses(&state.response_outbox).await;
@@ -2394,7 +2244,6 @@ mod tests {
             partial,
             claim.clone(),
             svc.clone(),
-            &unbond_sender(),
             &state,
         )
         .await
@@ -2412,7 +2261,6 @@ mod tests {
             request_frame(8, "health"),
             claim.clone(),
             svc.clone(),
-            &unbond_sender(),
             &state,
         )
         .await
@@ -2441,7 +2289,6 @@ mod tests {
             request_frame(1, "health"),
             claim.clone(),
             svc.clone(),
-            &unbond_sender(),
             &state,
         )
         .await
@@ -2455,7 +2302,6 @@ mod tests {
             request_frame(1, "health"),
             claim.clone(),
             svc.clone(),
-            &unbond_sender(),
             &state,
         )
         .await;
@@ -2555,16 +2401,9 @@ mod tests {
         // error; the write path must drop the buffered state rather than
         // wedge on it forever.
         let bad = ((MAX_FRAME_BYTES + 1) as u16).to_le_bytes().to_vec();
-        handle_write(
-            &p,
-            bad,
-            claim.clone(),
-            svc.clone(),
-            &unbond_sender(),
-            &state,
-        )
-        .await
-        .unwrap();
+        handle_write(&p, bad, claim.clone(), svc.clone(), &state)
+            .await
+            .unwrap();
         assert!(drain_responses(&state.response_outbox).await.is_empty());
 
         // A valid frame from the same peer afterwards still parses — the
@@ -2574,7 +2413,6 @@ mod tests {
             request_frame(2, "health"),
             claim.clone(),
             svc.clone(),
-            &unbond_sender(),
             &state,
         )
         .await
@@ -2901,18 +2739,13 @@ mod tests {
         let claim = claimed_machine();
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let state = TransportState::new();
-        let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
+        // The claim machine owns the removal now, so the test listens where it
+        // sends rather than where the server used to.
+        let (unbond_tx, mut unbond_rx) = mpsc::unbounded_channel::<Address>();
+        claim.set_unbond_sender(unbond_tx);
 
         let body = serde_json::to_vec(&req(5, "factory_reset", serde_json::Value::Null)).unwrap();
-        dispatch_frame(
-            &peer("AA:BB:CC:DD:EE:FF"),
-            &body,
-            &claim,
-            &svc,
-            &unbond_tx,
-            &state,
-        )
-        .await;
+        dispatch_frame(&peer("AA:BB:CC:DD:EE:FF"), &body, &claim, &svc, &state).await;
 
         assert!(!claim.is_claimed(), "device is Unclaimed after reset");
         let addr = unbond_rx.try_recv().expect("bond removal was requested");
@@ -2935,18 +2768,11 @@ mod tests {
         let claim: Arc<ClaimMachine> = Arc::new(ClaimMachine::new(store, ClaimState::Unclaimed));
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
         let state = TransportState::new();
-        let (unbond_tx, mut unbond_rx) = mpsc::channel::<Address>(4);
+        let (unbond_tx, mut unbond_rx) = mpsc::unbounded_channel::<Address>();
+        claim.set_unbond_sender(unbond_tx);
 
         let body = serde_json::to_vec(&req(1, "factory_reset", serde_json::Value::Null)).unwrap();
-        dispatch_frame(
-            &peer("AA:BB:CC:DD:EE:FF"),
-            &body,
-            &claim,
-            &svc,
-            &unbond_tx,
-            &state,
-        )
-        .await;
+        dispatch_frame(&peer("AA:BB:CC:DD:EE:FF"), &body, &claim, &svc, &state).await;
 
         assert!(matches!(
             unbond_rx.try_recv(),

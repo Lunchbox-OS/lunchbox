@@ -42,27 +42,26 @@ class ManagementClient(private val connection: ShepherdConnection) {
 
     // --- administrators (issue #149) -----------------------------------
     //
-    // Like the claim flow above, these live in `crates/shepherd-ble` rather
-    // than on `ManagementService`, so they build their own params.
+    // On `ManagementService`, unlike the claim flow above, so that a browser
+    // can reach them too — which means their params are generated like every
+    // other method's.
 
     suspend fun listAdmins(): List<AdminSummary> =
-        decode(call("list_admins", JsonObject(emptyMap())))
+        decode(call("list_admins", RpcParams.listAdmins()))
 
     suspend fun revokeAdmin(id: String) {
-        call("revoke_admin", byId(id))
+        call("revoke_admin", RpcParams.revokeAdmin(id))
     }
 
     suspend fun listEnrolmentRequests(): List<EnrolmentRequestInfo> =
-        decode(call("list_enrolment_requests", JsonObject(emptyMap())))
+        decode(call("list_enrolment_requests", RpcParams.listEnrolmentRequests()))
 
     suspend fun approveEnrolmentRequest(id: String): AdminSummary =
-        decode(call("approve_enrolment_request", byId(id)))
+        decode(call("approve_enrolment_request", RpcParams.approveEnrolmentRequest(id)))
 
     suspend fun denyEnrolmentRequest(id: String) {
-        call("deny_enrolment_request", byId(id))
+        call("deny_enrolment_request", RpcParams.denyEnrolmentRequest(id))
     }
-
-    private fun byId(id: String): JsonObject = buildJsonObject { put("id", JsonPrimitive(id)) }
 
     // --- health / state ------------------------------------------------
 

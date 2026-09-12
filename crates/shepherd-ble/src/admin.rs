@@ -13,6 +13,7 @@
 use chrono::{DateTime, Local};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use shepherd_management::AdminSummary;
 use shepherd_util::{ProtectedFile, ProtectedFiles};
 use std::sync::Arc;
 use thiserror::Error;
@@ -71,35 +72,25 @@ impl AdminRecord {
     }
 }
 
-/// One admin, as another admin sees them.
-///
-/// Carries no credential. [`AdminRecord`] holds the minted HTTP bearer token,
-/// which is the whole reason this type exists: listing admins over BLE hands
-/// the list to a phone, and a phone that can read every other phone's token
-/// does not need to be revoked to keep using the device after it has been.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct AdminSummary {
-    pub id: String,
-    pub device_name: String,
-    /// Shown so a parent can tell two phones with the same name apart.
-    pub identity_address: String,
-    pub bonded_at: DateTime<Local>,
-    pub role: AdminRole,
-    /// True for the phone doing the asking, so the UI can label its own row
-    /// and warn before revoking it.
-    pub is_self: bool,
-}
-
-impl AdminSummary {
-    pub fn of(record: &AdminRecord, is_self: bool) -> Self {
-        Self {
-            id: record.id.clone(),
-            device_name: record.device_name.clone(),
-            identity_address: record.identity_address.clone(),
-            bonded_at: record.bonded_at,
-            role: record.role.clone(),
-            is_self,
+impl AdminRecord {
+    /// The credential-free view of this record.
+    ///
+    /// [`AdminSummary`] lives in `shepherd-management` because both transports
+    /// return it and that crate sits below this one. It deliberately has no
+    /// "is this me?" flag: over HTTP there is no phone to be, and a client
+    /// that wants to recognise its own row already knows its own identity
+    /// address and can match on it. A flag would have meant either a `viewer`
+    /// argument threaded through `ManagementService` for one transport's
+    /// benefit, or the device guessing.
+    pub fn summary(&self) -> AdminSummary {
+        AdminSummary {
+            id: self.id.clone(),
+            device_name: self.device_name.clone(),
+            identity_address: self.identity_address.clone(),
+            bonded_at: self.bonded_at,
+            role: match self.role {
+                AdminRole::Admin => "admin".to_string(),
+            },
         }
     }
 }

@@ -5,6 +5,7 @@
 // `crates/shepherd-management/src/service.rs`.
 
 import type {
+  AdminSummary,
   AudioOutputRecord,
   BrightnessInfo,
   DailyOverride,
@@ -12,6 +13,7 @@ import type {
   DiagnosticSet,
   DisplayMode,
   DisplayState,
+  EnrolmentRequestInfo,
   EntryId,
   EntryView,
   GroupView,
@@ -90,6 +92,11 @@ export type RpcMethod =
   | "list_login_requests"
   | "approve_login_request"
   | "deny_login_request"
+  | "list_admins"
+  | "revoke_admin"
+  | "list_enrolment_requests"
+  | "approve_enrolment_request"
+  | "deny_enrolment_request"
   | "logout"
   | "list_diagnostics"
   | "network_status"
@@ -239,6 +246,17 @@ export interface RpcParamsMap {
   "deny_login_request": {
     id: string;
   };
+  "list_admins": Record<string, never>;
+  "revoke_admin": {
+    id: string;
+  };
+  "list_enrolment_requests": Record<string, never>;
+  "approve_enrolment_request": {
+    id: string;
+  };
+  "deny_enrolment_request": {
+    id: string;
+  };
   "logout": Record<string, never>;
   "list_diagnostics": Record<string, never>;
   "network_status": Record<string, never>;
@@ -316,6 +334,11 @@ export interface RpcResultMap {
   "list_login_requests": LoginRequestInfo[];
   "approve_login_request": null;
   "deny_login_request": null;
+  "list_admins": AdminSummary[];
+  "revoke_admin": null;
+  "list_enrolment_requests": EnrolmentRequestInfo[];
+  "approve_enrolment_request": AdminSummary;
+  "deny_enrolment_request": null;
   "logout": null;
   "list_diagnostics": DiagnosticSet;
   "network_status": NetworkStatusView;

@@ -121,28 +121,33 @@ enum class AdminRole(val wire: String) {
 }
 
 /**
- * One admin, as another admin sees them.
+ * One administrator, as anyone with standing to see the list sees them.
  *
- * Carries no credential. [`AdminRecord`] holds the minted HTTP bearer token,
- * which is the whole reason this type exists: listing admins over BLE hands
- * the list to a phone, and a phone that can read every other phone's token
- * does not need to be revoked to keep using the device after it has been.
+ * Carries no credential. The record behind this holds a minted HTTP bearer
+ * token, which is the whole reason the summary exists: listing administrators
+ * hands the list to a phone or a browser, and a client that can read every
+ * other client's token does not need to be revoked to keep using the device
+ * after it has been.
+ *
+ * Here rather than in `shepherd-ble` because both transports return it and
+ * `shepherd-ble` sits *above* this crate — the same reason
+ * [`crate::webauth::WebSessionInfo`] lives here.
  */
 @Serializable
 data class AdminSummary(
     val bondedAt: IsoTimestamp,
     val deviceName: String,
+    /**
+     * Stable public handle — what `revoke_admin` takes. Not a credential.
+     */
     val id: String,
     /**
-     * Shown so a parent can tell two phones with the same name apart.
+     * Shown so a parent can tell two phones with the same name apart, and so
+     * a client can recognise its own row without the device having to guess
+     * which caller it is talking to.
      */
     val identityAddress: String,
-    /**
-     * True for the phone doing the asking, so the UI can label its own row
-     * and warn before revoking it.
-     */
-    val isSelf: Boolean,
-    val role: AdminRole,
+    val role: String,
 )
 
 /**
@@ -981,12 +986,12 @@ enum class EbookViewer(val wire: String) {
 }
 
 /**
- * A phone waiting to be let in, as the admin who can let it in sees it.
+ * A phone waiting to be let in, as an administrator sees it.
  */
 @Serializable
 data class EnrolmentRequestInfo(
     /**
-     * Six digits the requesting phone is displaying. The approving parent
+     * Six digits the requesting phone is displaying. Whoever approves
      * compares them against that phone's screen.
      *
      * Same ritual as BLE pairing's Numeric Comparison and #156's login code,

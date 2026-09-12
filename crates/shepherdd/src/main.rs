@@ -79,6 +79,20 @@ const SETUP_CARD_POLL: Duration = Duration::from_secs(5);
 /// Compared rather than blindly re-spawned: the poll is fast, and restarting
 /// the overlay subprocess on every tick would flash the card in the face of
 /// the person reading the code off it.
+/// What starting BLE management leaves behind for the rest of the daemon.
+///
+/// One claim machine wearing two hats — it verifies the bearer tokens the HTTP
+/// middleware is presented with, and it is the administrator roster both
+/// transports manage (issue #149) — plus the task serving GATT. `Default` is
+/// the shape of a device with Bluetooth management switched off, or one whose
+/// BLE server failed to start: degraded, and everything else still runs.
+#[derive(Default)]
+struct BleManagement {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    authority: Option<Arc<dyn shepherd_management::AdminAuthority>>,
+    roster: Option<Arc<dyn shepherd_management::AdminRoster>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SetupCardContent {
     code: String,
@@ -1650,6 +1664,8 @@ impl Service {
                 config_path: config_path.clone(),
                 policy_files: policy_files.clone(),
                 media_refresh_tx: Some(media_refresh_tx),
+                // Plugged in below, once the BLE server has a claim machine.
+                admins: Default::default(),
                 shutdown_tx: shutdown_tx.clone(),
                 hidpi: hidpi.clone() as Arc<dyn HidpiController>,
                 hud_layout: hud_layout.clone() as Arc<dyn HudLayoutController>,
@@ -1726,10 +1742,11 @@ impl Service {
         // handed to HttpServer as the source of unified admin bearer
         // tokens. If BLE isn't configured, HTTP falls back to its
         // static-token-only auth.
-        let (ble_handle, admin_authority): (
-            Option<tokio::task::JoinHandle<()>>,
-            Option<Arc<dyn shepherd_management::AdminAuthority>>,
-        ) = match ble_management_config {
+        let BleManagement {
+            handle: ble_handle,
+            authority: admin_authority,
+            roster: admin_roster,
+        } = match ble_management_config {
             Some(ble_cfg) => {
                 let bsc = BleServerConfig {
                     device_name: ble_cfg.device_name,
@@ -1756,23 +1773,33 @@ impl Service {
                         let server = server
                             .with_diagnostics(Arc::new(diagnostic_publisher.clone())
                                 as Arc<dyn shepherd_api::DiagnosticSink>);
+                        // One claim machine, two roles: it verifies the
+                        // bearer tokens the HTTP middleware is presented with,
+                        // and it is the administrator roster both transports
+                        // manage (issue #149).
+                        let claim = server.claim_machine();
                         let authority =
-                            server.claim_machine() as Arc<dyn shepherd_management::AdminAuthority>;
+                            claim.clone() as Arc<dyn shepherd_management::AdminAuthority>;
+                        let roster = claim as Arc<dyn shepherd_management::AdminRoster>;
                         let rx = shutdown_rx.clone();
                         let handle = tokio::spawn(async move {
                             if let Err(e) = server.run(rx).await {
                                 error!(error = %e, "BLE management server error");
                             }
                         });
-                        (Some(handle), Some(authority))
+                        BleManagement {
+                            handle: Some(handle),
+                            authority: Some(authority),
+                            roster: Some(roster),
+                        }
                     }
                     Err(e) => {
                         error!(error = %e, "BLE management server failed to initialize");
-                        (None, None)
+                        BleManagement::default()
                     }
                 }
             }
-            None => (None, None),
+            None => BleManagement::default(),
         };
 
         // The store learns about the companion here rather than at
@@ -1782,6 +1809,9 @@ impl Service {
         if let Some(web) = &web_auth {
             web.set_companion(admin_authority.clone());
         }
+        // Same handover, for the same reason: this is what lets a browser list
+        // the administrators and approve a second phone (issue #149).
+        svc_concrete.set_admin_roster(admin_roster.clone());
 
         // Zipped, not two `if let`s: the store is built above from exactly this
         // `Option`, so pairing them here is what makes "an API always has a

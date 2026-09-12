@@ -153,6 +153,12 @@ fun AdminsScreen(vm: ShepherdViewModel, onBack: () -> Unit) {
             for (admin in admins.admins) {
                 AdminRow(
                     admin = admin,
+                    // The device does not say which row is us — over HTTP
+                    // there is no phone to be, so the flag was dropped from
+                    // the wire rather than made meaningless for one caller.
+                    // This phone already knows its own identity address.
+                    isSelf = admin.identityAddress
+                        .equals(state.record?.identityAddress, ignoreCase = true),
                     // The device refuses to remove the last administrator, so
                     // don't offer it: a button whose only outcome is an error
                     // teaches people to ignore errors.
@@ -173,7 +179,8 @@ fun AdminsScreen(vm: ShepherdViewModel, onBack: () -> Unit) {
     }
 
     confirmRevoke?.let { admin ->
-        val self = admin.isSelf
+        val self = admin.identityAddress
+            .equals(state.record?.identityAddress, ignoreCase = true)
         AlertDialog(
             onDismissRequest = { confirmRevoke = null },
             title = { Text(if (self) "Remove this phone?" else "Remove ${admin.deviceName}?") },
@@ -261,11 +268,16 @@ private fun EnrolmentRequestCard(
 }
 
 @Composable
-private fun AdminRow(admin: AdminSummary, canRevoke: Boolean, onRevoke: () -> Unit) {
+private fun AdminRow(
+    admin: AdminSummary,
+    isSelf: Boolean,
+    canRevoke: Boolean,
+    onRevoke: () -> Unit,
+) {
     Card(Modifier.fillMaxWidth()) {
         ListItem(
             headlineContent = {
-                Text(admin.deviceName + if (admin.isSelf) " (this phone)" else "")
+                Text(admin.deviceName + if (isSelf) " (this phone)" else "")
             },
             supportingContent = {
                 Column {
