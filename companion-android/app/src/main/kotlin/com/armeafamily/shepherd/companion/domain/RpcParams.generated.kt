@@ -68,6 +68,9 @@ object RpcParams {
         put("seconds", JsonPrimitive(seconds))
     }
 
+    /** Params for `back`, which takes none. */
+    fun back(): JsonObject = JsonObject(emptyMap())
+
     /** Params for `list_overrides`. */
     fun listOverrides(date: IsoDate? = null): JsonObject = buildJsonObject {
         put("date", date?.let { JsonPrimitive(it) } ?: JsonNull)

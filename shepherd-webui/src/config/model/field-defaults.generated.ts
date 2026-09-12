@@ -107,6 +107,9 @@ export const FIELD_DEFAULTS = {
  * lookup has to cope with `undefined` — `KIND_FIELD_DEFAULTS[k]?.x`.
  */
 export const KIND_FIELD_DEFAULTS = {
+  android: {
+    args: [],
+  },
   ebook: {
     args: [],
     env: {},

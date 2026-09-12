@@ -150,6 +150,7 @@ export interface RpcParamsMap {
   "extend_current": {
     seconds: number;
   };
+  "back": Record<string, never>;
   "list_overrides": {
     date?: IsoDate;
   };
@@ -297,6 +298,7 @@ export interface RpcResultMap {
   "stop_current": null;
   "reset_current": null;
   "extend_current": { new_deadline: IsoTimestamp | null };
+  "back": null;
   "list_overrides": DailyOverride[];
   "get_override": DailyOverride | null;
   "upsert_override": DailyOverride;

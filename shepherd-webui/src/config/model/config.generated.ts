@@ -493,6 +493,21 @@ export type RawEntryKind =
        */
       env?: Record<string, string>;
     }
+  /**
+   * Android application launched inside Waydroid (Linux)
+   */
+  | {
+      type: "android";
+      /**
+       * Additional arguments forwarded to the launch (reserved for future
+       * intent extras; unused today)
+       */
+      args?: string[];
+      /**
+       * The Android package name (e.g., "com.android.calculator2")
+       */
+      package_name: string;
+    }
   | {
       type: "vm";
       args?: Record<string, unknown>;
@@ -1100,6 +1115,10 @@ export interface RawServiceConfig {
    * Global volume restrictions
    */
   volume?: RawVolumeConfig | null;
+  /**
+   * Waydroid (Android activity kind) behaviour
+   */
+  waydroid?: RawWaydroidConfig | null;
 }
 
 /**
@@ -1311,6 +1330,56 @@ export interface RawWarningThreshold {
    * Severity: "info", "warn", "critical"
    */
   severity?: string;
+}
+
+/**
+ * Waydroid (Android activity kind) service configuration.
+ *
+ * Waydroid runs a single global Android container shared by every Android
+ * entry, so these knobs are service-level rather than per-entry. See
+ * `docs/ai/history/2026-06-28 001 android-activity-kind-scoping.md`.
+ */
+export interface RawWaydroidConfig {
+  /**
+   * How long to wait for "Android with user 0 is ready" after starting the
+   * session before giving up (seconds). Default 60.
+   */
+  boot_ready_timeout_seconds?: number | null;
+  /**
+   * Deprecated: use `lock_mode`. `true`/unset maps to `lock_mode =
+   * "statusbar"`, `false` to `"off"`. Ignored when `lock_mode` is set.
+   */
+  lock_down?: boolean | null;
+  /**
+   * Kiosk lock-in mode for launched Android sessions:
+   * - `"statusbar"` (default): disable the notification shade / quick
+   *   settings (which can reach Android Settings) and the nav-bar
+   *   home/recents/search buttons. Soft; keeps multi-window presentation.
+   * - `"locktask"`: pin the app in Android Lock Task Mode via the DPC
+   *   device-owner app (hard containment, single-surface presentation).
+   *   Requires `apps install android` to have set the DPC as device owner.
+   * - `"off"`: no lock-in.
+   *
+   * Requires the privileged helper (`shepherd install waydroid`).
+   */
+  lock_mode?: string | null;
+  /**
+   * Ensure `persist.waydroid.multi_windows` is enabled (each app gets its
+   * own Wayland toplevel with `app_id="waydroid.<package>"`, which the
+   * kiosk needs to fullscreen and track individual apps). Default true.
+   */
+  multi_window?: boolean | null;
+  /**
+   * Start the Waydroid session at daemon startup and keep it warm, so the
+   * first Android launch doesn't pay the full boot cost. When unset, the
+   * daemon preboots automatically iff at least one Android entry exists.
+   */
+  preboot?: boolean | null;
+  /**
+   * Freeze the container when idle (`persist.waydroid.suspend`) to drop CPU
+   * and RAM while keeping the session warm. Default true.
+   */
+  suspend_when_idle?: boolean | null;
 }
 
 /**

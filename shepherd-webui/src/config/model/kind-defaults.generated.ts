@@ -25,6 +25,7 @@ export const KIND_DEFAULTS: Record<RawEntryKind["type"], KindDefaults> = {
   snap: { confirm_on_close: true, input_compat: [] },
   steam: { confirm_on_close: true, input_compat: [] },
   flatpak: { confirm_on_close: true, input_compat: [] },
+  android: { confirm_on_close: true, input_compat: [] },
   vm: { confirm_on_close: true, input_compat: [] },
   media: { confirm_on_close: true, input_compat: [] },
   retroarch: { confirm_on_close: true, input_compat: [] },

@@ -1105,6 +1105,23 @@ sealed interface EntryKind {
         val env: Map<String, String> = emptyMap(),
     ) : EntryKind
 
+    /**
+     * Android application launched inside Waydroid (Linux).
+     */
+    @Serializable
+    @SerialName("android")
+    data class Android(
+        /**
+         * Additional arguments forwarded to the launch (reserved for future
+         * intent extras; unused today).
+         */
+        val args: List<String> = emptyList(),
+        /**
+         * The Android package name (e.g., "com.android.calculator2").
+         */
+        val packageName: String,
+    ) : EntryKind
+
     @Serializable
     @SerialName("vm")
     data class Vm(
@@ -1308,6 +1325,7 @@ enum class EntryKindTag(val wire: String) {
     SNAP("snap"),
     STEAM("steam"),
     FLATPAK("flatpak"),
+    ANDROID("android"),
     VM("vm"),
     MEDIA("media"),
     RETROARCH("retroarch"),
@@ -2392,6 +2410,12 @@ data class SessionInfo(
      */
     val deadline: IsoTimestamp? = null,
     val entryId: EntryId,
+    /**
+     * The entry's kind, so the HUD can adapt its chrome (e.g. show an Android
+     * back button). Defaults to `Process` when absent so older payloads
+     * deserialize and never spuriously enable Android-only affordances.
+     */
+    val kindTag: EntryKindTag? = null,
     val label: String,
     val sessionId: SessionId,
     val startedAt: IsoTimestamp,

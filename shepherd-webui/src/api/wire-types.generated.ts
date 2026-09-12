@@ -841,6 +841,21 @@ export type EntryKind =
        */
       env?: Record<string, string>;
     }
+  /**
+   * Android application launched inside Waydroid (Linux).
+   */
+  | {
+      type: "android";
+      /**
+       * Additional arguments forwarded to the launch (reserved for future
+       * intent extras; unused today).
+       */
+      args?: string[];
+      /**
+       * The Android package name (e.g., "com.android.calculator2").
+       */
+      package_name: string;
+    }
   | {
       type: "vm";
       args?: Record<string, unknown>;
@@ -1022,6 +1037,7 @@ export type EntryKindTag =
   | "snap"
   | "steam"
   | "flatpak"
+  | "android"
   | "vm"
   | "media"
   | "retroarch"
@@ -1100,6 +1116,10 @@ export type EventPayload =
        */
       deadline?: IsoTimestamp | null;
       entry_id: EntryId;
+      /**
+       * The entry's kind, so the HUD can adapt its chrome (Android back).
+       */
+      kind_tag?: EntryKindTag;
       label: string;
       session_id: SessionId;
     }
@@ -1952,6 +1972,18 @@ export interface ServiceStateSnapshot {
    */
   locked?: boolean;
   policy_loaded: boolean;
+  /**
+   * True while a startup step that visibly disrupts the screen is running,
+   * so a shell should cover the grid with its loading page until it clears
+   * (issue #2). Today that is only the Waydroid pre-boot, which holds every
+   * output at scale 1 while Android latches its display geometry — during
+   * which the launcher and HUD render physically smaller than normal.
+   *
+   * Lives in the snapshot rather than in a one-shot event so a shell that
+   * connects (or reconnects) mid-startup still learns it; shepherdd
+   * re-broadcasts the snapshot on every transition.
+   */
+  startup_busy?: boolean;
 }
 
 /**
@@ -2024,6 +2056,12 @@ export interface SessionInfo {
    */
   deadline?: IsoTimestamp | null;
   entry_id: EntryId;
+  /**
+   * The entry's kind, so the HUD can adapt its chrome (e.g. show an Android
+   * back button). Defaults to `Process` when absent so older payloads
+   * deserialize and never spuriously enable Android-only affordances.
+   */
+  kind_tag?: EntryKindTag;
   label: string;
   session_id: SessionId;
   started_at: IsoTimestamp;
