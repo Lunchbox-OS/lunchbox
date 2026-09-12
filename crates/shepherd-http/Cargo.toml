@@ -25,6 +25,10 @@ anyhow = { workspace = true }
 
 axum = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+# `fs` for `statvfs` (how much room is left on a root) and `access` (whether
+# this device's kiosk user may write to one) -- issue #195.
+nix = { workspace = true, features = ["fs"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 subtle = { workspace = true }
 axum-server = { workspace = true }

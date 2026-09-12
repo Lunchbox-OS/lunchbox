@@ -4528,6 +4528,7 @@ dependencies = [
  "axum-server",
  "chrono",
  "http-body-util",
+ "nix 0.29.0",
  "rcgen",
  "rust-embed",
  "rustls",
@@ -4547,6 +4548,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tracing",
 ]

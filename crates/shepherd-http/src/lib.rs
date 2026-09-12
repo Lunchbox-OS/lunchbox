@@ -17,12 +17,14 @@
 //! for one trait method.
 
 pub mod auth;
+pub mod files;
 pub mod handlers;
 pub mod state;
 pub mod tls;
 pub mod web_assets;
 
 pub use auth::{AuthSources, Identity};
+pub use files::FileService;
 pub use state::AppState;
 
 use anyhow::Context;

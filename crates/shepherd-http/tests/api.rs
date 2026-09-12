@@ -313,6 +313,10 @@ fn make_state_full(
     });
     AppState {
         svc: svc as Arc<dyn shepherd_management::ManagementService>,
+        // The file manager has its own fixture and its own test file
+        // (`tests/files.rs`), because it needs a temp directory to be a root
+        // of rather than a policy to be a service for.
+        file_manager: None,
     }
 }
 

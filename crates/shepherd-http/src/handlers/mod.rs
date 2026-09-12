@@ -13,9 +13,13 @@
 //!   routes under `/api/v1` reachable without a credential; see [`auth`].
 //! - `GET`/`PUT /api/v1/config` — the policy file itself (issue #185), for the
 //!   web config editor. Off the RPC endpoint on purpose; see [`config`].
+//! - `/api/v1/files/*` — remote file management (issue #195), mounted only on
+//!   a device that configures it on. Off the RPC endpoint for the same reason
+//!   the policy is; see [`files`].
 
 pub mod auth;
 pub mod config;
+pub mod files;
 pub mod rpc;
 pub mod sse;
 
@@ -46,12 +50,30 @@ pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
         .route("/auth/signout", post(auth::signout))
         .route("/auth/sessions", get(auth::list_sessions))
         .route("/auth/sessions/{id}", delete(auth::revoke_session))
-        .with_state(state.clone())
-        .layer(middleware::from_fn(
-            move |req: axum::extract::Request, next: middleware::Next| async move {
-                crate::auth::require_auth(req, next).await
-            },
-        ));
+        .with_state(state.clone());
+
+    // Mounted only where the device configures it on, so `enabled = false`
+    // means the routes are not there rather than answering 403 to everyone.
+    let guarded = if state.file_manager.is_some() {
+        guarded.merge(
+            Router::new()
+                .route("/files/roots", get(files::roots))
+                .route("/files/list", get(files::list))
+                .route("/files/content", get(files::download).put(files::upload))
+                .route("/files/dir", post(files::mkdir))
+                .route("/files/move", post(files::move_entry))
+                .route("/files/entry", delete(files::delete_entry))
+                .with_state(state.clone()),
+        )
+    } else {
+        guarded
+    };
+
+    let guarded = guarded.layer(middleware::from_fn(
+        move |req: axum::extract::Request, next: middleware::Next| async move {
+            crate::auth::require_auth(req, next).await
+        },
+    ));
 
     // The five pre-auth routes. Each one either says something a login page
     // cannot render without (`status`) or is itself a way of authenticating,
@@ -79,6 +101,21 @@ pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
             },
         ),
     );
+
+    // An unknown path under `/api/v1` is an API mistake, not a page: without
+    // this it reached the SPA fallback below and answered `200 text/html`,
+    // which an API client parses as JSON and fails on somewhere else entirely.
+    // It is what a caller sees for a route that is deliberately not mounted —
+    // the file manager on a device that configures it off (issue #195).
+    let api = api.fallback(|| async {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": "not_found",
+                "message": "This device does not serve that endpoint",
+            })),
+        )
+    });
 
     Router::new()
         .nest("/api/v1", api)

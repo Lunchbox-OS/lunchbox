@@ -33,6 +33,7 @@ import {
   VolumeEditor,
 } from "../components/RestrictionEditors";
 import { DangerZone } from "../components/DangerZone";
+import { KeyValueEditor } from "../components/KeyValueEditor";
 import { Section } from "../components/Section";
 import { StringListEditor } from "../components/StringListEditor";
 import { WarningTimeline } from "../components/WarningTimeline";
@@ -164,6 +165,19 @@ export function ServicePage({ config }: { config: RawConfig }) {
           }
         >
           <MediaServiceEditor config={config} />
+        </Section>
+
+        <Section
+          title="File manager"
+          description="Managing this device's files from the web interface (issue #195)."
+          present={service.file_manager != null}
+          onTogglePresent={(on) =>
+            on
+              ? apply(set(servicePath("file_manager"), { enabled: true } as never))
+              : apply(unset(servicePath("file_manager")))
+          }
+        >
+          <FileManagerEditor config={config} />
         </Section>
 
         <Section
@@ -518,6 +532,84 @@ function MediaServiceEditor({ config }: { config: RawConfig }) {
         helperText="How long watching a video protects its copy from being displaced. 0 orders purely by age."
       />
       <SponsorBlockEditor config={config} />
+    </Stack>
+  );
+}
+
+/**
+ * `[service.file_manager]` (issue #195).
+ *
+ * `extra_roots` is a list of `{ label, path }` in the schema and a label →
+ * path map here: the same shape, and `KeyValueEditor` already knows how to
+ * render one without a second repeated-row editor existing. Two roots sharing
+ * a label would collapse into one — which config validation refuses anyway,
+ * for the same reason it would be confusing on screen.
+ */
+function FileManagerEditor({ config }: { config: RawConfig }) {
+  const f = useFields("service.file_manager");
+  const v = config.service?.file_manager;
+  const roots: Record<string, string> = Object.fromEntries(
+    (v?.extra_roots ?? []).map((r) => [r.label, r.path]),
+  );
+  return (
+    <Stack spacing={2} sx={{ maxWidth: 520 }}>
+      <FormControlLabel
+        control={
+          <Switch
+            checked={v?.enabled ?? FIELD_DEFAULTS.RawFileManagerConfig.enabled}
+            onChange={(e) => f.setField("enabled", e.target.checked)}
+          />
+        }
+        label="Manage this device's files from the web interface"
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        Rooted at this kiosk user's home directory, which SSH and SFTP cannot
+        reach on a hardened account. Off means the routes are not served at
+        all; there is deliberately no on/off switch elsewhere in the interface.
+      </Typography>
+      <Stack direction="row" spacing={2}>
+        <GibField
+          label="Largest upload (GiB)"
+          value={v?.max_upload_bytes}
+          onChange={(bytes) => f.setField("max_upload_bytes", bytes)}
+          helperText="0 removes the cap."
+        />
+        <GibField
+          label="Keep free (GiB)"
+          value={v?.free_space_floor_bytes}
+          onChange={(bytes) => f.setField("free_space_floor_bytes", bytes)}
+          helperText="Refuse an upload that would cross this. 0 disables."
+        />
+      </Stack>
+      <FormControlLabel
+        control={
+          <Switch
+            checked={
+              v?.external_media ?? FIELD_DEFAULTS.RawFileManagerConfig.external_media
+            }
+            onChange={(e) => f.setField("external_media", e.target.checked)}
+          />
+        }
+        label="Offer removable drives"
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        Anything mounted under /media or /run/media, identified by its
+        filesystem UUID so a drive keeps its place when it is plugged in again.
+      </Typography>
+      <KeyValueEditor
+        label="Extra places to browse"
+        values={roots}
+        onChange={(next) =>
+          f.setField(
+            "extra_roots",
+            Object.entries(next).map(([label, path]) => ({ label, path })),
+          )
+        }
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+        A name, and an absolute path — a NAS mount, or a library on a second
+        disk. `/`, `/etc` and the other system directories are refused.
+      </Typography>
     </Stack>
   );
 }

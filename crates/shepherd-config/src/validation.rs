@@ -45,6 +45,25 @@ pub enum ValidationError {
     GlobalError(String),
 }
 
+/// Directories the file manager's extra roots may neither be nor contain
+/// (issue #195).
+///
+/// Not a security boundary — everything here is already unreadable to the uid
+/// shepherdd runs as, so a root pointing at `/etc` would list it and fail to
+/// open most of it. It is a typo guard, and it is where the mistake gets
+/// caught: `path = "/"` in a config file is a plausible slip and a browsable
+/// root filesystem is not a thing to discover later.
+const FORBIDDEN_FILE_MANAGER_ROOTS: &[&str] = &[
+    "/",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/proc",
+    "/root",
+    "/sys",
+    "/var/lib/shepherdd",
+];
+
 /// Validate a raw configuration
 pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
     let mut errors = Vec::new();
@@ -98,6 +117,49 @@ pub fn validate_config(config: &RawConfig) -> Vec<ValidationError> {
                 "Invalid service.media.sponsorblock.api '{}': {e}",
                 sb.api
             )));
+        }
+    }
+
+    // Validate the remote file manager's extra roots (issue #195).
+    //
+    // At parse time rather than at first use: a root that resolves to `/` is
+    // a web interface that browses the whole device, and the moment to find
+    // that out is while the administrator is still looking at the file they
+    // just wrote.
+    if let Some(fm) = &config.service.file_manager {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for root in &fm.extra_roots {
+            let label = root.label.trim();
+            if label.is_empty() {
+                errors.push(ValidationError::GlobalError(
+                    "service.file_manager.extra_roots entry has an empty label".into(),
+                ));
+            } else if !seen.insert(label) {
+                errors.push(ValidationError::GlobalError(format!(
+                    "service.file_manager.extra_roots has two roots labelled '{label}'"
+                )));
+            }
+            if !root.path.is_absolute() {
+                errors.push(ValidationError::GlobalError(format!(
+                    "service.file_manager.extra_roots path '{}' must be absolute",
+                    root.path.display()
+                )));
+                continue;
+            }
+            // Refused if the root *is* a protected directory or *contains*
+            // one. Containment is the case that matters: `/var` is a perfectly
+            // ordinary-looking path that hands out `/var/lib/shepherdd`, where
+            // the policy, the admin record and the web credentials live.
+            if let Some(bad) = FORBIDDEN_FILE_MANAGER_ROOTS.iter().find(|f| {
+                let forbidden = std::path::Path::new(f);
+                root.path == forbidden || forbidden.starts_with(&root.path)
+            }) {
+                errors.push(ValidationError::GlobalError(format!(
+                    "service.file_manager.extra_roots path '{}' is or contains '{bad}', which \
+                     would put system files on the web interface",
+                    root.path.display()
+                )));
+            }
         }
     }
 

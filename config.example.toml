@@ -232,6 +232,37 @@ mode = "self_signed"         # "auto" | "off" | "self_signed" | "files"
 # lockout_after = 8          # Failed logins from one address before it is locked out.
 # lockout_seconds = 300      # First lockout; each subsequent one doubles, to 16x.
 
+# Remote file manager (issue #195)
+# Puts a Files tab in the web management interface, rooted at this kiosk user's
+# home directory. It exists because a hardened account denies SSH and keeps its
+# home at mode 0700, so `scp`, `rsync` and every SFTP file manager are shut out
+# of exactly the directory a book, a ROM or a video has to go into -- and the
+# workaround (copy in as another user, then `sudo mv`) leaves root-owned files
+# in a child's home.
+#
+# There is no on/off switch in the UI. A signed-in administrator can already
+# write a policy containing `kind = { type = "process", command = ... }`, which
+# runs anything as this user, so withholding a file write from that same
+# credential would protect nothing. What is here instead is `enabled`: set it
+# to false and the routes are not served at all.
+[service.file_manager]
+# enabled = true
+# max_upload_bytes = 8589934592        # 8 GiB; 0 removes the cap
+# free_space_floor_bytes = 2147483648  # 2 GiB; refuse an upload that would cross it
+#
+# Offer removable drives mounted under /media and /run/media. Each is
+# identified by its filesystem UUID, so a drive keeps the same identity when it
+# is unplugged and mounted again somewhere else.
+# external_media = true
+#
+# Extra places to browse, beyond the home directory and removable drives --
+# a NAS mount, or a library kept on a second disk. Paths must be absolute, and
+# `/`, `/etc` and the other system directories are refused at config-validation
+# time rather than at first use.
+# [[service.file_manager.extra_roots]]
+# label = "Shared videos"
+# path = "/srv/media"
+
 # Bluetooth LE management transport (optional)
 # Primary admin path: works without network configuration, IP autodiscovery,
 # or a known static IP. Pairing uses Numeric Comparison (6-digit code shown

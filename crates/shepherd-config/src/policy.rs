@@ -346,6 +346,68 @@ pub struct ServiceConfig {
     pub display: DisplayConfig,
     /// Background media prefetch (issue #127).
     pub media: MediaServiceConfig,
+    /// Remote file management over the web interface (issue #195).
+    pub file_manager: FileManagerConfig,
+}
+
+/// Validated remote file manager settings (issue #195).
+#[derive(Debug, Clone)]
+pub struct FileManagerConfig {
+    /// Whether the file routes are served at all.
+    pub enabled: bool,
+    /// Largest single upload, in bytes. 0 removes the cap.
+    pub max_upload_bytes: u64,
+    /// Free-space floor on the destination filesystem, in bytes. 0 disables
+    /// the check.
+    pub free_space_floor_bytes: u64,
+    /// Whether removable drives under `/media` and `/run/media` are offered.
+    pub external_media: bool,
+    /// Extra directories to offer, already checked for absoluteness and for
+    /// not being a system directory.
+    pub extra_roots: Vec<FileManagerRoot>,
+}
+
+/// One extra place the file manager may browse (issue #195).
+#[derive(Debug, Clone)]
+pub struct FileManagerRoot {
+    /// What the web interface calls it.
+    pub label: String,
+    /// Absolute path on this device.
+    pub path: PathBuf,
+}
+
+impl Default for FileManagerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_upload_bytes: 8 * 1024 * 1024 * 1024,
+            free_space_floor_bytes: 2 * 1024 * 1024 * 1024,
+            external_media: true,
+            extra_roots: Vec::new(),
+        }
+    }
+}
+
+impl FileManagerConfig {
+    fn from_raw(raw: Option<&crate::schema::RawFileManagerConfig>) -> Self {
+        match raw {
+            Some(r) => Self {
+                enabled: r.enabled,
+                max_upload_bytes: r.max_upload_bytes,
+                free_space_floor_bytes: r.free_space_floor_bytes,
+                external_media: r.external_media,
+                extra_roots: r
+                    .extra_roots
+                    .iter()
+                    .map(|root| FileManagerRoot {
+                        label: root.label.clone(),
+                        path: root.path.clone(),
+                    })
+                    .collect(),
+            },
+            None => Self::default(),
+        }
+    }
 }
 
 /// Validated service-wide media behaviour (issue #127).
@@ -455,6 +517,7 @@ impl ServiceConfig {
             .filter(|c| c.enabled)
             .map(BleManagementConfig::from_raw);
         let display = DisplayConfig::from_raw(raw.display.as_ref());
+        let file_manager = FileManagerConfig::from_raw(raw.file_manager.as_ref());
         let media = raw
             .media
             .as_ref()
@@ -488,6 +551,7 @@ impl ServiceConfig {
             ble_management,
             display,
             media,
+            file_manager,
         }
     }
 }
@@ -723,6 +787,7 @@ impl Default for ServiceConfig {
             ble_management: None,
             display: DisplayConfig::default(),
             media: MediaServiceConfig::default(),
+            file_manager: FileManagerConfig::default(),
         }
     }
 }

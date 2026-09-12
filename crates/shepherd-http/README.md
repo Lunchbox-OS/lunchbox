@@ -15,6 +15,7 @@ The surface is three endpoints plus the login flow:
 | `POST` | `/api/v1/rpc` | JSON-RPC dispatch into every `ManagementService` method. |
 | `GET`  | `/api/v1/events` | Server-Sent Events stream of every `shepherd_api::Event`. |
 | `GET`/`PUT` | `/api/v1/config` | The policy file itself. See [The policy file](#the-policy-file). |
+| — | `/api/v1/files/*` | Remote file management. See [Files](#files). |
 | — | `/api/v1/auth/*` | Signing in. See [Auth](#auth). |
 
 Authentication is a session, not a shared secret (issue #156). See below.
@@ -132,6 +133,115 @@ check. A policy shepherdd cannot parse is survivable on *reload* and fatal at
 **The write does not reload.** It lands through a rename, which the state
 custodian's watch — or shepherdd's own, on a device without one — turns into a
 reload within a second, exactly as it does for the other two writers.
+
+## Files
+
+Remote file management (issue #195), rooted at the kiosk user's home. It exists
+because a hardened account denies SSH and keeps its home at mode 0700, so
+`scp`, `rsync` and every SFTP client are shut out of exactly the directory a
+book, a ROM or a video has to go into — while `shepherdd` already runs *as*
+that user.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/files/roots` | The places a caller may browse, plus the upload limits |
+| `GET` | `/files/list` | One directory |
+| `GET` | `/files/content` | Download (`HEAD` and `Range` too) |
+| `PUT` | `/files/content` | Upload or replace |
+| `POST` | `/files/dir` | Create a directory |
+| `POST` | `/files/move` | Rename or move, within one root |
+| `DELETE` | `/files/entry` | Delete a file or directory |
+
+Mounted only where `[service.file_manager] enabled` is true; a device with it
+off answers `404 not_found` from the `/api/v1` fallback rather than 403, so the
+surface is absent rather than merely shut.
+
+**There is no runtime toggle**, deliberately. A caller who reaches these routes
+can already `PUT /api/v1/config` with `kind = { type = "process", command = … }`,
+which runs anything as this user at the next launch — withholding a file write
+from that same credential would protect nothing. This is the argument
+`shepherd-webui/src/App.tsx` already records for the config editor.
+
+**Nothing is on `ManagementService`.** Like the policy routes, and for the same
+reason: `#[management_rpc]` carries every async trait method to BLE, whose
+frames cap at 16 KiB. The companion gets nothing from this feature and needs
+nothing — it cannot carry a file.
+
+### `root` + `path`, never an absolute path
+
+Every route names a **root** from `GET /files/roots` and a path inside it:
+
+```sh
+curl -b cookies 'https://device:8080/api/v1/files/list?root=home&path=Books'
+```
+
+A closed set the server enumerates cannot express a location the server did not
+offer, which is the `ProtectedFile`-is-an-enum argument applied as far as an
+API whose whole job is naming files can apply it. Both travel as **query
+parameters**: a wildcard path segment is percent-decoded by the router before
+any check sees it, which is how `%2e%2e%2f` becomes `../` one layer too early.
+
+Roots are re-enumerated per request — the home directory, every removable drive
+mounted under `/media` or `/run/media`, and each
+`[[service.file_manager.extra_roots]]`. A drive is identified by its
+**filesystem UUID** (`ext-<uuid>`), so it keeps the same id when it is
+unplugged and mounted somewhere else, and two drives labelled `UNTITLED` do not
+collide. A root that is gone answers `404`.
+
+### Preconditions are required, on writes *and* deletes
+
+The policy route's rule, applied to files that have more writers than a policy
+does — this API, the activities running at the same uid, and whoever is sitting
+at the device:
+
+| Header | `PUT` | `DELETE` |
+|---|---|---|
+| `If-None-Match: *` | create; `412` if anything is there | not accepted |
+| `If-Match: "<etag>"` | replace exactly that version | delete exactly that version |
+| `If-Match: *` | replace whatever is there | delete whatever is there |
+| *(none)* | `428` | `428` |
+
+The `etag` is `"<size>-<mtime_nanos>"`, opaque and compared only for equality.
+Deliberately not the content hash `PolicyDocument::version_of` uses: a policy is
+tens of kilobytes and worth hashing so a restore-from-backup reads as
+unchanged, while re-hashing a directory of ROMs to draw a list is not the same
+trade.
+
+### Downloads are always attachments
+
+`Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and a
+fixed `application/octet-stream` — all three, on every response. An uploaded
+`.html` served inline would run script *on the management origin*, where
+`fetch('/api/v1/rpc')` carries the administrator's cookie; `HttpOnly` does not
+help, because such a script never reads the cookie, it is merely sent with it.
+The SPA's own responses carry a `Content-Security-Policy` for the same reason
+(`web_assets.rs`). No preview or thumbnail feature may weaken any of it.
+
+### What it will not do
+
+- **Escape a root.** One resolver (`files::resolve`) sees every caller-supplied
+  path; `..` is refused rather than normalised, the parent is canonicalised
+  before the check, and a symlink out of the root is *listed* (so a person can
+  delete it) with `usable: false` but never followed. Any activity at the kiosk
+  uid can plant such a link, so this is not hypothetical.
+- **Serve shepherd's own state, or an SSH key.** `~/.local/share/shepherdd`
+  (the database), `$XDG_CACHE_HOME/shepherd` (the video cache, which keeps an
+  index that hand-deletion desynchronises) and `~/.ssh` are refused, for
+  reading and writing alike. The first two are about damage nobody would
+  connect back to the edit; `~/.ssh` is there on its own merits, because a
+  private key is a credential for somewhere *else* and so is the one thing here
+  not already implied by "this caller administers this device".
+  `~/.local/state/shepherdd` is *not* refused: pulling `shepherdd.log` off a
+  device with no shell is one of the better things this buys.
+- **Half-write a file.** An upload streams to a dotted `.part` file in the
+  destination directory, is `fsync`ed, and is renamed into place, so a child
+  mid-book never opens a partial one.
+- **Fill the disk.** `max_upload_bytes` and `free_space_floor_bytes` are both
+  checked against `Content-Length` before the first byte and again as the
+  stream grows, because a declared length can be a lie.
+- **Move between roots.** `rename(2)` does not cross filesystems, and a
+  copy-with-progress is a feature of its own. `400`, with a message saying to
+  download and re-upload.
 
 ## Auth
 

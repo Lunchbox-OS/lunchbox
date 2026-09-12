@@ -186,6 +186,9 @@ cairo-rs = "0.20"
 # HTTP API
 axum = { version = "0.8", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+# `io` only: `ReaderStream`, for streaming a file download out of the file
+# manager (issue #195) without reading it into memory first.
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 # TLS termination for the management API (issue #156). `rustls` is already in
 # the tree behind `ureq`, on the `ring` provider; both of these follow it there
 # rather than dragging in `aws-lc-rs`, which wants cmake and a C toolchain on a
