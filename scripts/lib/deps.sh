@@ -367,15 +367,55 @@ install_cargo_ndk() {
 # fails with a clear error rather than adding a source that would not work.
 DEPS_PORTS_URI="http://ports.ubuntu.com/ubuntu-ports/"
 
-# Does the apt mirror at $1 actually serve architecture $3 for suite $2?
+# Emit one TAB-separated record per deb822 stanza: file, first URI, first
+# suite, components, declared architectures.
+#
+# Per *stanza*, not per file: ubuntu.sources alone carries two (the archive and
+# the security mirror), and a host may have any number of PPA and vendor files
+# beside it. The previous version read the first `URIs:`/`Suites:` line across
+# the whole glob, which is whichever file sorts first -- a PPA on any machine
+# that has one -- and then drew conclusions about "the configured mirror" from
+# it.
+_deps_source_stanzas() {
+    local f
+    for f in "$@"; do
+        awk -v file="$f" '
+            function flush() {
+                if (uri != "" && suite != "")
+                    printf "%s\t%s\t%s\t%s\t%s\n", file, uri, suite, comps, arches
+                uri = ""; suite = ""; comps = ""; arches = ""
+            }
+            /^[[:space:]]*#/  { next }
+            /^[[:space:]]*$/  { flush(); next }
+            /^URIs:/          { sub(/^URIs:[[:space:]]*/, "");          uri = $1; next }
+            /^Suites:/        { sub(/^Suites:[[:space:]]*/, "");        suite = $1; next }
+            /^Components:/    { sub(/^Components:[[:space:]]*/, "");    comps = $0; next }
+            /^Architectures:/ { sub(/^Architectures:[[:space:]]*/, ""); arches = $0; next }
+            END { flush() }
+        ' "$f"
+    done
+}
+
+# Does the mirror at $1 serve architecture $3 for suite $2, across components $4?
 #
 # Probes the per-architecture binary index. The suite Release file's
 # `Architectures:` field cannot answer this -- it lists every architecture the
 # *suite* defines, so a mirror that carries only some of them still advertises
 # them all -- but binary-<arch>/Release is either there or it is not.
+#
+# The components come from the stanza rather than being hardcoded, and every
+# one of them must serve the architecture. Both halves matter. `apt-get update`
+# fetches an index for each component x architecture the stanza declares and
+# fails hard on a 404, so "serves this arch" has to mean *all* of its
+# components. But hardcoding `main universe` made that test unanswerable for a
+# Launchpad PPA, which only ever publishes `main`: the probe 404ed on a
+# component the stanza never claimed to have, and reported that the PPA did not
+# serve an architecture it does serve. ppa:libretro/testing publishes arm64 for
+# 119 packages, which is precisely the emulation core set an arm64 device wants.
 _deps_mirror_serves() {
-    local uri="${1%/}" suite="$2" arch="$3" component
-    for component in main universe; do
+    local uri="${1%/}" suite="$2" arch="$3" components="$4" component
+    [[ -n "$components" ]] || return 1
+    for component in $components; do
         curl -sfI --max-time 20 -o /dev/null \
             "$uri/dists/$suite/$component/binary-$arch/Release" || return 1
     done
@@ -386,11 +426,15 @@ _deps_mirror_serves() {
 #
 # Two steps, the second of which is conditional: dpkg has to be told the
 # architecture exists, and apt has to have somewhere to fetch it from. When the
-# configured mirror already carries it -- true of most full mirrors, and the
-# reason this probes instead of assuming Ubuntu's archive/ports split -- there is
-# nothing else to do. When it does not, every existing entry must first be
-# pinned to the architectures it *does* serve, or `apt-get update` fails hard on
-# the 404 for the new one, and only then can a ports entry be added.
+# sources already carry it -- true of most full mirrors, and the reason this
+# probes instead of assuming Ubuntu's archive/ports split -- there is nothing
+# else to do.
+#
+# Where a source does *not* carry it, that source must be pinned to the
+# architectures it does serve or `apt-get update` fails hard on the 404. That
+# is decided per source, against the components each one declares, so a stanza
+# that serves the target architecture keeps serving it. Pinning every source
+# indiscriminately would have cost this host its arm64 libretro cores.
 _deps_enable_foreign_arch() {
     local arch="$1"
     local ports_file="/etc/apt/sources.list.d/ubuntu-ports-$arch.sources"
@@ -413,13 +457,7 @@ _deps_enable_foreign_arch() {
         [[ -f "$f" ]] && sources+=("$f")
     done
 
-    local uri suite
-    if [[ ${#sources[@]} -gt 0 ]]; then
-        uri="$(awk '/^URIs:/ {print $2; exit}' "${sources[@]}")"
-        suite="$(awk '/^Suites:/ {print $2; exit}' "${sources[@]}")"
-    fi
-
-    if [[ -z "${uri:-}" || -z "${suite:-}" ]]; then
+    if [[ ${#sources[@]} -eq 0 ]]; then
         # Nothing to probe or pin. If apt can already reach the architecture
         # (a full mirror, or a source configured some other way) the install
         # below simply works; if it cannot, apt's own error is the honest one.
@@ -429,26 +467,59 @@ _deps_enable_foreign_arch() {
         return 0
     fi
 
-    if _deps_mirror_serves "$uri" "$suite" "$arch"; then
-        info "The configured mirror ($uri) already serves $arch; no ports entry needed"
+    # Walk every stanza: note which files need pinning, and whether the archive
+    # that provides the base system serves the target architecture. That last
+    # one is what decides the ports fallback -- the -dev packages a cross build
+    # links against come from the Ubuntu archive, not from a PPA, so a PPA
+    # serving the architecture is not a substitute for the archive doing so.
+    local -a needs_pin=()
+    local base_uri="" base_suite="" base_components="" base_serves="false"
+    local file uri suite comps arches
+    while IFS=$'\t' read -r file uri suite comps arches; do
+        [[ -n "$uri" && -n "$suite" ]] || continue
+
+        # An Ubuntu-archive-shaped stanza: the one carrying `universe` beside
+        # `main`. A PPA or vendor repo publishes `main` alone.
+        if [[ -z "$base_uri" && " $comps " == *" main "* && " $comps " == *" universe "* ]]; then
+            base_uri="$uri"
+            base_suite="$suite"
+            base_components="$comps"
+            if _deps_mirror_serves "$uri" "$suite" "$arch" "$comps"; then
+                base_serves="true"
+            fi
+        fi
+
+        # A stanza that already declares its architectures needs nothing: apt
+        # will not ask it for the new one.
+        [[ -n "$arches" ]] && continue
+
+        if _deps_mirror_serves "$uri" "$suite" "$arch" "$comps"; then
+            info "$uri ($suite) serves $arch; leaving $file alone"
+            continue
+        fi
+
+        info "$uri ($suite) does not serve $arch; $file will be pinned"
+        # One file may hold several stanzas; pin it once.
+        local seen
+        for seen in ${needs_pin[@]+"${needs_pin[@]}"}; do
+            [[ "$seen" == "$file" ]] && continue 2
+        done
+        needs_pin+=("$file")
+    done < <(_deps_source_stanzas "${sources[@]}")
+
+    if [[ -z "$base_uri" ]]; then
+        warn "No Ubuntu-archive-shaped apt source (main + universe) was found."
+        warn "Assuming apt can already fetch $arch packages; if it cannot, add a"
+        warn "$arch source manually and re-run."
         return 0
     fi
 
-    info "$uri does not serve $arch; falling back to $DEPS_PORTS_URI"
-    _deps_mirror_serves "$DEPS_PORTS_URI" "$suite" "$arch" \
-        || die "Neither $uri nor $DEPS_PORTS_URI serves $arch packages for $suite"
-
-    # Pin every existing stanza to the architectures it does serve, or
-    # `apt-get update` fails hard on the 404 for the new one. Stanzas that
-    # already declare `Architectures:` are left alone, so this is safe to run
-    # twice.
+    # Pin the sources that cannot serve the new architecture, whether or not a
+    # ports entry follows: a source that 404s for $arch breaks `apt-get update`
+    # on its own, now that dpkg knows the architecture exists.
     local native
     native="$(dpkg --print-architecture)"
-    for f in "${sources[@]}"; do
-        if grep -q '^Architectures:' "$f"; then
-            info "$f already declares its architectures; leaving it alone"
-            continue
-        fi
+    for f in ${needs_pin[@]+"${needs_pin[@]}"}; do
         info "Pinning $f to $native..."
         maybe_sudo cp -n "$f" "$f.pre-cross" || true
         # The `$` below belong to awk (an end-of-line anchor), not to the
@@ -470,17 +541,23 @@ _deps_enable_foreign_arch() {
         maybe_sudo mv "$f.new" "$f"
     done
 
+    if [[ "$base_serves" == "true" ]]; then
+        info "The archive ($base_uri) already serves $arch; no ports entry needed"
+        return 0
+    fi
+
+    info "$base_uri does not serve $arch; falling back to $DEPS_PORTS_URI"
+    _deps_mirror_serves "$DEPS_PORTS_URI" "$base_suite" "$arch" "$base_components" \
+        || die "Neither $base_uri nor $DEPS_PORTS_URI serves $arch packages for $base_suite"
+
     info "Adding a $DEPS_PORTS_URI entry for $arch..."
-    local components
-    components="$(awk '/^Components:/ {sub(/^Components: /, ""); print; exit}' "${sources[@]}")"
-    : "${components:=main restricted universe multiverse}"
     maybe_sudo tee "$ports_file" >/dev/null <<EOF
 # Added by \`shepherd deps install cross --arch $arch\`: the configured mirror
 # does not carry $arch, so its packages come from Ubuntu's ports mirror.
 Types: deb
 URIs: $DEPS_PORTS_URI
-Suites: $suite $suite-updates $suite-backports $suite-security
-Components: $components
+Suites: $base_suite $base_suite-updates $base_suite-backports $base_suite-security
+Components: $base_components
 Architectures: $arch
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
