@@ -205,6 +205,12 @@ async fn firewall_supported_path_invokes_helper_with_expected_argv() -> Result<(
 
     // shepherd-firewall-helper → record argv (one element per line, with
     // BEGIN/END markers), then exec the trailing command after `--`.
+    //
+    // Written to a scratch file and renamed into place, because `wait_for_file`
+    // waits for the log to *exist*: a redirection creates it before a byte is
+    // in it, and /bin/sh flushes after each command, so a reader can otherwise
+    // catch a prefix of the argv and report a flag as missing that is merely
+    // not written yet. Rename is atomic, so the log appears whole or not at all.
     write_executable(
         &stubs_path.join("shepherd-firewall-helper"),
         &format!(
@@ -213,7 +219,8 @@ async fn firewall_supported_path_invokes_helper_with_expected_argv() -> Result<(
                  printf '%s\\n' 'ARGV_BEGIN'\n\
                  for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n\
                  printf '%s\\n' 'ARGV_END'\n\
-             }} > '{log}'\n\
+             }} > '{log}.partial'\n\
+             mv '{log}.partial' '{log}'\n\
              # Skip the leading subcommand (apply-process).\n\
              if [ $# -gt 0 ]; then shift; fi\n\
              # Walk past helper flags up to the `--` separator.\n\
