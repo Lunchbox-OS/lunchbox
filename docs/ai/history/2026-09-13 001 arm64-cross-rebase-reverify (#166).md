@@ -161,18 +161,41 @@ with all ten `SHEPHERD_BINARIES` staged, and `package deb --arch amd64` on an
 amd64 host produces **byte-identical contents** — the no-op path the CI matrix
 depends on, so passing `--arch` on every leg costs nothing.
 
-## Left open
+## The second defect: `--arch armhf` derived the ARMv6 triple
 
-**`--arch armhf` silently targets the wrong ISA.** `arch_to_triple` derives
-`arm-unknown-linux-gnueabihf` from `dpkg-architecture`, and that triple *is* in
-`rustc --print target-list`, so the guard passes. But Debian's `armhf` is ARMv7
-hard-float; `arm-unknown-linux-gnueabihf` is the ARMv6 baseline, and the ARMv7
-triple is `armv7-unknown-linux-gnueabihf`. The comment above the function claims
-armhf "fails here rather than at link time" — it does not. The result would run
-(ARMv6 code runs on ARMv7) while being labelled Debian `armhf`, so this is a
-silent pessimisation rather than a break. Not fixed here: `arm64` is the only
-architecture this PR claims, and choosing between rejecting `armhf` and mapping it
-to the ARMv7 triple is a design decision, not a rebase repair.
+`arch_to_triple` derives its triple from `dpkg-architecture`, which reports
+`arm-linux-gnueabihf` for armhf — translated to `arm-unknown-linux-gnueabihf`.
+That *is* in `rustc --print target-list`, so the guard below it accepted the
+result, and the comment above the function claimed armhf "fails here rather than
+at link time". It did not fail; it succeeded with the wrong answer.
+
+`arm-unknown-linux-gnueabihf` is Rust's ARMv6 baseline. Debian defines armhf as
+ARMv7-A hard-float, which Rust spells `armv7-unknown-linux-gnueabihf`. Nothing
+fails loudly when this is wrong — ARMv6 code runs on an ARMv7 machine — so the
+result is a `.deb` labelled `armhf` whose contents quietly target an older ISA
+than the label promises.
+
+Fixed with an `ARCH_TRIPLE_OVERRIDES` table applied before the target-list check,
+carrying the single entry that needs it. A table is what the original comment set
+out to avoid, and the reason it gave is still right for the *derivation* — which
+is why the override corrects one triple rather than replacing `dpkg-architecture`
+with a list of them. Naming an arm literal is fine here: `check-arch-neutral.sh`
+guards this path against hardcoding the **host** architecture, which is the thing
+that has to be derived at runtime; a target architecture named as a target is the
+opposite of that.
+
+Every other architecture derives unchanged — `arm64` → `aarch64-unknown-linux-gnu`,
+`amd64` → `x86_64-unknown-linux-gnu`, `i386` → `i686-unknown-linux-gnu`,
+`ppc64el` → `powerpc64le-unknown-linux-gnu`, `s390x` → `s390x-unknown-linux-gnu` —
+and `riscv64` still fails loudly, correctly: its Rust triple is
+`riscv64gc-unknown-linux-gnu`, which the GNU type does not yield, so the guard
+reports it and points at `--target`. That is the failure mode the guard was
+written for, and the one armhf was slipping past.
+
+Neither armhf nor riscv64 is an architecture this PR claims to support; armhf is
+fixed because a silent wrong answer is worse than a loud refusal.
+
+## Left open
 
 **One-line (`.list`) apt sources are not covered.** `_deps_enable_foreign_arch`
 only parses deb822 `*.sources`. This host also has `waydroid.list`, which has no

@@ -47,14 +47,38 @@ SHEPHERD_BINARIES=(
 # re-entry) keeps it.
 export SHEPHERD_CARGO_TARGET="${SHEPHERD_CARGO_TARGET:-}"
 
+# Rust triples that name an ISA revision the GNU type does not.
+#
+# A GNU type says nothing about which revision of an architecture it means, and
+# for one Debian architecture that matters. dpkg-architecture reports
+# `arm-linux-gnueabihf` for armhf, which translates to
+# `arm-unknown-linux-gnueabihf` -- a real Rust target, so the target-list check
+# in arch_to_triple accepts it, but the wrong one. That triple is the ARMv6
+# baseline; Debian defines armhf as ARMv7-A hard-float, which Rust spells
+# `armv7-unknown-linux-gnueabihf`.
+#
+# Nothing fails loudly when this is wrong, which is exactly why it is corrected
+# here rather than left to be noticed: ARMv6 code runs on an ARMv7 machine, so
+# the result is a package labelled armhf whose contents quietly target an older
+# ISA than the label promises.
+#
+# Spelling an arm literal here is fine: check-arch-neutral.sh guards this path
+# against hardcoding the *host* architecture, which is the one thing that has to
+# be derived at runtime so a package is labelled for the machine it was built
+# for. A target architecture named as a target is the opposite of that.
+declare -A ARCH_TRIPLE_OVERRIDES=(
+    [arm-unknown-linux-gnueabihf]="armv7-unknown-linux-gnueabihf"
+)
+
 # Translate a Debian architecture name into its Rust target triple.
 #
 # Derived with dpkg-architecture rather than a lookup table on purpose: a table
 # would have to spell out the arch literals that scripts/ci/check-arch-neutral.sh
 # forbids in this path, and it is exactly the sort of thing that goes stale.
-# The result is checked against rustc's own target list, so an architecture
-# whose GNU type does not translate (armhf, whose Rust triple names the ISA
-# revision) fails here rather than at link time.
+# ARCH_TRIPLE_OVERRIDES above then corrects the one case the derivation gets
+# wrong while still satisfying rustc, and the result is checked against rustc's
+# own target list, so an architecture whose GNU type does not translate at all
+# fails here rather than at link time.
 arch_to_triple() {
     local arch="$1"
     local gnu triple
@@ -65,6 +89,7 @@ arch_to_triple() {
 
     # e.g. aarch64-linux-gnu -> aarch64-unknown-linux-gnu
     triple="${gnu/-linux-/-unknown-linux-}"
+    triple="${ARCH_TRIPLE_OVERRIDES[$triple]:-$triple}"
 
     if ! rustc --print target-list | grep -qx -- "$triple"; then
         die "No Rust target for Debian architecture '$arch' (derived $triple).
