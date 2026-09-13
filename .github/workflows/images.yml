@@ -307,3 +307,40 @@ jobs:
             --build-arg TARGET_ARCH="$TARGET_ARCH" \
             -t "$ref" -f .ci/Dockerfile.cross .
           docker push "$ref"
+
+  settle:
+    name: CI images (settle outputs)
+    # Deliberately the last job in this workflow, so that it -- and not an
+    # image job -- is the one that finishes in the same instant the caller does.
+    #
+    # Forgejo resolves this reusable workflow's `outputs:` once, when the caller
+    # job (`CI images` in ci.yml and release.yml) completes, and stores the
+    # result; every downstream job reads that stored value, however much later
+    # it runs. When the last image job finished in the same second as the caller,
+    # its output was missing from that snapshot. Run 462 lost the cross ref that
+    # way: `CI image (arm64 cross)` succeeded at 20:24:45, `CI images` completed
+    # at 20:24:45 with an empty `cross-ref`, and five minutes later `Package
+    # (arm64)` still read it empty. Its log shows the consequence -- `Start
+    # image=…-ci:…`, the base image, because `arm64 && cross-ref || base-ref`
+    # falls through on an empty string -- and `Build (arm64 cross)` started
+    # `node:20-bookworm`, the runner default, with no container at all.
+    #
+    # With this job last, the image jobs' outputs are persisted a whole job
+    # (scheduling, container start, one step) before the snapshot is taken. It
+    # exposes no outputs of its own, so if the snapshot ever races *it*, nothing
+    # is lost. The arm64 jobs' own "Assert this job got the arm64 cross image"
+    # step remains the backstop.
+    needs: [image, image-android, image-cross]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show the refs this workflow will hand to its caller
+        # Also a diagnostic: if a ref is non-empty here but a downstream job
+        # still receives it empty, the snapshot is not the (only) cause.
+        env:
+          BASE_REF: ${{ needs.image.outputs.ref }}
+          ANDROID_REF: ${{ needs.image-android.outputs.ref }}
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
+        run: |
+          echo "base-ref:    '$BASE_REF'"
+          echo "android-ref: '$ANDROID_REF'"
+          echo "cross-ref:   '$CROSS_REF'"
