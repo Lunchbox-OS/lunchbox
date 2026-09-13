@@ -653,6 +653,25 @@ compiles `wasm-bindgen` or `schemars` into the shipped binaries, and the side
 effect is that a bare `cargo test` skips them silently — including the codegen
 drift check.
 
+Shell scripts are linted with ShellCheck, as run in CI:
+
+```sh
+shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
+shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh
+shellcheck -e SC1091 run-dev
+```
+
+**CI's ShellCheck is older than yours.** The job installs Debian bookworm's
+package (0.9), while Ubuntu 26.04 ships 0.11, and the two disagree on some codes —
+0.10 split SC2329 ("function never invoked") out of SC2317 ("command
+unreachable"), so a `disable=SC2329` that satisfies 0.11 does nothing for 0.9.
+Where a disable is genuinely needed for a check that was renumbered, list both
+codes. To reproduce CI exactly, run the 0.9.0 release binary from
+<https://github.com/koalaman/shellcheck/releases/tag/v0.9.0>.
+
+Also, a comment line that *begins* with the word `shellcheck` is parsed as a
+directive, so prose that wraps onto one fails with SC1073.
+
 ### Editing a workflow file
 
 Run this before pushing:

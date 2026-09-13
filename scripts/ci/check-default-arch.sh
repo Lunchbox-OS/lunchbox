@@ -71,12 +71,14 @@ check_case() {
         # shellcheck source=../shepherd
         source "$repo_root/scripts/shepherd"
         # These override the real functions; package_deb calls them, which
-        # the linter cannot see through the `source` above.
-        # shellcheck disable=SC2329
+        # the linter cannot see through the `source` above. Both codes are
+        # needed: the 0.9 linter in CI (Debian bookworm) reports this as
+        # SC2317, and 0.10 onwards reports it as SC2329 instead.
+        # shellcheck disable=SC2317,SC2329
         build_cargo() { printf '%s' "${SHEPHERD_CARGO_TARGET:-}" > "$triple_file"; }
-        # shellcheck disable=SC2329
+        # shellcheck disable=SC2317,SC2329
         install_system() { :; }
-        # shellcheck disable=SC2329
+        # shellcheck disable=SC2317,SC2329
         is_root() { return 0; }
         package_deb --out "$out" "$@"
     ) > "$log" 2>&1; then
