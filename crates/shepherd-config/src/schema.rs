@@ -1101,10 +1101,6 @@ pub struct RawWaydroidConfig {
     ///
     /// Requires the privileged helper (`shepherd install waydroid`).
     pub lock_mode: Option<RawWaydroidLockMode>,
-
-    /// Deprecated: use `lock_mode`. `true`/unset maps to `lock_mode =
-    /// "statusbar"`, `false` to `"off"`. Ignored when `lock_mode` is set.
-    pub lock_down: Option<bool>,
 }
 
 /// Kiosk lock-in mode for a launched Android session.

@@ -1346,11 +1346,6 @@ export interface RawWaydroidConfig {
    */
   boot_ready_timeout_seconds?: number | null;
   /**
-   * Deprecated: use `lock_mode`. `true`/unset maps to `lock_mode =
-   * "statusbar"`, `false` to `"off"`. Ignored when `lock_mode` is set.
-   */
-  lock_down?: boolean | null;
-  /**
    * Kiosk lock-in mode for launched Android sessions:
    * - `"statusbar"` (default): disable the notification shade / quick
    *   settings (which can reach Android Settings) and the nav-bar

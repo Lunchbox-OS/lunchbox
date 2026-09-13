@@ -213,8 +213,7 @@ lock_mode = "statusbar"       # Kiosk lock-in for launched Android apps:
                               #     DPC device owner (hard containment; needs
                               #     `shepherd-admin apps install android` to have set it up).
                               #   "off" — no lock-in.
-                              # Needs `shepherd install waydroid`. (Legacy `lock_down = true/false`
-                              # still maps to "statusbar"/"off" when lock_mode is unset.)
+                              # Needs `shepherd install waydroid`.
 
 # HTTP management API (optional)
 # Exposes a REST API for remote control, usage analytics, and daily overrides.

@@ -95,9 +95,7 @@ pub struct LoadTimeDefaults {
     pub waydroid_suspend_when_idle: bool,
     /// `service.waydroid.boot_ready_timeout_seconds`.
     pub waydroid_boot_ready_timeout_seconds: u64,
-    /// `service.waydroid.lock_mode`. The legacy `lock_down` bool only changes
-    /// this when `lock_mode` is absent, so it is still what an untouched
-    /// config gets.
+    /// `service.waydroid.lock_mode`.
     pub waydroid_lock_mode: &'static str,
     /// `service.internet.interval_seconds`.
     pub internet_check_interval_seconds: u64,

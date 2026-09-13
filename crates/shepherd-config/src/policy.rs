@@ -609,16 +609,12 @@ impl WaydroidConfig {
                 .and_then(|c| c.boot_ready_timeout_seconds)
                 .map(Duration::from_secs)
                 .unwrap_or(DEFAULT_WAYDROID_BOOT_READY_TIMEOUT),
-            // Explicit lock_mode wins; an unknown one can no longer reach here,
-            // since serde refuses it when the file is parsed. Else honor the
-            // legacy lock_down bool: false -> off, true/unset -> statusbar.
-            lock_mode: match raw.and_then(|c| c.lock_mode) {
-                Some(mode) => mode.into(),
-                None => match raw.and_then(|c| c.lock_down) {
-                    Some(false) => LockMode::Off,
-                    _ => LockMode::Statusbar,
-                },
-            },
+            // An unknown mode cannot reach here: serde refuses it when the file
+            // is parsed.
+            lock_mode: raw
+                .and_then(|c| c.lock_mode)
+                .map(LockMode::from)
+                .unwrap_or(LockMode::Statusbar),
         }
     }
 }
@@ -1616,28 +1612,22 @@ mod tests {
     #[test]
     fn waydroid_lock_mode_resolution() {
         use crate::schema::{RawWaydroidConfig, RawWaydroidLockMode};
-        let mk = |mode: Option<RawWaydroidLockMode>, legacy: Option<bool>| {
+        let mk = |mode: Option<RawWaydroidLockMode>| {
             WaydroidConfig::from_raw(Some(&RawWaydroidConfig {
                 lock_mode: mode,
-                lock_down: legacy,
                 ..Default::default()
             }))
             .lock_mode
         };
-        // Explicit lock_mode wins and overrides the legacy lock_down.
+        assert_eq!(mk(Some(RawWaydroidLockMode::Locktask)), LockMode::Locktask);
+        assert_eq!(mk(Some(RawWaydroidLockMode::Off)), LockMode::Off);
         assert_eq!(
-            mk(Some(RawWaydroidLockMode::Locktask), None),
-            LockMode::Locktask
+            mk(Some(RawWaydroidLockMode::Statusbar)),
+            LockMode::Statusbar
         );
-        assert_eq!(
-            mk(Some(RawWaydroidLockMode::Off), Some(true)),
-            LockMode::Off
-        );
-        // Legacy lock_down fallback when lock_mode is unset.
-        assert_eq!(mk(None, Some(false)), LockMode::Off);
-        assert_eq!(mk(None, Some(true)), LockMode::Statusbar);
-        // Nothing set → statusbar default (unchanged from prior lock_down=true).
-        assert_eq!(mk(None, None), LockMode::Statusbar);
+        // Unset is the statusbar default: the kiosk locks down unless told not
+        // to, so a table that forgets the key is not an unlocked device.
+        assert_eq!(mk(None), LockMode::Statusbar);
         assert_eq!(WaydroidConfig::default().lock_mode, LockMode::Statusbar);
     }
 
