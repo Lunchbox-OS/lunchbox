@@ -48,6 +48,16 @@ a pass through this skill before they land.**
    adb kill-server && adb start-server
    ```
 
+   **The rule is per *vendor*, so a new phone needs its own line.** The
+   file already carries `18d1` (Google/Pixel) and `22b8` (Motorola);
+   anything else reports `no permissions` until you add it. `lsusb` gives
+   the id — and if the phone shows up there but not in `adb devices` at
+   all, check the interface: a single `255/255/0` interface is MTP with
+   USB debugging *off*, and no udev rule will conjure the missing
+   `255/66/1` adb interface. That one needs a human at the phone
+   (Settings -> About phone -> tap Build number x7, then Developer
+   options -> USB debugging).
+
    It must also be **usable**: `uiautomator dump` on a lock screen returns
    a tree with no app labels, so `pair.sh ui` prints nothing and every
    `tap` reports "not found".
@@ -80,6 +90,152 @@ a pass through this skill before they land.**
    A phone that is *not* the dev phone has none of this — ask its owner.
 3. **`[service.ble_management] enabled = true`** in the config the
    session boots (true in `config.example.toml`).
+
+## Two phones on the bench
+
+Issue #149 (multiple companion bonds) needs a second phone, so the bench
+now has two:
+
+| Serial | Phone | Android | Notes |
+| --- | --- | --- | --- |
+| `63251JEA305665` | Pixel 10a (`stallion`) | 16 / SDK 37 | The original dev phone. No lock screen. |
+| `ZY22F6Z6NT` | moto g power (2021) (`borneo`) | 11 / SDK 30 | No lock screen. **Below the app's `minSdk = 31`** — see below. |
+
+**Every bare `adb` call fails the moment both are plugged in**
+(`error: more than one device/emulator`), and `pair.sh` calls bare `adb`
+throughout — including `require_adb`, so it aborts with the misleading
+"no adb device (check 'adb devices' …)". Do not add `-s` to the script:
+`adb` already reads **`ANDROID_SERIAL`**, so export it once and every
+call in the shell — and in `pair.sh` — targets that phone.
+
+```sh
+export ANDROID_SERIAL=63251JEA305665   # the Pixel
+./.claude/skills/companion-pairing/pair.sh ui
+```
+
+`SHOTDIR` is shared, so give each phone its own when driving both in one
+session (`SHOTDIR=/tmp/shepherd-pairing/moto`) or the second run
+overwrites the first's `result.png`.
+
+The two phones are deliberately unalike — different Android versions,
+vendors and Bluetooth stacks — which is the point for a multi-bond
+feature: the "Android asks twice" consent ordering and the notification
+mechanics below are Pixel/SDK 37 observations and do **not** hold on the
+Motorola (see below).
+
+### Only one phone at a time can even see the device
+
+A peripheral stops advertising while a peer is connected. BlueZ goes on
+reporting the advertisement as registered — `ActiveInstances` still reads
+1 — so from the daemon's side everything looks healthy while the second
+phone's scan lists nothing at all. **Whenever a scan comes up empty,
+check whether the other phone is holding the link before anything else:**
+
+```sh
+busctl --system get-property org.bluez /org/bluez/hci2/dev_<peer> \
+  org.bluez.Device1 Connected
+adb -s <other-phone> shell am force-stop com.armeafamily.shepherd.companion
+```
+
+The device is back on air a few seconds after the peer drops. This makes
+the two-phone enrolment flow inherently a relay — phone B asks, B is
+parked, A approves, A is parked, B collects — and it is why #149 shipped
+turn-taking rather than concurrent sessions: the radio was already
+enforcing it.
+
+### `pair.sh run` works on the Motorola — get the state right first
+
+An earlier note here claimed it did not. That was wrong, and worth
+recording as a wrong diagnosis: `run` reported `consent prompt never
+opened` on a phone whose bond state was broken (the device held a key
+the phone did not), and the prompt genuinely never appeared because the
+link was being torn down mid-handshake. With both sides clean it drives
+Android 11's prompts fine.
+
+What `run` *does* do on a second phone is time out at the end, because
+it waits for `Paired` and an unapproved phone stops at "Waiting for
+approval". That is success, not failure — check the daemon log rather
+than the exit code:
+
+```sh
+grep -aE "Numeric Comparison|second phone asked" dev-runtime/headless/sway.log
+```
+
+Tapping the scan row by hand and letting the OS raise its own prompt
+also works, and needs no script.
+
+### The entry point depends on whether the phone remembers the device
+
+`pair.sh tap "Pair a device"` only finds that label on the empty-state
+home screen. A phone that has been revoked still holds its local record
+and lands on **"Bond lost — re-pair needed"** instead, whose button is
+`Re-pair`. Both lead to the same scan list; tapping for the wrong one
+reports `not found` and then `run` sits waiting for a scan nobody
+started, which reads as "the device isn't advertising".
+
+### Clearing a bond on the Motorola
+
+There is no adb unpair, and `pm clear com.google.android.bluetooth` is
+the thing the gotchas below warn against. Use the Settings UI, which
+automates fine:
+
+```sh
+adb shell am start -a android.settings.BLUETOOTH_SETTINGS
+# then: tap the gear beside the device -> Forget -> Forget device
+```
+
+Check *both* sides afterwards. A bond one side has and the other does not
+is the asymmetric lockout, and it looks like a product bug:
+
+```sh
+adb shell dumpsys bluetooth_manager | grep -aA3 "^  Bonded devices"
+sudo find /var/lib/bluetooth -maxdepth 2 -mindepth 2 -type d -not -name cache
+```
+
+### The Motorola runs the pre-Android-12 permission path
+
+`minSdk` was lowered 31 -> 30 for this phone (2026-09-07, for #149), so
+the app installs and runs on Android 11. Nothing in the dependency set
+floored above 21; the 31 was purely the manifest's permission model.
+Below Android 12 there are no split `BLUETOOTH_SCAN` /
+`BLUETOOTH_CONNECT` permissions, so `AndroidManifest.xml` declares
+`BLUETOOTH`, `BLUETOOTH_ADMIN` and `ACCESS_FINE_LOCATION` capped at
+`maxSdkVersion="30"`, and `ui/App.kt` picks the matching runtime list off
+`Build.VERSION.SDK_INT`.
+
+Three consequences when driving the Motorola:
+
+- **Grant location, not the Bluetooth pair.** The skill's `pm grant`
+  loop over `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT`/`POST_NOTIFICATIONS` is
+  a no-op here — those permissions do not exist on SDK 30. Grant
+  `ACCESS_FINE_LOCATION` (and `ACCESS_COARSE_LOCATION`, which AGP pulls
+  in alongside it) instead.
+- **Location *services* must be on, not just the permission.** Android
+  10+ returns an empty BLE scan with the global location toggle off, and
+  it fails silently — the scan list simply stays empty, exactly as it
+  looks when the device is not advertising. This phone shipped with it
+  off:
+
+  ```sh
+  adb shell cmd location set-location-enabled true
+  adb shell settings get secure location_mode      # expect 3
+  ```
+
+  (`settings put secure location_mode 3` does not stick; use the `cmd`.)
+- **It sleeps at 60 s and then `uiautomator dump` returns nothing**, so
+  `pair.sh` reports `not found:` for labels that are plainly on screen.
+  Pin it awake while on USB:
+
+  ```sh
+  adb shell settings put global stay_on_while_plugged_in 7   # AC|USB|wireless
+  ```
+
+Verified end-to-end on 2026-09-07: install, permission gate, and a scan
+that lists `shepherd` at the pinned adapter address. Pairing itself has
+*not* been exercised from this phone — the "Android asks twice" consent
+ordering and the notification mechanics below are Pixel/SDK 37
+observations and should be re-derived here rather than assumed.
+
 
 ## One-time setup
 

@@ -24,11 +24,43 @@ class ManagementClient(private val connection: ShepherdConnection) {
 
     // --- claim flow ----------------------------------------------------
 
-    suspend fun claim(deviceName: String): AdminRecord =
+    /**
+     * Ask to administer this device.
+     *
+     * Answers [ClaimOutcome.Claimed] when this phone is (or has just become)
+     * an administrator, and [ClaimOutcome.Pending] when the device already has
+     * one and somebody has to approve. Calling it again while pending is how
+     * the phone finds out what happened — the device returns the same request
+     * until it is approved, denied or expires.
+     */
+    suspend fun claim(deviceName: String): ClaimOutcome =
         decode(call("claim", buildJsonObject { put("device_name", JsonPrimitive(deviceName)) }))
 
     suspend fun factoryReset() {
         call("factory_reset", JsonObject(emptyMap()))
+    }
+
+    // --- administrators (issue #149) -----------------------------------
+    //
+    // On `ManagementService`, unlike the claim flow above, so that a browser
+    // can reach them too — which means their params are generated like every
+    // other method's.
+
+    suspend fun listAdmins(): List<AdminSummary> =
+        decode(call("list_admins", RpcParams.listAdmins()))
+
+    suspend fun revokeAdmin(id: String) {
+        call("revoke_admin", RpcParams.revokeAdmin(id))
+    }
+
+    suspend fun listEnrolmentRequests(): List<EnrolmentRequestInfo> =
+        decode(call("list_enrolment_requests", RpcParams.listEnrolmentRequests()))
+
+    suspend fun approveEnrolmentRequest(id: String): AdminSummary =
+        decode(call("approve_enrolment_request", RpcParams.approveEnrolmentRequest(id)))
+
+    suspend fun denyEnrolmentRequest(id: String) {
+        call("deny_enrolment_request", RpcParams.denyEnrolmentRequest(id))
     }
 
     // --- health / state ------------------------------------------------

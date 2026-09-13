@@ -257,6 +257,29 @@ impl ManagementService for MockSvc {
     async fn deny_login_request(&self, _id: String) -> ManagementResult<()> {
         Err(ManagementError::Conflict("no web auth in tests".into()))
     }
+    // The administrator roster (issue #149). Same shape: the BLE transport
+    // dispatches these like any other method now, and a mock with no claim
+    // machine behind it answers the way a device with BLE switched off would.
+    async fn list_admins(&self) -> ManagementResult<Vec<shepherd_management::AdminSummary>> {
+        Err(ManagementError::Conflict("no admin roster in tests".into()))
+    }
+    async fn revoke_admin(&self, _id: String) -> ManagementResult<()> {
+        Err(ManagementError::Conflict("no admin roster in tests".into()))
+    }
+    async fn list_enrolment_requests(
+        &self,
+    ) -> ManagementResult<Vec<shepherd_management::EnrolmentRequestInfo>> {
+        Err(ManagementError::Conflict("no admin roster in tests".into()))
+    }
+    async fn approve_enrolment_request(
+        &self,
+        _id: String,
+    ) -> ManagementResult<shepherd_management::AdminSummary> {
+        Err(ManagementError::Conflict("no admin roster in tests".into()))
+    }
+    async fn deny_enrolment_request(&self, _id: String) -> ManagementResult<()> {
+        Err(ManagementError::Conflict("no admin roster in tests".into()))
+    }
 
     async fn logout(&self) {}
     async fn ping(&self) {}

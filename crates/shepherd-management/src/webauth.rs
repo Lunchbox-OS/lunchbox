@@ -361,8 +361,7 @@ impl WebAuth {
             .read()
             .expect("companion lock poisoned")
             .as_ref()
-            .and_then(|c| c.current_http_token())
-            .is_some()
+            .is_some_and(|c| c.has_admin())
     }
 
     pub fn status(&self) -> WebAuthStatus {

@@ -32,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -141,6 +142,32 @@ private fun PairingDialog(phase: PairingPhase, onDone: () -> Unit, onDismiss: ()
 
         is PairingPhase.Claiming -> ProgressDialog("Finishing", "Claiming the device…")
 
+        is PairingPhase.AwaitingApproval -> AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+            title = { Text("Waiting for approval") },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "${phase.deviceName ?: "This device"} already has an administrator. " +
+                            "Approve this code under Administrators — either in the Shepherd " +
+                            "app on their phone, or on the device's web page.",
+                    )
+                    Text(
+                        phase.code,
+                        style = MaterialTheme.typography.displaySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    CircularProgressIndicator(strokeWidth = 2.dp)
+                }
+            },
+        )
+
         is PairingPhase.Success -> AlertDialog(
             onDismissRequest = onDone,
             confirmButton = { TextButton(onClick = onDone) { Text("Done") } },
@@ -151,13 +178,13 @@ private fun PairingDialog(phase: PairingPhase, onDone: () -> Unit, onDismiss: ()
         is PairingPhase.Failed -> AlertDialog(
             onDismissRequest = onDismiss,
             confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
-            title = { Text(if (phase.alreadyClaimed) "Already paired" else "Pairing failed") },
+            title = { Text(if (phase.needsApproval) "Not approved" else "Pairing failed") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(phase.reason)
-                    if (phase.alreadyClaimed) {
+                    if (phase.needsApproval) {
                         Text(
-                            "To take over, factory-reset the device's bond (SSH in and touch the reset sentinel, then restart shepherdd) and scan again.",
+                            "Ask whoever administers this device to approve the request, then try again.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }

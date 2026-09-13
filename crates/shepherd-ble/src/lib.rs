@@ -14,7 +14,7 @@ mod testsupport;
 
 pub use admin::{AdminRecord, AdminRole, AdminStore, check_reset_sentinel};
 pub use agent::{NoopPairingDisplay, PairingDisplay, PairingMethod};
-pub use claim::{AuthDecision, ClaimMachine, ClaimState, PeerIdentity};
+pub use claim::{AuthDecision, ClaimMachine, ClaimOutcome, ClaimState, PeerIdentity};
 pub use protocol::{
     ErrorCode, RpcError, RpcRequest, RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID,
     SHEPHERD_EVENTS_CHAR_UUID, SHEPHERD_MANAGEMENT_SERVICE_UUID, SHEPHERD_REQUEST_CHAR_UUID,

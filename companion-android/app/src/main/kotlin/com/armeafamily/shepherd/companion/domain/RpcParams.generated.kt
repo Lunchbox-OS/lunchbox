@@ -241,6 +241,27 @@ object RpcParams {
         put("id", JsonPrimitive(id))
     }
 
+    /** Params for `list_admins`, which takes none. */
+    fun listAdmins(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `revoke_admin`. */
+    fun revokeAdmin(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
+    /** Params for `list_enrolment_requests`, which takes none. */
+    fun listEnrolmentRequests(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `approve_enrolment_request`. */
+    fun approveEnrolmentRequest(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
+    /** Params for `deny_enrolment_request`. */
+    fun denyEnrolmentRequest(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
     /** Params for `logout`, which takes none. */
     fun logout(): JsonObject = JsonObject(emptyMap())
 

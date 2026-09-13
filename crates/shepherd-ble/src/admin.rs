@@ -3,10 +3,17 @@
 //! Stored as TOML alongside other shepherd persistent state. Also owns
 //! the factory-reset sentinel check that runs at daemon startup before
 //! the GATT server comes up.
+//!
+//! There is a *list* of these, not one (issue #149). A household with two
+//! caregivers, or a device that travels between two homes, needs more than one
+//! phone able to supervise it. The file grew an `[[admins]]` array for that;
+//! the v1 single `[admin]` table is still read and migrated on the next write,
+//! so a device claimed before this change keeps its admin and its token.
 
 use chrono::{DateTime, Local};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use shepherd_management::AdminSummary;
 use shepherd_util::{ProtectedFile, ProtectedFiles};
 use std::sync::Arc;
 use thiserror::Error;
@@ -22,6 +29,19 @@ pub enum AdminRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AdminRecord {
+    /// Stable public handle for this admin, minted once and never reused.
+    ///
+    /// Not a credential: it is what `revoke_admin` names and what
+    /// [`AdminSummary`] hands to a phone listing the others, so it has to be
+    /// safe to show. The identity address would have served, but an admin is
+    /// revoked and re-enrolled at the same address often enough — a phone
+    /// reset, a re-pair — that naming rows by address makes a stale tap in a
+    /// list act on a record the parent was not looking at.
+    ///
+    /// Defaulted rather than required so a v1 record, written before this
+    /// field existed, still parses and gets one on load.
+    #[serde(default = "new_admin_id")]
+    pub id: String,
     /// The BlueZ-resolved identity address for the bonded peer. Once
     /// pairing completes BlueZ presents this address regardless of the
     /// peer's random MAC rotation, so it doubles as the stable identity.
@@ -41,12 +61,36 @@ impl AdminRecord {
     /// Create a fresh admin record with a securely-random HTTP token.
     pub fn new(identity_address: String, address_type: String, device_name: String) -> Self {
         Self {
+            id: new_admin_id(),
             identity_address,
             address_type,
             device_name,
             bonded_at: shepherd_util::now(),
             http_token: random_token(),
             role: AdminRole::Admin,
+        }
+    }
+}
+
+impl AdminRecord {
+    /// The credential-free view of this record.
+    ///
+    /// [`AdminSummary`] lives in `shepherd-management` because both transports
+    /// return it and that crate sits below this one. It deliberately has no
+    /// "is this me?" flag: over HTTP there is no phone to be, and a client
+    /// that wants to recognise its own row already knows its own identity
+    /// address and can match on it. A flag would have meant either a `viewer`
+    /// argument threaded through `ManagementService` for one transport's
+    /// benefit, or the device guessing.
+    pub fn summary(&self) -> AdminSummary {
+        AdminSummary {
+            id: self.id.clone(),
+            device_name: self.device_name.clone(),
+            identity_address: self.identity_address.clone(),
+            bonded_at: self.bonded_at,
+            role: match self.role {
+                AdminRole::Admin => "admin".to_string(),
+            },
         }
     }
 }
@@ -99,17 +143,44 @@ impl AdminStore {
         Self { files }
     }
 
-    pub fn load(&self) -> Result<Option<AdminRecord>, AdminStoreError> {
+    /// Every admin on this device, oldest first, plus whether the file still
+    /// has to be rewritten in the current shape.
+    ///
+    /// A missing file is no admins, not an error: that is what an unclaimed
+    /// device looks like.
+    pub fn load(&self) -> Result<StoredAdmins, AdminStoreError> {
         let Some(text) = self.files.read(ProtectedFile::AdminRecord)? else {
-            return Ok(None);
+            return Ok(StoredAdmins::default());
         };
         let wrapped: AdminFile = toml::from_str(&text)?;
-        Ok(Some(wrapped.admin))
+        let AdminFile { mut admins, admin } = wrapped;
+        // A v1 file has `[admin]` and no `[[admins]]`. Take it as the first
+        // element rather than discarding it: the token in it is the one the
+        // paired phone and the HTTP API are both still using, so dropping it
+        // would silently unclaim a working device on upgrade.
+        let mut needs_migration = false;
+        if let Some(v1) = admin {
+            needs_migration = true;
+            if !admins.iter().any(|a| {
+                a.identity_address
+                    .eq_ignore_ascii_case(&v1.identity_address)
+            }) {
+                admins.insert(0, v1);
+            }
+        }
+        Ok(StoredAdmins {
+            admins,
+            needs_migration,
+        })
     }
 
-    pub fn save(&self, record: &AdminRecord) -> Result<(), AdminStoreError> {
+    /// Replace the whole list. Writing all of it at once is what keeps the
+    /// file consistent: there is no operation on one admin that does not also
+    /// have to be visible to the check that counts them.
+    pub fn save_all(&self, admins: &[AdminRecord]) -> Result<(), AdminStoreError> {
         let wrapped = AdminFile {
-            admin: record.clone(),
+            admins: admins.to_vec(),
+            admin: None,
         };
         self.files.write(
             ProtectedFile::AdminRecord,
@@ -124,9 +195,24 @@ impl AdminStore {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+/// What [`AdminStore::load`] found on disk.
+#[derive(Debug, Default)]
+pub struct StoredAdmins {
+    pub admins: Vec<AdminRecord>,
+    /// The file was in the v1 single-`[admin]` shape and wants writing back.
+    /// The caller does the write, because only it knows whether the process
+    /// got far enough to be trusted with one.
+    pub needs_migration: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
 struct AdminFile {
-    admin: AdminRecord,
+    #[serde(default)]
+    admins: Vec<AdminRecord>,
+    /// v1's single `[admin]` table, read-only. Never written back — a save
+    /// emits `[[admins]]` only, so the shape converges on first write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admin: Option<AdminRecord>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -253,6 +339,14 @@ fn random_token() -> String {
     hex_encode(&buf)
 }
 
+/// A short public handle for an admin row. Long enough not to collide across
+/// the handful of phones a household has; not a credential.
+pub(crate) fn new_admin_id() -> String {
+    let mut buf = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex_encode(&buf)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -288,14 +382,76 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = TempDir::new().unwrap();
         let store = AdminStore::new(files_in(&dir));
-        assert!(store.load().unwrap().is_none());
+        assert!(store.load().unwrap().admins.is_empty());
 
         let r = sample_record();
-        store.save(&r).unwrap();
-        let loaded = store.load().unwrap().unwrap();
-        assert_eq!(loaded.identity_address, r.identity_address);
-        assert_eq!(loaded.http_token, r.http_token);
-        assert_eq!(loaded.role, AdminRole::Admin);
+        store.save_all(std::slice::from_ref(&r)).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(!loaded.needs_migration);
+        assert_eq!(loaded.admins.len(), 1);
+        assert_eq!(loaded.admins[0].id, r.id);
+        assert_eq!(loaded.admins[0].identity_address, r.identity_address);
+        assert_eq!(loaded.admins[0].http_token, r.http_token);
+        assert_eq!(loaded.admins[0].role, AdminRole::Admin);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_several() {
+        let dir = TempDir::new().unwrap();
+        let store = AdminStore::new(files_in(&dir));
+        let a = sample_record();
+        let b = AdminRecord::new("11:22:33:44:55:66".into(), "public".into(), "Second".into());
+        store.save_all(&[a.clone(), b.clone()]).unwrap();
+
+        let loaded = store.load().unwrap().admins;
+        assert_eq!(loaded.len(), 2);
+        // Order is preserved: the list is oldest-first and a UI shows it that
+        // way, so a save must not reshuffle it.
+        assert_eq!(loaded[0].id, a.id);
+        assert_eq!(loaded[1].id, b.id);
+        // Ids are distinct, which is what makes revoke-by-id unambiguous.
+        assert_ne!(loaded[0].id, loaded[1].id);
+        assert_ne!(loaded[0].http_token, loaded[1].http_token);
+    }
+
+    /// A device claimed before #149 has a single `[admin]` table and no `id`.
+    /// It must come back as one admin, with its token intact — anything else
+    /// silently unclaims a working device on upgrade — and be flagged for
+    /// rewriting in the current shape.
+    #[test]
+    fn v1_single_admin_file_migrates() {
+        let dir = TempDir::new().unwrap();
+        let store = AdminStore::new(files_in(&dir));
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join(ProtectedFile::AdminRecord.file_name()),
+            r#"
+[admin]
+identity_address = "AA:BB:CC:DD:EE:FF"
+address_type = "public"
+device_name = "Pixel 10a"
+bonded_at = "2026-09-07T15:11:40.684313362-04:00"
+http_token = "5ee6bfbb85bb23212c32763c0067a212b160b1dff6d895f6711d944d7f788989"
+role = "admin"
+"#,
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+        assert!(loaded.needs_migration);
+        assert_eq!(loaded.admins.len(), 1);
+        assert_eq!(loaded.admins[0].identity_address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(
+            loaded.admins[0].http_token,
+            "5ee6bfbb85bb23212c32763c0067a212b160b1dff6d895f6711d944d7f788989"
+        );
+        assert!(!loaded.admins[0].id.is_empty(), "migration mints an id");
+
+        // Writing it back converges the shape: the reread is clean.
+        store.save_all(&loaded.admins).unwrap();
+        let again = store.load().unwrap();
+        assert!(!again.needs_migration);
+        assert_eq!(again.admins[0].id, loaded.admins[0].id);
     }
 
     #[test]
@@ -307,7 +463,7 @@ mod tests {
         let store = AdminStore::new(Arc::new(shepherd_util::LocalProtectedFiles::new(
             root.clone(),
         )));
-        store.save(&sample_record()).unwrap();
+        store.save_all(&[sample_record()]).unwrap();
         assert!(root.join("admin.toml").exists());
     }
 
@@ -315,9 +471,9 @@ mod tests {
     fn clear_removes_file_and_is_idempotent() {
         let dir = TempDir::new().unwrap();
         let store = AdminStore::new(files_in(&dir));
-        store.save(&sample_record()).unwrap();
+        store.save_all(&[sample_record()]).unwrap();
         store.clear().unwrap();
-        assert!(store.load().unwrap().is_none());
+        assert!(store.load().unwrap().admins.is_empty());
         // Calling clear again on a missing file is a no-op.
         store.clear().unwrap();
     }

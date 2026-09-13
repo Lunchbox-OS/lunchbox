@@ -26,6 +26,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"

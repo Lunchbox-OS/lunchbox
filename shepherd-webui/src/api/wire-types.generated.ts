@@ -35,6 +35,20 @@ export interface AdminRecord {
    */
   http_token: string;
   /**
+   * Stable public handle for this admin, minted once and never reused.
+   *
+   * Not a credential: it is what `revoke_admin` names and what
+   * [`AdminSummary`] hands to a phone listing the others, so it has to be
+   * safe to show. The identity address would have served, but an admin is
+   * revoked and re-enrolled at the same address often enough — a phone
+   * reset, a re-pair — that naming rows by address makes a stale tap in a
+   * list act on a record the parent was not looking at.
+   *
+   * Defaulted rather than required so a v1 record, written before this
+   * field existed, still parses and gets one on load.
+   */
+  id?: string;
+  /**
    * The BlueZ-resolved identity address for the bonded peer. Once
    * pairing completes BlueZ presents this address regardless of the
    * peer's random MAC rotation, so it doubles as the stable identity.
@@ -45,6 +59,35 @@ export interface AdminRecord {
 
 export type AdminRole =
   | "admin";
+
+/**
+ * One administrator, as anyone with standing to see the list sees them.
+ *
+ * Carries no credential. The record behind this holds a minted HTTP bearer
+ * token, which is the whole reason the summary exists: listing administrators
+ * hands the list to a phone or a browser, and a client that can read every
+ * other client's token does not need to be revoked to keep using the device
+ * after it has been.
+ *
+ * Here rather than in `shepherd-ble` because both transports return it and
+ * `shepherd-ble` sits *above* this crate — the same reason
+ * [`crate::webauth::WebSessionInfo`] lives here.
+ */
+export interface AdminSummary {
+  bonded_at: IsoTimestamp;
+  device_name: string;
+  /**
+   * Stable public handle — what `revoke_admin` takes. Not a credential.
+   */
+  id: string;
+  /**
+   * Shown so a parent can tell two phones with the same name apart, and so
+   * a client can recognise its own row without the device having to guess
+   * which caller it is talking to.
+   */
+  identity_address: string;
+  role: string;
+}
 
 /**
  * The audio output a volume reading applies to.
@@ -180,6 +223,28 @@ export interface BrightnessRestrictions {
    */
   min_brightness?: number | null;
 }
+
+/**
+ * What `claim` did.
+ */
+export type ClaimOutcome =
+  /**
+   * The caller is an admin: freshly enrolled, or already one and asking
+   * again. Carries the record, token and all — this is the one moment the
+   * token crosses the wire.
+   */
+  | {
+      status: "claimed";
+      admin: AdminRecord;
+    }
+  /**
+   * The device already has admins and this phone is not one. It has to be
+   * approved from a phone that is; poll `claim` again to find out.
+   */
+  | {
+      status: "pending";
+      request: EnrolmentRequestInfo;
+    };
 
 export type ClaimStateTag =
   | "unclaimed"
@@ -666,6 +731,35 @@ export type EbookViewer =
    * documented way to disable its own escape hatches.
    */
   | "okular";
+
+/**
+ * A phone waiting to be let in, as an administrator sees it.
+ */
+export interface EnrolmentRequestInfo {
+  /**
+   * Six digits the requesting phone is displaying. Whoever approves
+   * compares them against that phone's screen.
+   *
+   * Same ritual as BLE pairing's Numeric Comparison and #156's login code,
+   * and for the same reason: a racing attacker's request carries different
+   * digits, so comparing is what picks the right row out of a list.
+   */
+  code: string;
+  /**
+   * What the requesting phone calls itself.
+   */
+  device_name: string;
+  expires_at: IsoTimestamp;
+  /**
+   * Public handle — what `approve_enrolment_request` takes. Safe to list.
+   */
+  id: string;
+  /**
+   * Its address, so two phones with the same name are still distinguishable.
+   */
+  peer: string;
+  requested_at: IsoTimestamp;
+}
 
 /**
  * Unique identifier for an entry in the policy whitelist

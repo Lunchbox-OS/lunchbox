@@ -309,6 +309,7 @@ fn make_state_full(
         network: None,
         web_listener: WebListenerHandle::default(),
         web_auth: web,
+        admins: Default::default(),
     });
     AppState {
         svc: svc as Arc<dyn shepherd_management::ManagementService>,
@@ -413,16 +414,21 @@ async fn auth_admin_authority_token_passes() {
     use shepherd_management::AdminAuthority;
     use std::sync::Mutex;
 
-    struct MockAdmin(Mutex<Option<String>>);
+    // A roster, not a single token: a device can have several administrators
+    // and each has their own (issue #149).
+    struct MockAdmin(Mutex<Vec<String>>);
     impl AdminAuthority for MockAdmin {
-        fn current_http_token(&self) -> Option<String> {
-            self.0.lock().unwrap().clone()
+        fn verify_http_token(&self, presented: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|t| t == presented)
+        }
+        fn has_admin(&self) -> bool {
+            !self.0.lock().unwrap().is_empty()
         }
     }
 
     let cfg = temp_config();
     let admin: Arc<dyn AdminAuthority> =
-        Arc::new(MockAdmin(Mutex::new(Some("admin-tok".to_string()))));
+        Arc::new(MockAdmin(Mutex::new(vec!["admin-tok".to_string()])));
     let app = make_app_with_admin(None, cfg.path().to_path_buf(), Some(admin.clone()));
 
     // Admin token accepted.
@@ -438,6 +444,46 @@ async fn auth_admin_authority_token_passes() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// Every administrator's token opens the HTTP door, and revoking one closes
+/// only that one (issue #149).
+#[tokio::test]
+async fn auth_every_admin_token_is_accepted() {
+    use shepherd_management::AdminAuthority;
+    use std::sync::Mutex;
+
+    struct Roster(Mutex<Vec<String>>);
+    impl AdminAuthority for Roster {
+        fn verify_http_token(&self, presented: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|t| t == presented)
+        }
+        fn has_admin(&self) -> bool {
+            !self.0.lock().unwrap().is_empty()
+        }
+    }
+
+    let cfg = temp_config();
+    let roster = Arc::new(Roster(Mutex::new(vec![
+        "first-phone".to_string(),
+        "second-phone".to_string(),
+    ])));
+    let admin: Arc<dyn AdminAuthority> = roster.clone();
+    let app = make_app_with_admin(None, cfg.path().to_path_buf(), Some(admin));
+
+    for token in ["first-phone", "second-phone"] {
+        let (status, _) = rpc_auth(&app, "health", json!({}), token).await;
+        assert_eq!(status, StatusCode::OK, "{token} should be accepted");
+    }
+    let (status, _) = rpc_auth(&app, "health", json!({}), "third-phone").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Revoke the second phone. The first keeps working; the second does not.
+    roster.0.lock().unwrap().retain(|t| t != "second-phone");
+    let (status, _) = rpc_auth(&app, "health", json!({}), "first-phone").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = rpc_auth(&app, "health", json!({}), "second-phone").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn auth_admin_authority_unclaimed_stays_open() {
     use shepherd_management::AdminAuthority;
@@ -449,8 +495,11 @@ async fn auth_admin_authority_unclaimed_stays_open() {
     // before any admin has been set up.
     struct UnclaimedAdmin;
     impl AdminAuthority for UnclaimedAdmin {
-        fn current_http_token(&self) -> Option<String> {
-            None
+        fn verify_http_token(&self, _presented: &str) -> bool {
+            false
+        }
+        fn has_admin(&self) -> bool {
+            false
         }
     }
 
@@ -469,16 +518,21 @@ async fn auth_static_and_admin_tokens_both_accepted() {
     use shepherd_management::AdminAuthority;
     use std::sync::Mutex;
 
-    struct MockAdmin(Mutex<Option<String>>);
+    // A roster, not a single token: a device can have several administrators
+    // and each has their own (issue #149).
+    struct MockAdmin(Mutex<Vec<String>>);
     impl AdminAuthority for MockAdmin {
-        fn current_http_token(&self) -> Option<String> {
-            self.0.lock().unwrap().clone()
+        fn verify_http_token(&self, presented: &str) -> bool {
+            self.0.lock().unwrap().iter().any(|t| t == presented)
+        }
+        fn has_admin(&self) -> bool {
+            !self.0.lock().unwrap().is_empty()
         }
     }
 
     let cfg = temp_config();
     let admin: Arc<dyn AdminAuthority> =
-        Arc::new(MockAdmin(Mutex::new(Some("admin-tok".to_string()))));
+        Arc::new(MockAdmin(Mutex::new(vec!["admin-tok".to_string()])));
     let app = make_app_with_admin(Some("static"), cfg.path().to_path_buf(), Some(admin));
 
     let (status, _) = rpc_auth(&app, "health", json!({}), "static").await;

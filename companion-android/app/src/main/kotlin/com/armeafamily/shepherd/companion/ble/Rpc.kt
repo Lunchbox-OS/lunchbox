@@ -77,8 +77,14 @@ enum class ErrorCode {
     @SerialName("method_not_found") METHOD_NOT_FOUND,
     @SerialName("invalid_params") INVALID_PARAMS,
     @SerialName("not_claimed") NOT_CLAIMED,
+    /**
+     * No longer sent by a device speaking protocol v2: a second phone now gets
+     * a pending enrolment instead of a refusal (issue #149). Kept so the enum
+     * still decodes a v1 device's answer.
+     */
     @SerialName("already_claimed") ALREADY_CLAIMED,
     @SerialName("permission_denied") PERMISSION_DENIED,
+    @SerialName("enrolment_denied") ENROLMENT_DENIED,
     @SerialName("not_found") NOT_FOUND,
     @SerialName("bad_request") BAD_REQUEST,
     @SerialName("forbidden") FORBIDDEN,
