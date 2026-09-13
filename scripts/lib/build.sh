@@ -50,17 +50,20 @@ export SHEPHERD_CARGO_TARGET="${SHEPHERD_CARGO_TARGET:-}"
 # Rust triples that name an ISA revision the GNU type does not.
 #
 # A GNU type says nothing about which revision of an architecture it means, and
-# for one Debian architecture that matters. dpkg-architecture reports
-# `arm-linux-gnueabihf` for armhf, which translates to
-# `arm-unknown-linux-gnueabihf` -- a real Rust target, so the target-list check
-# in arch_to_triple accepts it, but the wrong one. That triple is the ARMv6
-# baseline; Debian defines armhf as ARMv7-A hard-float, which Rust spells
-# `armv7-unknown-linux-gnueabihf`.
+# on arm that matters twice. dpkg-architecture reports `arm-linux-gnueabihf` for
+# armhf and `arm-linux-gnueabi` for armel, which translate to
+# `arm-unknown-linux-gnueabihf` and `arm-unknown-linux-gnueabi` -- both real
+# Rust targets, so the target-list check in arch_to_triple accepts them, and
+# both the wrong one. Rust's bare `arm-*` triples are the ARMv6 baseline
+# (`+v6`), while Debian defines armhf as ARMv7-A hard-float and armel as ARMv5TE
+# soft-float. Rust spells those `armv7-unknown-linux-gnueabihf` and
+# `armv5te-unknown-linux-gnueabi`.
 #
-# Nothing fails loudly when this is wrong, which is exactly why it is corrected
-# here rather than left to be noticed: ARMv6 code runs on an ARMv7 machine, so
-# the result is a package labelled armhf whose contents quietly target an older
-# ISA than the label promises.
+# Neither is corrected for the same reason. armhf fails *quietly*: ARMv6 code
+# runs on an ARMv7 machine, so the result is a package labelled armhf whose
+# contents target an older ISA than the label promises. armel fails *loudly but
+# late*, at the far end -- ARMv6 instructions fault on ARMv5TE hardware, long
+# after the package looked fine on the build host.
 #
 # Spelling an arm literal here is fine: check-arch-neutral.sh guards this path
 # against hardcoding the *host* architecture, which is the one thing that has to
@@ -68,6 +71,7 @@ export SHEPHERD_CARGO_TARGET="${SHEPHERD_CARGO_TARGET:-}"
 # for. A target architecture named as a target is the opposite of that.
 declare -A ARCH_TRIPLE_OVERRIDES=(
     [arm-unknown-linux-gnueabihf]="armv7-unknown-linux-gnueabihf"
+    [arm-unknown-linux-gnueabi]="armv5te-unknown-linux-gnueabi"
 )
 
 # Translate a Debian architecture name into its Rust target triple.
