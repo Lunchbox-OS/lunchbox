@@ -134,7 +134,10 @@ Example (bedtime restriction):
     deep-link with — so to render one page, temporarily change the initial
     `useState<Page>` in `src/App.tsx`, `npm run build`, and re-boot (the daemon
     embeds `dist/` at compile time, so this needs a full `dev headless`, not
-    `--no-build`). Run the browser inside the session by sourcing
+    `--no-build`). **The config editor is the exception**: it has a standalone
+    build that needs no daemon, no rebuild and no login — see "Looking at the
+    config editor" below, and prefer it for anything under `src/config/`. Run
+    the browser inside the session by sourcing
     `dev-runtime/headless/session.env` and launching `firefox --kiosk
     http://127.0.0.1:8080/` with `MOZ_ENABLE_WAYLAND=1`. Firefox on Ubuntu is a
     **snap**: a `--profile` outside `$HOME/snap/firefox/common` fails with
@@ -383,6 +386,53 @@ m.cmd("WebDriver:NewSession", {
 Launch on `about:blank` and navigate *after* the session exists, for the same
 reason: a URL on the command line is loaded before any capability applies.
 
+### Looking at the config editor
+
+The config editor is the same source tree but a **second build target**, and it
+is much cheaper to look at than the embedded SPA: it talks to no daemon, so
+there is nothing to sign into, no `web_assets.rs` to touch and no `shepherdd`
+to rebuild.
+
+```sh
+cd shepherd-webui && npm run dev:standalone   # SHEPHERD_UI_TARGET=standalone, serves :3000
+```
+
+Then point the session's Firefox at `http://127.0.0.1:3000/` (plain http — no
+certificate, so `acceptInsecureCerts` is moot here). `npm run build:standalone`
+into `dist-standalone/` plus any static server works too, and is what CI ships
+to Pages, but the dev server is one command and rebuilds on save.
+
+Driving it:
+
+- **"Example" is the fastest way to a real config.** It loads
+  `config.example.toml`, inlined at build time, so one click gives you a
+  document that exercises most of the schema. There is no file picker to fight.
+- **Poll for state; do not `sleep` between steps.** The tabs render before the
+  wasm validator can accept a document, and nothing announces when it can, so a
+  fixed delay works until it doesn't — the same script passed, then failed with
+  every step a no-op, then passed again once each step waited on something it
+  could see (`Example` button exists → `Tux Math` in the body → `Device
+  settings` → `Kiosk lock-in`). A one-second poll loop against
+  `document.body.innerText` is enough.
+- **A collapsed `Section` unmounts its children**, so nothing inside one can be
+  queried or clicked until it is expanded. Expand by `aria-label`
+  (`Expand <title>` / `Collapse <title>`) rather than by clicking the header.
+- **Screenshot through Marionette, not `dev shot`.** The launcher's first-boot
+  setup card is a compositor overlay and sits *over* the browser window, even
+  fullscreen. `WebDriver:TakeScreenshot` captures the page itself and is not
+  affected.
+- **Collapsing the other sections is not the same as scrolling to yours.** The
+  device page is long enough that the section you expanded is still below the
+  fold afterwards, and `TakeScreenshot` captures the viewport — so a run that
+  collapses everything and shoots gets a picture of the page header. Collapse
+  the rest *and* `scrollIntoView({block: "start"})` the heading you want, then
+  shoot.
+
+The same one-session-at-a-time rule applies, and it bites differently here: a
+second Marionette connection re-navigates, so a script that assumes the state
+left by a previous script finds a freshly loaded page instead. Do the whole
+scenario — load, navigate, expand, screenshot — in one script.
+
 **Signing in (issue #156).** The API no longer has an open mode, and the
 `localStorage` `apiToken` route is gone for browsers — a person logs in and
 gets an `HttpOnly` cookie. On a fresh dev stack:
@@ -414,7 +464,9 @@ Gotchas here:
 
 - **`pkill -f firefox` kills your own shell.** The Bash tool's wrapper carries
   the command text, so `-f` matches it. Use `pkill -x firefox`, or match the
-  profile path.
+  profile path. The same trap catches the dev server — `pkill -f "rsbuild dev"`
+  exits 144 without stopping it; list with `ps -eo pid,cmd | grep rsbuild` and
+  kill the pids.
 
 - **`npm run build` alone does not reach the running daemon.** `rust_embed`
   embeds `shepherd-webui/dist/` at compile time but does not make cargo consider
