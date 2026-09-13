@@ -105,9 +105,15 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
     let argv_log = work.path().join("flatpak-argv.log");
     // Stub flatpak: record argv (one per line), then exit so the monitor fires
     // the wipe. `$SHEPHERD_TEST_ARGV` is set from [entries.kind.env].
+    //
+    // Written to a scratch file and renamed into place: `wait_for_file` waits
+    // for the log to *exist*, and a redirection creates it before a byte is in
+    // it, so a reader can otherwise catch it empty. Rename is atomic.
     write_executable(
         &work.path().join("flatpak"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SHEPHERD_TEST_ARGV\"\n",
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$@\" > \"$SHEPHERD_TEST_ARGV.partial\"\n\
+         mv \"$SHEPHERD_TEST_ARGV.partial\" \"$SHEPHERD_TEST_ARGV\"\n",
     )?;
     let augmented_path = format!(
         "{}:{}",

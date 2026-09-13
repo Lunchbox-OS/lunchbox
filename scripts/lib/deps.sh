@@ -13,6 +13,11 @@ source "$DEPS_LIB_DIR/common.sh"
 # shellcheck source=admin.sh
 source "$DEPS_LIB_DIR/admin.sh"
 
+# For arch_to_triple: `deps install cross` adds the same Rust target that
+# `shepherd build --arch` will ask for, and the two must agree.
+# shellcheck source=build.sh
+source "$DEPS_LIB_DIR/build.sh"
+
 # Directory containing package lists
 DEPS_DIR="$(get_repo_root)/scripts/deps"
 
@@ -116,6 +121,35 @@ install_rust() {
     else
         die "Rust installation failed. Please run: curl --proto '=https' --tlsv1.2 -sSf $RUSTUP_URL | sh"
     fi
+}
+
+# Add clippy and rustfmt to the stable toolchain.
+#
+# install_rust asks rustup for `--profile minimal`, which has neither, and it
+# returns early on a host that already has Rust -- so nothing put them back.
+# CONTRIBUTING tells developers to run `cargo clippy` and `cargo fmt`, and
+# .ci/Dockerfile has carried its own `rustup component add clippy rustfmt` for
+# the same reason, which is why CI never noticed.
+install_lint_components() {
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env" 2>/dev/null || true
+    command_exists rustup || return 0
+
+    local missing=()
+    local component
+    for component in clippy rustfmt; do
+        if ! rustup component list --installed 2>/dev/null | grep -q "^$component"; then
+            missing+=("$component")
+        fi
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        info "clippy and rustfmt are already installed"
+        return 0
+    fi
+
+    info "Adding Rust components: ${missing[*]}..."
+    rustup component add "${missing[@]}"
 }
 
 # Install the BPF authoring toolchain: nightly Rust (for `-Zbuild-std`),
@@ -318,6 +352,263 @@ install_cargo_ndk() {
     fi
 }
 
+# Fallback mirror, for the case where the configured one does not carry the
+# target architecture. Named for its role, not for any architecture, because
+# which arches live where is not stable enough to encode: on Ubuntu 26.04 the
+# main archive serves arm64 too (verified 2026-09-04 --
+# dists/resolute/main/binary-arm64/Release is present and real), so the old
+# rule that ports carried arm64 and the archive carried amd64/i386 no longer
+# holds. Hardcoding it would add a redundant source and rewrite a working
+# sources file for nothing. Hence the probe below.
+#
+# This is only the right fallback for an architecture the primary archive
+# lacks. Ports carries arm64 but not amd64, so cross-compiling towards amd64
+# from a host whose only mirror is ports is not something it can rescue -- that
+# fails with a clear error rather than adding a source that would not work.
+DEPS_PORTS_URI="http://ports.ubuntu.com/ubuntu-ports/"
+
+# Emit one TAB-separated record per deb822 stanza: file, first URI, first
+# suite, components, declared architectures.
+#
+# Per *stanza*, not per file: ubuntu.sources alone carries two (the archive and
+# the security mirror), and a host may have any number of PPA and vendor files
+# beside it. The previous version read the first `URIs:`/`Suites:` line across
+# the whole glob, which is whichever file sorts first -- a PPA on any machine
+# that has one -- and then drew conclusions about "the configured mirror" from
+# it.
+_deps_source_stanzas() {
+    local f
+    for f in "$@"; do
+        awk -v file="$f" '
+            function flush() {
+                if (uri != "" && suite != "")
+                    printf "%s\t%s\t%s\t%s\t%s\n", file, uri, suite, comps, arches
+                uri = ""; suite = ""; comps = ""; arches = ""
+            }
+            /^[[:space:]]*#/  { next }
+            /^[[:space:]]*$/  { flush(); next }
+            /^URIs:/          { sub(/^URIs:[[:space:]]*/, "");          uri = $1; next }
+            /^Suites:/        { sub(/^Suites:[[:space:]]*/, "");        suite = $1; next }
+            /^Components:/    { sub(/^Components:[[:space:]]*/, "");    comps = $0; next }
+            /^Architectures:/ { sub(/^Architectures:[[:space:]]*/, ""); arches = $0; next }
+            END { flush() }
+        ' "$f"
+    done
+}
+
+# Does the mirror at $1 serve architecture $3 for suite $2, across components $4?
+#
+# Probes the per-architecture binary index. The suite Release file's
+# `Architectures:` field cannot answer this -- it lists every architecture the
+# *suite* defines, so a mirror that carries only some of them still advertises
+# them all -- but binary-<arch>/Release is either there or it is not.
+#
+# The components come from the stanza rather than being hardcoded, and every
+# one of them must serve the architecture. Both halves matter. `apt-get update`
+# fetches an index for each component x architecture the stanza declares and
+# fails hard on a 404, so "serves this arch" has to mean *all* of its
+# components. But hardcoding `main universe` made that test unanswerable for a
+# Launchpad PPA, which only ever publishes `main`: the probe 404ed on a
+# component the stanza never claimed to have, and reported that the PPA did not
+# serve an architecture it does serve. ppa:libretro/testing publishes arm64 for
+# 119 packages, which is precisely the emulation core set an arm64 device wants.
+_deps_mirror_serves() {
+    local uri="${1%/}" suite="$2" arch="$3" components="$4" component
+    [[ -n "$components" ]] || return 1
+    for component in $components; do
+        curl -sfI --max-time 20 -o /dev/null \
+            "$uri/dists/$suite/$component/binary-$arch/Release" || return 1
+    done
+    return 0
+}
+
+# Make apt able to install packages for a foreign architecture.
+#
+# Two steps, the second of which is conditional: dpkg has to be told the
+# architecture exists, and apt has to have somewhere to fetch it from. When the
+# sources already carry it -- true of most full mirrors, and the reason this
+# probes instead of assuming Ubuntu's archive/ports split -- there is nothing
+# else to do.
+#
+# Where a source does *not* carry it, that source must be pinned to the
+# architectures it does serve or `apt-get update` fails hard on the 404. That
+# is decided per source, against the components each one declares, so a stanza
+# that serves the target architecture keeps serving it. Pinning every source
+# indiscriminately would have cost this host its arm64 libretro cores.
+_deps_enable_foreign_arch() {
+    local arch="$1"
+    local ports_file="/etc/apt/sources.list.d/ubuntu-ports-$arch.sources"
+
+    if ! dpkg --print-foreign-architectures | grep -qx -- "$arch"; then
+        info "Telling dpkg about the $arch architecture..."
+        maybe_sudo dpkg --add-architecture "$arch"
+    fi
+
+    if [[ -f "$ports_file" ]]; then
+        info "A ports entry for $arch is already configured ($ports_file)"
+        return 0
+    fi
+
+    # Every deb822 source, whatever it is called: Ubuntu ships ubuntu.sources,
+    # but images and derivatives rename and split it.
+    local -a sources=()
+    local f
+    for f in /etc/apt/sources.list.d/*.sources; do
+        [[ -f "$f" ]] && sources+=("$f")
+    done
+
+    if [[ ${#sources[@]} -eq 0 ]]; then
+        # Nothing to probe or pin. If apt can already reach the architecture
+        # (a full mirror, or a source configured some other way) the install
+        # below simply works; if it cannot, apt's own error is the honest one.
+        warn "No deb822 apt source found to read a mirror and suite from."
+        warn "Assuming apt can already fetch $arch packages; if it cannot, add a"
+        warn "$arch source manually and re-run."
+        return 0
+    fi
+
+    # Walk every stanza: note which files need pinning, and whether the archive
+    # that provides the base system serves the target architecture. That last
+    # one is what decides the ports fallback -- the -dev packages a cross build
+    # links against come from the Ubuntu archive, not from a PPA, so a PPA
+    # serving the architecture is not a substitute for the archive doing so.
+    local -a needs_pin=()
+    local base_uri="" base_suite="" base_components="" base_serves="false"
+    local file uri suite comps arches
+    while IFS=$'\t' read -r file uri suite comps arches; do
+        [[ -n "$uri" && -n "$suite" ]] || continue
+
+        # An Ubuntu-archive-shaped stanza: the one carrying `universe` beside
+        # `main`. A PPA or vendor repo publishes `main` alone.
+        if [[ -z "$base_uri" && " $comps " == *" main "* && " $comps " == *" universe "* ]]; then
+            base_uri="$uri"
+            base_suite="$suite"
+            base_components="$comps"
+            if _deps_mirror_serves "$uri" "$suite" "$arch" "$comps"; then
+                base_serves="true"
+            fi
+        fi
+
+        # A stanza that already declares its architectures needs nothing: apt
+        # will not ask it for the new one.
+        [[ -n "$arches" ]] && continue
+
+        if _deps_mirror_serves "$uri" "$suite" "$arch" "$comps"; then
+            info "$uri ($suite) serves $arch; leaving $file alone"
+            continue
+        fi
+
+        info "$uri ($suite) does not serve $arch; $file will be pinned"
+        # One file may hold several stanzas; pin it once.
+        local seen
+        for seen in ${needs_pin[@]+"${needs_pin[@]}"}; do
+            [[ "$seen" == "$file" ]] && continue 2
+        done
+        needs_pin+=("$file")
+    done < <(_deps_source_stanzas "${sources[@]}")
+
+    if [[ -z "$base_uri" ]]; then
+        warn "No Ubuntu-archive-shaped apt source (main + universe) was found."
+        warn "Assuming apt can already fetch $arch packages; if it cannot, add a"
+        warn "$arch source manually and re-run."
+        return 0
+    fi
+
+    # Pin the sources that cannot serve the new architecture, whether or not a
+    # ports entry follows: a source that 404s for $arch breaks `apt-get update`
+    # on its own, now that dpkg knows the architecture exists.
+    local native
+    native="$(dpkg --print-architecture)"
+    for f in ${needs_pin[@]+"${needs_pin[@]}"}; do
+        info "Pinning $f to $native..."
+        maybe_sudo cp -n "$f" "$f.pre-cross" || true
+        # The `$` below belong to awk (an end-of-line anchor), not to the
+        # shell, so the program has to stay single-quoted. The architecture
+        # reaches it via -v.
+        # shellcheck disable=SC2016
+        maybe_sudo awk -v arches="$native" '
+            /^[[:space:]]*$/ { flush(); print; next }
+            { buf[n++] = $0 }
+            END { flush() }
+            function flush(   i) {
+                for (i = 0; i < n; i++) {
+                    print buf[i]
+                    if (buf[i] ~ /^Types:/) print "Architectures: " arches
+                }
+                n = 0
+            }
+        ' "$f" | maybe_sudo tee "$f.new" >/dev/null
+        maybe_sudo mv "$f.new" "$f"
+    done
+
+    if [[ "$base_serves" == "true" ]]; then
+        info "The archive ($base_uri) already serves $arch; no ports entry needed"
+        return 0
+    fi
+
+    info "$base_uri does not serve $arch; falling back to $DEPS_PORTS_URI"
+    _deps_mirror_serves "$DEPS_PORTS_URI" "$base_suite" "$arch" "$base_components" \
+        || die "Neither $base_uri nor $DEPS_PORTS_URI serves $arch packages for $base_suite"
+
+    info "Adding a $DEPS_PORTS_URI entry for $arch..."
+    maybe_sudo tee "$ports_file" >/dev/null <<EOF
+# Added by \`shepherd deps install cross --arch $arch\`: the configured mirror
+# does not carry $arch, so its packages come from Ubuntu's ports mirror.
+Types: deb
+URIs: $DEPS_PORTS_URI
+Suites: $base_suite $base_suite-updates $base_suite-backports $base_suite-security
+Components: $base_components
+Architectures: $arch
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+}
+
+# Refuse to install a cross set that would uninstall the native one.
+#
+# The two architectures' -dev chains are not always co-installable, and apt
+# resolves that by *removing* the native half -- then exits 0. Installing
+# libmpv-dev:<arch> on this workspace's dependency set drags out the host's own
+# libmpv-dev, libgirepository1.0-dev, libarchive-dev, libcdio-dev,
+# libext2fs-dev and libtool-bin, because several of those are `Multi-Arch: no`
+# and libmpv-dev depends on them. The native build then fails at link time with
+# `cannot find -lmpv`, a long way from anything that mentions cross-compiling.
+#
+# So simulate first and stop, rather than leave someone with a broken
+# workstation and no idea why. A CI image that only ever cross-compiles has no
+# native build to protect and passes --allow-remove.
+_deps_refuse_destructive_install() {
+    local -a packages=("$@")
+    local sim removed
+
+    info "Checking whether this would remove any natively-installed packages..."
+    # `|| true`: a simulation that fails has nothing to say about removals, and
+    # the real install below will report the failure properly.
+    sim="$(maybe_sudo apt-get install -s -y "${packages[@]}" 2>/dev/null || true)"
+
+    # apt lists removals under a header, one indented continuation block.
+    removed="$(awk '
+        /^The following packages will be REMOVED:/ { inblock = 1; next }
+        inblock && /^[[:space:]]/ { print; next }
+        inblock { inblock = 0 }
+    ' <<<"$sim" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+
+    [[ -n "$removed" ]] || return 0
+
+    warn "This would REMOVE these natively-installed packages:"
+    warn "  $removed"
+    die "Refusing: that would break the native build on this host (a missing
+native libmpv-dev shows up as \`cannot find -lmpv\` when linking, which says
+nothing about cross-compiling).
+
+The two architectures' -dev chains are not co-installable here, so this host
+can have one or the other, not both. Options:
+
+  * Cross-compile in a container instead, and keep this host native. That is
+    what CI does; see .ci/Dockerfile.cross.
+  * Accept the trade and pass --allow-remove. Restore the native set afterwards
+    with: shepherd deps install build"
+}
+
 # Read a package file, stripping comments and empty lines
 read_package_file() {
     local file="$1"
@@ -330,11 +621,19 @@ read_package_file() {
     grep -v '^\s*#' "$file" | grep -v '^\s*$' | sed 's/#.*//' | tr -s '[:space:]' '\n' | grep -v '^$'
 }
 
-# Get packages for a specific set
+# Get packages for a specific set.
+#
+# $2 is the Debian architecture, required only by the `cross` set, whose file is
+# a template: every `@ARCH@` becomes the architecture being cross-compiled for.
 get_packages() {
     local set_name="$1"
+    local arch="${2:-}"
     
     case "$set_name" in
+        cross)
+            [[ -n "$arch" ]] || die "The 'cross' set needs --arch <debian-arch>"
+            read_package_file "$DEPS_DIR/cross.pkgs" | sed "s/@ARCH@/$arch/g"
+            ;;
         build)
             read_package_file "$DEPS_DIR/build.pkgs"
             ;;
@@ -363,37 +662,80 @@ get_packages() {
             } | sort -u
             ;;
         *)
-            die "Unknown package set: $set_name (valid: build, run, test, android, agent, dev)"
+            die "Unknown package set: $set_name (valid: build, run, test, android, agent, cross, dev)"
             ;;
     esac
 }
 
+# Split "<set> [--arch ARCH]" into DEPS_SET and DEPS_ARCH.
+_deps_parse_args() {
+    DEPS_SET="${1:-}"
+    DEPS_ARCH=""
+    DEPS_ALLOW_REMOVE=false
+    shift || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --arch)
+                [[ -n "${2:-}" ]] || die "--arch needs a Debian architecture"
+                DEPS_ARCH="$2"
+                shift 2
+                ;;
+            --allow-remove)
+                DEPS_ALLOW_REMOVE=true
+                shift
+                ;;
+            *)
+                die "Unknown deps option: $1 (try: shepherd deps help)"
+                ;;
+        esac
+    done
+
+    # The cross set is the only one that is per-architecture, and the only
+    # architecture worth cross-compiling for is one that is not the host's.
+    if [[ "$DEPS_SET" == "cross" ]]; then
+        [[ -n "$DEPS_ARCH" ]] || die "Usage: shepherd deps <cmd> cross --arch <debian-arch>"
+        if [[ "$DEPS_ARCH" == "$(dpkg --print-architecture)" ]]; then
+            die "$DEPS_ARCH is this host's own architecture; build for it natively instead"
+        fi
+    fi
+}
+
 # Print packages for a set (one per line)
 deps_print() {
-    local set_name="${1:-}"
+    local DEPS_SET DEPS_ARCH DEPS_ALLOW_REMOVE
+    _deps_parse_args "$@"
     
-    if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps print <build|run|dev>"
+    if [[ -z "$DEPS_SET" ]]; then
+        die "Usage: shepherd deps print <build|run|cross|dev>"
     fi
     
-    get_packages "$set_name"
+    get_packages "$DEPS_SET" "$DEPS_ARCH"
 }
 
 # Install packages for a set
 deps_install() {
-    local set_name="${1:-}"
+    local DEPS_SET DEPS_ARCH DEPS_ALLOW_REMOVE
+    _deps_parse_args "$@"
+    local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps install <build|run|dev>"
+        die "Usage: shepherd deps install <build|run|cross|dev>"
     fi
     
     check_ubuntu_version
     
     info "Installing $set_name dependencies..."
+
+    # Multiarch first: none of the `:<arch>` packages below can even be
+    # resolved until dpkg knows the architecture and apt has a mirror for it.
+    if [[ "$set_name" == "cross" ]]; then
+        _deps_enable_foreign_arch "$DEPS_ARCH"
+    fi
     
     # Get the package list
     local packages
-    packages=$(get_packages "$set_name" | tr '\n' ' ')
+    packages=$(get_packages "$set_name" "$DEPS_ARCH" | tr '\n' ' ')
     
     if [[ -z "$packages" ]]; then
         warn "No packages to install for set: $set_name"
@@ -401,6 +743,13 @@ deps_install() {
     fi
     
     info "Packages: $packages"
+
+    # The cross set is the one that can collide with what is already installed
+    # for the host; every other set only adds to it.
+    if [[ "$set_name" == "cross" ]] && [[ "$DEPS_ALLOW_REMOVE" != "true" ]]; then
+        # shellcheck disable=SC2086  # word splitting is the point
+        _deps_refuse_destructive_install $packages
+    fi
     
     # Install using apt
     maybe_sudo apt-get update
@@ -415,6 +764,12 @@ deps_install() {
         install_wasm_toolchain
     fi
 
+    # Only for dev: CI's image adds these itself, and a build-only host has no
+    # use for them.
+    if [[ "$set_name" == "dev" ]]; then
+        install_lint_components
+    fi
+
     # For run and dev sets, add shepherd-media's non-apt dependencies: yt-dlp in
     # its virtualenv, and the VA-API drivers for this host's GPU. Neither can
     # live in run.pkgs — that file is installed as one unconditional apt
@@ -422,6 +777,16 @@ deps_install() {
     # deliberately comes from pip. Runs after apt so python3-venv is present.
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         install_media_deps
+    fi
+
+    # The cross set needs rustc's own std for the target, which apt cannot
+    # provide. `shepherd build --arch` derives the same triple.
+    if [[ "$set_name" == "cross" ]]; then
+        source "$HOME/.cargo/env" 2>/dev/null || true
+        local triple
+        triple="$(arch_to_triple "$DEPS_ARCH")"
+        info "Adding the $triple Rust target..."
+        rustup target add "$triple"
     fi
 
     # For the android set, fetch the SDK after the JDK + unzip apt
@@ -436,14 +801,16 @@ deps_install() {
 
 # Check if all packages for a set are installed
 deps_check() {
-    local set_name="${1:-}"
+    local DEPS_SET DEPS_ARCH DEPS_ALLOW_REMOVE
+    _deps_parse_args "$@"
+    local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps check <build|run|dev>"
+        die "Usage: shepherd deps check <build|run|cross|dev>"
     fi
     
     local packages
-    packages=$(get_packages "$set_name")
+    packages=$(get_packages "$set_name" "$DEPS_ARCH")
     
     local missing=()
     while IFS= read -r pkg; do
@@ -464,6 +831,29 @@ deps_check() {
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_ytdlp_installed; then
             warn "yt-dlp is not installed (run: shepherd deps install run)"
+            return 1
+        fi
+    fi
+
+    # For the dev set, also check the components CONTRIBUTING asks developers
+    # to run: `cargo clippy` and `cargo fmt`.
+    if [[ "$set_name" == "dev" ]] && command_exists rustup; then
+        local component
+        for component in clippy rustfmt; do
+            if ! rustup component list --installed 2>/dev/null | grep -q "^$component"; then
+                warn "$component is not installed (run: shepherd deps install dev)"
+                return 1
+            fi
+        done
+    fi
+
+    # For the cross set, also check rustc's std for the target.
+    if [[ "$set_name" == "cross" ]]; then
+        local triple
+        triple="$(arch_to_triple "$DEPS_ARCH")"
+        if command_exists rustup \
+            && ! rustup target list --installed 2>/dev/null | grep -qx -- "$triple"; then
+            warn "The $triple Rust target is not installed (run: shepherd deps install cross --arch $DEPS_ARCH)"
             return 1
         fi
     fi
@@ -520,6 +910,11 @@ Package sets:
     android  JDK + Android SDK + NDK for the companion-android and
              shepherd-media-android apps
     agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
+    cross    Cross-compilation toolchain and the target architecture's half of
+             the build set. Needs --arch <debian-arch>; see 'shepherd build --arch'.
+             Refuses to run if it would uninstall the native build set (the two
+             are not always co-installable); --allow-remove overrides, and is
+             what the CI cross image passes.
     dev      All dependencies (build + run + test + agent + dev extras + Rust)
 
 Note: The 'build' and 'dev' sets automatically install Rust via rustup.
@@ -530,6 +925,7 @@ Examples:
     shepherd deps print build
     shepherd deps install dev
     shepherd deps install android
+    shepherd deps install cross --arch arm64
     shepherd deps check run
 EOF
             ;;

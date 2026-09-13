@@ -539,6 +539,96 @@ sudo apt install --no-install-recommends fdroidserver default-jdk-headless
 ./scripts/shepherd package fdroid --debug-keys    # --debug-keys: local debug-signed APKs
 ```
 
+### Cross-compiling for arm64 (aarch64)
+
+`--arch` takes a Debian architecture name and applies to both the build and the
+package:
+
+```sh
+./scripts/shepherd deps install cross --arch arm64   # one-time; ~1.5-2.5 GB
+./scripts/shepherd build --arch arm64                # target/aarch64-unknown-linux-gnu/
+./scripts/shepherd package deb --arch arm64          # dist/pkg/..._arm64.deb
+```
+
+`deps install cross` installs the cross toolchain, the target architecture's
+half of `deps/build.pkgs` (Ubuntu's multiarch makes it co-installable with the
+host's own), and rustc's std for the derived triple. It tells dpkg about the
+architecture and, only if the configured mirror does not already serve it, adds
+an entry for Ubuntu's ports mirror — on 26.04 the main archive carries arm64
+too, so that is decided by probing rather than assumed.
+
+**It will probably refuse, and that is the useful part.** The two
+architectures' `-dev` chains are not co-installable here: `libmpv-dev` depends
+on `libcdio-dev`, `libext2fs-dev`, `libgirepository1.0-dev` and `libtool-bin`,
+several of which are `Multi-Arch: no`, so apt makes room by removing the host's
+half — and `apt-get install -y` does that silently and exits 0. The native
+build then fails at link time with `cannot find -lmpv`, a long way from
+anything that mentions cross-compiling. `deps install cross` simulates the
+install first and stops rather than let that happen.
+
+So on a machine you also build natively on, **cross-compile in a container**
+(that is what CI does — see `.ci/Dockerfile.cross`). If you would rather take
+the trade on the host, pass `--allow-remove`, and restore the native set
+afterwards with `shepherd deps install build`.
+
+Installing a foreign architecture's libraries also prints a handful of
+`Exec format error` lines from their `postinst` scripts (glib schemas,
+gdk-pixbuf loaders). Those are expected on a multiarch host with no emulator,
+and harmless: the helpers matter to *running* that architecture's software, not
+to compiling against its headers.
+
+An `--arch` naming the **host's own** architecture builds natively, into the
+usual `target/{debug,release}`, so it is a no-op rather than a second target
+directory. `build --target <triple>` forces the triple path when you want it.
+
+Two things not to do:
+
+- **Do not export `CARGO_BUILD_TARGET`.** It beats
+  `crates/shepherd-firewall-bpf/.cargo/config.toml` and makes the eBPF program
+  build for your triple instead of `bpfel-unknown-none`. `shepherd build`
+  passes `--target` on the command line for this reason, and
+  `shepherd-firewall-helper`'s build script strips the variable.
+- **Do not treat a cross build as tested.** It buys no coverage at all: nothing
+  in `cargo test`, `shepherd-e2e`, the firewall BPF suites or the headless
+  session runs on the target architecture. The BPF path is the most exposed,
+  because the verifier runs on the *target* kernel — see issue #151.
+
+### Running the suites natively on arm64
+
+Because of that last point, correctness on arm64 is covered by a native
+aarch64 Ubuntu 26.04 machine rather than by the cross build. Any aarch64 host
+will do — a VM on an Apple-silicon Mac is what this project uses — and it needs
+no special setup beyond the usual:
+
+```sh
+./scripts/shepherd deps install dev
+cargo test --workspace --all-targets
+cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
+./scripts/shepherd dev headless && ./scripts/shepherd dev shot && ./scripts/shepherd dev stop
+```
+
+Set `SHEPHERD_REQUIRE_PEER_CGROUP=1` for the e2e run, so a kernel too old for
+the socket peer check fails rather than skips (issue #144).
+
+The firewall suites need **root**, and self-skip without it — reporting `ok` in
+0.00s, which reads exactly like a pass. Run them the way `ci.yml` does, with
+`SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` to turn "not applicable here" into a
+failure:
+
+```sh
+sudo -E env "PATH=$PATH" SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+    cargo test -p shepherd-e2e --test firewall_cgroup -- \
+        --include-ignored --test-threads=1 --nocapture
+```
+
+If `sudo` asks for a password despite a `NOPASSWD` rule, check the *order*:
+`sudo -l` applies the **last** matching rule, and Ubuntu's `/etc/sudoers` ends
+with `@includedir /etc/sudoers.d`, so a NOPASSWD rule must live in a file there
+to beat the `%sudo` group rule.
+
+Results from the first such run are in
+[`docs/ai/history/2026-09-04 002`](./docs/ai/history/).
+
 ### Testing and linting
 
 Run the test suite:
@@ -562,6 +652,25 @@ cargo clippy --workspace --all-targets -- -D warnings
 compiles `wasm-bindgen` or `schemars` into the shipped binaries, and the side
 effect is that a bare `cargo test` skips them silently — including the codegen
 drift check.
+
+Shell scripts are linted with ShellCheck, as run in CI:
+
+```sh
+shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
+shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh
+shellcheck -e SC1091 run-dev
+```
+
+**CI's ShellCheck is older than yours.** The job installs Debian bookworm's
+package (0.9), while Ubuntu 26.04 ships 0.11, and the two disagree on some codes —
+0.10 split SC2329 ("function never invoked") out of SC2317 ("command
+unreachable"), so a `disable=SC2329` that satisfies 0.11 does nothing for 0.9.
+Where a disable is genuinely needed for a check that was renumbered, list both
+codes. To reproduce CI exactly, run the 0.9.0 release binary from
+<https://github.com/koalaman/shellcheck/releases/tag/v0.9.0>.
+
+Also, a comment line that *begins* with the word `shellcheck` is parsed as a
+directive, so prose that wraps onto one fails with SC1073.
 
 ### Editing a workflow file
 

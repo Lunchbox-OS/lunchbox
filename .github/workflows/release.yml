@@ -142,15 +142,50 @@ jobs:
   # (on publish) upload it + a .sha256 to the release.
   # --------------------------------------------------------------------------
   deb:
-    name: Build .deb (amd64)
+    # The interpolation in `name:` is required, not cosmetic: two jobs in one
+    # workflow file may not share a name — Forgejo rejects the *entire* file
+    # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
+    # catches that locally.
+    name: Build .deb (${{ matrix.arch }})
     needs: [guard, images, create-release]
     runs-on: ubuntu-latest
+    strategy:
+      # Publish whichever architecture succeeded rather than losing both to
+      # one failure: each leg uploads its own asset independently.
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      # arm64 is cross-compiled on this amd64 runner and so needs the cross
+      # image; amd64 builds natively in the base one.
+      image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
+      - name: Assert this job got the arm64 cross image
+        if: matrix.arch == 'arm64'
+        # First, and before checkout: if this job did not get the cross image,
+        # nothing after it can succeed, and what it fails with points
+        # somewhere else entirely -- `rustc: command not found` when the
+        # container is dropped (an empty image ref), or E0463 "can't find
+        # crate for `core`" when the image expression above falls through: an empty cross-ref makes
+        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on run 462 against
+        # a cross image that was published and correct, so the ref itself is
+        # printed: it is the one fact the rest of the log cannot recover.
+        shell: sh
+        env:
+          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+        run: |
+          echo "cross-ref: '$CROSS_REF'"
+          if [ -z "$CROSS_REF" ]; then
+            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            exit 1
+          fi
+          if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
+            echo "::error::cross-ref is '$CROSS_REF', but this environment has no aarch64-unknown-linux-gnu std (or no rustup on PATH). It is not the image that ref names."
+            exit 1
+          fi
       - uses: actions/checkout@v4
 
       - name: Cache cargo registry and build
@@ -160,14 +195,29 @@ jobs:
             /usr/local/cargo/registry
             /usr/local/cargo/git
             target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-v2-
+            ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-
 
       - name: Build .deb
         # Builds --release, stages via `DESTDIR=… shepherd install …`, runs
         # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
-        run: ./scripts/shepherd package deb --out dist/pkg
+        run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
+
+      - name: Assert the package is labelled for the right architecture
+        # A cross build that silently fell back to the host would otherwise be
+        # published under the wrong Architecture: and installed by apt on
+        # machines that cannot run it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(echo dist/pkg/*.deb)"
+          got="$(dpkg-deb -f "$deb" Architecture)"
+          echo "$deb declares Architecture: $got"
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "::error::expected Architecture: ${{ matrix.arch }}, got $got"
+            exit 1
+          }
 
       - name: Upload .deb to the release
         if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
@@ -180,8 +230,11 @@ jobs:
 
       # Also publish to Forgejo's Debian package registry so users get an
       # `apt update`/`apt upgrade` path (the release asset above stays the
-      # offline/manual download). Forgejo signs the repo metadata itself, so the
-      # .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1) are
+      # offline/manual download). Both this and the upload above take file
+      # globs and need no per-arch handling: each matrix leg has exactly one
+      # .deb in dist/pkg/, and Forgejo reads `Architecture:` out of the control
+      # file, serving both arches from one distribution/component. Forgejo
+      # signs the repo metadata itself, so the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1) are
       # skipped so RC builds never reach `apt upgrade` users — they still get the
       # signed release asset for manual testing. See docs/INSTALL.md.
       - name: Publish .deb to the apt registry

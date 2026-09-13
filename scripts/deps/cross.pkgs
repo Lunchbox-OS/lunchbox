@@ -1,0 +1,53 @@
+# Cross-compilation dependencies for shepherd-launcher.
+#
+# Unlike the other sets, this one is parameterised: `@ARCH@` is replaced with
+# the Debian architecture being built *for* (see `shepherd deps install cross
+# --arch ARCH`). Lines ending in `:@ARCH@` are the target architecture's halves
+# of build.pkgs' library set, installed alongside — not instead of — the host's
+# own, which Ubuntu's multiarch support makes co-installable.
+#
+# Kept separate from build.pkgs because installing it is a deliberate act: the
+# GTK + mpv + D-Bus dev set is 1.5-2.5 GB per extra architecture, which no
+# native build should pay for. scripts/ci/check-cross-pkgs.sh keeps the target
+# half in step with build.pkgs.
+
+# Host-side cross toolchain: the target's gcc/binutils/libc headers, plus the
+# multiarch-aware pkg-config the -sys crates' build scripts shell out to.
+crossbuild-essential-@ARCH@
+pkgconf-bin
+
+# GLib/GTK development libraries
+libglib2.0-dev:@ARCH@
+libgtk-4-dev:@ARCH@
+libadwaita-1-dev:@ARCH@
+libcairo2-dev:@ARCH@
+libpango1.0-dev:@ARCH@
+libgdk-pixbuf-xlib-2.0-dev:@ARCH@
+
+# Wayland development libraries.
+#
+# libudev-dev is installed for the *host* too (it is in build.pkgs). Both halves
+# are needed: libudev-sys's build script, after its correctly cross-aware
+# pkg_config call, compiles a probe with the host rustc and `-l udev` to decide
+# whether to set cfg(hwdb). With only the target half present that probe fails
+# silently and hwdb is left off — harmless here, since nothing in this workspace
+# uses those bindings, but it makes a cross build disagree with a native one for
+# no reason.
+libwayland-dev:@ARCH@
+libxkbcommon-dev:@ARCH@
+libudev-dev:@ARCH@
+
+# X11 (for XWayland support)
+libx11-dev:@ARCH@
+
+# GObject introspection
+libgirepository1.0-dev:@ARCH@
+
+# Layer shell for HUD overlay
+libgtk4-layer-shell-dev:@ARCH@
+
+# libmpv (used by shepherd-media for in-process media playback)
+libmpv-dev:@ARCH@
+
+# D-Bus client library (bluer -> libdbus-sys, the BLE transport in shepherd-ble)
+libdbus-1-dev:@ARCH@
