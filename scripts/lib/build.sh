@@ -88,6 +88,11 @@ arch_to_triple() {
     local gnu triple
 
     require_command dpkg-architecture
+    # Checked up front because the target-list test below cannot tell "rustc is
+    # missing" from "rustc has no such target": under pipefail both just fail the
+    # pipeline, and the second message would blame the architecture for an
+    # environment that has no Rust toolchain on PATH at all.
+    require_command rustc rust
     gnu="$(dpkg-architecture -a"$arch" -qDEB_HOST_GNU_TYPE 2>/dev/null)" \
         || die "Not a Debian architecture: $arch"
 

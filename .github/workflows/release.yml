@@ -163,6 +163,29 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.REGISTRY_TOKEN }}
     steps:
+      - name: Assert this job got the arm64 cross image
+        if: matrix.arch == 'arm64'
+        # First, and before checkout: if this job did not get the cross image,
+        # nothing after it can succeed, and what it fails with points
+        # somewhere else entirely -- `rustc: command not found` when the
+        # container is dropped (an empty image ref), or E0463 "can't find
+        # crate for `core`" when the image expression above falls through: an empty cross-ref makes
+        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on run 462 against
+        # a cross image that was published and correct, so the ref itself is
+        # printed: it is the one fact the rest of the log cannot recover.
+        shell: sh
+        env:
+          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+        run: |
+          echo "cross-ref: '$CROSS_REF'"
+          if [ -z "$CROSS_REF" ]; then
+            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            exit 1
+          fi
+          if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
+            echo "::error::cross-ref is '$CROSS_REF', but this environment has no aarch64-unknown-linux-gnu std (or no rustup on PATH). It is not the image that ref names."
+            exit 1
+          fi
       - uses: actions/checkout@v4
 
       - name: Cache cargo registry and build
