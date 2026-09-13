@@ -165,6 +165,9 @@ Notes:
   natively, into the usual `target/{debug,release}`. That is deliberate, so a CI
   matrix can pass `--arch` on every leg without giving the native one a second
   target directory. Use `build --target <triple>` to force the triple path.
+  Because every CI job passes `--arch`, the no-`--arch` and host-`--arch` paths
+  never run there; `ci/check-default-arch.sh` covers them by faking the host's
+  `dpkg --print-architecture`. Run it after touching either.
 - `deps install cross` tells dpkg about the architecture and, only if the
   configured mirror does not serve it, adds an entry for Ubuntu's ports mirror.
   Many mirrors carry every architecture in one tree, so this is decided by

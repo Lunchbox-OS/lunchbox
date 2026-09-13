@@ -233,5 +233,9 @@ EOF
     esac
 }
 
-# Run main with all arguments
-main "$@"
+# Run main with all arguments -- unless this file is being sourced, which
+# scripts/ci/check-default-arch.sh does to drive the real `package deb` with its
+# build and install steps stubbed out.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

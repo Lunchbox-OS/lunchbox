@@ -443,8 +443,8 @@ jobs:
     # Matrixed over both architectures so the arm64 package -- which is what
     # release.yml will publish -- gets the same smoke build and the same
     # xz assertion. The two legs differ only in the image and the --arch value:
-    # `dpkg-deb -I` and `ar t` are arch-agnostic, and the arch-neutral job
-    # exists to keep the packaging path that way.
+    # `dpkg-deb -I` and `ar t` are arch-agnostic. (The legs always pass --arch,
+    # so the no---arch default is checked separately, in the arch-neutral job.)
     needs: [images, warmup]
     runs-on: ubuntu-latest
     strategy:
@@ -937,19 +937,27 @@ jobs:
 
   arch-neutral:
     name: Arch neutrality
-    # Two static guards over the same concern: that this repo can build and
-    # package for an architecture other than amd64. Neither needs a build or a
-    # container — just bash, grep and awk — so they run on the default runner
-    # even though the rest of CI executes on amd64 only.
+    # What CI does not already prove by building for arm64. The arm64 build and
+    # package jobs cover the --arch path with a real cross build; these cover
+    # what no job executes -- the default (no --arch) path, and the scripts the
+    # .deb ships to the device -- plus the cross dependency set's drift. None
+    # needs a Rust toolchain or a container, so they run on the default runner.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Fails if an amd64/x86-specific literal creeps into the build &
-      # packaging path, which would mislabel or break a non-amd64 (e.g. arm64)
-      # package. `shepherd package deb` derives the Debian arch at runtime
-      # (dpkg --print-architecture); this keeps it that way.
-      - name: Check build/packaging path is architecture-neutral
+      # A plain `shepherd package deb` must target the host. Every other job
+      # passes --arch on an amd64 runner, so a hardcoded amd64 default passes
+      # them all -- and on an arm64 host silently cross-builds a consistent,
+      # wrong amd64 package. This fakes `dpkg --print-architecture` and runs
+      # the real package_deb with the Rust build stubbed out.
+      - name: Check package deb defaults to the host architecture
+        run: ./scripts/ci/check-default-arch.sh
+
+      # Fails on an amd64/x86_64 literal in the scripts -- chiefly the libs and
+      # shepherd-admin the .deb installs, which run on the device and are only
+      # ever staged, never run, in CI. Lexical, so a backstop, not a proof.
+      - name: Check the shipped scripts have no amd64 literals
         run: ./scripts/ci/check-arch-neutral.sh
 
       # Fails if scripts/deps/cross.pkgs has drifted from build.pkgs. Without

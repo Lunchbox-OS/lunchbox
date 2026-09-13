@@ -65,8 +65,9 @@ export SHEPHERD_CARGO_TARGET="${SHEPHERD_CARGO_TARGET:-}"
 # late*, at the far end -- ARMv6 instructions fault on ARMv5TE hardware, long
 # after the package looked fine on the build host.
 #
-# Spelling an arm literal here is fine: check-arch-neutral.sh guards this path
-# against hardcoding the *host* architecture, which is the one thing that has to
+# Spelling an arm literal here is fine: what must not be hardcoded on this path
+# is the *host* architecture (check-default-arch.sh tests that with a faked
+# host; check-arch-neutral.sh flags the literal), which is the one thing that has to
 # be derived at runtime so a package is labelled for the machine it was built
 # for. A target architecture named as a target is the opposite of that.
 declare -A ARCH_TRIPLE_OVERRIDES=(
