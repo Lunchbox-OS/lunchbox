@@ -19,8 +19,9 @@ pass, `2026-09-04 002`, ran on -30).
 Everything passes natively, and the three commits added since the last native
 pass — the uninstall guard, the per-stanza mirror probe, and the armhf triple —
 behave correctly *on this host*, which is where two of them were found.
-RetroArch, Okular and `shepherd-media` were installed and driven end to end on
-arm64 for the first time.
+RetroArch (archive **and** libretro PPA), Okular and `shepherd-media` were
+installed and driven end to end on arm64 for the first time, and the ports
+fallback — recorded in `2026-09-04 002` as exercised nowhere — finally ran.
 
 Two defects surfaced and are fixed here: a **flaky e2e test** (unrelated to
 the branch) and **`armel` deriving the ARMv6 triple**, the same bug `fe39b8b`
@@ -96,13 +97,66 @@ ubuntu.sources  resolute-security  amd64 SERVES   riscv64 does NOT   arm64 SERVE
 ports                              amd64 does NOT riscv64 SERVES     arm64 SERVES
 ```
 
-The PPA half of that fix cannot be re-demonstrated here — this host has no PPA —
-but the riscv64 column is the ports-fallback decision the amd64 host verified,
-reproduced from the other side.
-
 After a real `deps install cross --arch amd64`, `/etc/apt/sources.list.d/` was
 **byte-identical** (md5sums unchanged, no `.pre-cross` backups, no ports entry,
 no `Architectures:` pin). The only host change was `dpkg --add-architecture`.
+
+#### With the libretro PPA added, which is the shape the bug was found in
+
+The first draft of this note said the PPA half "cannot be re-demonstrated here —
+this host has no PPA". That is a reason to add one, not to skip it. Installing a
+PPA-only core (`apps install retroarch --ppa mupen64plus-next`, below) puts this
+host in exactly the configuration that broke the old probe, and both halves of
+the bug reproduce:
+
+* **The glob order.** `libretro-ubuntu-testing-resolute.sources` sorts *before*
+  `ubuntu.sources`, so the old "first `URIs:`/`Suites:` line across the glob"
+  read a PPA and drew every conclusion about "the configured mirror" from it.
+* **The hardcoded components.** Probed by hand against the live PPA:
+
+  ```
+  main universe -> does NOT serve   <- the old, unanswerable verdict
+  main          -> SERVES           <- the truth
+  ```
+
+The stanza parser now yields three records — the PPA, the archive, and security —
+and each is probed against its own components.
+
+**The pinning path, run for real.** `--arch riscv64` is the case that actually
+rewrites something on this host, so it exercises the ports fallback that
+`2026-09-04 002` recorded as "exercised nowhere — not here, not in CI":
+
+```
+[INFO] …/libretro/testing/ubuntu/ (resolute) serves riscv64; leaving …libretro….sources alone
+[INFO] http://us.archive.ubuntu.com/ubuntu/ (resolute) does not serve riscv64; ubuntu.sources will be pinned
+[INFO] http://security.ubuntu.com/ubuntu/ (resolute-security) does not serve riscv64; ubuntu.sources will be pinned
+[INFO] Pinning /etc/apt/sources.list.d/ubuntu.sources to arm64...
+[INFO] Adding a http://ports.ubuntu.com/ubuntu-ports/ entry for riscv64...
+```
+
+Afterwards: the **PPA file is byte-identical** (md5 unchanged, no `Architectures:`
+line added), `ubuntu.sources` carries `Architectures: arm64` once per stanza —
+both of them, which is what `apt-get update` needs — the ports entry names
+`Architectures: riscv64` across all four suites, `apt-get update` succeeded, and
+all **102** libretro packages stayed resolvable. The `.pre-cross` backup was
+byte-identical to the original, and restoring from it returned
+`/etc/apt/sources.list.d/` to its pre-run md5sums exactly.
+
+Three things that run only turned up:
+
+1. The riscv64 *install* then failed (`EXIT=100`), and correctly: with amd64
+   already enabled, `libc6:amd64 Breaks libc6:riscv64`. A genuine three-way
+   multiarch conflict at the apt layer, not a script fault — and moot anyway,
+   since `arch_to_triple` refuses riscv64 before a build could start.
+2. The uninstall guard ran first and found nothing to remove, so an
+   *unsatisfiable* set is not something it covers. It answers "what would this
+   uninstall", not "will this resolve at all"; apt reports the latter.
+3. Pinning **reflows a stanza's comments**. `ubuntu.sources` has a commented-out
+   alternate mirror (`# URIs: http://mirrors.mit.edu/ubuntu/`) directly under the
+   active `URIs:`; after pinning it sits at the end of the stanza instead.
+   Semantically identical — same stanza, no blank line introduced — but the
+   comment is no longer next to the line it annotates. Cosmetic, unreported here
+   as anything more.
 
 ### `fe39b8b` — armhf is ARMv7, not ARMv6 — and armel has the same bug
 
@@ -159,6 +213,20 @@ All 14 archive cores in `RETROARCH_CORES` have arm64 candidates in
 `resolute/universe`, so the table needs no per-architecture handling.
 `sudo shepherd-admin apps install retroarch` installed `retroarch` 1.22.2,
 `retroarch-assets`, `libretro-core-info` and `libretro-mgba`, all aarch64.
+
+**The PPA path works on arm64 too.** All three libretro PPAs advertise
+`Architectures: amd64 amd64v3 arm64 armhf i386 ppc64el riscv64 s390x` with
+`Components: main` for `resolute`. `apps install retroarch --ppa mupen64plus-next`
+added `ppa:libretro/testing` and installed the N64 core: visible `libretro-*`
+packages went from **16 to 102**, and all 102 have an arm64 candidate — so the
+"PPA adds cores" claim in `docs/emulators.md` holds on this architecture, not
+just amd64.
+
+That core is also the naming-mismatch case: `core = "mupen64plus-next"` resolved
+against the real file on disk to
+`/usr/lib/aarch64-linux-gnu/libretro/mupen64plus_next_libretro.so`, with no
+diagnostic and the entry enabled. Package name, config spelling and shared-object
+name all disagree, and the resolution handles it on arm64 as it does elsewhere.
 
 The core landed at `/usr/lib/aarch64-linux-gnu/libretro/mgba_libretro.so`, and
 `core_search_dirs()` found it by reading `/usr/lib` rather than guessing a
@@ -257,12 +325,16 @@ once in a while is not a gate.
 
 Reversible, and left in place so a re-run need not redo it:
 
-- `retroarch`, `retroarch-assets`, `libretro-core-info`, `libretro-mgba`,
-  `okular`, `okular-extra-backends` (+ Qt5/Qt6/Breeze dependencies).
+- `ppa:libretro/testing`, plus `retroarch`, `retroarch-assets`,
+  `libretro-core-info`, `libretro-mgba`, `libretro-mupen64plus-next`,
+  `okular`, `okular-extra-backends` (+ Qt5/Qt6/Breeze dependencies). Remove the
+  PPA with `sudo add-apt-repository --remove ppa:libretro/testing`.
 - `shepherd-dev` added to the `shepherd-firewall` group.
 - `~/Games/retroarch/gba-tests-arm.gba`, `~/Books/alice.epub`,
   `~/Videos/shepherd-arm64-testclip.mp4`, and a `~/.config/shepherd/movies.toml`
   pointing at the last of these (it previously held the unedited example with
   `CHANGE-ME` paths).
 - `dpkg --add-architecture amd64` and the amd64 cross set, alongside the
-  restored native one. `/etc/apt/sources.list.d/` is unmodified.
+  restored native one. `/etc/apt/sources.list.d/` holds the PPA and is otherwise
+  unmodified; the riscv64 exercise above was fully reverted (sources restored to
+  their pre-run md5sums, ports entry deleted, `dpkg --remove-architecture`).
