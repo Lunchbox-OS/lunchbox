@@ -272,6 +272,74 @@ Two things this turned up that are not defects but are worth knowing:
   anyway. **Hardware decode on real ARM silicon is still untested**, exactly as
   `2026-09-04 002` left it.
 
+### Chrome
+
+Follow-up prompt: "check Chrome availability".
+
+**Available, end to end.** The chain has three links and all hold on arm64:
+
+- Google's own apt repo now publishes arm64: `dists/stable/Release` lists
+  `Architectures: amd64 arm64`, and `binary-arm64/Packages` carries
+  `google-chrome-stable 153.0.8010.36-1` — the same version Flathub wraps.
+- Flathub has a real `app/com.google.Chrome/aarch64/stable` ref on an aarch64
+  runtime (`org.freedesktop.Platform/aarch64/25.08`), committed within seconds of
+  the x86_64 one. **Do not trust Flathub's web API for this**: its
+  `/api/v2/summary` returns the x86_64 metadata (amd64 `.deb`, x86_64 runtime)
+  whatever `arch=` is asked for. `flatpak remote-info … /aarch64/stable` is the
+  question that has an answer.
+- `sudo shepherd-admin apps install chrome` installs it (after `apt install
+  flatpak`, which the command requires but does not install). The unpacked
+  `/app/extra/chrome` is `ELF … ARM aarch64` and reports
+  `Google Chrome 153.0.8010.36`; Widevine ships for
+  `_platform_specific/linux_arm64/`, so DRM streaming is not ruled out on this
+  architecture. The repeated `lseek error in child setup` during the extra-data
+  step is noise — the install completes.
+
+The `chrome-school` entry, booted with `--time "2026-09-14 16:00:00"` to land in
+its weekday window, launched through shepherd's policy shim
+(`ln -sf "$SHEPHERD_POLICY" /etc/opt/chrome/policies/managed/shepherd.json`) with
+the `school` profile and `--app=https://classroom.google.com`, inside a session
+with the HUD and deadline. `flatpak ps` shows two instances; that is Chrome's
+zypak sandbox helper, not a double launch.
+
+**But a fresh profile does not reach the kiosk.** Chrome opens on its own
+first-run *"Google Chrome and ChromeOS Additional Terms of Service"* page
+(Accept / Cancel), and a child would face it on the first launch of every
+`profile_id` — and on every launch with `wipe_on_exit = true`. It is Chrome's,
+not the Flatpak wrapper's: the window belongs to `/app/extra/chrome`, and a bare
+`flatpak run` against an empty `--user-data-dir` reproduces it with shepherd not
+involved. Synthetic clicks and keys did not get through to accept it here.
+
+Probed against fresh profiles in the same compositor:
+
+| Flags | Result |
+| --- | --- |
+| (none) | Terms-of-service page |
+| `--no-first-run` | Browser opens — then **"Unlock Login Keyring"** (`gcr-prompter`) |
+| `--no-first-run --password-store=basic` | Browser opens, no prompt |
+| `… --app=https://example.com` | Chromeless app window, no prompt |
+
+So `chrome_flags` should pass `--no-first-run` and `--password-store=basic`.
+Today only the headless *test* in `browser.rs` passes `--no-first-run`, which is
+why no automated test saw this. The keyring prompt depends on the session
+running a secret service — this dev VM does, a minimal kiosk session may not —
+but the flag is cheap and a supervised browser has no business storing
+passwords anyway. **Not changed here**: the prompt was to check availability, and
+whether the terms page also appears on amd64 was not verifiable from this host
+(it names no architecture and looks like Chrome-wide first-run behaviour).
+
+Also noticed: while the terms page was up, the adapter logged both
+`Activity window appeared pid=4165 window_pid=4178` *and*, 100 ms later,
+`Window on screen belongs to no tracked activity pid=4178`. The unowned-window
+sweep checks the spawned pid set (the `bwrap` at 4165), not the descendant that
+owns the window. Report-only, so harmless, but a false positive for every
+Flatpak activity.
+
+State added: `flatpak`, the Flathub remote, `com.google.Chrome` and its runtime
+(~1 GB), the `school` profile (terms page not accepted), and a management
+password on `dev-runtime/data` (set to clear the setup card off the Accept
+button).
+
 ## The defect this pass found: a flaky e2e test
 
 `firewall_supported_path_invokes_helper_with_expected_argv` failed once, then
