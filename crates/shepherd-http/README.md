@@ -269,13 +269,14 @@ version. Both spellings are honoured, because the two browsers disagree:
 
 | Client | Sends | A stale validator answers |
 |---|---|---|
-| Firefox | `Range` + **`If-Match`** | `412`, and Firefox discards its partial data |
-| Chromium | `Range` + **`If-Range`** | `200` with the whole file |
+| Firefox 155 | `Range` + **`If-Match`** | `412`, and Firefox discards its partial data |
+| Chrome 153 | `Range` + **`If-Range`** | `200` with the whole file, which Chrome restarts into |
 | `curl -C -`, `wget` | `Range` only | `206` — no validator, no check |
 
-`If-Match` is the one that was measured against a real browser and the one this
-route originally missed; ignoring it meant a resumed download could be half one
-version and half another, reported as a success. See
+Both rows were measured by interrupting a real download in each browser and
+reading what it sent next, not inferred from the specification: `If-Match` was
+the one this route originally missed, and ignoring it meant a resumed download
+could be half one version and half another, reported as a success. See
 `docs/ai/history/2026-09-14 001 browser-download-resume (#195).md`.
 
 ### Downloads are always attachments

@@ -11,11 +11,11 @@
 
 ## The short answer
 
-Firefox's resume works, and it now works *safely* — but only because this
-question was asked. The previous change had added `If-Range` on the strength of
-how the specification tells the resumption story. **Firefox does not send
-`If-Range`. It sends `If-Match`**, which the download route ignored entirely,
-and ignoring it was a silent-corruption bug.
+Both browsers' resume flows work, and they now work *safely* — but only
+because this question was asked. The previous change had added `If-Range` on
+the strength of how the specification tells the resumption story. Chrome does
+send that. **Firefox does not: it sends `If-Match`**, which the download route
+ignored entirely, and ignoring it was a silent-corruption bug.
 
 ## How it was measured
 
@@ -27,9 +27,11 @@ every request, and cutting the connection part-way through the first response
 body — which is what a wifi drop looks like from the browser's side.
 
 Firefox was driven through geckodriver, with the download resumed through the
-privileged `Downloads` API rather than by clicking in `about:downloads`.
+privileged `Downloads` API rather than by clicking in `about:downloads`. Chrome
+was driven over the DevTools protocol and resumes on its own, so it needed no
+equivalent.
 
-Two harness notes for whoever does this next:
+Two harness notes for whoever does this next (Chrome's are further down):
 
 - **`Navigate To` never returns for a download**, because a download fires no
   load event; it blocks until the page-load timeout. Start it with
@@ -78,7 +80,8 @@ partial data, and leaving nothing on disk.
 
 ## Every resume shape, measured
 
-Against the fixed route, with a 40 MB file:
+Against the fixed route, with a 40 MB file. The two browser rows were later
+confirmed against the real browsers; the rest are exercised directly:
 
 | Request | Answer |
 | --- | --- |
@@ -93,19 +96,62 @@ Against the fixed route, with a 40 MB file:
 End to end: Firefox's resumed 40 MB file is byte-identical to the one on the
 device, and so is `curl -C -`'s.
 
-## What was *not* verified directly
+## What Chrome sends
 
-**Chrome was not run.** It is not installed on this machine and there is no
-package of it in the dev dependencies. What is known: Chromium's download
-resumption sends `Range` plus `If-Range` with the stored strong `ETag`
-(`If-Range` is the header its download code uses), and both the matching and
-stale forms of that request are exercised above and behave correctly. That is
-evidence about *our* side of the contract, not about Chrome's, and the
-difference is worth stating plainly — this whole investigation exists because
-the specification-shaped guess about Firefox was wrong.
+Chrome 153 was then installed the way this project specifies —
+`sudo ./scripts/shepherd apps install chrome`, which adds Flathub and installs
+`com.google.Chrome` — and driven over the DevTools protocol through the same
+proxy. It needs no click: Chrome resumes an interrupted download by itself.
 
-If Chrome ever needs verifying here, `deps install` would have to grow a
-browser, and the same proxy harness would do the rest.
+```
+#1  GET …/files/content?…
+    → 200, Content-Length: 40000000
+    → connection cut at 8,000,000 bytes
+
+#2  GET …/files/content?…            (automatic, a few seconds later)
+    Range: bytes=8000000-
+    If-Range: "40000000-1789426590258418623"
+    → 206, Content-Range: bytes 8000000-39999999/40000000
+```
+
+`If-Range`, as its download code is documented to use — so the two browsers
+really do disagree, and covering only one of them would have left the other
+able to stitch two versions together.
+
+And the case that matters, with the proxy swapping the file at the moment it
+cuts the connection so the ordering is not a race:
+
+```
+#3  Range: bytes=8000000-
+    If-Range: "<the old etag>"
+    → 200, Content-Length: 40000000     (the whole new file)
+```
+
+Chrome threw away its 8 MB and saved a complete copy of the new version. No
+stitching, no corruption — and it is the `If-Range` handling added in the
+previous commit that makes that happen, exactly as `If-Match` does for Firefox.
+
+Both browsers' resumed files were byte-identical to what was on the device.
+
+### Getting Chrome to run at all here
+
+Three things cost time, and all three are environment rather than product:
+
+- **`--password-store=basic`** (with `--use-mock-keychain`). Without it the
+  Flatpak Chrome blocks on the GNOME keyring — a `gcr-prompter` window appears
+  in the session — and its network stack issues *no requests at all*, in
+  headless as well as headed. Every symptom looks like a broken server.
+- **The download directory must be inside the Flatpak's permissions.**
+  `Browser.setDownloadBehavior` pointed at `~/chrome-dl` silently produced no
+  request; the app is granted `xdg-download`, so `~/Downloads` works.
+- **Kill it by `pgrep -x chrome`.** The sandboxed process is not named
+  `com.google.Chrome`, so a stale instance survives the obvious `pkill` and
+  answers the next DevTools connection instead of the one just started.
+
+Also, when scripting the *test* rather than the browser: replace the file
+atomically. A `dd` over the live file leaves it momentarily empty, and the
+server then truthfully serves a zero-byte file, which looks like a bug and is
+not one.
 
 ## Deliberately not changed
 
