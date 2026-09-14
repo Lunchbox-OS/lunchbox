@@ -398,6 +398,65 @@ async fn a_resumed_download_refuses_to_stitch_two_versions() {
     assert_eq!(body, b"a completely new edition");
 }
 
+/// The validator Firefox actually sends when it resumes a download.
+///
+/// Measured against a real Firefox rather than read off the specification,
+/// which tells the resumption story with `If-Range`: Firefox sends `Range` +
+/// **`If-Match`**, and before this was honoured a resume after the file
+/// changed was answered with bytes from the new file at the old offset —
+/// stitching a download that matched neither version and reporting success.
+#[tokio::test]
+async fn a_resume_whose_file_changed_is_refused_rather_than_stitched() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/hobbit.epub";
+
+    let (_, _, headers) = body_of(&app, get(uri)).await;
+    let etag = headers[header::ETAG].to_str().unwrap().to_string();
+
+    // Still the same file: the resume is served.
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::RANGE, "bytes=5-8")
+        .header(header::IF_MATCH, &etag)
+        .body(Body::empty())
+        .unwrap();
+    let (status, body, _) = body_of(&app, req).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"upon");
+
+    // Changed underneath: refused, so the browser starts again instead of
+    // finishing a file that is half one version and half another.
+    std::fs::write(
+        dir.path().join("Books/hobbit.epub"),
+        b"a completely new edition",
+    )
+    .unwrap();
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::RANGE, "bytes=5-8")
+        .header(header::IF_MATCH, &etag)
+        .body(Body::empty())
+        .unwrap();
+    let (status, json, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(json["error"], "precondition_failed");
+}
+
+#[tokio::test]
+async fn a_download_with_a_matching_if_match_star_is_served() {
+    let (_dir, app) = fixture();
+    // `*` means "any version of this file", which is what a caller sends when
+    // it only cares that the file still exists.
+    let req = Request::builder()
+        .uri("/api/v1/files/content?root=home&path=Books/hobbit.epub")
+        .header(header::IF_MATCH, "*")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body, _) = body_of(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"once upon a time");
+}
+
 #[tokio::test]
 async fn a_range_past_the_end_is_not_satisfiable() {
     let (_dir, app) = fixture();

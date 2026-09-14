@@ -168,6 +168,28 @@ pub async fn download(
     let etag = etag_of(&meta);
     let len = meta.len();
 
+    // `If-Match`, which is what **Firefox** sends when it resumes an
+    // interrupted download — not `If-Range`, which is what the specification's
+    // resumption story is usually told with and what Chromium sends. Ignoring
+    // it is not a missing nicety: a resume whose validator no longer matches
+    // would be answered with bytes from the *new* file at the old offset, and
+    // the browser would stitch the two halves into a file that matches
+    // neither version and report it as a successful download. Measured, not
+    // theorised — see
+    // `docs/ai/history/2026-09-14 001 browser-download-resume (#195).md`.
+    if let Some(if_match) = header_str(&headers, header::IF_MATCH) {
+        let matches = if_match.trim() == "*"
+            || if_match
+                .split(',')
+                .any(|candidate| unquote(candidate) == etag);
+        if !matches {
+            return FileError::PreconditionFailed(
+                "that file has changed since it was first read; download it again".into(),
+            )
+            .into_response();
+        }
+    }
+
     // A cached copy is still good: the tag is derived from size and mtime, so
     // a file rewritten byte-identically in the same nanosecond is the only way
     // to fool it, and that is not a thing that happens to a book.

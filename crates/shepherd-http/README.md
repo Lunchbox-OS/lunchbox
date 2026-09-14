@@ -262,10 +262,21 @@ If-None-Match: *
   over `max_upload_bytes` is refused before the first byte.
 
 Downloads were already resumable — `Accept-Ranges`, `ETag`, `206` — and now
-honour **`If-Range`**, which is what makes resuming one *safe*: a browser
-continuing an interrupted download sends the validator it started with, and a
-file that changed in the meantime is sent whole rather than stitched onto bytes
-from the previous version.
+validate the resume, which is what makes it *safe*: a browser continuing an
+interrupted download sends the validator it started with, and a file that
+changed in the meantime must not be stitched onto bytes from the previous
+version. Both spellings are honoured, because the two browsers disagree:
+
+| Client | Sends | A stale validator answers |
+|---|---|---|
+| Firefox | `Range` + **`If-Match`** | `412`, and Firefox discards its partial data |
+| Chromium | `Range` + **`If-Range`** | `200` with the whole file |
+| `curl -C -`, `wget` | `Range` only | `206` — no validator, no check |
+
+`If-Match` is the one that was measured against a real browser and the one this
+route originally missed; ignoring it meant a resumed download could be half one
+version and half another, reported as a success. See
+`docs/ai/history/2026-09-14 001 browser-download-resume (#195).md`.
 
 ### Downloads are always attachments
 
