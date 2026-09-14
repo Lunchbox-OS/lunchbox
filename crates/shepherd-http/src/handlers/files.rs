@@ -36,6 +36,7 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -57,6 +58,9 @@ pub struct Target {
     root: String,
     #[serde(default)]
     path: String,
+    /// A resumable upload's identity, when this is one. See [`upload`].
+    #[serde(default)]
+    upload: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,7 +181,17 @@ pub async fn download(
             .into_response();
     }
 
-    let range = match header_str(&headers, header::RANGE).map(|r| parse_range(r, len)) {
+    // `If-Range`, which is what makes a *resumed* download safe: a browser
+    // continuing an interrupted one sends the validator it started with, and a
+    // file that changed since must be sent whole rather than stitched onto
+    // bytes from the previous version. A date form never matches, because the
+    // only validator this API emits is an `ETag`.
+    let range_is_stale =
+        header_str(&headers, header::IF_RANGE).is_some_and(|value| unquote(value) != etag);
+    let range = match header_str(&headers, header::RANGE)
+        .filter(|_| !range_is_stale)
+        .map(|r| parse_range(r, len))
+    {
         Some(Ok(range)) => Some(range),
         Some(Err(e)) => {
             return (
@@ -234,6 +248,13 @@ pub async fn upload(
         Err(e) => return e.into_response(),
     };
 
+    // A resumable upload: one chunk of a file, identified by a token the
+    // client chose, appended to a part file that survives the connection
+    // dying. See [`resumable_upload`].
+    if let Some(token) = q.upload.clone() {
+        return resumable_upload(files, &headers, q, token, precondition, body).await;
+    }
+
     // Everything that can be decided before a byte is read, decided before a
     // byte is read: a 4 GiB upload refused after it has been transferred is a
     // refusal nobody thanks you for.
@@ -278,6 +299,401 @@ pub async fn upload(
             e.into_response()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resumable uploads
+//
+// A device on repurposed hardware has the wifi chip it came with, and a drop
+// at 95% of a 4 GiB video should not cost 4 GiB. So an upload can arrive as a
+// series of chunks that append to the same part file, and a client that lost
+// the connection asks where it got to and carries on from there.
+//
+// The state *is* the part file — there is no session table, nothing to expire
+// and nothing to lose in a restart. What identifies it is a token the client
+// chose, which is also part of a filename, and is therefore validated the way
+// every other caller-supplied name here is.
+// ---------------------------------------------------------------------------
+
+/// `bytes X-Y/Z`, the header a chunk carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChunkRange {
+    start: u64,
+    /// Inclusive, as the header spells it.
+    end: u64,
+    total: u64,
+}
+
+impl ChunkRange {
+    fn len(&self) -> u64 {
+        self.end - self.start + 1
+    }
+
+    fn completes(&self) -> bool {
+        self.end + 1 == self.total
+    }
+}
+
+fn parse_content_range(value: &str) -> Result<ChunkRange, FileError> {
+    let bad = || FileError::BadRequest("Content-Range must be `bytes X-Y/Z`".into());
+    let spec = value.trim().strip_prefix("bytes ").ok_or_else(bad)?;
+    let (range, total) = spec.split_once('/').ok_or_else(bad)?;
+    let (start, end) = range.split_once('-').ok_or_else(bad)?;
+    let start: u64 = start.trim().parse().map_err(|_| bad())?;
+    let end: u64 = end.trim().parse().map_err(|_| bad())?;
+    let total: u64 = total.trim().parse().map_err(|_| bad())?;
+    if end < start || end >= total {
+        return Err(FileError::BadRequest(
+            "that Content-Range does not describe a piece of the file".into(),
+        ));
+    }
+    Ok(ChunkRange { start, end, total })
+}
+
+/// The token names a file on disk, so it is checked like every other name.
+///
+/// The alphabet is deliberately narrow — no dot, no slash, no separator of any
+/// kind — so the part file's name cannot be steered anywhere by choosing a
+/// clever token.
+fn validate_token(token: &str) -> Result<&str, FileError> {
+    let ok = token.len() >= 8
+        && token.len() <= 64
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if ok {
+        Ok(token)
+    } else {
+        Err(FileError::BadRequest(
+            "an upload token is 8 to 64 characters of letters, digits, - and _".into(),
+        ))
+    }
+}
+
+/// Where the chunks of one resumable upload accumulate.
+///
+/// Beside the file it is becoming, and dotted, for the same reasons the
+/// one-shot path's temp file is: the rename that publishes it is atomic only
+/// within a directory, and a listing hides it by default.
+fn part_path(target: &Path, token: &str) -> Result<PathBuf, FileError> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| FileError::BadRequest("name a file to write".into()))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| FileError::BadRequest("name a file to write".into()))?;
+    Ok(parent.join(format!(".{name}.{token}.part")))
+}
+
+/// How much of a resumable upload this device already holds.
+fn part_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// `GET /api/v1/files/upload` — where to carry on from.
+///
+/// Answers `0` for an upload this device has never seen, so a client that
+/// starts and a client that resumes ask the same question and read the same
+/// answer.
+pub async fn upload_offset(State(state): State<AppState>, Query(q): Query<Target>) -> Response {
+    let Some(files) = state.file_manager.clone() else {
+        return disabled();
+    };
+    let Some(token) = q.upload.clone() else {
+        return FileError::BadRequest("name the upload".into()).into_response();
+    };
+    let result = blocking(move || {
+        let token = validate_token(&token)?;
+        let located = files.locate(&q.root, &q.path)?;
+        let part = part_path(&located.path, token)?;
+        Ok::<u64, FileError>(part_len(&part))
+    })
+    .await;
+    match result {
+        Ok(Ok(offset)) => Json(json!({ "offset": offset })).into_response(),
+        Ok(Err(e)) | Err(e) => e.into_response(),
+    }
+}
+
+/// `DELETE /api/v1/files/upload` — give up on one, and take its bytes with it.
+///
+/// The sweep would collect it a day later; a cancel that leaves gigabytes on a
+/// small disk until tomorrow is not a cancel.
+pub async fn abandon_upload(State(state): State<AppState>, Query(q): Query<Target>) -> Response {
+    let Some(files) = state.file_manager.clone() else {
+        return disabled();
+    };
+    let Some(token) = q.upload.clone() else {
+        return FileError::BadRequest("name the upload".into()).into_response();
+    };
+    let result = blocking(move || {
+        let token = validate_token(&token)?;
+        let located = files.locate(&q.root, &q.path)?;
+        let part = part_path(&located.path, token)?;
+        match std::fs::remove_file(&part) {
+            Ok(()) => Ok(()),
+            // Already gone is the outcome the caller wanted.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(FileError::from_io(&e, "that upload")),
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) | Err(e) => e.into_response(),
+    }
+}
+
+/// One chunk of a resumable upload.
+///
+/// The precondition is evaluated twice, and both times matter: at the first
+/// chunk, so "create, do not replace" fails before anything is transferred,
+/// and again at the rename, so a file that appeared while the upload was in
+/// flight is not silently overwritten by it.
+async fn resumable_upload(
+    files: Arc<crate::files::FileService>,
+    headers: &HeaderMap,
+    q: Target,
+    token: String,
+    precondition: Precondition,
+    body: Body,
+) -> Response {
+    let settings = files.settings();
+    let Some(range) = header_str(headers, header::CONTENT_RANGE) else {
+        return FileError::BadRequest(
+            "a resumable upload sends Content-Range: bytes X-Y/Z on every chunk".into(),
+        )
+        .into_response();
+    };
+    let range = match parse_content_range(range) {
+        Ok(range) => range,
+        Err(e) => return e.into_response(),
+    };
+
+    let prep_files = files.clone();
+    let (root, path) = (q.root.clone(), q.path.clone());
+    let prepared = blocking(move || {
+        let token = validate_token(&token)?.to_string();
+        let located = prep_files.locate(&root, &path)?;
+        prepare_chunk(&located, &token, range, precondition, &settings)
+    })
+    .await;
+    let plan = match prepared {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(e)) | Err(e) => return e.into_response(),
+    };
+
+    match append_chunk(body, &plan, range).await {
+        Ok(()) => {}
+        Err(e) => {
+            // The part file is *kept*: it is the resumption state, and this is
+            // exactly the failure it exists for. `DELETE /files/upload`, or the
+            // sweep a day later, is what removes it.
+            return e.into_response();
+        }
+    }
+
+    if !range.completes() {
+        return (
+            StatusCode::NO_CONTENT,
+            [(UPLOAD_OFFSET, (range.end + 1).to_string())],
+        )
+            .into_response();
+    }
+
+    let finished = blocking(move || finish_chunked(plan)).await;
+    match finished {
+        Ok(Ok((created, etag, size))) => (
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            [(header::ETAG, quote(&etag))],
+            Json(json!({ "path": q.path, "size": size, "etag": etag })),
+        )
+            .into_response(),
+        Ok(Err(e)) | Err(e) => e.into_response(),
+    }
+}
+
+/// `Upload-Offset`, the one header this API invents.
+const UPLOAD_OFFSET: header::HeaderName = header::HeaderName::from_static("upload-offset");
+
+struct ChunkPlan {
+    target: PathBuf,
+    part: PathBuf,
+    precondition: Precondition,
+    /// Whether the target existed when the upload began.
+    created: bool,
+    max_bytes: u64,
+    floor: u64,
+    free: Option<u64>,
+    total: u64,
+}
+
+fn prepare_chunk(
+    located: &Located,
+    token: &str,
+    range: ChunkRange,
+    precondition: Precondition,
+    settings: &shepherd_config::FileManagerConfig,
+) -> Result<ChunkPlan, FileError> {
+    if !located.root.writable {
+        return Err(FileError::Forbidden("that place is read-only".into()));
+    }
+    let Some(parent) = located.path.parent() else {
+        return Err(FileError::BadRequest("name a file to write".into()));
+    };
+    let parent_meta =
+        std::fs::metadata(parent).map_err(|e| FileError::from_io(&e, "that folder"))?;
+    if !parent_meta.is_dir() {
+        return Err(FileError::Conflict("that is a file, not a folder".into()));
+    }
+
+    let existing = match std::fs::symlink_metadata(&located.path) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(FileError::from_io(&e, "that file")),
+    };
+    if let Some(meta) = &existing {
+        if meta.is_dir() {
+            return Err(FileError::Conflict("that name belongs to a folder".into()));
+        }
+        if meta.file_type().is_symlink() {
+            return Err(FileError::Conflict(
+                "that name is a link; delete it first".into(),
+            ));
+        }
+    }
+    // At the first chunk, so a refusal costs nothing. Checked again at the
+    // rename, because the answer can change while an upload is in flight.
+    if range.start == 0 {
+        precondition.check(existing.as_ref())?;
+    }
+
+    if settings.max_upload_bytes > 0 && range.total > settings.max_upload_bytes {
+        return Err(FileError::TooLarge(format!(
+            "this device accepts uploads up to {} bytes",
+            settings.max_upload_bytes
+        )));
+    }
+    let free = crate::files::roots::space(parent).map(|(_, free)| free);
+    if settings.free_space_floor_bytes > 0
+        && let Some(free) = free
+        && free.saturating_sub(range.total - range.start) < settings.free_space_floor_bytes
+    {
+        return Err(FileError::InsufficientStorage(format!(
+            "that would leave less than {} bytes free on this device",
+            settings.free_space_floor_bytes
+        )));
+    }
+
+    let part = part_path(&located.path, token)?;
+    // On a flaky link an upload rarely *finishes*, so sweeping only after a
+    // success would never run. Do it when one starts as well.
+    if range.start == 0 {
+        sweep_stale_parts(parent);
+    }
+
+    let have = part_len(&part);
+    if have != range.start {
+        // Not an error so much as an answer: here is where this device
+        // actually got to, carry on from there.
+        return Err(FileError::Conflict(format!(
+            "this device has {have} bytes of that upload, not {}",
+            range.start
+        )));
+    }
+
+    Ok(ChunkPlan {
+        target: located.path.clone(),
+        part,
+        precondition,
+        created: existing.is_none(),
+        max_bytes: settings.max_upload_bytes,
+        floor: settings.free_space_floor_bytes,
+        free,
+        total: range.total,
+    })
+}
+
+/// Append one chunk, refusing to write more than it said it would.
+async fn append_chunk(body: Body, plan: &ChunkPlan, range: ChunkRange) -> Result<(), FileError> {
+    use tokio::io::AsyncWriteExt;
+
+    let file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&plan.part)
+        .await
+        .map_err(|e| FileError::from_io(&e, "that upload"))?;
+    let mut file = tokio::io::BufWriter::new(file);
+
+    let mut written: u64 = 0;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| FileError::BadRequest(format!("the upload stopped: {e}")))?;
+        written += chunk.len() as u64;
+        // A chunk that overruns its own `Content-Range` would desynchronise
+        // every later offset, so it is refused rather than truncated.
+        if written > range.len() {
+            return Err(FileError::BadRequest(
+                "that chunk is longer than its Content-Range said".into(),
+            ));
+        }
+        if plan.max_bytes > 0 && range.start + written > plan.max_bytes {
+            return Err(FileError::TooLarge(format!(
+                "this device accepts uploads up to {} bytes",
+                plan.max_bytes
+            )));
+        }
+        if plan.floor > 0
+            && let Some(free) = plan.free
+            && free.saturating_sub(written) < plan.floor
+        {
+            return Err(FileError::InsufficientStorage(format!(
+                "that would leave less than {} bytes free on this device",
+                plan.floor
+            )));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| FileError::from_io(&e, "that upload"))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| FileError::from_io(&e, "that upload"))?;
+    file.into_inner()
+        .sync_all()
+        .await
+        .map_err(|e| FileError::from_io(&e, "that upload"))?;
+    Ok(())
+}
+
+/// Publish a finished resumable upload.
+fn finish_chunked(plan: ChunkPlan) -> Result<(bool, String, u64), FileError> {
+    let have = part_len(&plan.part);
+    if have != plan.total {
+        return Err(FileError::BadRequest(format!(
+            "this device holds {have} bytes, and the upload said {}",
+            plan.total
+        )));
+    }
+    // Again, and this is the half that matters: something may have appeared at
+    // the target while the upload was in flight, and the caller said whether
+    // that was allowed to be overwritten.
+    let existing = match std::fs::symlink_metadata(&plan.target) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(FileError::from_io(&e, "that file")),
+    };
+    plan.precondition.check(existing.as_ref())?;
+
+    std::fs::rename(&plan.part, &plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
+    let meta = std::fs::metadata(&plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
+    Ok((plan.created, etag_of(&meta), meta.len()))
 }
 
 /// Create a directory, parents included.

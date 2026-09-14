@@ -357,6 +357,47 @@ async fn a_range_request_gets_part_of_the_file() {
     assert_eq!(headers[header::CONTENT_RANGE], "bytes 5-8/16");
 }
 
+/// What makes a *resumed* download safe: a browser continuing an interrupted
+/// one sends the validator it started with, and a file that changed since must
+/// arrive whole rather than stitched onto bytes from the previous version.
+#[tokio::test]
+async fn a_resumed_download_refuses_to_stitch_two_versions() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/hobbit.epub";
+
+    let (_, _, headers) = body_of(&app, get(uri)).await;
+    let etag = headers[header::ETAG].to_str().unwrap().to_string();
+
+    // The validator still matches: the range is honoured and the download
+    // continues where it left off.
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::RANGE, "bytes=5-8")
+        .header(header::IF_RANGE, &etag)
+        .body(Body::empty())
+        .unwrap();
+    let (status, body, _) = body_of(&app, req).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"upon");
+
+    // It no longer matches: the whole file, not four bytes from the middle of
+    // a different one.
+    std::fs::write(
+        dir.path().join("Books/hobbit.epub"),
+        b"a completely new edition",
+    )
+    .unwrap();
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::RANGE, "bytes=5-8")
+        .header(header::IF_RANGE, &etag)
+        .body(Body::empty())
+        .unwrap();
+    let (status, body, _) = body_of(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"a completely new edition");
+}
+
 #[tokio::test]
 async fn a_range_past_the_end_is_not_satisfiable() {
     let (_dir, app) = fixture();
@@ -599,6 +640,211 @@ async fn an_upload_leaves_no_part_file_behind() {
         .filter(|n| n.ends_with(".part"))
         .collect();
     assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+}
+
+// ---------------------------------------------------------------------------
+// Resumable uploads
+//
+// The reason this exists: a device on repurposed hardware has the wifi chip it
+// came with, and a drop at 95% of a 4 GiB video should not cost 4 GiB.
+// ---------------------------------------------------------------------------
+
+fn chunk(
+    uri: &str,
+    body: &str,
+    range: &str,
+    precondition: (header::HeaderName, &str),
+) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header(header::CONTENT_RANGE, range)
+        .header(precondition.0, precondition.1)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+const CREATE: (header::HeaderName, &str) = (header::IF_NONE_MATCH, "*");
+
+#[tokio::test]
+async fn an_upload_can_arrive_in_pieces() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/serial.bin&upload=tok-12345678";
+
+    let (status, _, headers) = send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Where to carry on from, so a client that lost its place can be told.
+    assert_eq!(headers["upload-offset"], "5");
+    // Nothing is published until the last byte lands.
+    assert!(!dir.path().join("Books/serial.bin").exists());
+
+    let (status, body, _) = send(&app, chunk(uri, "fghij", "bytes 5-9/10", CREATE)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["size"], 10);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("Books/serial.bin")).unwrap(),
+        "abcdefghij"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_upload_is_told_where_it_got_to() {
+    let (_dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/serial.bin&upload=tok-12345678";
+    let offset_uri = "/api/v1/files/upload?root=home&path=Books/serial.bin&upload=tok-12345678";
+
+    // Nothing sent yet: the same question a fresh upload asks.
+    let (status, body, _) = send(&app, get(offset_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["offset"], 0);
+
+    send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+    let (_, body, _) = send(&app, get(offset_uri)).await;
+    assert_eq!(body["offset"], 5);
+}
+
+#[tokio::test]
+async fn a_chunk_at_the_wrong_offset_is_told_the_right_one() {
+    let (_dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/serial.bin&upload=tok-12345678";
+    send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+
+    // A client that lost track and re-sent from the start: refused, and told
+    // what this device actually holds rather than left to guess.
+    let (status, body, _) = send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body["message"].as_str().unwrap().contains("5 bytes"),
+        "unhelpful: {}",
+        body["message"]
+    );
+}
+
+#[tokio::test]
+async fn an_abandoned_upload_takes_its_bytes_with_it() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/serial.bin&upload=tok-12345678";
+    let state = "/api/v1/files/upload?root=home&path=Books/serial.bin&upload=tok-12345678";
+    send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+
+    let parts = || {
+        std::fs::read_dir(dir.path().join("Books"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+            .count()
+    };
+    assert_eq!(parts(), 1, "the part file is the resumption state");
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(state)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // A cancel that left gigabytes on a small disk until tomorrow is not a
+    // cancel.
+    assert_eq!(parts(), 0);
+}
+
+#[tokio::test]
+async fn a_half_sent_upload_publishes_nothing() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/serial.bin&upload=tok-12345678";
+    send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+
+    // The listing shows no half-file, and the name is still free.
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"serial.bin"), "published early: {names:?}");
+    assert!(!dir.path().join("Books/serial.bin").exists());
+}
+
+#[tokio::test]
+async fn the_precondition_is_checked_again_at_the_end() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/late.bin&upload=tok-12345678";
+    send(&app, chunk(uri, "abcde", "bytes 0-4/10", CREATE)).await;
+
+    // Somebody else put a file there while the upload was in flight. "Create,
+    // do not replace" has to still mean that at the moment of the rename.
+    std::fs::write(dir.path().join("Books/late.bin"), b"theirs").unwrap();
+
+    let (status, _, _) = send(&app, chunk(uri, "fghij", "bytes 5-9/10", CREATE)).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("Books/late.bin")).unwrap(),
+        "theirs"
+    );
+}
+
+#[tokio::test]
+async fn an_upload_token_cannot_name_a_file_somewhere_else() {
+    let (_dir, app) = fixture();
+    // The token becomes part of a filename, so it is checked like every other
+    // caller-supplied name on this API.
+    for token in ["../escape", "has/slash", "short", "has.dot", "has space"] {
+        let uri = format!(
+            "/api/v1/files/content?root=home&path=Books/x.bin&upload={}",
+            urlencode(token)
+        );
+        let (status, _, _) = send(&app, chunk(&uri, "abc", "bytes 0-2/3", CREATE)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "token {token:?} was accepted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_chunk_longer_than_it_claimed_is_refused() {
+    let (dir, app) = fixture();
+    let uri = "/api/v1/files/content?root=home&path=Books/serial.bin&upload=tok-12345678";
+    // Overrunning would desynchronise every later offset, so it is refused
+    // rather than truncated.
+    let (status, _, _) = send(&app, chunk(uri, "abcdefgh", "bytes 0-4/10", CREATE)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!dir.path().join("Books/serial.bin").exists());
+}
+
+#[tokio::test]
+async fn a_resumable_upload_over_the_cap_is_refused_at_the_first_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(
+        dir.path(),
+        FileManagerConfig {
+            external_media: false,
+            max_upload_bytes: 4,
+            ..Default::default()
+        },
+    );
+    // Judged on the declared total, not on the chunk: the point is to refuse
+    // before the transfer, not after it.
+    let uri = "/api/v1/files/content?root=home&path=big.bin&upload=tok-12345678";
+    let (status, body, _) = send(&app, chunk(uri, "ab", "bytes 0-1/100", CREATE)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(body["error"], "too_large");
+}
+
+/// Percent-encode for a query string, so a token with a slash in it reaches
+/// the handler as one rather than being routed.
+fn urlencode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

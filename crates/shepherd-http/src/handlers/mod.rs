@@ -15,7 +15,9 @@
 //!   web config editor. Off the RPC endpoint on purpose; see [`config`].
 //! - `/api/v1/files/*` — remote file management (issue #195), mounted only on
 //!   a device that configures it on. Off the RPC endpoint for the same reason
-//!   the policy is; see [`files`].
+//!   the policy is; see [`files`]. `/files/upload` is the resumption state of
+//!   an interrupted upload, which a device on a poor wifi chip needs rather
+//!   more than a device on a desk does.
 
 pub mod auth;
 pub mod config;
@@ -60,6 +62,10 @@ pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
                 .route("/files/roots", get(files::roots))
                 .route("/files/list", get(files::list))
                 .route("/files/content", get(files::download).put(files::upload))
+                .route(
+                    "/files/upload",
+                    get(files::upload_offset).delete(files::abandon_upload),
+                )
                 .route("/files/dir", post(files::mkdir))
                 .route("/files/move", post(files::move_entry))
                 .route("/files/entry", delete(files::delete_entry))

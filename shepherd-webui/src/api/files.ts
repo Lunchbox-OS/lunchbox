@@ -167,6 +167,100 @@ export async function uploadFile(
   return res.data;
 }
 
+/**
+ * How much of a file goes in one request.
+ *
+ * The unit of *retry*, which is the point: on a link that drops every few
+ * minutes, a failed 8 MiB chunk costs 8 MiB, and the rest of the file stays on
+ * the device. Small enough that a bad chip can finish one between drops, large
+ * enough that a 4 GiB video is not 4000 round trips.
+ */
+export const CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** How long one chunk may take before it is abandoned and retried. */
+export const CHUNK_TIMEOUT_MS = 120_000;
+
+/**
+ * Send one chunk of a resumable upload.
+ *
+ * `Content-Range: bytes X-Y/Z` says which piece this is; the device appends it
+ * to a part file named by `token` and answers `204` with `Upload-Offset` until
+ * the last byte lands, when it renames the part into place and answers with
+ * the file's new tag.
+ *
+ * A `409` means this device holds a different amount than the caller thought —
+ * the answer to which is [`uploadOffset`], not a retry of the same bytes.
+ */
+export async function uploadChunk(
+  root: string,
+  path: string,
+  token: string,
+  chunk: Blob,
+  start: number,
+  total: number,
+  precondition: Precondition,
+  options: { signal?: AbortSignal; onProgress?: (sentInChunk: number) => void } = {},
+): Promise<UploadResult | null> {
+  const end = start + chunk.size - 1;
+  const res = await apiHttp.put<UploadResult | null>("/files/content", chunk, {
+    params: { root, path, upload: token },
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Range": `bytes ${start}-${end}/${total}`,
+      ...preconditionHeaders(precondition),
+    },
+    signal: options.signal,
+    timeout: CHUNK_TIMEOUT_MS,
+    onUploadProgress: (event) => options.onProgress?.(event.loaded),
+  });
+  // 204 while there is more to come; the finished body when there is not.
+  return res.status === 204 ? null : res.data;
+}
+
+/** How much of a resumable upload this device already holds. */
+export async function uploadOffset(
+  root: string,
+  path: string,
+  token: string,
+): Promise<number> {
+  const res = await apiHttp.get<{ offset: number }>("/files/upload", {
+    params: { root, path, upload: token },
+  });
+  return res.data.offset;
+}
+
+/** Give up on a resumable upload, and take its bytes with it. */
+export async function abandonUpload(
+  root: string,
+  path: string,
+  token: string,
+): Promise<void> {
+  await apiHttp.delete("/files/upload", { params: { root, path, upload: token } });
+}
+
+/**
+ * An upload's identity, and therefore the name of the part file it
+ * accumulates in.
+ *
+ * Derived from the file rather than random, so that re-adding the same file
+ * after a browser reload resumes what is already on the device instead of
+ * starting a second copy of it. The alphabet is what the API accepts.
+ */
+export function uploadToken(dir: string, file: File): string {
+  const seed = `${dir}/${file.name}:${file.size}:${file.lastModified}`;
+  // FNV-1a, twice with different offsets: enough to tell two files apart, and
+  // nothing here is defending against a collision somebody wants.
+  const hash = (offset: number) => {
+    let h = offset;
+    for (let i = 0; i < seed.length; i += 1) {
+      h ^= seed.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(36).padStart(7, "0");
+  };
+  return `u-${hash(0x811c9dc5)}${hash(0x2f1e3a77)}`;
+}
+
 /** Create a folder, and every folder above it that is missing. */
 export async function createDirectory(root: string, path: string): Promise<void> {
   await apiHttp.post("/files/dir", { root, path });

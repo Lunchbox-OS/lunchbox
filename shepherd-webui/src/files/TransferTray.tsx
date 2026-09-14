@@ -20,7 +20,7 @@ import { formatBytes } from "./format";
 import { useUploads, type Transfer } from "./useUploads";
 
 export function TransferTray() {
-  const { transfers, cancel, replace, dismiss, clearFinished } = useUploads();
+  const { transfers, cancel, replace, retry, dismiss, clearFinished } = useUploads();
   if (transfers.length === 0) return null;
 
   const active = transfers.filter(
@@ -66,6 +66,7 @@ export function TransferTray() {
             transfer={transfer}
             onCancel={() => cancel(transfer.id)}
             onReplace={() => replace(transfer.id)}
+            onRetry={() => retry(transfer.id)}
             onDismiss={() => dismiss(transfer.id)}
           />
         ))}
@@ -78,11 +79,13 @@ function TransferRow({
   transfer,
   onCancel,
   onReplace,
+  onRetry,
   onDismiss,
 }: {
   transfer: Transfer;
   onCancel: () => void;
   onReplace: () => void;
+  onRetry: () => void;
   onDismiss: () => void;
 }) {
   const pending = transfer.status === "queued" || transfer.status === "sending";
@@ -105,10 +108,20 @@ function TransferRow({
             Replace
           </Button>
         ) : null}
-        {transfer.status === "error" ? (
-          <Tooltip title={transfer.error ?? ""}>
-            <ErrorOutlineIcon color="error" fontSize="small" />
-          </Tooltip>
+        {transfer.status === "error" || transfer.status === "cancelled" ? (
+          <>
+            {transfer.status === "error" ? (
+              <Tooltip title={transfer.error ?? ""}>
+                <ErrorOutlineIcon color="error" fontSize="small" />
+              </Tooltip>
+            ) : null}
+            {/* Resumes from whatever the device already holds rather than
+                starting the file again — which on a link that drops is the
+                difference between finishing and never finishing. */}
+            <Button size="small" onClick={onRetry}>
+              Retry
+            </Button>
+          </>
         ) : null}
         <IconButton
           size="small"
@@ -133,8 +146,16 @@ function statusLine(transfer: Transfer): string {
   switch (transfer.status) {
     case "queued":
       return "Waiting";
-    case "sending":
-      return `${formatBytes(transfer.sent)} of ${formatBytes(transfer.total)}`;
+    case "sending": {
+      const progress = `${formatBytes(transfer.sent)} of ${formatBytes(transfer.total)}`;
+      if (transfer.attempt > 1) return `${progress} · retrying (${transfer.attempt}/3)`;
+      // Said out loud, because "it started again from zero" is the thing a
+      // person watching a slow link is afraid of.
+      if (transfer.resumedFrom) {
+        return `${progress} · resumed from ${formatBytes(transfer.resumedFrom)}`;
+      }
+      return progress;
+    }
     case "conflict":
       return "Something is already there";
     case "done":

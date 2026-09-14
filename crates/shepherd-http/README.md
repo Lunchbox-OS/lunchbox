@@ -146,8 +146,9 @@ that user.
 |---|---|---|
 | `GET` | `/files/roots` | The places a caller may browse, plus the upload limits |
 | `GET` | `/files/list` | One directory |
-| `GET` | `/files/content` | Download (`HEAD` and `Range` too) |
-| `PUT` | `/files/content` | Upload or replace |
+| `GET` | `/files/content` | Download (`HEAD`, `Range` and `If-Range` too) |
+| `PUT` | `/files/content` | Upload or replace; in pieces with `Content-Range` |
+| `GET`/`DELETE` | `/files/upload` | How much of an interrupted upload survives, and giving up on one |
 | `POST` | `/files/dir` | Create a directory |
 | `POST` | `/files/move` | Rename or move, within one root |
 | `DELETE` | `/files/entry` | Delete a file or directory |
@@ -221,6 +222,50 @@ Deliberately not the content hash `PolicyDocument::version_of` uses: a policy is
 tens of kilobytes and worth hashing so a restore-from-backup reads as
 unchanged, while re-hashing a directory of ROMs to draw a list is not the same
 trade.
+
+### Uploads survive a bad link
+
+These devices are often repurposed hardware with the wifi chip they came with,
+so an interrupted transfer is the expected case, not the unlucky one. A whole
+file in one `PUT` still works — `curl`, the e2e harness and anything small use
+it — but an upload may also arrive in pieces:
+
+```
+PUT /files/content?root=home&path=Books/film.mp4&upload=u-9f2a1c04
+Content-Range: bytes 0-8388607/4294967296
+If-None-Match: *
+→ 204, Upload-Offset: 8388608        …and so on, until
+→ 201 + ETag                          the last byte, which publishes it
+```
+
+- **The state is the part file.** There is no session table, nothing to expire,
+  and a daemon restart loses only the chunk that was in flight.
+- **`upload` is a token the client chose**, and it becomes part of a filename,
+  so it is validated like every other caller-supplied name here: 8–64
+  characters of letters, digits, `-` and `_`. The web UI derives it from the
+  file's name, size and modification time, so re-adding the same file resumes
+  what the device already holds instead of starting a second copy.
+- **`GET /files/upload` answers `{"offset": N}`** — `0` for an upload this
+  device has never seen, so starting and resuming ask the same question. A
+  chunk whose `Content-Range` disagrees with `N` is a `409` that says what the
+  device actually holds; the answer is to continue from *there*, not to re-send.
+  That matters because a connection that died mid-chunk left a partial one
+  behind, and resuming from the chunk boundary would re-send bytes the device
+  already has.
+- **`DELETE /files/upload`** gives up on one and removes the part file. The
+  sweep would collect it a day later; a cancel that leaves gigabytes on a small
+  disk until tomorrow is not a cancel.
+- **The precondition is evaluated twice**: at the first chunk, so "create, do
+  not replace" costs nothing to refuse, and again at the rename, so a file that
+  appeared while the upload was in flight is not silently overwritten by it.
+- **The caps are judged on the declared total**, not on the chunk, so a file
+  over `max_upload_bytes` is refused before the first byte.
+
+Downloads were already resumable — `Accept-Ranges`, `ETag`, `206` — and now
+honour **`If-Range`**, which is what makes resuming one *safe*: a browser
+continuing an interrupted download sends the validator it started with, and a
+file that changed in the meantime is sent whole rather than stitched onto bytes
+from the previous version.
 
 ### Downloads are always attachments
 
