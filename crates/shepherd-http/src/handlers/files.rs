@@ -762,7 +762,12 @@ fn finish_chunked(plan: ChunkPlan) -> Result<(bool, Validator, u64), FileError> 
     plan.precondition
         .check(existing.as_ref(), plan.granularity)?;
 
-    std::fs::rename(&plan.part, &plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
+    publish(
+        &plan.part,
+        &plan.target,
+        matches!(plan.precondition, Precondition::MustNotExist),
+    )
+    .map_err(|e| publish_error(&e))?;
     let meta = std::fs::metadata(&plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
     Ok((
         plan.created,
@@ -1152,6 +1157,9 @@ struct WritePlan {
     granularity: Granularity,
     /// Whether the target existed, for `201` versus `200`.
     created: bool,
+    /// Whether the caller said `If-None-Match: *`, which the rename has to
+    /// keep rather than merely to have checked. See [`publish`].
+    must_not_exist: bool,
     /// 0 means no cap.
     max_bytes: u64,
     /// Bytes that must remain free on the destination filesystem afterwards.
@@ -1248,6 +1256,7 @@ fn prepare_write(
         temp,
         granularity: located.root.granularity,
         created: existing.is_none(),
+        must_not_exist: matches!(precondition, Precondition::MustNotExist),
         max_bytes: settings.max_upload_bytes,
         floor,
         free,
@@ -1311,10 +1320,57 @@ async fn stream_to_temp(body: Body, plan: &WritePlan) -> Result<u64, FileError> 
 }
 
 /// Publish the temp file, and tidy up after uploads that never finished.
+/// Put a finished upload in place of the target.
+///
+/// A plain `rename(2)` replaces whatever is there, which is right for every
+/// precondition but one. `If-None-Match: *` is a promise that nothing is
+/// overwritten, and `prepare_write` can only check that a moment *before* the
+/// bytes arrive — long enough for a second administrator, or for this caller's
+/// own retry, to create the same name in between. Two uploads then both answer
+/// `201` and one person's file is silently gone.
+///
+/// `RENAME_NOREPLACE` moves the promise into the kernel, where it is a single
+/// atomic operation. Filesystems that do not implement it — vfat among them,
+/// which matters here because removable drives are a first-class root — answer
+/// `EINVAL` or `ENOSYS`, and there is nothing better to do on those than the
+/// plain rename the code did before. The window stays open on a USB stick and
+/// is closed everywhere else, which is the right way round: the device's own
+/// disk is where two administrators are actually both writing.
+fn publish(from: &Path, to: &Path, must_not_exist: bool) -> std::io::Result<()> {
+    if must_not_exist {
+        use nix::errno::Errno;
+        use nix::fcntl::{RenameFlags, renameat2};
+        match renameat2(None, from, None, to, RenameFlags::RENAME_NOREPLACE) {
+            Ok(()) => return Ok(()),
+            // Somebody got there first, between the check and now.
+            Err(Errno::EEXIST) => {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            // The filesystem has no such call. Fall through.
+            Err(Errno::EINVAL | Errno::ENOSYS | Errno::EOPNOTSUPP | Errno::EPERM) => {}
+            Err(e) => return Err(std::io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+    std::fs::rename(from, to)
+}
+
+/// `EEXIST` out of [`publish`] is the caller's precondition failing late, not a
+/// name collision the caller could not have known about, so it reads as the
+/// same `412` a collision found early does.
+fn publish_error(e: &std::io::Error) -> FileError {
+    if e.kind() == std::io::ErrorKind::AlreadyExists {
+        FileError::PreconditionFailed(
+            "something else created that name while this upload was in flight".into(),
+        )
+    } else {
+        FileError::from_io(e, "that file")
+    }
+}
+
 fn finish_write(plan: WritePlan, size: u64) -> Result<(bool, Validator, u64), FileError> {
-    std::fs::rename(&plan.temp, &plan.target).map_err(|e| {
+    publish(&plan.temp, &plan.target, plan.must_not_exist).map_err(|e| {
         let _ = std::fs::remove_file(&plan.temp);
-        FileError::from_io(&e, "that file")
+        publish_error(&e)
     })?;
     let meta = std::fs::metadata(&plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
     if let Some(parent) = plan.target.parent() {

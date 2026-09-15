@@ -339,6 +339,13 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
 - **Half-write a file.** An upload streams to a dotted `.part` file in the
   destination directory, is `fsync`ed, and is renamed into place, so a child
   mid-book never opens a partial one.
+- **Let two creators both win.** `If-None-Match: *` is checked before the body
+  arrives, which is long enough for another administrator — or this caller's
+  own retry — to take the name. The promise is kept at the rename instead, with
+  `RENAME_NOREPLACE`, so the loser gets a `412` rather than a `201` over
+  somebody else's file. Filesystems without that call (vfat among them) fall
+  back to a plain rename; the window stays open on a USB stick and is closed on
+  the device's own disk, which is where two administrators actually both write.
 - **Fill the disk.** `max_upload_bytes` and `free_space_floor_bytes` are both
   checked against `Content-Length` before the first byte and again as the
   stream grows, because a declared length can be a lie. The free-space floor
@@ -501,6 +508,14 @@ shepherdd process.
 the escapes, and the resumable upload protocol. It runs on a
 `tempfile::tempdir()`, which is to say on ext4 or tmpfs — the one filesystem
 the file manager is least likely to be pointed at.
+
+`tests/files_on_disk.rs` covers what a protocol test cannot see: a filename
+that is not UTF-8, a fifo (where a route that opened before it asked questions
+would block a worker thread forever), a recursive delete with a symlink out of
+the root inside it, the `.part` sweep, two writers at once, a reader while a
+writer renames, and a 24 MiB body in one piece and in chunks. The concurrency
+tests assert invariants that hold in every interleaving, so they are
+deterministic even though what happens is not.
 
 `tests/files_removable.rs` is the other half, and it is `#[ignore]`d because it
 needs something FAT-formatted mounted under `/media`, which needs root. Without
