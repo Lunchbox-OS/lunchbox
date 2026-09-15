@@ -17,6 +17,13 @@ use tokio::net::TcpStream;
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,
+    /// The body before it was made printable.
+    ///
+    /// `body` is `from_utf8_lossy`, which is right for JSON and wrong for the
+    /// file manager's downloads (issue #195): a file that has to come back
+    /// byte-identical cannot be compared through a conversion that replaces
+    /// what it does not understand.
+    pub bytes: Vec<u8>,
     /// Response headers, in the order the server sent them. Kept since issue
     /// #156 because the login flow's whole result is a `Set-Cookie`.
     pub headers: Vec<(String, String)>,
@@ -147,10 +154,37 @@ impl HttpClient {
         path: &str,
         body: Option<&Value>,
     ) -> Result<HttpResponse> {
+        match body {
+            Some(value) => {
+                let serialized = value.to_string();
+                self.send(
+                    method,
+                    path,
+                    &[("Content-Type", "application/json")],
+                    serialized.as_bytes(),
+                )
+                .await
+            }
+            None => self.send(method, path, &[], &[]).await,
+        }
+    }
+
+    /// A request carrying arbitrary headers and a raw body.
+    ///
+    /// The file manager's routes (issue #195) are the reason this exists:
+    /// their bodies are bytes rather than JSON, and the whole contract lives
+    /// in headers — `If-None-Match`, `If-Match`, `Range`, `Content-Range` —
+    /// that no JSON helper has a place to put.
+    pub async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<HttpResponse> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
 
-        let serialized = body.map(|v| v.to_string());
         let mut req = format!(
             "{method} {path} HTTP/1.1\r\n\
              Host: 127.0.0.1:{port}\r\n\
@@ -164,21 +198,19 @@ impl HttpClient {
         if let Some(c) = &self.cookie {
             req.push_str(&format!("Cookie: {c}\r\n"));
         }
-        if let Some(b) = &serialized {
-            req.push_str("Content-Type: application/json\r\n");
-            req.push_str(&format!("Content-Length: {}\r\n", b.len()));
-        } else {
-            req.push_str("Content-Length: 0\r\n");
+        for (name, value) in headers {
+            req.push_str(&format!("{name}: {value}\r\n"));
         }
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
         req.push_str("\r\n");
-        if let Some(b) = &serialized {
-            req.push_str(b);
-        }
 
         write
             .write_all(req.as_bytes())
             .await
             .context("write HTTP request")?;
+        if !body.is_empty() {
+            write.write_all(body).await.context("write HTTP body")?;
+        }
         write.flush().await.ok();
 
         let mut reader = BufReader::new(read);
@@ -211,6 +243,7 @@ impl HttpClient {
         Ok(HttpResponse {
             status,
             body,
+            bytes: body_bytes,
             headers,
         })
     }

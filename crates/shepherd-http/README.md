@@ -532,3 +532,13 @@ The images are 512 MiB on purpose — under the 2 GiB free-space floor, which is
 what makes the floor test mean anything — and the second is mounted read-only.
 Three bugs were found this way that no amount of tmpfs testing could reach; see
 `docs/ai/history/2026-09-14 003 what-a-real-fat-drive-found (#195).md`.
+
+`crates/shepherd-e2e/tests/files.rs` is the last layer: a real `shepherdd`,
+driven over a real socket. It is there for the three things no in-process test
+can assert — that the routes are behind the authentication layer (the routers
+above are built `without_credential_store`, so every one of their tests would
+pass just as happily if the file manager were open to the network), that
+`enabled` survives the trip from a config file through another crate, and that
+the refused directories are the ones the running daemon is actually using.
+
+`shepherd-webui/src/api/files.test.ts` pins the other end of the same wire.

@@ -19,6 +19,12 @@ The tests cover:
 - Session extension via `POST /sessions/current/extend`.
 - Daily overrides via `PUT /overrides/{entry_id}` toggling availability.
 - Config reload after rewriting the file on disk.
+- The file manager (issue #195), in `tests/files.rs`: a file up and back down
+  byte-identically through a real socket, a resumable upload spanning three
+  connections, the routes answering `401` without a credential — which the
+  in-process tests cannot see, since their router is built without a credential
+  store — the daemon refusing its own state directory, and `enabled = false`
+  leaving no routes rather than routes that refuse.
 
 ## Firewall tests
 

@@ -327,6 +327,22 @@ impl FileService {
         Self::new(home, rx)
     }
 
+    /// Also refuse `dir`, and everything under it.
+    ///
+    /// [`denied_dirs`] works the database's location out from the environment,
+    /// which is a guess: `shepherdd -d /srv/library` puts it somewhere else
+    /// entirely, and a `-d` pointing inside the home would leave the database
+    /// downloadable while the refusal quietly guarded a path nothing was at.
+    /// The process that opened the store is the one that knows where it is, so
+    /// it says so here rather than being second-guessed.
+    pub fn also_deny(mut self, dir: PathBuf) -> Self {
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if !self.denied.contains(&dir) {
+            self.denied.push(dir);
+        }
+        self
+    }
+
     pub fn settings(&self) -> Arc<FileManagerConfig> {
         self.settings.borrow().clone()
     }

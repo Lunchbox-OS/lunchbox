@@ -280,6 +280,11 @@ struct Service {
     /// Where the BLE admin record, unbond queue and reset sentinel live.
     /// Always present, unlike `policy_files` — see [`StateParts`].
     protected_files: Arc<dyn ProtectedFiles>,
+    /// The data directory this process actually opened, after `-d` and
+    /// `service.data_dir` have had their say. Carried so the file manager can
+    /// refuse it by the path it really is rather than by the one the
+    /// environment suggests (issue #195).
+    data_dir: PathBuf,
     /// The connection the custodian watches to know this daemon is still
     /// supervising the session (issue #172).
     ///
@@ -1095,6 +1100,7 @@ impl Service {
             state_protection,
             policy_files,
             protected_files,
+            data_dir,
             supervision,
             session_guard,
         })
@@ -1842,10 +1848,15 @@ impl Service {
                     .then(shepherd_util::home_dir)
                     .flatten()
                     .map(|home| {
-                        Arc::new(shepherd_http::FileService::new(
-                            home,
-                            file_manager_rx.clone(),
-                        ))
+                        // The data directory this process actually opened,
+                        // rather than the one the environment suggests: `-d`
+                        // and `service.data_dir` both move it, and a database
+                        // inside the home that the file manager would hand
+                        // over is not a thing to leave to a guess.
+                        Arc::new(
+                            shepherd_http::FileService::new(home, file_manager_rx.clone())
+                                .also_deny(self.data_dir.clone()),
+                        )
                     });
                 if file_manager_config.enabled && file_manager.is_none() {
                     warn!(

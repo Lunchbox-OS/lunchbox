@@ -1193,6 +1193,72 @@ async fn ssh_keys_are_not_browsable() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+/// `shepherdd -d /somewhere/else`, or a `service.data_dir` in the config.
+///
+/// The environment-derived refusal guards `$XDG_DATA_HOME/shepherdd`, which on
+/// a device is where the database is and on a device started with `-d` is a
+/// path nothing is at. The daemon says where its store really is, so that the
+/// refusal is about the file rather than about a guess.
+#[tokio::test]
+async fn a_store_somewhere_else_is_refused_by_the_path_it_really_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("Library/state");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("shepherdd.db"), b"sqlite").unwrap();
+
+    let state = AppState {
+        svc: make_service(),
+        file_manager: Some(Arc::new(
+            FileService::fixed(
+                dir.path().to_path_buf(),
+                FileManagerConfig {
+                    external_media: false,
+                    ..Default::default()
+                },
+            )
+            .also_deny(store.clone()),
+        )),
+    };
+    let app = handlers::router(
+        state,
+        shepherd_http::AuthSources::without_credential_store(),
+    );
+
+    let (status, _, _) = send(&app, get("/api/v1/files/list?root=home&path=Library/state")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(
+        &app,
+        get("/api/v1/files/content?root=home&path=Library/state/shepherdd.db"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // And it cannot be written into either, which is the half that would
+    // corrupt rather than merely leak.
+    let (status, _, _) = send(
+        &app,
+        put_with(
+            "/api/v1/files/content?root=home&path=Library/state/shepherdd.db",
+            "not a database",
+            header::IF_MATCH,
+            "*",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The folder above it is still browsable — denying a subtree is not
+    // denying its parent, and a person should be able to see that it is there.
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Library")).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "state")
+        .expect("the state folder vanished from its parent");
+    assert_eq!(row["unusable"], "not_browsable");
+}
+
 #[tokio::test]
 async fn a_device_with_it_switched_off_has_no_routes() {
     let state = AppState {
