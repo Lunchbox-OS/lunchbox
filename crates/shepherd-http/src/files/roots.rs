@@ -145,7 +145,31 @@ fn removable() -> Vec<RootInfo> {
     let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
         return Vec::new();
     };
-    let uuids = uuid_map();
+    let mut out: Vec<RootInfo> = removable_mounts(&mounts, &uuid_map())
+        .into_iter()
+        .filter_map(|m| describe(m.id, m.label, RootKind::External, &m.mount_point))
+        .collect();
+    out.sort_by_key(|r| r.label.to_lowercase());
+    out
+}
+
+/// One line of `/proc/mounts` that turned out to be a removable drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemovableMount {
+    id: String,
+    label: String,
+    mount_point: PathBuf,
+}
+
+/// The half of [`removable`] that is a pure function of two files.
+///
+/// Split out because the interesting cases — a label with a space in it, a
+/// filesystem with no UUID, two drives labelled the same — cannot be arranged
+/// on the machine running the tests: they need something mounted under
+/// `/media`, which needs root. Everything below this line is arithmetic on
+/// text, and is tested as such; the privileged half is
+/// `crates/shepherd-e2e/tests/removable_real.rs`.
+fn removable_mounts(mounts: &str, uuids: &HashMap<PathBuf, String>) -> Vec<RemovableMount> {
     let mut out = Vec::new();
     for line in mounts.lines() {
         let mut fields = line.split_whitespace();
@@ -177,11 +201,12 @@ fn removable() -> Vec<RootInfo> {
             // a worse answer than an id that does not survive a replug.
             None => format!("ext-dev-{}", device.replace('/', "-")),
         };
-        if let Some(root) = describe(id, label, RootKind::External, &mount_point) {
-            out.push(root);
-        }
+        out.push(RemovableMount {
+            id,
+            label,
+            mount_point,
+        });
     }
-    out.sort_by_key(|r| r.label.to_lowercase());
     out
 }
 
@@ -262,6 +287,101 @@ mod tests {
         assert!(!is_removable_location(Path::new("/")));
         assert!(!is_removable_location(Path::new("/home/kiosk")));
         assert!(!is_removable_location(Path::new("/mnt/nas")));
+    }
+
+    /// The two files [`removable_mounts`] reads, as a real machine writes
+    /// them. Taken from an actual `/proc/mounts` with a FAT stick in it, with
+    /// the interesting cases kept and the ordinary ones trimmed.
+    const MOUNTS: &str = "\
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+/dev/nvme0n1p2 / ext4 rw,relatime 0 0
+/dev/sdb1 /media/kiosk/My\\040Photos vfat rw,nosuid,nodev,relatime 0 0
+/dev/sdc1 /run/media/kiosk/KINGSTON exfat rw,nosuid,nodev,relatime 0 0
+/dev/sdd1 /media/usb0 vfat ro,nosuid,nodev,relatime 0 0
+tmpfs /run/user/1000 tmpfs rw,nosuid,nodev,relatime 0 0
+gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw,nosuid,nodev,relatime 0 0
+/dev/nvme0n1p1 /boot/efi vfat rw,relatime 0 0
+";
+
+    fn uuids() -> HashMap<PathBuf, String> {
+        [
+            ("/dev/sdb1", "1A2B-3C4D"),
+            ("/dev/sdc1", "5E6F-7890"),
+            // /dev/sdd1 deliberately absent: a filesystem with no UUID.
+        ]
+        .into_iter()
+        .map(|(dev, uuid)| (PathBuf::from(dev), uuid.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn only_the_drives_a_person_plugged_in_are_offered() {
+        let found = removable_mounts(MOUNTS, &uuids());
+        let points: Vec<&str> = found
+            .iter()
+            .map(|m| m.mount_point.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            points,
+            [
+                "/media/kiosk/My Photos",
+                "/run/media/kiosk/KINGSTON",
+                "/media/usb0",
+            ],
+            "the root filesystem, the EFI partition, tmpfs or gvfs leaked in"
+        );
+    }
+
+    #[test]
+    fn a_drive_is_identified_by_its_filesystem_uuid() {
+        let found = removable_mounts(MOUNTS, &uuids());
+        // The UUID, not the mount point: unplug the drive and mount it
+        // somewhere else and the Files page still points at the same root.
+        assert_eq!(found[0].id, "ext-1A2B-3C4D");
+        assert_eq!(found[1].id, "ext-5E6F-7890");
+        // No UUID at all — offered anyway, because "your drive is not listed"
+        // is a worse answer than an id that does not survive a replug.
+        assert_eq!(found[2].id, "ext-dev--dev-sdd1");
+    }
+
+    #[test]
+    fn a_label_with_a_space_in_it_is_read_as_one_drive() {
+        // `/proc/mounts` octal-escapes it, and reading the field literally is
+        // a drive that silently never appears.
+        let found = removable_mounts(MOUNTS, &uuids());
+        assert_eq!(found[0].label, "My Photos");
+        assert_eq!(
+            found[0].mount_point,
+            PathBuf::from("/media/kiosk/My Photos")
+        );
+    }
+
+    #[test]
+    fn two_drives_labelled_the_same_stay_two_drives() {
+        let mounts = "\
+/dev/sdb1 /media/kiosk/UNTITLED vfat rw 0 0
+/dev/sdc1 /run/media/kiosk/UNTITLED vfat rw 0 0
+";
+        let uuids: HashMap<PathBuf, String> = [
+            (PathBuf::from("/dev/sdb1"), "1111-1111".to_string()),
+            (PathBuf::from("/dev/sdc1"), "2222-2222".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let found = removable_mounts(mounts, &uuids);
+        assert_eq!(found.len(), 2);
+        assert_ne!(
+            found[0].id, found[1].id,
+            "two UNTITLED sticks collapsed into one root"
+        );
+    }
+
+    #[test]
+    fn a_truncated_mounts_line_is_skipped_rather_than_panicking() {
+        // `/proc/mounts` is read without locking; a short read can leave a
+        // half line, and that must not take the roots list with it.
+        let found = removable_mounts("/dev/sdb1\n\n   \n/dev", &uuids());
+        assert!(found.is_empty());
     }
 
     #[test]

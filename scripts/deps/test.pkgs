@@ -16,3 +16,14 @@ dbus-daemon
 # stand-in for a real activity. It's almost always installed already, but
 # list it for completeness.
 coreutils
+
+# `mkfs.vfat`, for the loopback FAT images the file manager's removable-drive
+# tests run against (scripts/integration-tests/setup-removable-dev.sh). Those
+# tests are `#[ignore]`d and skip cleanly without it, so this is only needed on
+# a machine that means to run them.
+dosfstools
+
+# `mountpoint` and `findmnt`, which the same scripts use to refuse to run
+# against an unmounted directory -- a check that matters, because an empty
+# /media/shepherd-fat on ext4 would pass the tests for the wrong reason.
+util-linux

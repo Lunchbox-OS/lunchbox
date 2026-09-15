@@ -120,3 +120,72 @@ amount of tmpfs testing reaches into that gap.
 
 Hence the next chapter: a FAT image in the integration-test scripts, so this is
 a thing that can be re-run rather than a thing that was once done.
+
+## The harness
+
+Two loopback images, because the two properties that matter cannot be arranged
+any other way on every machine: a drive **smaller than the free-space floor**
+and a drive **mounted read-only**.
+
+- `scripts/integration-tests/setup-removable-dev.sh` makes two 512 MiB FAT32
+  images and mounts them at `/media/shepherd-fat` and
+  `/media/shepherd-fat-ro`, the second `ro`. `--teardown` undoes it. Nothing
+  survives a reboot, deliberately.
+- `scripts/integration-tests/test-removable.sh` checks the mounts and runs the
+  tests, following `test-firewall.sh`.
+- `crates/shepherd-http/tests/files_removable.rs` — eight `#[ignore]`d tests
+  that print `[SKIP]` and pass when the mounts are absent, so
+  `cargo test --include-ignored` is the same command on CI.
+- `dosfstools` and `util-linux` in `scripts/deps/test.pkgs`.
+
+One check in there is worth naming: the skip test reads `/proc/mounts` and
+requires the fstype to be `vfat`/`exfat`/`msdos`, rather than just checking that
+the directory exists. An **unmounted** `/media/shepherd-fat` is an ordinary ext4
+directory that would pass every assertion in the file for the wrong reason —
+which is the precise failure this whole exercise exists to stop.
+
+`roots::removable` was also split in two: `removable_mounts(mounts, uuids)` is
+now a pure function of the two files it reads, and the cases that cannot be
+arranged on a test machine — a label with a space, a filesystem with no UUID,
+two sticks both labelled `UNTITLED`, a torn `/proc/mounts` line — are unit
+tests. The privileged half is what `files_removable.rs` covers.
+
+## What the harness found on its first run
+
+Two more, neither of which the fixes above had reached.
+
+### 4. The *upload* response still handed out a strong tag
+
+`GET` had learned to spell a coarse tag weakly. `PUT` had not: `finish_write`
+and `finish_chunked` both built theirs with `etag_of`, so the `201` answering
+an upload to a FAT drive carried `ETag: "13-…"` — and the obvious thing for a
+client to do with it is to send it straight back as an `If-Match`. Both now
+return a `Validator` and emit `validator.header()`.
+
+The lesson is narrow and worth writing down: *a validator is a property of the
+file, not of the route*, and fixing it at one route is fixing it nowhere.
+
+### 5. `412` was a lie in the one case the drive creates
+
+With the above fixed, a delete issued within two seconds of the upload before
+it answers `412` — correctly, because the tag genuinely cannot distinguish the
+file from a replacement. But the message said "that file has changed since you
+last read it" about a file nobody had touched.
+
+`Precondition::check` now separates the two: when the caller's tag *equals* a
+weak one, the answer says the drive records times too coarsely to be sure, and
+to try again in a moment. Which is true, and actionable, because the tick
+passes on its own.
+
+## Deliberately not tested against the image
+
+- **`ENAMETOOLONG`** is unreachable through this API. `resolve` caps a path
+  component at 255 **bytes** and vfat's limit is 255 **UTF-16 units**; any name
+  over vfat's limit is over 255 bytes too, so the API's own `400` always lands
+  first.
+- **`EFBIG`** needs a file over 4 GiB, and the image is 512 MiB, so `ENOSPC`
+  arrives first. A 4 GiB image would make the suite cost minutes.
+
+Both mappings are covered by the unit test on `from_io` instead. This is
+written down because a test that appears to cover them and does not is worse
+than no test.

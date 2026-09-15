@@ -50,7 +50,7 @@ use serde_json::json;
 use tokio_stream::StreamExt;
 
 use crate::files::{
-    DEFAULT_LIMIT, FileError, Granularity, Located, MAX_LIMIT, etag_of, list_dir, validator_of,
+    DEFAULT_LIMIT, FileError, Granularity, Located, MAX_LIMIT, Validator, list_dir, validator_of,
 };
 use crate::state::AppState;
 
@@ -323,14 +323,19 @@ pub async fn upload(
         Ok(size) => {
             let finished = blocking(move || finish_write(plan, size)).await;
             match finished {
-                Ok(Ok((created, etag, size))) => (
+                Ok(Ok((created, validator, size))) => (
                     if created {
                         StatusCode::CREATED
                     } else {
                         StatusCode::OK
                     },
-                    [(header::ETAG, quote(&etag))],
-                    Json(json!({ "path": q.path, "size": size, "etag": etag })),
+                    // The header carries the wire form, weakness and all: a
+                    // file just written to a FAT drive is inside the tick its
+                    // tag cannot see past, and saying otherwise here would
+                    // hand the caller a validator it must not trust. The JSON
+                    // field stays the bare value, matching the listing.
+                    [(header::ETAG, validator.header())],
+                    Json(json!({ "path": q.path, "size": size, "etag": validator.value })),
                 )
                     .into_response(),
                 Ok(Err(e)) | Err(e) => e.into_response(),
@@ -561,14 +566,14 @@ async fn resumable_upload(
 
     let finished = blocking(move || finish_chunked(plan)).await;
     match finished {
-        Ok(Ok((created, etag, size))) => (
+        Ok(Ok((created, validator, size))) => (
             if created {
                 StatusCode::CREATED
             } else {
                 StatusCode::OK
             },
-            [(header::ETAG, quote(&etag))],
-            Json(json!({ "path": q.path, "size": size, "etag": etag })),
+            [(header::ETAG, validator.header())],
+            Json(json!({ "path": q.path, "size": size, "etag": validator.value })),
         )
             .into_response(),
         Ok(Err(e)) | Err(e) => e.into_response(),
@@ -738,7 +743,7 @@ async fn append_chunk(body: Body, plan: &ChunkPlan, range: ChunkRange) -> Result
 }
 
 /// Publish a finished resumable upload.
-fn finish_chunked(plan: ChunkPlan) -> Result<(bool, String, u64), FileError> {
+fn finish_chunked(plan: ChunkPlan) -> Result<(bool, Validator, u64), FileError> {
     let have = part_len(&plan.part);
     if have != plan.total {
         return Err(FileError::BadRequest(format!(
@@ -759,7 +764,11 @@ fn finish_chunked(plan: ChunkPlan) -> Result<(bool, String, u64), FileError> {
 
     std::fs::rename(&plan.part, &plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
     let meta = std::fs::metadata(&plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
-    Ok((plan.created, etag_of(&meta), meta.len()))
+    Ok((
+        plan.created,
+        validator_of(&meta, plan.granularity),
+        meta.len(),
+    ))
 }
 
 /// Create a directory, parents included.
@@ -979,8 +988,22 @@ impl Precondition {
                 "a folder has no version to match; send If-Match: *".into(),
             )),
             (Self::Exactly(want), Some(meta)) => {
-                if validator_of(meta, granularity).strongly_matches(want) {
+                let validator = validator_of(meta, granularity);
+                if validator.strongly_matches(want) {
                     Ok(())
+                } else if validator.weak
+                    && want.trim().trim_start_matches("W/").trim_matches('"') == validator.value
+                {
+                    // The tag the caller holds still *looks* right, and on any
+                    // other filesystem it would be. Saying "it changed" here
+                    // would be a lie about a file nobody touched, so say the
+                    // true thing instead — and it is actionable, because the
+                    // tick passes on its own.
+                    Err(FileError::PreconditionFailed(
+                        "this drive records times too coarsely to be sure that is still \
+                         the same file; try again in a moment"
+                            .into(),
+                    ))
                 } else {
                     Err(FileError::PreconditionFailed(
                         "that has changed since you read it; read it again and redo the change"
@@ -1125,6 +1148,8 @@ fn parse_range(value: &str, len: u64) -> Result<(u64, u64), String> {
 struct WritePlan {
     target: PathBuf,
     temp: PathBuf,
+    /// The destination filesystem's, for the tag in the answer.
+    granularity: Granularity,
     /// Whether the target existed, for `201` versus `200`.
     created: bool,
     /// 0 means no cap.
@@ -1221,6 +1246,7 @@ fn prepare_write(
     Ok(WritePlan {
         target: located.path.clone(),
         temp,
+        granularity: located.root.granularity,
         created: existing.is_none(),
         max_bytes: settings.max_upload_bytes,
         floor,
@@ -1285,7 +1311,7 @@ async fn stream_to_temp(body: Body, plan: &WritePlan) -> Result<u64, FileError> 
 }
 
 /// Publish the temp file, and tidy up after uploads that never finished.
-fn finish_write(plan: WritePlan, size: u64) -> Result<(bool, String, u64), FileError> {
+fn finish_write(plan: WritePlan, size: u64) -> Result<(bool, Validator, u64), FileError> {
     std::fs::rename(&plan.temp, &plan.target).map_err(|e| {
         let _ = std::fs::remove_file(&plan.temp);
         FileError::from_io(&e, "that file")
@@ -1294,7 +1320,7 @@ fn finish_write(plan: WritePlan, size: u64) -> Result<(bool, String, u64), FileE
     if let Some(parent) = plan.target.parent() {
         sweep_stale_parts(parent);
     }
-    Ok((plan.created, etag_of(&meta), size))
+    Ok((plan.created, validator_of(&meta, plan.granularity), size))
 }
 
 /// Remove `.part` files older than a day.
@@ -1404,12 +1430,6 @@ fn disabled() -> Response {
 
 fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
     headers.get(name).and_then(|v| v.to_str().ok())
-}
-
-/// `"abc"`, the way an `ETag` is spelled. Shared with the config route, which
-/// spells its own the same way.
-fn quote(tag: &str) -> String {
-    format!("\"{tag}\"")
 }
 
 fn unquote(value: &str) -> &str {

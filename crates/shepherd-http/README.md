@@ -279,6 +279,37 @@ the one this route originally missed, and ignoring it meant a resumed download
 could be half one version and half another, reported as a success. See
 `docs/ai/history/2026-09-14 001 browser-download-resume (#195).md`.
 
+### A drive that cannot keep the etag's promise says so
+
+The etag is `size-mtime`, and FAT and exFAT record mtimes at **two-second**
+resolution — so two different files of the same size written in the same tick
+carry the same tag. A resumed download whose file was replaced inside that
+window would otherwise be answered `206` with bytes from the new version at the
+old offset, and the browser would report success.
+
+HTTP already has the word for this. `Granularity::of` asks `statfs` once per
+root; a file younger than one tick on a coarse filesystem is tagged **weakly**
+(`W/"…"`), and the rules that come with that are exactly the ones needed:
+
+- a weak validator may not assemble a range, so `If-Range` restarts the
+  download whole rather than stitching;
+- `If-Match` compares strongly, so a stale resume — or a `DELETE` holding a tag
+  from a moment ago — is `412` rather than an operation on the wrong file;
+- `304` is not answered from one at all.
+
+Once the tick has passed no later write can land on the same second, so the tag
+is strong again and the steady state is unchanged. The one visible cost is a
+`412` on a write or delete issued within two seconds of the upload before it;
+that answer says so in words, because "that file has changed" would be a lie
+about a file nobody touched.
+
+### What a removable drive refuses is the caller's problem, not a fault
+
+`EINVAL` (a name FAT cannot spell), `EFBIG` (past FAT32's 4 GiB per-file
+ceiling), `EROFS` and `ENAMETOOLONG` map to `400`, `413`, `403` and `400`. They
+were all `500 internal`, which tells a person their device is broken rather
+than to rename the file.
+
 ### Downloads are always attachments
 
 `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and a
@@ -310,7 +341,10 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
   mid-book never opens a partial one.
 - **Fill the disk.** `max_upload_bytes` and `free_space_floor_bytes` are both
   checked against `Content-Length` before the first byte and again as the
-  stream grows, because a declared length can be a lie.
+  stream grows, because a declared length can be a lie. The free-space floor
+  guards **this device's own disk only** — a removable drive may be filled to
+  the last byte, because a full USB stick costs nobody a session and a 2 GiB
+  floor would make every drive smaller than that unwritable.
 - **Move between roots.** `rename(2)` does not cross filesystems, and a
   copy-with-progress is a feature of its own. `400`, with a message saying to
   download and re-upload.
@@ -462,3 +496,24 @@ result shapes, and error mapping. The credential store's own arithmetic
 `shepherd-management/src/webauth.rs`. The e2e crate
 (`crates/shepherd-e2e`) drives the same endpoint end-to-end against a real
 shepherdd process.
+
+`tests/files.rs` covers the file routes: the wire contract, the preconditions,
+the escapes, and the resumable upload protocol. It runs on a
+`tempfile::tempdir()`, which is to say on ext4 or tmpfs — the one filesystem
+the file manager is least likely to be pointed at.
+
+`tests/files_removable.rs` is the other half, and it is `#[ignore]`d because it
+needs something FAT-formatted mounted under `/media`, which needs root. Without
+it each test prints `[SKIP]` and passes, so `cargo test --include-ignored`
+works unchanged on CI. On a dev host:
+
+```sh
+sudo ./scripts/integration-tests/setup-removable-dev.sh   # two loopback images
+./scripts/integration-tests/test-removable.sh             # run them
+sudo ./scripts/integration-tests/setup-removable-dev.sh --teardown
+```
+
+The images are 512 MiB on purpose — under the 2 GiB free-space floor, which is
+what makes the floor test mean anything — and the second is mounted read-only.
+Three bugs were found this way that no amount of tmpfs testing could reach; see
+`docs/ai/history/2026-09-14 003 what-a-real-fat-drive-found (#195).md`.
