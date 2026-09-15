@@ -250,6 +250,10 @@ mode = "self_signed"         # "auto" | "off" | "self_signed" | "files"
 # max_upload_bytes = 8589934592        # 8 GiB; 0 removes the cap
 # free_space_floor_bytes = 2147483648  # 2 GiB; refuse an upload that would cross it
 #
+# The floor guards this device's own disk only. A removable drive is allowed to
+# be filled to the last byte -- a full USB stick costs nobody a session, and a
+# 2 GiB floor would make every drive smaller than that unwritable.
+#
 # Offer removable drives mounted under /media and /run/media. Each is
 # identified by its filesystem UUID, so a drive keeps the same identity when it
 # is unplugged and mounted again somewhere else.

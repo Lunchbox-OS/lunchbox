@@ -26,7 +26,7 @@ pub mod roots;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json,
@@ -93,17 +93,50 @@ impl FileError {
     /// Turn an `io::Error` from an operation on `path` into the closest thing
     /// a caller can act on.
     pub fn from_io(e: &std::io::Error, what: &str) -> Self {
+        // The errno arms come first, because a removable drive's refusals are
+        // answers about the *request* — a name FAT cannot spell, a file past
+        // what the format can hold — and `ErrorKind` either flattens them into
+        // something misleading or leaves them uncategorised. Every one of
+        // these reached a caller as `500 internal` until a FAT stick was
+        // tested against.
+        match e.raw_os_error() {
+            // ENOSPC arriving mid-write, after the free-space check passed —
+            // somebody else filled the disk while the upload was in flight.
+            Some(28) => {
+                return Self::InsufficientStorage("the disk filled up during the write".into());
+            }
+            // EINVAL. On FAT and exFAT this is how the kernel says the name
+            // contains a character the format has no room for.
+            Some(22) => {
+                return Self::BadRequest(format!(
+                    "{what}: that name is not one this drive can store — \
+                     removable drives cannot hold : * ? \" < > | or \\ in a name"
+                ));
+            }
+            // EFBIG: past what the format can address at all, which on FAT32
+            // is 4 GiB however much space is free.
+            Some(27) => {
+                return Self::TooLarge(format!(
+                    "{what} is larger than this drive can store in one file"
+                ));
+            }
+            // EROFS: mounted read-only, usually because the drive was pulled
+            // out mid-write once and has a dirty bit set.
+            Some(30) => {
+                return Self::Forbidden(format!("{what}: this drive is mounted read-only"));
+            }
+            // ENAMETOOLONG.
+            Some(36) => {
+                return Self::BadRequest(format!("{what}: that name is too long for this drive"));
+            }
+            _ => {}
+        }
         match e.kind() {
             std::io::ErrorKind::NotFound => Self::NotFound(format!("{what} is not on this device")),
             std::io::ErrorKind::PermissionDenied => {
                 Self::Forbidden(format!("this device's kiosk user may not touch {what}"))
             }
             std::io::ErrorKind::AlreadyExists => Self::Conflict(format!("{what} already exists")),
-            // ENOSPC arriving mid-write, after the free-space check passed —
-            // somebody else filled the disk while the upload was in flight.
-            _ if e.raw_os_error() == Some(28) => {
-                Self::InsufficientStorage("the disk filled up during the write".into())
-            }
             _ => Self::Internal(format!("{what}: {e}")),
         }
     }
@@ -248,6 +281,14 @@ impl Located {
 pub struct FileService {
     /// shepherdd's own home directory, canonicalised once.
     home: PathBuf,
+    /// The device id of the filesystem that home is on.
+    ///
+    /// What the free-space floor is *for*: a kiosk whose own disk fills up is
+    /// a session that will not start. A removable drive filling up costs
+    /// nobody an evening, so the floor does not apply there — and applied
+    /// everywhere it made any drive smaller than the floor unwritable, which
+    /// is most USB sticks.
+    home_device: Option<u64>,
     settings: watch::Receiver<Arc<FileManagerConfig>>,
     /// shepherd's own directories inside the home, refused for read and write
     /// alike. See [`resolve::check_denied`].
@@ -264,8 +305,12 @@ impl FileService {
     pub fn new(home: PathBuf, settings: watch::Receiver<Arc<FileManagerConfig>>) -> Self {
         let home = std::fs::canonicalize(&home).unwrap_or(home);
         let denied = denied_dirs(&home);
+        let home_device = std::fs::metadata(&home)
+            .ok()
+            .map(|meta| std::os::unix::fs::MetadataExt::dev(&meta));
         Self {
             home,
+            home_device,
             settings,
             denied,
         }
@@ -288,6 +333,17 @@ impl FileService {
 
     pub fn denied(&self) -> &[PathBuf] {
         &self.denied
+    }
+
+    /// Whether the free-space floor applies to writes landing on `meta`'s
+    /// filesystem — that is, whether this is the device's own disk.
+    pub fn floor_applies(&self, meta: &std::fs::Metadata) -> bool {
+        match self.home_device {
+            Some(home) => std::os::unix::fs::MetadataExt::dev(meta) == home,
+            // Unknown: keep the floor, which is the cautious direction and the
+            // behaviour before this existed.
+            None => true,
+        }
     }
 
     /// Everywhere this device will let a caller browse, right now.
@@ -351,6 +407,110 @@ fn denied_dirs(home: &Path) -> Vec<PathBuf> {
         // a lexical path would not match a home reached through a symlink.
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
         .collect()
+}
+
+/// How precisely a filesystem records modification times.
+///
+/// The etag is `size-mtime`, so this is the window inside which a file can be
+/// rewritten *without the tag changing* — which is exactly what a weak
+/// validator means in HTTP, and exactly what a resumed download must not
+/// trust. On ext4 and friends it is a nanosecond and nothing is ever weak; on
+/// the FAT and exFAT drives this device is expected to have plugged into it,
+/// it is two seconds, and two different files of the same size written in the
+/// same tick really do produce the same tag. Measured, not assumed — see
+/// `docs/ai/history/2026-09-14 003 …`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Granularity(pub Duration);
+
+impl Default for Granularity {
+    fn default() -> Self {
+        Self::FINE
+    }
+}
+
+impl Granularity {
+    /// What ext4, xfs, btrfs and tmpfs do: enough resolution that a second
+    /// write always moves the tag.
+    pub const FINE: Self = Self(Duration::from_nanos(1));
+    /// FAT and exFAT, whose directory entries hold two-second resolution.
+    pub const COARSE: Self = Self(Duration::from_secs(2));
+
+    /// Ask the filesystem holding `path`.
+    ///
+    /// Anything this does not recognise is treated as fine-grained, which is
+    /// the same answer it would have given before this existed. Being wrong in
+    /// that direction only costs the safety this adds; being wrong the other
+    /// way would refuse every resume on an ordinary disk.
+    pub fn of(path: &Path) -> Self {
+        use nix::sys::statfs::{MSDOS_SUPER_MAGIC, statfs};
+        // exFAT has no constant in `nix`; its superblock magic is this, and
+        // the kernel has used it since exfat landed in 5.7.
+        const EXFAT_SUPER_MAGIC: i64 = 0x2011_BAB0;
+        match statfs(path) {
+            Ok(stat) => {
+                let fs = stat.filesystem_type();
+                #[allow(clippy::unnecessary_cast)]
+                let raw = fs.0 as i64;
+                if fs == MSDOS_SUPER_MAGIC || raw == EXFAT_SUPER_MAGIC {
+                    Self::COARSE
+                } else {
+                    Self::FINE
+                }
+            }
+            Err(_) => Self::FINE,
+        }
+    }
+}
+
+/// A file's validator, and whether it can be trusted byte-for-byte.
+///
+/// Weak means "this tag may not change when the content does", which HTTP
+/// already has a spelling for (`W/"…"`) and already has rules about: a weak
+/// validator may not be used to assemble a range, and `If-Match` compares
+/// strongly, so a weak tag never satisfies one. Both of those are the
+/// behaviour this needs on a FAT drive, for free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Validator {
+    pub value: String,
+    pub weak: bool,
+}
+
+impl Validator {
+    /// How it goes on the wire.
+    pub fn header(&self) -> String {
+        if self.weak {
+            format!("W/\"{}\"", self.value)
+        } else {
+            format!("\"{}\"", self.value)
+        }
+    }
+
+    /// Whether a caller's tag matches this one *strongly*, which is what
+    /// `If-Match` and range assembly require. A weak validator never does.
+    pub fn strongly_matches(&self, candidate: &str) -> bool {
+        let candidate = candidate.trim();
+        if self.weak || candidate.starts_with("W/") {
+            return false;
+        }
+        candidate.trim_matches('"') == self.value
+    }
+}
+
+/// The tag for a file, and whether the filesystem can be trusted to change it.
+///
+/// A file written *within the last tick* of a coarse-grained filesystem is the
+/// dangerous case: another write in the same tick would leave the tag alone.
+/// Once the tick has passed, any later write must land on a different second,
+/// so the tag is as good as it is anywhere else.
+pub fn validator_of(meta: &std::fs::Metadata, granularity: Granularity) -> Validator {
+    let value = etag_of(meta);
+    let weak = granularity.0 > Duration::from_nanos(1)
+        && meta
+            .modified()
+            .ok()
+            .and_then(|m| SystemTime::now().duration_since(m).ok())
+            .is_none_or(|age| age < granularity.0);
+    Validator { value, weak }
 }
 
 /// The tag for a file, from what a `stat` already told us.
@@ -492,4 +652,99 @@ pub fn list_dir(
         truncated,
         cursor: cursor.flatten(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Error;
+
+    /// Built by hand rather than by touching a filesystem: what matters is the
+    /// arithmetic between the tick and the file's age, and there is no FAT
+    /// drive in a unit test.
+    fn meta_of(path: &Path) -> std::fs::Metadata {
+        std::fs::metadata(path).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_file_on_a_coarse_filesystem_is_only_weakly_tagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("v.bin");
+        std::fs::write(&file, b"AAAA").unwrap();
+        let meta = meta_of(&file);
+
+        // On an ordinary disk a second write always moves the tag, so it is
+        // worth the caller's trust.
+        assert!(!validator_of(&meta, Granularity::FINE).weak);
+
+        // On FAT it is not: another write in the same two-second tick would
+        // leave size and mtime alone, and the tag with them.
+        let weak = validator_of(&meta, Granularity::COARSE);
+        assert!(weak.weak);
+        assert!(weak.header().starts_with("W/"), "{}", weak.header());
+    }
+
+    #[test]
+    fn once_the_tick_has_passed_a_coarse_tag_is_as_good_as_any() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("v.bin");
+        std::fs::write(&file, b"AAAA").unwrap();
+        // Ten seconds old: no later write can land on the same second, so the
+        // tag is once again a promise.
+        let ten_seconds_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(ten_seconds_ago))
+            .unwrap();
+        let validator = validator_of(&meta_of(&file), Granularity::COARSE);
+        assert!(!validator.weak);
+        assert!(validator.header().starts_with('"'));
+    }
+
+    #[test]
+    fn a_weak_validator_satisfies_nothing() {
+        let weak = Validator {
+            value: "8-1789437996000000000".into(),
+            weak: true,
+        };
+        // Neither spelling of the same value: `If-Match` and range assembly
+        // both compare strongly, and that is the entire protection.
+        assert!(!weak.strongly_matches("\"8-1789437996000000000\""));
+        assert!(!weak.strongly_matches("W/\"8-1789437996000000000\""));
+
+        let strong = Validator {
+            value: "8-1789437996000000000".into(),
+            weak: false,
+        };
+        assert!(strong.strongly_matches("\"8-1789437996000000000\""));
+        // A caller's *weak* tag never matches either, whatever ours is.
+        assert!(!strong.strongly_matches("W/\"8-1789437996000000000\""));
+        assert!(!strong.strongly_matches("\"8-1\""));
+    }
+
+    /// The errnos a removable drive answers with. Each of these reached a
+    /// caller as `500 internal` until a FAT stick was tested against.
+    #[test]
+    fn a_drives_refusals_are_answers_rather_than_faults() {
+        let cases = [
+            (22, "not one this drive can store"), // EINVAL: a name FAT rejects
+            (27, "larger than this drive"),       // EFBIG: past FAT32's 4 GiB
+            (30, "read-only"),                    // EROFS
+            (36, "too long"),                     // ENAMETOOLONG
+        ];
+        for (errno, needle) in cases {
+            let error = FileError::from_io(&Error::from_raw_os_error(errno), "that file");
+            let (status, code, message) = error.parts();
+            assert_ne!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "errno {errno} still reads as a fault in the device: {message}"
+            );
+            assert!(
+                message.contains(needle),
+                "errno {errno} ({code}) says {message:?}, which does not mention {needle:?}"
+            );
+        }
+        // And the one that was already right.
+        let full = FileError::from_io(&Error::from_raw_os_error(28), "that file");
+        assert_eq!(full.parts().1, "insufficient_storage");
+    }
 }

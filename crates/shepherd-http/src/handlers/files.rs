@@ -49,7 +49,9 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_stream::StreamExt;
 
-use crate::files::{DEFAULT_LIMIT, FileError, Located, MAX_LIMIT, etag_of, list_dir};
+use crate::files::{
+    DEFAULT_LIMIT, FileError, Granularity, Located, MAX_LIMIT, etag_of, list_dir, validator_of,
+};
 use crate::state::AppState;
 
 /// A root and a path inside it. Every route speaks this.
@@ -157,15 +159,18 @@ pub async fn download(
     };
     let opened = blocking(move || {
         let located = files.locate(&q.root, &q.path)?;
-        open_for_read(&located, files.denied())
+        let granularity = located.root.granularity;
+        let (file, meta, name) = open_for_read(&located, files.denied())?;
+        Ok::<_, FileError>((file, meta, name, granularity))
     })
     .await;
-    let (file, meta, name) = match opened {
+    let (file, meta, name, granularity) = match opened {
         Ok(Ok(v)) => v,
         Ok(Err(e)) | Err(e) => return e.into_response(),
     };
 
-    let etag = etag_of(&meta);
+    let validator = validator_of(&meta, granularity);
+    let etag = validator.value.clone();
     let len = meta.len();
 
     // `If-Match`, which is what **Firefox** sends when it resumes an
@@ -178,10 +183,15 @@ pub async fn download(
     // theorised — see
     // `docs/ai/history/2026-09-14 001 browser-download-resume (#195).md`.
     if let Some(if_match) = header_str(&headers, header::IF_MATCH) {
+        // Strong comparison, which is what `If-Match` is defined to use — and
+        // on a filesystem whose timestamps are too coarse to promise the tag
+        // changes with the content, nothing compares strongly. That is the
+        // whole protection on a FAT drive: a resume inside the two-second
+        // window is refused rather than served bytes from a different file.
         let matches = if_match.trim() == "*"
             || if_match
                 .split(',')
-                .any(|candidate| unquote(candidate) == etag);
+                .any(|candidate| validator.strongly_matches(candidate));
         if !matches {
             return FileError::PreconditionFailed(
                 "that file has changed since it was first read; download it again".into(),
@@ -193,12 +203,15 @@ pub async fn download(
     // A cached copy is still good: the tag is derived from size and mtime, so
     // a file rewritten byte-identically in the same nanosecond is the only way
     // to fool it, and that is not a thing that happens to a book.
+    // Not answered from a weak validator: "you already have this" is exactly
+    // the claim a coarse filesystem cannot support.
     if let Some(inm) = header_str(&headers, header::IF_NONE_MATCH)
+        && !validator.weak
         && (inm.trim() == "*" || unquote(inm) == etag)
     {
         return (
             StatusCode::NOT_MODIFIED,
-            download_headers(&name, &etag, None),
+            download_headers(&name, &validator, None),
         )
             .into_response();
     }
@@ -208,8 +221,11 @@ pub async fn download(
     // file that changed since must be sent whole rather than stitched onto
     // bytes from the previous version. A date form never matches, because the
     // only validator this API emits is an `ETag`.
-    let range_is_stale =
-        header_str(&headers, header::IF_RANGE).is_some_and(|value| unquote(value) != etag);
+    // A weak validator can never assemble a range — the specification says so,
+    // and it is the reason Chrome restarts instead of stitching when this
+    // answers with one.
+    let range_is_stale = header_str(&headers, header::IF_RANGE)
+        .is_some_and(|value| !validator.strongly_matches(value));
     let range = match header_str(&headers, header::RANGE)
         .filter(|_| !range_is_stale)
         .map(|r| parse_range(r, len))
@@ -243,7 +259,7 @@ pub async fn download(
     let content_range = range.map(|(start, end)| format!("bytes {start}-{end}/{len}"));
     let mut response = (
         status,
-        download_headers(&name, &etag, content_range),
+        download_headers(&name, &validator, content_range),
         Body::from_stream(stream),
     )
         .into_response();
@@ -289,7 +305,13 @@ pub async fn upload(
     let q_path = q.path.clone();
     let prepared = blocking(move || {
         let located = files_for_prep.locate(&q_root, &q_path)?;
-        prepare_write(&located, precondition, declared, &settings)
+        let floor_applies = located
+            .path
+            .parent()
+            .and_then(|parent| std::fs::metadata(parent).ok())
+            .map(|meta| files_for_prep.floor_applies(&meta))
+            .unwrap_or(true);
+        prepare_write(&located, precondition, declared, &settings, floor_applies)
     })
     .await;
     let plan = match prepared {
@@ -498,7 +520,20 @@ async fn resumable_upload(
     let prepared = blocking(move || {
         let token = validate_token(&token)?.to_string();
         let located = prep_files.locate(&root, &path)?;
-        prepare_chunk(&located, &token, range, precondition, &settings)
+        let floor_applies = located
+            .path
+            .parent()
+            .and_then(|parent| std::fs::metadata(parent).ok())
+            .map(|meta| prep_files.floor_applies(&meta))
+            .unwrap_or(true);
+        prepare_chunk(
+            &located,
+            &token,
+            range,
+            precondition,
+            &settings,
+            floor_applies,
+        )
     })
     .await;
     let plan = match prepared {
@@ -547,6 +582,8 @@ struct ChunkPlan {
     target: PathBuf,
     part: PathBuf,
     precondition: Precondition,
+    /// The destination filesystem's, for the precondition at the rename.
+    granularity: Granularity,
     /// Whether the target existed when the upload began.
     created: bool,
     max_bytes: u64,
@@ -561,6 +598,7 @@ fn prepare_chunk(
     range: ChunkRange,
     precondition: Precondition,
     settings: &shepherd_config::FileManagerConfig,
+    floor_applies: bool,
 ) -> Result<ChunkPlan, FileError> {
     if !located.root.writable {
         return Err(FileError::Forbidden("that place is read-only".into()));
@@ -592,7 +630,7 @@ fn prepare_chunk(
     // At the first chunk, so a refusal costs nothing. Checked again at the
     // rename, because the answer can change while an upload is in flight.
     if range.start == 0 {
-        precondition.check(existing.as_ref())?;
+        precondition.check(existing.as_ref(), located.root.granularity)?;
     }
 
     if settings.max_upload_bytes > 0 && range.total > settings.max_upload_bytes {
@@ -602,13 +640,17 @@ fn prepare_chunk(
         )));
     }
     let free = crate::files::roots::space(parent).map(|(_, free)| free);
-    if settings.free_space_floor_bytes > 0
+    let floor = if floor_applies {
+        settings.free_space_floor_bytes
+    } else {
+        0
+    };
+    if floor > 0
         && let Some(free) = free
-        && free.saturating_sub(range.total - range.start) < settings.free_space_floor_bytes
+        && free.saturating_sub(range.total - range.start) < floor
     {
         return Err(FileError::InsufficientStorage(format!(
-            "that would leave less than {} bytes free on this device",
-            settings.free_space_floor_bytes
+            "that would leave less than {floor} bytes free on this device"
         )));
     }
 
@@ -633,9 +675,10 @@ fn prepare_chunk(
         target: located.path.clone(),
         part,
         precondition,
+        granularity: located.root.granularity,
         created: existing.is_none(),
         max_bytes: settings.max_upload_bytes,
-        floor: settings.free_space_floor_bytes,
+        floor,
         free,
         total: range.total,
     })
@@ -711,7 +754,8 @@ fn finish_chunked(plan: ChunkPlan) -> Result<(bool, String, u64), FileError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(FileError::from_io(&e, "that file")),
     };
-    plan.precondition.check(existing.as_ref())?;
+    plan.precondition
+        .check(existing.as_ref(), plan.granularity)?;
 
     std::fs::rename(&plan.part, &plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
     let meta = std::fs::metadata(&plan.target).map_err(|e| FileError::from_io(&e, "that file"))?;
@@ -830,7 +874,7 @@ pub async fn delete_entry(
         }
         let meta = std::fs::symlink_metadata(&located.path)
             .map_err(|e| FileError::from_io(&e, "what you asked to delete"))?;
-        precondition.check(Some(&meta))?;
+        precondition.check(Some(&meta), located.root.granularity)?;
 
         if meta.is_dir() {
             if q.recursive {
@@ -913,7 +957,15 @@ impl Precondition {
     }
 
     /// Test against what is actually on disk.
-    fn check(&self, existing: Option<&std::fs::Metadata>) -> Result<(), FileError> {
+    ///
+    /// `granularity` is the filesystem's, because a tag it cannot promise to
+    /// change with the content must not satisfy an `If-Match` — the caller
+    /// would be replacing or deleting something other than what it read.
+    fn check(
+        &self,
+        existing: Option<&std::fs::Metadata>,
+        granularity: Granularity,
+    ) -> Result<(), FileError> {
         match (self, existing) {
             (Self::MustNotExist, None) => Ok(()),
             (Self::MustNotExist, Some(_)) => Err(FileError::PreconditionFailed(
@@ -927,7 +979,7 @@ impl Precondition {
                 "a folder has no version to match; send If-Match: *".into(),
             )),
             (Self::Exactly(want), Some(meta)) => {
-                if etag_of(meta) == *want {
+                if validator_of(meta, granularity).strongly_matches(want) {
                     Ok(())
                 } else {
                     Err(FileError::PreconditionFailed(
@@ -989,7 +1041,11 @@ fn open_for_read(
 
 /// Headers every download carries. See the module comment: all three of these
 /// are why an uploaded `.html` cannot run as this origin.
-fn download_headers(name: &str, etag: &str, content_range: Option<String>) -> HeaderMap {
+fn download_headers(
+    name: &str,
+    validator: &crate::files::Validator,
+    content_range: Option<String>,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -1009,7 +1065,7 @@ fn download_headers(name: &str, etag: &str, content_range: Option<String>) -> He
     if let Ok(value) = HeaderValue::try_from(disposition) {
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
-    if let Ok(value) = HeaderValue::try_from(quote(etag)) {
+    if let Ok(value) = HeaderValue::try_from(validator.header()) {
         headers.insert(header::ETAG, value);
     }
     if let Some(range) = content_range
@@ -1084,6 +1140,7 @@ fn prepare_write(
     precondition: Precondition,
     declared: Option<u64>,
     settings: &shepherd_config::FileManagerConfig,
+    floor_applies: bool,
 ) -> Result<WritePlan, FileError> {
     if !located.root.writable {
         return Err(FileError::Forbidden("that place is read-only".into()));
@@ -1119,7 +1176,7 @@ fn prepare_write(
             ));
         }
     }
-    precondition.check(existing.as_ref())?;
+    precondition.check(existing.as_ref(), located.root.granularity)?;
 
     if settings.max_upload_bytes > 0
         && let Some(len) = declared
@@ -1132,13 +1189,17 @@ fn prepare_write(
     }
 
     let free = crate::files::roots::space(parent).map(|(_, free)| free);
-    if settings.free_space_floor_bytes > 0
+    let floor = if floor_applies {
+        settings.free_space_floor_bytes
+    } else {
+        0
+    };
+    if floor > 0
         && let (Some(free), Some(len)) = (free, declared)
-        && free.saturating_sub(len) < settings.free_space_floor_bytes
+        && free.saturating_sub(len) < floor
     {
         return Err(FileError::InsufficientStorage(format!(
-            "that would leave less than {} bytes free on this device",
-            settings.free_space_floor_bytes
+            "that would leave less than {floor} bytes free on this device"
         )));
     }
 
@@ -1162,7 +1223,7 @@ fn prepare_write(
         temp,
         created: existing.is_none(),
         max_bytes: settings.max_upload_bytes,
-        floor: settings.free_space_floor_bytes,
+        floor,
         free,
     })
 }
@@ -1181,7 +1242,10 @@ async fn stream_to_temp(body: Body, plan: &WritePlan) -> Result<u64, FileError> 
         .create_new(true)
         .open(&plan.temp)
         .await
-        .map_err(|e| FileError::from_io(&e, "a temporary file"))?;
+        // Named for what the caller asked for, not for the mechanism: the temp
+        // file is this API's business, and a person who typed a name that the
+        // drive will not take should be told about *that* name.
+        .map_err(|e| FileError::from_io(&e, "that file"))?;
     let mut file = tokio::io::BufWriter::new(file);
 
     let mut written: u64 = 0;

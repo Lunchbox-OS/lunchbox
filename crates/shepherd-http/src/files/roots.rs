@@ -47,6 +47,11 @@ pub struct RootInfo {
     /// it once here is why that function does not pay for it per call.
     #[serde(skip)]
     pub canonical: PathBuf,
+    /// How precisely this filesystem records modification times, which decides
+    /// whether its etags can be trusted byte-for-byte. Asked once per root
+    /// rather than once per file.
+    #[serde(skip)]
+    pub granularity: super::Granularity,
 }
 
 /// Build the list. `home` is shepherdd's own home directory.
@@ -101,6 +106,7 @@ fn describe(id: String, label: String, kind: RootKind, path: &Path) -> Option<Ro
         writable: writable(&canonical),
         total_bytes,
         free_bytes,
+        granularity: super::Granularity::of(&canonical),
         canonical,
     })
 }

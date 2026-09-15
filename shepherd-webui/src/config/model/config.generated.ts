@@ -695,12 +695,16 @@ export interface RawFileManagerConfig {
    */
   extra_roots?: RawFileManagerRoot[];
   /**
-   * Refuse an upload that would leave the destination filesystem with less
-   * than this much free space. 0 disables the check.
+   * Refuse an upload that would leave the device's own disk with less than
+   * this much free space. 0 disables the check.
    *
    * Separate from `service.media.free_space_floor_bytes`, which bounds a
    * background prefetch: this one bounds a person, and a kiosk whose disk
    * is full is a session that will not start.
+   *
+   * **Only the device's own disk.** A removable drive filling up costs
+   * nobody an evening, and a floor applied to one would make every drive
+   * smaller than the floor — which is most USB sticks — unwritable.
    */
   free_space_floor_bytes?: number;
   /**
