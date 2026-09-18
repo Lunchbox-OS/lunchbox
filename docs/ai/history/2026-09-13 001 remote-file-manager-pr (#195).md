@@ -151,7 +151,10 @@ and needs nothing.
   destination directory, is `fsync`ed, and is renamed into place, so a child
   mid-book never opens a partial one. That part file is also the resumption
   state, so there is no session table and a restart loses only the chunk in
-  flight. A resumable upload's precondition is checked twice — at the first
+  flight. An abandoned one is collected by a sweep that is one directory deep
+  and opportunistic — it runs where an upload lands and where somebody is
+  listing, never on a timer and never recursively, because a daily scan of a
+  ROM directory is a child's evening rather than housekeeping. A resumable upload's precondition is checked twice — at the first
   chunk and again at the rename — so a file that appeared while a 4 GiB upload
   was in flight is not overwritten by it.
 - **Fill the disk.** `max_upload_bytes` and `free_space_floor_bytes` are checked
@@ -312,9 +315,9 @@ it. The audit and the ten gaps are in
 
 ## Reviewing this
 
-Fourteen commits in four groups: the API and its design (1–3), the UI (4–6),
+Fifteen commits in four groups: the API and its design (1–3), the UI (4–6),
 the resilience work (7–8), and the testing and hardening round that followed
-(9–14). The seams are clean between them. In order:
+(9–15). The seams are clean between them. In order:
 
 1. `feat(http): manage this device's files from the web interface` — the
    routes, the resolver, the root enumeration, the config.
@@ -350,6 +353,11 @@ the resilience work (7–8), and the testing and hardening round that followed
     prompted by a review question about the error path. No injection, but the
     margin was one unasserted header wide; now it is a layer with tests that
     were checked to fail without it.
+15. `fix(files): sweep stale part files where somebody is looking` — also from
+    review. The `.part` sweep only ever ran in a folder an upload was landing
+    in, so bytes abandoned somewhere nobody uploaded again stayed for good, and
+    four places in the docs described it as running on a clock. Listing a
+    folder now sweeps it too.
 
 The reasoning behind each stage, including what was rejected, is in
 `docs/ai/history/2026-09-11 003…005`, `2026-09-13 002` and
