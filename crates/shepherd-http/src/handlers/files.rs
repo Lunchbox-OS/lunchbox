@@ -132,6 +132,24 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     let result = blocking(move || {
         let located = files.locate(&q.root, &q.path)?;
         let dir = located.follow(files.denied())?;
+        // Before the listing, so a part file collected here is not also
+        // reported as being there.
+        //
+        // Reading a directory is the other moment a stale part file can be
+        // noticed — and, unlike an upload, it is the moment somebody is
+        // actually *looking* at the folder the stray bytes are in. The two
+        // upload call sites only ever sweep the directory an upload is landing
+        // in, so a transfer abandoned into a folder nobody uploads to again
+        // would otherwise keep its bytes for good.
+        //
+        // The cost is one extra `getdents` pass. It is not the second walk it
+        // looks like: the sweep `stat`s only the entries whose names match
+        // `.*.part`, which is approximately none of them, while the listing
+        // below `stat`s every single one — so against a ROM directory this is
+        // noise beside the work already being done.
+        if located.root.writable {
+            sweep_stale_parts(&dir);
+        }
         list_dir(
             &located.root,
             &q.path,
@@ -467,7 +485,8 @@ pub async fn upload_offset(State(state): State<AppState>, Query(q): Query<Target
 
 /// `DELETE /api/v1/files/upload` — give up on one, and take its bytes with it.
 ///
-/// The sweep would collect it a day later; a cancel that leaves gigabytes on a
+/// A later upload or listing in that folder would collect it a day on; a
+/// cancel that leaves gigabytes on a
 /// small disk until tomorrow is not a cancel.
 pub async fn abandon_upload(State(state): State<AppState>, Query(q): Query<Target>) -> Response {
     let Some(files) = state.file_manager.clone() else {
@@ -550,8 +569,10 @@ async fn resumable_upload(
         Ok(()) => {}
         Err(e) => {
             // The part file is *kept*: it is the resumption state, and this is
-            // exactly the failure it exists for. `DELETE /files/upload`, or the
-            // sweep a day later, is what removes it.
+            // exactly the failure it exists for. `DELETE /files/upload` is what
+            // removes it deliberately; failing that, the sweep collects it once
+            // it is a day old, the next time anybody uploads into this folder
+            // or lists it.
             return e.into_response();
         }
     }
@@ -1379,7 +1400,19 @@ fn finish_write(plan: WritePlan, size: u64) -> Result<(bool, Validator, u64), Fi
     Ok((plan.created, validator_of(&meta, plan.granularity), size))
 }
 
-/// Remove `.part` files older than a day.
+/// Remove `.part` files in `dir` older than a day.
+///
+/// **One directory, and opportunistic.** Not recursive, and not on a timer:
+/// it runs where an upload is landing and where somebody is looking, which
+/// between them cover every folder anybody has reason to care about. A
+/// daemon-wide daily walk was the alternative and is not worth it — every root
+/// includes directories with tens of thousands of files in them, and a scan of
+/// those is the child's evening rather than a housekeeping task.
+///
+/// The consequence, stated so nobody has to rediscover it: a transfer
+/// abandoned into a folder that is never uploaded to or opened again keeps its
+/// part file. It is dotted, so it is reported as a hidden entry rather than
+/// concealed, and a person who turns hidden files on can delete it themselves.
 ///
 /// An upload whose connection dropped leaves one behind — the handler removes
 /// what it knows about, but a daemon that was killed mid-upload knows nothing.

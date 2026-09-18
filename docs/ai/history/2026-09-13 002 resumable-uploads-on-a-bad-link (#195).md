@@ -27,7 +27,8 @@ contradicted the guess.
   and the handler's error path unlinks it. (A first, sloppier test suggested a
   60 MB leak; the kill had missed and the upload had actually completed. The
   24h sweep remains the backstop for the case the error path cannot cover — a
-  *daemon* killed mid-write.)
+  *daemon* killed mid-write. It is opportunistic rather than timed: see the
+  correction in `2026-09-18 001`.)
 - **Retrying is safe by construction.** `If-None-Match: *` means an upload
   retried after an ambiguous failure cannot silently clobber.
 - **Browsing survives drops**: listings are React Query queries, which retry
@@ -124,7 +125,9 @@ and re-sending gigabytes will not change that — so only `500`, `502`, `503` an
   System Access API, which is Chromium-only.
 - **No server-side inactivity timeout.** The client's watchdog covers the case
   that matters (a person watching a frozen bar); a stalled connection the
-  client has forgotten about still holds a part file until the sweep.
+  client has forgotten about still holds a part file until the sweep reaches
+  that folder — which happens when somebody uploads into it or opens it, not on
+  a clock. See `2026-09-18 001`.
 - **Downloads resume only as well as the browser does.** The cross-origin path
   (`apiBase` pointing at another device) still buffers to a blob with no
   resumption — it is the path that needs it least, and fixing it means

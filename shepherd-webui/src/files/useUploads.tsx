@@ -370,9 +370,10 @@ export function UploadsProvider({ children }: { children: React.ReactNode }) {
       const waiting = queue.current.get(id);
       queue.current.delete(id);
       update(id, { status: "cancelled" });
-      // And the bytes the device is holding go too. The sweep would collect
-      // them a day later; a cancel that leaves gigabytes on a small disk until
-      // tomorrow is not a cancel.
+      // And the bytes the device is holding go too. The device's sweep might
+      // collect them eventually -- it runs where an upload lands and where
+      // somebody is looking, not on a clock -- but a cancel that leaves
+      // gigabytes on a small disk until then is not a cancel.
       setTransfers((list) => {
         const transfer = waiting?.transfer ?? list.find((t) => t.id === id);
         if (transfer && transfer.total > CHUNK_BYTES) {

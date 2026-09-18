@@ -375,7 +375,11 @@ And three limits left in the resilience work on purpose:
   session without the Chromium-only File System Access API.
 - **No server-side inactivity timeout.** The client's watchdog covers the case
   a person is watching; a stalled connection the client has forgotten holds its
-  part file until the 24h sweep.
+  part file until the sweep reaches that folder. The sweep is one directory
+  deep and opportunistic — it runs where an upload lands and where somebody is
+  looking, not on a clock — so a folder that is never uploaded to or opened
+  again keeps its stray bytes. They are listed as a hidden entry, so a person
+  can delete them.
 - **Cross-origin downloads still buffer to a blob**, so they neither resume nor
   stream. That is the `apiBase`-points-elsewhere path, which needs it least.
 - **`RENAME_NOREPLACE` has no equivalent on vfat**, so two simultaneous

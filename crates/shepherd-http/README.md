@@ -253,8 +253,8 @@ If-None-Match: *
   behind, and resuming from the chunk boundary would re-send bytes the device
   already has.
 - **`DELETE /files/upload`** gives up on one and removes the part file. The
-  sweep would collect it a day later; a cancel that leaves gigabytes on a small
-  disk until tomorrow is not a cancel.
+  sweep might collect it eventually; a cancel that leaves gigabytes on a small
+  disk until somebody happens to open that folder is not a cancel.
 - **The precondition is evaluated twice**: at the first chunk, so "create, do
   not replace" costs nothing to refuse, and again at the rename, so a file that
   appeared while the upload was in flight is not silently overwritten by it.
@@ -356,7 +356,14 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
   device with no shell is one of the better things this buys.
 - **Half-write a file.** An upload streams to a dotted `.part` file in the
   destination directory, is `fsync`ed, and is renamed into place, so a child
-  mid-book never opens a partial one.
+  mid-book never opens a partial one. What is left of an abandoned one is
+  collected by a sweep that is **one directory deep and opportunistic** — it
+  runs where an upload lands and where somebody is listing, never on a timer
+  and never recursively, because every root here holds directories with tens of
+  thousands of files in them and a daily scan of those is a child's evening
+  rather than housekeeping. A folder that is never uploaded to or opened again
+  keeps its stray part file; it is dotted, so a listing reports it as a hidden
+  entry a person can delete rather than hiding it outright.
 - **Let two creators both win.** `If-None-Match: *` is checked before the body
   arrives, which is long enough for another administrator — or this caller's
   own retry — to take the name. The promise is kept at the rename instead, with
@@ -530,7 +537,8 @@ the file manager is least likely to be pointed at.
 `tests/files_on_disk.rs` covers what a protocol test cannot see: a filename
 that is not UTF-8, a fifo (where a route that opened before it asked questions
 would block a worker thread forever), a recursive delete with a symlink out of
-the root inside it, the `.part` sweep, two writers at once, a reader while a
+the root inside it, the `.part` sweep from both the upload and the listing
+side, two writers at once, a reader while a
 writer renames, and a 24 MiB body in one piece and in chunks. The concurrency
 tests assert invariants that hold in every interleaving, so they are
 deterministic even though what happens is not.

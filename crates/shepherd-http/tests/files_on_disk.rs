@@ -271,6 +271,100 @@ async fn the_sweep_takes_a_days_old_part_and_nothing_else() {
     assert!(plain.exists(), "the sweep took a file a person had named");
 }
 
+/// The other half of the sweep, and the reason it exists.
+///
+/// The upload call sites only ever reach the directory an upload is landing
+/// in, so a transfer abandoned into a folder nobody uploads to again would
+/// keep its bytes for good. Opening the folder is the other moment anybody has
+/// a reason to care — and it is the moment somebody is actually looking at it.
+#[tokio::test]
+async fn opening_a_folder_collects_what_was_abandoned_in_it() {
+    let (dir, app) = fixture();
+    let books = dir.path().join("Books");
+    std::fs::create_dir_all(books.join("2019")).unwrap();
+
+    // A film somebody gave up on, in a folder they never uploaded to again.
+    let abandoned = books.join("2019/.film.bin.u-abc12345.part");
+    std::fs::write(&abandoned, vec![b'x'; 4096]).unwrap();
+    let fresh = books.join("2019/.other.bin.u-def67890.part");
+    std::fs::write(&fresh, b"still going").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+    filetime::set_file_mtime(&abandoned, filetime::FileTime::from_system_time(old)).unwrap();
+
+    // Listing a *different* folder does not reach it: the sweep is one
+    // directory deep, deliberately.
+    let (status, _, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(abandoned.exists(), "the sweep descended into a subfolder");
+
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books/2019")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !abandoned.exists(),
+        "a day-old part survived its folder being opened"
+    );
+    // Swept before the listing was built, so it is not reported as being
+    // somewhere it no longer is.
+    assert!(
+        row(&body, ".film.bin.u-abc12345.part").is_none(),
+        "the listing named a file it had just deleted"
+    );
+
+    // An upload still in flight is not rubbish, however slow the link is — and
+    // it is *listed*, as a hidden entry, so a person can see and remove it
+    // themselves rather than wondering where their space went.
+    assert!(fresh.exists(), "an upload in progress was swept away");
+    let row = row(&body, ".other.bin.u-def67890.part").expect("the live part was hidden entirely");
+    assert_eq!(row["hidden"], true);
+}
+
+#[tokio::test]
+async fn a_read_only_place_is_listed_without_trying_to_tidy_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("library");
+    std::fs::create_dir_all(&outside).unwrap();
+    let stale = outside.join(".film.bin.u-abc12345.part");
+    std::fs::write(&stale, b"x").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+    filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(old)).unwrap();
+
+    let mut perms = std::fs::metadata(&outside).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+    std::fs::set_permissions(&outside, perms).unwrap();
+
+    let state = AppState {
+        svc: make_service(),
+        file_manager: Some(Arc::new(FileService::fixed(
+            dir.path().to_path_buf(),
+            FileManagerConfig {
+                external_media: false,
+                extra_roots: vec![shepherd_config::FileManagerRoot {
+                    label: "Library".into(),
+                    path: outside.clone(),
+                }],
+                ..Default::default()
+            },
+        ))),
+    };
+    let app = handlers::router(
+        state,
+        shepherd_http::AuthSources::without_credential_store(),
+    );
+
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=extra-0&path=")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["writable"], false);
+    // Nothing to delete here and no permission to do it with, so the sweep is
+    // not attempted at all — the file stays, and is reported honestly.
+    assert!(stale.exists());
+    assert!(row(&body, ".film.bin.u-abc12345.part").is_some());
+
+    // Leave it removable by the tempdir's own cleanup.
+    let mut perms = std::fs::metadata(&outside).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&outside, perms).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Two writers
 // ---------------------------------------------------------------------------
