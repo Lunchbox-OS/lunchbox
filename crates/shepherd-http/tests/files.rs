@@ -1273,6 +1273,92 @@ async fn a_device_with_it_switched_off_has_no_routes() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// These routes carry more caller-chosen text than any other part of the API —
+/// a filename in a listing, the path an upload echoes back — so the two headers
+/// that decide how a browser treats a body are worth pinning here as well as in
+/// `tests/api.rs`.
+#[tokio::test]
+async fn a_file_routes_answers_are_json_a_browser_will_not_sniff() {
+    let (dir, app) = fixture();
+    std::fs::write(dir.path().join("Books/blocker"), b"x").unwrap();
+
+    let cases: Vec<(&str, Request<Body>)> = vec![
+        ("a listing", get("/api/v1/files/list?root=home&path=Books")),
+        (
+            "a refusal",
+            get("/api/v1/files/list?root=home&path=../escaped"),
+        ),
+        (
+            "a conflict",
+            post(
+                "/api/v1/files/dir",
+                serde_json::json!({ "root": "home", "path": "Books/blocker/deeper" }),
+            ),
+        ),
+        (
+            "an upload",
+            put_with(
+                "/api/v1/files/content?root=home&path=Books/new.epub",
+                "chapter one",
+                header::IF_NONE_MATCH,
+                "*",
+            ),
+        ),
+    ];
+
+    for (name, req) in cases {
+        let response = app.clone().oneshot(req).await.unwrap();
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.split(';').next().unwrap_or(v).trim().to_string()),
+            Some("application/json".to_string()),
+            "{name} did not answer JSON",
+        );
+        assert_eq!(
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "{name} would let a browser guess at its body",
+        );
+    }
+}
+
+/// A `409` from `mkdir` used to quote the path component back at the caller.
+///
+/// It told them nothing they had not just sent, and an error message is a poor
+/// place to reflect bytes somebody else chose — `serde_json` escapes quotes and
+/// control characters but not `<`, `>` or `&`, so the content type was the only
+/// thing between a filename and a browser reading it as markup.
+#[tokio::test]
+async fn a_refusal_does_not_read_a_filename_back_to_the_caller() {
+    let (dir, app) = fixture();
+    // A name an activity at the kiosk uid could have written, or an
+    // administrator could have uploaded.
+    let payload = "<img src=x onerror=alert(1)>";
+    std::fs::write(dir.path().join("Books").join(payload), b"x").unwrap();
+
+    let (status, body, _) = send(
+        &app,
+        post(
+            "/api/v1/files/dir",
+            serde_json::json!({ "root": "home", "path": format!("Books/{payload}/deeper") }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        !message.contains('<') && !message.contains(payload),
+        "the refusal quoted the caller back at themselves: {message:?}"
+    );
+    // Still says what went wrong, which is the whole job of the message.
+    assert!(message.contains("runs through a file"), "{message:?}");
+}
+
 /// Nothing about this feature reaches the RPC surface, and that is a decision
 /// rather than an omission: `#[management_rpc]` carries every async trait
 /// method to BLE, whose frames cap at 16 KiB.

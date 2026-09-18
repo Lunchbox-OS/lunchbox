@@ -1435,9 +1435,14 @@ fn make_dirs(root: &Path, rel: &str, denied: &[PathBuf]) -> Result<bool, FileErr
                 }
             }
             Ok(_) => {
-                return Err(FileError::Conflict(format!(
-                    "'{part}' is a file, so a folder cannot go there"
-                )));
+                // Deliberately not naming the component. The caller sent the
+                // path and already knows what is in it, so echoing one of its
+                // pieces back buys nothing — and an error message is a poor
+                // place to reflect bytes somebody else chose, whatever the
+                // content type says.
+                return Err(FileError::Conflict(
+                    "that path runs through a file, so a folder cannot go there".into(),
+                ));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 std::fs::create_dir(&candidate)

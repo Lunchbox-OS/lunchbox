@@ -310,6 +310,24 @@ ceiling), `EROFS` and `ENAMETOOLONG` map to `400`, `413`, `403` and `400`. They
 were all `500 internal`, which tells a person their device is broken rather
 than to rename the file.
 
+### Nothing under `/api/v1` may be sniffed
+
+Every response under `/api/v1` carries `X-Content-Type-Options: nosniff`, from
+one layer on the router rather than a line in each handler — errors and the
+unknown-path fallback included.
+
+It is defence in depth: these bodies are `application/json`, which no current
+browser renders as HTML. But several of them carry text *the caller chose* — a
+filename in a listing, the path an upload echoes back — and `serde_json` escapes
+quotes and control characters, not `<`, `>` or `&`. That leaves the content type
+as the only thing between a filename and a browser reading it as markup, and
+this router has already had that bug once: unknown `/api/v1` paths used to reach
+the SPA fallback and answer `200 text/html`. A layer, because the failure mode
+is a route that forgets.
+
+For the same reason an error message never quotes a path component back at the
+caller. It tells them nothing they did not just send.
+
 ### Downloads are always attachments
 
 `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and a

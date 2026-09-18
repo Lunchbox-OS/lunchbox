@@ -26,7 +26,9 @@ pub mod rpc;
 pub mod sse;
 
 use axum::{
-    Router, middleware,
+    Router,
+    http::{HeaderValue, header},
+    middleware,
     routing::{delete, get, post},
 };
 
@@ -122,6 +124,30 @@ pub fn router(state: AppState, auth_sources: AuthSources) -> Router {
             })),
         )
     });
+
+    // `nosniff` on everything under `/api/v1`, errors and the fallback
+    // included.
+    //
+    // These responses are `application/json`, which no current browser renders
+    // as HTML — but that one header is the *whole* reason, and several of
+    // these bodies carry text the caller chose: a filename in a listing, the
+    // path echoed back by an upload. A layer rather than a line in each
+    // handler because the failure mode is a route that forgets, and this
+    // router has had exactly that bug: unknown `/api/v1` paths used to reach
+    // the SPA fallback and answer `200 text/html`.
+    //
+    // `insert` rather than `append`, so the download route setting its own
+    // copy stays idempotent.
+    let api = api.layer(middleware::from_fn(
+        |req: axum::extract::Request, next: middleware::Next| async move {
+            let mut response = next.run(req).await;
+            response.headers_mut().insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            response
+        },
+    ));
 
     Router::new()
         .nest("/api/v1", api)

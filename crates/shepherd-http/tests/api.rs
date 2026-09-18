@@ -1455,3 +1455,60 @@ fn body_error(body: &str) -> String {
         .unwrap()
         .to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Response hardening
+// ---------------------------------------------------------------------------
+
+/// Several API bodies carry text the caller chose — a filename in a listing,
+/// the path echoed back by an upload — and the only thing that keeps a browser
+/// from reading one as markup is the content type. It is worth an assertion,
+/// because it is one header and it has been wrong before: unknown `/api/v1`
+/// paths used to reach the SPA fallback and answer `200 text/html`, which an
+/// API client parses as JSON and fails on somewhere else entirely.
+#[tokio::test]
+async fn every_api_answer_is_json_a_browser_will_not_sniff() {
+    let cfg = temp_config();
+    let app = make_app(Some("secret"), cfg.path().to_path_buf());
+
+    let cases: Vec<(&str, Request<Body>)> = vec![
+        // The fallback, which is a different code path from every route.
+        (
+            "unknown path",
+            Request::builder()
+                .uri("/api/v1/no/such/endpoint")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+        // An error raised by the auth layer, before any handler runs.
+        ("unauthorised", get_config()),
+        // And an ordinary answer, so the rule is not only about errors.
+        (
+            "open route",
+            Request::builder()
+                .uri("/api/v1/auth/status")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    ];
+
+    for (name, req) in cases {
+        let response = app.clone().oneshot(req).await.unwrap();
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.split(';').next().unwrap_or(v).trim().to_string()),
+            Some("application/json".to_string()),
+            "{name} did not answer JSON",
+        );
+        assert_eq!(
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "{name} would let a browser guess at its body",
+        );
+    }
+}
