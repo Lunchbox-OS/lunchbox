@@ -92,6 +92,19 @@ and needs nothing.
   desynchronises) and `~/.ssh` are refused for reading and writing alike.
   `~/.local/state/shepherdd` is deliberately *not*: pulling `shepherdd.log` off
   a device with no shell is one of the better things this buys.
+- **Let a browser guess what an API answer is.** Every response under
+  `/api/v1` carries `X-Content-Type-Options: nosniff`, from one layer rather
+  than a line per handler — errors and the unknown-path fallback included. The
+  bodies are `application/json`, which no browser renders as HTML, but several
+  of them carry text the *caller* chose (a filename in a listing, the path an
+  upload echoes back) and `serde_json` escapes quotes and control characters,
+  not `<`, `>` or `&`. That left the content type as the only thing between a
+  filename and a browser reading it as markup — and this router has shipped the
+  matching bug once already, when unknown `/api/v1` paths reached the SPA
+  fallback and answered `200 text/html`. Error messages also no longer quote a
+  path component back at the caller, which told them nothing they had not just
+  sent. A filename carrying a quote and a CRLF reaches `Content-Disposition`
+  percent-encoded, so there is no header injection either.
 - **Run an uploaded file as this origin.** Downloads are always
   `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff` + a
   fixed `application/octet-stream`. An uploaded `.html` served inline would run
@@ -299,9 +312,9 @@ it. The audit and the ten gaps are in
 
 ## Reviewing this
 
-Thirteen commits in four groups: the API and its design (1–3), the UI (4–6),
-the resilience work (7–8), and the testing round that followed (9–13). The
-seams are clean between them. In order:
+Fourteen commits in four groups: the API and its design (1–3), the UI (4–6),
+the resilience work (7–8), and the testing and hardening round that followed
+(9–14). The seams are clean between them. In order:
 
 1. `feat(http): manage this device's files from the web interface` — the
    routes, the resolver, the root enumeration, the config.
@@ -333,6 +346,10 @@ seams are clean between them. In order:
 13. `test(webui): pin the file manager's transport` and
     `test(e2e): the file manager against a running daemon` — the two ends of
     the wire. The second found the data-directory gap.
+14. `fix(http): nosniff on every API answer, and stop quoting the caller` —
+    prompted by a review question about the error path. No injection, but the
+    margin was one unasserted header wide; now it is a layer with tests that
+    were checked to fail without it.
 
 The reasoning behind each stage, including what was rejected, is in
 `docs/ai/history/2026-09-11 003…005`, `2026-09-13 002` and
