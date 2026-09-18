@@ -1277,19 +1277,33 @@ async fn a_device_with_it_switched_off_has_no_routes() {
 /// a filename in a listing, the path an upload echoes back — so the two headers
 /// that decide how a browser treats a body are worth pinning here as well as in
 /// `tests/api.rs`.
+///
+/// Two content types, deliberately, and the download is the interesting one:
+/// everything that answers *about* files is `application/json`, and the one
+/// route that answers *with* a file is a fixed `application/octet-stream`,
+/// never a type derived from the name. It is listed here beside the others so
+/// that the rule this pins is the true one — **never `text/html`, always
+/// `nosniff`** — rather than "the file routes answer JSON", which is false of
+/// the most important of them.
 #[tokio::test]
-async fn a_file_routes_answers_are_json_a_browser_will_not_sniff() {
+async fn no_file_route_answers_html_and_none_may_be_sniffed() {
     let (dir, app) = fixture();
     std::fs::write(dir.path().join("Books/blocker"), b"x").unwrap();
 
-    let cases: Vec<(&str, Request<Body>)> = vec![
-        ("a listing", get("/api/v1/files/list?root=home&path=Books")),
+    let cases: Vec<(&str, &str, Request<Body>)> = vec![
+        (
+            "a listing",
+            "application/json",
+            get("/api/v1/files/list?root=home&path=Books"),
+        ),
         (
             "a refusal",
+            "application/json",
             get("/api/v1/files/list?root=home&path=../escaped"),
         ),
         (
             "a conflict",
+            "application/json",
             post(
                 "/api/v1/files/dir",
                 serde_json::json!({ "root": "home", "path": "Books/blocker/deeper" }),
@@ -1297,6 +1311,7 @@ async fn a_file_routes_answers_are_json_a_browser_will_not_sniff() {
         ),
         (
             "an upload",
+            "application/json",
             put_with(
                 "/api/v1/files/content?root=home&path=Books/new.epub",
                 "chapter one",
@@ -1304,19 +1319,36 @@ async fn a_file_routes_answers_are_json_a_browser_will_not_sniff() {
                 "*",
             ),
         ),
+        // The file itself. Fixed, not guessed from the extension — and the
+        // reason the rule above cannot be "everything is JSON".
+        (
+            "a download",
+            "application/octet-stream",
+            get("/api/v1/files/content?root=home&path=Books/hobbit.epub"),
+        ),
+        // A range and a not-modified take the same path and are asserted to,
+        // because they build their headers through the same function and a
+        // change that missed one would be silent.
+        (
+            "a ranged download",
+            "application/octet-stream",
+            Request::builder()
+                .uri("/api/v1/files/content?root=home&path=Books/hobbit.epub")
+                .header(header::RANGE, "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        ),
     ];
 
-    for (name, req) in cases {
+    for (name, want, req) in cases {
         let response = app.clone().oneshot(req).await.unwrap();
         let headers = response.headers().clone();
-        assert_eq!(
-            headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.split(';').next().unwrap_or(v).trim().to_string()),
-            Some("application/json".to_string()),
-            "{name} did not answer JSON",
-        );
+        let got = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap_or(v).trim().to_string());
+        assert_eq!(got.as_deref(), Some(want), "{name} answered the wrong type");
+        assert_ne!(got.as_deref(), Some("text/html"), "{name} answered markup",);
         assert_eq!(
             headers
                 .get(header::X_CONTENT_TYPE_OPTIONS)
@@ -1325,6 +1357,32 @@ async fn a_file_routes_answers_are_json_a_browser_will_not_sniff() {
             "{name} would let a browser guess at its body",
         );
     }
+}
+
+/// A `304` carries no body, so it is checked on its own — it still has to say
+/// what it would have been, and still has to be unsniffable.
+#[tokio::test]
+async fn a_not_modified_download_keeps_its_type_and_its_guard() {
+    let (_dir, app) = fixture();
+    let (_, _, headers) = body_of(
+        &app,
+        get("/api/v1/files/content?root=home&path=Books/hobbit.epub"),
+    )
+    .await;
+    let etag = headers[header::ETAG].to_str().unwrap().to_string();
+
+    let (status, _, headers) = body_of(
+        &app,
+        Request::builder()
+            .uri("/api/v1/files/content?root=home&path=Books/hobbit.epub")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/octet-stream");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
 }
 
 /// A `409` from `mkdir` used to quote the path component back at the caller.

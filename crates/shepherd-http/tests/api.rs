@@ -1466,8 +1466,13 @@ fn body_error(body: &str) -> String {
 /// because it is one header and it has been wrong before: unknown `/api/v1`
 /// paths used to reach the SPA fallback and answer `200 text/html`, which an
 /// API client parses as JSON and fails on somewhere else entirely.
+///
+/// The rule is *not* "everything is JSON" — `GET /files/content` serves
+/// `application/octet-stream` on purpose, and `tests/files.rs` covers both
+/// halves together. The rule is that a response is one of those two types and
+/// is never `text/html`, and that it always says so unsniffably.
 #[tokio::test]
-async fn every_api_answer_is_json_a_browser_will_not_sniff() {
+async fn no_api_answer_is_html_and_none_may_be_sniffed() {
     let cfg = temp_config();
     let app = make_app(Some("secret"), cfg.path().to_path_buf());
 

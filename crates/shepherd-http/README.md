@@ -316,14 +316,23 @@ Every response under `/api/v1` carries `X-Content-Type-Options: nosniff`, from
 one layer on the router rather than a line in each handler — errors and the
 unknown-path fallback included.
 
-It is defence in depth: these bodies are `application/json`, which no current
-browser renders as HTML. But several of them carry text *the caller chose* — a
-filename in a listing, the path an upload echoes back — and `serde_json` escapes
-quotes and control characters, not `<`, `>` or `&`. That leaves the content type
-as the only thing between a filename and a browser reading it as markup, and
-this router has already had that bug once: unknown `/api/v1` paths used to reach
-the SPA fallback and answer `200 text/html`. A layer, because the failure mode
-is a route that forgets.
+There are exactly two content types under `/api/v1`, and the rule is that a
+response is one of them and **never `text/html`**:
+
+| | |
+| --- | --- |
+| Everything that answers *about* files, and every error | `application/json` |
+| `GET /files/content`, the one route that answers *with* a file | `application/octet-stream`, fixed |
+
+Neither is rendered as HTML by any current browser, which is the whole defence —
+and it is thinner than it looks, because several of those bodies carry text *the
+caller chose* (a filename in a listing, the path an upload echoes back) and
+`serde_json` escapes quotes and control characters, not `<`, `>` or `&`. That
+leaves the content type as the only thing between a filename and a browser
+reading it as markup, and this router has already had that bug once: unknown
+`/api/v1` paths used to reach the SPA fallback and answer `200 text/html`. Hence
+a layer rather than a line per handler — the failure mode is a route that
+forgets.
 
 For the same reason an error message never quotes a path component back at the
 caller. It tells them nothing they did not just send.
