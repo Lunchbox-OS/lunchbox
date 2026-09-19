@@ -85,6 +85,18 @@ pub fn data_dir_without_env() -> PathBuf {
     PathBuf::from("/tmp").join(APP_DIR).join("data")
 }
 
+/// The home directory of the user this process runs as.
+///
+/// `$HOME`, and nothing clever if it is missing: every path shepherdd cares
+/// about is derived from it, and a daemon whose environment has no `HOME` is
+/// one whose session never started properly. Callers that can carry on without
+/// one (the file manager, issue #195) say so by handling the `None`.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
 /// Get the default log directory.
 ///
 /// Order of precedence:

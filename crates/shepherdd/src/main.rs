@@ -280,6 +280,11 @@ struct Service {
     /// Where the BLE admin record, unbond queue and reset sentinel live.
     /// Always present, unlike `policy_files` — see [`StateParts`].
     protected_files: Arc<dyn ProtectedFiles>,
+    /// The data directory this process actually opened, after `-d` and
+    /// `service.data_dir` have had their say. Carried so the file manager can
+    /// refuse it by the path it really is rather than by the one the
+    /// environment suggests (issue #195).
+    data_dir: PathBuf,
     /// The connection the custodian watches to know this daemon is still
     /// supervising the session (issue #172).
     ///
@@ -1095,6 +1100,7 @@ impl Service {
             state_protection,
             policy_files,
             protected_files,
+            data_dir,
             supervision,
             session_guard,
         })
@@ -1555,14 +1561,28 @@ impl Service {
         // Start management transports (HTTP and/or BLE). Both speak the
         // same shepherd_management::ManagementService, so the service is
         // constructed once and shared.
-        let (management_api_config, ble_management_config, auto_brightness_policy) = {
+        let (
+            management_api_config,
+            ble_management_config,
+            auto_brightness_policy,
+            file_manager_config,
+        ) = {
             let eng = engine.lock().await;
             (
                 eng.policy().service.management_api.clone(),
                 eng.policy().service.ble_management.clone(),
                 eng.policy().auto_brightness.clone(),
+                eng.policy().service.file_manager.clone(),
             )
         };
+
+        // The file manager's live settings (issue #195). A channel rather than
+        // a value handed over once: `extra_roots` and the upload caps are
+        // ordinary policy, so a parent who changes them in the web config
+        // editor should not have to end the session to see it take effect.
+        // Published here at boot and again from `handle_config_reload`.
+        let (file_manager_tx, file_manager_rx) =
+            tokio::sync::watch::channel(Arc::new(file_manager_config.clone()));
 
         // The web listener's real state (issue #182), created before the
         // service that reads it and before the server that writes it. A
@@ -1820,7 +1840,34 @@ impl Service {
         let http_handle = match management_api_config.zip(web_auth.clone()) {
             Some((api_cfg, web)) => {
                 announce_web_auth_state(&web, &api_cfg);
-                let http_state = HttpAppState { svc: svc.clone() };
+                // `enabled = false` is `None`, and `handlers::router` then
+                // does not mount the routes at all — a device that does not
+                // want the surface does not have one to refuse people from.
+                let file_manager = file_manager_config
+                    .enabled
+                    .then(shepherd_util::home_dir)
+                    .flatten()
+                    .map(|home| {
+                        // The data directory this process actually opened,
+                        // rather than the one the environment suggests: `-d`
+                        // and `service.data_dir` both move it, and a database
+                        // inside the home that the file manager would hand
+                        // over is not a thing to leave to a guess.
+                        Arc::new(
+                            shepherd_http::FileService::new(home, file_manager_rx.clone())
+                                .also_deny(self.data_dir.clone()),
+                        )
+                    });
+                if file_manager_config.enabled && file_manager.is_none() {
+                    warn!(
+                        "Remote file management is configured on, but this session has no HOME \
+                         to offer; the file routes are not being served"
+                    );
+                }
+                let http_state = HttpAppState {
+                    svc: svc.clone(),
+                    file_manager,
+                };
                 let http_server = HttpServer::new(http_state, api_cfg)
                     .with_admin_authority(admin_authority)
                     .with_listener_status(web_listener.clone())
@@ -2153,6 +2200,7 @@ impl Service {
                         &event_tx,
                         &config_path,
                         policy_files.as_ref(),
+                        &file_manager_tx,
                     )
                     .await;
                     // Re-probe against the new policy. Without this an admin who
@@ -2264,6 +2312,7 @@ impl Service {
         event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
         policy_files: Option<&Arc<dyn ProtectedFiles>>,
+        file_manager: &tokio::sync::watch::Sender<Arc<shepherd_config::FileManagerConfig>>,
     ) {
         // Read from wherever the policy was read at boot. Reloading from a
         // different source than the one that started the session would mean a
@@ -2311,6 +2360,17 @@ impl Service {
                 );
                 let state = engine.lock().await.get_state();
                 Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
+                // The file manager reads its roots and its caps from here, so
+                // a reload that changed them reaches the web interface without
+                // a restart. `enabled` is deliberately *not* re-read: the
+                // routes were mounted (or not) when the router was built, and
+                // a surface that appeared mid-session would be one nobody
+                // watching the device had asked for.
+                let settings = {
+                    let eng = engine.lock().await;
+                    eng.policy().service.file_manager.clone()
+                };
+                let _ = file_manager.send(Arc::new(settings));
             }
             Err(e) => {
                 warn!(error = %e, "Failed to reload config, keeping existing policy");

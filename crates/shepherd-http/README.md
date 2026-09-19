@@ -15,6 +15,7 @@ The surface is three endpoints plus the login flow:
 | `POST` | `/api/v1/rpc` | JSON-RPC dispatch into every `ManagementService` method. |
 | `GET`  | `/api/v1/events` | Server-Sent Events stream of every `shepherd_api::Event`. |
 | `GET`/`PUT` | `/api/v1/config` | The policy file itself. See [The policy file](#the-policy-file). |
+| — | `/api/v1/files/*` | Remote file management. See [Files](#files). |
 | — | `/api/v1/auth/*` | Signing in. See [Auth](#auth). |
 
 Authentication is a session, not a shared secret (issue #156). See below.
@@ -132,6 +133,296 @@ check. A policy shepherdd cannot parse is survivable on *reload* and fatal at
 **The write does not reload.** It lands through a rename, which the state
 custodian's watch — or shepherdd's own, on a device without one — turns into a
 reload within a second, exactly as it does for the other two writers.
+
+## Files
+
+Remote file management (issue #195), rooted at the kiosk user's home. It exists
+because a hardened account denies SSH and keeps its home at mode 0700, so
+`scp`, `rsync` and every SFTP client are shut out of exactly the directory a
+book, a ROM or a video has to go into — while `shepherdd` already runs *as*
+that user.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/files/roots` | The places a caller may browse, plus the upload limits |
+| `GET` | `/files/list` | One directory |
+| `GET` | `/files/content` | Download (`HEAD`, `Range` and `If-Range` too) |
+| `PUT` | `/files/content` | Upload or replace; in pieces with `Content-Range` |
+| `GET`/`DELETE` | `/files/upload` | How much of an interrupted upload survives, and giving up on one |
+| `POST` | `/files/dir` | Create a directory |
+| `POST` | `/files/move` | Rename or move, within one root |
+| `DELETE` | `/files/entry` | Delete a file or directory |
+
+Mounted only where `[service.file_manager] enabled` is true; a device with it
+off answers `404 not_found` from the `/api/v1` fallback rather than 403, so the
+surface is absent rather than merely shut.
+
+**There is no runtime toggle**, deliberately. A caller who reaches these routes
+can already `PUT /api/v1/config` with `kind = { type = "process", command = … }`,
+which runs anything as this user at the next launch — withholding a file write
+from that same credential would protect nothing. This is the argument
+`shepherd-webui/src/App.tsx` already records for the config editor.
+
+**Nothing is on `ManagementService`.** Like the policy routes, and for the same
+reason: `#[management_rpc]` carries every async trait method to BLE, whose
+frames cap at 16 KiB. The companion gets nothing from this feature and needs
+nothing — it cannot carry a file.
+
+### `root` + `path`, never an absolute path
+
+Every route names a **root** from `GET /files/roots` and a path inside it:
+
+```sh
+curl -b cookies 'https://device:8080/api/v1/files/list?root=home&path=Books'
+```
+
+A closed set the server enumerates cannot express a location the server did not
+offer, which is the `ProtectedFile`-is-an-enum argument applied as far as an
+API whose whole job is naming files can apply it. Both travel as **query
+parameters**: a wildcard path segment is percent-decoded by the router before
+any check sees it, which is how `%2e%2e%2f` becomes `../` one layer too early.
+
+Roots are re-enumerated per request — the home directory, every removable drive
+mounted under `/media` or `/run/media`, and each
+`[[service.file_manager.extra_roots]]`. A drive is identified by its
+**filesystem UUID** (`ext-<uuid>`), so it keeps the same id when it is
+unplugged and mounted somewhere else, and two drives labelled `UNTITLED` do not
+collide. A root that is gone answers `404`.
+
+### Preconditions are required, on writes *and* deletes
+
+The policy route's rule, applied to files that have more writers than a policy
+does — this API, the activities running at the same uid, and whoever is sitting
+at the device:
+
+| Header | `PUT` | `DELETE` |
+|---|---|---|
+| `If-None-Match: *` | create; `412` if anything is there | not accepted |
+| `If-Match: "<etag>"` | replace exactly that version | delete exactly that version |
+| `If-Match: *` | replace whatever is there | delete whatever is there |
+| *(none)* | `428` | `428` |
+
+### What a listing says beyond the names
+
+Two fields exist because a client has to draw controls *before* anybody clicks
+them, and guessing wrong means a button that 403s:
+
+- **`unusable`** — absent when the entry is fine, and otherwise
+  `symlink_escapes`, `name_not_utf8`, `special_file` or `not_browsable`. A
+  reason rather than a bare flag because they differ in what they still allow:
+  an escaping link can be **deleted** (which is why it is listed at all), while
+  a name that is not valid UTF-8 cannot be addressed from here in any way.
+- **`writable`** — on the listing itself, and on directory rows. The listing's
+  is what delete and rename need, because both are permissions on the *parent*;
+  a directory row's is what an upload into it needs. File rows deliberately
+  carry none: a `writable` there would look like the answer without being it.
+
+The `etag` is `"<size>-<mtime_nanos>"`, opaque and compared only for equality.
+Deliberately not the content hash `PolicyDocument::version_of` uses: a policy is
+tens of kilobytes and worth hashing so a restore-from-backup reads as
+unchanged, while re-hashing a directory of ROMs to draw a list is not the same
+trade.
+
+### Uploads survive a bad link
+
+These devices are often repurposed hardware with the wifi chip they came with,
+so an interrupted transfer is the expected case, not the unlucky one. A whole
+file in one `PUT` still works — `curl`, the e2e harness and anything small use
+it — but an upload may also arrive in pieces:
+
+```
+PUT /files/content?root=home&path=Books/film.mp4&upload=u-9f2a1c04
+Content-Range: bytes 0-8388607/4294967296
+If-None-Match: *
+→ 204, Upload-Offset: 8388608        …and so on, until
+→ 201 + ETag                          the last byte, which publishes it
+```
+
+- **The state is the part file.** There is no session table, nothing to expire,
+  and a daemon restart loses only the chunk that was in flight.
+- **`upload` is a token the client chose**, and it becomes part of a filename,
+  so it is validated like every other caller-supplied name here: 8–64
+  characters of letters, digits, `-` and `_`. The web UI derives it from the
+  file's name, size and modification time, so re-adding the same file resumes
+  what the device already holds instead of starting a second copy.
+- **`GET /files/upload` answers `{"offset": N}`** — `0` for an upload this
+  device has never seen, so starting and resuming ask the same question. A
+  chunk whose `Content-Range` disagrees with `N` is a `409` that says what the
+  device actually holds; the answer is to continue from *there*, not to re-send.
+  That matters because a connection that died mid-chunk left a partial one
+  behind, and resuming from the chunk boundary would re-send bytes the device
+  already has.
+- **`DELETE /files/upload`** gives up on one and removes the part file. The
+  sweep might collect it eventually; a cancel that leaves gigabytes on a small
+  disk until somebody happens to open that folder is not a cancel.
+- **The precondition is evaluated twice**: at the first chunk, so "create, do
+  not replace" costs nothing to refuse, and again at the rename, so a file that
+  appeared while the upload was in flight is not silently overwritten by it.
+- **The caps are judged on the declared total**, not on the chunk, so a file
+  over `max_upload_bytes` is refused before the first byte.
+
+Downloads were already resumable — `Accept-Ranges`, `ETag`, `206` — and now
+validate the resume, which is what makes it *safe*: a browser continuing an
+interrupted download sends the validator it started with, and a file that
+changed in the meantime must not be stitched onto bytes from the previous
+version. Both spellings are honoured, because the two browsers disagree:
+
+| Client | Sends | A stale validator answers |
+|---|---|---|
+| Firefox 155 | `Range` + **`If-Match`** | `412`, and Firefox discards its partial data |
+| Chrome 153 | `Range` + **`If-Range`** | `200` with the whole file, which Chrome restarts into |
+| `curl -C -`, `wget` | `Range` only | `206` — no validator, no check |
+
+Both rows were measured by interrupting a real download in each browser and
+reading what it sent next, not inferred from the specification: `If-Match` was
+the one this route originally missed, and ignoring it meant a resumed download
+could be half one version and half another, reported as a success. See
+`docs/ai/history/2026-09-14 001 browser-download-resume (#195).md`.
+
+### A drive that cannot keep the etag's promise says so
+
+The etag is `size-mtime`, and FAT and exFAT record mtimes at **two-second**
+resolution — so two different files of the same size written in the same tick
+carry the same tag. A resumed download whose file was replaced inside that
+window would otherwise be answered `206` with bytes from the new version at the
+old offset, and the browser would report success.
+
+HTTP already has the word for this. `Granularity::of` asks `statfs` once per
+root; a file younger than one tick on a coarse filesystem is tagged **weakly**
+(`W/"…"`), and the rules that come with that are exactly the ones needed:
+
+- a weak validator may not assemble a range, so `If-Range` restarts the
+  download whole rather than stitching;
+- `If-Match` compares strongly, so a stale resume — or a `DELETE` holding a tag
+  from a moment ago — is `412` rather than an operation on the wrong file;
+- `304` is not answered from one at all.
+
+Once the tick has passed no later write can land on the same second, so the tag
+is strong again and the steady state is unchanged. The one visible cost is a
+`412` on a write or delete issued within two seconds of the upload before it;
+that answer says so in words, because "that file has changed" would be a lie
+about a file nobody touched.
+
+### What a removable drive refuses is the caller's problem, not a fault
+
+`EINVAL` (a name FAT cannot spell), `EFBIG` (past FAT32's 4 GiB per-file
+ceiling), `EROFS` and `ENAMETOOLONG` map to `400`, `413`, `403` and `400`. They
+were all `500 internal`, which tells a person their device is broken rather
+than to rename the file.
+
+### Nothing under `/api/v1` may be sniffed
+
+Every response under `/api/v1` carries `X-Content-Type-Options: nosniff`, from
+one layer on the router rather than a line in each handler — errors and the
+unknown-path fallback included.
+
+There are exactly two content types under `/api/v1`, and the rule is that a
+response is one of them and **never `text/html`**:
+
+| | |
+| --- | --- |
+| Everything that answers *about* files, and every error | `application/json` |
+| `GET /files/content`, the one route that answers *with* a file | `application/octet-stream`, fixed |
+
+Neither is rendered as HTML by any current browser, which is the whole defence —
+and it is thinner than it looks, because several of those bodies carry text *the
+caller chose* (a filename in a listing, the path an upload echoes back) and
+`serde_json` escapes quotes and control characters, not `<`, `>` or `&`. That
+leaves the content type as the only thing between a filename and a browser
+reading it as markup, and this router has already had that bug once: unknown
+`/api/v1` paths used to reach the SPA fallback and answer `200 text/html`. Hence
+a layer rather than a line per handler — the failure mode is a route that
+forgets.
+
+For the same reason an error message never quotes a path component back at the
+caller. It tells them nothing they did not just send.
+
+### Downloads are always attachments
+
+`Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and a
+fixed `application/octet-stream` — all three, on every response. An uploaded
+`.html` served inline would run script *on the management origin*, where
+`fetch('/api/v1/rpc')` carries the administrator's cookie; `HttpOnly` does not
+help, because such a script never reads the cookie, it is merely sent with it.
+The SPA's own responses carry a `Content-Security-Policy` for the same reason
+(`web_assets.rs`). No preview or thumbnail feature may weaken any of it.
+
+### What it will not do
+
+- **List a file it can never let you remove.** A name that is not valid UTF-8
+  can only be *shown* lossily, and the lossy spelling addresses nothing — so
+  every route that takes a path is shut to it. The listing therefore hands back
+  a `handle` for those rows: the entry's own bytes in hex, which `DELETE`
+  accepts in place of the last path component (`path` then names the containing
+  folder). Hex because a query string is decoded to a `String` before any
+  handler sees it, so the one encoding that cannot work is the obvious one.
+  `POST /files/move` takes one too, as `from_handle`, and that is the better
+  half: renaming such a file to something typable is the *repair* — it keeps
+  the file and makes every other route work on it again — where deleting it is
+  only the bin. The same handle moves it to another folder, and the UI asks
+  before it does: a destination can only ever be something typable, so a move
+  renames the file whether or not that was the intention, and on the drive it
+  came from the `é` in `café.mp3` becomes three bytes of nonsense. The two
+  names render identically, so nothing about the result would show it. There is deliberately no handle for a move's `to`: a
+  destination is always something the caller typed, and a move that could name
+  an unreachable target would be a way to create files nothing can reach.
+
+  It is **not a capability**: it names one entry inside a folder the caller has
+  already named and been granted, the folder still goes through the resolver,
+  and the handle is validated as a single component — no separator, no
+  traversal — before it is used. One function resolves it for both routes, so
+  the checks cannot drift apart. Download does not take one: a file that cannot
+  be named has no `Content-Disposition` to give, and being unable to read it is
+  not the gap that mattered.
+- **Quietly show a short list.** Every entry a directory reports becomes a row,
+  even when nothing can be learned about it — a `stat` that fails leaves
+  `unusable: "unreadable"` and empty columns rather than an entry that is
+  simply not there. It is not a hypothetical: a FAT drive whose `iocharset`
+  cannot spell a stored name hands back a rendering that is not a name the
+  filesystem can look up again, and another writer can unlink something between
+  the directory being read and the row being built. The one thing that cannot
+  become a row — an entry the directory could not even name — is counted in
+  `unreadable` instead, so the shortfall is stated rather than silent.
+- **Escape a root.** One resolver (`files::resolve`) sees every caller-supplied
+  path; `..` is refused rather than normalised, the parent is canonicalised
+  before the check, and a symlink out of the root is *listed* (so a person can
+  delete it) with `unusable: "symlink_escapes"` but never followed. Any
+  activity at the kiosk uid can plant such a link, so this is not hypothetical.
+- **Serve shepherd's own state, or an SSH key.** `~/.local/share/shepherdd`
+  (the database), `$XDG_CACHE_HOME/shepherd` (the video cache, which keeps an
+  index that hand-deletion desynchronises) and `~/.ssh` are refused, for
+  reading and writing alike. The first two are about damage nobody would
+  connect back to the edit; `~/.ssh` is there on its own merits, because a
+  private key is a credential for somewhere *else* and so is the one thing here
+  not already implied by "this caller administers this device".
+  `~/.local/state/shepherdd` is *not* refused: pulling `shepherdd.log` off a
+  device with no shell is one of the better things this buys.
+- **Half-write a file.** An upload streams to a dotted `.part` file in the
+  destination directory, is `fsync`ed, and is renamed into place, so a child
+  mid-book never opens a partial one. What is left of an abandoned one is
+  collected by a sweep that is **one directory deep and opportunistic** — it
+  runs where an upload lands and where somebody is listing, never on a timer
+  and never recursively, because every root here holds directories with tens of
+  thousands of files in them and a daily scan of those is a child's evening
+  rather than housekeeping. A folder that is never uploaded to or opened again
+  keeps its stray part file; it is dotted, so a listing reports it as a hidden
+  entry a person can delete rather than hiding it outright.
+- **Let two creators both win.** `If-None-Match: *` is checked before the body
+  arrives, which is long enough for another administrator — or this caller's
+  own retry — to take the name. The promise is kept at the rename instead, with
+  `RENAME_NOREPLACE`, so the loser gets a `412` rather than a `201` over
+  somebody else's file. Filesystems without that call (vfat among them) fall
+  back to a plain rename; the window stays open on a USB stick and is closed on
+  the device's own disk, which is where two administrators actually both write.
+- **Fill the disk.** `max_upload_bytes` and `free_space_floor_bytes` are both
+  checked against `Content-Length` before the first byte and again as the
+  stream grows, because a declared length can be a lie. The free-space floor
+  guards **this device's own disk only** — a removable drive may be filled to
+  the last byte, because a full USB stick costs nobody a session and a 2 GiB
+  floor would make every drive smaller than that unwritable.
+- **Move between roots.** `rename(2)` does not cross filesystems, and a
+  copy-with-progress is a feature of its own. `400`, with a message saying to
+  download and re-upload.
 
 ## Auth
 
@@ -280,3 +571,43 @@ result shapes, and error mapping. The credential store's own arithmetic
 `shepherd-management/src/webauth.rs`. The e2e crate
 (`crates/shepherd-e2e`) drives the same endpoint end-to-end against a real
 shepherdd process.
+
+`tests/files.rs` covers the file routes: the wire contract, the preconditions,
+the escapes, and the resumable upload protocol. It runs on a
+`tempfile::tempdir()`, which is to say on ext4 or tmpfs — the one filesystem
+the file manager is least likely to be pointed at.
+
+`tests/files_on_disk.rs` covers what a protocol test cannot see: a filename
+that is not UTF-8, a fifo (where a route that opened before it asked questions
+would block a worker thread forever), a recursive delete with a symlink out of
+the root inside it, the `.part` sweep from both the upload and the listing
+side, two writers at once, a reader while a
+writer renames, and a 24 MiB body in one piece and in chunks. The concurrency
+tests assert invariants that hold in every interleaving, so they are
+deterministic even though what happens is not.
+
+`tests/files_removable.rs` is the other half, and it is `#[ignore]`d because it
+needs something FAT-formatted mounted under `/media`, which needs root. Without
+it each test prints `[SKIP]` and passes, so `cargo test --include-ignored`
+works unchanged on CI. On a dev host:
+
+```sh
+sudo ./scripts/integration-tests/setup-removable-dev.sh   # two loopback images
+./scripts/integration-tests/test-removable.sh             # run them
+sudo ./scripts/integration-tests/setup-removable-dev.sh --teardown
+```
+
+The images are 512 MiB on purpose — under the 2 GiB free-space floor, which is
+what makes the floor test mean anything — and the second is mounted read-only.
+Three bugs were found this way that no amount of tmpfs testing could reach; see
+`docs/ai/history/2026-09-14 003 what-a-real-fat-drive-found (#195).md`.
+
+`crates/shepherd-e2e/tests/files.rs` is the last layer: a real `shepherdd`,
+driven over a real socket. It is there for the three things no in-process test
+can assert — that the routes are behind the authentication layer (the routers
+above are built `without_credential_store`, so every one of their tests would
+pass just as happily if the file manager were open to the network), that
+`enabled` survives the trip from a config file through another crate, and that
+the refused directories are the ones the running daemon is actually using.
+
+`shepherd-webui/src/api/files.test.ts` pins the other end of the same wire.

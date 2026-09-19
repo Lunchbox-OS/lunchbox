@@ -60,6 +60,13 @@ export const FIELD_DEFAULTS = {
     forward_check: true,
     required: false,
   },
+  RawFileManagerConfig: {
+    enabled: true,
+    external_media: true,
+    extra_roots: [],
+    free_space_floor_bytes: 2147483648,
+    max_upload_bytes: 8589934592,
+  },
   RawFirewallConfig: {
     allow: [],
     default: "deny",

@@ -665,6 +665,70 @@ export type RawEntryKind =
     };
 
 /**
+ * Remote file management over the web interface (issue #195).
+ *
+ * A hardened kiosk account denies SSH and keeps its home at mode 0700, so
+ * `scp` and every SFTP file manager are shut out of exactly the directory a
+ * parent needs to put a book, a ROM or a video into. shepherdd already runs
+ * as that user, so the web interface is the one door that is already open.
+ *
+ * There is no runtime toggle. The surface is reachable by a signed-in
+ * administrator whenever `enabled` is true, the same way the config editor
+ * is — a caller who can reach it can already write a policy containing
+ * `kind = { type = "process", command = ... }`, so withholding a file write
+ * from that same credential protects nothing.
+ */
+export interface RawFileManagerConfig {
+  /**
+   * Whether the file routes exist at all. `false` removes them from the
+   * router rather than answering 403, so a household that does not want
+   * the surface does not have one.
+   */
+  enabled?: boolean;
+  /**
+   * Offer removable drives mounted under `/media` and `/run/media`.
+   */
+  external_media?: boolean;
+  /**
+   * Extra directories to offer, beyond the home directory and removable
+   * drives — a NAS mount, or a library kept on a second disk.
+   */
+  extra_roots?: RawFileManagerRoot[];
+  /**
+   * Refuse an upload that would leave the device's own disk with less than
+   * this much free space. 0 disables the check.
+   *
+   * Separate from `service.media.free_space_floor_bytes`, which bounds a
+   * background prefetch: this one bounds a person, and a kiosk whose disk
+   * is full is a session that will not start.
+   *
+   * **Only the device's own disk.** A removable drive filling up costs
+   * nobody an evening, and a floor applied to one would make every drive
+   * smaller than the floor — which is most USB sticks — unwritable.
+   */
+  free_space_floor_bytes?: number;
+  /**
+   * Largest single upload, in bytes. 0 removes the cap.
+   */
+  max_upload_bytes?: number;
+}
+
+/**
+ * One extra place the file manager may browse (issue #195).
+ */
+export interface RawFileManagerRoot {
+  /**
+   * What the web interface calls it. Must be unique.
+   */
+  label: string;
+  /**
+   * Absolute path. Validation refuses `/` and the system directories, so a
+   * typo here cannot turn the file manager into a root browser.
+   */
+  path: string;
+}
+
+/**
  * Per-entry firewall configuration
  *
  * Enforced via systemd `IPAddressAllow=`/`IPAddressDeny=` properties on the
@@ -1059,6 +1123,10 @@ export interface RawServiceConfig {
    * External monitor / docking behaviour (issue #87).
    */
   display?: RawDisplayConfig | null;
+  /**
+   * Remote file management over the web interface (issue #195).
+   */
+  file_manager?: RawFileManagerConfig | null;
   /**
    * HUD placement (issue #171).
    */

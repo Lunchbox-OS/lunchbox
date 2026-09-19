@@ -47,10 +47,44 @@ fn serve(path: &str) -> Option<Response> {
         Response::builder()
             .header(header::CONTENT_TYPE, mime)
             .header(header::CACHE_CONTROL, cache)
+            .header(header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY)
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             .body(Body::from(file.data))
             .unwrap(),
     )
 }
+
+/// What the management UI's own origin is allowed to load and run.
+///
+/// It matters more since issue #195 put a file manager on this origin: a file
+/// a parent uploads is served back from here, and script running as this
+/// origin can call `/api/v1/rpc` with the administrator's cookie attached.
+/// Downloads defend themselves — `Content-Disposition: attachment`, `nosniff`,
+/// a fixed `application/octet-stream` — and this is the second lock on the
+/// same door.
+///
+/// Three of these are load-bearing and not to be tidied away:
+///
+/// - **`'wasm-unsafe-eval'`** — the config editor's validator is a ~950 kB
+///   wasm module, and without this it does not instantiate at all.
+/// - **`'unsafe-inline'` for styles** — MUI's emotion injects `<style>` tags
+///   at runtime. Nonces would be better and would mean threading one through
+///   a `rust_embed` fallback that serves a fixed byte string.
+/// - **`connect-src *`** — `ConnectionSettings` lets this SPA be pointed at a
+///   *different* device's `apiBase`, which is how `npm run dev` and a browser
+///   managing two devices both work. Narrowing it to `'self'` would break
+///   that, and the exfiltration channel it would close is not the one that
+///   matters here: `script-src 'self'` is what stops an uploaded file running
+///   in the first place.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+     script-src 'self' 'wasm-unsafe-eval'; \
+     style-src 'self' 'unsafe-inline'; \
+     img-src 'self' data: blob:; \
+     font-src 'self' data:; \
+     connect-src *; \
+     object-src 'none'; \
+     base-uri 'none'; \
+     frame-ancestors 'none'";
 
 fn mime_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {

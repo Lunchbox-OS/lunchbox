@@ -25,6 +25,10 @@ anyhow = { workspace = true }
 
 axum = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+# `fs` for `statvfs` (how much room is left on a root) and `access` (whether
+# this device's kiosk user may write to one) -- issue #195.
+nix = { workspace = true, features = ["fs"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 subtle = { workspace = true }
 axum-server = { workspace = true }
@@ -34,6 +38,8 @@ rustls-pemfile = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+# Setting an mtime by hand, for the tests about validators going stale.
+filetime = "0.2"
 async-trait = "0.1"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
