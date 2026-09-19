@@ -751,7 +751,10 @@ jobs:
             | docker exec -i "$cid" tar -xC "$ws"
 
           # target/debug from the `build` job, instead of compiling it here.
-          docker exec -i "$cid" tar -xf - -C "$ws" < /tmp/target-debug.tar.gz
+          # -z explicitly: tar auto-detects compression on a file but not on
+          # stdin, and this arrives down a pipe. Without it: "tar: Archive is
+          # compressed. Use -z option".
+          docker exec -i "$cid" tar -xzf - -C "$ws" < /tmp/target-debug.tar.gz
           docker exec "$cid" ls -l "$ws/target/debug/shepherdd"
 
           # shepherdd, shepherd-launcher, shepherd-hud and the firewall helper
