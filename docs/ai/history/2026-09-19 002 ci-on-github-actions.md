@@ -1,9 +1,10 @@
 # CI on GitHub Actions
 
-> Status: **ported and green**, 2026-09-19. All 22 jobs pass on
-> `ubuntu-latest`: 29m cold (run 35453898976, images built), 8.2m warm (run
-> 35455590713, images hit). A verbatim port of the Forgejo workflows; speedups
-> are recorded here but deliberately not attempted. Companion to
+> Status: **ported, green, then tuned**, 2026-09-19. Written in two passes, and
+> it reads that way on purpose: first a verbatim port of the Forgejo workflows
+> with the speedups only *recorded*, then those speedups implemented. Where a
+> section says something was not acted on, the "What the tuning actually did"
+> section near the end says what happened when it was. Companion to
 > `2026-09-19 001`.
 
 ## Prompt
@@ -59,8 +60,9 @@ already there. Everything below follows from that one difference.
    bridge-gateway discovery, no "Wait for DinD daemon".
 4. **ShellCheck installs under `sudo`.**
 
-Unchanged: every job, every assertion, every cache key, the `settle` job, and
-the "Assert this job got the arm64 cross image" guards.
+Unchanged at this point: every job, every assertion, every cache key, the
+`settle` job, and the "Assert this job got the arm64 cross image" guards. (The
+`settle` job and the shared cache keys did not survive the tuning pass below.)
 
 ### The one that bit
 
@@ -114,7 +116,8 @@ compile on every run, forever.
 Both workflows say, in their headers, that they avoid cross-job artifacts
 because Forgejo does not implement the `upload-artifact@v4` protocol (the runner
 reports as GHES and the action hard-fails). **GitHub implements it**, so the
-constraint is lifted. Not acted on — recorded for when it is.
+constraint is lifted. _Written before any of it was done; all five were acted on
+afterwards, and the results are below._
 
 1. **`build` → `e2e`.** `e2e` opens with `./scripts/shepherd build`, compiling
    what `build` just compiled. Worth being careful about the size of this one:
@@ -157,11 +160,54 @@ turns into thrash. Passing artifacts between jobs is the fix, which makes items 
 and 2 above the first things to do rather than the cheapest. (The warm run did
 hit its caches, so this is a ceiling being approached, not a fire.)
 
+## What the tuning actually did
+
+Measured, on the same workflow, after implementing everything above:
+
+| | Before | After |
+|---|---:|---:|
+| Actions cache | 10.49 GB / 9 caches | **8.06 GB / 8** |
+| `Firewall E2E` | 6m42s | **4m00s** |
+| `Android companion` | 4m03s | **2m19s** |
+| Base image → first consumer starting (cold) | 5m36s | **3s** |
+| Wall clock, warm | 8.2m | 9.8m |
+
+What changed, and the parts worth keeping in mind:
+
+* **Debug info is the cache, mostly.** `CARGO_PROFILE_DEV_DEBUG:
+  line-tables-only`, set in the workflow so a local `cargo build` is unaffected,
+  took ~30% off every `target/` cache — not the ~50% guessed above.
+* **Merging `lint` into `test` barely helped the cache**, though it did remove a
+  duplicate compile: 2.91 + 0.64 GB became a single 3.48 GB, because the two
+  jobs' artifacts are additive rather than overlapping.
+* **The Gradle cache had never worked.** Not eviction — `~/.gradle/...` was not
+  where Gradle wrote, so every run ended with `Path(s) specified in the action
+  for caching do(es) not exist, hence no cache is being saved` and re-downloaded
+  the dependency set. That is why the job took 227s cold and 243s warm. Fixed by
+  setting `GRADLE_USER_HOME` explicitly and caching that same absolute path.
+* **`firewall` gets `target/debug` from `build`.** It still compiles 70 crates in
+  24s — dev-dependencies and test targets, which `cargo build` never produces —
+  against ~200s for the full build it used to do.
+* **Unpacking that artifact needs `tar -xzf`, not `-xf`.** tar auto-detects
+  compression from a file but not from stdin, and the firewall job pipes it in:
+  `tar: Archive is compressed. Use -z option`. `e2e` reads the same artifact from
+  a file and needed no flag, so this failed in exactly one of the two consumers.
+* **`settle` is gone**, and with it the reusable-workflow call that built all
+  three images as a unit. `needs:` on such a call is all-or-nothing, so every job
+  waited for every image: on a cold build the base was ready at 16:14:35 and
+  nothing started until 16:20:11. `images.yml` became `image.yml`, one image per
+  `kind` input, instantiated three times.
+* **Wall clock did not improve**, which is the honest headline. The critical path
+  is `warmup` → `Package (arm64)`, and none of this touches it. The wins are
+  cache headroom, cold-start latency on an image rebuild, and work that was being
+  done twice.
+
 ## Jobs that need more than this, flagged not fixed
 
 * **`Firewall E2E` — expected to be the blocker, and is not.** It needs systemd
   as PID1, polkit, dbus, a writable cgroup hierarchy and BPF `cgroup_skb`
-  attach, via a privileged container, and it passes in 6m24s. Worth recording
+  attach, via a privileged container, and it passes (6m24s at the time of
+  writing, 4m00s once it stopped rebuilding the workspace). Worth recording
   what its log shows, because it answers a question the job's own comment leaves
   open: the plain leg found `/sys/fs/cgroup` **writable**, and the deliberately
   forced-read-only leg took the private-cgroup2-mount fallback
