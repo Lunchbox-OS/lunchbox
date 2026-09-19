@@ -1,9 +1,10 @@
 # CI on GitHub Actions
 
 > Status: **ported and green**, 2026-09-19. All 22 jobs pass on
-> `ubuntu-latest` (run 35453898976, 29m wall clock). A verbatim port of the
-> Forgejo workflows; speedups are recorded here but deliberately not attempted.
-> Companion to `2026-09-19 001`.
+> `ubuntu-latest`: 29m cold (run 35453898976, images built), 8.2m warm (run
+> 35455590713, images hit). A verbatim port of the Forgejo workflows; speedups
+> are recorded here but deliberately not attempted. Companion to
+> `2026-09-19 001`.
 
 ## Prompt
 
@@ -73,23 +74,40 @@ as `docker build` not finding `.ci`, several steps after the actual damage. If
 an image ref ever carries `e3b0c44298fc`, the tree was empty, not the Dockerfile
 wrong.
 
-## Where the 29 minutes went
+## Where the time goes
 
-First run, so all three images were built cold; later runs skip that on a
-content-hash hit.
+Two runs: the first built all three images cold, the second hit them
+(`Image already published`) and reused warm `target/` caches. The warm column is
+the one to reason about.
 
-| Job | | Job | |
-|---|---:|---|---:|
-| Test | 13m19s | Clippy | 4m33s |
-| Package (arm64) | 12m03s | Android media | 4m25s |
-| Package (amd64) | 11m46s | Android companion | 3m47s |
-| Build (arm64 cross) | 10m00s | Config editor | 3m03s |
-| E2E | 9m56s | Warm cargo registry | 2m25s |
-| Build | 9m07s | Rustfmt | 2m06s |
-| CI image | 7m51s | Web UI | 1m05s |
-| Firewall E2E | 6m24s | ShellCheck | 14s |
-| CI image (Android) | 5m23s | Arch neutrality | 9s |
-| CI image (arm64 cross) | 4m37s | Version harmony, Workflow syntax, settle | <10s |
+| Job | cold | warm |
+|---|---:|---:|
+| Package (.deb, arm64) | 12m03s | **5m46s** |
+| Package (.deb, amd64) | 11m46s | 4m57s |
+| Firewall E2E | 6m24s | **6m42s** |
+| E2E | 9m56s | 4m42s |
+| Build (arm64 cross) | 10m00s | 4m13s |
+| Test | 13m19s | 3m37s |
+| Android companion | 3m47s | 4m03s |
+| Config editor | 3m03s | 3m16s |
+| Build | 9m07s | 3m13s |
+| Android media | 4m25s | 2m17s |
+| Clippy | 4m33s | 2m17s |
+| Warm cargo registry | 2m25s | 1m53s |
+| Rustfmt | 2m06s | 1m38s |
+| Web UI | 1m05s | 58s |
+| CI image / Android / cross | 7m51s / 5m23s / 4m37s | **7s / 6s / 7s** |
+| ShellCheck, Version harmony, Arch neutrality, Workflow syntax, settle | <15s | <15s |
+| **Wall clock** | **29m** | **8.2m** |
+
+The critical path on a warm run is `warmup` (1m53s) → `Package (arm64)` (5m46s).
+`Firewall E2E` is the longest single job at 6m42s but only `needs: images`, so it
+starts immediately and is not on the path.
+
+Note which jobs do *not* get faster when warm: `Firewall E2E`, `Android
+companion`, `Config editor`. The first builds the workspace *inside* its
+privileged container, which has no route to `actions/cache` — so it pays a cold
+compile on every run, forever.
 
 ## Speedups available here that Forgejo could not do
 
@@ -99,22 +117,28 @@ reports as GHES and the action hard-fails). **GitHub implements it**, so the
 constraint is lifted. Not acted on — recorded for when it is.
 
 1. **`build` → `e2e`.** `e2e` opens with `./scripts/shepherd build`, compiling
-   what `build` just compiled. Measured here: `Build` 9m07s, `E2E` 9m56s, of
-   which almost all is that rebuild — the e2e suite itself finishes in seconds.
-   Handing `target/debug` over as an artifact should take `E2E` to about a
-   minute and take ~9 minutes off the critical path. This is the single largest
-   win available. `test`, `lint` and `config-editor` are similar but not
-   identical — each wants different `--all-targets` output.
-2. **`release.yml`'s build→publish handoff.** Today `create-release` must make
+   what `build` just compiled. Worth being careful about the size of this one:
+   cold it looks like ~9 minutes, but warm `E2E` is 4m42s against `Build`'s
+   3m13s, so the duplicated work is nearer 3 minutes than 9. Still worth having,
+   and it removes a whole `target/` cache from the quota below. `test`, `lint`
+   and `config-editor` are similar but not identical — each wants different
+   `--all-targets` output.
+2. **`build` → `firewall`.** The bigger prize, and the one caching cannot touch.
+   `Firewall E2E` runs `./scripts/shepherd build` inside its privileged
+   container, which cannot reach `actions/cache`, so it compiles the workspace
+   from scratch on every single run — 6m42s warm, the longest job in the suite.
+   The workspace already crosses into the container by tar-pipe; sending
+   `target/debug` the same way, from a `build` artifact, would cut most of it.
+3. **`release.yml`'s build→publish handoff.** Today `create-release` must make
    the release *first* so the parallel `deb` and `apk` jobs can each push their
    own asset into it. With artifacts the natural shape inverts: build jobs
    upload, one publish job creates the release and attaches everything. That
    also closes a real hole — right now a failed asset upload leaves a
    half-populated release behind.
-3. **`config-editor`'s bundle.** The job explicitly notes it does not upload,
+4. **`config-editor`'s bundle.** The job explicitly notes it does not upload,
    because Forgejo could not. Uploading `dist-standalone/` would let a release
    reuse the PR's bundle instead of rebuilding it.
-4. **`ubuntu-24.04-arm` runners exist now** and are free for public repos. The
+5. **`ubuntu-24.04-arm` runners exist now** and are free for public repos. The
    arm64 story is currently cross-compile-only, with native correctness checked
    by hand on an M1 VM (see `2026-09-04 002`). A native arm64 leg is now
    possible in CI. Not a speedup — a coverage gain.
@@ -128,8 +152,9 @@ clobbering each other's save — plus the shared dep registry and the Gradle
 cache. A Rust workspace this size puts each `target/` in the low gigabytes, so
 the set cannot fit, and they will evict each other run after run. The per-job-key
 design was the right answer to a save race; under a hard repo-wide quota it
-turns into thrash. Passing artifacts between jobs is the fix, which makes item 1
-above the first thing to do rather than the cheapest.
+turns into thrash. Passing artifacts between jobs is the fix, which makes items 1
+and 2 above the first things to do rather than the cheapest. (The warm run did
+hit its caches, so this is a ceiling being approached, not a fire.)
 
 ## Jobs that need more than this, flagged not fixed
 
