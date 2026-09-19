@@ -41,6 +41,8 @@ jobs:
     env:
       CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
     steps:
+      - uses: actions/checkout@v4
+
       - name: Compute image tag
         id: tag
         run: |
@@ -95,6 +97,8 @@ jobs:
     env:
       CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
     steps:
+      - uses: actions/checkout@v4
+
       - name: Compute image tag
         id: tag
         env:
@@ -161,6 +165,8 @@ jobs:
       CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
       TARGET_ARCH: arm64
     steps:
+      - uses: actions/checkout@v4
+
       - name: Compute image tag
         id: tag
         env:
