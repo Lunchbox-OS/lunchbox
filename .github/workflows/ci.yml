@@ -938,11 +938,14 @@ jobs:
         run: npm run typecheck
 
       # The bundle is uploaded now. It could not be on Forgejo: that runner
-      # reports as GHES and upload-artifact@v4 hard-fails against it, which is
-      # why release.yml's config-editor job rebuilds the bundle rather than
-      # taking a handoff. GitHub implements the protocol, so a release can reuse
-      # what a PR already built, and a reviewer can download the exact bundle a
-      # PR produces.
+      # reports as GHES and upload-artifact@v4 hard-fails against it. What this
+      # buys is a reviewer being able to download the exact bundle a PR builds
+      # and open it locally, which is the only way to see the editor a change
+      # produces without running the whole stack.
+      #
+      # It does not save release.yml any work: artifacts belong to the run that
+      # made them, so a tag's run cannot pick up a PR's bundle, and that job
+      # still builds its own.
       #
       # The check below stays regardless of the upload:
       # Worth checking rather than assuming: `output.distPath` in

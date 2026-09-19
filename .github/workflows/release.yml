@@ -20,18 +20,21 @@ name: Release
 # git.armeafamily.com. Decide where releases and the apt repo live before
 # tagging here.
 #
-# No cross-job artifacts: Forgejo doesn't implement the upload-artifact@v4
-# protocol (the runner reports as GHES and the action hard-fails). So instead of
-# a build→publish handoff, `create-release` makes the release first, then the
-# parallel `deb` and `apk` jobs each upload their own asset straight to it.
-# GitHub *does* implement that protocol, so this constraint is lifted here --
-# see the speedup notes in the migration history doc.
+# Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
+# as an artifact, and a single `publish` job at the end creates the release and
+# attaches all of them. Nothing reaches a release until every build has passed.
+#
+# Forgejo could not do this -- it does not implement the upload-artifact@v4
+# protocol (its runner reports as GHES and the action hard-fails) -- so there
+# the release had to be created *first* for the parallel build jobs to attach to,
+# which left a window where a later failure published a half-populated release.
 #
 # Secrets required (the CI images come from GHCR on the ambient GITHUB_TOKEN,
 # so there is no REGISTRY_TOKEN any more):
 #   RELEASE_TOKEN               repo-write PAT to create the release + upload
-#                               assets. (Not FORGEJO_*/GITEA_*/GITHUB_* — Forgejo
-#                               reserves those prefixes for secret names.)
+#                               assets, used only by `publish`. (Not
+#                               FORGEJO_*/GITEA_*/GITHUB_* — Forgejo reserves
+#                               those prefixes for secret names.)
 #   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
 #                               .deb into Forgejo's Debian (apt) package registry.
 #   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
@@ -97,56 +100,6 @@ jobs:
     secrets: inherit
 
   # --------------------------------------------------------------------------
-  # create-release: make (or fetch) the Forgejo release up front so the parallel
-  # build jobs can attach their assets to it. Runs on every trigger but only
-  # touches the API when publishing; on a dry run it's a no-op and the build
-  # jobs (which `need` it) still run and simply skip their upload step.
-  # --------------------------------------------------------------------------
-  create-release:
-    name: Create release
-    needs: guard
-    runs-on: ubuntu-latest
-    outputs:
-      release_id: ${{ steps.rel.outputs.release_id }}
-    steps:
-      - name: Create or fetch the Forgejo release
-        id: rel
-        if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          SERVER_URL: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          command -v jq >/dev/null 2>&1 || { apt-get update && apt-get install -y jq; }
-          api="${SERVER_URL}/api/v1/repos/${REPO}"
-          auth="Authorization: token ${RELEASE_TOKEN}"
-
-          # Tags with a -prerelease suffix (e.g. v0.2.0-rc1) publish as a
-          # prerelease so they aren't shown as "latest" — this is how you cut a
-          # release candidate to test the real signed artifacts, then delete it.
-          case "${TAG#v}" in
-            *-*) prerelease=true ;;
-            *)   prerelease=false ;;
-          esac
-
-          # Create the release; if it already exists (a re-run), fetch it.
-          code="$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST "${api}/releases" \
-            -H "$auth" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg t "$TAG" --argjson pre "$prerelease" \
-                    '{tag_name:$t, name:$t, draft:false, prerelease:$pre}')" || true)"
-          if [ "$code" = "201" ]; then
-            id="$(jq -r '.id' /tmp/rel.json)"
-          else
-            echo "POST /releases returned $code; fetching existing release for $TAG"
-            id="$(curl -fsS "${api}/releases/tags/${TAG}" -H "$auth" | jq -r '.id')"
-          fi
-          [ -n "$id" ] && [ "$id" != "null" ] || { echo "::error::could not determine release id"; exit 1; }
-          echo "release_id=$id" >> "$GITHUB_OUTPUT"
-          echo "release id=$id"
-
-  # --------------------------------------------------------------------------
   # deb: stage the install tree via install.sh (DESTDIR) and dpkg-deb it, then
   # (on publish) upload it + a .sha256 to the release.
   # --------------------------------------------------------------------------
@@ -156,7 +109,7 @@ jobs:
     # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
     # catches that locally.
     name: Build .deb (${{ matrix.arch }})
-    needs: [guard, images, create-release]
+    needs: [guard, images]
     runs-on: ubuntu-latest
     strategy:
       # Publish whichever architecture succeeded rather than losing both to
@@ -228,38 +181,14 @@ jobs:
             exit 1
           }
 
-      - name: Upload .deb to the release
-        if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
-        env:
-          SERVER_URL: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-        run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb
-
-      # Also publish to Forgejo's Debian package registry so users get an
-      # `apt update`/`apt upgrade` path (the release asset above stays the
-      # offline/manual download). Both this and the upload above take file
-      # globs and need no per-arch handling: each matrix leg has exactly one
-      # .deb in dist/pkg/, and Forgejo reads `Architecture:` out of the control
-      # file, serving both arches from one distribution/component. Forgejo
-      # signs the repo metadata itself, so the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1) are
-      # skipped so RC builds never reach `apt upgrade` users — they still get the
-      # signed release asset for manual testing. See docs/INSTALL.md.
-      - name: Publish .deb to the apt registry
-        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
-        env:
-          SERVER_URL: ${{ github.server_url }}
-          OWNER: ${{ github.repository_owner }}
-          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
-          APT_DIST: stable
-          APT_COMPONENT: main
-        run: ./scripts/ci/publish-apt.sh dist/pkg/*.deb
-
-      - name: Dry run note
-        if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
-        run: |
-          echo "Dry run: built the .deb above; not uploading (no release)."
+      # Hand the .deb to `publish` rather than uploading it from here. Nothing
+      # reaches a release until every build leg has succeeded.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/pkg/*.deb
+          retention-days: 7
+          if-no-files-found: error
 
   # --------------------------------------------------------------------------
   # config-editor: build the standalone config editor and publish it to
@@ -349,7 +278,7 @@ jobs:
   # --------------------------------------------------------------------------
   apk:
     name: Build .apk (${{ matrix.module.name }})
-    needs: [guard, images, create-release]
+    needs: [guard, images]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.images.outputs.android-ref }}
@@ -454,16 +383,140 @@ jobs:
           apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
           ./scripts/shepherd package fdroid --apks dist/pkg
 
-      - name: Upload .apk to the release
-        if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.module.artifact }}
+          path: dist/pkg/*.apk
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # publish: the only job that touches a release. It runs after every build leg
+  # has succeeded, downloads their artifacts, then creates the release and
+  # attaches the lot.
+  #
+  # This inverts what Forgejo forced. There, `create-release` had to run first
+  # so the parallel build jobs could each attach their own asset, because
+  # Forgejo does not implement the upload-artifact@v4 protocol and there was no
+  # way to hand a built file between jobs. The cost was a window in which a
+  # release existed with some or none of its assets: a build that failed after
+  # `create-release` succeeded left a published, half-populated release behind.
+  #
+  # It also reverses a deliberate decision recorded on the `deb` matrix --
+  # "publish whichever architecture succeeded rather than losing both to one
+  # failure". That is now all-or-nothing. For a release that seems the better
+  # trade: a release carrying the amd64 .deb but not the arm64 one is a trap for
+  # arm64 users, who get "no such package" from apt rather than a clear "this
+  # version was not released". `fail-fast: false` stays on both matrices, so a
+  # broken leg still reports alongside the others rather than cancelling them.
+  #
+  # NOT PORTED: every API call below still speaks Forgejo. Note especially that
+  # `SERVER_URL: ${{ github.server_url }}` now resolves to https://github.com
+  # while the scripts append Forgejo's `/api/v1/...` paths, so these steps would
+  # 404 rather than publish anywhere at all. Fixing that means deciding where
+  # releases and the apt repository live -- both are still on
+  # git.armeafamily.com. Until then a `v*` tag pushed here builds everything and
+  # fails at this job, which is the safe direction to fail in.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Publish release
+    needs: [guard, deb, apk]
+    if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect every built asset
+        uses: actions/download-artifact@v4
+        with:
+          # No `name:`, so this takes every artifact the run produced; the
+          # patterns keep it to the packages.
+          pattern: '{deb-*,apk-*}'
+          merge-multiple: true
+          path: dist/pkg
+
+      - name: Show what will be published
+        run: ls -l dist/pkg
+
+      - name: Create or fetch the release
+        id: rel
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
+          api="${SERVER_URL}/api/v1/repos/${REPO}"
+          auth="Authorization: token ${RELEASE_TOKEN}"
+
+          # Tags with a -prerelease suffix (e.g. v0.2.0-rc1) publish as a
+          # prerelease so they aren't shown as "latest" — this is how you cut a
+          # release candidate to test the real signed artifacts, then delete it.
+          case "${TAG#v}" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+
+          # Create the release; if it already exists (a re-run), fetch it.
+          code="$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST "${api}/releases" \
+            -H "$auth" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg t "$TAG" --argjson pre "$prerelease" \
+                    '{tag_name:$t, name:$t, draft:false, prerelease:$pre}')" || true)"
+          if [ "$code" = "201" ]; then
+            id="$(jq -r '.id' /tmp/rel.json)"
+          else
+            echo "POST /releases returned $code; fetching existing release for $TAG"
+            id="$(curl -fsS "${api}/releases/tags/${TAG}" -H "$auth" | jq -r '.id')"
+          fi
+          [ -n "$id" ] && [ "$id" != "null" ] || { echo "::error::could not determine release id"; exit 1; }
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+          echo "release id=$id"
+
+      - name: Upload every asset to the release
         env:
           SERVER_URL: ${{ github.server_url }}
           REPO: ${{ github.repository }}
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-        run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.apk
+          RELEASE_ID: ${{ steps.rel.outputs.release_id }}
+        run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb dist/pkg/*.apk
 
-      - name: Dry run note
-        if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
-        run: |
-          echo "Dry run: built + signed the ${{ matrix.module.name }} APK; not uploading."
+      # The apt registry gets the .debs too, so users have an
+      # `apt update`/`apt upgrade` path; the release assets stay the
+      # offline/manual download. One invocation for both arches: the registry
+      # reads `Architecture:` out of each control file and serves both from one
+      # distribution/component, and it signs the repository metadata itself, so
+      # the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1)
+      # are skipped so RC builds never reach `apt upgrade` users -- they still
+      # get the signed release asset for manual testing. See docs/INSTALL.md.
+      - name: Publish the .debs to the apt registry
+        if: ${{ !contains(github.ref_name, '-') || github.event.inputs.publish == 'true' }}
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+          APT_DIST: stable
+          APT_COMPONENT: main
+        run: ./scripts/ci/publish-apt.sh dist/pkg/*.deb
+
+  # --------------------------------------------------------------------------
+  # dry-run-note: says, on a manual run with `publish` off, that the builds all
+  # happened and nothing was published. Replaces the per-job notes the build
+  # jobs used to print.
+  # --------------------------------------------------------------------------
+  dry-run-note:
+    name: Dry run (nothing published)
+    needs: [deb, apk]
+    if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: What a real run would have published
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{deb-*,apk-*}'
+          merge-multiple: true
+          path: dist/pkg
+      - run: |
+          echo "Dry run: built and signed everything below; published nothing."
+          ls -l dist/pkg
