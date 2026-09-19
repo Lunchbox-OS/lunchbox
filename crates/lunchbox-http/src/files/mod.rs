@@ -278,7 +278,7 @@ pub enum UnusableReason {
     /// A socket, fifo, device node or other special file. Listed so it is not
     /// invisible, and not something this API will open.
     SpecialFile,
-    /// One of lunchbox's own directories, or `~/.ssh`. Refused for reading and
+    /// One of Lunchbox's own directories, or `~/.ssh`. Refused for reading and
     /// writing alike — see [`denied_dirs`].
     NotBrowsable,
     /// The directory named it, and then nothing could be learned about it —
@@ -381,7 +381,7 @@ pub struct FileService {
     /// is most USB sticks.
     home_device: Option<u64>,
     settings: watch::Receiver<Arc<FileManagerConfig>>,
-    /// lunchbox's own directories inside the home, refused for read and write
+    /// Lunchbox's own directories inside the home, refused for read and write
     /// alike. See [`resolve::check_denied`].
     denied: Vec<PathBuf>,
 }

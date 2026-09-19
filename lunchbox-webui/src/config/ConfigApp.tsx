@@ -238,7 +238,7 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
             // "click Example" matches nothing under voice control.
             <Tooltip
               describeChild
-              title="Open the annotated example that ships with lunchbox"
+              title="Open the annotated example that ships with Lunchbox"
             >
               <Button
                 size="small"

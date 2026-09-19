@@ -110,7 +110,7 @@ pub fn resolve(root: &Path, rel: &str, denied: &[PathBuf]) -> Result<PathBuf, Fi
     Ok(path)
 }
 
-/// Refuse a path inside one of lunchbox's own directories.
+/// Refuse a path inside one of Lunchbox's own directories.
 ///
 /// Not about the remote caller's privilege — they can already rewrite the
 /// policy, which is strictly more power than reading the database. It is about
@@ -121,7 +121,7 @@ pub fn resolve(root: &Path, rel: &str, denied: &[PathBuf]) -> Result<PathBuf, Fi
 pub fn check_denied(path: &Path, denied: &[PathBuf]) -> Result<(), FileError> {
     if denied.iter().any(|d| path.starts_with(d)) {
         return Err(FileError::Forbidden(
-            "that folder belongs to lunchbox itself and is not editable here".into(),
+            "that folder belongs to Lunchbox itself and is not editable here".into(),
         ));
     }
     Ok(())

@@ -503,7 +503,7 @@ mod libmpv_backend {
     ///
     /// Identical with `hr-seek-framedrop` on and off, identical under `vo=gpu`
     /// and `vo=gpu-next`, and identical with a larger surface pool — and bare
-    /// `mpv` reproduces it with no lunchbox code involved, so it is a driver
+    /// `mpv` reproduces it with no Lunchbox code involved, so it is a driver
     /// bug in the DMABUF export, not something this crate can seek its way
     /// around. The one thing that changes it is whether the decoded surface is
     /// read back into system RAM, which is exactly what a `-copy` mode does.

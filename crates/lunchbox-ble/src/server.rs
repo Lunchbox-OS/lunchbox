@@ -903,7 +903,7 @@ fn spawn_device_watcher(
         // keeps only the changed properties, throwing away the interface
         // that emitted them (`device.rs`: `Event::PropertiesChanged {
         // changed, .. }`), and then matches on the property *name*. On
-        // BlueZ >= 5.82 with `Experimental` — which lunchbox requires for
+        // BlueZ >= 5.82 with `Experimental` — which Lunchbox requires for
         // `PreferredBearer`, so every device has it — one device object
         // carries `org.bluez.Device1`, `org.bluez.Bearer.LE1` *and*
         // `org.bluez.Bearer.BREDR1`, and all three have a `Connected`

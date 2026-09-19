@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.uuid.ExperimentalUuidApi
 
 /**
- * A live BLE session with one lunchbox device.
+ * A live BLE session with one Lunchbox device.
  *
  * Wraps a Kable [Peripheral] and layers the management protocol on top:
  * MTU-aware chunked writes to the Request characteristic, **read-poll

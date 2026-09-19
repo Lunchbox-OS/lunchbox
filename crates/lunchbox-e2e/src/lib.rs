@@ -8,7 +8,7 @@
 //! See the crate README for usage. The harness is intentionally Linux-only
 //! and assumes the workspace binaries have been built (`cargo build`).
 
-// The harness spawns `sway` and the lunchbox binaries by name on purpose: it is
+// The harness spawns `sway` and the Lunchbox binaries by name on purpose: it is
 // test scaffolding running as the developer, not a daemon on a device choosing a
 // helper through a `$PATH` the kiosk user wrote (issue #144). Tests also stub
 // binaries on `$PATH` precisely so they can be intercepted.
@@ -240,7 +240,7 @@ max_run_seconds = 0
 "#
 }
 
-/// A running lunchbox stack: sway + lunchboxd (+ optional UIs), inside an
+/// A running Lunchbox stack: sway + lunchboxd (+ optional UIs), inside an
 /// isolated temp directory. Drop kills everything.
 pub struct TestHarness {
     /// Held to keep the temp dir alive until drop.

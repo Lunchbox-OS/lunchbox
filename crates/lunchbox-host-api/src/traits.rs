@@ -308,7 +308,7 @@ pub trait HostAdapter: Send + Sync {
 
     /// Optional: turn the displays on or off (DPMS).
     ///
-    /// The idle timer stays outside lunchbox — `swayidle` is what notices that
+    /// The idle timer stays outside Lunchbox — `swayidle` is what notices that
     /// nobody has touched the device — but the blanking itself has to happen
     /// here, because on a hardened device the compositor's IPC socket has no
     /// name for `swaymsg` to connect to (issue #144). This runs on the

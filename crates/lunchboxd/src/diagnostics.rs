@@ -242,14 +242,14 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
                 format!("The libretro core \"{name}\" this activity names is not installed"),
                 format!(
                     "Install it with `sudo lunchbox-admin apps install retroarch {name}`. If it \
-                     is installed somewhere lunchbox does not search, point `core_path` at that \
+                     is installed somewhere Lunchbox does not search, point `core_path` at that \
                      copy of {filename} instead -- otherwise the activity fails to launch."
                 ),
             ),
             MissingCore::NoSuchPath { path } => (
                 format!("This activity's core_path is not a file, so it will not launch: {path}"),
                 "Point `core_path` at an installed `*_libretro.so`, or replace it with \
-                 `core = \"<name>\"` and let lunchbox find the core."
+                 `core = \"<name>\"` and let Lunchbox find the core."
                     .to_string(),
             ),
         };

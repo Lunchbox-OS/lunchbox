@@ -11,7 +11,7 @@
 //! explicit setting to guarantee: `config_save_on_exit` defaults to *true*, so
 //! a clean exit would otherwise write RetroArch's entire live settings block —
 //! including everything we appended — back into the user's own config, making
-//! lunchbox's per-activity choices permanent and global. The fragment turns it
+//! Lunchbox's per-activity choices permanent and global. The fragment turns it
 //! off for the run.
 //!
 //! Two kinds of "save" are in play and they are not interchangeable:
@@ -424,7 +424,7 @@ pub fn render_append_config(paths: &Paths, save_state: RetroarchSaveState, kiosk
     out.push_str(&format!("config_save_on_exit = {}\n\n", cfg_quote("false")));
 
     out.push_str(
-        "# The save *state* is lunchbox's own mechanism, so it lives in the\n\
+        "# The save *state* is Lunchbox's own mechanism, so it lives in the\n\
          # activity's own directory. The in-game save is deliberately left\n\
          # alone -- savefile_directory is yours -- so a game keeps one save\n\
          # whether it was launched from here or from a desktop session, and a\n\
@@ -714,7 +714,7 @@ fn warn_about_conflicting_overrides(core_path: &Path, content: &Path) {
         warn!(
             override_file = %file.display(),
             settings = %settings.join(", "),
-            "RetroArch override sets settings lunchbox relies on; RetroArch applies \
+            "RetroArch override sets settings Lunchbox relies on; RetroArch applies \
              overrides after --appendconfig, so these win. Save-state resume, the \
              save directories, or the menu lock may not behave as configured — \
              remove those keys from the override file to restore them"
@@ -1071,7 +1071,7 @@ mod tests {
         assert!(
             !cfg.lines()
                 .any(|l| l.trim_start().starts_with("savefile_directory")),
-            "lunchbox must not relocate the in-game save:\n{cfg}"
+            "Lunchbox must not relocate the in-game save:\n{cfg}"
         );
     }
 

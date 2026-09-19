@@ -407,7 +407,7 @@ impl std::fmt::Display for Rejection {
 /// classified. A deny-list — "refuse peers I recognise as activities" — fails
 /// open on precisely the cases it cannot classify, and there is a verified
 /// escape that lands in exactly that gap: an activity can ask `systemd --user`
-/// to start a process for it in a cgroup that is in no lunchbox scope at all.
+/// to start a process for it in a cgroup that is in no Lunchbox scope at all.
 /// That process is refused here because it is not *in lunchboxd's own cgroup*,
 /// which is a different question from whether it is in a scope we made.
 #[derive(Debug, Clone)]
@@ -625,7 +625,7 @@ mod tests {
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let err = policy
             .classify(a.as_fd(), Some(PEER_UID))
-            .expect_err("a peer outside lunchbox's cgroup must be refused");
+            .expect_err("a peer outside Lunchbox's cgroup must be refused");
         assert!(
             err.reason.contains("not the trusted one"),
             "unhelpful refusal: {}",

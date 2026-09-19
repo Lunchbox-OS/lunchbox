@@ -46,7 +46,7 @@ pub enum DiagnosticCode {
     /// launch. Distinct from [`Self::FirewallUnenforceable`], which is the
     /// host-wide cause: this one names an activity the child has lost.
     FirewallNotApplied,
-    /// lunchbox cannot talk to the compositor, so it cannot see what is on
+    /// Lunchbox cannot talk to the compositor, so it cannot see what is on
     /// screen. The escape sweep closes nothing and no orphaned window is
     /// reported, which is indistinguishable from a clear screen unless it is
     /// said out loud (issue #147).
@@ -78,7 +78,7 @@ pub enum DiagnosticCode {
     /// running, so nothing else about the device looks wrong and the downgrade
     /// is invisible unless it is said out loud.
     IpcSocketNotHardened,
-    /// lunchbox's policy and state are files at the uid activities run as,
+    /// Lunchbox's policy and state are files at the uid activities run as,
     /// because this device has no state custodian (issue #157).
     ///
     /// The session is deliberately left running — an unprotected kiosk beats a

@@ -1,4 +1,4 @@
-//! Where lunchbox's helper binaries come from (issue #144).
+//! Where Lunchbox's helper binaries come from (issue #144).
 //!
 //! `lunchboxd` execs a good deal that it did not write — `systemd-run`,
 //! `pkexec`, `snap`, `pgrep`, `wpctl` and a dozen more. Every one of them used
@@ -7,11 +7,11 @@
 //! `pam_env.so … user_readenv=1`, and `libpam-modules` still honours it, so
 //! `~/.pam_environment` sets the session's environment outright. Every activity
 //! runs as that uid, so any of them could write one file, drop a `systemd-run`
-//! on the resulting `PATH`, and at the next login have lunchbox exec it — as a
+//! on the resulting `PATH`, and at the next login have Lunchbox exec it — as a
 //! direct child of the daemon, in the daemon's own cgroup, which the management
 //! socket accepts as `Admin`. The same substitution turns
 //! [`crate::user_scope_argv_prefix`] into a no-op, so every activity lands in
-//! lunchbox's cgroup too. Nothing fails loudly; the peer check simply stops
+//! Lunchbox's cgroup too. Nothing fails loudly; the peer check simply stops
 //! separating anything.
 //!
 //! Sanitising the inherited `PATH` would not fix that, because the environment
@@ -149,7 +149,7 @@ pub fn resolve(name: &str) -> PathBuf {
     resolved
 }
 
-/// The absolute path to one of lunchbox's **own** binaries.
+/// The absolute path to one of Lunchbox's **own** binaries.
 ///
 /// A sibling of the running daemon first, which is where both an install and a
 /// `cargo build` put them, then a trusted system directory. Never the bare
@@ -169,7 +169,7 @@ pub fn resolve_daemon_sibling(name: &str) -> PathBuf {
 
 /// A [`std::process::Command`] for helper `name`, resolved (issue #144).
 ///
-/// The way lunchbox should spawn anything it chose itself. `Command::new` is
+/// The way Lunchbox should spawn anything it chose itself. `Command::new` is
 /// banned workspace-wide (see `clippy.toml`) precisely so that reaching for it
 /// is a deliberate act with a comment attached, rather than the default.
 #[allow(clippy::disallowed_methods)]

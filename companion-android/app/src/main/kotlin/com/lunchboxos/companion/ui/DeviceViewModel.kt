@@ -440,7 +440,7 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
                 // makes the next attempt rediscover.
                 runCatching { conn.disconnect() }
                 // Any connect/drain failure lands here — out of range, the
-                // box powered off, lunchbox not running (bond fine but the
+                // box powered off, Lunchbox not running (bond fine but the
                 // GATT service is absent), a genuinely one-sided bond, or a
                 // revoked BLUETOOTH_CONNECT permission (hence the guarded
                 // isBonded). We deliberately do NOT treat an encrypted-read
@@ -461,9 +461,9 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
                 if (failures > backoffs.size) {
                     // Exhausted retries while still OS-bonded. Distinguish a
                     // stale one-sided bond from a device that's simply
-                    // unreachable (off, out of range, or lunchbox not
-                    // running) by scanning for the *lunchbox service*: if the
-                    // device is still advertising it — i.e. lunchbox is up and
+                    // unreachable (off, out of range, or Lunchbox not
+                    // running) by scanning for the *Lunchbox service*: if the
+                    // device is still advertising it — i.e. Lunchbox is up and
                     // in range — yet we can't hold an encrypted link, a stale
                     // bond is the leading explanation.
                     //
@@ -1535,7 +1535,7 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
 /**
  * Build a persisted record from the claim result.
  *
- * [deviceName] comes from `DeviceInfo` — the lunchbox device's own name —
+ * [deviceName] comes from `DeviceInfo` — the Lunchbox device's own name —
  * and deliberately *not* from [AdminRecord.deviceName], which is the
  * admin phone's name (`claim(phoneName)` sets it, correctly, to identify
  * who claimed the device). Using the claim record's value labelled every

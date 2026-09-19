@@ -199,8 +199,8 @@ private fun PermissionGate(onRequest: () -> Unit) {
             textAlign = TextAlign.Center,
         )
         Text(
-            "Your phone needs to talk to the lunchbox device over Bluetooth. " +
-                "The app only scans for lunchbox devices and never uses your location.",
+            "Your phone needs to talk to the Lunchbox device over Bluetooth. " +
+                "The app only scans for Lunchbox devices and never uses your location.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
         )

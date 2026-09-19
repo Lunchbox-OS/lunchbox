@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlin.uuid.ExperimentalUuidApi
 
-/** One advertisement from a lunchbox device during onboarding. */
+/** One advertisement from a Lunchbox device during onboarding. */
 data class DiscoveredDevice(
     /** Platform identifier — the MAC address on Android. */
     val identifier: String,
@@ -18,7 +18,7 @@ data class DiscoveredDevice(
 )
 
 /**
- * Scans for lunchbox devices, filtered natively to the management
+ * Scans for Lunchbox devices, filtered natively to the management
  * service UUID. The returned [Flow] is cold — collection starts the
  * system scanner and cancellation stops it, so scanning never runs in
  * the background (a project constraint).

@@ -1,4 +1,4 @@
-//! The installer's idea of lunchbox's protected files must match this crate's.
+//! The installer's idea of Lunchbox's protected files must match this crate's.
 //!
 //! [`ProtectedFile`] is the Rust list; `scripts/lib/install.sh` carries a shell
 //! list of the same files, because the migration that moves a device's state
@@ -79,7 +79,7 @@ fn every_protected_file_is_accounted_for_by_the_installer() {
 fn the_installer_does_not_carry_files_that_no_longer_exist() {
     // The other direction. A name removed from `ProtectedFile` but left in the
     // installer is harmless on a device — it moves a file nothing writes — but
-    // it is a lie about what lunchbox keeps, and the next person to read the
+    // it is a lie about what Lunchbox keeps, and the next person to read the
     // list would believe it.
     let script = installer();
     let known: Vec<&str> = ALL
@@ -97,7 +97,7 @@ fn the_installer_does_not_carry_files_that_no_longer_exist() {
     {
         assert!(
             known.contains(&name.as_str()),
-            "install.sh migrates {name}, which is not a file lunchbox keeps any more \
+            "install.sh migrates {name}, which is not a file Lunchbox keeps any more \
              (known: {known:?})"
         );
     }

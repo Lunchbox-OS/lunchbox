@@ -343,7 +343,7 @@ pub fn alias_socket(alias: &Path) -> HostResult<()> {
 /// keep working — but nothing can connect by path afterwards, which takes the
 /// compositor's command channel away from every other process running as this
 /// uid (issue #144). That matters because `RUN_COMMAND "exec …"` starts a
-/// process outside lunchbox's supervision *and* outside the cgroup the
+/// process outside Lunchbox's supervision *and* outside the cgroup the
 /// per-entry firewall is attached to.
 ///
 /// Destructive and irreversible: an unlinked socket with no other name cannot

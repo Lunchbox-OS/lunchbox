@@ -141,7 +141,7 @@ fn shell_window_id(windows: &[lunchbox_api::WindowInfo]) -> Option<u64> {
         .map(|w| w.id)
 }
 
-/// The windows a caregiver opened: everything that is not lunchbox's own
+/// The windows a caregiver opened: everything that is not Lunchbox's own
 /// furniture, **including the ones stashed on the scratchpad**. What the
 /// taskbar lists.
 ///
@@ -167,7 +167,7 @@ fn admin_windows(windows: &[lunchbox_api::WindowInfo]) -> Vec<lunchbox_api::Wind
 ///
 /// A separate question from what the taskbar lists, and the two must not share
 /// an answer. The preloaded Steam client sits stashed for the life of the
-/// session and the compositor reports it as belonging to nothing lunchbox
+/// session and the compositor reports it as belonging to nothing Lunchbox
 /// knows about — `snap run` re-execs, so the pid the host recorded is not the
 /// pid that draws — so counting stashed windows here would mean the "X" never
 /// offered the way out on any device that preloads Steam. Which is every device
@@ -3169,7 +3169,7 @@ mod tests {
         }
     }
 
-    /// The taskbar lists what the caregiver opened, not lunchbox's own
+    /// The taskbar lists what the caregiver opened, not Lunchbox's own
     /// furniture: the launcher and the HUD are always mapped, and buttons for
     /// them would be a row that never empties — which is also what the "X"
     /// keys its "leave the mode" state off.

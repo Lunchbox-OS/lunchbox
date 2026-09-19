@@ -294,7 +294,7 @@ async fn a_read_only_folder_says_so_before_it_is_used() {
     assert_eq!(body["writable"], false);
 }
 
-/// lunchbox's own directories are listed — they are in the home, and hiding
+/// Lunchbox's own directories are listed — they are in the home, and hiding
 /// them would be a lie about what is on the disk — with the reason they cannot
 /// be opened.
 #[tokio::test]

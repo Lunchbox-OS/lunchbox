@@ -291,7 +291,7 @@ pub struct SupervisionStream {
 }
 
 impl SupervisionStream {
-    /// Tell the custodian lunchbox is still supervising.
+    /// Tell the custodian Lunchbox is still supervising.
     ///
     /// Keeps the write timeout the connection was opened with: a beat that
     /// blocks forever would leave the custodian waiting on a deadline that

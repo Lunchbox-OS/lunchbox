@@ -43,7 +43,7 @@ pub enum PairingMethod {
 /// Visual surface for the 6-digit pairing passkey.
 ///
 /// Implementations should render the passkey somewhere the user can
-/// see it from where they are pairing — for lunchbox's primary use
+/// see it from where they are pairing — for Lunchbox's primary use
 /// case, that's a full-screen Sway overlay on the TV. See
 /// `docs/ai/history/2026-06-20 002 ble-management.md`.
 ///

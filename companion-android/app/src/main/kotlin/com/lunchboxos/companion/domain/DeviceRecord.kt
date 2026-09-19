@@ -3,7 +3,7 @@ package com.lunchboxos.companion.domain
 import kotlinx.serialization.Serializable
 
 /**
- * One bonded lunchbox device, persisted locally (encrypted).
+ * One bonded Lunchbox device, persisted locally (encrypted).
  *
  * Built from the [AdminRecord] returned by `claim`, plus the Android
  * scan [androidIdentifier] (MAC) used to reconnect without re-scanning,

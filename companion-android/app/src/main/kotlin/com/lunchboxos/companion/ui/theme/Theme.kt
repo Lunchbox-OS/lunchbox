@@ -33,7 +33,7 @@ fun LunchboxTheme(
     content: @Composable () -> Unit,
 ) {
     // Material You dynamic color where available (Android 12+), falling
-    // back to the lunchbox green palette.
+    // back to the Lunchbox green palette.
     val colorScheme = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current

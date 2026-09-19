@@ -38,7 +38,7 @@ import type {
 } from "./wire-types.generated";
 
 /**
- * Every RPC method the lunchbox device speaks. The web-ui client is
+ * Every RPC method the Lunchbox device speaks. The web-ui client is
  * REST-shaped and doesn't dispatch by name, but references such as
  * feature-flag names or telemetry event names benefit from a compile-time
  * check that the string matches a real RPC.

@@ -86,14 +86,14 @@ fun PairingScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "Make sure the lunchbox device's TV is on — you'll compare a 6-digit code during pairing.",
+                "Make sure the Lunchbox device's TV is on — you'll compare a 6-digit code during pairing.",
                 style = MaterialTheme.typography.bodySmall,
             )
             if (discovered.isEmpty()) {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         CircularProgressIndicator(strokeWidth = 2.dp)
-                        Text("Scanning for lunchbox devices…")
+                        Text("Scanning for Lunchbox devices…")
                     }
                 }
             }

@@ -138,10 +138,10 @@ fn probe_polkit_grant() -> Result<(), String> {
 ///
 /// The privileged firewall helper already moves an activity out, via a
 /// system-manager scope. This is the unprivileged path for everything that
-/// does not go through it: `systemd-run --user --scope` asks lunchbox's own
+/// does not go through it: `systemd-run --user --scope` asks Lunchbox's own
 /// user manager for a transient scope. That is enough here even though it is
 /// not enough for the firewall (BPF attach needs the *system* manager), because
-/// all this has to achieve is "not lunchbox's cgroup".
+/// all this has to achieve is "not Lunchbox's cgroup".
 ///
 /// Snap and flatpak activities need nothing: their runtimes already place them
 /// under `user@<uid>.service/app.slice` — the same fact
@@ -213,7 +213,7 @@ fn probe_activity_isolation() -> ActivityIsolationStatus {
 }
 
 /// Build the argv prefix that launches an activity into a transient scope of
-/// its own in lunchbox's *user* manager (issue #144).
+/// its own in Lunchbox's *user* manager (issue #144).
 ///
 /// `--collect` so the scope is reaped when the activity exits: there is no
 /// teardown call to forget, unlike the privileged path's `stop_firewall_scope`.
@@ -234,12 +234,12 @@ pub fn user_scope_argv_prefix(scope_name: &str) -> Vec<String> {
     ]
 }
 
-/// The argv prefix that puts one of lunchbox's own **helper subprocesses** into
+/// The argv prefix that puts one of Lunchbox's own **helper subprocesses** into
 /// a transient scope of its own (issue #144).
 ///
 /// Distinct from [`user_scope_argv_prefix`], which isolates an *activity*, and
-/// the reasoning is different. A helper is lunchbox's own choice of binary with
-/// lunchbox's own argv, so it is not the untrusted party — but some helpers
+/// the reasoning is different. A helper is Lunchbox's own choice of binary with
+/// Lunchbox's own argv, so it is not the untrusted party — but some helpers
 /// parse data that is. `yt-dlp` is the one that matters: it runs on a
 /// background prefetch timer with no activity launched, and it parses whatever
 /// a remote host returns. Being a direct child of lunchboxd puts it inside the
@@ -334,8 +334,8 @@ fn sanitize_unit_tag(tag: &str) -> String {
 ///
 /// This looks redundant and is not. `snap run` re-scopes the client into
 /// `snap.steam.steam-<uuid>.scope` moments later, so the scope built here
-/// empties and `--collect` reaps it. It is here so that "nothing lunchbox
-/// starts for an activity is ever in lunchbox's cgroup" holds because of what
+/// empties and `--collect` reaps it. It is here so that "nothing Lunchbox
+/// starts for an activity is ever in Lunchbox's cgroup" holds because of what
 /// this code does, not because snapd usually moves the process quickly enough
 /// — and the preloaded client is the parent every Steam game inherits from, so
 /// it is the launch that matters.
@@ -554,7 +554,7 @@ pub fn init() {
         ActivityIsolationStatus::Unsupported { reason } => {
             warn!(
                 reason = %reason,
-                "Activities will share lunchbox's own cgroup, so the management socket \
+                "Activities will share Lunchbox's own cgroup, so the management socket \
                  cannot tell one from the launcher (issue #144)"
             );
         }
@@ -1001,7 +1001,7 @@ pub fn signal_group(pgid: u32, signal: Signal) {
 /// reaches *every* copy of that program the user is running, which for
 /// `retroarch` includes the game a child started seconds ago in a different
 /// session. Killing that one costs the child their save — a `SIGKILL` runs no
-/// shutdown path at all — so a session lunchbox is still tracking is spared,
+/// shutdown path at all — so a session Lunchbox is still tracking is spared,
 /// identified by its process group (every descendant shares it, courtesy of
 /// `setsid` at spawn).
 ///
@@ -1132,7 +1132,7 @@ impl ManagedProcess {
 
         // Deliberately not resolved here (issue #144). `program` is
         // `actual_argv[0]`, which is either an activity's own command from
-        // `config.toml` — the admin's string, and not lunchbox's to reinterpret
+        // `config.toml` — the admin's string, and not Lunchbox's to reinterpret
         // — or a helper the caller already resolved before building the argv.
         // Resolving again would be wrong for the first and redundant for the
         // second.
@@ -1561,7 +1561,7 @@ mod tests {
         // Process should be gone or terminating
     }
 
-    /// The by-name last resort must not reach a session lunchbox is still
+    /// The by-name last resort must not reach a session Lunchbox is still
     /// tracking.
     ///
     /// `pkill -f retroarch` does not know which RetroArch it is looking at, so
@@ -1604,7 +1604,7 @@ mod tests {
         );
         assert!(
             pid_is_live(tracked.pid),
-            "a session lunchbox is tracking must survive a by-name kill aimed at another"
+            "a session Lunchbox is tracking must survive a by-name kill aimed at another"
         );
 
         let _ = tracked.kill();
@@ -1688,7 +1688,7 @@ mod tests {
         // Deliberate, and it looks redundant: `snap run` re-scopes the client
         // into `snap.steam.steam-<uuid>.scope` a moment later, so the scope
         // built here empties out and is reaped. Keeping it is what makes
-        // "nothing lunchbox starts for an activity is ever in lunchbox's
+        // "nothing Lunchbox starts for an activity is ever in Lunchbox's
         // cgroup" a property of this code rather than of snapd's timing — and
         // the preloaded client is the parent every Steam game inherits from,
         // so dropping it would reopen the window for every game at once.

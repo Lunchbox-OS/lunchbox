@@ -413,7 +413,7 @@ struct EscapedActivity {
     reported: bool,
 }
 
-/// Every pid lunchbox is accountable for, snapshotted so a window can be
+/// Every pid Lunchbox is accountable for, snapshotted so a window can be
 /// attributed to whatever is (or is not) supervising it.
 ///
 /// The compositor only knows which process drew a surface. Turning that into
@@ -917,7 +917,7 @@ impl LinuxHost {
         }
     }
 
-    /// `app_id`s that are lunchbox's own furniture rather than an activity.
+    /// `app_id`s that are Lunchbox's own furniture rather than an activity.
     /// A window matching one of these is expected to outlive every session.
     fn is_infrastructure(window: &WindowInfo) -> bool {
         const INFRA: &[&str] = &[
@@ -939,7 +939,7 @@ impl LinuxHost {
     /// late Steam game arriving after we stopped watching. Neither shows up in
     /// `processes`, so only the compositor knows they exist.
     ///
-    /// Deliberately **report-only** for pids lunchbox did not spawn. Closing an
+    /// Deliberately **report-only** for pids Lunchbox did not spawn. Closing an
     /// unrecognized window is a policy call with real blast radius (a system
     /// dialog, something an admin started deliberately), and getting it wrong
     /// on a kiosk a child depends on is worse than the visibility gap. Windows
@@ -1060,7 +1060,7 @@ impl LinuxHost {
     /// Send every kill we have at an activity, hardest first. Shared by the
     /// stop paths and by the reconciliation sweep.
     ///
-    /// `protected_pgids` is every *other* session lunchbox is currently
+    /// `protected_pgids` is every *other* session Lunchbox is currently
     /// tracking. Only the by-name last resort consults it, and it must: this
     /// runs every two seconds for as long as an activity refuses to die, and
     /// `pkill`ing `retroarch` would take out the game a child launched
@@ -1108,7 +1108,7 @@ impl LinuxHost {
     /// Subscribe to sway's `window` events and turn them into sweeps.
     ///
     /// Reconciliation used to be a sampling detector: a 2s sweep asking "is
-    /// there a surface on screen that lunchbox does not own?". For a problem
+    /// there a surface on screen that Lunchbox does not own?". For a problem
     /// whose entire symptom is an unexpected window, sampling is the wrong
     /// shape — an orphan went unnoticed for up to 2s, and one that mapped and
     /// unmapped inside a single sweep was never noticed at all (issue #147).
@@ -1205,7 +1205,7 @@ impl LinuxHost {
                         code: DiagnosticCode::CompositorUnreachable,
                         subject: DiagnosticSubject::Service,
                         severity: DiagnosticSeverity::Critical,
-                        message: "lunchbox cannot see the compositor, so it cannot tell what is \
+                        message: "Lunchbox cannot see the compositor, so it cannot tell what is \
                                   on screen or close a window that escaped supervision"
                             .to_string(),
                         remedy: Some(
@@ -2160,7 +2160,7 @@ impl HostAdapter for LinuxHost {
         // itself is a child of the preloaded client rather than of this
         // process. The scope this creates empties out at that hand-off and
         // `--collect` reaps it. It is kept because the alternative is an
-        // invariant with a hole in it: "an activity is never in lunchbox's
+        // invariant with a hole in it: "an activity is never in Lunchbox's
         // cgroup" should hold because of what this function does, not because
         // snapd usually moves the process quickly enough. `preload_steam` wraps
         // the client for the same reason, and that is the launch a game
@@ -2184,7 +2184,7 @@ impl HostAdapter for LinuxHost {
                         command = ?final_argv.first(),
                         reason = %reason,
                         "Cannot give this activity a cgroup of its own; it will share \
-                         lunchbox's, and the management socket cannot tell it from the launcher"
+                         Lunchbox's, and the management socket cannot tell it from the launcher"
                     );
                     final_argv
                 }

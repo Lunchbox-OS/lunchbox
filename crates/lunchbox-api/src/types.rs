@@ -383,7 +383,7 @@ pub enum EntryKind {
         /// The RetroArch binary. Defaults to `retroarch` on `PATH`.
         #[serde(default = "default_retroarch_command")]
         command: String,
-        /// Extra arguments, appended after the ones lunchbox derives.
+        /// Extra arguments, appended after the ones Lunchbox derives.
         #[serde(default)]
         args: Vec<String>,
         #[serde(default)]
@@ -403,7 +403,7 @@ pub enum EntryKind {
     /// One book, opened in a document reader locked down to reading it
     /// (issue #160).
     ///
-    /// The reader keeps the page: lunchbox's job is to hand it a private
+    /// The reader keeps the page: Lunchbox's job is to hand it a private
     /// configuration that closes every door out of the book, and to close the
     /// window politely at the end of the session so the position is written.
     /// See [`lunchbox_host_linux::ebook`] for what is generated.
@@ -432,7 +432,7 @@ pub enum EntryKind {
         /// The reader binary. Defaults to the viewer's usual name.
         #[serde(default)]
         command: Option<String>,
-        /// Extra arguments, appended after the ones lunchbox derives.
+        /// Extra arguments, appended after the ones Lunchbox derives.
         #[serde(default)]
         args: Vec<String>,
         #[serde(default)]
@@ -571,7 +571,7 @@ pub enum RetroarchSaveState {
 }
 
 impl RetroarchSaveState {
-    /// Whether lunchbox should turn on RetroArch's auto save-state handling.
+    /// Whether Lunchbox should turn on RetroArch's auto save-state handling.
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
     }
@@ -770,7 +770,7 @@ impl EntryKind {
     /// or a scroll wheel — and a touchscreen produces none of those, while the
     /// reader itself has no swipe gesture. On a touch-only device that leaves
     /// a child on page one, so the buttons live where every activity's
-    /// controls already live: lunchbox's own HUD, which is on the overlay
+    /// controls already live: Lunchbox's own HUD, which is on the overlay
     /// layer, always reachable, and cannot be locked out by the reader.
     pub fn supports_page_turn(&self) -> bool {
         matches!(self, EntryKind::Ebook { .. })
@@ -1552,7 +1552,7 @@ pub enum WindowAction {
     Focus,
 }
 
-/// Who lunchbox believes a window belongs to.
+/// Who Lunchbox believes a window belongs to.
 ///
 /// The compositor cannot answer this — it reports pids, not intent. The host
 /// fills it in by matching each window against what it is actually
@@ -1566,7 +1566,7 @@ pub enum WindowOwner {
     /// mirror, and background processes it keeps warm (the preloaded Steam
     /// client). Expected to outlive every session.
     Lunchbox,
-    /// A process lunchbox is supervising for the current session — the
+    /// A process Lunchbox is supervising for the current session — the
     /// activity itself, something in its process group, a Steam game
     /// launched on its behalf, or one of its input sidecars.
     Activity,
@@ -1574,8 +1574,8 @@ pub enum WindowOwner {
     /// the host is still working on killing it — the same condition that
     /// writes an `ActivityEscaped` audit record.
     Escaped,
-    /// No process lunchbox knows about. Either something started outside
-    /// lunchbox entirely, or an activity that got away without the host ever
+    /// No process Lunchbox knows about. Either something started outside
+    /// Lunchbox entirely, or an activity that got away without the host ever
     /// noticing — the case supervision cannot fix on its own, and the reason
     /// this field exists.
     Unowned,
@@ -1608,7 +1608,7 @@ pub struct WindowInfo {
     pub visible: bool,
     /// True if the window has keyboard focus.
     pub focused: bool,
-    /// What lunchbox is supervising behind this window, if anything.
+    /// What Lunchbox is supervising behind this window, if anything.
     ///
     /// A host that cannot attribute windows reports every one of them as
     /// unowned.

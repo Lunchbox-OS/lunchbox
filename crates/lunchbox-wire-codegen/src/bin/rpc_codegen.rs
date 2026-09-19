@@ -300,7 +300,7 @@ fn render_kotlin(schema: &Schema) -> String {
     out.push_str("// `crates/lunchbox-management/src/service.rs`.\n\n");
     out.push_str("package com.lunchboxos.companion.ble\n\n");
     out.push_str("/**\n");
-    out.push_str(" * Wire-name constants for every RPC exposed by the lunchbox device.\n");
+    out.push_str(" * Wire-name constants for every RPC exposed by the Lunchbox device.\n");
     out.push_str(" * Mirrors the trait annotated with `#[management_rpc]` on the Rust side,\n");
     out.push_str(" * generated from that trait's `RPC_SCHEMA_JSON` so a drift between the\n");
     out.push_str(" * two sides is a CI failure, not a silent runtime miss.\n");
@@ -493,7 +493,7 @@ fn render_ts(schema: &Schema) -> String {
     out.push_str("} from \"./wire-types.generated\";\n\n");
 
     out.push_str("/**\n");
-    out.push_str(" * Every RPC method the lunchbox device speaks. The web-ui client is\n");
+    out.push_str(" * Every RPC method the Lunchbox device speaks. The web-ui client is\n");
     out.push_str(" * REST-shaped and doesn't dispatch by name, but references such as\n");
     out.push_str(" * feature-flag names or telemetry event names benefit from a compile-time\n");
     out.push_str(" * check that the string matches a real RPC.\n");

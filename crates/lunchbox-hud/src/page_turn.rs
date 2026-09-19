@@ -7,7 +7,7 @@
 //! one.
 //!
 //! The HUD is the natural place to fix that: it is already on screen, on the
-//! overlay layer, and it is lunchbox's own surface rather than something the
+//! overlay layer, and it is Lunchbox's own surface rather than something the
 //! reader's own restrictions could take away. So the buttons live there, and
 //! pressing one synthesizes the key the reader is already listening for.
 //!

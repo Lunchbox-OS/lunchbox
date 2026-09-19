@@ -400,7 +400,7 @@ export type DiagnosticCode =
    */
   | "firewall_not_applied"
   /**
-   * lunchbox cannot talk to the compositor, so it cannot see what is on
+   * Lunchbox cannot talk to the compositor, so it cannot see what is on
    * screen. The escape sweep closes nothing and no orphaned window is
    * reported, which is indistinguishable from a clear screen unless it is
    * said out loud (issue #147).
@@ -440,7 +440,7 @@ export type DiagnosticCode =
    */
   | "ipc_socket_not_hardened"
   /**
-   * lunchbox's policy and state are files at the uid activities run as,
+   * Lunchbox's policy and state are files at the uid activities run as,
    * because this device has no state custodian (issue #157).
    *
    * The session is deliberately left running — an unprotected kiosk beats a
@@ -912,7 +912,7 @@ export type EntryKind =
   | {
       type: "retroarch";
       /**
-       * Extra arguments, appended after the ones lunchbox derives.
+       * Extra arguments, appended after the ones Lunchbox derives.
        */
       args?: string[];
       /**
@@ -956,7 +956,7 @@ export type EntryKind =
    * One book, opened in a document reader locked down to reading it
    * (issue #160).
    *
-   * The reader keeps the page: lunchbox's job is to hand it a private
+   * The reader keeps the page: Lunchbox's job is to hand it a private
    * configuration that closes every door out of the book, and to close the
    * window politely at the end of the session so the position is written.
    * See [`lunchbox_host_linux::ebook`] for what is generated.
@@ -964,7 +964,7 @@ export type EntryKind =
   | {
       type: "ebook";
       /**
-       * Extra arguments, appended after the ones lunchbox derives.
+       * Extra arguments, appended after the ones Lunchbox derives.
        */
       args?: string[];
       /**
@@ -2386,7 +2386,7 @@ export interface WindowInfo {
    */
   name?: string | null;
   /**
-   * What lunchbox is supervising behind this window, if anything.
+   * What Lunchbox is supervising behind this window, if anything.
    *
    * A host that cannot attribute windows reports every one of them as
    * unowned.
@@ -2412,7 +2412,7 @@ export interface WindowInfo {
 }
 
 /**
- * Who lunchbox believes a window belongs to.
+ * Who Lunchbox believes a window belongs to.
  *
  * The compositor cannot answer this — it reports pids, not intent. The host
  * fills it in by matching each window against what it is actually
@@ -2427,7 +2427,7 @@ export type WindowOwner =
    */
   | "lunchbox"
   /**
-   * A process lunchbox is supervising for the current session — the
+   * A process Lunchbox is supervising for the current session — the
    * activity itself, something in its process group, a Steam game
    * launched on its behalf, or one of its input sidecars.
    */
@@ -2439,8 +2439,8 @@ export type WindowOwner =
    */
   | "escaped"
   /**
-   * No process lunchbox knows about. Either something started outside
-   * lunchbox entirely, or an activity that got away without the host ever
+   * No process Lunchbox knows about. Either something started outside
+   * Lunchbox entirely, or an activity that got away without the host ever
    * noticing — the case supervision cannot fix on its own, and the reason
    * this field exists.
    */

@@ -63,12 +63,12 @@ const OWNER_LABEL: Record<WindowOwner, string> = {
 };
 
 const OWNER_HELP: Record<WindowOwner, string> = {
-  lunchbox: "Part of lunchbox itself — the launcher, the HUD, or a background helper.",
+  lunchbox: "Part of Lunchbox itself — the launcher, the HUD, or a background helper.",
   activity: "Belongs to the session running right now.",
   escaped:
-    "This activity outlived its own teardown. Its session is over and lunchbox is still trying to kill it.",
+    "This activity outlived its own teardown. Its session is over and Lunchbox is still trying to kill it.",
   unowned:
-    "No process lunchbox knows about. Either it was started outside lunchbox, or an activity got away without lunchbox noticing.",
+    "No process Lunchbox knows about. Either it was started outside Lunchbox, or an activity got away without Lunchbox noticing.",
 };
 
 function OwnerChip({ owner }: { owner: WindowOwner }) {

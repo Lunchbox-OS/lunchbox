@@ -209,7 +209,7 @@ pub fn chrome_flags(spec: &BrowserSpec, user_data_dir: Option<&Path>) -> Vec<Str
     }
     match spec.mode {
         // Both kiosk and app open a *chromeless* window via `--app=<url>`. We
-        // deliberately avoid Chrome's `--kiosk` for kiosk mode: lunchbox's sway
+        // deliberately avoid Chrome's `--kiosk` for kiosk mode: Lunchbox's sway
         // compositor force-disables client fullscreen for every non-launcher
         // window (to keep the time-remaining HUD's exclusive zone visible), so
         // `--kiosk` only has its fullscreen request denied and then falls back to
@@ -479,7 +479,7 @@ mod tests {
 
     // --- Real-Chrome gated test (manual; needs the com.google.Chrome flatpak) ---
     //
-    // Everything above verifies the lunchbox side. This test verifies what only
+    // Everything above verifies the Lunchbox side. This test verifies what only
     // real Chrome can confirm: that the per-user policy injection
     // ([`chrome_flatpak_argv`]) is actually honored (URL allow/blocklist
     // enforced) **without** touching the host's machine-wide /etc, and that

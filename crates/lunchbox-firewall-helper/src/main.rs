@@ -575,7 +575,7 @@ mod tests {
         assert!(is_valid_scope_name("lunchbox-abc.scope"));
         assert!(is_valid_scope_name("lunchbox-1234567890abcdef.scope"));
         assert!(!is_valid_scope_name("lunchbox-abc"));
-        assert!(!is_valid_scope_name("lunchbox abc.scope"));
+        assert!(!is_valid_scope_name("Lunchbox abc.scope"));
         assert!(!is_valid_scope_name(".scope"));
         assert!(!is_valid_scope_name("../lunchbox.scope"));
     }

@@ -213,7 +213,7 @@ private fun EmptyDevices(onAddDevice: () -> Unit) {
     ) {
         Text("No devices paired", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Pair a lunchbox device over Bluetooth to manage it.",
+            "Pair a Lunchbox device over Bluetooth to manage it.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Button(onClick = onAddDevice) { Text("Pair a device") }

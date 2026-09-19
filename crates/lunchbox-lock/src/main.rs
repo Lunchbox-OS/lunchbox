@@ -8,7 +8,7 @@
 //! work keeps running, and the screen cannot be touched until an administrator
 //! unlocks it from the companion or web app.
 //!
-//! # Why this is not GTK, unlike every other lunchbox surface
+//! # Why this is not GTK, unlike every other Lunchbox surface
 //!
 //! It has to be a *real* session lock — `ext-session-lock-v1` — rather than a
 //! `gtk4-layer-shell` overlay like the HUD and the pairing display.
@@ -73,7 +73,7 @@ extern "C" fn on_sigterm(_: i32) {
 
 #[derive(Parser, Debug)]
 #[command(name = "lunchbox-lock")]
-#[command(about = "Session lock for lunchbox's administrator mode", long_about = None)]
+#[command(about = "Session lock for Lunchbox's administrator mode", long_about = None)]
 struct Args {
     /// Headline shown on the lock screen.
     #[arg(long, default_value = "Locked")]

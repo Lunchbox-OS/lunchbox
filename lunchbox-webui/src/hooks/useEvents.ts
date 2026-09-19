@@ -6,7 +6,7 @@ import { openEventStream } from "../api/client";
 const RETRY_MS = 5000;
 
 /**
- * Subscribes to the lunchbox SSE event stream and invalidates all cached
+ * Subscribes to the Lunchbox SSE event stream and invalidates all cached
  * queries on every event so TanStack Query refetches fresh data automatically.
  *
  * Reads the stream with `fetch` rather than `EventSource` so the token travels

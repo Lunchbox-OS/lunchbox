@@ -334,7 +334,7 @@ private fun WebInterfaceCard(listener: WebListenerView, urls: List<String>) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    urls.forEach { CopyableRow(it, label = "lunchbox web interface", emphasis = true) }
+                    urls.forEach { CopyableRow(it, label = "Lunchbox web interface", emphasis = true) }
                 }
             }
         }

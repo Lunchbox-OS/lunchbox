@@ -1,4 +1,4 @@
-//! `lunchbox-stated` — custodian for lunchbox's policy and state (issue #157).
+//! `lunchbox-stated` — custodian for Lunchbox's policy and state (issue #157).
 //!
 //! lunchboxd runs inside the kiosk session, as the same uid as every activity
 //! it launches. So do its files: `lunchboxd.db`, `config.toml`, the BLE admin

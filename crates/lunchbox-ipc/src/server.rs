@@ -145,7 +145,7 @@ impl IpcServer {
         // the takeover this file guards against with `socket_was_replaced`
         // would be impossible. But an abstract name ignores filesystem
         // permissions entirely, and that forecloses the fix that actually ends
-        // this whole class — separating lunchbox's uid from the activities'
+        // this whole class — separating Lunchbox's uid from the activities'
         // (#105/#157), after which a 0700 socket directory does the job that no
         // amount of peer checking can do while the uid is shared.
         let listener = UnixListener::bind(&self.socket_path)?;

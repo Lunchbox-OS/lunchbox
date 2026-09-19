@@ -4,7 +4,7 @@
  * GitHub's "Danger Zone" by shape, and for the same reason: some settings on a
  * settings page are not merely important but *self-referential* — they decide
  * whether the thing you are using to change them still works afterwards. The
- * management API is lunchbox's one such block. A config that disables it,
+ * management API is Lunchbox's one such block. A config that disables it,
  * binds it to an address this browser cannot reach, or turns off the TLS a
  * non-loopback bind requires, ends the session that saved it; and on a device
  * that `harden apply` has been run against there is no SSH to go back in with.

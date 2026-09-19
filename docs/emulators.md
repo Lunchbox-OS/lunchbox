@@ -313,7 +313,7 @@ Lunchbox checks for this at every launch and warns, naming the file and the
 keys:
 
 ```
-WARN lunchbox_host_linux::retroarch: RetroArch override sets settings lunchbox
+WARN lunchbox_host_linux::retroarch: RetroArch override sets settings Lunchbox
 relies on; RetroArch applies overrides after --appendconfig, so these win …
 override_file=~/.config/retroarch/config/mGBA/mGBA.cfg
 settings=savestate_auto_save, kiosk_mode_enable

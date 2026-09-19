@@ -1,6 +1,6 @@
 //! `AdminRecord`: the per-bond admin identity that survives restarts.
 //!
-//! Stored as TOML alongside other lunchbox persistent state. Also owns
+//! Stored as TOML alongside other Lunchbox persistent state. Also owns
 //! the factory-reset sentinel check that runs at daemon startup before
 //! the GATT server comes up.
 //!
@@ -251,7 +251,7 @@ impl std::fmt::Debug for PendingUnbondStore {
 }
 
 impl PendingUnbondStore {
-    /// Keep the queue with the rest of lunchbox's protected files (issue #157).
+    /// Keep the queue with the rest of Lunchbox's protected files (issue #157).
     ///
     /// It used to derive its own path beside the admin record, under a
     /// different name (`ble-pending-unbond.toml`) from the one the custodian

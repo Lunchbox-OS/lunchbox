@@ -7,7 +7,7 @@
 package com.lunchboxos.companion.ble
 
 /**
- * Wire-name constants for every RPC exposed by the lunchbox device.
+ * Wire-name constants for every RPC exposed by the Lunchbox device.
  * Mirrors the trait annotated with `#[management_rpc]` on the Rust side,
  * generated from that trait's `RPC_SCHEMA_JSON` so a drift between the
  * two sides is a CI failure, not a silent runtime miss.

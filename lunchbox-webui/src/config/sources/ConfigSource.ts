@@ -5,7 +5,7 @@
  * one component tree serve three homes:
  *
  * - `FileConfigSource` — local files, for the standalone static build.
- * - `DeviceConfigSource` — a lunchbox device over `GET`/`PUT /api/v1/config`
+ * - `DeviceConfigSource` — a Lunchbox device over `GET`/`PUT /api/v1/config`
  *   (issue #185). It lives in `src/sources/` rather than here, because this
  *   tree may not import `src/api/`: it also builds into the standalone bundle,
  *   which has no daemon to talk to.

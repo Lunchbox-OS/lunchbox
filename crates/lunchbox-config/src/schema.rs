@@ -340,7 +340,7 @@ pub struct RawBrowserConfig {
 
     /// Window mode: "kiosk"/"app" both open a chromeless window (no tabs or
     /// omnibox) via Chrome's `--app`, or "windowed" (normal browser window).
-    /// Default "kiosk". Note: lunchbox's sway compositor denies clients true
+    /// Default "kiosk". Note: Lunchbox's sway compositor denies clients true
     /// fullscreen to keep the HUD visible, so "kiosk" does not use `--kiosk`
     /// (which would fall back to a toolbar'd window); it behaves like "app".
     #[serde(default = "default_browser_mode")]
@@ -626,7 +626,7 @@ pub enum RawEntryKind {
         sponsorblock: Option<bool>,
     },
     /// A single piece of content played through RetroArch. See
-    /// [`lunchbox_api::EntryKind::Retroarch`] for what lunchbox sets up around
+    /// [`lunchbox_api::EntryKind::Retroarch`] for what Lunchbox sets up around
     /// the launch.
     Retroarch {
         /// Core short name (`"mgba"`); resolved to `mgba_libretro.so`.
@@ -646,7 +646,7 @@ pub enum RawEntryKind {
         /// The RetroArch binary; defaults to `retroarch` on `PATH`.
         #[serde(default = "default_retroarch_command")]
         command: String,
-        /// Extra arguments, appended after the ones lunchbox derives.
+        /// Extra arguments, appended after the ones Lunchbox derives.
         #[serde(default)]
         args: Vec<String>,
         /// Additional environment variables
@@ -660,7 +660,7 @@ pub enum RawEntryKind {
         reset: bool,
     },
     /// A single book, opened in a reader locked down to reading it. See
-    /// [`lunchbox_api::EntryKind::Ebook`] for what lunchbox sets up around the
+    /// [`lunchbox_api::EntryKind::Ebook`] for what Lunchbox sets up around the
     /// launch.
     Ebook {
         /// The book to open. Must be absolute or start with `~/`.
@@ -686,7 +686,7 @@ pub enum RawEntryKind {
         /// The reader binary; defaults to the viewer's own name.
         #[serde(default)]
         command: Option<String>,
-        /// Extra arguments, appended after the ones lunchbox derives.
+        /// Extra arguments, appended after the ones Lunchbox derives.
         #[serde(default)]
         args: Vec<String>,
         /// Additional environment variables
@@ -1258,7 +1258,7 @@ pub struct RawBleManagementConfig {
 
     /// Advertised local name and the device name returned in `DeviceInfo`.
     /// Defaults to `"lunchbox"`. Pick something the companion app can
-    /// disambiguate when multiple lunchbox devices are in range.
+    /// disambiguate when multiple Lunchbox devices are in range.
     pub device_name: Option<String>,
 
     /// Which Bluetooth controller to serve on, when the host has more

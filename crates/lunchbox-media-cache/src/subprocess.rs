@@ -2,7 +2,7 @@
 //!
 //! `lunchboxd` accepts a client on its management socket only from its own
 //! cgroup. Every subprocess it starts is a direct child, so it inherits that
-//! cgroup and lands inside the allow-list. For most of lunchbox's helpers that
+//! cgroup and lands inside the allow-list. For most of Lunchbox's helpers that
 //! is uninteresting — fixed argv, output read straight back. `yt-dlp` is not:
 //! it runs on a background prefetch timer with no activity launched, and it
 //! parses whatever a remote host returns, from an extractor with a recurring

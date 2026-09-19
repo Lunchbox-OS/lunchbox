@@ -128,7 +128,7 @@ export function unusableLabel(reason: UnusableReason): string {
     case "special_file":
       return "Not an ordinary file — a socket, a pipe or a device.";
     case "not_browsable":
-      return "Managed by lunchbox itself, or holding credentials. Not editable here.";
+      return "Managed by Lunchbox itself, or holding credentials. Not editable here.";
     case "unreadable":
       return "This device can see it but cannot read anything about it. It may still be possible to delete.";
   }

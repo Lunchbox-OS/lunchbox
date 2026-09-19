@@ -1,5 +1,5 @@
 /**
- * The annotated example config that ships with lunchbox, for trying the editor
+ * The annotated example config that ships with Lunchbox, for trying the editor
  * out.
  *
  * The standalone editor is a static page with no device behind it, so the

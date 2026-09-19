@@ -121,7 +121,7 @@ export interface RawBleManagementConfig {
   /**
    * Advertised local name and the device name returned in `DeviceInfo`.
    * Defaults to `"lunchbox"`. Pick something the companion app can
-   * disambiguate when multiple lunchbox devices are in range.
+   * disambiguate when multiple Lunchbox devices are in range.
    */
   device_name?: string | null;
   /**
@@ -185,7 +185,7 @@ export interface RawBrowserConfig {
   /**
    * Window mode: "kiosk"/"app" both open a chromeless window (no tabs or
    * omnibox) via Chrome's `--app`, or "windowed" (normal browser window).
-   * Default "kiosk". Note: lunchbox's sway compositor denies clients true
+   * Default "kiosk". Note: Lunchbox's sway compositor denies clients true
    * fullscreen to keep the HUD visible, so "kiosk" does not use `--kiosk`
    * (which would fall back to a toolbar'd window); it behaves like "app".
    */
@@ -562,13 +562,13 @@ export type RawEntryKind =
     }
   /**
    * A single piece of content played through RetroArch. See
-   * [`lunchbox_api::EntryKind::Retroarch`] for what lunchbox sets up around
+   * [`lunchbox_api::EntryKind::Retroarch`] for what Lunchbox sets up around
    * the launch.
    */
   | {
       type: "retroarch";
       /**
-       * Extra arguments, appended after the ones lunchbox derives.
+       * Extra arguments, appended after the ones Lunchbox derives.
        */
       args?: string[];
       /**
@@ -609,13 +609,13 @@ export type RawEntryKind =
     }
   /**
    * A single book, opened in a reader locked down to reading it. See
-   * [`lunchbox_api::EntryKind::Ebook`] for what lunchbox sets up around the
+   * [`lunchbox_api::EntryKind::Ebook`] for what Lunchbox sets up around the
    * launch.
    */
   | {
       type: "ebook";
       /**
-       * Extra arguments, appended after the ones lunchbox derives.
+       * Extra arguments, appended after the ones Lunchbox derives.
        */
       args?: string[];
       /**

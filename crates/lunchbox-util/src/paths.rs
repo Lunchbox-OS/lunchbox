@@ -254,7 +254,7 @@ mod tests {
     }
 }
 
-/// One of lunchbox's protected files (issue #157).
+/// One of Lunchbox's protected files (issue #157).
 ///
 /// The files that decide what a child may do: the policy, the BLE admin
 /// identity, and the two small records that go with it. They live at a uid
@@ -344,7 +344,7 @@ impl ProtectedFile {
     }
 }
 
-/// A small store of lunchbox's protected files, wherever they actually live.
+/// A small store of Lunchbox's protected files, wherever they actually live.
 ///
 /// Implemented against the local filesystem in development, and against the
 /// custodian's socket on a device. It exists so `lunchbox-ble` can keep the

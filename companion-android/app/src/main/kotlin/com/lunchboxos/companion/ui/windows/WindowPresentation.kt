@@ -117,7 +117,7 @@ object WindowPresentation {
                 "the device is still trying to close it."
         WindowOwner.UNOWNED ->
             "No process the device knows about. Either it was started outside " +
-                "lunchbox, or an activity got away without being noticed."
+                "Lunchbox, or an activity got away without being noticed."
         // `UNKNOWN` gets no detail for the same reason the two ordinary owners
         // do not: this build cannot say anything true about a category it does
         // not have, and `isOrphan` already leaves it out of the orphan set.

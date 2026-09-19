@@ -1,4 +1,4 @@
-//! End-to-end tests for the full lunchbox stack.
+//! End-to-end tests for the full Lunchbox stack.
 //!
 //! Each `#[ignore]` test boots its own Sway, lunchboxd, and (optionally) UIs
 //! in an isolated temp environment, then drives the daemon through the

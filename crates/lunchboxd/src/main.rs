@@ -1,4 +1,4 @@
-//! lunchboxd - The lunchbox background service
+//! lunchboxd - The Lunchbox background service
 //!
 //! This is the main entry point for the lunchboxd service.
 //! It wires together all the components:
@@ -158,7 +158,7 @@ struct Args {
     // Deliberately no `env =` (issue #144). This is the most dangerous of the
     // development switches to leave environment-settable: the others disarm a
     // check, this one *hands out a working compositor socket* at a path the
-    // caller picks, and sway's IPC grants `exec` — a process outside lunchbox's
+    // caller picks, and sway's IPC grants `exec` — a process outside Lunchbox's
     // supervision and outside the cgroup the firewall is attached to. On a
     // device the environment belongs to the kiosk user, so a flag it is.
     #[arg(long)]
@@ -168,7 +168,7 @@ struct Args {
     /// of unlinking it once lunchboxd has connected.
     ///
     /// Hardening is the default because sway's IPC hands any process running as
-    /// this uid `exec`, which starts a process outside lunchbox's supervision
+    /// this uid `exec`, which starts a process outside Lunchbox's supervision
     /// *and* outside the cgroup the per-entry firewall is attached to
     /// (issue #144) — a device that ships unhardened is a device where
     /// `default_deny` means nothing.
@@ -207,7 +207,7 @@ struct Args {
     /// `LUNCHBOX_FIREWALL_HELPER` and `LUNCHBOX_BROWSER_ROOT`, and search
     /// `$PATH` ahead of the compiled-in trusted directories.
     ///
-    /// Off by default, because on a device the environment is not lunchbox's to
+    /// Off by default, because on a device the environment is not Lunchbox's to
     /// trust: GDM's PAM stack reads `~/.pam_environment`, a file the kiosk user
     /// owns, so every activity can choose what `$PATH` says (issue #144). A
     /// substituted `systemd-run` would run as a direct child of the daemon, in
@@ -336,7 +336,7 @@ enum IpcPeerHardening {
     Degraded(String),
 }
 
-/// Where lunchbox's state ended up living, and why.
+/// Where Lunchbox's state ended up living, and why.
 ///
 /// Three outcomes for the same reason [`IpcPeerHardening`] has three: "the
 /// operator asked for the old behaviour" and "the protection was wanted and
@@ -827,7 +827,7 @@ impl Service {
             subject: DiagnosticSubject::Service,
             severity: DiagnosticSeverity::Critical,
             message: format!(
-                "lunchbox's usage, quota and audit state is a file owned by the user every \
+                "Lunchbox's usage, quota and audit state is a file owned by the user every \
                  activity runs as, so an activity can reset today's usage or grant itself \
                  time — {reason}"
             ),
@@ -1110,7 +1110,7 @@ impl Service {
     ///
     /// Sway's IPC grants any process running as lunchboxd's own uid — which is
     /// every activity — the whole compositor: `exec` starts a process outside
-    /// lunchbox's supervision *and* outside the cgroup the per-entry firewall
+    /// Lunchbox's supervision *and* outside the cgroup the per-entry firewall
     /// is attached to, `exit` ends the kiosk session, and `kill` closes the HUD.
     /// Sway has no access control to turn on (its `ipc` permission blocks went
     /// away in 1.0), and no permission or path scheme can help while everything
@@ -1158,7 +1158,7 @@ impl Service {
         // connect.
         if let Err(e) = lunchbox_host_linux::sway_ipc::client().connect_now().await {
             warn!(error = %e, "Not hardening the sway IPC socket: no connection to keep alive");
-            report(format!("lunchbox could not reach the compositor: {e}"));
+            report(format!("Lunchbox could not reach the compositor: {e}"));
             return;
         }
 
@@ -1219,16 +1219,16 @@ impl Service {
                 // client, including the launcher. Staying open is the same
                 // trade the compositor hardening makes: an unhardened kiosk
                 // beats a dead one, as long as it is said out loud.
-                warn!(error = %e, "Could not read lunchbox's own cgroup; leaving the management socket open to this uid");
+                warn!(error = %e, "Could not read Lunchbox's own cgroup; leaving the management socket open to this uid");
                 return IpcPeerHardening::Degraded(format!(
-                    "lunchbox could not read its own cgroup, so it cannot tell its own \
+                    "Lunchbox could not read its own cgroup, so it cannot tell its own \
                      clients from an activity: {e}"
                 ));
             }
         };
         ipc.set_peer_policy(policy);
 
-        // Armed — but only a boundary where lunchbox's cgroup is one an
+        // Armed — but only a boundary where Lunchbox's cgroup is one an
         // activity cannot get into. Inside the user manager's delegated
         // subtree every cgroup is owned by this uid, so any process at this
         // uid can move itself into any other: the allow-list still refuses a
@@ -1240,14 +1240,14 @@ impl Service {
             Ok(path) if lunchbox_ipc::is_delegated_user_cgroup(&path) => {
                 warn!(
                     cgroup = %path,
-                    "lunchbox is running inside the user manager's delegated cgroup subtree, \
+                    "Lunchbox is running inside the user manager's delegated cgroup subtree, \
                      where a process at this uid can join any cgroup; the management socket's \
                      peer check is not a boundary here"
                 );
                 IpcPeerHardening::Degraded(format!(
-                    "lunchbox is running inside the user manager's delegated cgroups \
+                    "Lunchbox is running inside the user manager's delegated cgroups \
                      ({path}), where any process at this uid can join any cgroup — including \
-                     lunchbox's own"
+                     Lunchbox's own"
                 ))
             }
             Ok(path) => {
@@ -1264,13 +1264,13 @@ impl Service {
                     lunchbox_host_linux::ActivityIsolationStatus::Unsupported { reason } => {
                         IpcPeerHardening::Degraded(format!(
                             "activities cannot be given a cgroup of their own, so they share \
-                         lunchbox's and the check cannot tell them from the launcher: {reason}"
+                         Lunchbox's and the check cannot tell them from the launcher: {reason}"
                         ))
                     }
                 }
             }
             Err(e) => IpcPeerHardening::Degraded(format!(
-                "lunchbox could not read its own cgroup path, so it cannot tell whether the \
+                "Lunchbox could not read its own cgroup path, so it cannot tell whether the \
                  peer check is a boundary on this host: {e}"
             )),
         }
@@ -1303,7 +1303,7 @@ impl Service {
             subject: DiagnosticSubject::Service,
             severity: DiagnosticSeverity::Critical,
             message: format!(
-                "lunchbox's own management socket can be driven by any process running as \
+                "Lunchbox's own management socket can be driven by any process running as \
                  this user, so an activity can stop itself, launch another, or log the \
                  session out — {reason}"
             ),
@@ -1343,7 +1343,7 @@ impl Service {
                         code: DiagnosticCode::IpcSocketReplaced,
                         subject: DiagnosticSubject::Service,
                         severity: DiagnosticSeverity::Critical,
-                        message: "Something replaced lunchbox's management socket, so the \
+                        message: "Something replaced Lunchbox's management socket, so the \
                                   launcher, the HUD and the screen-blank timer can no longer \
                                   reach the daemon. They refuse to talk to whatever bound it \
                                   instead, so nothing has been given away — but this session \
@@ -1382,7 +1382,7 @@ impl Service {
             subject: DiagnosticSubject::Service,
             severity: DiagnosticSeverity::Warning,
             message: format!(
-                "a process outside this session tried to drive lunchbox and was refused{who}"
+                "a process outside this session tried to drive Lunchbox and was refused{who}"
             ),
             remedy: Some(
                 "Nothing is broken: the request was denied. If it repeats, check what that \
@@ -1772,7 +1772,7 @@ impl Service {
                     device_name: ble_cfg.device_name,
                     firmware_version: env!("CARGO_PKG_VERSION").to_string(),
                     // The admin record carries the minted HTTP token, so when
-                    // the custodian is holding lunchbox's state it holds this
+                    // the custodian is holding Lunchbox's state it holds this
                     // too — otherwise the credential sits at the uid every
                     // activity runs as (issue #157).
                     //
@@ -3139,7 +3139,7 @@ mod harden_diagnostic_tests {
     }
 
     /// The check being armed is not the same as the check being a boundary.
-    /// Where lunchbox sits in a cgroup any process at this uid can join —
+    /// Where Lunchbox sits in a cgroup any process at this uid can join —
     /// a stack started from a shell, which is every dev session — arming it
     /// changes nothing, and a device configured that way has to say so rather
     /// than look protected.
@@ -3178,7 +3178,7 @@ mod harden_diagnostic_tests {
     #[test]
     fn a_refused_peer_names_where_it_came_from() {
         let d = Service::ipc_peer_rejected_diagnostic(&lunchbox_ipc::Rejection {
-            reason: "not lunchbox's own".into(),
+            reason: "not Lunchbox's own".into(),
             peer_cgroup: Some("/system.slice/lunchbox-abc-123.scope".into()),
             peer_pid: Some(4242),
         });

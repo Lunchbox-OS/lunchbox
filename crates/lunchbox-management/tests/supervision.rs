@@ -234,7 +234,7 @@ async fn launch(svc: &DefaultManagementService, id: &str) {
 // #144 — the idle blank runs through lunchboxd, and respects a live activity
 // ---------------------------------------------------------------------------
 
-/// `swayidle` fires on its own timer and cannot see lunchbox's state, so the
+/// `swayidle` fires on its own timer and cannot see Lunchbox's state, so the
 /// "don't blank over a running activity" rule has to hold on this side.
 ///
 /// It used to live in the sway config as `--is-idle-allowed && swaymsg …`,

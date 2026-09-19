@@ -94,7 +94,7 @@ fn load_or_generate(
         .context("building self-signed certificate parameters")?;
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "lunchbox management");
+        .push(rcgen::DnType::CommonName, "Lunchbox management");
     params.not_after = rcgen::date_time_ymd(time_now_year() + SELF_SIGNED_VALID_YEARS, 1, 1);
     let key = rcgen::KeyPair::generate().context("generating a key pair")?;
     let cert = params

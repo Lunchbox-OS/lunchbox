@@ -160,7 +160,7 @@ fun WindowsScreen(vm: DeviceViewModel, onBack: () -> Unit) {
                 }
                 section("Unsupervised", orphaned, windows.busyId, windows.adminMode, vm, onConfirmClose = { confirmClose = it })
                 section("On screen", windows.onScreen, windows.busyId, windows.adminMode, vm, onConfirmClose = { confirmClose = it })
-                // The scratchpad is where lunchbox stashes windows it wants
+                // The scratchpad is where Lunchbox stashes windows it wants
                 // running but out of sight (the Steam client, chiefly), so
                 // its contents are worth their own heading rather than being
                 // mixed in and distinguishable only by a chip.
