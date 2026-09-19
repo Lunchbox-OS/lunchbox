@@ -661,8 +661,9 @@ shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh
 shellcheck -e SC1091 run-dev
 ```
 
-**CI's ShellCheck is older than yours.** The job installs Debian bookworm's
-package (0.9), while Ubuntu 26.04 ships 0.11, and the two disagree on some codes —
+**CI's ShellCheck is older than yours.** The job installs the runner's Ubuntu
+24.04 package (0.9) — it was Debian bookworm's, also 0.9, while the job still ran
+in a container — while Ubuntu 26.04 ships 0.11, and the two disagree on some codes —
 0.10 split SC2329 ("function never invoked") out of SC2317 ("command
 unreachable"), so a `disable=SC2329` that satisfies 0.11 does nothing for 0.9.
 Where a disable is genuinely needed for a check that was renumbered, list both
