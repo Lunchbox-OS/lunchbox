@@ -1,4 +1,11 @@
-# DISABLED — the whole workflow below is commented out.
+# DISABLED — commented out, and named `.yml.disabled` so GitHub does not read it.
+#
+# Both, because commenting alone does not disable a workflow. GitHub parses
+# every `.yml` and `.yaml` under .github/workflows/ whatever its contents, and a
+# file with no `on:` trigger is an invalid workflow: it reported a startup
+# failure against every push, with no jobs and nothing to click into. Only the
+# extension keeps it out of that. To re-enable, rename it back to `.yml` and
+# uncomment.
 #
 # Everything it published went to the Forgejo instance the project has left:
 # `create-release` and `scripts/ci/upload-release-asset.sh` speak Forgejo's
