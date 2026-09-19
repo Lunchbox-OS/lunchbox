@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manual end-to-end firewall enforcement test for Flatpak entries.
 #
-# Builds a tiny "com.lunchbox-os.firewall.Probe" flatpak from this repo with
+# Builds a tiny "com.lunchboxos.firewall.Probe" flatpak from this repo with
 # flatpak-builder, installs it user-scoped, then drives `cargo test
 # -p lunchbox-e2e --test firewall_real_flatpak`. Same shape as
 # test-firewall-snap.sh but for the flatpak path of
@@ -24,9 +24,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
-POLKIT_ACTION="com.lunchbox-os.firewall.apply-process"
+POLKIT_ACTION="com.lunchboxos.firewall.apply-process"
 DENY_TARGET="${LUNCHBOX_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
-APP_ID="com.lunchbox-os.firewall.Probe"
+APP_ID="com.lunchboxos.firewall.Probe"
 RUNTIME_VERSION="24.08"
 
 fail() {

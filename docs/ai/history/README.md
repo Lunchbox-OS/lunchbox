@@ -27,8 +27,8 @@ So when reading an older note, translate as you go:
 | `./scripts/shepherd` | `./scripts/lunchbox` |
 | `shepherd-webui` | `lunchbox-webui` |
 | `SHEPHERD_*` env vars | `LUNCHBOX_*` |
-| `org.shepherd.*` app IDs | `com.lunchbox-os.*` |
-| `com.armeafamily.shepherd.{companion,media}` | `com.lunchbox_os.{companion,media}` |
+| `org.shepherd.*` app IDs | `com.lunchboxos.*` |
+| `com.armeafamily.shepherd.{companion,media}` | `com.lunchboxos.{companion,media}` |
 | `/etc/shepherd`, `~/.config/shepherd` | `/etc/lunchbox`, `~/.config/lunchbox` |
 | `/var/lib/shepherdd`, `shepherdd.db` | `/var/lib/lunchboxd`, `lunchboxd.db` |
 | `git.armeafamily.com/albert/shepherd-launcher` | `github.com/aarmea/lunchbox` |

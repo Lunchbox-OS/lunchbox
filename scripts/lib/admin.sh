@@ -446,13 +446,13 @@ android_app_meta() {
         companion)
             ANDROID_APP_DIR="companion-android"
             ANDROID_APP_ARTIFACT="lunchbox-companion"
-            ANDROID_APP_PACKAGE="com.lunchbox_os.companion"
+            ANDROID_APP_PACKAGE="com.lunchboxos.companion"
             ANDROID_APP_LABEL="Lunchbox Companion"
             ;;
         media)
             ANDROID_APP_DIR="crates/lunchbox-media-android/android"
             ANDROID_APP_ARTIFACT="lunchbox-media"
-            ANDROID_APP_PACKAGE="com.lunchbox_os.media"
+            ANDROID_APP_PACKAGE="com.lunchboxos.media"
             ANDROID_APP_LABEL="Lunchbox Media"
             ;;
         *)

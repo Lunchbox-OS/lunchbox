@@ -95,7 +95,7 @@ the full design and roadmap.
   decode, audio, transport controls, and EOF.
 
   Video does **not** go through egui. mpv decodes straight into a `SurfaceView`
-  that [`LunchboxMediaActivity`](./android/app/src/main/java/com/lunchbox_os/media/LunchboxMediaActivity.java)
+  that [`LunchboxMediaActivity`](./android/app/src/main/java/com/lunchboxos/media/LunchboxMediaActivity.java)
   puts behind the (translucent) activity window — `vo=mediacodec_embed`,
   `hwdec=mediacodec`, `--wid` — so frames stay on the GPU and SurfaceFlinger can
   put them on a hardware overlay plane. egui paints only the overlay, over

@@ -2,7 +2,7 @@
 
 > Status: **done**, 2026-09-19. The tree builds, lints and tests clean, both
 > Android apps build, and a headless session boots the launcher under
-> `com.lunchbox-os.launcher`. Two follow-ups are listed at the end — both are
+> `com.lunchboxos.launcher`. Two follow-ups are listed at the end — both are
 > infrastructure that has to exist in the world, not code.
 
 ## Prompt
@@ -38,9 +38,37 @@ application IDs and Kotlin package names require every segment to match
 identifier. `com.lunchbox-os.companion` would not build. The hyphen is fine
 everywhere else it is used here — GTK application IDs and polkit action IDs
 both already carried one (`org.shepherd.pairing-display`,
-`org.shepherd.firewall.apply-process`) — so only Android needed an answer.
-Chosen: `com.lunchbox_os.{companion,media}` for the Android apps,
-`com.lunchbox-os.*` everywhere else.
+`org.shepherd.firewall.apply-process`) — so at first only Android needed an
+answer, and it got `com.lunchbox_os.{companion,media}` while everything else
+kept `com.lunchbox-os.*`.
+
+**That split was then undone.** Replacing a hyphen with an underscore is the
+documented Java convention (JLS §6.1 gives `hyphenated-name.example.org` →
+`org.example.hyphenated_name`), so it was *correct* — but it is vanishingly
+rare in practice, because projects avoid hyphenated domains rather than remap
+them. Measured on this bench, in the domain-derived part of a package name:
+
+| Sample | with `_` |
+|---|---|
+| 293 human-chosen packages installed on the Pixel | 0 |
+| 279 on the Motorola | 0 |
+| 113 Maven group IDs in the gradle cache | 1 (`org.bitbucket.b_c`) |
+
+(System-generated names — `auto_generated_rro_*`, `icon_pack.*` — were excluded
+as not chosen by anyone.) `com.lunchbox_os` would have been the only instance
+of the pattern in ~570 real Android packages.
+
+Owning `lunchboxos.com` as well as `lunchbox-os.com` removed the need for the
+remapping entirely, so everything unified on **`com.lunchboxos.*`** — Android,
+GTK app IDs and polkit actions alike. One identifier family, no per-platform
+exception to remember. Reverse-DNS IDs exist for uniqueness and provable
+ownership, not to match the marketing domain, so user-facing URLs stay on
+`lunchbox-os.com` while the identifiers use the hyphen-free domain.
+
+The window to do this was now: an application ID is permanent once published,
+and changing it after release re-inflicts the "not an upgrade, re-pair
+everything" break described below. Nothing had shipped, so it cost one more
+sweep.
 
 **2. On-disk names are a clean break, with a migration.** Nothing in the new
 tree reads an old path. `scripts/lib/migrate.sh` moves an existing device over
@@ -149,9 +177,9 @@ installer's to delete.
 | `lunchbox-webui` — `tsc --noEmit`, `vitest` | clean, 213 passed |
 | config-wasm | builds, emits `lunchbox_config` |
 | `config.example.toml` | validates |
-| companion app | `assembleDebug` + unit tests pass as `com.lunchbox_os.companion` |
+| companion app | `assembleDebug` + unit tests pass as `com.lunchboxos.companion` |
 | media app | builds, installs, runs on device (below) |
-| headless session | launcher up and focused as `com.lunchbox-os.launcher` |
+| headless session | launcher up and focused as `com.lunchboxos.launcher` |
 | IPC | `dev-runtime/lunchbox.sock` answers a `launch` RPC |
 | web UI | serves, `<title>Lunchbox</title>` |
 | `.deb` | builds; every shipped path renamed; postinst is valid POSIX sh |
@@ -197,7 +225,7 @@ nativeloader: Load .../lib/arm64/liblunchbox_media_android.so ... ok
 lunchbox_media_androi..: registered the JavaVM with FFmpeg; MediaCodec decoding is available
 ```
 
-The activity resolves as `com.lunchbox_os.media/.LunchboxMediaActivity`, the
+The activity resolves as `com.lunchboxos.media/.LunchboxMediaActivity`, the
 process stays up, and the UI renders titled `lunchbox-media`. There are no
 Android-side unit tests here (the source set is `main` only) — the logic is in
 Rust, and `cargo test` covers the six media crates: 342 tests, 0 failures.
@@ -206,7 +234,7 @@ The desktop `lunchbox-media` binary ships in the `.deb` and answers `--help`.
 
 ### The app-ID rename is not an upgrade
 
-Android keys an install by application ID, so `com.lunchbox_os.companion`
+Android keys an install by application ID, so `com.lunchboxos.companion`
 installs **alongside** `com.armeafamily.shepherd.companion` rather than over
 it — confirmed on both bench phones, which now list both. The consequences are
 the user-visible half of this rename:

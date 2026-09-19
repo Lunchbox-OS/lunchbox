@@ -921,9 +921,9 @@ impl LinuxHost {
     /// A window matching one of these is expected to outlive every session.
     fn is_infrastructure(window: &WindowInfo) -> bool {
         const INFRA: &[&str] = &[
-            "com.lunchbox-os.launcher",
-            "com.lunchbox-os.hud",
-            "com.lunchbox-os.pairing",
+            "com.lunchboxos.launcher",
+            "com.lunchboxos.hud",
+            "com.lunchboxos.pairing",
             "at.yrlf.wl_mirror",
         ];
         window
@@ -3559,7 +3559,7 @@ mod tests {
             WindowOwner::Activity
         );
         assert_eq!(
-            owners(window(101, "com.lunchbox-os.launcher")),
+            owners(window(101, "com.lunchboxos.launcher")),
             WindowOwner::Lunchbox,
             "our own furniture is recognised by app_id, whatever its pid"
         );
@@ -3640,7 +3640,7 @@ mod tests {
 
         let windows = vec![
             window(100, "org.example.TrackedActivity"), // a tracked activity
-            window(101, "com.lunchbox-os.launcher"),    // our own furniture
+            window(101, "com.lunchboxos.launcher"),     // our own furniture
             window(102, "org.example.Orphan"),          // the one that matters
         ];
 

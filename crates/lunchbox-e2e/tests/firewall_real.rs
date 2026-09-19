@@ -38,7 +38,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchboxos.firewall.apply-process";
 /// Public, well-known TCP endpoint used as the deny target. Must be
 /// reachable from outside the firewall scope, otherwise the deny check
 /// passes for the wrong reason.

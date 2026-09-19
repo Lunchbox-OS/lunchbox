@@ -466,7 +466,7 @@ pub fn render(defs: &Map<String, Value>) -> String {
     out.push_str("// types listed as hand-written in `kotlin_types.rs`) live in\n");
     out.push_str("// `Models.kt` alongside this file.\n\n");
     out.push_str("@file:OptIn(ExperimentalSerializationApi::class)\n\n");
-    out.push_str("package com.lunchbox_os.companion.domain\n\n");
+    out.push_str("package com.lunchboxos.companion.domain\n\n");
     out.push_str("import kotlinx.serialization.ExperimentalSerializationApi\n");
     out.push_str("import kotlinx.serialization.KSerializer\n");
     out.push_str("import kotlinx.serialization.SerialName\n");

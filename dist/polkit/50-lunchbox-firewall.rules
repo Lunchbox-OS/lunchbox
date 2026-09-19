@@ -1,7 +1,7 @@
 // Polkit rule for lunchbox-firewall-helper.
 //
-// Grants the action `com.lunchbox-os.firewall.apply-process` (declared in
-// /usr/share/polkit-1/actions/com.lunchbox-os.firewall.policy) without a password
+// Grants the action `com.lunchboxos.firewall.apply-process` (declared in
+// /usr/share/polkit-1/actions/com.lunchboxos.firewall.policy) without a password
 // prompt to members of the unix group `lunchbox-firewall`.
 //
 // Install path: /etc/polkit-1/rules.d/50-lunchbox-firewall.rules
@@ -13,7 +13,7 @@
 //      effect, OR lunchboxd must be restarted from a fresh session.
 
 polkit.addRule(function(action, subject) {
-    if (action.id === "com.lunchbox-os.firewall.apply-process" &&
+    if (action.id === "com.lunchboxos.firewall.apply-process" &&
         subject.isInGroup("lunchbox-firewall")) {
         return polkit.Result.YES;
     }

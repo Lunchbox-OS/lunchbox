@@ -194,7 +194,7 @@ Two Android apps ship alongside the launcher:
 
 > **Coming from Shepherd Companion?** The project was renamed in 2026-09, and
 > with it the apps' package names (`com.armeafamily.shepherd.*` →
-> `com.lunchbox_os.*`). Android treats a new package name as a *different app*,
+> `com.lunchboxos.*`). Android treats a new package name as a *different app*,
 > so this is not an upgrade:
 >
 > * Lunchbox Companion installs alongside Shepherd Companion instead of

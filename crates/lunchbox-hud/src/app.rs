@@ -137,7 +137,7 @@ fn rebuild_taskbar(row: &gtk4::Box, windows: &[lunchbox_api::WindowInfo]) {
 fn shell_window_id(windows: &[lunchbox_api::WindowInfo]) -> Option<u64> {
     windows
         .iter()
-        .find(|w| w.app_id.as_deref() == Some("com.lunchbox-os.launcher"))
+        .find(|w| w.app_id.as_deref() == Some("com.lunchboxos.launcher"))
         .map(|w| w.id)
 }
 
@@ -546,7 +546,7 @@ impl HudApp {
         height: i32,
     ) -> Self {
         let app = gtk4::Application::builder()
-            .application_id("com.lunchbox-os.hud")
+            .application_id("com.lunchboxos.hud")
             .build();
 
         Self {
@@ -3177,8 +3177,8 @@ mod tests {
     fn the_taskbar_lists_only_what_the_caregiver_opened() {
         use lunchbox_api::WindowOwner;
         let windows = vec![
-            window(1, "com.lunchbox-os.launcher", WindowOwner::Lunchbox),
-            window(2, "com.lunchbox-os.hud", WindowOwner::Lunchbox),
+            window(1, "com.lunchboxos.launcher", WindowOwner::Lunchbox),
+            window(2, "com.lunchboxos.hud", WindowOwner::Lunchbox),
             window(3, "steam", WindowOwner::Unowned),
             window(4, "org.gnome.Nautilus", WindowOwner::Unowned),
         ];
@@ -3186,7 +3186,7 @@ mod tests {
         assert_eq!(listed, vec![3, 4]);
 
         // With nothing of the caregiver's left, the "X" becomes the way out.
-        let only_ours = vec![window(1, "com.lunchbox-os.launcher", WindowOwner::Lunchbox)];
+        let only_ours = vec![window(1, "com.lunchboxos.launcher", WindowOwner::Lunchbox)];
         assert!(admin_windows(&only_ours).is_empty());
         assert!(admin_windows_on_screen(&only_ours).is_empty());
     }
@@ -3215,7 +3215,7 @@ mod tests {
         stashed.in_scratchpad = true;
         stashed.visible = false;
         let windows = vec![
-            window(1, "com.lunchbox-os.launcher", WindowOwner::Lunchbox),
+            window(1, "com.lunchboxos.launcher", WindowOwner::Lunchbox),
             stashed,
         ];
         assert_eq!(
@@ -3238,7 +3238,7 @@ mod tests {
         use lunchbox_api::WindowOwner;
         let windows = vec![
             window(7, "steam", WindowOwner::Unowned),
-            window(9, "com.lunchbox-os.launcher", WindowOwner::Lunchbox),
+            window(9, "com.lunchboxos.launcher", WindowOwner::Lunchbox),
         ];
         assert_eq!(shell_window_id(&windows), Some(9));
         assert_eq!(shell_window_id(&windows[..1]), None);

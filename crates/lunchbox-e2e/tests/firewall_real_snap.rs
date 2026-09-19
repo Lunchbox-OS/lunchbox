@@ -23,7 +23,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchboxos.firewall.apply-process";
 
 /// Returns `None` when this host can run the test, or `Some(reason)` if
 /// not. Mirrors the predicate in firewall_real.rs but adds snapd and the

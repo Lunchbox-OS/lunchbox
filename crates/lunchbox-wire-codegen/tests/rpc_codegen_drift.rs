@@ -49,7 +49,7 @@ fn codegen_outputs_match_checked_in() {
     let files = [
         ("docs/rpc-schema.json", "rpc-schema.json"),
         (
-            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/RpcMethods.kt",
+            "companion-android/app/src/main/kotlin/com/lunchboxos/companion/ble/RpcMethods.kt",
             "RpcMethods.kt",
         ),
         // The request half of the protocol. Param *names* were the last part
@@ -57,7 +57,7 @@ fn codegen_outputs_match_checked_in() {
         // rename compiled on both sides and failed only when someone tapped
         // the button.
         (
-            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/RpcParams.generated.kt",
+            "companion-android/app/src/main/kotlin/com/lunchboxos/companion/domain/RpcParams.generated.kt",
             "RpcParams.generated.kt",
         ),
         (
@@ -68,7 +68,7 @@ fn codegen_outputs_match_checked_in() {
         // companion's hand-written mirrors drifted twice before they were
         // generated, and neither drift was catchable from the method schema.
         (
-            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/WireTypes.generated.kt",
+            "companion-android/app/src/main/kotlin/com/lunchboxos/companion/domain/WireTypes.generated.kt",
             "WireTypes.generated.kt",
         ),
         // The web UI's half of the same story. Its types were hand-written for
@@ -141,11 +141,11 @@ fn codegen_outputs_match_checked_in() {
 /// found during #149, on a phone that had just been given the new build.
 #[test]
 fn protocol_constants_match_the_companion() {
-    let kotlin =
-        std::fs::read_to_string(repo_root().join(
-            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/Protocol.kt",
-        ))
-        .expect("companion Protocol.kt");
+    let kotlin = std::fs::read_to_string(
+        repo_root()
+            .join("companion-android/app/src/main/kotlin/com/lunchboxos/companion/ble/Protocol.kt"),
+    )
+    .expect("companion Protocol.kt");
 
     let expected_version = format!(
         "const val PROTOCOL_VERSION: Long = {}",

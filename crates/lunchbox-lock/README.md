@@ -23,7 +23,7 @@ The deciding property is what happens when the process dies. Under the lock
 protocol the compositor keeps the session locked and paints a blank screen —
 verified against sway 1.11, which paints it solid red. A layer surface is just a
 window: anything that can reach the compositor can close it, and #148 recorded
-that happening for real, an activity issuing `[app_id=com.lunchbox-os.hud] kill` to
+that happening for real, an activity issuing `[app_id=com.lunchboxos.hud] kill` to
 remove the HUD for the rest of a session. The same command against a layer-shell
 "lock" would unlock the device.
 

@@ -28,7 +28,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
-POLKIT_ACTION="com.lunchbox-os.firewall.apply-process"
+POLKIT_ACTION="com.lunchboxos.firewall.apply-process"
 DENY_TARGET="${LUNCHBOX_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
 
 fail() {

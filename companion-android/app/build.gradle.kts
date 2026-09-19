@@ -20,11 +20,11 @@ val lunchboxVersionCode: Int =
     }
 
 android {
-    namespace = "com.lunchbox_os.companion"
+    namespace = "com.lunchboxos.companion"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.lunchbox_os.companion"
+        applicationId = "com.lunchboxos.companion"
         // 30, not 31, so Android 11 handsets are supported. A household
         // with several caregivers has whatever phones it has (issue #149),
         // and nothing in the dependency set floors above 21 — the only cost

@@ -31,7 +31,7 @@ can screenshot and drive.
 
 ```sh
 ./scripts/lunchbox dev headless          # build + boot, detached; prints when ready
-./scripts/lunchbox dev tree              # assert app_id "com.lunchbox-os.launcher" is up/focused
+./scripts/lunchbox dev tree              # assert app_id "com.lunchboxos.launcher" is up/focused
 ./scripts/lunchbox dev shot home.png     # screenshot -> Read home.png to SEE the UI
 # ...edit code...
 ./scripts/lunchbox dev headless --no-build   # respawn is cheap; or rebuild without --no-build

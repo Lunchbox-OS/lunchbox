@@ -24,7 +24,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchboxos.firewall.apply-process";
 
 fn skip_reason(app_id: &str) -> Option<String> {
     if !Path::new(HELPER_PATH).exists() {
@@ -73,7 +73,7 @@ fn deny_target_reachable(target: &str) -> bool {
 #[ignore]
 async fn flatpak_firewall_enforcement_with_real_helper() -> Result<()> {
     let app_id = std::env::var("LUNCHBOX_FIREWALL_PROBE_FLATPAK")
-        .unwrap_or_else(|_| "com.lunchbox-os.firewall.Probe".into());
+        .unwrap_or_else(|_| "com.lunchboxos.firewall.Probe".into());
     let deny_target =
         std::env::var("LUNCHBOX_FIREWALL_PROBE_DENY").unwrap_or_else(|_| "8.8.8.8:53".into());
 

@@ -14,7 +14,7 @@
 //!
 //! Prerequisites — the same set as the other `firewall_real*` tests:
 //!   * `/usr/libexec/lunchbox-firewall-helper` installed
-//!   * polkit granting `com.lunchbox-os.firewall.apply-process` without a prompt
+//!   * polkit granting `com.lunchboxos.firewall.apply-process` without a prompt
 //!   * a running system systemd manager
 //!
 //! Set up with:
@@ -41,7 +41,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchboxos.firewall.apply-process";
 
 /// `None` when this host can run the test, `Some(reason)` otherwise.
 fn skip_reason() -> Option<String> {

@@ -7,7 +7,7 @@
 //! `vo=mediacodec_embed` + `hwdec=mediacodec` and keep decoded frames on the
 //! GPU (see [`VideoOutput::AndroidSurface`]).
 //!
-//! [activity]: ../../android/app/src/main/java/com/lunchbox_os/media/LunchboxMediaActivity.java
+//! [activity]: ../../android/app/src/main/java/com/lunchboxos/media/LunchboxMediaActivity.java
 //!
 //! ## Reference lifetime
 //!

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<!--
+  Polkit action declaration for lunchbox-firewall-helper.
+
+  Together with the rules file at dist/polkit/50-lunchbox-firewall.rules,
+  this lets lunchboxd invoke the helper as root (via pkexec) without a
+  password prompt, but only for the configured kiosk user / group.
+
+  Install path: /usr/share/polkit-1/actions/com.lunchboxos.firewall.policy
+-->
+<policyconfig>
+
+  <vendor>Lunchbox Launcher</vendor>
+  <vendor_url>https://github.com/aarmea/lunchbox</vendor_url>
+
+  <!--
+    One action covers every helper subcommand because polkit's
+    `org.freedesktop.policykit.exec.path` annotation gates execution of
+    the binary as a whole, regardless of argv. Both `apply-process` (for
+    Process-kind entries via systemd-run) and `apply-cgroup` (for
+    Snap/Flatpak BPF cgroup attach) go through this single action.
+  -->
+  <action id="com.lunchboxos.firewall.apply-process">
+    <description>Apply per-activity firewall rules to a lunchbox-launcher activity</description>
+    <message>Authentication is required to apply per-activity firewall rules.</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/lunchbox-firewall-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>
+  </action>
+
+</policyconfig>

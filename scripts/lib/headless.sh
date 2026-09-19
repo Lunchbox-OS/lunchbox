@@ -177,7 +177,7 @@ headless_wait_ipc() {
 #   headless_wait_launcher [tries] [hint_after]
 headless_wait_launcher() {
     local tries="${1:-900}" hint_after="${2:-200}" i=0
-    # The launcher registers as "com.lunchbox-os.launcher" (older builds used the
+    # The launcher registers as "com.lunchboxos.launcher" (older builds used the
     # bare "lunchbox-launcher"); accept either.
     for _ in $(seq 1 "$tries"); do
         if headless_run swaymsg -t get_tree 2>/dev/null \

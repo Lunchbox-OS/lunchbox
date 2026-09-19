@@ -21,7 +21,7 @@ the system manager can attach BPF programs to.
 ## Trust boundary
 
 * The helper is invoked via pkexec under a polkit rule that grants the
-  caller's user the action `com.lunchbox-os.firewall.apply-process` without a
+  caller's user the action `com.lunchboxos.firewall.apply-process` without a
   password prompt (see [`dist/polkit/`](../../dist/polkit/)).
 * The helper validates every argument with a strict allowlist: numeric uid /
   gid, IP address tokens (`any`, `localhost`, `link-local`, `multicast`),

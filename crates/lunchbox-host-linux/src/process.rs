@@ -39,7 +39,7 @@ pub fn firewall_helper_path() -> String {
 /// `/usr/libexec/lunchbox-firewall-helper`, which is invoked via `pkexec`.
 ///
 /// "Supported" therefore means: the helper is installed AND polkit grants the
-/// current user the `com.lunchbox-os.firewall.apply-process` action without an
+/// current user the `com.lunchboxos.firewall.apply-process` action without an
 /// auth prompt. Both are checked at startup.
 #[derive(Debug, Clone)]
 pub enum FirewallEnforcementStatus {
@@ -97,7 +97,7 @@ fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
         Ok(()) => FirewallEnforcementStatus::Supported,
         Err(e) => FirewallEnforcementStatus::Unsupported {
             reason: format!(
-                "polkit denies non-prompted access to com.lunchbox-os.firewall.apply-process: \
+                "polkit denies non-prompted access to com.lunchboxos.firewall.apply-process: \
                  {}. Install dist/polkit/50-lunchbox-firewall.rules and add this user to \
                  the `lunchbox-firewall` group (see scripts/integration-tests/setup-firewall-dev.sh).",
                 e
@@ -113,7 +113,7 @@ fn probe_polkit_grant() -> Result<(), String> {
     let output = helpers::command("pkcheck")
         .args([
             "--action-id",
-            "com.lunchbox-os.firewall.apply-process",
+            "com.lunchboxos.firewall.apply-process",
             "--process",
             &pid.to_string(),
         ])

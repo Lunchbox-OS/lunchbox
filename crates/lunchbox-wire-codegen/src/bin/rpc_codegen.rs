@@ -5,7 +5,7 @@
 //! - `docs/rpc-schema.json` — pretty-printed schema, committed to
 //!   the repo so it's diffable in PRs and available to future
 //!   codegen tools.
-//! - `companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/RpcMethods.kt`
+//! - `companion-android/app/src/main/kotlin/com/lunchboxos/companion/ble/RpcMethods.kt`
 //!   — typed method-name constants for the Kotlin companion. Kills
 //!   the raw method-name string literals scattered through
 //!   `ManagementClient.kt`.
@@ -155,11 +155,11 @@ fn main() -> anyhow::Result<()> {
                 format!("{pretty}\n"),
             ),
             (
-                repo.join("companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/RpcMethods.kt"),
+                repo.join("companion-android/app/src/main/kotlin/com/lunchboxos/companion/ble/RpcMethods.kt"),
                 render_kotlin(&schema),
             ),
             (
-                repo.join("companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/RpcParams.generated.kt"),
+                repo.join("companion-android/app/src/main/kotlin/com/lunchboxos/companion/domain/RpcParams.generated.kt"),
                 render_kotlin_params(&schema),
             ),
             (
@@ -167,7 +167,7 @@ fn main() -> anyhow::Result<()> {
                 render_ts(&schema),
             ),
             (
-                repo.join("companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/WireTypes.generated.kt"),
+                repo.join("companion-android/app/src/main/kotlin/com/lunchboxos/companion/domain/WireTypes.generated.kt"),
                 render_wire_types(),
             ),
             (
@@ -298,7 +298,7 @@ fn render_kotlin(schema: &Schema) -> String {
     out.push_str("// Run `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/lunchbox-management/src/service.rs`.\n\n");
-    out.push_str("package com.lunchbox_os.companion.ble\n\n");
+    out.push_str("package com.lunchboxos.companion.ble\n\n");
     out.push_str("/**\n");
     out.push_str(" * Wire-name constants for every RPC exposed by the lunchbox device.\n");
     out.push_str(" * Mirrors the trait annotated with `#[management_rpc]` on the Rust side,\n");
@@ -347,8 +347,8 @@ fn render_kotlin_params(schema: &Schema) -> String {
     out.push_str("// Run `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/lunchbox-management/src/service.rs`.\n\n");
-    out.push_str("package com.lunchbox_os.companion.domain\n\n");
-    out.push_str("import com.lunchbox_os.companion.ble.LunchboxJson\n");
+    out.push_str("package com.lunchboxos.companion.domain\n\n");
+    out.push_str("import com.lunchboxos.companion.ble.LunchboxJson\n");
     out.push_str("import kotlinx.serialization.json.JsonNull\n");
     out.push_str("import kotlinx.serialization.json.JsonObject\n");
     out.push_str("import kotlinx.serialization.json.JsonPrimitive\n");

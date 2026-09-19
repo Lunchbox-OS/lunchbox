@@ -23,11 +23,11 @@ val lunchboxVersionCode: Int =
     }
 
 android {
-    namespace = "com.lunchbox_os.media"
+    namespace = "com.lunchboxos.media"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.lunchbox_os.media"
+        applicationId = "com.lunchboxos.media"
         minSdk = 24
         targetSdk = 35
         versionCode = lunchboxVersionCode

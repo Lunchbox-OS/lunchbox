@@ -5,8 +5,8 @@ this project's two Android apps, so they can be installed and updated from a
 phone instead of being sideloaded with `adb install`.
 
 ```
-metadata/com.lunchbox_os.companion.yml
-metadata/com.lunchbox_os.media.yml
+metadata/com.lunchboxos.companion.yml
+metadata/com.lunchboxos.media.yml
 ```
 
 ## Who reads these files

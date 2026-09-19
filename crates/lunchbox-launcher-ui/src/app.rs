@@ -117,7 +117,7 @@ impl LauncherApp {
 
     pub fn run(&self) -> i32 {
         let app = gtk4::Application::builder()
-            .application_id("com.lunchbox-os.launcher")
+            .application_id("com.lunchboxos.launcher")
             .build();
 
         let socket_path = self.socket_path.clone();

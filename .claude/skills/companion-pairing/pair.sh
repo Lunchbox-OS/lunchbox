@@ -12,7 +12,7 @@
 #      for when more than one lunchbox is in range).
 set -uo pipefail
 
-PKG=${PKG:-com.lunchbox_os.companion}
+PKG=${PKG:-com.lunchboxos.companion}
 REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 SWAYLOG=${SWAYLOG:-$REPO/dev-runtime/headless/sway.log}
 SHOTDIR=${SHOTDIR:-${TMPDIR:-/tmp}/lunchbox-pairing}

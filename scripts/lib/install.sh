@@ -65,7 +65,7 @@ POLKIT_RULES_DIR="/usr/share/polkit-1/rules.d"
 # clear a copy left there by an older from-source install; the .deb's
 # maintainer scripts do the same with `dpkg-maintscript-helper rm_conffile`.
 POLKIT_LEGACY_RULES_DIR="/etc/polkit-1/rules.d"
-FIREWALL_POLICY_NAME="com.lunchbox-os.firewall.policy"
+FIREWALL_POLICY_NAME="com.lunchboxos.firewall.policy"
 FIREWALL_RULES_NAME="50-lunchbox-firewall.rules"
 FIREWALL_GROUP="lunchbox-firewall"
 

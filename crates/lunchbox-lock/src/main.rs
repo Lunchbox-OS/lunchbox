@@ -19,7 +19,7 @@
 //! window: anything that can reach the compositor can close it, and #148
 //! recorded that happening for real —
 //!
-//! > an activity that issued `[app_id=com.lunchbox-os.hud] kill` removed the HUD
+//! > an activity that issued `[app_id=com.lunchboxos.hud] kill` removed the HUD
 //! > for the rest of the session
 //!
 //! The same command against a layer-shell "lock" would unlock the device. For a

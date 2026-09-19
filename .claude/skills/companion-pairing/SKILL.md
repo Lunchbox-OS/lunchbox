@@ -134,7 +134,7 @@ check whether the other phone is holding the link before anything else:**
 ```sh
 busctl --system get-property org.bluez /org/bluez/hci2/dev_<peer> \
   org.bluez.Device1 Connected
-adb -s <other-phone> shell am force-stop com.lunchbox_os.companion
+adb -s <other-phone> shell am force-stop com.lunchboxos.companion
 ```
 
 The device is back on air a few seconds after the peer drops. This makes
@@ -247,7 +247,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 If that fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, a release-signed
 build is already installed and the only way past it is
-`adb uninstall com.lunchbox_os.companion`. **That erases the
+`adb uninstall com.lunchboxos.companion`. **That erases the
 app's data, including admin records and claim tokens for real devices** —
 confirm with the owner first; the token is not recoverable.
 
@@ -256,7 +256,7 @@ dialog:
 
 ```sh
 for p in BLUETOOTH_SCAN BLUETOOTH_CONNECT POST_NOTIFICATIONS; do
-  adb shell pm grant com.lunchbox_os.companion android.permission.$p
+  adb shell pm grant com.lunchboxos.companion android.permission.$p
 done
 ```
 
@@ -264,7 +264,7 @@ done
 
 ```sh
 ./scripts/lunchbox dev headless          # device side (see the headless-dev skill)
-adb shell am start -n com.lunchbox_os.companion/.MainActivity
+adb shell am start -n com.lunchboxos.companion/.MainActivity
 ./.claude/skills/companion-pairing/pair.sh tap "Pair a device"
 DEVICE=8C:68:8B:41:02:DC ./.claude/skills/companion-pairing/pair.sh run
 ```
