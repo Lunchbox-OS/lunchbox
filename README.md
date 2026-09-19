@@ -25,7 +25,7 @@ or write your own.
 
 The flow of manually opening and closing activities should be familiar.
 
-<video controls src="https://git.armeafamily.com/albert/shepherd-launcher/raw/branch/main/docs/readme/basic-flow.webm" alt="Happy path demo showing home screen --> GCompris --> home screen"></video>
+<video controls src="https://github.com/aarmea/lunchbox/raw/main/docs/readme/basic-flow.webm" alt="Happy path demo showing home screen --> GCompris --> home screen"></video>
 
 Activities can be made selectively available at certain times of day.
 
@@ -41,7 +41,7 @@ Activities can have configurable time limits, including:
 * cooldown periods before that particular activity can be restarted (skipped
   when the activity only ran for a moment, so a crash on launch costs nothing)
 
-<video controls src="https://git.armeafamily.com/albert/shepherd-launcher/raw/branch/main/docs/readme/tuxmath-expiring.webm" alt="TuxMath session shown about to expire, including warnings and automatic termination"></video>
+<video controls src="https://github.com/aarmea/lunchbox/raw/main/docs/readme/tuxmath-expiring.webm" alt="TuxMath session shown about to expire, including warnings and automatic termination"></video>
 
 ### Anything on Linux
 
@@ -186,7 +186,7 @@ message = "30 seconds! Save NOW!"
 ```
 
 See [config.example.toml](./config.example.toml) and 
-[the Wiki](https://git.armeafamily.com/albert/shepherd-launcher/wiki)
+[the Wiki](https://github.com/aarmea/lunchbox/wiki)
 for more.
 
 ## Development
@@ -195,7 +195,7 @@ Build instructions and contribution guidelines are described in
 [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 If you'd like to help out, you can find potential work items on
-[the Issues page](https://git.armeafamily.com/albert/shepherd-launcher/issues).
+[the Issues page](https://github.com/aarmea/lunchbox/issues).
 You may email me patch sets at <shepherd-launcher-patch@albertarmea.com>.
 
 ## Written in 2025, responsibly

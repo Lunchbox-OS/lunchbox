@@ -1,4 +1,13 @@
-Issues are tracked on Forgejo at <https://git.armeafamily.com/albert/shepherd-launcher/issues>.
+Issues are tracked on GitHub at <https://github.com/aarmea/lunchbox/issues>.
+
+Issue numbers 1-201 predate this repository and kept the values they had on
+Forgejo, where issues and pull requests shared one sequence. The numbers that
+belonged to pull requests are held by closed placeholder issues labelled
+`legacy-pull-request`, so `#N` still means what it always meant; those pull
+requests' descriptions, CI results and discussion are archived at
+<https://github.com/aarmea/lunchbox-legacy-issues-prs>. Filter with
+`is:issue -label:legacy-pull-request` to see only real issues. See
+<docs/ai/history/2026-09-19 001 forgejo-to-github-issue-migration.md>.
 
 Agents: please use the existing documentation for setup.
 
