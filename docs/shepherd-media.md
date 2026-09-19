@@ -416,8 +416,8 @@ Amazon Prime Video URLs (`/gp/video`, `/Prime-Video`), Apple TV+/Music,
 URI schemes `widevine:`, `playready:`, and `fairplay:` are also rejected.
 
 DRM-protected playback is intentionally out of scope — see issues
-[#2](https://git.armeafamily.com/albert/shepherd-launcher/issues/2) and
-[#10](https://git.armeafamily.com/albert/shepherd-launcher/issues/10).
+[#2](https://github.com/aarmea/lunchbox/issues/2) and
+[#10](https://github.com/aarmea/lunchbox/issues/10).
 
 ## CLI
 

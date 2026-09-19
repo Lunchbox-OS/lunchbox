@@ -8,20 +8,29 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every `target/` cache below was carrying full DWARF, which is what made them
+  # multi-gigabyte: the `test` one alone reached 2.91 GB, and the nine of them
+  # together 10.53 GB against GitHub's 10 GB per-repository cache quota, so they
+  # had begun evicting each other. Line tables keep what CI actually reads out
+  # of a failure -- file and line in a panic backtrace -- and drop the variable
+  # and type DWARF that only an interactive debugger uses.
+  #
+  # Set here rather than in Cargo.toml's [profile.dev] on purpose: a developer
+  # running `cargo build` locally keeps a fully debuggable binary. The `test`
+  # and `bench` profiles inherit `dev`, so this covers `cargo test` too.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-# All Rust jobs share a pre-baked CI image (.ci/Dockerfile) hosted in Forgejo's
-# container registry, so they don't race to apt-install the same ~1 GB of build
-# deps in parallel containers (which used to OOM-kill the runner). Building and
-# publishing those images (on content-hash miss) lives in the reusable
-# `images.yml` workflow; the `images` job below calls it and re-exposes the refs
-# for the rest of the chain.
+# All Rust jobs share a pre-baked CI image (.ci/Dockerfile) published to GHCR,
+# so they don't race to apt-install the same ~1 GB of build deps in parallel
+# containers (which used to OOM-kill the runner). Building and publishing those
+# images (on content-hash miss) lives in the reusable `images.yml` workflow; the
+# `images` job below calls it and re-exposes the refs for the rest of the chain.
 #
-# Requires a repo secret named `REGISTRY_TOKEN` containing a Forgejo personal
-# access token with package read+write scope; the `permissions: packages: write`
-# block alone does not elevate `secrets.GITHUB_TOKEN` enough to push to the
-# registry on this Forgejo instance (it authenticates fine for read but 401s on
-# push). `secrets: inherit` passes REGISTRY_TOKEN through to the reusable
-# workflow.
+# No PAT: `permissions: packages: write` plus the ambient `GITHUB_TOKEN` both
+# pushes the images and pulls them for `container:`. The Forgejo original needed
+# a `REGISTRY_TOKEN` secret because that registry authenticated the ambient
+# token for read but 401'd on push. `secrets: inherit` is kept on the `images`
+# call so the reusable workflow keeps working if a PAT is reintroduced.
 #
 # Cargo caching is split in two so the parallel compile jobs cooperate instead
 # of racing:
@@ -37,22 +46,53 @@ env:
 #     Per-job keys let each keep its own incremental artifacts.
 
 jobs:
-  images:
-    name: CI images
-    uses: ./.github/workflows/images.yml
+  # One call per image, not one call building all three. `needs:` on a
+  # reusable-workflow call is all-or-nothing, so while these were a single call
+  # every job waited for every image: on a cold build the base was ready at
+  # 16:14:35 and nothing started until 16:20:11, because the Android and cross
+  # layers (and the outputs-settling job that is now gone) had to finish first.
+  # 5m36s of idling for jobs that only ever wanted the base image.
+  image-base:
+    name: CI image
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: base
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-android:
+    name: CI image (Android)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: android
+      base-ref: ${{ needs.image-base.outputs.ref }}
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-cross:
+    name: CI image (arm64 cross)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: cross
+      base-ref: ${{ needs.image-base.outputs.ref }}
+      target-arch: arm64
     permissions:
       packages: write
     secrets: inherit
 
   warmup:
     name: Warm cargo registry
-    needs: images
+    needs: image-base
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -77,13 +117,13 @@ jobs:
 
   build:
     name: Build
-    needs: [images, warmup]
+    needs: [image-base, warmup]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -104,12 +144,42 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-target-build-v1-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-build-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-target-build-v1-
+            ${{ runner.os }}-cargo-target-build-v2-
 
       - name: Build
         run: ./scripts/shepherd build
+
+      # Hand target/debug to the two jobs that were compiling this same
+      # workspace again: `e2e`, which opened with its own
+      # `./scripts/shepherd build`, and `firewall`, which cannot reach
+      # actions/cache at all from inside its privileged container and so paid a
+      # full cold build on every run -- 6m42s, the longest job in the suite.
+      #
+      # Tarred rather than uploaded as a file tree, for two reasons:
+      # upload-artifact does not preserve the executable bit, and the e2e
+      # harness execs these binaries; and a tree of tens of thousands of small
+      # files uploads far slower than one stream. gzip -1 rather than zstd
+      # because zstd is not in the image's package set, and
+      # `compression-level: 0` so the artifact is not compressed a second time.
+      #
+      # `incremental/` is excluded: it is large and only accelerates a rebuild
+      # in the same directory, which no consumer does.
+      - name: Pack target/debug for e2e and firewall
+        run: |
+          tar -I 'gzip -1' -cf /tmp/target-debug.tar.gz \
+            --exclude=./target/debug/incremental \
+            -C "$GITHUB_WORKSPACE" ./target/debug
+          ls -lh /tmp/target-debug.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: target-debug
+          path: /tmp/target-debug.tar.gz
+          # Consumed within the run; nothing needs it afterwards.
+          retention-days: 1
+          compression-level: 0
 
   build-arm64:
     name: Build (arm64 cross)
@@ -130,32 +200,32 @@ jobs:
     # gates outside the wasm crate, so a second clippy target would cost
     # minutes per PR to re-report what the amd64 `lint` job already says.
     # Measurements: docs/ai/history/2026-09-04 002.
-    needs: [images, warmup]
+    needs: [image-cross, warmup]
     runs-on: ubuntu-latest
     container:
       # The cross image, not the base one: it carries the cross toolchain and
       # the arm64 sysroot, and is 1.5-2.5 GB larger. Only this job and the
       # arm64 leg of `package` pull it.
-      image: ${{ needs.images.outputs.cross-ref }}
+      image: ${{ needs.image-cross.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Assert this job got the arm64 cross image
         # First, and before checkout: if this job did not get the cross image,
         # nothing after it can succeed, and what it fails with points
         # somewhere else entirely -- `rustc: command not found` when the
         # container is dropped (an empty image ref), or E0463 "can't find
-        # crate for `core`" when the container is some other image. Both were seen on run 462 against
+        # crate for `core`" when the container is some other image. Both were seen on Forgejo run 462 against
         # a cross image that was published and correct, so the ref itself is
         # printed: it is the one fact the rest of the log cannot recover.
         shell: sh
         env:
-          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
         run: |
           echo "cross-ref: '$CROSS_REF'"
           if [ -z "$CROSS_REF" ]; then
-            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
             exit 1
           fi
           if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
@@ -181,9 +251,9 @@ jobs:
           # nothing with the amd64 jobs' artifacts -- hence its own key, per
           # the per-job-key convention already in this file.
           path: target
-          key: ${{ runner.os }}-cargo-target-build-arm64-v1-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-build-arm64-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-target-build-arm64-v1-
+            ${{ runner.os }}-cargo-target-build-arm64-v2-
 
       - name: Build for arm64
         # --arch (not --target): build.sh derives the triple with
@@ -225,14 +295,23 @@ jobs:
           }
 
   test:
-    name: Test
-    needs: [images, warmup]
+    name: Test and Clippy
+    # Clippy runs here rather than in a job of its own. Both commands are
+    # `--workspace --all-targets` over the same lockfile, so as separate jobs
+    # they kept two target/ caches of substantially the same build -- 2.91 GB
+    # and 0.64 GB -- and compiled it twice. Clippy goes first: it fails fast on
+    # a lint, and what it compiles the tests then reuse.
+    #
+    # The cost is that `Clippy` is no longer a separate check. It was not on the
+    # critical path either way (that is `warmup` -> `Package (arm64)`), so this
+    # does not lengthen a run.
+    needs: [image-base, warmup]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -250,9 +329,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-target-test-v1-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-test-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-target-test-v1-
+            ${{ runner.os }}-cargo-target-test-v2-
 
       # `--workspace`, not the bare default-members set: the codegen crate is
       # excluded from `default-members` so `cargo build` never compiles schemars
@@ -272,6 +351,12 @@ jobs:
       # and the one variable that must not be dropped is the one that turns a
       # skipped peer-cgroup test into a failure — losing it would quietly
       # restore exactly the blind spot this step exists to remove.
+      # `--workspace` for the same reason the test run below uses it: the crates
+      # kept out of `default-members` still have to lint, and naming them here
+      # would be one more list to forget to update.
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Run tests
         run: |
           chown -R ci: . "$CARGO_HOME"
@@ -293,13 +378,13 @@ jobs:
 
   e2e:
     name: E2E
-    needs: [images, warmup]
+    needs: [image-base, warmup, build]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -313,16 +398,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-v2-
 
-      - name: Cache build artifacts
-        uses: actions/cache@v4
+      # No target/ cache here any more, and no build either: `build` already
+      # compiled this workspace in this same run, and its artifact is always a
+      # hit where a cache could miss or be evicted. Worth 1.81 GB of the
+      # repository's 10 GB cache quota.
+      #
+      # This job is a container job, so its workspace is at the same absolute
+      # path as `build`'s (/__w/<repo>/<repo>). That matters: cargo's
+      # fingerprints record absolute paths, and unpacking somewhere else would
+      # make it rebuild everything the artifact just supplied.
+      - uses: actions/download-artifact@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-e2e-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-e2e-v1-
+          name: target-debug
+          path: /tmp
 
-      - name: Build binaries (e2e harness execs them from target/debug)
-        run: ./scripts/shepherd build
+      - name: Unpack target/debug
+        run: |
+          tar -xf /tmp/target-debug.tar.gz -C "$GITHUB_WORKSPACE"
+          ls -l target/debug/shepherdd target/debug/shepherd-launcher
 
       - name: Run e2e tests
         run: cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
@@ -331,51 +424,15 @@ jobs:
           # here rather than skip quietly (issue #144).
           SHEPHERD_REQUIRE_PEER_CGROUP: "1"
 
-  lint:
-    name: Clippy
-    needs: [images, warmup]
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.images.outputs.base-ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Restore cargo registry
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-v2-
-
-      - name: Cache build artifacts
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-clippy-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-clippy-v1-
-
-      # `--workspace` for the same reason the test job uses it: the crates kept
-      # out of `default-members` still have to lint, and naming them here would
-      # be one more list to forget to update.
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
   fmt:
     name: Rustfmt
-    needs: images
+    needs: image-base
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -445,7 +502,11 @@ jobs:
     # xz assertion. The two legs differ only in the image and the --arch value:
     # `dpkg-deb -I` and `ar t` are arch-agnostic. (The legs always pass --arch,
     # so the no---arch default is checked separately, in the arch-neutral job.)
-    needs: [images, warmup]
+    # Both images: the matrix picks the cross one for arm64 and the base one for
+    # amd64, and a single job cannot depend on a different thing per matrix leg.
+    # So the amd64 leg still waits for the cross image. Splitting the matrix in
+    # two would fix that at the cost of duplicating every assertion below.
+    needs: [image-base, image-cross, warmup]
     runs-on: ubuntu-latest
     strategy:
       # Don't let one architecture's failure hide the other's result.
@@ -456,10 +517,10 @@ jobs:
       # arm64 needs the cross image (toolchain + sysroot); amd64 builds
       # natively in the base one. Selected here rather than in the matrix
       # because `container:` is where both `needs` and `matrix` are available.
-      image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
+      image: ${{ matrix.arch == 'arm64' && needs.image-cross.outputs.ref || needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Assert this job got the arm64 cross image
         if: matrix.arch == 'arm64'
@@ -468,16 +529,16 @@ jobs:
         # somewhere else entirely -- `rustc: command not found` when the
         # container is dropped (an empty image ref), or E0463 "can't find
         # crate for `core`" when the image expression above falls through: an empty cross-ref makes
-        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on run 462 against
+        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on Forgejo run 462 against
         # a cross image that was published and correct, so the ref itself is
         # printed: it is the one fact the rest of the log cannot recover.
         shell: sh
         env:
-          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
         run: |
           echo "cross-ref: '$CROSS_REF'"
           if [ -z "$CROSS_REF" ]; then
-            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
             exit 1
           fi
           if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
@@ -504,9 +565,9 @@ jobs:
           # key too, so that leg takes one cold cache on the first run after
           # this lands.)
           path: target
-          key: ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v1-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v1-
+            ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v2-
 
       - name: Build .deb
         run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
@@ -594,6 +655,51 @@ jobs:
           fi
           echo "OK: no conffiles, and no shipped bluetoothd drop-in"
 
+      # Everything above asserted against exactly what `shepherd package deb`
+      # produced; the rename happens only now, so the checks never see a name
+      # this project would not ship.
+      #
+      # The marker goes in the filename and not the package: dpkg reads the
+      # control file, so `Version:` stays 0.5.1 and nothing installing this is
+      # misled. It exists because the name dpkg generates carries only version
+      # and architecture -- every PR produces an identical
+      # `shepherd-launcher_0.5.1_amd64.deb`, and two of them in a downloads
+      # folder are indistinguishable.
+      - name: Name the .deb after the PR that built it
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          origin="${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || 'main' }}"
+          debs=(dist/pkg/*.deb)
+          deb="${debs[0]}"
+          # From the control file rather than by unpicking the filename, so a
+          # renamed package or a new arch needs no change here.
+          pkg="$(dpkg-deb -f "$deb" Package)"
+          version="$(dpkg-deb -f "$deb" Version)"
+          arch="$(dpkg-deb -f "$deb" Architecture)"
+          new="dist/pkg/${pkg}_${version}+${origin}.g${sha:0:7}_${arch}.deb"
+          mv "$deb" "$new"
+          ls -l "$new"
+
+      # A reviewer can install this on a real device, which is the only way to
+      # see packaging behaviour -- the postinst, the generated sway config, the
+      # udev and polkit rules -- actually working.
+      #
+      # Worth knowing before that becomes routine: this .deb is unsigned, and
+      # its postinst runs as root. While pull requests come from this repository
+      # that is the same trust as running the branch locally. The first pull
+      # request from a fork changes it, and this upload would then be handing
+      # reviewers root-executing code from an unreviewed branch; gate it on
+      # `github.event.pull_request.head.repo.full_name == github.repository` if
+      # that day comes.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || 'main' }}
+          path: dist/pkg/*.deb
+          retention-days: 14
+          if-no-files-found: error
+
   versions:
     name: Version harmony
     # No custom image needed: the default job container (node:20-bookworm) has
@@ -608,58 +714,42 @@ jobs:
 
   firewall:
     name: Firewall E2E
-    needs: images
+    needs: [image-base, build]
     runs-on: ubuntu-latest
     # The test (crates/shepherd-e2e/tests/firewall_real.rs) needs systemd
     # as PID1 + polkit + dbus + a writable cgroup hierarchy + the BPF
-    # capabilities for cgroup_skb attach. The runner config has
-    # `container.privileged: false`, which we *don't* want to flip
-    # globally (it would erode isolation for every other job). Instead,
-    # this job stays a regular non-privileged Forgejo job and uses the
-    # dind sidecar it already has access to to launch a private
-    # privileged container with `--entrypoint /sbin/init`, copies the
-    # workspace into it via `tar | docker exec`, and drives the test
-    # there over `docker exec`. The sidecar is torn down on exit.
+    # capabilities for cgroup_skb attach. So this job does not run *in* a
+    # container: it runs on the runner host and launches a private privileged
+    # container with `--entrypoint /sbin/init`, copies the workspace into it
+    # via `tar | docker exec`, and drives the test there over `docker exec`.
+    # The container is torn down on exit.
+    #
+    # On Forgejo the same shape was forced by `container.privileged: false` in
+    # the runner config, and reached the daemon through the dind sidecar. A
+    # GitHub-hosted runner is a VM with docker already running and permits
+    # --privileged directly, so the DOCKER_HOST dance is gone; the tar-pipe
+    # stays, because the workspace path still is not shared with the container.
     steps:
-      - name: Install docker CLI
-        run: |
-          apt-get update
-          apt-get install -y docker.io
-
-      - name: Point DOCKER_HOST at the DinD bridge gateway
-        run: |
-          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
-          if [ -z "$gateway" ]; then
-            echo "::error::could not determine bridge gateway IP"
-            ip route || true
-            exit 1
-          fi
-          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=tcp://${gateway}:2375"
-
       - uses: actions/checkout@v4
 
-      - name: Wait for DinD daemon
+      - name: Log in to GHCR
         run: |
-          for _ in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "docker daemon ready at $DOCKER_HOST"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::DinD daemon never became ready"
-          exit 1
-
-      - name: Log in to Forgejo container registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login git.armeafamily.com \
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io \
                 --username "${{ github.actor }}" --password-stdin
+
+      # target/debug from `build`, so this job stops compiling the workspace
+      # inside the container. It is the one job that cannot use actions/cache
+      # for target/ -- the compile happens through `docker exec`, where the
+      # action cannot follow -- so it paid a full build every run.
+      - uses: actions/download-artifact@v4
+        with:
+          name: target-debug
+          path: /tmp
 
       - name: Run firewall_real in a privileged systemd sidecar
         env:
-          IMAGE_REF: ${{ needs.images.outputs.base-ref }}
+          IMAGE_REF: ${{ needs.image-base.outputs.ref }}
         run: |
           set -euo pipefail
 
@@ -688,18 +778,34 @@ jobs:
             exit 1
           '
 
-          # Copy the workspace in. The runner job and the dind daemon
-          # do not share a filesystem, so `--volume` between them
-          # silently mounts the wrong path; tar-pipe over `docker exec`
-          # is the cleanest way across that boundary.
-          docker exec "$cid" mkdir -p /work
+          # Copy the workspace in. The runner job and the container do not
+          # share a filesystem, so `--volume` between them silently mounts the
+          # wrong path; tar-pipe over `docker exec` is the cleanest way across
+          # that boundary.
+          #
+          # It lands at /__w/<repo>/<repo>, not /work, and that is load-bearing
+          # now: it is the path a *container* job has its workspace at, so it is
+          # where `build` compiled, and cargo's fingerprints record absolute
+          # paths. Unpack target/debug anywhere else and cargo rebuilds the lot,
+          # which is the entire cost this artifact exists to avoid.
+          repo="${GITHUB_REPOSITORY##*/}"
+          ws="/__w/${repo}/${repo}"
+          echo "container workspace: $ws"
+          docker exec "$cid" mkdir -p "$ws"
           tar -c -C "$PWD" --exclude=./target --exclude=./.git . \
-            | docker exec -i "$cid" tar -xC /work
+            | docker exec -i "$cid" tar -xC "$ws"
 
-          # Build everything (webui + workspace) so the TestHarness has
-          # shepherdd, shepherd-launcher, shepherd-hud, and the firewall
-          # helper under target/debug. Then install the helper via the
-          # project's own installer (drops polkit policy + rule, creates
+          # target/debug from the `build` job, instead of compiling it here.
+          # -z explicitly: tar auto-detects compression on a file but not on
+          # stdin, and this arrives down a pipe. Without it: "tar: Archive is
+          # compressed. Use -z option".
+          docker exec -i "$cid" tar -xzf - -C "$ws" < /tmp/target-debug.tar.gz
+          docker exec "$cid" ls -l "$ws/target/debug/shepherdd"
+
+          # shepherdd, shepherd-launcher, shepherd-hud and the firewall helper
+          # are already under target/debug, unpacked above from `build`'s
+          # artifact -- this job no longer builds them. Install the helper via
+          # the project's own installer (drops polkit policy + rule, creates
           # the shepherd-firewall group, adds the test user to it).
           #
           # The helper rejects `--uid 0` to prevent a polkit-blessed user
@@ -711,8 +817,7 @@ jobs:
           # added by the installer) so polkit's isInGroup() check passes.
           docker exec "$cid" bash -c '
             set -euo pipefail
-            cd /work
-            ./scripts/shepherd build
+            cd "'"$ws"'"
 
             # First, the cgroup path (issue #151). `firewall_real` below
             # covers the Process kind, which wraps the launch in
@@ -769,14 +874,14 @@ jobs:
             # No apostrophes in this comment: the whole block is a
             # single-quoted argument to `bash -c`, so one would close the
             # string early. That is what broke run 4516.
-            chown -R tester:tester /work
+            chown -R tester:tester .
 
             runuser -u tester -- env \
               CARGO_HOME="$CARGO_HOME" \
               RUSTUP_HOME="$RUSTUP_HOME" \
               PATH="$PATH" \
               bash -c "
-                cd /work
+                cd '"$ws"'
                 cargo test -p shepherd-e2e --test firewall_real -- \
                   --include-ignored --test-threads=1 --nocapture
               "
@@ -794,31 +899,41 @@ jobs:
     # /opt/android-sdk (with ANDROID_SDK_ROOT set), so there's no per-run
     # toolchain download. Only the Gradle/Maven dep cache — which churns
     # with build.gradle edits — rides on actions/cache.
-    needs: images
+    needs: image-android
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.android-ref }}
+      image: ${{ needs.image-android.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
+      # GRADLE_USER_HOME is set explicitly, and the cache names that same
+      # absolute path, because the `~/.gradle/...` this used to cache never
+      # existed at save time: every run ended with `Path Validation Error:
+      # Path(s) specified in the action for caching do(es) not exist, hence no
+      # cache is being saved`, and every run therefore re-downloaded the whole
+      # dependency set. It is why this job took 227s cold and 243s warm -- no
+      # faster the second time, because nothing was ever cached. Naming the
+      # directory both to Gradle and to actions/cache removes the guess.
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('companion-android/gradle/libs.versions.toml', 'companion-android/gradle/wrapper/gradle-wrapper.properties', 'companion-android/**/build.gradle.kts') }}
+            /github/home/.gradle/caches
+            /github/home/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-v2-${{ hashFiles('companion-android/gradle/libs.versions.toml', 'companion-android/gradle/wrapper/gradle-wrapper.properties', 'companion-android/**/build.gradle.kts') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-
+            ${{ runner.os }}-gradle-v2-
 
       # JVM unit tests only (the hardware-independent framing codec +
       # wire-decode of every sampled spec payload). No emulator; the live
       # pair/claim path stays a manual smoke test.
       - name: Run companion-android unit tests
         working-directory: companion-android
+        env:
+          GRADLE_USER_HOME: /github/home/.gradle
         run: ./gradlew --no-daemon :app:testDebugUnitTest
 
   android-media:
@@ -833,26 +948,37 @@ jobs:
     # set — so there's no per-run toolchain install. Unlike android-portability's
     # `cargo check` of the core, this fully builds and links the cdylib against
     # the vendored libmpv.
-    needs: images
+    needs: image-android
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.android-ref }}
+      image: ${{ needs.image-android.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
+      # Split, so this job stops keeping a second copy of the dep registry: it
+      # used to cache registry + git + target under one key, which duplicated
+      # the 0.26 GB `warmup` already publishes. Same read-only restore of the
+      # shared key as every other compile job, plus a per-job target/ key.
+      - name: Restore cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             /usr/local/cargo/registry
             /usr/local/cargo/git
-            target
-          key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v2-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-media-android-
+            ${{ runner.os }}-cargo-registry-v2-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-media-android-v2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-media-android-v2-
 
       # Same cargo-ndk cross-compile as android/app/build.gradle.kts's
       # cargoNdkBuild task, but debug rather than --release: this is a
@@ -864,13 +990,13 @@ jobs:
 
   config-editor:
     name: Config editor
-    needs: [images, warmup]
+    needs: [image-base, warmup]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -894,13 +1020,17 @@ jobs:
         working-directory: shepherd-webui
         run: npm run typecheck
 
-      # No upload-artifact here, deliberately. Forgejo does not implement the
-      # upload-artifact@v4 protocol — the runner reports as GHES and the action
-      # hard-fails — which release.yml's header already records, and which is
-      # why its own config-editor job builds the bundle itself rather than
-      # taking a handoff. Nothing consumes a bundle from CI, so there is nothing
-      # to hand off; this checks the build landed where it should instead.
+      # The bundle is uploaded now. It could not be on Forgejo: that runner
+      # reports as GHES and upload-artifact@v4 hard-fails against it. What this
+      # buys is a reviewer being able to download the exact bundle a PR builds
+      # and open it locally, which is the only way to see the editor a change
+      # produces without running the whole stack.
       #
+      # It does not save release.yml any work: artifacts belong to the run that
+      # made them, so a tag's run cannot pick up a PR's bundle, and that job
+      # still builds its own.
+      #
+      # The check below stays regardless of the upload:
       # Worth checking rather than assuming: `output.distPath` in
       # rsbuild.config.ts is resolved relative to the working directory, so a
       # build run from the wrong cwd succeeds and writes somewhere else — and
@@ -917,6 +1047,14 @@ jobs:
           test -z "$stray" || { echo "standalone build wrote into dist/: $stray" >&2; exit 1; }
           echo "[OK] standalone bundle built, dist/ untouched"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-editor-standalone
+          path: shepherd-webui/dist-standalone
+          # A static bundle: no executables, so the lost executable bit that
+          # forces the target/debug handoff to be tarred does not matter here.
+          retention-days: 7
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -924,12 +1062,21 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install ShellCheck
+        # `sudo`, unlike on Forgejo: there every job ran as root inside
+        # node:20-bookworm, while a GitHub-hosted runner is a VM whose user is
+        # `runner`. (ubuntu-latest preinstalls shellcheck, but install it
+        # anyway so the version tracks the distro on both forges.)
         run: |
-          apt-get update
-          apt-get install -y shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
 
       - name: Run ShellCheck
         run: |
+          # Printed because the version decides which codes exist: 0.10 split
+          # SC2329 out of SC2317, so a disable that satisfies a newer local
+          # shellcheck can do nothing here. See CONTRIBUTING, "CI's ShellCheck
+          # is older than yours".
+          shellcheck --version | sed -n '2p'
           # SC1091: Not following sourced files (info only, safe to ignore)
           shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
           shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh

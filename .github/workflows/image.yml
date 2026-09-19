@@ -1,0 +1,146 @@
+name: CI image
+
+# Builds (on content-hash miss) and publishes ONE pre-baked CI image, and
+# exposes its ref. Callers instantiate it once per image they need:
+#
+#   image-base:    with: {kind: base}
+#   image-android: needs: image-base, with: {kind: android, base-ref: ...}
+#   image-cross:   needs: image-base, with: {kind: cross,  base-ref: ...}
+#
+# One image per call, rather than the three-in-one workflow this replaces,
+# because `needs:` on a reusable-workflow call is all-or-nothing: a job that
+# needed only the base image still waited for the Android and cross layers. On a
+# cold build that cost every downstream job 5m36s of idling -- the base finished
+# at 16:14:35 and nothing else started until 16:20:11, after the two layers and
+# the outputs-settling job. Now `Rustfmt` and `warmup` start when the base is
+# ready, and only the Android and arm64 jobs wait for their own layer.
+#
+# The hashes are byte-for-byte what the previous workflow computed, so images
+# already in GHCR still hit. `printf '%s' ""` for the base kind contributes
+# nothing, which is what keeps its hash identical.
+#
+# Publishes to GHCR. `permissions: packages: write` plus the ambient
+# GITHUB_TOKEN covers both build and push, so no PAT is needed.
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: Which image to build — base, android or cross.
+        required: true
+        type: string
+      base-ref:
+        description: >-
+          The base image ref to layer onto. Required for the android and cross
+          kinds, unused by base. Folding it into the hash rebuilds a layer
+          whenever the base it sits on is rebuilt.
+        required: false
+        type: string
+        default: ''
+      target-arch:
+        description: Target architecture for kind=cross. In the hash, because it changes what the layer installs.
+        required: false
+        type: string
+        default: arm64
+    outputs:
+      ref:
+        description: The image ref, whether this run built it or found it published.
+        value: ${{ jobs.image.outputs.ref }}
+
+jobs:
+  image:
+    name: ${{ inputs.kind }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
+    # Job-level, not workflow-level: Forgejo's runner did not propagate a
+    # reusable workflow's top-level `env:` into its jobs, which silently blanked
+    # this and produced an invalid `:tag`-only ref. GitHub does propagate it;
+    # kept job-level so the two forges behave identically.
+    env:
+      CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        env:
+          KIND: ${{ inputs.kind }}
+          BASE_REF: ${{ inputs.base-ref }}
+          TARGET_ARCH: ${{ inputs.target-arch }}
+        run: |
+          set -euo pipefail
+          # Strict hash over the inputs that determine image content. The
+          # year+week prefix forces a weekly rebuild so distro security updates
+          # roll in even when no input file has changed.
+          case "$KIND" in
+            base)
+              files=(.ci/Dockerfile scripts/deps/build.pkgs scripts/deps/run.pkgs
+                     scripts/deps/test.pkgs scripts/lib/deps.sh)
+              extra=''
+              suffix=''
+              ;;
+            android)
+              files=(.ci/Dockerfile.android scripts/deps/android.pkgs scripts/lib/deps.sh)
+              extra="$BASE_REF"
+              suffix='-android'
+              ;;
+            cross)
+              files=(.ci/Dockerfile.cross scripts/deps/cross.pkgs scripts/lib/deps.sh)
+              extra="${BASE_REF}${TARGET_ARCH}"
+              suffix="-cross-${TARGET_ARCH}"
+              ;;
+            *)
+              echo "::error::unknown image kind '$KIND' (expected base, android or cross)"
+              exit 1
+              ;;
+          esac
+          if [ "$KIND" != base ] && [ -z "$BASE_REF" ]; then
+            echo "::error::kind '$KIND' layers onto the base image but base-ref is empty"
+            exit 1
+          fi
+          hash=$( { cat "${files[@]}"; printf '%s' "$extra"; } | sha256sum | cut -c1-12)
+          year_week=$(date -u +%Gw%V)
+          ref="${CI_IMAGE_NAME}${suffix}:${year_week}-${hash}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Image ref: ${ref}"
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io \
+                --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and push if tag is missing
+        env:
+          KIND: ${{ inputs.kind }}
+          BASE_REF: ${{ inputs.base-ref }}
+          TARGET_ARCH: ${{ inputs.target-arch }}
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "$REF" >/dev/null 2>&1; then
+            echo "Image already published: $REF"
+            exit 0
+          fi
+          case "$KIND" in
+            base)
+              docker build -t "$REF" -f .ci/Dockerfile .
+              ;;
+            android)
+              # Pull the base explicitly so the daemon has it locally for the
+              # FROM (it may not be in the daemon's cache).
+              docker pull "$BASE_REF"
+              docker build --build-arg BASE_IMAGE="$BASE_REF" \
+                -t "$REF" -f .ci/Dockerfile.android .
+              ;;
+            cross)
+              docker pull "$BASE_REF"
+              docker build --build-arg BASE_IMAGE="$BASE_REF" \
+                --build-arg TARGET_ARCH="$TARGET_ARCH" \
+                -t "$REF" -f .ci/Dockerfile.cross .
+              ;;
+          esac
+          docker push "$REF"
