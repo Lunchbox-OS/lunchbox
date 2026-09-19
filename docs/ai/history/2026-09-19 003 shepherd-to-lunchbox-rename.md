@@ -150,7 +150,7 @@ installer's to delete.
 | config-wasm | builds, emits `lunchbox_config` |
 | `config.example.toml` | validates |
 | companion app | `assembleDebug` + unit tests pass as `com.lunchbox_os.companion` |
-| media app | `assembleDebug` passes, packages `liblunchbox_media_android.so` |
+| media app | builds, installs, runs on device (below) |
 | headless session | launcher up and focused as `com.lunchbox-os.launcher` |
 | IPC | `dev-runtime/lunchbox.sock` answers a `launch` RPC |
 | web UI | serves, `<title>Lunchbox</title>` |
@@ -182,6 +182,27 @@ mismatch would have failed there rather than in a unit test.
 
 `WindowOwner`'s new spelling agrees on all three sides: Rust `"lunchbox"`,
 Kotlin `LUNCHBOX("lunchbox")`, and the regenerated TS mirror.
+
+### The media app
+
+Its one rename-specific hazard is the JNI chain, because the loaded library is
+named after the crate: `lunchbox-media-android` builds
+`liblunchbox_media_android.so`, and `AndroidManifest.xml`'s
+`android.app.lib_name` has to say the same thing. A mismatch is invisible at
+build time and an `UnsatisfiedLinkError` at launch, so it was checked on the
+device rather than by reading:
+
+```
+nativeloader: Load .../lib/arm64/liblunchbox_media_android.so ... ok
+lunchbox_media_androi..: registered the JavaVM with FFmpeg; MediaCodec decoding is available
+```
+
+The activity resolves as `com.lunchbox_os.media/.LunchboxMediaActivity`, the
+process stays up, and the UI renders titled `lunchbox-media`. There are no
+Android-side unit tests here (the source set is `main` only) — the logic is in
+Rust, and `cargo test` covers the six media crates: 342 tests, 0 failures.
+
+The desktop `lunchbox-media` binary ships in the `.deb` and answers `--help`.
 
 ### The app-ID rename is not an upgrade
 

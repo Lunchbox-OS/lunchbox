@@ -439,7 +439,7 @@ Architecture: $arch
 Maintainer: $PACKAGE_MAINTAINER
 Section: admin
 Priority: optional
-Homepage: https://github.com/aarmea/lunchbox
+Homepage: https://lunchbox-os.com
 Depends: $depends
 Pre-Depends: dpkg (>= 1.15.7.2)
 Suggests: $suggests
