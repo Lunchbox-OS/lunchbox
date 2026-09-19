@@ -80,6 +80,12 @@ and needs nothing.
 
 ## What it will not do
 
+- **List a file it can never let you remove.** A name that is not valid UTF-8
+  addresses nothing, so every route that takes a path is shut to it. The
+  listing hands back a `handle` for those rows — the entry's own bytes, which
+  `DELETE` takes in place of the last path component. A *name*, not a path: the
+  folder still goes through the resolver and the handle is validated as one
+  component, so it grants nothing the folder does not already grant.
 - **Quietly show a short list.** Every entry a directory reports becomes a row,
   even when nothing can be learned about it: a failed `stat` leaves
   `unusable: "unreadable"` and empty columns rather than an absence. Reachable
@@ -321,9 +327,9 @@ it. The audit and the ten gaps are in
 
 ## Reviewing this
 
-Seventeen commits in four groups: the API and its design (1–3), the UI (4–6),
+Eighteen commits in four groups: the API and its design (1–3), the UI (4–6),
 the resilience work (7–8), and the testing and hardening round that followed
-(9–17). The seams are clean between them. In order:
+(9–18). The seams are clean between them. In order:
 
 1. `feat(http): manage this device's files from the web interface` — the
    routes, the resolver, the root enumeration, the config.
@@ -370,6 +376,10 @@ the resilience work (7–8), and the testing and hardening round that followed
     that failed silently removed the entry from the listing. Reachable on a FAT
     drive whose charset cannot spell a stored name, and by any writer deleting
     something mid-read.
+18. `feat(files): delete a file whose name is not text` — the gap that found
+    opened. Such a file could be listed and flagged and never removed, on a
+    device with no shell; the listing now hands back an opaque handle that
+    `DELETE` accepts in place of the last path component.
 
 The reasoning behind each stage, including what was rejected, is in
 `docs/ai/history/2026-09-11 003…005`, `2026-09-13 002` and
