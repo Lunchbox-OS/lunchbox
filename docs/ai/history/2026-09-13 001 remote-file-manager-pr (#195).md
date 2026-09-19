@@ -80,6 +80,12 @@ and needs nothing.
 
 ## What it will not do
 
+- **Quietly show a short list.** Every entry a directory reports becomes a row,
+  even when nothing can be learned about it: a failed `stat` leaves
+  `unusable: "unreadable"` and empty columns rather than an absence. Reachable
+  on a FAT drive whose `iocharset` cannot spell a stored name, and by any other
+  writer unlinking something mid-read. The one thing that cannot be a row — an
+  entry with no readable name — is counted rather than dropped.
 - **Escape a root.** One resolver sees every caller-supplied path: `..` is
   refused rather than normalised, the parent is canonicalised before the check,
   and a symlink out of the root is *listed* — so a person can see and delete
@@ -315,9 +321,9 @@ it. The audit and the ten gaps are in
 
 ## Reviewing this
 
-Fifteen commits in four groups: the API and its design (1–3), the UI (4–6),
+Seventeen commits in four groups: the API and its design (1–3), the UI (4–6),
 the resilience work (7–8), and the testing and hardening round that followed
-(9–15). The seams are clean between them. In order:
+(9–17). The seams are clean between them. In order:
 
 1. `feat(http): manage this device's files from the web interface` — the
    routes, the resolver, the root enumeration, the config.
@@ -358,6 +364,12 @@ the resilience work (7–8), and the testing and hardening round that followed
     in, so bytes abandoned somewhere nobody uploaded again stayed for good, and
     four places in the docs described it as running on a clock. Listing a
     folder now sweeps it too.
+16. `test(http): state the content-type rule as the true one` — the two tests
+    from 14 were named for a rule that `GET /files/content` breaks.
+17. `fix(files): a listing never drops an entry it was told about` — a `stat`
+    that failed silently removed the entry from the listing. Reachable on a FAT
+    drive whose charset cannot spell a stored name, and by any writer deleting
+    something mid-read.
 
 The reasoning behind each stage, including what was rejected, is in
 `docs/ai/history/2026-09-11 003…005`, `2026-09-13 002` and
