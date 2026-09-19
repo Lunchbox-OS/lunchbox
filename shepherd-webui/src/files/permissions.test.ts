@@ -92,13 +92,19 @@ describe("who may write where", () => {
     // never be got rid of from a device with no shell.
     const named = entryRow({ unusable: "name_not_utf8", handle: "636166e9" });
     expect(canDelete(named)).toBe(true);
-    expect(canRename(named)).toBe(false);
+    // And renamed, which is the repair rather than the bin: a name somebody
+    // can type makes every other action work again.
+    expect(canRename(named)).toBe(true);
+    // Not opened or downloaded, though. Those would have to say *which* file,
+    // and a handle only answers that for the two routes that take one.
     expect(canDownload(named)).toBe(false);
     expect(canWriteInto(named)).toBe(false);
 
-    // An older device that does not send one is not offered a button that
+    // An older device that does not send one is not offered buttons that
     // cannot work.
-    expect(canDelete(entryRow({ unusable: "name_not_utf8" }))).toBe(false);
+    const unnamed = entryRow({ unusable: "name_not_utf8" });
+    expect(canDelete(unnamed)).toBe(false);
+    expect(canRename(unnamed)).toBe(false);
   });
   it("still deletes something it could not explain", () => {
     // Not knowing what a thing *is* says nothing about whether its name still

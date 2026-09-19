@@ -74,6 +74,15 @@ fn get(uri: &str) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
 }
 
+fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
 fn create(uri: &str, body: impl Into<Body>) -> Request<Body> {
     Request::builder()
         .method("PUT")
@@ -613,6 +622,123 @@ async fn a_handle_cannot_separate_names_the_filesystem_itself_conflates() {
         .to_string();
     // It is a function of the bytes and nothing else — no inode, no ordering.
     assert_eq!(handle, hex(raw));
+}
+
+/// The repair, rather than the bin.
+///
+/// Deleting an un-typable file was the first thing offered and is the lesser
+/// one: what a person actually wants is to keep the file and give it a name
+/// they can use. That is a rename, and a rename could not name its own source.
+#[tokio::test]
+async fn a_file_whose_name_is_not_text_can_be_given_one_that_is() {
+    let (dir, app) = fixture();
+    let raw = b"caf\xe9.mp3";
+    let name = std::ffi::OsStr::from_bytes(raw);
+    std::fs::write(dir.path().join("Books").join(name), b"a song").unwrap();
+
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    let handle = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["unusable"] == "name_not_utf8")
+        .expect("not listed")["handle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body, _) = send(
+        &app,
+        post(
+            "/api/v1/files/move",
+            serde_json::json!({
+                "root": "home",
+                // The folder, not the entry: the handle supplies the rest.
+                "from": "Books",
+                "to": "Books/cafe.mp3",
+                "from_handle": handle,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // The bytes are the same file, under a name anybody can type.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("Books/cafe.mp3")).unwrap(),
+        "a song"
+    );
+    assert!(!dir.path().join("Books").join(name).exists());
+
+    // And it is an ordinary row now — no flag, no handle.
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    let entry = row(&body, "cafe.mp3").expect("the renamed file is not listed");
+    assert!(entry["unusable"].is_null());
+    assert!(entry.get("handle").is_none());
+}
+
+#[tokio::test]
+async fn a_forged_handle_is_no_better_on_the_move_route() {
+    let (dir, app) = fixture();
+    std::fs::write(dir.path().join("secret.txt"), b"not yours").unwrap();
+
+    // The same table the delete route is held to — one helper resolves both,
+    // so this is checking that both actually go through it.
+    for handle in [
+        hex(b"../secret.txt"),
+        hex(b"sub/deeper"),
+        hex(b".."),
+        hex(b"a\0b"),
+        String::new(),
+        "zzzz".to_string(),
+    ] {
+        let (status, body, _) = send(
+            &app,
+            post(
+                "/api/v1/files/move",
+                serde_json::json!({
+                    "root": "home",
+                    "from": "Books",
+                    "to": "Books/stolen.txt",
+                    "from_handle": handle,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{handle:?} answered: {body}"
+        );
+    }
+    assert!(
+        dir.path().join("secret.txt").exists(),
+        "a forged handle escaped"
+    );
+    assert!(!dir.path().join("Books/stolen.txt").exists());
+}
+
+/// A destination is always typed, so there is no handle for it — and that is
+/// the point, not an omission.
+#[tokio::test]
+async fn a_move_cannot_invent_a_destination_nothing_can_reach() {
+    let (_dir, app) = fixture();
+    let (status, _, _) = send(
+        &app,
+        post(
+            "/api/v1/files/move",
+            serde_json::json!({
+                "root": "home",
+                "from": "Books",
+                "to": "Books/x",
+                "to_handle": hex(b"caf\xe9.mp3"),
+            }),
+        ),
+    )
+    .await;
+    // Unknown fields are ignored rather than honoured: there is no way to ask
+    // for a target that cannot be named, so no way to create one.
+    assert_ne!(status, StatusCode::NO_CONTENT);
 }
 
 fn delete_with_handle(uri: &str, if_match: &str) -> Request<Body> {

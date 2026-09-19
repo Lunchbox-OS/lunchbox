@@ -135,21 +135,25 @@ add one component to it, and is refused if it contains a separator or a NUL, is
 table fires all ten of those at it and checks that a file outside the root is
 still there afterwards.
 
-Nothing else accepts one. A file that cannot be named cannot be opened, renamed
-or downloaded either — those would all need to say *which* file, and there is no
-answer. The gap that mattered was being unable to tidy up after a drive on a
-device with no shell, and that is the one that is closed.
+`POST /files/move` takes one as `from_handle`, and it is the better half of the
+two. Deleting an un-typable file throws it away; **renaming it to something
+typable is the repair** — the bytes stay, and every other route works on it
+again afterwards. One function resolves the handle for both routes, so the
+validation cannot drift between them, and the forgery table is fired at both.
 
-Two limits, deliberately:
+There is deliberately **no handle for a move's `to`**. A destination is always
+something the caller typed, and a move that could name an unreachable target
+would be a way to *create* files nothing can reach — the opposite of the point.
 
-- **It does not separate the `???.zip` collision.** Three files whose rendered
-  names are byte-identical produce three identical handles, because a handle
-  *is* the rendered bytes. No API can invent a distinction the filesystem will
-  not make; the fix for that case is mounting the drive with a charset that can
-  spell its contents.
-- **Rename does not take one.** Renaming such a file to something typable would
-  arguably be more useful than deleting it — it keeps the file — and is a small
-  follow-up, but it was not what was asked for here.
+Download does not take one either. A file that cannot be named has no
+`Content-Disposition` to offer, and not being able to read it was never the gap;
+not being able to fix or remove it was.
+
+One limit, deliberately: **this does not separate the `???.zip` collision.**
+Three files whose rendered names are byte-identical produce three identical
+handles, because a handle *is* the rendered bytes. No API can invent a
+distinction the filesystem will not make; the fix for that case is mounting the
+drive with a charset that can spell its contents.
 
 ## Not chased to the end
 

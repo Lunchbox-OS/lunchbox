@@ -278,8 +278,19 @@ export async function moveEntry(
   from: string,
   to: string,
   overwrite = false,
+  fromHandle?: string,
 ): Promise<void> {
-  await apiHttp.post("/files/move", { root, from, to, overwrite });
+  await apiHttp.post("/files/move", {
+    root,
+    from,
+    to,
+    overwrite,
+    // With a handle, `from` is the folder and this names the entry in it --
+    // which is how a file whose name is not text gets given one that is.
+    // There is no handle for `to`: a destination is always typed, and a move
+    // that could name an unreachable target would be a way to create one.
+    ...(fromHandle ? { from_handle: fromHandle } : {}),
+  });
 }
 
 /** Delete a file, or a folder and optionally everything in it. */

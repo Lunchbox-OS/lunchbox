@@ -28,6 +28,11 @@ export interface Rename {
   rootId: string;
   path: string;
   name: string;
+  /**
+   * For a row whose name is not text: the bytes the listing gave it, with
+   * `path` naming the folder it is in rather than the entry.
+   */
+  handle?: string;
 }
 
 export interface Move {
@@ -65,14 +70,19 @@ export function useFileActions(forgetSubtree: (key: NodeKey) => void) {
   });
 
   const rename = useMutation({
-    mutationFn: ({ rootId, path, name }: Rename) =>
-      moveEntry(rootId, path, joinPath(parentPath(path), name)),
-    onSuccess: (_data, { rootId, path }) => {
-      void refresh.directory(nodeKey(rootId, parentPath(path)));
+    // With a handle, `path` is already the folder; without one it is the entry
+    // and the folder is its parent. Either way the destination is built from
+    // the folder plus the typed name.
+    mutationFn: ({ rootId, path, name, handle }: Rename) => {
+      const folder = handle ? path : parentPath(path);
+      return moveEntry(rootId, handle ? folder : path, joinPath(folder, name), false, handle);
+    },
+    onSuccess: (_data, { rootId, path, handle }) => {
+      void refresh.directory(nodeKey(rootId, handle ? path : parentPath(path)));
       // The old name's subtree is gone as a key even though the files are the
       // same ones; without this, a folder later given the old name arrives
       // pre-expanded with a listing that was never about it.
-      forgetSubtree(nodeKey(rootId, path));
+      if (!handle) forgetSubtree(nodeKey(rootId, path));
     },
   });
 

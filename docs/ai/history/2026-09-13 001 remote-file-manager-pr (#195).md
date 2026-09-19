@@ -80,12 +80,16 @@ and needs nothing.
 
 ## What it will not do
 
-- **List a file it can never let you remove.** A name that is not valid UTF-8
+- **List a file it can never let you fix.** A name that is not valid UTF-8
   addresses nothing, so every route that takes a path is shut to it. The
-  listing hands back a `handle` for those rows — the entry's own bytes, which
-  `DELETE` takes in place of the last path component. A *name*, not a path: the
-  folder still goes through the resolver and the handle is validated as one
-  component, so it grants nothing the folder does not already grant.
+  listing hands back a `handle` for those rows — the entry's own bytes — which
+  `DELETE` and `POST /files/move` take in place of the last path component.
+  Renaming is the one that matters: it gives the file a name somebody can type
+  and makes every other route work on it again, where deleting it is only the
+  bin. A *name*, not a path: the folder still goes through the resolver and the
+  handle is validated as one component, so it grants nothing the folder does
+  not already grant — and there is no handle for a move's destination, which
+  would be a way to create files nothing can reach.
 - **Quietly show a short list.** Every entry a directory reports becomes a row,
   even when nothing can be learned about it: a failed `stat` leaves
   `unusable: "unreadable"` and empty columns rather than an absence. Reachable
@@ -376,10 +380,12 @@ the resilience work (7–8), and the testing and hardening round that followed
     that failed silently removed the entry from the listing. Reachable on a FAT
     drive whose charset cannot spell a stored name, and by any writer deleting
     something mid-read.
-18. `feat(files): delete a file whose name is not text` — the gap that found
-    opened. Such a file could be listed and flagged and never removed, on a
-    device with no shell; the listing now hands back an opaque handle that
-    `DELETE` accepts in place of the last path component.
+18. `feat(files): delete a file whose name is not text` and
+    `feat(files): rename one too` — the gap that found opened. Such a file
+    could be listed and flagged and never acted on, on a device with no shell;
+    the listing now hands back an opaque handle that `DELETE` and
+    `POST /files/move` accept in place of the last path component. Renaming is
+    the repair, deleting is the bin.
 
 The reasoning behind each stage, including what was rejected, is in
 `docs/ai/history/2026-09-11 003…005`, `2026-09-13 002` and

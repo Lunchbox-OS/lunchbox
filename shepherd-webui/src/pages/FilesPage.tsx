@@ -166,8 +166,16 @@ export function FilesPage() {
     (row: Row, name: string) => {
       setRenaming(null);
       if (row.kind !== "entry") return;
+      // A name that is not text cannot say which file it means, so the row is
+      // renamed by its handle and `path` becomes the folder it sits in.
+      const handle = row.entry.handle;
       actions.rename.mutate(
-        { rootId: row.rootId, path: row.path, name },
+        {
+          rootId: row.rootId,
+          path: handle ? parentPath(row.path) : row.path,
+          name,
+          handle,
+        },
         {
           onError: (error) => say(describeWriteFailure(error, name), true),
         },

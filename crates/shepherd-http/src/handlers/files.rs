@@ -105,6 +105,19 @@ pub struct MoveRequest {
     to: String,
     #[serde(default)]
     overwrite: bool,
+    /// Name the thing being moved by its bytes instead of by `from`'s last
+    /// component.
+    ///
+    /// When this is present `from` names the **containing folder**. It is what
+    /// turns a file whose name is not text from something that can only be
+    /// deleted into something that can be *kept*: renaming it to a name that
+    /// can be typed is the repair, and throwing it away was the only thing on
+    /// offer before.
+    ///
+    /// There is deliberately no handle for `to`. A destination is always
+    /// something the caller typed, and a move whose target could not be named
+    /// would be a way to create files nothing can reach.
+    from_handle: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -836,13 +849,19 @@ pub async fn move_entry(State(state): State<AppState>, Json(req): Json<MoveReque
         if !from.root.writable {
             return Err(FileError::Forbidden("that place is read-only".into()));
         }
+        // With a handle, `from` is the folder and the handle is the entry
+        // inside it. The folder is resolved exactly as any other path is.
+        let from_path = match &req.from_handle {
+            Some(handle) => locate_by_handle(&files, &from, handle)?,
+            None => from.path.clone(),
+        };
         let to = files.locate(&req.root, &req.to)?;
-        if from.path == from.root.canonical || to.path == to.root.canonical {
+        if from_path == from.root.canonical || to.path == to.root.canonical {
             return Err(FileError::Forbidden(
                 "the top of a place cannot be moved".into(),
             ));
         }
-        std::fs::symlink_metadata(&from.path)
+        std::fs::symlink_metadata(&from_path)
             .map_err(|e| FileError::from_io(&e, "what you asked to move"))?;
         match std::fs::symlink_metadata(&to.path) {
             Ok(existing) => {
@@ -860,7 +879,7 @@ pub async fn move_entry(State(state): State<AppState>, Json(req): Json<MoveReque
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(FileError::from_io(&e, "where you asked to move it")),
         }
-        std::fs::rename(&from.path, &to.path).map_err(|e| match e.raw_os_error() {
+        std::fs::rename(&from_path, &to.path).map_err(|e| match e.raw_os_error() {
             // EXDEV. Cannot happen for two paths in one root today, since a
             // root is one filesystem — but a bind mount inside a home would
             // make it possible, and the honest answer is not a 500.
@@ -917,19 +936,7 @@ pub async fn delete_entry(
         // only ever adds one validated component to a directory the caller has
         // already been granted.
         let target = match &q.handle {
-            Some(handle) => {
-                let name = crate::files::decode_handle(handle)?;
-                let dir = located.follow(files.denied())?;
-                if !dir.is_dir() {
-                    return Err(FileError::BadRequest(
-                        "a handle names something inside a folder; `path` must be that folder"
-                            .into(),
-                    ));
-                }
-                let target = dir.join(&name);
-                crate::files::resolve::check_denied(&target, files.denied())?;
-                target
-            }
+            Some(handle) => locate_by_handle(&files, &located, handle)?,
             None => located.path.clone(),
         };
         if target == located.root.canonical {
@@ -1550,6 +1557,29 @@ where
 /// a 404 rather than a panic.
 fn disabled() -> Response {
     FileError::NotFound("this device does not offer remote file management".into()).into_response()
+}
+
+/// Resolve "a folder, and an entry inside it named by its bytes" to one path.
+///
+/// Shared by the two routes that take a handle so the checks cannot drift
+/// apart between them. The folder has already been through the resolver by the
+/// time this is called; what this adds is exactly one component, and
+/// [`crate::files::decode_handle`] is what guarantees it is one.
+fn locate_by_handle(
+    files: &crate::files::FileService,
+    folder: &Located,
+    handle: &str,
+) -> Result<PathBuf, FileError> {
+    let name = crate::files::decode_handle(handle)?;
+    let dir = folder.follow(files.denied())?;
+    if !dir.is_dir() {
+        return Err(FileError::BadRequest(
+            "a handle names something inside a folder, and that is not a folder".into(),
+        ));
+    }
+    let target = dir.join(&name);
+    crate::files::resolve::check_denied(&target, files.denied())?;
+    Ok(target)
 }
 
 fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {

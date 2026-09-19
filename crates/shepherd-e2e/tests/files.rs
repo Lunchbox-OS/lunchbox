@@ -222,7 +222,7 @@ async fn a_file_goes_to_a_real_device_and_comes_back() -> Result<()> {
     h.shutdown().await
 }
 
-/// A file whose name is not text, removed through a real socket.
+/// A file whose name is not text, renamed and removed through a real socket.
 ///
 /// Worth doing end to end rather than only through the router: the whole
 /// reason a handle exists is that a query string is decoded to a `String`
@@ -230,7 +230,7 @@ async fn a_file_goes_to_a_real_device_and_comes_back() -> Result<()> {
 /// this spelling survives a real HTTP parser where the name itself cannot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn a_name_that_is_not_text_can_be_deleted_through_a_real_socket() -> Result<()> {
+async fn a_name_that_is_not_text_can_be_repaired_or_removed_through_a_real_socket() -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     let home = fake_home()?;
@@ -255,6 +255,47 @@ async fn a_name_that_is_not_text_can_be_deleted_through_a_real_socket() -> Resul
         .context("the un-typable file was not listed")?;
     let handle = entry["handle"].as_str().context("no handle")?.to_string();
     assert_eq!(handle, "636166e92e6d7033");
+
+    // The repair first: give it a name that can be typed, and check the bytes
+    // are the same file rather than a new empty one.
+    let renamed = http
+        .post_json(
+            "/api/v1/files/move",
+            &serde_json::json!({
+                "root": "home",
+                "from": "Books",
+                "to": "Books/cafe.mp3",
+                "from_handle": handle,
+            }),
+        )
+        .await?;
+    assert_eq!(renamed.status, 204, "{}", renamed.body);
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("Books/cafe.mp3"))?,
+        "a song"
+    );
+    assert!(
+        !home
+            .path()
+            .join("Books")
+            .join(std::ffi::OsStr::from_bytes(raw))
+            .exists()
+    );
+
+    // Put it back under the un-typable name, and take the other route.
+    std::fs::rename(
+        home.path().join("Books/cafe.mp3"),
+        home.path()
+            .join("Books")
+            .join(std::ffi::OsStr::from_bytes(raw)),
+    )?;
+    let listing = json_body(&http.get("/api/v1/files/list?root=home&path=Books").await?)?;
+    let entry = listing["entries"]
+        .as_array()
+        .context("no entries")?
+        .iter()
+        .find(|e| e["unusable"] == "name_not_utf8")
+        .context("not listed the second time")?;
 
     let deleted = http
         .send(

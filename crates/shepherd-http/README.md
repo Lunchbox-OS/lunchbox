@@ -356,12 +356,20 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
   accepts in place of the last path component (`path` then names the containing
   folder). Hex because a query string is decoded to a `String` before any
   handler sees it, so the one encoding that cannot work is the obvious one.
+  `POST /files/move` takes one too, as `from_handle`, and that is the better
+  half: renaming such a file to something typable is the *repair* — it keeps
+  the file and makes every other route work on it again — where deleting it is
+  only the bin. There is deliberately no handle for a move's `to`: a
+  destination is always something the caller typed, and a move that could name
+  an unreachable target would be a way to create files nothing can reach.
+
   It is **not a capability**: it names one entry inside a folder the caller has
   already named and been granted, the folder still goes through the resolver,
   and the handle is validated as a single component — no separator, no
-  traversal — before it is used. Nothing else takes one: a file that cannot be
-  named cannot be opened or renamed either, and the gap that mattered was being
-  unable to tidy up after a drive on a device with no shell.
+  traversal — before it is used. One function resolves it for both routes, so
+  the checks cannot drift apart. Download does not take one: a file that cannot
+  be named has no `Content-Disposition` to give, and being unable to read it is
+  not the gap that mattered.
 - **Quietly show a short list.** Every entry a directory reports becomes a row,
   even when nothing can be learned about it — a `stat` that fails leaves
   `unusable: "unreadable"` and empty columns rather than an entry that is

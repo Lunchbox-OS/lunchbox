@@ -399,7 +399,14 @@ describe("the file tree", () => {
     await userEvent.type(field, "the-hobbit.epub{Enter}");
 
     await waitFor(() =>
-      expect(moveEntry).toHaveBeenCalledWith("home", "hobbit.epub", "the-hobbit.epub"),
+      expect(moveEntry).toHaveBeenCalledWith(
+        "home",
+        "hobbit.epub",
+        "the-hobbit.epub",
+        false,
+        // No handle: an ordinary name says which file it means.
+        undefined,
+      ),
     );
   });
 
@@ -456,6 +463,44 @@ describe("the file tree", () => {
         // The *folder*, not the entry: the handle supplies the last part.
         "Books",
         { kind: "replace", etag: "1863410-1756557164123456789" },
+        false,
+        "636166e92e6d7033",
+      ),
+    );
+  });
+
+  it("renames a file whose name is not text, by the handle it was given", async () => {
+    await renderPage();
+    const broken = file("caf\uFFFD.mp3", {
+      unusable: "name_not_utf8",
+      handle: "636166e92e6d7033",
+    });
+    listDirectory.mockImplementation(async (root: string, path: string) =>
+      path === ""
+        ? listing(root, "", [folder("Books")])
+        : listing(root, path, [broken]),
+    );
+    moveEntry.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Expand Books"));
+    expect(await screen.findByText("caf\uFFFD.mp3")).toBeTruthy();
+
+    // Offered at all, which is the point: this is the repair, and before the
+    // handle existed the only thing on offer for such a file was deleting it.
+    await userEvent.click(screen.getByLabelText("Actions for caf\uFFFD.mp3"));
+    await userEvent.click(screen.getByText("Rename"));
+    const field = await screen.findByRole("textbox");
+    await userEvent.clear(field);
+    await userEvent.type(field, "cafe.mp3{Enter}");
+
+    await waitFor(() =>
+      expect(moveEntry).toHaveBeenCalledWith(
+        "home",
+        // The folder on both sides; the handle supplies the source's name and
+        // the typed text supplies the destination's.
+        "Books",
+        "Books/cafe.mp3",
         false,
         "636166e92e6d7033",
       ),

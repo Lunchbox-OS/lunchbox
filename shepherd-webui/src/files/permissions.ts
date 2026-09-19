@@ -66,8 +66,16 @@ export function canRename(row: Row): boolean {
   return (
     row.kind === "entry" &&
     row.parentWritable &&
-    row.entry.unusable === undefined
+    // Renaming is the *repair* for a name that is not text, and the better
+    // half of what a handle buys: deleting such a file throws it away, while
+    // giving it a name somebody can type keeps it and makes every other action
+    // work again.
+    (row.entry.unusable === undefined || renameableByHandle(row.entry))
   );
+}
+
+function renameableByHandle(entry: DirEntryInfo): boolean {
+  return entry.unusable === "name_not_utf8" && entry.handle !== undefined;
 }
 
 export function canDelete(row: Row): boolean {
