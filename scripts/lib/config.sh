@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configuration validation logic for lunchbox-launcher
+# Configuration validation logic for Lunchbox
 # Validates lunchboxd configuration files
 
 # Get the directory containing this script

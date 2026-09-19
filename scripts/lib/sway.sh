@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sway compositor helpers for lunchbox-launcher
+# Sway compositor helpers for Lunchbox
 # Handles nested sway execution for development and production
 
 # Get the directory containing this script

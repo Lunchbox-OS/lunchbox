@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# User hardening logic for lunchbox-launcher
+# User hardening logic for Lunchbox
 # Applies and reverts kiosk-style user restrictions
 
 # Get the directory containing this script

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lunchbox-admin - post-install admin tasks for lunchbox-launcher.
+# lunchbox-admin - post-install admin tasks for Lunchbox.
 #
 # A slim, repo-independent companion to `scripts/lunchbox`. It exposes the admin
 # operations that are useful on an installed system — per-user setup, yt-dlp,
@@ -55,7 +55,7 @@ fi
 
 usage() {
     cat <<EOF
-lunchbox-admin - post-install admin tasks for lunchbox-launcher
+lunchbox-admin - post-install admin tasks for Lunchbox
 
 Usage: lunchbox-admin <command> [options]
 

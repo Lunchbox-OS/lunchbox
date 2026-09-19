@@ -194,7 +194,7 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
             </Tooltip>
           )}
           <Typography variant="h6" color="primary" sx={{ fontWeight: 700 }}>
-            {isLocalFiles ? "lunchbox-launcher config editor" : "Configuration"}
+            {isLocalFiles ? "Lunchbox config editor" : "Configuration"}
           </Typography>
           {versions && (
             // Which build this is. The standalone editor is deployed on its own

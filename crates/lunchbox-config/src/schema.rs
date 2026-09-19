@@ -326,7 +326,7 @@ fn default_firewall_default() -> String {
 /// file plus a set of Chrome command-line flags. Hostname allowlisting is
 /// enforced by the browser itself via `URLAllowlist`/`URLBlocklist` (no
 /// extensions); pair with [`RawFirewallConfig`] for coarse IP-layer
-/// defense-in-depth. lunchbox-launcher only wraps Chrome through documented
+/// defense-in-depth. Lunchbox only wraps Chrome through documented
 /// controls — it does not patch the browser or circumvent any protections.
 ///
 /// [policies]: https://chromeenterprise.google/policies/

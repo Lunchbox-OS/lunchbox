@@ -858,7 +858,7 @@ cooldown_seconds = 0  # No cooldown
 #   2. [entries.browser] -> a Chromium managed-policy (URL allowlist + lockdown)
 #                           plus the launch mode and on-disk profile
 #   3. [entries.firewall] -> optional coarse IP-layer defense-in-depth
-# lunchbox-launcher only wraps Chrome through documented controls (enterprise
+# Lunchbox only wraps Chrome through documented controls (enterprise
 # policy JSON + command-line flags) -- it does not patch the browser or
 # circumvent any protections.
 #

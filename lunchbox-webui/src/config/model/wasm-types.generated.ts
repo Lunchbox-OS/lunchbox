@@ -156,7 +156,7 @@ export interface Versions {
    */
   config_version: number;
   /**
-   * The lunchbox-launcher release this was built from.
+   * The Lunchbox release this was built from.
    *
    * Worth showing because the standalone editor is deployed on its own
    * subdomain, decoupled from any device: a stale cached bundle is

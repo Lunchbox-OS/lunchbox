@@ -30,7 +30,7 @@ AntiFeatures:
       not use it.
 
 Description: |-
-  The Android build of lunchbox-media, the media player from lunchbox-launcher —
+  The Android build of lunchbox-media, the media player from Lunchbox —
   a child-friendly, parent-guided desktop environment for Wayland.
 
   Plays from libraries you define: a local directory, a YouTube channel or
@@ -42,7 +42,7 @@ Description: |-
   all navigable with a TV remote, and adding a library needs no typing. Runs on
   phones, tablets, and Fire TV sticks (including 32-bit ones).
 
-  Unlike the desktop build there is no lunchbox-launcher daemon on Android, so
+  Unlike the desktop build there is no Lunchbox daemon on Android, so
   this app owns its own library configuration and can be used standalone.
 
 # Pin the release signing certificate. `fdroid update` refuses to publish an APK

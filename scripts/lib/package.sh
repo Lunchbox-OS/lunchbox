@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Distro packaging for lunchbox-launcher.
+# Distro packaging for Lunchbox.
 #
 # `lunchbox package deb` produces a Debian package for the host architecture
 # (amd64, arm64, …). It does NOT
@@ -445,7 +445,7 @@ Pre-Depends: dpkg (>= 1.15.7.2)
 Suggests: $suggests
 Installed-Size: $size
 Description: Parent-guided kiosk desktop environment for Wayland
- lunchbox-launcher provides supervised, time-scoped access to the
+ Lunchbox provides supervised, time-scoped access to the
  applications and content a parent defines, with the ease-of-use of a game
  console. Policy lives outside the applications being run; sessions end
  predictably and enforceably.
@@ -650,7 +650,7 @@ if [ "$1" = "configure" ]; then
         fi
     fi
     cat <<'EOM'
-lunchbox-launcher installed. Finish setting up a kiosk user (replace USER):
+Lunchbox installed. Finish setting up a kiosk user (replace USER):
 
   lunchbox-admin setup-user USER     # config, groups, and the state custodian
   lunchbox-admin yt-dlp install      # only for YouTube media libraries

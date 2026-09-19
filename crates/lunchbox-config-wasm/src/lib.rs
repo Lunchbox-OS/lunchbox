@@ -27,7 +27,7 @@ pub struct Versions {
     /// different one comes back as a `version` report rather than being
     /// edited on a schema this build does not know.
     pub config_version: u32,
-    /// The lunchbox-launcher release this was built from.
+    /// The Lunchbox release this was built from.
     ///
     /// Worth showing because the standalone editor is deployed on its own
     /// subdomain, decoupled from any device: a stale cached bundle is

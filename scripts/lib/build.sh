@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build logic for lunchbox-launcher
+# Build logic for Lunchbox
 # Wraps cargo build with project-specific settings
 
 # Get the directory containing this script

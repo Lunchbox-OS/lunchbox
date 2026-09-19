@@ -24,7 +24,7 @@
     Snap/Flatpak BPF cgroup attach) go through this single action.
   -->
   <action id="com.lunchboxos.firewall.apply-process">
-    <description>Apply per-activity firewall rules to a lunchbox-launcher activity</description>
+    <description>Apply per-activity firewall rules to a Lunchbox activity</description>
     <message>Authentication is required to apply per-activity firewall rules.</message>
     <defaults>
       <allow_any>auth_admin_keep</allow_any>

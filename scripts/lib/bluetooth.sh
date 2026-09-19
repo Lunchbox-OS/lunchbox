@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bluetooth admin operations for lunchbox-launcher.
+# Bluetooth admin operations for Lunchbox.
 #
 # Currently one subcommand: `clear`, which force-disconnects and unpairs
 # every BLE peer recorded in lunchbox's admin record, then deletes the record

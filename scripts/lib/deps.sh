@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dependency management for lunchbox-launcher
+# Dependency management for Lunchbox
 # Provides functions to read, union, and install package sets
 
 # Get the directory containing this script

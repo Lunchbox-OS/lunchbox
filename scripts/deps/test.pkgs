@@ -1,4 +1,4 @@
-# Test-time system packages for lunchbox-launcher
+# Test-time system packages for Lunchbox
 # These are needed in addition to the build deps to run the
 # `lunchbox-e2e` end-to-end suite, which boots a real headless
 # Sway compositor and the lunchbox binaries inside a temp environment.

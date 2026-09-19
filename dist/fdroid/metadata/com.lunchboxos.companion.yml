@@ -15,10 +15,10 @@ SourceCode: https://github.com/aarmea/lunchbox
 IssueTracker: https://github.com/aarmea/lunchbox/issues
 
 Name: Lunchbox Companion
-Summary: Manage lunchbox-launcher kiosk devices over Bluetooth LE
+Summary: Manage Lunchbox kiosk devices over Bluetooth LE
 
 Description: |-
-  The parent-facing admin app for lunchbox-launcher, a child-friendly,
+  The parent-facing admin app for Lunchbox, a child-friendly,
   parent-guided desktop environment for Wayland.
 
   Pairs with a device over Bluetooth LE using Numeric Comparison, claims it
@@ -33,7 +33,7 @@ Description: |-
   * set bedtime and availability windows
   * manage tokens and grouped time limits
 
-  Requires a device running lunchbox-launcher; it has no use on its own.
+  Requires a device running Lunchbox; it has no use on its own.
 
 # Pin the release signing certificate. `fdroid update` refuses to publish an APK
 # signed with anything else, and --delete-unknown removes it from the repo. This

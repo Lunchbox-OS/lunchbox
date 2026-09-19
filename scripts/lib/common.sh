@@ -105,7 +105,7 @@ verify_repo() {
     fi
     # Check it's the right project
     if ! grep -q 'lunchbox-launcher-ui' "$repo_root/Cargo.toml" 2>/dev/null; then
-        die "This doesn't appear to be the lunchbox-launcher repository"
+        die "This doesn't appear to be the Lunchbox repository"
     fi
 }
 

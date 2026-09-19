@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Headless, agent-drivable development session for lunchbox-launcher.
+# Headless, agent-drivable development session for Lunchbox.
 #
 # `lunchbox dev run` boots the launcher in a *nested* Sway
 # (WLR_BACKENDS=wayland), which must attach to a parent Wayland compositor and
@@ -177,11 +177,12 @@ headless_wait_ipc() {
 #   headless_wait_launcher [tries] [hint_after]
 headless_wait_launcher() {
     local tries="${1:-900}" hint_after="${2:-200}" i=0
-    # The launcher registers as "com.lunchboxos.launcher" (older builds used the
-    # bare "lunchbox-launcher"); accept either.
+    # The launcher registers as "com.lunchboxos.launcher" (older builds used
+    # "org.shepherd.launcher", and older ones still the bare
+    # "shepherd-launcher"/"lunchbox-launcher"); accept any of them.
     for _ in $(seq 1 "$tries"); do
         if headless_run swaymsg -t get_tree 2>/dev/null \
-            | grep -qE '"app_id": *"(org\.)?lunchbox[.-]launcher"'; then
+            | grep -qE '"app_id": *"(com\.lunchboxos\.launcher|(org\.)?(lunchbox|shepherd)[.-]launcher)"'; then
             return 0
         fi
         i=$((i + 1))

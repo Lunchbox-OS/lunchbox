@@ -1,4 +1,4 @@
-# Agent / headless-development packages for lunchbox-launcher.
+# Agent / headless-development packages for Lunchbox.
 #
 # These power `lunchbox dev headless`, which boots the real launcher stack in a
 # GPU-less, login-session-less headless Sway so an automated agent (or a

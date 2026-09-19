@@ -82,7 +82,7 @@ chmod 0755 "$SNAP_DIR/bin/probe.sh"
 cat > "$SNAP_DIR/meta/snap.yaml" <<EOF
 name: $SNAP_NAME
 version: '1.0'
-summary: Test snap for lunchbox-launcher firewall enforcement
+summary: Test snap for Lunchbox firewall enforcement
 description: |
   Probes one allowed and one denied TCP target inside the snap's systemd
   scope. Used by crates/lunchbox-e2e/tests/firewall_real_snap.rs only.

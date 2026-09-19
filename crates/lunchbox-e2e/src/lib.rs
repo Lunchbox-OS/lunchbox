@@ -1,4 +1,4 @@
-//! End-to-end test harness for lunchbox-launcher.
+//! End-to-end test harness for Lunchbox.
 //!
 //! Spins up a real headless Sway compositor, a real `lunchboxd` daemon, and
 //! optionally the launcher/HUD UIs, all wired through an isolated temp

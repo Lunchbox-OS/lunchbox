@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installation logic for lunchbox-launcher
+# Installation logic for Lunchbox
 # Handles binary installation, config deployment, and desktop entry setup
 
 # Get the directory containing this script
@@ -461,7 +461,7 @@ install_config() {
     fi
 }
 
-# Groups the kiosk user must belong to for lunchbox-launcher features.
+# Groups the kiosk user must belong to for Lunchbox features.
 #
 # - input: required by lunchbox-touch-bridge, lunchbox-tablet-bridge, and
 #   lunchbox-gamepad-bridge (used when an entry has `input_compat =
@@ -527,7 +527,7 @@ add_user_to_groups() {
     fi
 }
 
-# Add the target user to all groups required by lunchbox-launcher.
+# Add the target user to all groups required by Lunchbox.
 # Idempotent: skips any group the user is already in.
 install_user_groups() {
     local user="${1:-}"
@@ -665,7 +665,7 @@ remove_superseded_copy() {
     rm -f "$path"
 }
 
-# Install the udev rules lunchbox-launcher needs.
+# Install the udev rules Lunchbox needs.
 #
 # Currently just the /dev/uinput access rule. The input-compat sidecars
 # synthesize their mouse/keyboard output through /dev/uinput, which is
@@ -1247,7 +1247,7 @@ install_all() {
     require_root
     validate_user "$user"
 
-    info "Installing lunchbox-launcher (prefix: $prefix)..."
+    info "Installing Lunchbox (prefix: $prefix)..."
 
     # Before anything is installed, not after. The migration moves a legacy
     # device's state to the lunchbox paths, and it refuses to move onto a path
@@ -1764,7 +1764,7 @@ uninstall_all() {
 
     require_root
 
-    info "Uninstalling lunchbox-launcher (prefix: $prefix)..."
+    info "Uninstalling Lunchbox (prefix: $prefix)..."
 
     uninstall_system "$prefix" "$restore"
 

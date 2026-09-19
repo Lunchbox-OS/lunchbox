@@ -1,4 +1,4 @@
-# CI image for lunchbox-launcher.
+# CI image for Lunchbox.
 #
 # Pre-installs everything `./scripts/lunchbox deps install dev` would on a
 # real Ubuntu 26.04 host: apt build/run/test deps, rustup with stable
@@ -13,7 +13,7 @@
 # when no input file changed; the hash forces a rebuild whenever the
 # inputs do change.
 
-# 26.04, matching the platform lunchbox-launcher is developed and tested on
+# 26.04, matching the platform Lunchbox is developed and tested on
 # (docs/INSTALL.md) and the floor `check_ubuntu_version` recommends. CI had sat
 # a release behind on 25.10, which is how it ended up running an npm below the
 # `engines` floor lunchbox-webui declares, and a Node wrangler refuses to start

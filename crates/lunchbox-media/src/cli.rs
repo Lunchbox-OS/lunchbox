@@ -10,7 +10,7 @@ pub use lunchbox_media_app::Quality;
 
 #[derive(Debug, Parser)]
 #[command(name = "lunchbox-media")]
-#[command(about = "lunchbox-launcher media-library activity", long_about = None)]
+#[command(about = "Lunchbox media-library activity", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

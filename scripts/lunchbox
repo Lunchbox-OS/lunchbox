@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lunchbox CLI - Main entrypoint for lunchbox-launcher tooling
+# Lunchbox CLI - Main entrypoint for Lunchbox tooling
 # Provides unified interface for build, development, installation, and hardening
 
 set -euo pipefail
@@ -42,7 +42,7 @@ VERSION="$(version_read)"
 # Print usage information
 usage() {
     cat <<EOF
-lunchbox - Unified tooling for lunchbox-launcher
+lunchbox - Unified tooling for Lunchbox
 
 Usage: lunchbox <command> [subcommand] [options]
 

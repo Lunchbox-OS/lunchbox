@@ -1,4 +1,4 @@
-# Android CI image for lunchbox-launcher.
+# Android CI image for Lunchbox.
 #
 # Layers the JDK + Android SDK on top of the base CI image (.ci/Dockerfile)
 # so the companion-android Gradle jobs get a ready SDK without every

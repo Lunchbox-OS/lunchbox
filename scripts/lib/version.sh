@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version management for lunchbox-launcher.
+# Version management for Lunchbox.
 #
 # The canonical version string lives in the repo-root VERSION file. It is the
 # single place to bump; everything else derives from it:

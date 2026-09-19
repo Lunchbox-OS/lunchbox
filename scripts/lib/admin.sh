@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared post-install admin tasks for lunchbox-launcher.
+# Shared post-install admin tasks for Lunchbox.
 #
 # These operations are useful *after* the software is installed, and they are
 # deliberately repo-independent: they perform pure system actions (pip into a
