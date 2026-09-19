@@ -119,9 +119,37 @@ this feature follows — an escaping symlink is listed *precisely so somebody ca
 delete it*. A `name_not_utf8` entry can be seen, is flagged, and can never be
 removed, on a device whose whole premise is that there is no shell.
 
-Closing it needs a server-issued opaque handle for un-nameable entries (a
-listing would hand back an id that `DELETE` accepts in place of a path), which
-is an API change and was not made unilaterally.
+**Since closed.** The listing hands back a `handle` on exactly those rows — the
+entry's own bytes in hex — and `DELETE` takes it in place of the last path
+component, with `path` naming the containing folder.
+
+Hex rather than base64 (no dependency) and rather than percent-encoding, which
+*cannot* work: a query string is decoded to a `String` before any handler sees
+it, so a percent-escape for a byte that is not valid UTF-8 fails to parse — the
+exact situation the handle exists for.
+
+It is a **name, not a path**, and that is the whole of its safety. The folder it
+applies to goes through the resolver like any other request; the handle may only
+add one component to it, and is refused if it contains a separator or a NUL, is
+`.` or `..`, is empty, is not hex, or is longer than a name can be. A test
+table fires all ten of those at it and checks that a file outside the root is
+still there afterwards.
+
+Nothing else accepts one. A file that cannot be named cannot be opened, renamed
+or downloaded either — those would all need to say *which* file, and there is no
+answer. The gap that mattered was being unable to tidy up after a drive on a
+device with no shell, and that is the one that is closed.
+
+Two limits, deliberately:
+
+- **It does not separate the `???.zip` collision.** Three files whose rendered
+  names are byte-identical produce three identical handles, because a handle
+  *is* the rendered bytes. No API can invent a distinction the filesystem will
+  not make; the fix for that case is mounting the drive with a charset that can
+  spell its contents.
+- **Rename does not take one.** Renaming such a file to something typable would
+  arguably be more useful than deleting it — it keeps the file — and is a small
+  follow-up, but it was not what was asked for here.
 
 ## Not chased to the end
 

@@ -283,14 +283,28 @@ export async function moveEntry(
 }
 
 /** Delete a file, or a folder and optionally everything in it. */
+/**
+ * Delete a file, or a folder and optionally everything in it.
+ *
+ * `handle` is for the entries whose names are not valid UTF-8: those cannot
+ * ride in a query string at all, so the listing hands back the entry's own
+ * bytes and `path` becomes the *containing folder* instead of the entry. The
+ * client never builds one — it passes back what it was given.
+ */
 export async function deleteEntry(
   root: string,
   path: string,
   precondition: Precondition,
   recursive = false,
+  handle?: string,
 ): Promise<void> {
   await apiHttp.delete("/files/entry", {
-    params: { root, path, ...(recursive ? { recursive: true } : {}) },
+    params: {
+      root,
+      path,
+      ...(recursive ? { recursive: true } : {}),
+      ...(handle ? { handle } : {}),
+    },
     headers: preconditionHeaders(precondition),
   });
 }

@@ -349,6 +349,19 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
 
 ### What it will not do
 
+- **List a file it can never let you remove.** A name that is not valid UTF-8
+  can only be *shown* lossily, and the lossy spelling addresses nothing — so
+  every route that takes a path is shut to it. The listing therefore hands back
+  a `handle` for those rows: the entry's own bytes in hex, which `DELETE`
+  accepts in place of the last path component (`path` then names the containing
+  folder). Hex because a query string is decoded to a `String` before any
+  handler sees it, so the one encoding that cannot work is the obvious one.
+  It is **not a capability**: it names one entry inside a folder the caller has
+  already named and been granted, the folder still goes through the resolver,
+  and the handle is validated as a single component — no separator, no
+  traversal — before it is used. Nothing else takes one: a file that cannot be
+  named cannot be opened or renamed either, and the gap that mattered was being
+  unable to tidy up after a drive on a device with no shell.
 - **Quietly show a short list.** Every entry a directory reports becomes a row,
   even when nothing can be learned about it — a `stat` that fails leaves
   `unusable: "unreadable"` and empty columns rather than an entry that is

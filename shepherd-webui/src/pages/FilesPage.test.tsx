@@ -419,6 +419,45 @@ describe("the file tree", () => {
         "hobbit.epub",
         { kind: "replace", etag: "1863410-1756557164123456789" },
         false,
+        // No handle: an ordinary name addresses its own file, and `path` is
+        // the entry rather than the folder it sits in.
+        undefined,
+      ),
+    );
+  });
+
+  it("deletes a file whose name is not text, by the handle it was given", async () => {
+    await renderPage();
+    // What a FAT drive mounted with the wrong charset hands back: the name is
+    // a lossy rendering that addresses nothing, so every other action is off
+    // and this one goes by the bytes instead.
+    const broken = file("caf\uFFFD.mp3", {
+      unusable: "name_not_utf8",
+      handle: "636166e92e6d7033",
+    });
+    listDirectory.mockImplementation(async (root: string, path: string) =>
+      path === ""
+        ? listing(root, "", [folder("Books")])
+        : listing(root, path, [broken]),
+    );
+    deleteEntry.mockResolvedValue(undefined);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Expand Books"));
+    expect(await screen.findByText("caf\uFFFD.mp3")).toBeTruthy();
+
+    await userEvent.click(screen.getByLabelText("Actions for caf\uFFFD.mp3"));
+    await userEvent.click(screen.getByText("Delete…"));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(deleteEntry).toHaveBeenCalledWith(
+        "home",
+        // The *folder*, not the entry: the handle supplies the last part.
+        "Books",
+        { kind: "replace", etag: "1863410-1756557164123456789" },
+        false,
+        "636166e92e6d7033",
       ),
     );
   });
@@ -436,7 +475,13 @@ describe("the file tree", () => {
 
     await waitFor(() =>
       // A folder has no version to match, so it goes with `If-Match: *`.
-      expect(deleteEntry).toHaveBeenCalledWith("home", "Books", { kind: "force" }, true),
+      expect(deleteEntry).toHaveBeenCalledWith(
+        "home",
+        "Books",
+        { kind: "force" },
+        true,
+        undefined,
+      ),
     );
   });
 

@@ -195,6 +195,71 @@ pub struct DirEntryInfo {
     /// be a field that looks like the one you want and is not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writable: Option<bool>,
+    /// How to name this entry when its name cannot be typed.
+    ///
+    /// Present only for [`UnusableReason::NameNotUtf8`], where `name` is a
+    /// lossy rendering that addresses nothing. Everything else is reachable by
+    /// the name it is listed under and carries no handle, so a listing of five
+    /// thousand ROMs does not grow a field per row for the sake of the one
+    /// case in a thousand folders that needs it.
+    ///
+    /// **Not a secret and not a capability**: it is the entry's own bytes in
+    /// hex, because that is the only spelling that survives a query string
+    /// whose contents must be valid UTF-8. It names a single entry *within a
+    /// directory the caller also names*, so it grants nothing that directory
+    /// does not already grant, and it is validated as one path component
+    /// before it is used. See [`decode_handle`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+}
+
+/// The raw bytes of a directory entry's name, in lowercase hex.
+///
+/// Hex rather than base64 to avoid a dependency, and rather than
+/// percent-encoding because that cannot work: a query string is decoded to a
+/// `String` before anything here sees it, so a percent-escape for a byte that
+/// is not valid UTF-8 fails to parse — which is precisely the situation this
+/// exists for.
+pub fn encode_handle(name: &std::ffi::OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    name.as_bytes().iter().fold(
+        String::with_capacity(name.as_bytes().len() * 2),
+        |mut out, b| {
+            use std::fmt::Write;
+            let _ = write!(out, "{b:02x}");
+            out
+        },
+    )
+}
+
+/// Turn a handle back into a name, refusing anything that is not one.
+///
+/// The check is the same one [`resolve::components`] makes of a typed path,
+/// applied to bytes: a handle names **one entry inside a directory the caller
+/// has already named and been granted**, so it may not contain a separator,
+/// may not be a traversal, and may not be empty. Without that, a forged handle
+/// would be a path — and a path that skipped the resolver.
+pub fn decode_handle(handle: &str) -> Result<std::ffi::OsString, FileError> {
+    use std::os::unix::ffi::OsStringExt;
+    let refuse = |why: &str| FileError::BadRequest(format!("that handle {why}"));
+    if handle.is_empty() || !handle.len().is_multiple_of(2) {
+        return Err(refuse("is not an even number of hex digits"));
+    }
+    let mut bytes = Vec::with_capacity(handle.len() / 2);
+    for pair in handle.as_bytes().chunks(2) {
+        let text = std::str::from_utf8(pair).map_err(|_| refuse("is not hex"))?;
+        bytes.push(u8::from_str_radix(text, 16).map_err(|_| refuse("is not hex"))?);
+    }
+    if bytes.len() > 255 {
+        return Err(refuse("is longer than any name can be"));
+    }
+    if bytes.contains(&b'/') || bytes.contains(&0) {
+        return Err(refuse("is not a single name"));
+    }
+    if bytes == b"." || bytes == b".." {
+        return Err(refuse("is not a name this API accepts"));
+    }
+    Ok(std::ffi::OsString::from_vec(bytes))
 }
 
 /// Why an entry is listed but cannot be operated on.
@@ -690,6 +755,9 @@ pub fn list_dir(
             // this API will not go.
             writable: (kind == EntryKind::Dir && unusable.is_none())
                 .then(|| roots::writable(&path)),
+            // Only where the name itself cannot address the entry. Anything
+            // else is reachable by what it is listed as.
+            handle: (!utf8).then(|| encode_handle(&raw)),
             unusable,
             name,
         };

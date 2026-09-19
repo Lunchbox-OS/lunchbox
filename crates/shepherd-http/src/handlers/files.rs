@@ -81,6 +81,15 @@ pub struct DeleteQuery {
     path: String,
     #[serde(default)]
     recursive: bool,
+    /// Name the entry by its bytes instead of by `path`'s last component.
+    ///
+    /// When this is present `path` names the **containing directory** and the
+    /// handle names one entry inside it. It exists for the entries whose names
+    /// are not valid UTF-8: those cannot ride in a query string at all, so
+    /// without it a file this API *lists* — and flags as unusable — could
+    /// never be got rid of, on a device whose whole premise is that there is
+    /// no shell to do it from.
+    handle: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -902,12 +911,33 @@ pub async fn delete_entry(
         if !located.root.writable {
             return Err(FileError::Forbidden("that place is read-only".into()));
         }
-        if located.path == located.root.canonical {
+        // With a handle, `path` is the folder and the handle is the entry.
+        // The folder still goes through the resolver, so every escape check
+        // applies to it exactly as it would to any other request; the handle
+        // only ever adds one validated component to a directory the caller has
+        // already been granted.
+        let target = match &q.handle {
+            Some(handle) => {
+                let name = crate::files::decode_handle(handle)?;
+                let dir = located.follow(files.denied())?;
+                if !dir.is_dir() {
+                    return Err(FileError::BadRequest(
+                        "a handle names something inside a folder; `path` must be that folder"
+                            .into(),
+                    ));
+                }
+                let target = dir.join(&name);
+                crate::files::resolve::check_denied(&target, files.denied())?;
+                target
+            }
+            None => located.path.clone(),
+        };
+        if target == located.root.canonical {
             return Err(FileError::Forbidden(
                 "the top of a place cannot be deleted".into(),
             ));
         }
-        let meta = std::fs::symlink_metadata(&located.path)
+        let meta = std::fs::symlink_metadata(&target)
             .map_err(|e| FileError::from_io(&e, "what you asked to delete"))?;
         precondition.check(Some(&meta), located.root.granularity)?;
 
@@ -916,9 +946,9 @@ pub async fn delete_entry(
                 // Does not follow symlinks: `remove_dir_all` unlinks a link
                 // rather than descending through it, so a link into `/`
                 // deletes the link.
-                std::fs::remove_dir_all(&located.path)
+                std::fs::remove_dir_all(&target)
             } else {
-                std::fs::remove_dir(&located.path)
+                std::fs::remove_dir(&target)
             }
             .map_err(|e| match e.raw_os_error() {
                 // ENOTEMPTY / EEXIST
@@ -929,7 +959,7 @@ pub async fn delete_entry(
                 _ => FileError::from_io(&e, "that folder"),
             })
         } else {
-            std::fs::remove_file(&located.path).map_err(|e| FileError::from_io(&e, "that file"))
+            std::fs::remove_file(&target).map_err(|e| FileError::from_io(&e, "that file"))
         }
     })
     .await;

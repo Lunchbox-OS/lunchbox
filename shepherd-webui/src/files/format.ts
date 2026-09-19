@@ -124,7 +124,7 @@ export function unusableLabel(reason: UnusableReason): string {
     case "symlink_escapes":
       return "This shortcut points outside this place, so it cannot be opened here. It can still be deleted.";
     case "name_not_utf8":
-      return "This name is not text this device can address, so nothing can be done to it here.";
+      return "This name is not text this device can address, so it cannot be opened or renamed. It can still be deleted.";
     case "special_file":
       return "Not an ordinary file — a socket, a pipe or a device.";
     case "not_browsable":

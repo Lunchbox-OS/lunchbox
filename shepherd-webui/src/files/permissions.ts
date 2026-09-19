@@ -38,6 +38,19 @@ function addressable(entry: DirEntryInfo): boolean {
   return entry.unusable === undefined || DELETABLE_ANYWAY.includes(entry.unusable);
 }
 
+/**
+ * Whether this row can be deleted despite having no usable name.
+ *
+ * A `name_not_utf8` entry is unreachable by every other route -- it cannot be
+ * opened, renamed or downloaded, because none of those can say which file they
+ * mean. Deleting it can, because the listing hands back a handle for exactly
+ * that. Without this, a file the device shows you and flags as broken could
+ * never be got rid of from a device that has no shell.
+ */
+function deletableByHandle(entry: DirEntryInfo): boolean {
+  return entry.unusable === "name_not_utf8" && entry.handle !== undefined;
+}
+
 /** Whether files can be uploaded into this row, and folders created in it. */
 export function canWriteInto(row: Row): boolean {
   if (row.kind === "root") return row.root.writable;
@@ -58,7 +71,11 @@ export function canRename(row: Row): boolean {
 }
 
 export function canDelete(row: Row): boolean {
-  return row.kind === "entry" && row.parentWritable && addressable(row.entry);
+  return (
+    row.kind === "entry" &&
+    row.parentWritable &&
+    (addressable(row.entry) || deletableByHandle(row.entry))
+  );
 }
 
 export function canDownload(row: Row): boolean {

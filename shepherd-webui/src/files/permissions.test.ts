@@ -85,6 +85,21 @@ describe("who may write where", () => {
     expect(canRename(rootRow())).toBe(false);
   });
 
+  it("deletes a name that is not text only when it was given a handle", () => {
+    // Every other action is off -- none of them can say which file they mean.
+    // Delete can, because the listing hands back the entry's own bytes; before
+    // that existed, a file this device shows you and flags as broken could
+    // never be got rid of from a device with no shell.
+    const named = entryRow({ unusable: "name_not_utf8", handle: "636166e9" });
+    expect(canDelete(named)).toBe(true);
+    expect(canRename(named)).toBe(false);
+    expect(canDownload(named)).toBe(false);
+    expect(canWriteInto(named)).toBe(false);
+
+    // An older device that does not send one is not offered a button that
+    // cannot work.
+    expect(canDelete(entryRow({ unusable: "name_not_utf8" }))).toBe(false);
+  });
   it("still deletes something it could not explain", () => {
     // Not knowing what a thing *is* says nothing about whether its name still
     // reaches it -- a FAT drive whose charset cannot spell a stored name is

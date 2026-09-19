@@ -222,6 +222,65 @@ async fn a_file_goes_to_a_real_device_and_comes_back() -> Result<()> {
     h.shutdown().await
 }
 
+/// A file whose name is not text, removed through a real socket.
+///
+/// Worth doing end to end rather than only through the router: the whole
+/// reason a handle exists is that a query string is decoded to a `String`
+/// before any handler sees it, so the one thing that must be proved is that
+/// this spelling survives a real HTTP parser where the name itself cannot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_name_that_is_not_text_can_be_deleted_through_a_real_socket() -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = fake_home()?;
+    // `café.mp3` as a FAT drive mounted with the kernel's default charset
+    // hands it back.
+    let raw = b"caf\xe9.mp3";
+    std::fs::write(
+        home.path()
+            .join("Books")
+            .join(std::ffi::OsStr::from_bytes(raw)),
+        b"a song",
+    )?;
+    let h = harness(home.path(), true).await?;
+    let http = h.http();
+
+    let listing = json_body(&http.get("/api/v1/files/list?root=home&path=Books").await?)?;
+    let entry = listing["entries"]
+        .as_array()
+        .context("no entries")?
+        .iter()
+        .find(|e| e["unusable"] == "name_not_utf8")
+        .context("the un-typable file was not listed")?;
+    let handle = entry["handle"].as_str().context("no handle")?.to_string();
+    assert_eq!(handle, "636166e92e6d7033");
+
+    let deleted = http
+        .send(
+            "DELETE",
+            &format!("/api/v1/files/entry?root=home&path=Books&handle={handle}"),
+            &[("If-Match", entry["etag"].as_str().context("no etag")?)],
+            &[],
+        )
+        .await?;
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+    assert!(
+        !home
+            .path()
+            .join("Books")
+            .join(std::ffi::OsStr::from_bytes(raw))
+            .exists(),
+        "the file is still there"
+    );
+    assert!(
+        home.path().join("Books/hobbit.epub").exists(),
+        "its neighbour went too"
+    );
+
+    h.shutdown().await
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn the_file_routes_are_behind_the_same_door_as_everything_else() -> Result<()> {

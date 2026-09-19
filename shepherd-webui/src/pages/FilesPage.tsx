@@ -220,14 +220,18 @@ export function FilesPage() {
   const confirmDelete = () => {
     const row = deleting;
     if (!row || row.kind !== "entry") return;
+    // A name that is not text addresses nothing, so the row is deleted by the
+    // handle the listing gave it and `path` becomes the folder it sits in.
+    const byHandle = row.entry.handle !== undefined;
     actions.remove.mutate(
       {
         rootId: row.rootId,
-        path: row.path,
+        path: byHandle ? parentPath(row.path) : row.path,
         // A folder has no version to match, so it goes with `If-Match: *`; a
         // file is pinned to the one this list was drawn from.
         etag: row.entry.kind === "dir" ? null : row.entry.etag,
         recursive: row.entry.kind === "dir",
+        handle: row.entry.handle,
       },
       {
         onSuccess: () => {

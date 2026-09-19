@@ -46,6 +46,11 @@ export interface Delete {
   /** The version the row was drawn with; `null` for a folder, which has none. */
   etag: string | null;
   recursive: boolean;
+  /**
+   * For a row whose name is not text: the bytes the listing handed back, with
+   * `path` naming the folder it is in rather than the entry.
+   */
+  handle?: string;
 }
 
 export function useFileActions(forgetSubtree: (key: NodeKey) => void) {
@@ -83,17 +88,21 @@ export function useFileActions(forgetSubtree: (key: NodeKey) => void) {
   });
 
   const remove = useMutation({
-    mutationFn: ({ rootId, path, etag, recursive }: Delete) =>
+    mutationFn: ({ rootId, path, etag, recursive, handle }: Delete) =>
       deleteEntry(
         rootId,
         path,
         etag ? { kind: "replace", etag } : { kind: "force" },
         recursive,
+        handle,
       ),
-    onSuccess: (_data, { rootId, path }) => {
-      void refresh.directory(nodeKey(rootId, parentPath(path)));
+    onSuccess: (_data, { rootId, path, handle }) => {
+      // With a handle, `path` is already the folder; without one it is the
+      // entry, and the folder is its parent.
+      const folder = handle ? path : parentPath(path);
+      void refresh.directory(nodeKey(rootId, folder));
       void refresh.roots();
-      forgetSubtree(nodeKey(rootId, path));
+      if (!handle) forgetSubtree(nodeKey(rootId, path));
     },
   });
 

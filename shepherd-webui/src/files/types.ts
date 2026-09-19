@@ -62,6 +62,13 @@ export interface DirEntryInfo {
   symlink: boolean;
   /** Absent when the entry is fine. */
   unusable?: UnusableReason;
+  /**
+   * How to name this entry when `name` cannot be typed.
+   *
+   * Only ever present on `name_not_utf8` rows, where `name` is a lossy
+   * rendering that addresses nothing. Opaque: pass it back, never build one.
+   */
+  handle?: string;
   /** Directories only: whether things can be created inside. */
   writable?: boolean;
 }

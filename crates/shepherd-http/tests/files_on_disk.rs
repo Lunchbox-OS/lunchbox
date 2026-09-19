@@ -433,6 +433,198 @@ async fn a_folder_that_reads_cleanly_reports_nothing_unreadable() {
 }
 
 // ---------------------------------------------------------------------------
+// Naming a file whose name cannot be typed
+// ---------------------------------------------------------------------------
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn a_file_whose_name_is_not_text_can_still_be_got_rid_of() {
+    let (dir, app) = fixture();
+    // What a FAT stick mounted with a charset that cannot spell the stored
+    // name hands back: `café.mp3` written on Windows, read as iso8859-1.
+    let raw = b"caf\xe9.mp3";
+    let name = std::ffi::OsStr::from_bytes(raw);
+    std::fs::write(dir.path().join("Books").join(name), b"a song").unwrap();
+    // A neighbour, so "the right one went" is asserted rather than "something
+    // went".
+    std::fs::write(dir.path().join("Books/hobbit.epub"), b"a book").unwrap();
+
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["unusable"] == "name_not_utf8")
+        .expect("the un-typable file was not listed");
+    // The listing is what hands the handle over; a client never builds one.
+    let handle = entry["handle"]
+        .as_str()
+        .expect("no handle on an un-typable name");
+    assert_eq!(handle, hex(raw));
+    let etag = entry["etag"].as_str().expect("no etag").to_string();
+
+    // The name it is *shown* under still addresses nothing, which is the
+    // whole reason the handle exists.
+    let (status, _, _) = send(
+        &app,
+        delete_with_handle(
+            "/api/v1/files/entry?root=home&path=Books/caf%EF%BF%BD.mp3",
+            "*",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // And the precondition is not weakened by going in this way.
+    let (status, _, _) = send(
+        &app,
+        delete_with_handle(
+            &format!("/api/v1/files/entry?root=home&path=Books&handle={handle}"),
+            "\"0-0\"",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert!(dir.path().join("Books").join(name).exists());
+
+    let (status, _, _) = send(
+        &app,
+        delete_with_handle(
+            &format!("/api/v1/files/entry?root=home&path=Books&handle={handle}"),
+            &etag,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!dir.path().join("Books").join(name).exists());
+    // And nothing beside it went with it.
+    assert!(dir.path().join("Books/hobbit.epub").exists());
+}
+
+/// A handle is a **name**, not a path, and the difference is the whole of its
+/// safety: the folder it applies to goes through the resolver like any other
+/// request, and the handle may only add one component to it.
+#[tokio::test]
+async fn a_forged_handle_is_not_a_way_around_the_resolver() {
+    let (dir, app) = fixture();
+    std::fs::write(dir.path().join("secret.txt"), b"not yours").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("payroll.csv"), b"keep").unwrap();
+
+    let forged = [
+        ("a traversal", hex(b"../secret.txt")),
+        ("a separator", hex(b"sub/deeper")),
+        (
+            "an absolute path",
+            hex(outside
+                .path()
+                .join("payroll.csv")
+                .to_str()
+                .unwrap()
+                .as_bytes()),
+        ),
+        ("the parent itself", hex(b"..")),
+        ("this folder", hex(b".")),
+        ("a NUL", hex(b"a\0b")),
+        ("nothing at all", String::new()),
+        ("half a byte", "abc".to_string()),
+        ("not hex", "zzzz".to_string()),
+        ("too long a name", hex(&vec![b'a'; 256])),
+    ];
+    for (what, handle) in forged {
+        let (status, body, _) = send(
+            &app,
+            delete_with_handle(
+                &format!("/api/v1/files/entry?root=home&path=Books&handle={handle}"),
+                "*",
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{what} answered {status}: {body}"
+        );
+    }
+    assert!(
+        dir.path().join("secret.txt").exists(),
+        "a forged handle escaped"
+    );
+    assert!(outside.path().join("payroll.csv").exists());
+
+    // And the folder half is still resolved: a handle does not excuse the path
+    // it is applied to.
+    let (status, _, _) = send(
+        &app,
+        delete_with_handle(
+            &format!(
+                "/api/v1/files/entry?root=home&path=../escaped&handle={}",
+                hex(b"x")
+            ),
+            "*",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn an_ordinary_name_carries_no_handle() {
+    let (_dir, app) = fixture();
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    assert_eq!(status, StatusCode::OK);
+    // A folder of five thousand ROMs should not grow a field per row for the
+    // sake of the one case in a thousand folders that needs it.
+    for entry in body["entries"].as_array().unwrap() {
+        assert!(entry.get("handle").is_none(), "{entry} carries a handle");
+    }
+}
+
+/// The `???.zip` collision, which a handle deliberately does **not** solve.
+#[tokio::test]
+async fn a_handle_cannot_separate_names_the_filesystem_itself_conflates() {
+    // Three files whose rendered names are byte-identical would produce three
+    // identical handles, because a handle *is* the rendered bytes. Recorded as
+    // a test so the limit is not mistaken for an oversight: the fix for that
+    // case is mounting the drive with a charset that can spell its contents,
+    // and no API can invent a distinction the filesystem will not make.
+    let (dir, app) = fixture();
+    let raw = b"caf\xe9.mp3";
+    std::fs::write(
+        dir.path()
+            .join("Books")
+            .join(std::ffi::OsStr::from_bytes(raw)),
+        b"x",
+    )
+    .unwrap();
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    let handle = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["unusable"] == "name_not_utf8")
+        .unwrap()["handle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // It is a function of the bytes and nothing else — no inode, no ordering.
+    assert_eq!(handle, hex(raw));
+}
+
+fn delete_with_handle(uri: &str, if_match: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header(header::IF_MATCH, if_match)
+        .body(Body::empty())
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
 // Two writers
 // ---------------------------------------------------------------------------
 
