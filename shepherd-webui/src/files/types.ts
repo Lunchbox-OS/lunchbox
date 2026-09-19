@@ -47,7 +47,8 @@ export type UnusableReason =
   | "symlink_escapes"
   | "name_not_utf8"
   | "special_file"
-  | "not_browsable";
+  | "not_browsable"
+  | "unreadable";
 
 export interface DirEntryInfo {
   name: string;
@@ -76,4 +77,12 @@ export interface Listing {
   entries: DirEntryInfo[];
   truncated: boolean;
   cursor: string | null;
+  /**
+   * Entries the device could see but could not name — absent when there were
+   * none, which is nearly always.
+   *
+   * They cannot be rows, having no name to show, so the count is how the list
+   * says it is shorter than the folder instead of quietly being so.
+   */
+  unreadable?: number;
 }

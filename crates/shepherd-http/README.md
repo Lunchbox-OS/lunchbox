@@ -349,6 +349,15 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
 
 ### What it will not do
 
+- **Quietly show a short list.** Every entry a directory reports becomes a row,
+  even when nothing can be learned about it — a `stat` that fails leaves
+  `unusable: "unreadable"` and empty columns rather than an entry that is
+  simply not there. It is not a hypothetical: a FAT drive whose `iocharset`
+  cannot spell a stored name hands back a rendering that is not a name the
+  filesystem can look up again, and another writer can unlink something between
+  the directory being read and the row being built. The one thing that cannot
+  become a row — an entry the directory could not even name — is counted in
+  `unreadable` instead, so the shortfall is stated rather than silent.
 - **Escape a root.** One resolver (`files::resolve`) sees every caller-supplied
   path; `..` is refused rather than normalised, the parent is canonicalised
   before the check, and a symlink out of the root is *listed* (so a person can

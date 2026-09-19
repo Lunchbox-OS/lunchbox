@@ -129,5 +129,7 @@ export function unusableLabel(reason: UnusableReason): string {
       return "Not an ordinary file — a socket, a pipe or a device.";
     case "not_browsable":
       return "Managed by shepherd itself, or holding credentials. Not editable here.";
+    case "unreadable":
+      return "This device can see it but cannot read anything about it. It may still be possible to delete.";
   }
 }

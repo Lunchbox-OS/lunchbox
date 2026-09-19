@@ -85,6 +85,18 @@ describe("who may write where", () => {
     expect(canRename(rootRow())).toBe(false);
   });
 
+  it("still deletes something it could not explain", () => {
+    // Not knowing what a thing *is* says nothing about whether its name still
+    // reaches it -- a FAT drive whose charset cannot spell a stored name is
+    // the usual cause, and being unable to tidy up after one would be the
+    // worse answer. It is offered nothing else, because nothing else could be
+    // made to work without knowing what it is.
+    const puzzling = entryRow({ unusable: "unreadable", size: null, etag: null });
+    expect(canDelete(puzzling)).toBe(true);
+    expect(canRename(puzzling)).toBe(false);
+    expect(canDownload(puzzling)).toBe(false);
+    expect(canWriteInto(puzzling)).toBe(false);
+  });
   it("still deletes a link that points out of its place", () => {
     // The entire reason such a link is listed rather than hidden.
     const escaping = entryRow({ kind: "dir", symlink: true, unusable: "symlink_escapes" });

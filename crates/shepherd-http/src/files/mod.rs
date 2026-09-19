@@ -216,6 +216,19 @@ pub enum UnusableReason {
     /// One of shepherd's own directories, or `~/.ssh`. Refused for reading and
     /// writing alike — see [`denied_dirs`].
     NotBrowsable,
+    /// The directory named it, and then nothing could be learned about it —
+    /// no size, no kind, no timestamp.
+    ///
+    /// Not hypothetical, and not always a failing disk. A FAT drive mounted
+    /// with a charset that cannot represent a stored name renders it with
+    /// literal `?` characters, and that rendering is not a name the filesystem
+    /// can look up again; the same is true of an entry another writer unlinks
+    /// between the directory being read and the row being built. Listed
+    /// anyway, because an entry that is *there* and merely unexplainable is
+    /// still something a person needs to know about — and, unlike
+    /// [`Self::NameNotUtf8`], its name may well still address it well enough
+    /// to delete.
+    Unreadable,
 }
 
 /// A page of one directory.
@@ -234,6 +247,19 @@ pub struct Listing {
     pub entries: Vec<DirEntryInfo>,
     pub truncated: bool,
     pub cursor: Option<String>,
+    /// How many entries the directory reported that could not be read *at
+    /// all* — not even their names.
+    ///
+    /// Those cannot become rows, because a row with no name is not something
+    /// anybody can act on or even recognise. They are counted instead, so that
+    /// the one answer a file manager must never give — a list that is quietly
+    /// short — is not what a failing USB stick produces.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unreadable: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Default and maximum page sizes.
@@ -587,7 +613,15 @@ pub fn list_dir(
     let entries = std::fs::read_dir(dir).map_err(|e| FileError::from_io(&e, "that folder"))?;
 
     let mut rows: Vec<((u8, String), DirEntryInfo)> = Vec::new();
-    for entry in entries.flatten() {
+    let mut unreadable = 0usize;
+    for entry in entries {
+        // Counted rather than skipped. There is no name here to build a row
+        // out of, so this is the one thing that cannot become a row — and the
+        // count is what keeps it from silently shortening the list instead.
+        let Ok(entry) = entry else {
+            unreadable += 1;
+            continue;
+        };
         let raw = entry.file_name();
         let (name, utf8) = match raw.to_str() {
             Some(s) => (s.to_string(), true),
@@ -595,17 +629,25 @@ pub fn list_dir(
         };
         // `symlink_metadata`, so a link is reported as a link rather than as
         // whatever it points at.
-        let Ok(link_meta) = entry.metadata() else {
-            continue;
-        };
-        let symlink = link_meta.file_type().is_symlink();
+        //
+        // `None` when even that fails, which this used to treat as a reason to
+        // drop the entry. It is not: the directory just said the entry is
+        // there. A FAT drive whose charset cannot spell a stored name hands
+        // back a rendering that cannot be looked up again, and another writer
+        // can unlink something between the read and this line — in both cases
+        // the honest answer is a row saying so, not a list that is quietly
+        // one shorter than the folder.
+        let link_meta = entry.metadata().ok();
+        let symlink = link_meta
+            .as_ref()
+            .is_some_and(|m| m.file_type().is_symlink());
         let path = entry.path();
         // What it *is* — for a link, what it points at, which is what a person
         // browsing wants to see.
         let target_meta = if symlink {
             std::fs::metadata(&path).ok()
         } else {
-            Some(link_meta.clone())
+            link_meta.clone()
         };
         let kind = match &target_meta {
             Some(m) if m.is_dir() => EntryKind::Dir,
@@ -620,6 +662,11 @@ pub fn list_dir(
             Some(UnusableReason::NameNotUtf8)
         } else if resolve::check_denied(&path, denied).is_err() {
             Some(UnusableReason::NotBrowsable)
+        } else if link_meta.is_none() {
+            // Before the `SpecialFile` arm below, which would otherwise claim
+            // this is a socket or a device — `kind` is `Other` here only
+            // because nothing could be learned, not because anything was.
+            Some(UnusableReason::Unreadable)
         } else if symlink && !resolve::link_stays_inside(&path, &root.canonical, denied) {
             Some(UnusableReason::SymlinkEscapes)
         } else if kind == EntryKind::Other {
@@ -667,6 +714,7 @@ pub fn list_dir(
         entries: rows.into_iter().map(|(_, info)| info).collect(),
         truncated,
         cursor: cursor.flatten(),
+        unreadable,
     })
 }
 

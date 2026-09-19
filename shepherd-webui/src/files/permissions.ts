@@ -22,9 +22,17 @@ import type { Row } from "./tree";
  * The escaping symlink is the case this whole flag exists for: it is listed
  * rather than hidden precisely so that somebody can get rid of it, and
  * deleting it removes the link and not what it points at. A special file goes
- * the same way. The other two cannot be addressed or reached at all.
+ * the same way, and so does an entry nothing could be learned about: not
+ * knowing what something *is* says nothing about whether its name still
+ * reaches it, and being unable to tidy it up would be the worse answer.
+ *
+ * The other two cannot be addressed or reached at all.
  */
-const DELETABLE_ANYWAY: UnusableReason[] = ["symlink_escapes", "special_file"];
+const DELETABLE_ANYWAY: UnusableReason[] = [
+  "symlink_escapes",
+  "special_file",
+  "unreadable",
+];
 
 function addressable(entry: DirEntryInfo): boolean {
   return entry.unusable === undefined || DELETABLE_ANYWAY.includes(entry.unusable);

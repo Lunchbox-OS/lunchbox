@@ -365,6 +365,73 @@ async fn a_read_only_place_is_listed_without_trying_to_tidy_it() {
     std::fs::set_permissions(&outside, perms).unwrap();
 }
 
+/// An entry the directory names and then refuses to explain.
+///
+/// A directory with read but not *search* permission is the deterministic way
+/// to arrange it: `readdir` hands back every name, and `fstatat` on each of
+/// them is `EACCES`. The same shape happens for real when a FAT drive's
+/// charset cannot spell a stored name — the rendering readdir returns is not
+/// something the filesystem can look up again — and when another writer
+/// unlinks an entry between the read and the row being built.
+///
+/// This used to `continue`, and the file vanished from the listing with
+/// nothing said. A listing that is quietly short is the one answer a file
+/// manager must never give.
+#[tokio::test]
+async fn an_entry_that_cannot_be_explained_is_still_listed() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!(
+            "[SKIP] an_entry_that_cannot_be_explained_is_still_listed: running as root, \
+             which bypasses the directory permission this test is built on."
+        );
+        return;
+    }
+    let (dir, app) = fixture();
+    let locked = dir.path().join("Books/locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("film.bin"), b"x").unwrap();
+    std::fs::write(locked.join("poster.png"), b"y").unwrap();
+
+    // Readable, not searchable.
+    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o444);
+    std::fs::set_permissions(&locked, perms).unwrap();
+
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books/locked")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "the listing was quietly short: {body}");
+    for name in ["film.bin", "poster.png"] {
+        let entry = row(&body, name).unwrap_or_else(|| panic!("{name} was dropped: {body}"));
+        // Named, and honest about knowing nothing else.
+        assert_eq!(entry["unusable"], "unreadable");
+        assert!(entry["size"].is_null());
+        assert!(entry["modified"].is_null());
+        assert!(entry["etag"].is_null());
+        // Not "special_file", which would claim it is a socket or a device —
+        // something was asserted about it that nobody had learned.
+        assert_ne!(entry["unusable"], "special_file");
+    }
+
+    // Put it back so the tempdir can clean up after itself.
+    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&locked, perms).unwrap();
+}
+
+/// The ordinary case still says nothing, so the new field is not noise.
+#[tokio::test]
+async fn a_folder_that_reads_cleanly_reports_nothing_unreadable() {
+    let (_dir, app) = fixture();
+    let (status, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("unreadable").is_none(),
+        "a clean listing grew a field: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Two writers
 // ---------------------------------------------------------------------------

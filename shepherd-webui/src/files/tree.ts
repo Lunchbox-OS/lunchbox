@@ -276,6 +276,20 @@ export function buildRows(options: WalkOptions): Row[] {
         pushDirectory(out, rootId, childPath, depth + 1);
       }
     }
+    if (listing.unreadable) {
+      // Reusing the error row: "try again" is the right offer, because the
+      // usual cause is a drive that answered badly once.
+      out.push({
+        kind: "error",
+        key: `${key}${FILLER}unreadable`,
+        depth,
+        node: key,
+        message:
+          listing.unreadable === 1
+            ? "One item here could not be read."
+            : `${listing.unreadable} items here could not be read.`,
+      });
+    }
     if (listing.truncated) {
       out.push({
         kind: "more",

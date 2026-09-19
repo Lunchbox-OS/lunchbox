@@ -285,6 +285,49 @@ describe("the walk", () => {
     expect(rows.map((r) => r.kind)).toEqual(["root", "entry", "more"]);
   });
 
+  it("says so when the folder held things it could not name", () => {
+    // Those entries cannot be rows -- there is no name to draw -- so the count
+    // is the only way the list can admit it is shorter than the folder.
+    const rows = buildRows({
+      roots: [root("home")],
+      expanded: new Set([nodeKey("home", "")]),
+      directories: new Map([
+        listing("home", "", [entry("a.txt")], { unreadable: 2 }),
+      ]),
+      sort: BY_NAME,
+      foldersFirst: true,
+      showHidden: false,
+    });
+    expect(rows.map((r) => r.kind)).toEqual(["root", "entry", "error"]);
+    expect(rows[2]).toMatchObject({ message: "2 items here could not be read." });
+  });
+
+  it("counts one of them in the singular", () => {
+    const rows = buildRows({
+      roots: [root("home")],
+      expanded: new Set([nodeKey("home", "")]),
+      directories: new Map([
+        listing("home", "", [entry("a.txt")], { unreadable: 1 }),
+      ]),
+      sort: BY_NAME,
+      foldersFirst: true,
+      showHidden: false,
+    });
+    expect(rows[2]).toMatchObject({ message: "One item here could not be read." });
+  });
+
+  it("says nothing at all when the folder read cleanly", () => {
+    const rows = buildRows({
+      roots: [root("home")],
+      expanded: new Set([nodeKey("home", "")]),
+      directories: new Map([listing("home", "", [entry("a.txt")])]),
+      sort: BY_NAME,
+      foldersFirst: true,
+      showHidden: false,
+    });
+    expect(rows.map((r) => r.kind)).toEqual(["root", "entry"]);
+  });
+
   it("will not expand a link that points out of its root", () => {
     const escaping = dir("escape", { symlink: true, unusable: "symlink_escapes" });
     const rows = buildRows({
