@@ -1,551 +1,578 @@
-name: Release
-
-# Tag-driven release pipeline. Pushing a `vX.Y.Z` tag builds the amd64 `.deb`
-# and a signed `.apk` per Android module, then publishes them to a Forgejo
-# release (each asset gets a `.sha256` sidecar).
+# DISABLED — the whole workflow below is commented out.
 #
-# Release flow:
-#   ./scripts/shepherd version set X.Y.Z
-#   git commit -am "bump to X.Y.Z" && git tag -a vX.Y.Z -m vX.Y.Z
-#   git push && git push --tags
+# Everything it published went to the Forgejo instance the project has left:
+# `create-release` and `scripts/ci/upload-release-asset.sh` speak Forgejo's
+# release API, and `scripts/ci/publish-apt.sh` pushes into Forgejo's Debian
+# registry. After the move those endpoints resolve against `github.server_url`
+# — https://github.com — with Forgejo's `/api/v1/...` paths appended, so a `v*`
+# tag would build everything and then 404. There is no version of this file
+# that works until the destinations are chosen.
 #
-# See docs/ai/history/2026-07-04 003 binary-releases.md for the full design.
+# It is commented out rather than deleted because the build half is correct and
+# worth keeping: the tag-vs-VERSION guard, the per-arch .deb build, the signed
+# APK matrix, the F-Droid metadata validation, and the build -> artifacts ->
+# single `publish` job restructuring.
 #
-# NOT YET PORTED TO GITHUB. The image pulls below now come from GHCR, but every
-# publishing step still targets the Forgejo instance, which still hosts the
-# releases, the apt registry and the F-Droid repo:
-#   * create-release + upload-release-asset.sh talk to the Forgejo release API
-#   * publish-apt.sh pushes into Forgejo's Debian package registry
-# A `v*` tag pushed to GitHub would therefore run these against
-# git.armeafamily.com. Decide where releases and the apt repo live before
-# tagging here.
+# Re-enable by uncommenting once these are settled:
 #
-# Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
-# as an artifact, and a single `publish` job at the end creates the release and
-# attaches all of them. Nothing reaches a release until every build has passed.
+#   #203  Sign the .deb published with each release
+#   #204  Publish releases to a Launchpad PPA
+#   #205  Publish the Android apps to f-droid.org proper
 #
-# Forgejo could not do this -- it does not implement the upload-artifact@v4
-# protocol (its runner reports as GHES and the action hard-fails) -- so there
-# the release had to be created *first* for the parallel build jobs to attach to,
-# which left a window where a later failure published a half-populated release.
+# and then replace the three publishing steps in `publish` with whatever those
+# decide on. Until then nothing here runs, and `v*` tags should not be pushed:
+# 18 of them exist locally and are deliberately not on GitHub.
 #
-# Secrets required (the CI images come from GHCR on the ambient GITHUB_TOKEN,
-# so there is no REGISTRY_TOKEN any more):
-#   RELEASE_TOKEN               repo-write PAT to create the release + upload
-#                               assets, used only by `publish`. (Not
-#                               FORGEJO_*/GITEA_*/GITHUB_* — Forgejo reserves
-#                               those prefixes for secret names.)
-#   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
-#                               .deb into Forgejo's Debian (apt) package registry.
-#   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
-#   SHEPHERD_KEYSTORE_PASSWORD  keystore password
-#   SHEPHERD_KEY_ALIAS          signing key alias
-#   SHEPHERD_KEY_PASSWORD       signing key password
-#   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
-#                               Edit" permission, to publish the config editor
-#   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
+# ----------------------------------------------------------------------------
 
-on:
-  push:
-    tags:
-      - 'v*'
-  # Manual dry run: builds the .deb + both signed .apks (exercising signing and
-  # the media armeabi-v7a cargo-ndk cross-compile) WITHOUT creating a Forgejo
-  # release — unless you tick `publish`. Run it before cutting a real vX.Y.Z tag.
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: "Create the Forgejo release + upload assets (off = dry run)"
-        type: boolean
-        default: false
-
-env:
-  CARGO_TERM_COLOR: always
-
-jobs:
-  # --------------------------------------------------------------------------
-  # guard: the tag must match the canonical VERSION, and all synced literals
-  # must be in harmony (reuses the #83 guarantee).
-  # --------------------------------------------------------------------------
-  guard:
-    name: Guard (tag == VERSION)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Only meaningful for a tag push; a manual dry run has no vX.Y.Z ref.
-      - name: Tag matches VERSION
-        if: github.event_name == 'push'
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          file_version="$(./scripts/shepherd version)"
-          if [ "$tag_version" != "$file_version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME (=$tag_version) does not match VERSION ($file_version)"
-            exit 1
-          fi
-          echo "Releasing version $file_version"
-
-      - name: Version harmony
-        run: ./scripts/shepherd version check
-
-  # --------------------------------------------------------------------------
-  # images: build-if-missing the pre-baked CI images and expose their refs. One
-  # call per image, so a job waits only for the image it pulls -- see the note in
-  # ci.yml, and image.yml's own header, for why that is worth the three calls.
-  # --------------------------------------------------------------------------
-  image-base:
-    name: CI image
-    needs: guard
-    uses: ./.github/workflows/image.yml
-    with:
-      kind: base
-    permissions:
-      packages: write
-    secrets: inherit
-
-  image-android:
-    name: CI image (Android)
-    needs: image-base
-    uses: ./.github/workflows/image.yml
-    with:
-      kind: android
-      base-ref: ${{ needs.image-base.outputs.ref }}
-    permissions:
-      packages: write
-    secrets: inherit
-
-  image-cross:
-    name: CI image (arm64 cross)
-    needs: image-base
-    uses: ./.github/workflows/image.yml
-    with:
-      kind: cross
-      base-ref: ${{ needs.image-base.outputs.ref }}
-      target-arch: arm64
-    permissions:
-      packages: write
-    secrets: inherit
-
-  # --------------------------------------------------------------------------
-  # deb: stage the install tree via install.sh (DESTDIR) and dpkg-deb it, then
-  # (on publish) upload it + a .sha256 to the release.
-  # --------------------------------------------------------------------------
-  deb:
-    # The interpolation in `name:` is required, not cosmetic: two jobs in one
-    # workflow file may not share a name — Forgejo rejects the *entire* file
-    # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
-    # catches that locally.
-    name: Build .deb (${{ matrix.arch }})
-    # Both images: the matrix picks the cross one for arm64 and the base one for
-    # amd64, and a single job cannot depend on a different thing per matrix leg.
-    needs: [guard, image-base, image-cross]
-    runs-on: ubuntu-latest
-    strategy:
-      # Publish whichever architecture succeeded rather than losing both to
-      # one failure: each leg uploads its own asset independently.
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    container:
-      # arm64 is cross-compiled on this amd64 runner and so needs the cross
-      # image; amd64 builds natively in the base one.
-      image: ${{ matrix.arch == 'arm64' && needs.image-cross.outputs.ref || needs.image-base.outputs.ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Assert this job got the arm64 cross image
-        if: matrix.arch == 'arm64'
-        # First, and before checkout: if this job did not get the cross image,
-        # nothing after it can succeed, and what it fails with points
-        # somewhere else entirely -- `rustc: command not found` when the
-        # container is dropped (an empty image ref), or E0463 "can't find
-        # crate for `core`" when the image expression above falls through: an empty cross-ref makes
-        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on Forgejo run 462 against
-        # a cross image that was published and correct, so the ref itself is
-        # printed: it is the one fact the rest of the log cannot recover.
-        shell: sh
-        env:
-          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
-        run: |
-          echo "cross-ref: '$CROSS_REF'"
-          if [ -z "$CROSS_REF" ]; then
-            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
-            exit 1
-          fi
-          if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
-            echo "::error::cross-ref is '$CROSS_REF', but this environment has no aarch64-unknown-linux-gnu std (or no rustup on PATH). It is not the image that ref names."
-            exit 1
-          fi
-      - uses: actions/checkout@v4
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-
-
-      - name: Build .deb
-        # Builds --release, stages via `DESTDIR=… shepherd install …`, runs
-        # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
-        run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
-
-      - name: Assert the package is labelled for the right architecture
-        # A cross build that silently fell back to the host would otherwise be
-        # published under the wrong Architecture: and installed by apt on
-        # machines that cannot run it.
-        shell: bash
-        run: |
-          set -euo pipefail
-          deb="$(echo dist/pkg/*.deb)"
-          got="$(dpkg-deb -f "$deb" Architecture)"
-          echo "$deb declares Architecture: $got"
-          [ "$got" = "${{ matrix.arch }}" ] || {
-            echo "::error::expected Architecture: ${{ matrix.arch }}, got $got"
-            exit 1
-          }
-
-      # Hand the .deb to `publish` rather than uploading it from here. Nothing
-      # reaches a release until every build leg has succeeded.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deb-${{ matrix.arch }}
-          path: dist/pkg/*.deb
-          retention-days: 7
-          if-no-files-found: error
-
-  # --------------------------------------------------------------------------
-  # config-editor: build the standalone config editor and publish it to
-  # Cloudflare Pages, which serves it at config.shepherd.armeafamily.com.
-  # (Its own subdomain, so shepherd.armeafamily.com is free for a landing and
-  # documentation site later. The hostname lives in the Pages project's custom
-  # domain settings, not here — nothing in this job hardcodes it.)
-  #
-  # Tag-driven like everything else here, so the hosted editor matches the last
-  # released shepherd rather than whatever is on main — it renders a schema
-  # (`config_version`) that ships with the daemon, and an editor ahead of the
-  # release would offer fields the installed version cannot read.
-  #
-  # Prerelease tags are skipped for the same reason the apt registry skips them:
-  # an RC should not replace the editor people are using. The bundle is still
-  # built on every trigger, so a dry run exercises wasm-pack and the npm build.
-  #
-  # Direct Upload rather than a git integration: Cloudflare never needs access
-  # to the repo, which is on Forgejo and not mirrored anywhere.
-  # --------------------------------------------------------------------------
-  config-editor:
-    name: Config editor (Cloudflare Pages)
-    needs: [guard, image-base]
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.image-base.outputs.ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      # The Pages project. Its production branch must be `main` for the deploy
-      # below to publish to production rather than to a preview URL.
-      PAGES_PROJECT: shepherd-config-editor
-      # Pinned for the same reason bpf-linker, cargo-ndk and wasm-pack are: an
-      # unpinned `npx wrangler` adopts whatever upstream published last.
-      WRANGLER_VERSION: "4.125.0"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-v2-
-
-      # wasm-pack builds crates/shepherd-config-wasm, then rsbuild writes
-      # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
-      # shepherdd by rust-embed.
-      #
-      # Building and uploading in one job is forced: Forgejo does not implement
-      # upload-artifact@v4, so `dist-standalone/` cannot be handed from a
-      # Rust-capable job to a Node-capable one. That means the base image has to
-      # satisfy wrangler's Node floor (>= 22) as well as carry the Rust
-      # toolchain, which is one of the reasons it moved to 26.04.
-      - name: Build the standalone bundle
-        run: ./scripts/shepherd build config-editor
-
-      - name: Deploy to Cloudflare Pages
-        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy \
-            shepherd-webui/dist-standalone \
-            --project-name "$PAGES_PROJECT" \
-            --branch main \
-            --commit-dirty=true
-
-      - name: Dry run note
-        if: ${{ !((github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true') }}
-        run: |
-          echo "Built shepherd-webui/dist-standalone; not deploying."
-          du -sh shepherd-webui/dist-standalone
-
-  # --------------------------------------------------------------------------
-  # apk: one signed APK per Android module, built in parallel; each (on publish)
-  # uploads itself + a .sha256. cargo-ndk, the Android Rust targets, and
-  # ANDROID_NDK_HOME are baked into the android image, so there's no toolchain
-  # setup here. Add a matrix row per new Android module.
-  # --------------------------------------------------------------------------
-  apk:
-    name: Build .apk (${{ matrix.module.name }})
-    needs: [guard, image-android]
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.image-android.outputs.ref }}
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - name: companion
-            dir: companion-android
-            gradle_module: app
-            artifact: shepherd-companion
-          # media is a NativeActivity app whose Gradle build cross-compiles a
-          # Rust cdylib via cargo-ndk; rust: true gates the cargo cache below.
-          - name: media
-            dir: crates/shepherd-media-android/android
-            gradle_module: app
-            artifact: shepherd-media
-            rust: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles(format('{0}/gradle/libs.versions.toml', matrix.module.dir), format('{0}/**/build.gradle.kts', matrix.module.dir)) }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      # Rust-native modules only: assembleRelease invokes cargo-ndk, so cache the
-      # cargo registry + target dir. Key matches ci.yml's android-media job so
-      # they share the built deps. (Keeps the companion job from polluting it.)
-      - name: Cache cargo (Rust-native APKs)
-        if: matrix.module.rust
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            target
-          key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-media-android-
-
-      - name: Decode signing keystore
-        env:
-          KEYSTORE_B64: ${{ secrets.SHEPHERD_KEYSTORE_B64 }}
-        run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::SHEPHERD_KEYSTORE_B64 is not set; cannot produce a signed release APK"
-            exit 1
-          fi
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-release.jks"
-
-      - name: Assemble signed release APK
-        working-directory: ${{ matrix.module.dir }}
-        env:
-          SHEPHERD_KEYSTORE_FILE: ${{ runner.temp }}/shepherd-release.jks
-          SHEPHERD_KEYSTORE_PASSWORD: ${{ secrets.SHEPHERD_KEYSTORE_PASSWORD }}
-          SHEPHERD_KEY_ALIAS: ${{ secrets.SHEPHERD_KEY_ALIAS }}
-          SHEPHERD_KEY_PASSWORD: ${{ secrets.SHEPHERD_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon :${{ matrix.module.gradle_module }}:assembleRelease
-
-      - name: Stage APK with release name
-        run: |
-          set -euo pipefail
-          src="${{ matrix.module.dir }}/${{ matrix.module.gradle_module }}/build/outputs/apk/release"
-          apk="$(find "$src" -name '*.apk' | head -n1)"
-          [ -n "$apk" ] || { echo "::error::no release APK found under $src"; exit 1; }
-          version="$(./scripts/shepherd version)"
-          mkdir -p dist/pkg
-          cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
-
-      # Validate dist/fdroid/metadata against the APK we just signed. The
-      # published F-Droid repository is generated on the server that hosts
-      # git.armeafamily.com, which downloads these release assets and this
-      # repo's metadata at the release tag and runs `fdroid update` with nobody
-      # watching — so this is the last place a bad metadata file or a
-      # wrongly-signed APK can surface. `package fdroid` fails if the APK does
-      # not reach the generated index, which is what a mismatched
-      # AllowedAPKSigningKeys looks like (fdroid update warns, drops the APK,
-      # and still exits 0). Runs on dry runs too — that is the point of them.
-      # See dist/fdroid/README.md and docs/ai/history/2026-07-26 003 …spec.md.
-      - name: Validate the F-Droid metadata
-        run: |
-          apt-get update
-          # --no-install-recommends keeps this to ~67 packages / ~78 MB rather
-          # than ~269 / ~300 MB: matplotlib and tk come in as Recommends of
-          # androguard and `fdroid update` does not need them. Installed per job
-          # rather than baked into the android CI image so that every Android CI
-          # run doesn't pay for a release-only check.
-          #
-          # default-jdk-headless because fdroidserver signs the index with
-          # /usr/lib/jvm/default-java/bin/jarsigner and unconditionally prefers
-          # that path over every other JDK present (including the image's
-          # openjdk-21-jdk-headless), so the default has to be a JDK.
-          apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
-          ./scripts/shepherd package fdroid --apks dist/pkg
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ matrix.module.artifact }}
-          path: dist/pkg/*.apk
-          retention-days: 7
-          if-no-files-found: error
-
-  # --------------------------------------------------------------------------
-  # publish: the only job that touches a release. It runs after every build leg
-  # has succeeded, downloads their artifacts, then creates the release and
-  # attaches the lot.
-  #
-  # This inverts what Forgejo forced. There, `create-release` had to run first
-  # so the parallel build jobs could each attach their own asset, because
-  # Forgejo does not implement the upload-artifact@v4 protocol and there was no
-  # way to hand a built file between jobs. The cost was a window in which a
-  # release existed with some or none of its assets: a build that failed after
-  # `create-release` succeeded left a published, half-populated release behind.
-  #
-  # It also reverses a deliberate decision recorded on the `deb` matrix --
-  # "publish whichever architecture succeeded rather than losing both to one
-  # failure". That is now all-or-nothing. For a release that seems the better
-  # trade: a release carrying the amd64 .deb but not the arm64 one is a trap for
-  # arm64 users, who get "no such package" from apt rather than a clear "this
-  # version was not released". `fail-fast: false` stays on both matrices, so a
-  # broken leg still reports alongside the others rather than cancelling them.
-  #
-  # NOT PORTED: every API call below still speaks Forgejo. Note especially that
-  # `SERVER_URL: ${{ github.server_url }}` now resolves to https://github.com
-  # while the scripts append Forgejo's `/api/v1/...` paths, so these steps would
-  # 404 rather than publish anywhere at all. Fixing that means deciding where
-  # releases and the apt repository live -- both are still on
-  # git.armeafamily.com. Until then a `v*` tag pushed here builds everything and
-  # fails at this job, which is the safe direction to fail in.
-  # --------------------------------------------------------------------------
-  publish:
-    name: Publish release
-    needs: [guard, deb, apk]
-    if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Collect every built asset
-        uses: actions/download-artifact@v4
-        with:
-          # No `name:`, so this takes every artifact the run produced; the
-          # patterns keep it to the packages.
-          pattern: '{deb-*,apk-*}'
-          merge-multiple: true
-          path: dist/pkg
-
-      - name: Show what will be published
-        run: ls -l dist/pkg
-
-      - name: Create or fetch the release
-        id: rel
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          SERVER_URL: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          command -v jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
-          api="${SERVER_URL}/api/v1/repos/${REPO}"
-          auth="Authorization: token ${RELEASE_TOKEN}"
-
-          # Tags with a -prerelease suffix (e.g. v0.2.0-rc1) publish as a
-          # prerelease so they aren't shown as "latest" — this is how you cut a
-          # release candidate to test the real signed artifacts, then delete it.
-          case "${TAG#v}" in
-            *-*) prerelease=true ;;
-            *)   prerelease=false ;;
-          esac
-
-          # Create the release; if it already exists (a re-run), fetch it.
-          code="$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST "${api}/releases" \
-            -H "$auth" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg t "$TAG" --argjson pre "$prerelease" \
-                    '{tag_name:$t, name:$t, draft:false, prerelease:$pre}')" || true)"
-          if [ "$code" = "201" ]; then
-            id="$(jq -r '.id' /tmp/rel.json)"
-          else
-            echo "POST /releases returned $code; fetching existing release for $TAG"
-            id="$(curl -fsS "${api}/releases/tags/${TAG}" -H "$auth" | jq -r '.id')"
-          fi
-          [ -n "$id" ] && [ "$id" != "null" ] || { echo "::error::could not determine release id"; exit 1; }
-          echo "release_id=$id" >> "$GITHUB_OUTPUT"
-          echo "release id=$id"
-
-      - name: Upload every asset to the release
-        env:
-          SERVER_URL: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          RELEASE_ID: ${{ steps.rel.outputs.release_id }}
-        run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb dist/pkg/*.apk
-
-      # The apt registry gets the .debs too, so users have an
-      # `apt update`/`apt upgrade` path; the release assets stay the
-      # offline/manual download. One invocation for both arches: the registry
-      # reads `Architecture:` out of each control file and serves both from one
-      # distribution/component, and it signs the repository metadata itself, so
-      # the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1)
-      # are skipped so RC builds never reach `apt upgrade` users -- they still
-      # get the signed release asset for manual testing. See docs/INSTALL.md.
-      - name: Publish the .debs to the apt registry
-        if: ${{ !contains(github.ref_name, '-') || github.event.inputs.publish == 'true' }}
-        env:
-          SERVER_URL: ${{ github.server_url }}
-          OWNER: ${{ github.repository_owner }}
-          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
-          APT_DIST: stable
-          APT_COMPONENT: main
-        run: ./scripts/ci/publish-apt.sh dist/pkg/*.deb
-
-  # --------------------------------------------------------------------------
-  # dry-run-note: says, on a manual run with `publish` off, that the builds all
-  # happened and nothing was published. Replaces the per-job notes the build
-  # jobs used to print.
-  # --------------------------------------------------------------------------
-  dry-run-note:
-    name: Dry run (nothing published)
-    needs: [deb, apk]
-    if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: What a real run would have published
-        uses: actions/download-artifact@v4
-        with:
-          pattern: '{deb-*,apk-*}'
-          merge-multiple: true
-          path: dist/pkg
-      - run: |
-          echo "Dry run: built and signed everything below; published nothing."
-          ls -l dist/pkg
+# name: Release
+#
+# # Tag-driven release pipeline. Pushing a `vX.Y.Z` tag builds the amd64 `.deb`
+# # and a signed `.apk` per Android module, then publishes them to a Forgejo
+# # release (each asset gets a `.sha256` sidecar).
+# #
+# # Release flow:
+# #   ./scripts/shepherd version set X.Y.Z
+# #   git commit -am "bump to X.Y.Z" && git tag -a vX.Y.Z -m vX.Y.Z
+# #   git push && git push --tags
+# #
+# # See docs/ai/history/2026-07-04 003 binary-releases.md for the full design.
+# #
+# # NOT YET PORTED TO GITHUB. The image pulls below now come from GHCR, but every
+# # publishing step still targets the Forgejo instance, which still hosts the
+# # releases, the apt registry and the F-Droid repo:
+# #   * create-release + upload-release-asset.sh talk to the Forgejo release API
+# #   * publish-apt.sh pushes into Forgejo's Debian package registry
+# # A `v*` tag pushed to GitHub would therefore run these against
+# # git.armeafamily.com. Decide where releases and the apt repo live before
+# # tagging here.
+# #
+# # Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
+# # as an artifact, and a single `publish` job at the end creates the release and
+# # attaches all of them. Nothing reaches a release until every build has passed.
+# #
+# # Forgejo could not do this -- it does not implement the upload-artifact@v4
+# # protocol (its runner reports as GHES and the action hard-fails) -- so there
+# # the release had to be created *first* for the parallel build jobs to attach to,
+# # which left a window where a later failure published a half-populated release.
+# #
+# # Secrets required (the CI images come from GHCR on the ambient GITHUB_TOKEN,
+# # so there is no REGISTRY_TOKEN any more):
+# #   RELEASE_TOKEN               repo-write PAT to create the release + upload
+# #                               assets, used only by `publish`. (Not
+# #                               FORGEJO_*/GITEA_*/GITHUB_* — Forgejo reserves
+# #                               those prefixes for secret names.)
+# #   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
+# #                               .deb into Forgejo's Debian (apt) package registry.
+# #   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
+# #   SHEPHERD_KEYSTORE_PASSWORD  keystore password
+# #   SHEPHERD_KEY_ALIAS          signing key alias
+# #   SHEPHERD_KEY_PASSWORD       signing key password
+# #   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
+# #                               Edit" permission, to publish the config editor
+# #   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
+#
+# on:
+#   push:
+#     tags:
+#       - 'v*'
+#   # Manual dry run: builds the .deb + both signed .apks (exercising signing and
+#   # the media armeabi-v7a cargo-ndk cross-compile) WITHOUT creating a Forgejo
+#   # release — unless you tick `publish`. Run it before cutting a real vX.Y.Z tag.
+#   workflow_dispatch:
+#     inputs:
+#       publish:
+#         description: "Create the Forgejo release + upload assets (off = dry run)"
+#         type: boolean
+#         default: false
+#
+# env:
+#   CARGO_TERM_COLOR: always
+#
+# jobs:
+#   # --------------------------------------------------------------------------
+#   # guard: the tag must match the canonical VERSION, and all synced literals
+#   # must be in harmony (reuses the #83 guarantee).
+#   # --------------------------------------------------------------------------
+#   guard:
+#     name: Guard (tag == VERSION)
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       # Only meaningful for a tag push; a manual dry run has no vX.Y.Z ref.
+#       - name: Tag matches VERSION
+#         if: github.event_name == 'push'
+#         run: |
+#           tag_version="${GITHUB_REF_NAME#v}"
+#           file_version="$(./scripts/shepherd version)"
+#           if [ "$tag_version" != "$file_version" ]; then
+#             echo "::error::tag $GITHUB_REF_NAME (=$tag_version) does not match VERSION ($file_version)"
+#             exit 1
+#           fi
+#           echo "Releasing version $file_version"
+#
+#       - name: Version harmony
+#         run: ./scripts/shepherd version check
+#
+#   # --------------------------------------------------------------------------
+#   # images: build-if-missing the pre-baked CI images and expose their refs. One
+#   # call per image, so a job waits only for the image it pulls -- see the note in
+#   # ci.yml, and image.yml's own header, for why that is worth the three calls.
+#   # --------------------------------------------------------------------------
+#   image-base:
+#     name: CI image
+#     needs: guard
+#     uses: ./.github/workflows/image.yml
+#     with:
+#       kind: base
+#     permissions:
+#       packages: write
+#     secrets: inherit
+#
+#   image-android:
+#     name: CI image (Android)
+#     needs: image-base
+#     uses: ./.github/workflows/image.yml
+#     with:
+#       kind: android
+#       base-ref: ${{ needs.image-base.outputs.ref }}
+#     permissions:
+#       packages: write
+#     secrets: inherit
+#
+#   image-cross:
+#     name: CI image (arm64 cross)
+#     needs: image-base
+#     uses: ./.github/workflows/image.yml
+#     with:
+#       kind: cross
+#       base-ref: ${{ needs.image-base.outputs.ref }}
+#       target-arch: arm64
+#     permissions:
+#       packages: write
+#     secrets: inherit
+#
+#   # --------------------------------------------------------------------------
+#   # deb: stage the install tree via install.sh (DESTDIR) and dpkg-deb it, then
+#   # (on publish) upload it + a .sha256 to the release.
+#   # --------------------------------------------------------------------------
+#   deb:
+#     # The interpolation in `name:` is required, not cosmetic: two jobs in one
+#     # workflow file may not share a name — Forgejo rejects the *entire* file
+#     # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
+#     # catches that locally.
+#     name: Build .deb (${{ matrix.arch }})
+#     # Both images: the matrix picks the cross one for arm64 and the base one for
+#     # amd64, and a single job cannot depend on a different thing per matrix leg.
+#     needs: [guard, image-base, image-cross]
+#     runs-on: ubuntu-latest
+#     strategy:
+#       # Publish whichever architecture succeeded rather than losing both to
+#       # one failure: each leg uploads its own asset independently.
+#       fail-fast: false
+#       matrix:
+#         arch: [amd64, arm64]
+#     container:
+#       # arm64 is cross-compiled on this amd64 runner and so needs the cross
+#       # image; amd64 builds natively in the base one.
+#       image: ${{ matrix.arch == 'arm64' && needs.image-cross.outputs.ref || needs.image-base.outputs.ref }}
+#       credentials:
+#         username: ${{ github.actor }}
+#         password: ${{ secrets.GITHUB_TOKEN }}
+#     steps:
+#       - name: Assert this job got the arm64 cross image
+#         if: matrix.arch == 'arm64'
+#         # First, and before checkout: if this job did not get the cross image,
+#         # nothing after it can succeed, and what it fails with points
+#         # somewhere else entirely -- `rustc: command not found` when the
+#         # container is dropped (an empty image ref), or E0463 "can't find
+#         # crate for `core`" when the image expression above falls through: an empty cross-ref makes
+#         # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on Forgejo run 462 against
+#         # a cross image that was published and correct, so the ref itself is
+#         # printed: it is the one fact the rest of the log cannot recover.
+#         shell: sh
+#         env:
+#           CROSS_REF: ${{ needs.image-cross.outputs.ref }}
+#         run: |
+#           echo "cross-ref: '$CROSS_REF'"
+#           if [ -z "$CROSS_REF" ]; then
+#             echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
+#             exit 1
+#           fi
+#           if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
+#             echo "::error::cross-ref is '$CROSS_REF', but this environment has no aarch64-unknown-linux-gnu std (or no rustup on PATH). It is not the image that ref names."
+#             exit 1
+#           fi
+#       - uses: actions/checkout@v4
+#
+#       - name: Cache cargo registry and build
+#         uses: actions/cache@v4
+#         with:
+#           path: |
+#             /usr/local/cargo/registry
+#             /usr/local/cargo/git
+#             target
+#           key: ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+#           restore-keys: |
+#             ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-
+#
+#       - name: Build .deb
+#         # Builds --release, stages via `DESTDIR=… shepherd install …`, runs
+#         # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
+#         run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
+#
+#       - name: Assert the package is labelled for the right architecture
+#         # A cross build that silently fell back to the host would otherwise be
+#         # published under the wrong Architecture: and installed by apt on
+#         # machines that cannot run it.
+#         shell: bash
+#         run: |
+#           set -euo pipefail
+#           deb="$(echo dist/pkg/*.deb)"
+#           got="$(dpkg-deb -f "$deb" Architecture)"
+#           echo "$deb declares Architecture: $got"
+#           [ "$got" = "${{ matrix.arch }}" ] || {
+#             echo "::error::expected Architecture: ${{ matrix.arch }}, got $got"
+#             exit 1
+#           }
+#
+#       # Hand the .deb to `publish` rather than uploading it from here. Nothing
+#       # reaches a release until every build leg has succeeded.
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: deb-${{ matrix.arch }}
+#           path: dist/pkg/*.deb
+#           retention-days: 7
+#           if-no-files-found: error
+#
+#   # --------------------------------------------------------------------------
+#   # config-editor: build the standalone config editor and publish it to
+#   # Cloudflare Pages, which serves it at config.shepherd.armeafamily.com.
+#   # (Its own subdomain, so shepherd.armeafamily.com is free for a landing and
+#   # documentation site later. The hostname lives in the Pages project's custom
+#   # domain settings, not here — nothing in this job hardcodes it.)
+#   #
+#   # Tag-driven like everything else here, so the hosted editor matches the last
+#   # released shepherd rather than whatever is on main — it renders a schema
+#   # (`config_version`) that ships with the daemon, and an editor ahead of the
+#   # release would offer fields the installed version cannot read.
+#   #
+#   # Prerelease tags are skipped for the same reason the apt registry skips them:
+#   # an RC should not replace the editor people are using. The bundle is still
+#   # built on every trigger, so a dry run exercises wasm-pack and the npm build.
+#   #
+#   # Direct Upload rather than a git integration: Cloudflare never needs access
+#   # to the repo, which is on Forgejo and not mirrored anywhere.
+#   # --------------------------------------------------------------------------
+#   config-editor:
+#     name: Config editor (Cloudflare Pages)
+#     needs: [guard, image-base]
+#     runs-on: ubuntu-latest
+#     container:
+#       image: ${{ needs.image-base.outputs.ref }}
+#       credentials:
+#         username: ${{ github.actor }}
+#         password: ${{ secrets.GITHUB_TOKEN }}
+#     env:
+#       # The Pages project. Its production branch must be `main` for the deploy
+#       # below to publish to production rather than to a preview URL.
+#       PAGES_PROJECT: shepherd-config-editor
+#       # Pinned for the same reason bpf-linker, cargo-ndk and wasm-pack are: an
+#       # unpinned `npx wrangler` adopts whatever upstream published last.
+#       WRANGLER_VERSION: "4.125.0"
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - name: Cache cargo registry and build
+#         uses: actions/cache@v4
+#         with:
+#           path: |
+#             /usr/local/cargo/registry
+#             /usr/local/cargo/git
+#             target
+#           key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+#           restore-keys: |
+#             ${{ runner.os }}-cargo-v2-
+#
+#       # wasm-pack builds crates/shepherd-config-wasm, then rsbuild writes
+#       # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
+#       # shepherdd by rust-embed.
+#       #
+#       # Building and uploading in one job is forced: Forgejo does not implement
+#       # upload-artifact@v4, so `dist-standalone/` cannot be handed from a
+#       # Rust-capable job to a Node-capable one. That means the base image has to
+#       # satisfy wrangler's Node floor (>= 22) as well as carry the Rust
+#       # toolchain, which is one of the reasons it moved to 26.04.
+#       - name: Build the standalone bundle
+#         run: ./scripts/shepherd build config-editor
+#
+#       - name: Deploy to Cloudflare Pages
+#         if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
+#         env:
+#           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#         run: |
+#           set -euo pipefail
+#           npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy \
+#             shepherd-webui/dist-standalone \
+#             --project-name "$PAGES_PROJECT" \
+#             --branch main \
+#             --commit-dirty=true
+#
+#       - name: Dry run note
+#         if: ${{ !((github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true') }}
+#         run: |
+#           echo "Built shepherd-webui/dist-standalone; not deploying."
+#           du -sh shepherd-webui/dist-standalone
+#
+#   # --------------------------------------------------------------------------
+#   # apk: one signed APK per Android module, built in parallel; each (on publish)
+#   # uploads itself + a .sha256. cargo-ndk, the Android Rust targets, and
+#   # ANDROID_NDK_HOME are baked into the android image, so there's no toolchain
+#   # setup here. Add a matrix row per new Android module.
+#   # --------------------------------------------------------------------------
+#   apk:
+#     name: Build .apk (${{ matrix.module.name }})
+#     needs: [guard, image-android]
+#     runs-on: ubuntu-latest
+#     container:
+#       image: ${{ needs.image-android.outputs.ref }}
+#       credentials:
+#         username: ${{ github.actor }}
+#         password: ${{ secrets.GITHUB_TOKEN }}
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         module:
+#           - name: companion
+#             dir: companion-android
+#             gradle_module: app
+#             artifact: shepherd-companion
+#           # media is a NativeActivity app whose Gradle build cross-compiles a
+#           # Rust cdylib via cargo-ndk; rust: true gates the cargo cache below.
+#           - name: media
+#             dir: crates/shepherd-media-android/android
+#             gradle_module: app
+#             artifact: shepherd-media
+#             rust: true
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - name: Cache Gradle dependencies
+#         uses: actions/cache@v4
+#         with:
+#           path: |
+#             ~/.gradle/caches
+#             ~/.gradle/wrapper
+#           key: ${{ runner.os }}-gradle-${{ hashFiles(format('{0}/gradle/libs.versions.toml', matrix.module.dir), format('{0}/**/build.gradle.kts', matrix.module.dir)) }}
+#           restore-keys: |
+#             ${{ runner.os }}-gradle-
+#
+#       # Rust-native modules only: assembleRelease invokes cargo-ndk, so cache the
+#       # cargo registry + target dir. Key matches ci.yml's android-media job so
+#       # they share the built deps. (Keeps the companion job from polluting it.)
+#       - name: Cache cargo (Rust-native APKs)
+#         if: matrix.module.rust
+#         uses: actions/cache@v4
+#         with:
+#           path: |
+#             /usr/local/cargo/registry
+#             /usr/local/cargo/git
+#             target
+#           key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
+#           restore-keys: |
+#             ${{ runner.os }}-cargo-media-android-
+#
+#       - name: Decode signing keystore
+#         env:
+#           KEYSTORE_B64: ${{ secrets.SHEPHERD_KEYSTORE_B64 }}
+#         run: |
+#           if [ -z "$KEYSTORE_B64" ]; then
+#             echo "::error::SHEPHERD_KEYSTORE_B64 is not set; cannot produce a signed release APK"
+#             exit 1
+#           fi
+#           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-release.jks"
+#
+#       - name: Assemble signed release APK
+#         working-directory: ${{ matrix.module.dir }}
+#         env:
+#           SHEPHERD_KEYSTORE_FILE: ${{ runner.temp }}/shepherd-release.jks
+#           SHEPHERD_KEYSTORE_PASSWORD: ${{ secrets.SHEPHERD_KEYSTORE_PASSWORD }}
+#           SHEPHERD_KEY_ALIAS: ${{ secrets.SHEPHERD_KEY_ALIAS }}
+#           SHEPHERD_KEY_PASSWORD: ${{ secrets.SHEPHERD_KEY_PASSWORD }}
+#         run: ./gradlew --no-daemon :${{ matrix.module.gradle_module }}:assembleRelease
+#
+#       - name: Stage APK with release name
+#         run: |
+#           set -euo pipefail
+#           src="${{ matrix.module.dir }}/${{ matrix.module.gradle_module }}/build/outputs/apk/release"
+#           apk="$(find "$src" -name '*.apk' | head -n1)"
+#           [ -n "$apk" ] || { echo "::error::no release APK found under $src"; exit 1; }
+#           version="$(./scripts/shepherd version)"
+#           mkdir -p dist/pkg
+#           cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
+#
+#       # Validate dist/fdroid/metadata against the APK we just signed. The
+#       # published F-Droid repository is generated on the server that hosts
+#       # git.armeafamily.com, which downloads these release assets and this
+#       # repo's metadata at the release tag and runs `fdroid update` with nobody
+#       # watching — so this is the last place a bad metadata file or a
+#       # wrongly-signed APK can surface. `package fdroid` fails if the APK does
+#       # not reach the generated index, which is what a mismatched
+#       # AllowedAPKSigningKeys looks like (fdroid update warns, drops the APK,
+#       # and still exits 0). Runs on dry runs too — that is the point of them.
+#       # See dist/fdroid/README.md and docs/ai/history/2026-07-26 003 …spec.md.
+#       - name: Validate the F-Droid metadata
+#         run: |
+#           apt-get update
+#           # --no-install-recommends keeps this to ~67 packages / ~78 MB rather
+#           # than ~269 / ~300 MB: matplotlib and tk come in as Recommends of
+#           # androguard and `fdroid update` does not need them. Installed per job
+#           # rather than baked into the android CI image so that every Android CI
+#           # run doesn't pay for a release-only check.
+#           #
+#           # default-jdk-headless because fdroidserver signs the index with
+#           # /usr/lib/jvm/default-java/bin/jarsigner and unconditionally prefers
+#           # that path over every other JDK present (including the image's
+#           # openjdk-21-jdk-headless), so the default has to be a JDK.
+#           apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
+#           ./scripts/shepherd package fdroid --apks dist/pkg
+#
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: apk-${{ matrix.module.artifact }}
+#           path: dist/pkg/*.apk
+#           retention-days: 7
+#           if-no-files-found: error
+#
+#   # --------------------------------------------------------------------------
+#   # publish: the only job that touches a release. It runs after every build leg
+#   # has succeeded, downloads their artifacts, then creates the release and
+#   # attaches the lot.
+#   #
+#   # This inverts what Forgejo forced. There, `create-release` had to run first
+#   # so the parallel build jobs could each attach their own asset, because
+#   # Forgejo does not implement the upload-artifact@v4 protocol and there was no
+#   # way to hand a built file between jobs. The cost was a window in which a
+#   # release existed with some or none of its assets: a build that failed after
+#   # `create-release` succeeded left a published, half-populated release behind.
+#   #
+#   # It also reverses a deliberate decision recorded on the `deb` matrix --
+#   # "publish whichever architecture succeeded rather than losing both to one
+#   # failure". That is now all-or-nothing. For a release that seems the better
+#   # trade: a release carrying the amd64 .deb but not the arm64 one is a trap for
+#   # arm64 users, who get "no such package" from apt rather than a clear "this
+#   # version was not released". `fail-fast: false` stays on both matrices, so a
+#   # broken leg still reports alongside the others rather than cancelling them.
+#   #
+#   # NOT PORTED: every API call below still speaks Forgejo. Note especially that
+#   # `SERVER_URL: ${{ github.server_url }}` now resolves to https://github.com
+#   # while the scripts append Forgejo's `/api/v1/...` paths, so these steps would
+#   # 404 rather than publish anywhere at all. Fixing that means deciding where
+#   # releases and the apt repository live -- both are still on
+#   # git.armeafamily.com. Until then a `v*` tag pushed here builds everything and
+#   # fails at this job, which is the safe direction to fail in.
+#   # --------------------------------------------------------------------------
+#   publish:
+#     name: Publish release
+#     needs: [guard, deb, apk]
+#     if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - name: Collect every built asset
+#         uses: actions/download-artifact@v4
+#         with:
+#           # No `name:`, so this takes every artifact the run produced; the
+#           # patterns keep it to the packages.
+#           pattern: '{deb-*,apk-*}'
+#           merge-multiple: true
+#           path: dist/pkg
+#
+#       - name: Show what will be published
+#         run: ls -l dist/pkg
+#
+#       - name: Create or fetch the release
+#         id: rel
+#         env:
+#           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+#           SERVER_URL: ${{ github.server_url }}
+#           REPO: ${{ github.repository }}
+#           TAG: ${{ github.ref_name }}
+#         run: |
+#           set -euo pipefail
+#           command -v jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
+#           api="${SERVER_URL}/api/v1/repos/${REPO}"
+#           auth="Authorization: token ${RELEASE_TOKEN}"
+#
+#           # Tags with a -prerelease suffix (e.g. v0.2.0-rc1) publish as a
+#           # prerelease so they aren't shown as "latest" — this is how you cut a
+#           # release candidate to test the real signed artifacts, then delete it.
+#           case "${TAG#v}" in
+#             *-*) prerelease=true ;;
+#             *)   prerelease=false ;;
+#           esac
+#
+#           # Create the release; if it already exists (a re-run), fetch it.
+#           code="$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST "${api}/releases" \
+#             -H "$auth" -H 'Content-Type: application/json' \
+#             -d "$(jq -n --arg t "$TAG" --argjson pre "$prerelease" \
+#                     '{tag_name:$t, name:$t, draft:false, prerelease:$pre}')" || true)"
+#           if [ "$code" = "201" ]; then
+#             id="$(jq -r '.id' /tmp/rel.json)"
+#           else
+#             echo "POST /releases returned $code; fetching existing release for $TAG"
+#             id="$(curl -fsS "${api}/releases/tags/${TAG}" -H "$auth" | jq -r '.id')"
+#           fi
+#           [ -n "$id" ] && [ "$id" != "null" ] || { echo "::error::could not determine release id"; exit 1; }
+#           echo "release_id=$id" >> "$GITHUB_OUTPUT"
+#           echo "release id=$id"
+#
+#       - name: Upload every asset to the release
+#         env:
+#           SERVER_URL: ${{ github.server_url }}
+#           REPO: ${{ github.repository }}
+#           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+#           RELEASE_ID: ${{ steps.rel.outputs.release_id }}
+#         run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb dist/pkg/*.apk
+#
+#       # The apt registry gets the .debs too, so users have an
+#       # `apt update`/`apt upgrade` path; the release assets stay the
+#       # offline/manual download. One invocation for both arches: the registry
+#       # reads `Architecture:` out of each control file and serves both from one
+#       # distribution/component, and it signs the repository metadata itself, so
+#       # the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1)
+#       # are skipped so RC builds never reach `apt upgrade` users -- they still
+#       # get the signed release asset for manual testing. See docs/INSTALL.md.
+#       - name: Publish the .debs to the apt registry
+#         if: ${{ !contains(github.ref_name, '-') || github.event.inputs.publish == 'true' }}
+#         env:
+#           SERVER_URL: ${{ github.server_url }}
+#           OWNER: ${{ github.repository_owner }}
+#           PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+#           APT_DIST: stable
+#           APT_COMPONENT: main
+#         run: ./scripts/ci/publish-apt.sh dist/pkg/*.deb
+#
+#   # --------------------------------------------------------------------------
+#   # dry-run-note: says, on a manual run with `publish` off, that the builds all
+#   # happened and nothing was published. Replaces the per-job notes the build
+#   # jobs used to print.
+#   # --------------------------------------------------------------------------
+#   dry-run-note:
+#     name: Dry run (nothing published)
+#     needs: [deb, apk]
+#     if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: What a real run would have published
+#         uses: actions/download-artifact@v4
+#         with:
+#           pattern: '{deb-*,apk-*}'
+#           merge-multiple: true
+#           path: dist/pkg
+#       - run: |
+#           echo "Dry run: built and signed everything below; published nothing."
+#           ls -l dist/pkg

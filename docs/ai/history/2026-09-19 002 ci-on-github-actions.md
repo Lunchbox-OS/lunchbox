@@ -129,7 +129,8 @@ constraint is lifted. Not acted on — recorded for when it is.
    from scratch on every single run — 6m42s warm, the longest job in the suite.
    The workspace already crosses into the container by tar-pipe; sending
    `target/debug` the same way, from a `build` artifact, would cut most of it.
-3. **`release.yml`'s build→publish handoff.** Today `create-release` must make
+3. **`release.yml`'s build→publish handoff** — done, though the file is now
+   commented out, so it lands whenever publishing is settled. `create-release` had to make
    the release *first* so the parallel `deb` and `apk` jobs can each push their
    own asset into it. With artifacts the natural shape inverts: build jobs
    upload, one publish job creates the release and attaches everything. That
@@ -170,12 +171,24 @@ hit its caches, so this is a ceiling being approached, not a fire.)
   first if CI starts flaking.
 * **Native arm64** — not in CI on either forge; correctness is validated by hand
   on an M1 VM. Cross-compilation buys no test coverage.
-* **`release.yml`'s publishing** — not a runner limitation but an infrastructure
-  one: `create-release` and `upload-release-asset.sh` talk to the Forgejo
-  release API, and `publish-apt.sh` pushes into Forgejo's Debian registry. Both
-  still live on `git.armeafamily.com`, and GitHub has no apt-registry
-  equivalent. A `v*` tag pushed here would publish *there*. Flagged in the file;
-  needs a decision, not a patch.
+* **`release.yml` — commented out in full, not ported.** Not a runner
+  limitation but an infrastructure one: `create-release` and
+  `upload-release-asset.sh` speak the Forgejo release API, and `publish-apt.sh`
+  pushes into Forgejo's Debian registry. Both still live on
+  `git.armeafamily.com`, and GitHub has no apt-registry equivalent. After the
+  move those endpoints resolve against `github.server_url` — `https://github.com`
+  — with Forgejo's `/api/v1/...` paths appended, so there is no version of the
+  file that works until the destinations are chosen.
+
+  Commented rather than deleted, because the build half is correct and worth
+  keeping: the tag-vs-VERSION guard, the per-arch `.deb`, the signed APK matrix,
+  the F-Droid metadata validation, and the build → artifacts → single `publish`
+  restructuring. What it is waiting on is recorded as #203 (sign the `.deb`),
+  #204 (Launchpad PPA) and #205 (f-droid.org proper).
+
+  The 18 `v*` tags are deliberately still local. Pushing them while this file was
+  live would have fired 18 release runs, each building both `.deb`s and both
+  APKs before failing at `publish`.
 * **Nothing needs root that it cannot get.** The only root assumption that broke
   was ShellCheck's `apt-get`, fixed with `sudo`. Jobs with `container:` still run
   as root inside the container, so `test`'s `chown` + `sudo -u ci` dance and
